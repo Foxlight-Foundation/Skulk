@@ -3,6 +3,7 @@ import gc
 import os
 import resource
 import signal
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -10,10 +11,15 @@ from collections.abc import Callable, Iterator
 import loguru
 
 from skulk.shared.constants import preferred_env_value
+from skulk.shared.models.capabilities import (
+    family_predates_in_process_llama_cpp,
+    resolve_model_capability_profile,
+)
 from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     card_serves_speech,
 )
+from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.diagnostics import (
     RunnerDiagnosticContext,
@@ -25,6 +31,7 @@ from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import RunnerFailed
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.utils.channels import ClosedResourceError, MpReceiver, MpSender
+from skulk.utils.stack_dump import install_stack_dump_signal
 from skulk.worker.runner.diagnostics import (
     configure_runner_diagnostics,
     record_runner_phase,
@@ -314,6 +321,11 @@ def _release_metal_resources() -> None:
     wired memory is returned to the OS instead of leaking when the runner
     subprocess is terminated mid-load.
     """
+    if sys.platform != "darwin":
+        # Linux engine runners have no Metal allocation to release. Loading
+        # an unused MLX extension during shutdown can abort its native runtime.
+        gc.collect()
+        return
     try:
         import mlx.core as mx
 
@@ -401,30 +413,87 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     backends, ordered by ``backend_preference``. Returns the engine, or ``None``
     to fall through to the default MLX runner.
     """
+    from skulk.facts import (
+        current_backend_derivation,
+        current_node_facts,
+        engine_build_inventory,
+        hardware_class_inventory,
+    )
     from skulk.shared.backends import (
         engine_of,
         platform_compatible_backends,
         probe_node_backends,
         resolve_node_engine,
     )
+    from skulk.shared.models.model_cards import (
+        load_cached_registry_engine_support,
+        registry_supported_backends_for_node,
+    )
     shard = bound_instance.bound_shard
+    require_remote_code_approval(shard.model_card)
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
 
     placement = shard.model_card.placement
+    derivation = current_backend_derivation()
+    facts = current_node_facts()
+    engine_builds = safe_engine_build_inventory(
+        lambda: engine_build_inventory(derivation.backends, facts)
+    )
+    if shard.model_card.registry_card_id is not None:
+        load_cached_registry_engine_support()
+    compatible_backends = placement.compatible_backends | (
+        registry_supported_backends_for_node(
+            shard.model_card,
+            node_backends=derivation.backends,
+            engine_builds=engine_builds,
+            hardware_classes=hardware_class_inventory(facts),
+        )
+    )
     # Same platform-capability filter the master applies at placement: the
     # card declares MODEL truth, and engines whose runner cannot serve one of
     # the card's declared capabilities (e.g. vision without served mmproj
     # support) are subtracted in code so the fallback probe cannot pick one.
+    profile = resolve_model_capability_profile(
+        shard.model_card.model_id, model_card=shard.model_card
+    )
     return resolve_node_engine(
         platform_compatible_backends(
-            placement.compatible_backends,
+            compatible_backends,
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
+            card_serves_music=shard.model_card.music is not None,
+            card_has_pinned_projector=(
+                shard.model_card.vision is not None
+                and shard.model_card.vision.has_pinned_projector
+            ),
+            card_supports_tool_calling=profile.supports_tool_calling,
+            card_vllm_tool_call_parser=(
+                shard.model_card.runtime.vllm_tool_call_parser
+                if shard.model_card.runtime is not None
+                else None
+            ),
+            card_family_predates_in_process_binding=(
+                family_predates_in_process_llama_cpp(shard.model_card)
+            ),
         ),
         placement.backend_preference,
         probe_node_backends(),
     )
+
+
+def safe_engine_build_inventory(
+    inventory_provider: Callable[[], dict[str, str]],
+) -> dict[str, str]:
+    """Fail signed matrix fallback closed without breaking legacy placement."""
+    try:
+        return inventory_provider()
+    except ValueError as error:
+        logger.error(
+            "Invalid local engine-build inventory; disabling signed engine-support "
+            f"fallback while preserving legacy card compatibility: {error}"
+        )
+        return {}
 
 
 def entrypoint(
@@ -444,6 +513,9 @@ def entrypoint(
     # triggers Metal cleanup instead of an abrupt death that leaks wired RAM.
     signal.signal(signal.SIGTERM, _metal_cleanup_signal_handler)
     signal.signal(signal.SIGINT, _metal_cleanup_signal_handler)
+    # `kill -USR1 <runner pid>` writes this runner's Python stacks to the node
+    # log: a runner wedged in native code shows only C frames to the sampler.
+    install_stack_dump_signal()
 
     # Backstop for SIGKILL of the supervisor: signal handlers above only fire
     # for graceful agent shutdown. If the agent is SIGKILLed we get reparented
@@ -480,6 +552,68 @@ def entrypoint(
 
     # Import main after setting global logger - this lets us just import logger from this module
     try:
+        # This guard belongs before runner-type dispatch: image and embedding
+        # runners do not pass through text-engine resolution. Keep it inside the
+        # failure-reporting boundary so a denied card becomes an actionable
+        # RunnerFailed state rather than an unreported process-exit retry loop.
+        require_remote_code_approval(shard.model_card)
+        if bound_instance.is_music_model:
+            from skulk.shared.backends import engine_of
+            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
+
+            resolved = shard.resolved_backend
+            music_engine = (
+                engine_of(resolved)
+                if resolved is not None
+                else _resolve_text_engine(bound_instance)
+            )
+            if music_engine != "audio_cpp":
+                raise RuntimeError(
+                    "no audio.cpp engine serves this music placement on this node "
+                    f"(resolved backend {resolved!r})"
+                )
+            runner = AudioCppRunner(
+                bound_instance, event_sender, task_receiver, cancel_receiver
+            )
+            runner.main()
+            return
+        if bound_instance.is_video_model:
+            # Video placements are single-host. The master normally stamps
+            # the resolved backend; an unstamped shard (telemetry still
+            # warming, or a manual launch) resolves locally exactly like the
+            # text engines do.
+            from skulk.shared.backends import engine_of
+
+            resolved = shard.resolved_backend
+            video_engine = (
+                engine_of(resolved)
+                if resolved is not None
+                else _resolve_text_engine(bound_instance)
+            )
+            if video_engine == "test_video":
+                from skulk.worker.runner.test_video.runner import (
+                    Runner as TestVideoRunner,
+                )
+
+                runner = TestVideoRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                )
+                runner.main()
+                return
+            if video_engine == "comfy":
+                from skulk.worker.runner.comfy.runner import Runner as ComfyRunner
+
+                runner = ComfyRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                )
+                runner.main()
+                return
+            # Fail loudly with the reason instead of letting a text runner
+            # try to load a diffusion stack and report something unrelated.
+            raise RuntimeError(
+                "no video engine serves this placement on this node "
+                f"(resolved backend {resolved!r})"
+            )
         if bound_instance.is_image_model:
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner
 

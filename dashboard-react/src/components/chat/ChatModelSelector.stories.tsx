@@ -17,7 +17,7 @@ const meta: Meta<typeof ChatModelSelector> = {
   title: 'Chat/ChatModelSelector',
   component: ChatModelSelector,
   parameters: { layout: 'centered' },
-  decorators: [(Story) => <div style={{ padding: 40, background: '#111', minHeight: 400 }}><Story /></div>],
+  decorators: [(Story) => <div style={{ padding: 16, minHeight: 400, width: 'min(480px, calc(100vw - 32px))' }}><Story /></div>],
 };
 
 export default meta;

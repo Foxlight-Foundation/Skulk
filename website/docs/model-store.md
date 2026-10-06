@@ -35,22 +35,155 @@ With the model store:
 - other nodes stage needed files from that host
 - Skulk keeps the same cluster and inference architecture, but changes where model artifacts come from
 
+## Recommended Setup: Dashboard First
+
+This is the simplest path for most people.
+
+1. Start Skulk on all nodes from the desktop app or, for source checkouts, with
+   `uv run skulk`. Fresh defaults already converge on one store.
+2. Open the dashboard on the node you want to use for administration.
+3. Open **Settings → Model Store** and turn **Enabled** on.
+4. Set **Store host** to the intended host identity, **HTTP host** to its
+   reachable address when different, and review **Port** and **Store path**.
+   Store host and Store path must not be blank when enabled.
+5. Review **Download → Allow HuggingFace fallback** and **Staging**. Staging
+   exposes **Enabled**, **Cache path**, and **Cleanup on deactivate**.
+6. Select **Save changes**. The configuration propagates through the cluster;
+   follow any restart guidance before launching work.
+
+After that, use the dashboard or API normally. When models are available in
+the store, worker nodes stage from the store host instead of downloading
+independently.
+
+## Installed Cards and Existing Caches
+
+Every complete canonical or staged artifact carries an atomic
+`.skulk/installed-card.json` sidecar. The versioned record retains the full
+model card, immutable registry identity and provenance when available, exact
+artifact selection, base or companion role, owning base card, and a canonical
+SHA-256 file manifest. For signed v2 cards it also retains the bundle identity,
+so two aliases from one repository and revision cannot collide or reuse the
+wrong quant. The sidecar is durable truth; `registry.json` is a
+rebuildable index.
+The dashboard labels the immediately placeable group **Fits this cluster**. This
+is a live capacity statement, not a recommendation or qualification claim.
+Registry-backed rows also show the signed origin as Foxlight, Agent, or
+Community; provenance describes authorship, not runtime confidence.
+When a model root is mounted read-only, Skulk stores the same strict record
+under its data directory, keyed by the resolved artifact path and manifest
+digest. This fallback changes only metadata placement; the model bytes remain
+untouched in their mounted root.
+
+On startup, Skulk reads installed cards before contacting the registry. In
+`SKULK_OFFLINE=true` mode, an installed model remains usable indefinitely while
+its manifest is complete; the registry client's bounded last-known-good window
+does not expire installed artifacts. Custom cards retain precedence. If the
+registry removes or replaces a card, the installed generation remains active
+and the dashboard reports `installed_not_current` or `update_available` until a
+complete replacement commits.
+
+Pre-existing caches are associated only with trusted card sources: an existing
+sidecar, persisted download state, custom card, or signed catalog. When the
+registry cannot be read, the last verified catalog cached on the node serves
+this association without its age limit; it is never listed or placed from.
+A matching directory name never creates signed verification by itself. A full
+immutable revision marker plus matching artifact selection is
+`registry_verified`; complete bytes without that proof are `local_legacy` and
+remain usable under their retained effective card. Unmatched directories are
+inventoried as `unresolved` and are not launched or imported automatically.
+Interrupted or partial directories never receive a legacy installed-card
+sidecar merely because their directory name matches a trusted card.
+
+## Automatic Reconciliation
+
+The authoritative store host periodically inventories bounded node-local cache
+summaries outside replicated State and the event log. Replicas deduplicate by
+installed identity and manifest digest. When the store is missing an artifact,
+it prefers a same-host copy, then a revision-verified copy, then a deterministic
+healthy source node.
+
+The source issues a random short-lived capability bound to the source, target
+store node, manifest digest, byte ceiling, and expiry. The store pulls files
+with HTTP ranges into a resumable temporary generation, verifies every size and
+SHA-256 digest, writes the sidecar, and atomically publishes the generation.
+Failed replacement transfers leave the previous generation intact. Source node
+caches are never removed during migration. Capacity admission credits bytes
+already retained in valid partial files, while the export capability enforces
+its manifest-bound cumulative byte ceiling and rejects source files changed
+after issuance.
+The internal store import mutation accepts only a direct loopback peer and
+rejects proxy-forwarding headers, so a local reverse proxy cannot turn it into
+a remote mutation surface.
+
+Automatic imports are enabled by default. On a production fleet where you want
+to inspect the first migration before moving bytes, temporarily enable
+inventory-only mode through advanced configuration; this control is not exposed
+in the Settings panel:
+
+```yaml
+model_store:
+  reconciliation:
+    enabled: true
+    inventory_only: true
+    interval_seconds: 300
+```
+
+Inspect `GET /store/reconciliation`, then restore `inventory_only: false` to
+resume automatic imports. `POST /store/reconciliation/rescan` is a loopback-only
+operator retry; periodic reconciliation remains the normal path.
+Inventory and capability-bound export cover the staging cache, direct-download
+fallbacks in `SKULK_MODELS_DIR`, and configured read-only model roots. A
+canonical index entry suppresses import only while its adjacent sidecar and
+complete manifest still validate.
+
+An operator store deletion writes a durable alias tombstone before removing
+the canonical generation. Reconciliation continues to report any node caches
+that missed the best-effort eviction, but it will not import the deleted base
+artifact or companions owned by that base card. The tombstone remains through
+restarts; a later explicit, successfully completed store download clears it.
+
 ### GGUF repositories download only the pinned quantization
 
 A GGUF repository often ships several quantizations of the same model (for
 example `Q4_K_M`, `Q5_K_M`, `Q8_0`, `bf16`). The store downloads only the
-quantization a model card pins (its `gguf_file`), plus the multimodal projector
-for a vision model, rather than every quant in the repository. This keeps a
+quantization a model card pins (its `gguf_file`), plus the exact
+`vision.projector_file` for a newly compiled vision model, rather than every
+quant or projector variant in the repository. Legacy cards retain the older
+projector-glob behavior for compatibility. This keeps a
 single-quant download to roughly the size of that one file instead of the whole
 repo.
+
+The projector is included in the installed-card manifest and staged atomically
+with the selected GGUF. At served-runner load, Skulk verifies its path, card
+size, manifest entry, and SHA-256 digest. A missing, stale, incorrectly sized,
+or corrupt projector fails with an actionable re-stage error instead of
+silently serving image prompts as text.
+
+### Exact artifact bundles
+
+A signed registry v2 card declares the complete downloadable bundle for one
+artifact. Direct downloads and central-store downloads fetch only that
+allow-list, preserve its repository-relative directory layout, and reject a
+missing file or immutable size/object-identity mismatch. The engine loads from
+the declared `artifact_root`; an MLX quant in `4-bit/`, for example, remains a
+self-contained directory instead of causing its sibling quants to be fetched.
+
+Bundle identity participates in canonical and staged generation matching. A
+metadata-only card refresh reuses existing bytes when the installed manifest
+already satisfies the exact bundle; a different bundle publishes as a distinct
+generation even when repository and revision are shared. Existing cards without
+`artifact_bundle` keep repository-wide tensor and pinned-GGUF behavior. Eviction
+still removes the complete staged generation, including its installed-card
+sidecar.
 
 ### Qualified cards can pin immutable artifacts
 
 A model card may set `source_revision` to a full Hugging Face commit hash. The
-store records that revision with its registry entry and treats a different
-revision as a different artifact generation. If a card's pin changes, Skulk
-downloads and registers the replacement before removing the previous canonical
-copy.
+store records both that revision and the effective source repository with its
+registry entry. Either mismatch identifies a different artifact generation,
+even when the selectable alias is unchanged. If either identity field changes,
+Skulk downloads and registers the replacement before removing the previous
+canonical copy; concurrent downloads deduplicate only when both fields match.
 
 Worker staging enforces the same discipline: each staged directory records the
 revision it was staged from, and a staging request checks that record before
@@ -95,9 +228,13 @@ outside the dynamic client-port ranges used by supported operating systems, so
 an unrelated outbound connection cannot claim it before Skulk starts.
 
 :::note Fresh installs
-The packaged runtime and `install.sh` both use bootstrap store defaults (this host under
-`~/.skulk/model-store`) when no config exists, so a single node works
-immediately. When several independently installed nodes form a cluster, the
+A node that starts without a `skulk.yaml`, as every Mac app and Linux package
+install does, writes one with a store on itself in Skulk's data folder
+(`~/.skulk/model-store` on macOS, `~/.local/share/skulk/model-store` for the
+Linux packages). `install.sh` writes the same default at
+`~/.skulk/model-store` for source installs, so a single node works
+immediately. A node started offline writes no store, since the store would
+fetch from Hugging Face. When several independently installed nodes form a cluster, the
 elected master advertises a routable store address through bootstrap state
 sync. Followers adopt that authoritative config, stop their temporary local
 store servers, and point both dashboard and worker traffic at the same store.
@@ -105,27 +242,21 @@ If you need a specific machine or attached volume, configure the same explicit
 `store_host` on every node instead.
 :::
 
-## Recommended Setup: Dashboard First
-
-This is the simplest path for most people.
-
-1. Start Skulk on all nodes from the desktop app or, for source checkouts, with
-   `uv run skulk`. Fresh defaults already converge on one store.
-2. Open the dashboard on the node you want to use for administration.
-3. Go to **Settings**.
-4. To override the elected default, enable the store host toggle for the
-   machine that should own the canonical store.
-5. Choose its store path.
-6. Save the config.
-7. Restart Skulk on all nodes if the dashboard tells you a restart is required.
-
-After that, use the dashboard or API normally. When models are available in
-the store, worker nodes stage from the store host instead of downloading
-independently.
+:::note Hugging Face tokens propagate to the store host
+The store host is the node that fetches from Hugging Face. A token for gated
+or private repositories entered in **any** node's dashboard Settings rides the
+encrypted cluster fabric to the store host (and every other node), and nodes
+joining later adopt it at bootstrap, so one entry covers the fleet. To verify,
+run `skulk doctor` on the store host and check its **Hugging Face token**
+verdict. See [Hugging Face token](./install.md#add-a-hugging-face-token) for the
+per-node mechanisms and their precedence.
+:::
 
 ## Manual Setup with `skulk.yaml`
 
-If you prefer to configure the model store manually, put the same `skulk.yaml` file on each node.
+For headless or advanced administration, the equivalent settings can be written
+to `skulk.yaml`. Dashboard users can use the controls above without editing files.
+Keep manually managed configuration consistent across nodes.
 
 Minimal example:
 
@@ -161,6 +292,11 @@ model_store:
     # (unbounded) and reclaim disk only via POST /store/purge-staging.
     cleanup_on_deactivate: true
     staging_keep_recent_gb: 40
+
+  reconciliation:
+    enabled: true
+    inventory_only: false
+    interval_seconds: 300
 
   node_overrides:
     mac-studio-1:
@@ -212,8 +348,11 @@ safety check and an explicit delete path.
 
 A staged copy is **in use** whenever a live runner depends on it, including
 companion repositories that no instance names directly (a speculative-decoding
-draft model, an assistant model, or separate vision weights). In-use copies are
-never evicted automatically.
+draft model, an assistant model, or separate vision weights). A copy is also in
+use while an instance placed on the node needs it, even before its runner
+starts, for example while a failed runner is retried. RPC donors never read the
+model, so a donor placement protects nothing. In-use copies are never evicted
+automatically.
 
 ### The recency budget
 
@@ -223,7 +362,11 @@ deleted. This warm-cache check runs at two specific moments, and only when
 `cleanup_on_deactivate` is `true`:
 
 - when a model instance is shut down, and
-- at node startup, which reconciles copies orphaned by a crash or kill.
+- at node startup, which reconciles copies orphaned by a crash or kill. A copy
+  used within the last 30 minutes is kept whatever its size: in-use models
+  refresh their last-use time every minute, so this keeps what was serving
+  before a restart, an update or a master change, when the same models are
+  placed again.
 
 `cleanup_on_deactivate` is the on/off switch for that check:
 
@@ -238,6 +381,11 @@ what is in use). Raise it on nodes with large disks to keep more models warm.
 The in-use set rides on top of the budget rather than inside it: a node always
 keeps everything its live runners need, plus up to 40 GiB of the most recently
 used idle copies.
+
+Before any store probe or copy, staging checks the installed identity and local
+manifest. An exact complete cache is used immediately, including while
+air-gapped. A stale generation is replaced atomically from the central store,
+and missing required companions disable the fast path.
 
 ### Pre-download capacity safety
 
@@ -389,7 +537,11 @@ These are exposed through the main Skulk API:
 - `GET /store/health`
 - `GET /store/registry`
 - `GET /store/downloads`
+- `GET /store/storage`
+- `GET /store/reconciliation`
+- `POST /store/reconciliation/rescan`
 - `POST /store/models/{model_id}/download`
+- `DELETE /store/models/{model_id}/download`
 - `GET /store/models/{model_id}/download/status`
 - `DELETE /store/models/{model_id}`
 - `POST /store/purge-staging`
@@ -400,9 +552,23 @@ metadata so it can show capability-derived tags for downloaded models. Today
 that includes `vision`, `thinking`, `embedding`, `tensor`, and `optiq` when the
 underlying model card exposes enough metadata for Skulk to derive them.
 
+`DELETE /store/models/{model_id}/download` stops pending or active canonical
+store transfer work without deleting its partial files. A later
+`POST /store/models/{model_id}/download` resumes from those partials. Repeating
+the cancellation is safe; a request for a model with no cancellable transfer
+returns `409`.
+
+`POST /store/purge-staging` recursively removes each selected node-cache
+artifact directory, including its adjacent `.skulk/installed-card.json`,
+revision marker, and last-use marker. It does not remove the canonical store
+generation. `DELETE /store/models/{model_id}` removes the canonical generation
+and broadcasts the corresponding staged-cache eviction across the fleet.
+
 Common meanings:
 
-- `503 Store not configured`: the cluster is not configured to use a model store
+- `503 Store not configured`: the cluster is not configured to use a model store.
+  `POST /store/models/{model_id}/download` instead downloads a catalog model
+  onto the node that answered (see the API guide)
 - `503 Store unreachable`: the store is configured, but the API cannot reach it
 - `404`: the model or job does not exist
 - `409`: a conflicting operation is already in progress
@@ -490,7 +656,7 @@ when `node_cache_path` equals `store_path`.
 
 ## Related Docs
 
-- [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
+- [README](https://github.com/Foxlight-Foundation/Skulk/blob/dev/README.md)
 - [API guide](api-guide)
 - [Architecture overview](architecture)
-- [skulk.yaml example](https://github.com/Foxlight-Foundation/Skulk/blob/main/skulk.yaml.example)
+- [skulk.yaml example](https://github.com/Foxlight-Foundation/Skulk/blob/dev/skulk.yaml.example)

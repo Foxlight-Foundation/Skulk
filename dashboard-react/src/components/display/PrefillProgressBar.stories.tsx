@@ -8,7 +8,7 @@ const meta: Meta<typeof PrefillProgressBar> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 400, padding: 24, background: '#111' }}>
+      <div style={{ width: 'min(400px, calc(100vw - 48px))', padding: 24, }}>
         <Story />
       </div>
     ),

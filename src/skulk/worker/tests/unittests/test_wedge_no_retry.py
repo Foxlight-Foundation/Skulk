@@ -7,9 +7,19 @@ especially because wedges take ~300s each and would never trip the
 3-in-60s crash window.
 """
 
+from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.remote_code_approval import (
+    MODEL_TRUST_FAILURE_MARKER,
+)
+from skulk.shared.types.common import ModelId
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.state import State
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerReady
 from skulk.worker.main import (
+    _model_load_trust_failure_message,  # pyright: ignore[reportPrivateUsage] — unit under test
+    _require_worker_model_execution_identity,  # pyright: ignore[reportPrivateUsage] — unit under test
     _runner_failed_wedged,  # pyright: ignore[reportPrivateUsage] — unit under test
+    model_trust_failed_live_instances,
 )
 from skulk.worker.runner.bootstrap import WEDGE_EXIT_CODE, WEDGE_FAILURE_MARKER
 
@@ -110,3 +120,84 @@ def test_wedged_live_instances_sweep() -> None:
     # deleted instances follow the normal Shutdown cleanup, ordinary failures
     # keep the 3-in-60s breaker semantics, healthy runners are untouched.
     assert result == [("inst-a", "model-a")]
+
+
+def test_model_trust_failure_is_terminal_for_live_instance() -> None:
+    """A deterministic trust denial is selected for immediate teardown once."""
+    from types import SimpleNamespace
+    from typing import cast
+
+    from skulk.shared.types.worker.instances import InstanceId
+    from skulk.shared.types.worker.runners import RunnerId
+    from skulk.worker.runner.runner_supervisor import RunnerSupervisor
+
+    denied = SimpleNamespace(
+        bound_instance=SimpleNamespace(instance=SimpleNamespace(instance_id="inst-a")),
+        shard_metadata=SimpleNamespace(
+            model_card=SimpleNamespace(model_id="org/model")
+        ),
+        status=RunnerFailed(
+            error_message=f"{MODEL_TRUST_FAILURE_MARKER}: approval required"
+        ),
+    )
+    ordinary = SimpleNamespace(
+        bound_instance=SimpleNamespace(instance=SimpleNamespace(instance_id="inst-b")),
+        shard_metadata=SimpleNamespace(
+            model_card=SimpleNamespace(model_id="org/other")
+        ),
+        status=RunnerFailed(error_message="ordinary engine crash"),
+    )
+    runners = cast(
+        "dict[RunnerId, RunnerSupervisor]",
+        cast(object, {"runner-a": denied, "runner-b": ordinary}),
+    )
+
+    assert model_trust_failed_live_instances(
+        runners,
+        cast("set[InstanceId]", {"inst-a", "inst-b"}),
+    ) == [("inst-a", "org/model", f"{MODEL_TRUST_FAILURE_MARKER}: approval required")]
+
+
+def test_durable_model_trust_failure_excludes_raw_exception_detail() -> None:
+    """Only classified trust guidance is suitable for replicated failure truth."""
+    from skulk.worker.main import (
+        _model_trust_instance_failure_message,  # pyright: ignore[reportPrivateUsage] - durable boundary under test
+    )
+
+    message = _model_trust_instance_failure_message(ModelId("org/model"))
+
+    assert message == (
+        "runner for org/model was refused by immutable model trust policy; "
+        "not retrying until the card approval or installed artifact identity changes."
+    )
+
+
+def test_missing_model_path_is_a_terminal_trust_failure() -> None:
+    """A vanished staged path carries the stable non-retry marker."""
+    message = _model_load_trust_failure_message(FileNotFoundError("model missing"))
+
+    assert message.startswith(f"{MODEL_TRUST_FAILURE_MARKER}:")
+    assert "model missing" in message
+
+
+def test_worker_needs_no_secondary_approval_for_published_card() -> None:
+    """Runner creation accepts the authorization carried by publication."""
+
+    card = ModelCard(
+        model_id=ModelId("org/model"),
+        storage_size=Memory.from_mb(100),
+        n_layers=4,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        source_revision="a" * 40,
+        registry_card_id="card_" + "a" * 52,
+        registry_snapshot_id="snapshot-test",
+        registry_provenance="agent",
+        trust_remote_code=True,
+    )
+    _require_worker_model_execution_identity(
+        card,
+        State(model_trust_approved_remote_code_identities=()),
+    )
+    _require_worker_model_execution_identity(card, State())

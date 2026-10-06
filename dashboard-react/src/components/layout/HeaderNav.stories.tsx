@@ -6,7 +6,7 @@ const meta: Meta<typeof HeaderNav> = {
   title: 'Layout/HeaderNav',
   component: HeaderNav,
   parameters: { layout: 'fullscreen' },
-  decorators: [(Story) => <div style={{ background: '#000' }}><Story /></div>],
+  decorators: [(Story) => <div style={{ }}><Story /></div>],
 };
 
 export default meta;

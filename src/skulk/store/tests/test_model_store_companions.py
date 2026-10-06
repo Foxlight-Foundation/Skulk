@@ -33,6 +33,7 @@ from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloade
 
 _BASE_MODEL = "mlx-community/Qwen-test-9B-4bit"
 _SIDECAR_REPO = "FoxlightAI/qwen-test-9b-mtp"
+_SIDECAR_REVISION = "c" * 40
 
 
 class _UnusedInnerDownloader(ShardDownloader):
@@ -74,8 +75,34 @@ class _RecordingStoreClient:
     async def is_model_available(
         self, model_id: str, source_revision: str | None = None
     ) -> bool:
-        assert source_revision is None
+        expected_revision = _SIDECAR_REVISION if model_id == _SIDECAR_REPO else None
+        assert source_revision == expected_revision
         return model_id in self.available
+
+    async def request_and_wait_for_download(
+        self,
+        model_id: str,
+        *,
+        pinned_gguf: str | None = None,
+        extra_pinned_gguf: list[str] | None = None,
+        source_revision: str | None = None,
+        source_repository: str | None = None,
+        registry_card_id: str | None = None,
+        owner_model_id: str | None = None,
+        owner_registry_card_id: str | None = None,
+        artifact_role: str = "base",
+    ) -> bool:
+        """Accept the exact pinned companion request before staging it."""
+        assert model_id == _SIDECAR_REPO
+        assert pinned_gguf is None
+        assert not extra_pinned_gguf
+        assert source_revision == _SIDECAR_REVISION
+        assert source_repository == _SIDECAR_REPO
+        assert registry_card_id is None
+        assert owner_model_id == _BASE_MODEL
+        assert owner_registry_card_id is None
+        assert artifact_role == "mtp_sidecar"
+        return True
 
     async def stage_shard(
         self,
@@ -85,7 +112,8 @@ class _RecordingStoreClient:
         source_revision: str | None = None,
         capacity_preflight: Callable[[int], Awaitable[None]] | None = None,
     ) -> Path:
-        assert source_revision is None
+        expected_revision = _SIDECAR_REVISION if model_id == _SIDECAR_REPO else None
+        assert source_revision == expected_revision
         if model_id in self.fail_staging:
             raise RuntimeError(f"simulated staging failure for {model_id}")
         if capacity_preflight is not None:
@@ -106,9 +134,11 @@ def _shard_with_sidecar() -> PipelineShardMetadata:
             hidden_size=8,
             supports_tensor=False,
             tasks=[ModelTask.TextGeneration],
+            trust_remote_code=False,
             runtime=RuntimeCapabilityCardConfig(
                 mtp_heads=True,
                 mtp_sidecar_repo=_SIDECAR_REPO,
+                mtp_sidecar_revision=_SIDECAR_REVISION,
             ),
         ),
         device_rank=0,
@@ -377,3 +407,68 @@ async def test_partial_staged_dir_is_restaged(tmp_path: Path) -> None:
     await downloader.ensure_shard(_shard_with_sidecar())
 
     assert _BASE_MODEL in store.staged
+
+
+
+def test_a_staged_video_companion_is_complete_when_its_named_files_are(
+    tmp_path: Path,
+) -> None:
+    """Named files at their declared sizes, not a model directory layout."""
+    from skulk.shared.models.model_cards import VideoCardConfig
+    from skulk.store.model_store_client import (
+        _declared_companion_files,
+        _staged_directory_looks_complete,
+    )
+
+    revision = "e" * 40
+    owner = ModelCard(
+        model_id=ModelId("org/video"),
+        storage_size=Memory.from_bytes(0),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToVideo],
+        video=VideoCardConfig.model_validate(
+            {
+                "modes": ["t2va"],
+                "companions": [
+                    {
+                        "kind": "preprocessor",
+                        "name": "depth",
+                        "role": "depth_estimator",
+                        "path": "geometry_estimation/depth.safetensors",
+                        "repo": "org/depth",
+                        "revision": revision,
+                        "size_bytes": 5,
+                    }
+                ],
+            }
+        ),
+    )
+    shard = PipelineShardMetadata(
+        model_card=ModelCard(
+            model_id=ModelId("org/depth"),
+            source_revision=revision,
+            storage_size=Memory.from_bytes(0),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+        ),
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+    expected = _declared_companion_files(shard, owner, "video_companion")
+    assert expected == (("geometry_estimation/depth.safetensors", 5),)
+    assert _declared_companion_files(shard, owner, "mtp_sidecar") == ()
+
+    staged = tmp_path / "staged"
+    (staged / "geometry_estimation").mkdir(parents=True)
+    weights = staged / "geometry_estimation" / "depth.safetensors"
+    weights.write_bytes(b"12")
+    assert not _staged_directory_looks_complete(staged, shard.model_card, expected)
+    weights.write_bytes(b"12345")
+    assert _staged_directory_looks_complete(staged, shard.model_card, expected)

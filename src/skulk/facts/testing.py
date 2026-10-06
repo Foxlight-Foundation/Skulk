@@ -35,6 +35,7 @@ AMD_STRIX = GpuDeviceFact(
     detection_source="amdgpu_sysfs",
     vram_total_bytes=8 * 2**30,
     gtt_total_bytes=120 * 2**30,
+    pci_device_id="1002:1586",
 )
 """A unified-memory AMD APU (Strix Halo shape: small carve, large GTT)."""
 

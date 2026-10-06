@@ -410,9 +410,7 @@ class _ImmediateFailureInputProvider(_BidirectionalProvider):
         )
 
 
-def _build_api(
-    provider: object, *, provider_transport_buffer: int = 256
-) -> API:
+def _build_api(provider: object, *, provider_transport_buffer: int = 256) -> API:
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     _, event_receiver = channel[IndexedEvent]()
@@ -972,9 +970,7 @@ async def test_remote_bidirectional_input_and_output_use_provider_data(
 
 
 async def test_invalid_provider_chunk_becomes_typed_failed_terminal() -> None:
-    opened, frames = await _collect_local_stream(
-        _build_api(_InvalidChunkProvider())
-    )
+    opened, frames = await _collect_local_stream(_build_api(_InvalidChunkProvider()))
 
     assert opened is True
     assert [frame.kind for frame in frames] == ["started", "failed"]
@@ -1258,3 +1254,111 @@ async def test_non_consuming_caller_overflow_cancels_provider_immediately() -> N
             await provider.cancelled.wait()
         await session.frames.aclose()  # type: ignore[attr-defined]
         task_group.cancel_scope.cancel()
+
+
+async def test_readiness_withdrawal_during_admission_prevents_stream_execution() -> (
+    None
+):
+    """An accepted dynamic probe cannot reopen a provider disabled while it awaited."""
+
+    class WithdrawingProvider(_TtsProvider):
+        ready = True
+        invoked = False
+
+        def capability_ready(self, qualified_id: str) -> bool:
+            return self.ready
+
+        async def admit_stream(
+            self, context: ExtensionContext, call: CapabilityCall
+        ) -> CapabilityError | None:
+            await anyio.sleep(0)
+            self.ready = False
+            return None
+
+        async def handle_stream(
+            self, context: ExtensionContext, call: CapabilityCall
+        ) -> AsyncIterator[CapabilityStreamFrame]:
+            self.invoked = True
+            async for frame in super().handle_stream(context, call):
+                yield frame
+
+    provider = WithdrawingProvider()
+    opened, frames = await _collect_local_stream(_build_api(provider))
+    assert not opened
+    assert frames == []
+    assert not provider.invoked
+
+
+class _DynamicStreamingProvider(_MixedStreamingProvider):
+    """Exercise Fabric dispatch using dynamic discovery rather than static registration."""
+
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        """Keep stream contracts off the static path."""
+        return []
+
+    def dynamic_capabilities(self) -> tuple[CapabilityDescriptor, ...]:
+        """Publish all three stream modes as managed providers do."""
+        return (_TTS, _CLIENT_STREAMING, _BIDIRECTIONAL)
+
+    async def handle_input_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Half-close input before producing the selected mode's output."""
+        async for frame in input_frames:
+            self.input_frames.append(frame)
+            if frame.is_terminal:
+                break
+        if call.capability_id == _BIDIRECTIONAL.id:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="chunk",
+                payload={"text": "heard"},
+            )
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=2 if call.capability_id == _BIDIRECTIONAL.id else 1,
+            kind="completed",
+            payload={"text": "heard"} if call.capability_id == _CLIENT_STREAMING.id else None,
+        )
+
+
+@pytest.mark.parametrize("descriptor", [_TTS, _CLIENT_STREAMING, _BIDIRECTIONAL])
+async def test_dynamic_streams_traverse_fabric_admission_and_data(
+    descriptor: CapabilityDescriptor,
+) -> None:
+    """Cached streaming discovery reaches executable Fabric admission and raw DATA."""
+    provider = _DynamicStreamingProvider()
+    api = _build_api(provider)
+    async with api._tg as tasks:  # pyright: ignore[reportPrivateUsage]
+        tasks.start_soon(api._apply_provider_data)  # pyright: ignore[reportPrivateUsage]
+        session = await api._extension_context.stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("api-node"),
+            descriptor.id,
+            descriptor.version,
+            descriptor_revision(descriptor),
+            {"text": "hello"},
+            timeout_seconds=2.0,
+        )
+        assert session.open_result.ok
+        if descriptor.io_mode != "server_streaming":
+            assert session.input is not None
+            await session.input.send_chunk(
+                payload={"format": "pcm_s16le"},
+                media=InlineMediaAttachment(data=b"\x00\xff", media_type="audio/pcm"),
+            )
+            await session.input.complete()
+        frames = [frame async for frame in session.frames]
+        assert frames[0].kind == "started" and frames[-1].kind == "completed", frames
+        if descriptor.io_mode == "client_streaming":
+            assert [frame.kind for frame in frames] == ["started", "completed"]
+            assert frames[-1].payload == {"text": "heard"}
+        if descriptor.io_mode == "server_streaming":
+            assert isinstance(frames[1].media, InlineMediaAttachment)
+            assert frames[1].media.data == b"\x00\xff\x80\x7f"
+        tasks.cancel_scope.cancel()

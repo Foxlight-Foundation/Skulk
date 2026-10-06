@@ -9,6 +9,7 @@ import pytest
 from skulk.utils.info_gatherer.nvidia_gpu import (
     has_nvidia_gpu,
     read_accelerator_metrics,
+    read_nvidia_device_name,
     read_system_profile,
 )
 
@@ -100,6 +101,64 @@ def test_full_metrics_normalize() -> None:
     assert metrics.native_fp4 is False
 
 
+def test_gb10_uses_cuda_memory_when_nvml_does_not_report_it() -> None:
+    """GB10 has a working CUDA pool even when its NVML memory call is unsupported."""
+    total = 128 * 1024**3
+    free = 80 * 1024**3
+    metrics = read_accelerator_metrics(
+        _FakeNvml(broken={"memory"}, name="NVIDIA GB10", cc=(12, 1)),
+        cuda_memory_info=lambda: (free, total),
+        host_memory_available=lambda: None,
+    )
+    assert metrics.vram_total_bytes == total
+    assert metrics.vram_used_bytes == total - free
+
+
+def test_gb10_counts_reclaimable_page_cache_as_free() -> None:
+    """Page cache the kernel can reclaim does not read as used GPU memory.
+
+    The shape measured on a GB10 after a model download: CUDA reported 14 GiB
+    free while the host could hand out 74 GiB, and placement refused a model
+    that fit.
+    """
+    total = 130 * 1024**3
+    cuda_free = 14 * 1024**3
+    host_available = 74 * 1024**3
+    metrics = read_accelerator_metrics(
+        _FakeNvml(broken={"memory"}, name="NVIDIA GB10", cc=(12, 1)),
+        cuda_memory_info=lambda: (cuda_free, total),
+        host_memory_available=lambda: host_available,
+    )
+    assert metrics.vram_used_bytes == total - host_available
+
+
+@pytest.mark.parametrize("host_available", [None, 10 * 1024**3])
+def test_gb10_never_reads_less_free_than_cuda_reports(
+    host_available: int | None,
+) -> None:
+    """An unreadable or smaller host figure leaves CUDA's free memory in charge."""
+    total = 130 * 1024**3
+    cuda_free = 40 * 1024**3
+    metrics = read_accelerator_metrics(
+        _FakeNvml(broken={"memory"}, name="NVIDIA GB10", cc=(12, 1)),
+        cuda_memory_info=lambda: (cuda_free, total),
+        host_memory_available=lambda: host_available,
+    )
+    assert metrics.vram_used_bytes == total - cuda_free
+
+
+def test_cuda_memory_fallback_does_not_hide_other_nvml_failures() -> None:
+    """A non-GB10 device with no NVML memory stays unmeasured."""
+    def unexpected_cuda_read() -> tuple[int, int] | None:
+        raise AssertionError("CUDA fallback is GB10-specific")
+
+    metrics = read_accelerator_metrics(
+        _FakeNvml(broken={"memory"}), cuda_memory_info=unexpected_cuda_read
+    )
+    assert metrics.vram_total_bytes is None
+    assert metrics.vram_used_bytes is None
+
+
 @pytest.mark.parametrize(
     ("cc", "capability", "fp4", "fp8"),
     [
@@ -131,6 +190,34 @@ def test_compute_capability_degrades_to_none() -> None:
 def test_bytes_name_decodes() -> None:
     metrics = read_accelerator_metrics(_FakeNvml(name=b"NVIDIA A5000"))
     assert metrics.name == "NVIDIA A5000"
+
+
+def test_device_name_reads_only_static_nvml_identity() -> None:
+    nvml = _FakeNvml(
+        broken={
+            "utilization",
+            "memory",
+            "power",
+            "temperature",
+            "clock",
+            "compute_capability",
+        },
+        name=b"NVIDIA GB10",
+    )
+
+    assert read_nvidia_device_name(nvml) == "NVIDIA GB10"
+
+
+@pytest.mark.parametrize("broken", [{"handle"}, {"name"}])
+def test_device_name_degrades_when_nvml_identity_is_unavailable(
+    broken: set[str],
+) -> None:
+    assert read_nvidia_device_name(_FakeNvml(broken=broken)) is None
+
+
+@pytest.mark.parametrize("name", ["", "  ", "Unknown", b"unknown"])
+def test_device_name_rejects_empty_or_unknown_values(name: str | bytes) -> None:
+    assert read_nvidia_device_name(_FakeNvml(name=name)) is None
 
 
 def test_per_field_degradation_never_blanks_the_rest() -> None:

@@ -1,6 +1,11 @@
+import tomllib
+
+import pytest
+
 from skulk.shared.models.memory_estimate import (
     GPU_WORKING_SET_FRACTION,
     LLAMA_CPP_MEMORY_OVERHEAD_FACTOR,
+    LOAD_FIT_TOLERANCE,
     MEMORY_OVERHEAD_FACTOR,
     MEMORY_OVERHEAD_FLOOR,
     estimate_kv_cache_bytes,
@@ -9,6 +14,7 @@ from skulk.shared.models.memory_estimate import (
     memory_overhead_factor,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR, fixture_card_path
 from skulk.shared.types.memory import Memory
 
 
@@ -50,6 +56,42 @@ def test_shard_footprint_uses_lighter_factor_for_gguf():
         Memory.from_gb(40) * LLAMA_CPP_MEMORY_OVERHEAD_FACTOR + MEMORY_OVERHEAD_FLOOR
     )
     assert gguf.in_bytes == expected.in_bytes
+
+
+def test_ace_cpu_footprint_covers_observed_generation_peak() -> None:
+    """ACE's CPU admission must cover generation buffers beyond its GGUF weights."""
+    path = fixture_card_path("audio-cpp/ACE-Step1.5-Turbo-BF16")
+    card = ModelCard.model_validate(tomllib.loads(path.read_text()))
+    measured_peak = Memory.from_bytes(18_218_632 * 1024)
+    cpu = estimate_shard_footprint(card, 1.0, resolved_backend="audio_cpp-cpu")
+    assert cpu > measured_peak * 1.1
+    for backend in (None, "audio_cpp-metal", "audio_cpp-rocm"):
+        assert estimate_shard_footprint(card, 1.0, resolved_backend=backend) == (
+            card.storage_size * LLAMA_CPP_MEMORY_OVERHEAD_FACTOR + MEMORY_OVERHEAD_FLOOR
+        )
+
+
+@pytest.mark.parametrize(
+    ("filename", "backend", "measured_peak_kib", "insufficient_pool_gib"),
+    [
+        ("audio-cpp--ACE-Step1.5-Turbo-BF16.toml", "audio_cpp-cuda", 18_361 * 1024, 16),
+        ("audio-cpp--MiniMax-Music3-GGUF-Q4.toml", "audio_cpp-cuda", 9_365 * 1024, 8),
+        ("audio-cpp--ACE-Step1.5-Turbo-BF16.toml", "audio_cpp-vulkan", 16_072_680, 16),
+        ("audio-cpp--MiniMax-Music3-GGUF-Q4.toml", "audio_cpp-vulkan", 8_755_704, 8),
+        ("audio-cpp--MiniMax-Music3-GGUF-Q4.toml", "audio_cpp-metal", 12_400_080, 12),
+    ],
+)
+def test_qualified_accelerator_music_admission_covers_native_generation_peak(
+    filename: str, backend: str, measured_peak_kib: int, insufficient_pool_gib: int,
+) -> None:
+    """Qualified peaks need headroom beyond weights, including Metal's RAM ceiling."""
+    path = FIXTURE_CARDS_DIR / filename
+    card = ModelCard.model_validate(tomllib.loads(path.read_text()))
+    footprint = estimate_shard_footprint(card, 1.0, resolved_backend=backend)
+    measured_peak = Memory.from_bytes(measured_peak_kib * 1024)
+    assert footprint > measured_peak * 1.1
+    assert footprint > Memory.from_gb(insufficient_pool_gib)
+    assert footprint < Memory.from_gb(24) * 0.9
 
 
 def test_kv_is_zero_without_kv_heads():
@@ -328,8 +370,8 @@ def test_instance_limit_gguf_not_capped_to_kv_budget_on_vram_node():
     assert limit <= 131072  # never above the card's advertised max
 
 
-def test_instance_limit_gguf_uma_node_clamps_to_floor():
-    """A combined UMA pool may place GGUF but cannot justify a fixed-window lift."""
+def test_instance_limit_gguf_uma_node_sizes_the_window_from_live_ram():
+    """A combined UMA pool does not justify the static fit; live host RAM sizes it."""
     node_id = NodeId("n0")
     card = _card(17, kv_heads=4, n_layers=65, gguf_file="m.gguf").model_copy(
         update={"context_length": 262144}
@@ -344,16 +386,27 @@ def test_instance_limit_gguf_uma_node_clamps_to_floor():
         {node_id: Memory.from_gb(32)},
         node_vram={node_id: Memory.from_gb(42)},
     )
-    uma_limit = instance_context_token_limit(
+    uma_without_live = instance_context_token_limit(
         assignments,
         {node_id: Memory.from_gb(32)},
         node_vram={node_id: Memory.from_gb(42)},
         unified_memory_gpu_nodes=frozenset({node_id}),
     )
+    uma_limit = instance_context_token_limit(
+        assignments,
+        {node_id: Memory.from_gb(32)},
+        node_vram={node_id: Memory.from_gb(42)},
+        unified_memory_gpu_nodes=frozenset({node_id}),
+        node_ram_available={node_id: Memory.from_gb(30)},
+    )
 
     assert discrete_limit is not None
     assert discrete_limit > KV_CONTEXT_BUDGET_TOKENS
-    assert uma_limit == KV_CONTEXT_BUDGET_TOKENS
+    # No live reading: the floor is the only safe window.
+    assert uma_without_live == KV_CONTEXT_BUDGET_TOKENS
+    # A live reading sizes the window from host RAM, below the combined-pool fit.
+    assert uma_limit is not None
+    assert KV_CONTEXT_BUDGET_TOKENS < uma_limit < discrete_limit
 
 
 def test_instance_limit_gguf_cpu_resolved_on_vram_node_clamps_to_floor():
@@ -376,13 +429,33 @@ def test_instance_limit_gguf_cpu_resolved_on_vram_node_clamps_to_floor():
     assert limit == KV_CONTEXT_BUDGET_TOKENS
 
 
-def test_instance_limit_gguf_non_vram_node_clamps_to_floor():
-    # The gguf lift applies only to discrete-VRAM nodes. On a node WITHOUT discrete
-    # VRAM the fit is derived from static ram_total, but llama.cpp preallocates the
-    # window up front against live ram_available (which placement admits on and can
-    # be far lower under memory pressure) -- so preallocating a ram_total-sized
-    # window could OOM. gguf on a non-VRAM node stays at the budget floor. (P1
-    # review, #585.)
+def test_instance_limit_gguf_cpu_resolved_on_vram_node_sizes_from_live_ram():
+    """A CPU-resolved shard on a GPU host is sized from system RAM, not the card's VRAM."""
+    node_id = NodeId("n0")
+    card = _card(16, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 1048576}
+    )
+    cpu_shard = _pipeline_shard(card, start=0, end=32).model_copy(
+        update={"resolved_backend": "llama_server-cpu"}
+    )
+    assignments = _assignments(card, {"r0": (cpu_shard, str(node_id))})
+    # A small discrete GPU beside plenty of system RAM.
+    limit = instance_context_token_limit(
+        assignments,
+        {node_id: Memory.from_gb(128)},
+        node_vram={node_id: Memory.from_gb(8)},
+        node_ram_available={node_id: Memory.from_gb(100)},
+    )
+    assert limit is not None
+    assert limit > KV_CONTEXT_BUDGET_TOKENS
+
+
+def test_instance_limit_gguf_non_vram_node_without_live_ram_keeps_the_floor():
+    # On a node WITHOUT discrete VRAM the static fit is derived from ram_total, but
+    # llama.cpp commits the window up front against live ram_available (which
+    # placement admits on and can be far lower under memory pressure), so the
+    # static fit alone cannot size the window. Without a live reading the floor is
+    # the only safe window. (P1 review, #585.)
     card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
         update={"context_length": 131072}
     )
@@ -394,6 +467,91 @@ def test_instance_limit_gguf_non_vram_node_clamps_to_floor():
         instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
         == KV_CONTEXT_BUDGET_TOKENS
     )
+
+
+def test_instance_limit_gguf_non_vram_node_sizes_the_window_from_live_ram():
+    """The served window on unified memory follows the live figure placement admitted on."""
+    node_id = NodeId("n0")
+    card = _card(16, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 1048576}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), str(node_id))}
+    )
+    totals = {node_id: Memory.from_gb(64)}
+
+    generous = instance_context_token_limit(
+        assignments, totals, node_ram_available={node_id: Memory.from_gb(60)}
+    )
+    tighter = instance_context_token_limit(
+        assignments, totals, node_ram_available={node_id: Memory.from_gb(30)}
+    )
+    # Under memory pressure the live figure is below what the floor needs; admission
+    # already guaranteed the floor, so the window never drops beneath it.
+    squeezed = instance_context_token_limit(
+        assignments, totals, node_ram_available={node_id: Memory.from_gb(18)}
+    )
+    # The live figure can exceed the GPU working-set ceiling; the ceiling caps it,
+    # so a reading above it sizes the same window a discrete GPU of that size gets.
+    gpu_shard = _pipeline_shard(card, start=0, end=32).model_copy(
+        update={"resolved_backend": "llama_server-cuda"}
+    )
+    static_fit = instance_context_token_limit(
+        _assignments(card, {"r0": (gpu_shard, str(node_id))}),
+        totals,
+        node_vram={node_id: Memory.from_gb(48)},
+    )
+
+    assert generous is not None and tighter is not None
+    assert generous > tighter > KV_CONTEXT_BUDGET_TOKENS
+    assert squeezed == KV_CONTEXT_BUDGET_TOKENS
+    assert static_fit is not None
+    assert generous <= static_fit
+    # The window leaves the worker guard's tolerance as headroom: its
+    # footprint fits within (1 - tolerance) of the pool it was sized from, so
+    # the guard's allowance cannot be spent on memory that is not there.
+    footprint = estimate_shard_footprint(card, 1.0, context_budget=tighter)
+    assert footprint.in_bytes <= Memory.from_gb(30).in_bytes * (1 - LOAD_FIT_TOLERANCE)
+    assert footprint.in_bytes > Memory.from_gb(30).in_bytes * (1 - LOAD_FIT_TOLERANCE) * 0.97
+
+
+def test_instance_limit_gguf_ring_takes_the_smallest_live_window():
+    """A multi-node served placement is bounded by its tightest hosting node."""
+    card = _card(16, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 1048576}
+    )
+    assignments = _assignments(
+        card,
+        {
+            "r0": (_pipeline_shard(card, start=0, end=16, rank=0, world=2), "n0"),
+            "r1": (_pipeline_shard(card, start=16, end=32, rank=1, world=2), "n1"),
+        },
+    )
+    totals = {NodeId("n0"): Memory.from_gb(64), NodeId("n1"): Memory.from_gb(64)}
+    both_generous = instance_context_token_limit(
+        assignments,
+        totals,
+        node_ram_available={
+            NodeId("n0"): Memory.from_gb(60),
+            NodeId("n1"): Memory.from_gb(60),
+        },
+    )
+    one_tight = instance_context_token_limit(
+        assignments,
+        totals,
+        node_ram_available={
+            NodeId("n0"): Memory.from_gb(60),
+            NodeId("n1"): Memory.from_gb(12),
+        },
+    )
+    one_missing = instance_context_token_limit(
+        assignments,
+        totals,
+        node_ram_available={NodeId("n0"): Memory.from_gb(60)},
+    )
+    assert both_generous is not None and one_tight is not None
+    assert both_generous > one_tight >= KV_CONTEXT_BUDGET_TOKENS
+    assert one_missing == KV_CONTEXT_BUDGET_TOKENS
 
 
 def test_instance_limit_mlx_non_vram_node_keeps_memory_fit():
@@ -549,3 +707,21 @@ def test_backend_preference_round_trips_and_preserves_order() -> None:
 
     restored = PlacementCardConfig.model_validate(cfg.model_dump(mode="json"))
     assert restored.backend_preference == ("llama_cpp-vulkan", "llama_cpp-rocm")
+
+
+def test_comfy_backend_offloads_to_vram() -> None:
+    from skulk.shared.models.memory_estimate import backend_offloads_to_vram
+
+    assert backend_offloads_to_vram("comfy-cuda") and backend_offloads_to_vram("comfy-rocm")
+    # The engine has no CPU mode, so even the bare tag lands on the GPU.
+    assert backend_offloads_to_vram("comfy")
+
+
+def test_audio_cpp_discrete_gpu_lanes_offload_to_vram() -> None:
+    """A music GPU lane consumes its accelerator pool except unified Metal."""
+    from skulk.shared.models.memory_estimate import backend_offloads_to_vram
+
+    for lane in ("audio_cpp-cuda", "audio_cpp-rocm", "audio_cpp-vulkan"):
+        assert backend_offloads_to_vram(lane)
+    for lane in ("audio_cpp", "audio_cpp-cpu", "audio_cpp-metal"):
+        assert not backend_offloads_to_vram(lane)

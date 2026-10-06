@@ -28,10 +28,20 @@ import contextlib
 import shutil
 import time
 from pathlib import Path
+from typing import Literal
 
 from loguru import logger
 from pydantic import Field
 
+from skulk.shared.models.model_cards import (
+    ModelId,
+    unregister_installed_card_record,
+)
+from skulk.store.installed_cards import (
+    VerifiedDetachedInstalledCardCache,
+    read_installed_card_with_fallback,
+    verify_installed_card,
+)
 from skulk.utils.pydantic_ext import CamelCaseModel
 
 LAST_USED_MARKER_FILENAME = ".last_used"
@@ -48,6 +58,19 @@ The staging cache contains reproducible copies while the rest of the volume
 contains the operating system, logs, package caches, and user data. Keeping
 10 GiB uncommitted prevents an otherwise successful model copy from leaving
 the host at the filesystem's hard-stop boundary.
+"""
+
+
+STARTUP_RECENT_USE_GRACE_SECONDS = 30 * 60
+"""How recently a staged model must have been used to survive startup.
+
+At startup no runner exists and the node's id is new, so nothing can say
+which staged models were serving. A worker refreshes the recency marker of
+every in-use model each minute, so a model used within this window was
+almost certainly serving when the previous process stopped, and a restart or
+a master change is about to place it again. The window covers a slow
+restart, such as an update that rebuilds native bindings; a model idle for
+longer competes for the grace budget as usual.
 """
 
 
@@ -75,6 +98,33 @@ class StagedModelInfo(CamelCaseModel):
     in_use: bool = False
     """True when a live runner currently uses this model (directly or as a
     companion). In-use models are never eviction candidates."""
+
+    installed_identity: str | None = None
+    """Durable installed generation identity, when a sidecar is present."""
+
+    manifest_sha256: str | None = None
+    """Canonical file-manifest digest used for replica deduplication."""
+
+    verification_state: str | None = None
+    """Evidence level binding this copy to its retained card."""
+
+    manifest_complete: bool = False
+    """Whether every sidecar manifest path and size is present."""
+
+    artifact_role: str | None = None
+    """Base or companion role represented by this cache directory."""
+
+    owner_model_id: str | None = None
+    """Owning base model for companion artifacts."""
+
+    owner_card_id: str | None = None
+    """Immutable owning card identity for a companion artifact."""
+
+    registry_card_id: str | None = None
+    """Registry identity retained by the artifact's full effective card."""
+
+    location_kind: Literal["store_local", "node_cache"] = "node_cache"
+    """Whether this directory is canonical-store-local or a node cache."""
 
 
 def model_id_from_staging_directory_name(directory_name: str) -> str:
@@ -135,12 +185,14 @@ def _last_used_epoch_seconds(directory: Path) -> float:
 def list_staged_models(
     staging_root: Path,
     in_use_model_ids: frozenset[str] = frozenset(),
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
 ) -> list[StagedModelInfo]:
     """Inventory the staging directory, newest-used first.
 
     ``in_use_model_ids`` are repo-form IDs (``org/name``) of models a live
     runner currently depends on — including companion repos of active
-    models.
+    models. ``verified_detached_cache`` avoids rehashing stable read-only
+    artifacts for periodic operator telemetry after their initial full check.
     """
     if not staging_root.is_dir():
         return []
@@ -154,14 +206,52 @@ def list_staged_models(
     for entry in staging_root.iterdir():
         if not entry.is_dir():
             continue
-        model_id = model_id_from_staging_directory_name(entry.name)
+        inferred_model_id = model_id_from_staging_directory_name(entry.name)
+        try:
+            installed = read_installed_card_with_fallback(
+                entry,
+                verified_detached_cache=verified_detached_cache,
+            )
+        except (OSError, ValueError):
+            installed = None
+        manifest_complete = (
+            verify_installed_card(entry, installed) if installed is not None else False
+        )
         staged.append(
             StagedModelInfo(
-                model_id=model_id,
+                model_id=(
+                    installed.artifact_model_id
+                    if installed is not None
+                    else inferred_model_id
+                ),
                 directory=str(entry),
                 size_bytes=_directory_size_bytes(entry),
                 last_used_epoch_seconds=_last_used_epoch_seconds(entry),
                 in_use=entry.name in in_use_directory_names,
+                installed_identity=(
+                    installed.installed_identity if installed is not None else None
+                ),
+                manifest_sha256=(
+                    installed.manifest_sha256 if installed is not None else None
+                ),
+                verification_state=(
+                    installed.verification if installed is not None else "unresolved"
+                ),
+                manifest_complete=manifest_complete,
+                artifact_role=(
+                    installed.artifact_role if installed is not None else None
+                ),
+                owner_model_id=(
+                    installed.owner_model_id if installed is not None else None
+                ),
+                owner_card_id=(
+                    installed.owner_card_id if installed is not None else None
+                ),
+                registry_card_id=(
+                    installed.model_card.registry_card_id
+                    if installed is not None
+                    else None
+                ),
             )
         )
     staged.sort(key=lambda info: info.last_used_epoch_seconds, reverse=True)
@@ -207,6 +297,11 @@ def _remove_staged_model(
         return False
     report.evicted_model_ids.append(info.model_id)
     report.evicted_bytes += info.size_bytes
+    if info.installed_identity is not None:
+        # An unresolved directory has no durable association with this alias.
+        # Clearing the process-wide record in that case could discard valid
+        # installed truth loaded from a different configured model root.
+        unregister_installed_card_record(ModelId(info.model_id))
     age_hours = (time.time() - info.last_used_epoch_seconds) / 3600
     logger.info(
         f"Evicted staged model {info.model_id} "
@@ -223,13 +318,16 @@ def enforce_staging_budget(
     *,
     required_free_bytes: int = 0,
     enforce_recent_budget: bool = True,
+    protect_used_since: float | None = None,
 ) -> StagingEvictionReport:
     """Evict idle staged models to enforce recency and free-space constraints.
 
     In-use models are never touched. When ``enforce_recent_budget`` is true,
     candidates are retained newest-first until the grace budget is spent and
     the older tail is deleted. With a budget of 0 this is strict
-    evict-on-deactivate.
+    evict-on-deactivate. A model last used at or after ``protect_used_since``
+    (epoch seconds) is treated as in use, whatever its size; the startup pass
+    uses it to keep what was serving when the previous process stopped.
 
     When ``required_free_bytes`` is non-zero, least-recently-used retained
     candidates are also removed until the filesystem reaches that target.
@@ -257,6 +355,10 @@ def enforce_staging_budget(
         info
         for info in list_staged_models(staging_root, in_use_model_ids)
         if not info.in_use
+        and (
+            protect_used_since is None
+            or info.last_used_epoch_seconds < protect_used_since
+        )
     ]
 
     retained: list[StagedModelInfo] = []

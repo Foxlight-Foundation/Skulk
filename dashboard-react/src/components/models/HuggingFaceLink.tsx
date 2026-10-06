@@ -16,11 +16,11 @@ const LinkButton = styled.a`
   height: 26px;
   flex-shrink: 0;
   border-radius: ${({ theme }) => theme.radii.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   transition: color 0.15s, background 0.15s;
 
   &:hover {
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
     background: ${({ theme }) => theme.colors.goldBg};
   }
 `;

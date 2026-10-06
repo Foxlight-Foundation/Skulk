@@ -67,6 +67,40 @@ export interface ResolvedModelCapabilities {
   supports_native_multimodal: boolean;
 }
 
+/** Open signed model/artifact capability independent of engine availability. */
+export interface RegistryCapabilityClaim {
+  capability_id: string;
+  scope: 'model' | 'artifact';
+  status: 'claimed' | 'observed' | 'complete' | 'incomplete' | 'unknown';
+  source: 'upstream_structured' | 'artifact_manifest' | 'agent_analysis';
+  confidence: number;
+  evidence_urls: string[];
+  reviewer_model?: string | null;
+  input_modalities: string[];
+  output_modalities: string[];
+  details: Record<string, unknown>;
+}
+
+/** Active signed engine/build compatibility decision for an exact artifact. */
+export interface RegistryEngineSupportClaim {
+  claim_id: string;
+  engine: string;
+  engine_build: string;
+  architecture: string;
+  artifact_format: string;
+  artifact_card_id?: string | null;
+  quantization?: string | null;
+  capability_id: string;
+  status: 'supported' | 'experimental' | 'unsupported';
+  evidence_kind: 'upstream_compatibility' | 'load_qualification' | 'feature_qualification';
+  evidence_trust: string;
+  source_url: string;
+  source_sha256: string;
+  rationale: string;
+  hardware_classes: string[];
+  supersedes_claim_id?: string | null;
+}
+
 /** Complete dashboard-facing model metadata entry returned by the model catalog. */
 export interface ModelInfo {
   id: string;
@@ -75,6 +109,25 @@ export interface ModelInfo {
   tags?: string[];
   storage_size_megabytes?: number;
   base_model?: string;
+  artifact_repository?: string;
+  artifact_file?: string | null;
+  registry_card_id?: string | null;
+  registry_snapshot_id?: string | null;
+  registry_provenance?: 'foxlight' | 'agent' | 'community' | null;
+  registry_architecture?: string | null;
+  capability_claims?: RegistryCapabilityClaim[];
+  engine_support?: RegistryEngineSupportClaim[];
+  catalog_source?: 'registry' | 'installed' | 'custom';
+  /** @deprecated Current cards are authorized by signed publication, explicit addition, or an installed card recorded from an earlier release. */
+  remote_code_approval_required?: boolean;
+  /** @deprecated Identity from the retired secondary approval ceremony. */
+  remote_code_trust_identity?: string | null;
+  /** @deprecated Legacy compatibility state with no execution effect. */
+  remote_code_approved_for_cluster?: boolean;
+  /** @deprecated Use remote_code_approved_for_cluster. */
+  remote_code_approved_on_this_node?: boolean;
+  /** Whether the card entry path authorizes its selected repository code. */
+  remote_code_automatically_trusted?: boolean;
   quantization?: string;
   supports_tensor?: boolean;
   capabilities?: string[];
@@ -237,9 +290,32 @@ export interface PlacementPreview {
   instance: unknown | null;
   memory_delta_by_node: Record<string, number> | null;
   error: string | null;
+  /** Stable failure category for an unavailable preview. */
+  error_code?:
+    | 'no_valid_placement'
+    | 'placement_info_pending'
+    | 'model_code_approval_required'
+    | null;
+  /** @deprecated Compatibility detail emitted only by older Skulk nodes. */
+  trust_requirement?: string | null;
+  /** Whether card compatibility or the signed engine matrix admitted the backend. */
+  compatibility_source?: 'card' | 'signed_engine_support' | null;
+  /** Signed claims applicable when the matrix admitted the placement. */
+  support_claim_ids?: string[];
+  /** Operator-readable missing artifact, engine/build, or platform detail. */
+  compatibility_detail?: string | null;
   /** Per-host alternative to the ranked pick: a single-node placement on a
    * host that passes admission but lost the planner ranking (#557). */
   alternative?: boolean;
+  /** Largest context window this placement holds; a larger request is refused. */
+  max_context_tokens?: number | null;
+  /** Window an unspecified launch gets: the fleet default for engines that
+   * reserve at load, otherwise the maximum. */
+  default_context_tokens?: number | null;
+  /** Whether the engine reserves the whole window's KV memory at load. */
+  reserves_context_at_load?: boolean;
+  /** Estimated KV bytes per token of window across the placement. */
+  kv_bytes_per_token?: number | null;
 }
 
 /** All known capability tags. */
@@ -250,6 +326,7 @@ export const CAPABILITIES = [
   'vision',
   'image_gen',
   'image_edit',
+  'video_gen',
   'embedding',
   'tts',
   'stt',

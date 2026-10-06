@@ -1,0 +1,58 @@
+model_id = "mlx-community/gemma-4-26b-a4b-it-4bit"
+n_layers = 30
+hidden_size = 2816
+num_key_value_heads = 8
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "gemma"
+quantization = "4bit"
+base_model = "Gemma 4 26B A4B"
+capabilities = ["text", "vision", "thinking"]
+context_length = 262144
+
+[reasoning]
+supports_toggle = true
+format = "channel_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[modalities]
+supports_native_multimodal = true
+
+[tooling]
+tool_call_format = "gemma4"
+
+[runtime]
+prompt_renderer = "gemma4"
+output_parser = "gemma4"
+# Companion drafter for speculative decoding (Gemma 4 assistant pattern).
+# ACTIVE since gemma4-mtp Phase C; re-validated 2026-06-05 under the
+# bonus-driven cadence at depth 1 — 84% acceptance, 35.1 tok/s vs ~16
+# warm vanilla (~2.2x; the MoE vanilla baseline is noisy and warms from
+# ~10 to ~16-19 tok/s across runs, speculative throughput is stable).
+# Depth > 1 measured slower (depth 2: 65%, 31.2 tok/s) — chain acceptance
+# decay outweighs the extra rows; leave depth at the default 1.
+assistant_model_repo = "mlx-community/gemma-4-26B-A4B-it-assistant-bf16"
+assistant_model_revision = "cda74908f1dbe7d3dbd3030e66576a7d4094144f"
+# MLX_METAL_FAST_SYNCH wedges the GPU command queue on this model under the
+# ring backend with multimodal load: the runner thread enters TH_UNINT in
+# the AGX driver at pipeline_last_eval_output, transitively starves
+# WindowServer, and trips the macOS userspace watchdog into a kernel panic.
+# Reproduced 2026-04 on M4 (Mac16,10) with multinode pipeline-parallel.
+metal_fast_synch = false
+# Multi-node speculation measured SLOWER than plain sharded decode on this
+# MoE: 2026-06-06 matrix, 2-node pipeline on 2x M4 16GB — 30.2 tok/s plain
+# vs 28.2 with MTP (62-76% acceptance). Sharding halves the active-params
+# bandwidth bottleneck, so plain decode is already fast and the per-round
+# draft+verify overhead nets negative. Single-node MTP on this model
+# measures 2.2x (16 -> 35.1 tok/s) and stays enabled.
+speculative_multi_node = false
+
+[vision]
+image_token_id = 258880
+model_type = "gemma4"
+boi_token_id = 255999
+eoi_token_id = 258882
+
+[storage_size]
+in_bytes = 15500000000

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { darkTheme } from '../../theme/theme';
 import { RunningInstanceCard, type RunningInstanceCardProps } from './RunningInstanceCard';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
@@ -47,6 +47,24 @@ const readyCard: RunningInstanceCardProps = {
   status: 'ready',
   onChat: vi.fn(),
 };
+
+describe('RunningInstanceCard engine label', () => {
+  it('names a non-MLX engine and its accelerator instead of an MLX ring', async () => {
+    await renderCard({ ...readyCard, modelId: 'org/video', engine: 'comfy', accelerator: 'ROCm', supportsTextChat: false });
+    expect(container!.textContent).toContain('ComfyUI · ROCm');
+    expect(container!.textContent).not.toContain('MLX Ring');
+  });
+
+  it('keeps the MLX sharding and transport label', async () => {
+    await renderCard({ ...readyCard, supportsTextChat: true });
+    expect(container!.textContent).toContain('Pipeline · MLX Ring');
+  });
+
+  it('names served llama.cpp with its accelerator', async () => {
+    await renderCard({ ...readyCard, engine: 'served', accelerator: 'Vulkan', supportsTextChat: true });
+    expect(container!.textContent).toContain('Served (llama.cpp) · Vulkan');
+  });
+});
 
 describe('RunningInstanceCard chat action', () => {
   it('shows chat for a ready text-generation model', async () => {

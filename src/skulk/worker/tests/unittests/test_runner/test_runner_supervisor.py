@@ -1474,3 +1474,42 @@ async def test_duplicate_terminal_status_is_forwarded_exactly_once() -> None:
     event_sender.close()
     with anyio.move_on_after(0.1):
         await event_receiver.aclose()
+
+
+class _ClosedProcess(_DeadProcess):
+    """A process object teardown has already closed."""
+
+    def is_alive(self) -> bool:
+        raise ValueError("process object is closed")
+
+
+@pytest.mark.asyncio
+async def test_a_closed_runner_process_reads_as_dead() -> None:
+    """The worker's shutdown path asks after teardown has closed the process."""
+
+    event_sender, _ = channel[Event](10)
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("closed-instance"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("closed-runner"),
+        node_id=NodeId("closed-node"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _ClosedProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+
+    assert supervisor.process_alive() is False
+    assert supervisor.diagnostics().process_alive is False
+

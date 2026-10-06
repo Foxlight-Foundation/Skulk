@@ -6,15 +6,19 @@ every other host that passes admission. The alternatives pass re-runs the
 planner per remaining host and surfaces the viable single-node options.
 """
 
+from datetime import datetime, timezone
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 import skulk.api.main as api_main
+import skulk.master.placement as placement_module
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.registry import RegistryEngineSupportClaim
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
@@ -23,6 +27,8 @@ from skulk.shared.types.commands import (
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.instances import (
     InstanceId,
     MlxRingInstance,
@@ -62,15 +68,22 @@ def _card() -> ModelCard:
     )
 
 
-def _single_node_instance(node: str) -> MlxRingInstance:
+def _single_node_instance(
+    node: str,
+    *,
+    model_card: ModelCard | None = None,
+    resolved_backend: str | None = None,
+) -> MlxRingInstance:
     runner = RunnerId(f"runner-{node}")
+    card = _card() if model_card is None else model_card
     shard = PipelineShardMetadata(
-        model_card=_card(),
+        model_card=card,
         device_rank=0,
         world_size=1,
         start_layer=0,
         end_layer=8,
         n_layers=8,
+        resolved_backend=resolved_backend,
     )
     return MlxRingInstance(
         instance_id=InstanceId(f"instance-{node}"),
@@ -82,6 +95,319 @@ def _single_node_instance(node: str) -> MlxRingInstance:
         hosts_by_node={},
         ephemeral_port=0,
     )
+
+
+async def test_quick_launch_rejects_unknown_model_without_hub_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /place_instance cannot turn an arbitrary alias into authorization."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    fetch = AsyncMock()
+
+    async def _unknown(_model_id: object) -> ModelCard:
+        raise ValueError("Unknown model attacker/repository; add it first")
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_unknown))
+    monkeypatch.setattr(ModelCard, "fetch_from_hf", fetch)
+    response = client.post(
+        "/place_instance",
+        json={"model_id": "attacker/repository"},
+    )
+
+    assert response.status_code == 404
+    assert "Unknown model attacker/repository" in response.json()["error"]["message"]
+    fetch.assert_not_awaited()
+
+
+async def test_preview_preserves_unknown_model_not_found_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /instance/previews preserves the catalog lookup's HTTP 404."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    api.state.topology.add_node(NodeId("preview-node"))
+
+    async def _unknown(_model_id: object) -> ModelCard:
+        raise ValueError("Unknown model attacker/repository; add it first")
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_unknown))
+    response = client.get(
+        "/instance/previews",
+        params={"model_id": "attacker/repository"},
+    )
+
+    assert response.status_code == 404
+    assert "Unknown model attacker/repository" in response.json()["error"]["message"]
+
+
+async def test_exact_instance_creation_accepts_publication_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /instance needs no second decision for a published shard card."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    card = _card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "d" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    instance = _single_node_instance("published-node", model_card=card)
+
+    async def _load(_model_id: object) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    monkeypatch.setattr(
+        api,
+        "_calculate_total_available_memory",
+        lambda: Memory.from_gb(1),
+    )
+    response = client.post(
+        "/instance",
+        json={"instance": instance.model_dump(mode="json")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["model_card"]["registryCardId"] == card.registry_card_id
+
+
+async def test_exact_instance_creation_rejects_mismatched_shard_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /instance cannot mix assignment and embedded model identities."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    canonical_card = _card()
+    mismatched_card = canonical_card.model_copy(
+        update={"model_id": ModelId("other-org/other-model")}
+    )
+    instance = _single_node_instance(
+        "mismatched-node",
+        model_card=mismatched_card,
+    )
+
+    async def _load(_model_id: object) -> ModelCard:
+        return canonical_card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    response = client.post(
+        "/instance",
+        json={"instance": instance.model_dump(mode="json")},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.headers["X-Skulk-Placement-Failure"]
+        == "model_card_identity_mismatch"
+    )
+    assert "other-org/other-model" in response.json()["error"]["message"]
+
+
+async def test_exact_instance_creation_rejects_forged_same_alias_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /instance accepts only the exact card held by the local catalog."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    canonical_card = _card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "d" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "trust_remote_code": True,
+        }
+    )
+    forged_card = canonical_card.model_copy(
+        update={
+            "source_repository": ModelId("attacker/repository"),
+            "source_revision": "b" * 40,
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "is_custom": True,
+        }
+    )
+    instance = _single_node_instance("forged-node", model_card=forged_card)
+
+    async def _load(_model_id: object) -> ModelCard:
+        return canonical_card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    response = client.post(
+        "/instance",
+        json={"instance": instance.model_dump(mode="json")},
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.headers["X-Skulk-Placement-Failure"]
+        == "model_card_identity_mismatch"
+    )
+    assert "does not match the authorized catalog card" in response.json()[
+        "error"
+    ]["message"]
+
+
+async def test_explicit_download_rejects_forged_same_alias_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /download/start cannot ingest caller-selected repository code."""
+
+    api = _build_api()
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
+    canonical_card = _card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "d" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "trust_remote_code": True,
+        }
+    )
+    forged_card = canonical_card.model_copy(
+        update={
+            "source_repository": ModelId("attacker/repository"),
+            "source_revision": "b" * 40,
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+        }
+    )
+    shard = PipelineShardMetadata(
+        model_card=forged_card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=8,
+        n_layers=8,
+    )
+
+    async def _load(_model_id: object) -> ModelCard:
+        return canonical_card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    response = client.post(
+        "/download/start",
+        json={
+            "targetNodeId": "download-target",
+            "shardMetadata": shard.model_dump(mode="json"),
+        },
+    )
+
+    assert response.status_code == 409
+    assert "does not match the authorized catalog" in response.json()["error"][
+        "message"
+    ]
+
+
+async def test_preview_exposes_exact_signed_engine_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operators can distinguish matrix-admitted placements from legacy cards."""
+    api = _build_api()
+    client = TestClient(api.app)
+    node_id = NodeId("future-engine-node")
+    api.state.topology.add_node(node_id)
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=node_id,
+            info=NodeResources(
+                backends=frozenset({"vllm", "vllm-cuda"}),
+                engine_builds={
+                    "vllm": "vllm@9.9.9",
+                    "vllm-cuda": "vllm@9.9.9",
+                },
+                hardware_classes=frozenset({"nvidia"}),
+            ),
+        ),
+        received_at=datetime.now(tz=timezone.utc),
+    )
+    card = _card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "registry_architecture": "future_architecture_v1",
+            "registry_artifact_format": "safetensors",
+        }
+    )
+    monkeypatch.setattr(
+        api,
+        "_cluster_remote_code_approvals",
+        lambda: frozenset({card.registry_card_id or ""}),
+    )
+
+    def approval_not_required(_card: ModelCard) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        approval_not_required,
+    )
+    support = RegistryEngineSupportClaim.model_validate(
+        {
+            "claim_id": "support_" + "b" * 52,
+            "engine": "vllm",
+            "engine_build": "vllm@9.9.9",
+            "architecture": "future_architecture_v1",
+            "artifact_format": "safetensors",
+            "artifact_card_id": "card_" + "a" * 52,
+            "capability_id": "text.generate",
+            "status": "supported",
+            "evidence_kind": "load_qualification",
+            "evidence_trust": "foxlight_observed",
+            "source_url": "https://evidence.example/load",
+            "source_sha256": "c" * 64,
+            "rationale": "Qualified the exact build and artifact.",
+            "hardware_classes": ["nvidia"],
+            "recorded_by": "operator@example.com",
+            "created_at": "2026-08-16T12:00:00Z",
+        },
+        strict=False,
+    )
+
+    async def _load(_model_id: object) -> ModelCard:
+        return card
+
+    def _fake_placements(
+        _command: PlaceInstance, **_kwargs: object
+    ) -> dict[InstanceId, MlxRingInstance]:
+        instance = _single_node_instance(
+            str(node_id), resolved_backend="vllm-cuda"
+        )
+        return {instance.instance_id: instance}
+
+    def _support_for_card(_card: ModelCard) -> tuple[RegistryEngineSupportClaim, ...]:
+        return (support,)
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    monkeypatch.setattr(api_main, "get_model_engine_support", _support_for_card)
+    monkeypatch.setattr(api_main, "get_instance_placements", _fake_placements)
+
+    response = client.get("/instance/previews", params={"model_id": str(_MODEL_ID)})
+
+    assert response.status_code == 200
+    previews = cast("list[dict[str, object]]", response.json()["previews"])
+    successful = [preview for preview in previews if preview["instance"] is not None]
+    assert successful
+    assert all(
+        preview["compatibility_source"] == "signed_engine_support"
+        for preview in successful
+    )
+    assert all(
+        preview["support_claim_ids"] == [support.claim_id]
+        for preview in successful
+    )
+    assert all(preview["trust_requirement"] is None for preview in successful)
 
 
 async def test_previews_surface_per_host_alternatives(
@@ -123,6 +449,7 @@ async def test_previews_surface_per_host_alternatives(
     ranked = [p for p in previews if not p.get("alternative")]
     alternatives = [p for p in previews if p.get("alternative")]
     assert any(p.get("instance") is not None for p in ranked)
+    assert all(preview.get("trust_requirement") is None for preview in previews)
     assert len(alternatives) == 1
     alt_instance = cast("dict[str, object]", alternatives[0]["instance"])
     inner = cast("dict[str, object]", next(iter(alt_instance.values())))
@@ -268,5 +595,12 @@ async def test_placement_apis_forward_unified_memory_classification(
 
     assert placement.shard_assignments.node_to_runner.keys() == {node_id}
     assert previews.previews
+    from skulk.shared.models.model_cards import authorized_model_card_digest
+
+    for preview in previews.previews:
+        assert preview.card_digest == (
+            authorized_model_card_digest(_card())
+            if preview.instance is not None else None
+        )
     assert seen_unified_nodes
     assert all(value == expected_unified_nodes for value in seen_unified_nodes)

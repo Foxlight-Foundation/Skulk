@@ -26,7 +26,8 @@ Skulk now treats capability handling as two related layers:
 
 The model card stores broad static metadata plus optional advanced capability sections.
 
-This is the durable, syncable, editable source of truth.
+This is the durable, syncable source of truth. Signed registry cards are
+immutable; operators can add custom cards through the explicit model-add flow.
 
 ### 2. Resolved runtime profile
 
@@ -73,6 +74,29 @@ The decisions it drives today are:
 - prompt renderer selection
 - output parser selection
 - speech model discovery and TTS/STT dashboard affordances
+
+## Model behavior and engine compatibility
+
+A model's intrinsic capability and the ability to serve it on this cluster are
+separate facts. The ecosystem combines four layers:
+
+1. The signed model card and capability claims describe the exact artifact.
+2. The signed engine-support matrix can add compatibility for an exact engine
+   build, artifact format, architecture, capability, and hardware class.
+3. Live node resources advertise the installed engine builds and hardware.
+4. Skulk's runner support applies the final platform limitations.
+
+Declared card backends remain valid alongside exact supported matrix matches.
+Experimental, unsupported, stale-build, and hardware-mismatched claims do not
+expand placement. An explicit incomplete-artifact claim blocks matrix admission
+for that capability. A capability badge therefore does not guarantee that every
+node, engine, or placement can execute it.
+
+See [Model cards](model-cards.md) for the metadata contract and
+[The Skulk ecosystem](ecosystem.md) for how publication, downloading, and runtime
+readiness fit together. Model capabilities on this page describe model behavior;
+[capability nodes](capability-nodes.md) are fabric services with a separate
+provider lifecycle.
 
 ## Thinking contract
 
@@ -145,7 +169,7 @@ Cards with a fixed speaker inventory may declare `default_voice`; Skulk applies
 it only when the caller omits `voice`, and schema validation requires it to be
 one of the card's `voices`.
 When the card declares `audio.supports_streaming = true`, clients can pass
-`stream=true` for stable chunked HTTP MP3 output; bundled cards keep that flag
+`stream=true` for stable chunked HTTP MP3 output; curated cards keep that flag
 off until a real MLX model has passed streaming validation. Mounted
 `supports_transcription` models serve
 non-streaming `/v1/audio/transcriptions`.
@@ -154,6 +178,21 @@ the stable `stt.realtime@1.0.0` bidirectional provider when the API can reach a
 ready single-host runner. The provider accepts mono PCM16, requires a true
 upstream incremental session, and does not infer realtime support from a batch
 transcription API.
+
+## Music contract
+
+`TextToMusic` is a distinct model-card task with a required typed `[music]`
+section. The registry derives `music.generate` from that task and records the
+card's family, lyric rule, and accepted duration targets. Speech's `[audio]`
+section remains reserved for TTS and STT. Music metadata appears in
+`/v1/models`; mounted, ready models serve asynchronous `/v1/music` jobs and
+return verified WAV content. The requested seconds are a generation target,
+not a guarantee of exact output duration.
+
+The capability claim describes the model, while an exact signed `supported`
+engine-build claim and matching live node inventory are required for placement.
+The initial music cards deliberately have no legacy compatible backends. See
+[Model cards](model-cards.md#music) for the complete `[music]` field contract.
 
 ## Fallback Behavior
 

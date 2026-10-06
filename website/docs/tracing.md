@@ -20,9 +20,9 @@ The short version:
 
 In the dashboard:
 
-1. click the bug icon in the toolbar
-2. open the **Traces** page
-3. use the tracing toggle card at the top of the page
+1. open **Observability**
+2. select **Traces**
+3. use the tracing toggle at the top of the view
 
 The UI copy intentionally says:
 
@@ -44,9 +44,7 @@ curl -X PUT http://localhost:52415/v1/tracing \
 
 ## What Gets Traced
 
-Tracing is no longer image-only.
-
-Skulk can now emit traces for:
+Skulk emits traces for:
 
 - image generation and image edits
 - text generation
@@ -74,7 +72,7 @@ The traces page supports two browsing scopes:
 This distinction matters:
 
 - browsing is available from any reachable node in cluster scope
-- deletion is still local-only in v1
+- deletion is still local-only
 - if some peers are offline or unreachable, cluster results may be partial
 
 ## API Surface
@@ -120,5 +118,5 @@ When you want to debug a live problem:
 - enabling tracing affects new requests only
 - the old env-var path still exists as a hidden developer boot override, but it
   is no longer the normal user workflow
-- cluster browsing is read-only in v1
-- local deletion remains explicit and local-only in v1
+- cluster browsing is read-only
+- local deletion remains explicit and local-only

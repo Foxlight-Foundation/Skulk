@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { FiChevronRight } from 'react-icons/fi';
@@ -62,12 +63,13 @@ const FilterBar = styled.div`
   padding: 0 2px;
 `;
 
-const FilterSelect = styled.select`
-  background: ${({ theme }) => theme.colors.bg};
+const FilterSelect = styled(DesignedSelect)`
+  background: ${({ theme }) => theme.colors.surfaceHover};
   color: ${({ theme }) => theme.colors.text};
   border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 3px 6px;
+  border-radius: 6px;
+  min-height: 30px;
+  padding: 0 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   outline: none;
@@ -75,16 +77,18 @@ const FilterSelect = styled.select`
   max-width: 180px;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 `;
 
 const FilterInput = styled.input`
-  background: ${({ theme }) => theme.colors.bg};
+  background: ${({ theme }) => theme.colors.surfaceHover};
   color: ${({ theme }) => theme.colors.text};
   border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 3px 6px;
+  border-radius: 6px;
+  min-height: 30px;
+  padding: 0 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   outline: none;
@@ -92,6 +96,7 @@ const FilterInput = styled.input`
   min-width: 100px;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 `;
@@ -186,7 +191,7 @@ const ListRow = styled.button<{ $selected: boolean }>`
 const Chevron = styled(FiChevronRight)<{ $expanded: boolean }>`
   transition: transform 0.15s ease-out;
   transform: rotate(${({ $expanded }) => ($expanded ? '90deg' : '0deg')});
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const RowMain = styled.span`
@@ -199,11 +204,11 @@ const RowSecondary = styled.span`
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const RowTime = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   white-space: nowrap;
 `;
 
@@ -211,7 +216,7 @@ const Notice = styled.div`
   padding: 12px 10px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const ErrorNotice = styled(Notice)`
@@ -261,7 +266,7 @@ const SelectedRow = styled.div`
 `;
 
 const SelectedKey = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const SelectedValue = styled.span`
@@ -478,7 +483,7 @@ export function TracesTab() {
       <FilterBar>
         <FilterSelect
           value={taskKindFilter}
-          onChange={(e) => setTaskKindFilter(e.target.value)}
+          onValueChange={(selectedValue) => setTaskKindFilter(selectedValue)}
           aria-label={t('observability.traces.filterByTaskKind', 'Filter by task kind')}
         >
           <option value="all">{t('observability.traces.allKinds', 'All kinds')}</option>
@@ -488,7 +493,7 @@ export function TracesTab() {
         </FilterSelect>
         <FilterSelect
           value={modelFilter}
-          onChange={(e) => setModelFilter(e.target.value)}
+          onValueChange={(selectedValue) => setModelFilter(selectedValue)}
           aria-label={t('observability.traces.filterByModel', 'Filter by model')}
           disabled={availableModels.length === 0}
         >
@@ -499,7 +504,7 @@ export function TracesTab() {
         </FilterSelect>
         <FilterSelect
           value={sourceNodeFilter}
-          onChange={(e) => setSourceNodeFilter(e.target.value)}
+          onValueChange={(selectedValue) => setSourceNodeFilter(selectedValue)}
           aria-label={t('observability.traces.filterBySourceNode', 'Filter by source node')}
           disabled={availableSourceNodes.length === 0}
         >

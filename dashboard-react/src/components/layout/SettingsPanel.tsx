@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useState } from 'react';
-import styled, { keyframes } from 'styled-components';
+import { Select as DesignedSelect } from '../common/Select';
+import { Toggle } from '../common/Toggle';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import styled from 'styled-components';
 import { generateInstallId } from './TelemetryConsentModal';
 import {
   useConfig,
   type StoreConfig,
   type FullConfig,
+  type IntelligentFabricConfig,
   type LoggingConfig,
   type TelemetryConfig,
 } from '../../hooks/useConfig';
 import {
   DEFAULT_MODEL_STORE_PORT,
   normalizeStoreConfig,
+  withStoreDefaults,
 } from './modelStoreConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
@@ -20,97 +24,49 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import type { ThemeName } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { DevicesPanel } from './DevicesPanel';
+import { RightDrawer } from '../common/RightDrawer';
+import { CollapsibleSection } from '../common/Surfaces';
+import { FiArrowLeft, FiChevronRight, FiSmartphone } from 'react-icons/fi';
 
+/** Visibility and dismissal for the draft-owning Settings drawer. */
 export interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
 }
 
-/* ---- animations ---- */
-
-const fadeIn = keyframes`
-  from { opacity: 0; }
-  to   { opacity: 1; }
-`;
-
-const slideIn = keyframes`
-  from { transform: translateX(100%); }
-  to   { transform: translateX(0); }
-`;
-
 /* ---- styles ---- */
-
-const Backdrop = styled.div`
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  background: ${({ theme }) => theme.colors.shadowStrong};
-  backdrop-filter: blur(2px);
-  animation: ${fadeIn} 0.2s ease-out;
-`;
-
-const Drawer = styled.aside`
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 50;
-  width: 380px;
-  max-width: 100vw;
-  background: ${({ theme }) => theme.colors.surface};
-  border-left: 1px solid ${({ theme }) => theme.colors.border};
-  display: flex;
-  flex-direction: column;
-  animation: ${slideIn} 0.25s cubic-bezier(0.33, 1, 0.68, 1);
-`;
-
-const Header = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
-`;
-
-const Title = styled.h2`
-  font-size: ${({ theme }) => theme.fontSizes.md};
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-weight: 600;
-  color: ${({ theme }) => theme.colors.gold};
-`;
 
 const Body = styled.div`
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 0;
 `;
 
+const Sections = styled.div`
+  border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
+  background: ${({ theme }) => theme.colors.surface};
+`;
+const DevicesEntry = styled.button`
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px; margin-bottom: 14px;
+  width: 100%; border-radius: 12px; border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  background: ${({ theme }) => theme.colors.surface}; color: ${({ theme }) => theme.colors.text};
+  cursor: pointer; text-align: left; font: 600 14px ${({ theme }) => theme.fonts.body};
+  > svg:first-child { width: 36px; height: 36px; padding: 10px; border-radius: 10px; flex-shrink: 0; background: ${({ theme }) => theme.colors.selected}; }
+  > svg:last-child { flex-shrink: 0; margin-left: auto; }
+  span { min-width: 0; overflow-wrap: anywhere; }
+  small { display: block; margin-top: 2px; font-size: 12.5px; font-weight: 400; color: ${({ theme }) => theme.colors.textSecondary}; }
+  &:hover { border-color: ${({ theme }) => theme.colors.borderStrong}; }
+`;
 const Footer = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 16px 20px;
+  padding: 14px 20px;
   border-top: 1px solid ${({ theme }) => theme.colors.border};
-`;
-
-const Fieldset = styled.fieldset`
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.md};
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-`;
-
-const Legend = styled.legend`
-  font-size: ${({ theme }) => theme.fontSizes.label};
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-weight: 600;
-  color: ${({ theme }) => theme.colors.textSecondary};
-  padding: 0 6px;
 `;
 
 const Row = styled.label`
@@ -127,7 +83,7 @@ const FieldLabel = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textSecondary};
-  white-space: nowrap;
+  white-space: normal;
 `;
 
 const SecondaryButton = styled.button`
@@ -144,58 +100,27 @@ const SecondaryButton = styled.button`
   }
 `;
 
-const Toggle = styled.button<{ $on: boolean }>`
-  all: unset;
-  cursor: pointer;
-  width: 36px;
-  height: 20px;
-  border-radius: 10px;
-  position: relative;
-  flex-shrink: 0;
-  transition: background 0.2s;
-
-  background: ${({ $on, theme }) =>
-    $on ? theme.colors.gold : theme.colors.surfaceSunken};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-
-  &:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
-  }
-
-  &::after {
-    content: '';
-    position: absolute;
-    top: 2px;
-    left: ${({ $on }) => ($on ? '18px' : '2px')};
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: ${({ theme }) => theme.colors.surface};
-    box-shadow: 0 1px 2px ${({ theme }) => theme.colors.shadow};
-    transition: left 0.2s;
-  }
-`;
-
 const StyledField = styled(Field)`
   flex: 1;
   min-width: 0;
 `;
 
-const Select = styled.select`
+const Select = styled(DesignedSelect)`
   width: 100%;
   box-sizing: border-box;
-  background: ${({ theme }) => theme.colors.bg};
+  background: ${({ theme }) => theme.colors.surfaceHover};
   color: ${({ theme }) => theme.colors.text};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 4px 8px;
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border-radius: ${({ theme }) => theme.radii.md};
+  min-height: 36px;
+  padding: 6px 10px;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
   outline: none;
   cursor: pointer;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 
@@ -208,14 +133,14 @@ const Select = styled.select`
 const HintText = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-style: italic;
 `;
 
 const ConfigPath = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  font-size: 11px;
+  font-family: ${({ theme }) => theme.fonts.mono};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const ErrorText = styled.div`
@@ -231,7 +156,7 @@ const LoadingText = styled.div`
   height: 200px;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Spacer = styled.span`
@@ -240,6 +165,20 @@ const Spacer = styled.span`
 
 /* ---- component ---- */
 
+/** Server default for ``inference.served_context_tokens``. */
+const SERVED_CONTEXT_DEFAULT_TOKENS = 32768;
+/** Bounds the server enforces on a requested context window. */
+const MIN_SERVED_CONTEXT_TOKENS = 256;
+const MAX_SERVED_CONTEXT_TOKENS = 1048576;
+
+/** Keep a typed value inside the server's accepted range before saving;
+ * an empty or unreadable entry saves the default. */
+function clampServedContext(value: number): number {
+  if (!Number.isFinite(value)) return SERVED_CONTEXT_DEFAULT_TOKENS;
+  return Math.min(MAX_SERVED_CONTEXT_TOKENS, Math.max(MIN_SERVED_CONTEXT_TOKENS, Math.round(value)));
+}
+
+/** Retain an unsaved configuration draft while visiting immediate device actions. */
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const { t } = useSkulkTranslation();
   const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig(
@@ -247,17 +186,47 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   );
   const themeName = useAppSelector((s) => s.ui.theme);
   const dispatch = useAppDispatch();
-  const setTheme = (name: ThemeName) => dispatch(uiActions.setTheme(name));
+  const [themeDraft, setThemeDraft] = useState<ThemeName>(themeName);
+  const seeded = useRef(false);
+  const [devicesOpen, setDevicesOpen] = useState(false);
+  const [width, setWidth] = useState(420);
+  const [devicesWidth, setDevicesWidth] = useState(720);
+  const devicesEntry = useRef<HTMLButtonElement>(null);
+  const devicesBack = useRef<HTMLButtonElement>(null);
+  const returnToSettings = () => {
+    setDevicesOpen(false);
+    requestAnimationFrame(() => devicesEntry.current?.focus());
+  };
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
+    try {
+      const value: unknown = JSON.parse(localStorage.getItem('skulk-settings-sections') ?? '{}');
+      if (value && typeof value === 'object' && !Array.isArray(value)) return Object.fromEntries(Object.entries(value).filter(([, entry]) => typeof entry === 'boolean'));
+    } catch { /* Storage is optional for disclosure preferences. */ }
+    return {};
+  });
+  const section = (key: string) => ({ open: expanded[key] ?? false, onOpenChange: (value: boolean) => {
+    setExpanded(previous => {
+      const next = { ...previous, [key]: value };
+      try { localStorage.setItem('skulk-settings-sections', JSON.stringify(next)); } catch { /* Keep the current session usable when storage is unavailable. */ }
+      return next;
+    });
+  } });
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
+  // Held as typed text so a cleared field stays cleared while the operator types.
+  const [servedContextText, setServedContextText] = useState(String(SERVED_CONTEXT_DEFAULT_TOKENS));
   const [hfToken, setHfToken] = useState('');
   const [telemetryDraft, setTelemetryDraft] = useState<TelemetryConfig | null>(null);
+  const [fabricDraft, setFabricDraft] = useState<IntelligentFabricConfig>({
+    enabled: false,
+  });
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
     enabled: false, ingest_url: '',
   });
   // Fetch config when panel opens
   useEffect(() => {
-    if (open) fetchConfig();
+    if (!open) return;
+    fetchConfig();
   }, [open, fetchConfig]);
 
   // Seed draft from fetched config — use effective value for KV backend
@@ -265,13 +234,23 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     && effective.kv_cache_backend !== 'default'
     && effective.kv_cache_backend !== (fullConfig?.inference?.kv_cache_backend ?? 'default');
   useEffect(() => {
+    if (!open) { seeded.current = false; return; }
+    if (seeded.current || !fullConfig || loading) return;
+    seeded.current = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Seed an editable snapshot once after the external query completes; later refreshes must not overwrite drafts.
+    setThemeDraft(themeName);
     setDraft(
       fullConfig?.model_store
         ? normalizeStoreConfig(fullConfig.model_store)
         : null,
     );
     setKvBackend(effective?.kv_cache_backend ?? fullConfig?.inference?.kv_cache_backend ?? 'default');
+    setServedContextText(String(fullConfig?.inference?.served_context_tokens ?? SERVED_CONTEXT_DEFAULT_TOKENS));
     setHfToken(fullConfig?.hf_token ?? '');
+    setFabricDraft({
+      enabled: fullConfig?.intelligent_fabric?.enabled ?? false,
+      steward_models: fullConfig?.intelligent_fabric?.steward_models,
+    });
     setLoggingDraft({
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
@@ -286,13 +265,23 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         ingest_url: 'https://skulk-ledger-ingest.thomastupper92618.workers.dev',
       },
     );
-  }, [fullConfig, effective]);
+  }, [open, fullConfig, effective, loading, themeName]);
 
   const modelStoreDraft = normalizeStoreConfig(draft);
 
   const update = useCallback((patch: Partial<StoreConfig>) => {
     setDraft((prev) => ({ ...normalizeStoreConfig(prev), ...patch }));
   }, []);
+
+  // Switching the store on fills blank fields with this node's defaults, so
+  // a new user can turn it on without knowing their hostname or a path.
+  const storeDefaults = effective?.model_store_defaults;
+  const toggleStore = useCallback(() => {
+    setDraft((prev) => {
+      const base = normalizeStoreConfig(prev);
+      return withStoreDefaults({ ...base, enabled: !base.enabled }, storeDefaults);
+    });
+  }, [storeDefaults]);
 
   const updateDownload = useCallback((patch: Partial<StoreConfig['download']>) => {
     setDraft((prev) => {
@@ -309,12 +298,37 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   }, []);
 
   const handleSave = useCallback(async () => {
+    // An enabled store with a blank host or path is refused by the server
+    // (an empty host interpolates into unusable store URLs and once shipped
+    // a fleet that could not place any new model), so surface the problem
+    // here instead of persisting a config the API will 422.
+    const storeDraft = draft ? withStoreDefaults(draft, storeDefaults) : null;
+    if (storeDraft?.enabled && (!storeDraft.store_host.trim() || !storeDraft.store_path.trim())) {
+      addToast({
+        type: 'error',
+        message: t(
+          'settings.toasts.storeIdentityRequired',
+          'Model store is enabled but the store host or store path is blank - name them, or disable the store',
+        ),
+      });
+      return;
+    }
     // Base on the last fetched config to avoid dropping sections
     const updated: FullConfig = { ...(fullConfig ?? {}) };
-    if (draft) updated.model_store = draft;
-    updated.inference = { kv_cache_backend: kvBackend };
+    if (storeDraft) updated.model_store = storeDraft;
+    // Keep every inference field the server knows, not only the ones this
+    // form edits: rebuilding the section from two fields would drop the rest.
+    updated.inference = {
+      ...(fullConfig?.inference ?? {}),
+      kv_cache_backend: kvBackend,
+      served_context_tokens: clampServedContext(Number.parseInt(servedContextText, 10)),
+    };
     // Include logging config
     updated.logging = { ...loggingDraft };
+    updated.intelligent_fabric = { ...fabricDraft };
+    // Retain compatibility with nodes that still expose the retired model-trust
+    // field, but never write the inert legacy allow-list back through Settings.
+    delete updated.model_trust;
     // Persist only once the operator has interacted (an untouched unasked
     // draft must not overwrite the "never asked" state that gates the modal).
     if (telemetryDraft && (telemetryDraft.consent !== 'unasked' || telemetryDraft.diagnostics_consent !== 'unasked')) {
@@ -328,8 +342,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     }
     // Only send hf_token when user entered a new one
     if (hfToken && hfToken !== '') updated.hf_token = hfToken;
-    const ok = await saveFullConfig(updated);
-    if (ok) {
+    const configSaved = await saveFullConfig(updated);
+    if (configSaved) {
+      dispatch(uiActions.setTheme(themeDraft));
       addToast({
         type: 'success',
         message: t(
@@ -341,68 +356,52 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, telemetryDraft, onClose, saveFullConfig, t]);
+  }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
 
-  // ESC to close
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [open, onClose]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- Closing the modal resets its nested navigation for the next opening.
+  useEffect(() => { if (!open) setDevicesOpen(false); }, [open]);
 
   if (!open) return null;
 
   return (
-    <>
-      <Backdrop onClick={onClose} />
-      <Drawer>
-        <Header>
-          <Title>{t('settings.title', 'Settings')}</Title>
-          <Button
-            variant="ghost"
-            size="sm"
-            icon
-            onClick={onClose}
-            aria-label={t('settings.close', 'Close settings')}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </Button>
-        </Header>
-
-        <Body>
+    <RightDrawer open={open} onClose={onClose} width={devicesOpen ? devicesWidth : width} minWidth={360} maxWidth={720} onWidthChange={devicesOpen ? setDevicesWidth : setWidth}
+      ariaLabel={devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
+      title={devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
+      headerLeading={devicesOpen ? <Button ref={devicesBack} variant="ghost" size="sm" aria-label={t('devices.backToSettings', 'Back to Settings')} onClick={returnToSettings}><FiArrowLeft /></Button> : undefined}
+      closeLabel={t('settings.close', 'Close settings')} resizeLabel={t('settings.resize', 'Resize settings')}>
+      {devicesOpen ? <DevicesPanel /> : null}
+        <Body style={{ display: devicesOpen ? 'none' : undefined }}>
           {loading && <LoadingText>{t('settings.loadingConfig', 'Loading config...')}</LoadingText>}
           {error && <ErrorText>{error}</ErrorText>}
 
+          <DevicesEntry ref={devicesEntry} aria-label={t('devices.title', 'Devices & pairing')} onClick={() => { setDevicesOpen(true); requestAnimationFrame(() => devicesBack.current?.focus()); }}><FiSmartphone aria-hidden /><span>{t('devices.title', 'Devices & pairing')}<small>{t('devices.manageHint', 'Manage paired devices and invitations')}</small></span><FiChevronRight size={14} aria-hidden /></DevicesEntry>
+
+          <Sections>
           {/* Appearance */}
-          <Fieldset>
-            <Legend>{t('settings.appearance.legend', 'Appearance')}</Legend>
+          <CollapsibleSection {...section('appearance')} title={t('settings.appearance.legend', 'Appearance')} summary={themeDraft === 'dark' ? 'Night' : 'Noon Ridge'}>
             <Row>
               <FieldLabel>{t('settings.appearance.colorTheme', 'Color theme')}</FieldLabel>
               <Toggle
-                $on={themeName === 'light'}
-                onClick={() => setTheme(themeName === 'dark' ? 'light' : 'dark')}
+                $on={themeDraft === 'light'}
+                onClick={() => setThemeDraft(themeDraft === 'dark' ? 'light' : 'dark')}
                 role="switch"
-                aria-checked={themeName === 'light'}
-                aria-label={themeName === 'light'
+                aria-checked={themeDraft === 'light'}
+                aria-label={themeDraft === 'light'
                   ? t('settings.appearance.switchToDark', 'Switch to dark theme')
                   : t('settings.appearance.switchToLight', 'Switch to light theme')}
               />
               <Spacer />
               <span style={{ fontSize: 13, opacity: 0.7 }}>
-                {themeName === 'light'
-                  ? t('settings.appearance.light', 'Light')
-                  : t('settings.appearance.dark', 'Dark')}
+                {themeDraft === 'light'
+                  ? t('settings.appearance.noonRidge', 'Noon Ridge')
+                  : t('settings.appearance.night', 'Night')}
               </span>
             </Row>
-          </Fieldset>
+          </CollapsibleSection>
 
           <>
             {/* Model Store */}
-            <Fieldset>
-              <Legend>{t('settings.modelStore.legend', 'Model Store')}</Legend>
+            <CollapsibleSection {...section('modelStore')} title={t('settings.modelStore.legend', 'Model Store')} summary={modelStoreDraft.enabled ? modelStoreDraft.store_host : t('common.off', 'Off')}>
               <Row>
                 <FieldLabel>
                   {t('settings.common.enabled', 'Enabled')}
@@ -414,7 +413,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle $on={modelStoreDraft.enabled} onClick={() => update({ enabled: !modelStoreDraft.enabled })} />
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')} $on={modelStoreDraft.enabled} onClick={toggleStore} />
               </Row>
               {modelStoreDraft.enabled && (
                 <>
@@ -457,11 +456,10 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   </Row>
                 </>
               )}
-            </Fieldset>
+            </CollapsibleSection>
 
             {/* Download */}
-            <Fieldset>
-              <Legend>{t('settings.download.legend', 'Download')}</Legend>
+            <CollapsibleSection {...section('download')} title={t('settings.download.legend', 'Download')} summary={modelStoreDraft.download.allow_hf_fallback ? t('common.on', 'On') : t('common.off', 'Off')}>
               <Row>
                 <FieldLabel>
                   {t('settings.download.allowHuggingFaceFallback', 'Allow HuggingFace fallback')}
@@ -473,16 +471,15 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                   $on={modelStoreDraft.download.allow_hf_fallback}
                   onClick={() => updateDownload({ allow_hf_fallback: !modelStoreDraft.download.allow_hf_fallback })}
                 />
               </Row>
-            </Fieldset>
+            </CollapsibleSection>
 
             {/* Staging */}
-            <Fieldset>
-              <Legend>{t('settings.staging.legend', 'Staging')}</Legend>
+            <CollapsibleSection {...section('staging')} title={t('settings.staging.legend', 'Staging')} summary={modelStoreDraft.staging.enabled ? modelStoreDraft.staging.node_cache_path : t('common.off', 'Off')}>
               <Row>
                 <FieldLabel>
                   {t('settings.common.enabled', 'Enabled')}
@@ -494,7 +491,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                   $on={modelStoreDraft.staging.enabled}
                   onClick={() => updateStaging({ enabled: !modelStoreDraft.staging.enabled })}
                 />
@@ -521,25 +518,19 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                         )}
                       />
                     </FieldLabel>
-                    <Toggle
+                    <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                       $on={modelStoreDraft.staging.cleanup_on_deactivate}
                       onClick={() => updateStaging({ cleanup_on_deactivate: !modelStoreDraft.staging.cleanup_on_deactivate })}
                     />
                   </Row>
                 </>
               )}
-            </Fieldset>
+            </CollapsibleSection>
 
-            {configPath && (
-              <ConfigPath>
-                {t('settings.configPath', 'Config: {configPath}', { configPath })}
-              </ConfigPath>
-            )}
           </>
 
           {/* Inference — always shown, not gated on model_store config */}
-          <Fieldset>
-            <Legend>{t('settings.inference.legend', 'Inference')}</Legend>
+          <CollapsibleSection {...section('inference')} title={t('settings.inference.legend', 'Inference')} summary={({ default: 'Default', optiq: 'OptiQ', turboquant_adaptive: 'TurboQuant Adaptive', turboquant: 'TurboQuant', mlx_quantized: 'MLX Quantized' } as Record<string, string>)[kvBackend] ?? kvBackend}>
             <FieldLabel>
               {t('settings.inference.kvCacheBackend', 'KV Cache Backend')}
               <InfoTooltip
@@ -552,7 +543,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 }
               />
             </FieldLabel>
-            <Select value={kvBackend} onChange={(e) => setKvBackend(e.target.value)} disabled={!!envOverride}>
+            <Select aria-label={t('settings.inference.kvCacheBackend', 'KV Cache Backend')} value={kvBackend} onValueChange={(selectedValue) => setKvBackend(selectedValue)} disabled={!!envOverride}>
               <option value="default">{t('settings.inference.defaultOption', 'Default (no quantization)')}</option>
               <option value="optiq">{t('settings.inference.optiqOption', 'OptiQ (rotation-based)')}</option>
               <option value="turboquant_adaptive">{t('settings.inference.turboquantAdaptiveOption', 'TurboQuant Adaptive')}</option>
@@ -561,6 +552,33 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 {t('settings.inference.mlxQuantizedOption', 'MLX Quantized (requires SKULK_KV_CACHE_BITS env)')}
               </option>
             </Select>
+            <FieldLabel>
+              {t('settings.inference.servedContext', 'Default served context (tokens)')}
+              <InfoTooltip
+                filled
+                content={t(
+                  'settings.inference.servedContextTooltip',
+                  'llama-server, in-process llama.cpp and vLLM reserve the whole context window in memory when a model loads, whether or not requests use it. Placements that do not choose a window get this many tokens; a placement can ask for more under Advanced, up to what its nodes hold. MLX grows its cache per request and is not affected.',
+                )}
+              />
+            </FieldLabel>
+            <StyledField
+              size="sm"
+              type="number"
+              min={MIN_SERVED_CONTEXT_TOKENS}
+              max={MAX_SERVED_CONTEXT_TOKENS}
+              step={1024}
+              aria-label={t('settings.inference.servedContext', 'Default served context (tokens)')}
+              value={servedContextText}
+              onChange={(e) => setServedContextText((e.target as HTMLInputElement).value)}
+              style={{ maxWidth: 120 }}
+            />
+            <HintText>
+              {t(
+                'settings.inference.servedContextHint',
+                'Applies to the next placement. Running models keep the window they loaded with.',
+              )}
+            </HintText>
             {envOverride ? (
               <HintText>
                 {t(
@@ -576,11 +594,10 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 )}
               </HintText>
             )}
-          </Fieldset>
+          </CollapsibleSection>
 
           {/* HuggingFace */}
-          <Fieldset>
-            <Legend>{t('settings.huggingFace.legend', 'HuggingFace')}</Legend>
+          <CollapsibleSection {...section('huggingFace')} title={t('settings.huggingFace.legend', 'HuggingFace')} summary={hfToken || effective?.has_hf_token ? t('settings.tokenSet', 'Token set') : t('settings.tokenNotSet', 'Not set')}>
             <Row>
               <FieldLabel>
                 {t('settings.huggingFace.apiToken', 'API Token')}
@@ -606,11 +623,10 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               {effective?.has_hf_token ? t('settings.huggingFace.tokenConfigured', 'Token is configured. ') : ''}
               {t('settings.huggingFace.syncHint', 'Synced to all nodes. Env var HF_TOKEN takes precedence if set.')}
             </HintText>
-          </Fieldset>
+          </CollapsibleSection>
 
           {/* Logging */}
-          <Fieldset>
-            <Legend>{t('settings.logging.legend', 'Logging')}</Legend>
+          <CollapsibleSection {...section('logging')} title={t('settings.logging.legend', 'Logging')} summary={loggingDraft.enabled ? t('common.on', 'On') : t('common.off', 'Off')}>
             <Row>
               <FieldLabel>
                 {t('settings.common.enabled', 'Enabled')}
@@ -622,7 +638,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   )}
                 />
               </FieldLabel>
-              <Toggle $on={loggingDraft.enabled} onClick={() => setLoggingDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
+              <Toggle aria-label={t('settings.common.enabled', 'Enabled')} $on={loggingDraft.enabled} onClick={() => setLoggingDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
             </Row>
             {loggingDraft.enabled && (
               <>
@@ -643,15 +659,41 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 </HintText>
               </>
             )}
-          </Fieldset>
+          </CollapsibleSection>
+
+          {/* Intelligent fabric: Skulk's resident operator cognition. The toggle is the
+              whole surface; model preference stays config-file-only until
+              the cards-DB arc gives model pickers a proper home. */}
+          <CollapsibleSection {...section('intelligentFabric')} title={t('settings.intelligentFabric.legend', 'Intelligent Fabric')} summary={fabricDraft.enabled ? t('common.on', 'On') : t('common.off', 'Off')}>
+            <Row>
+              <FieldLabel>
+                {t('settings.common.enabled', 'Enabled')}
+                <InfoTooltip
+                  filled
+                  content={t(
+                    'settings.intelligentFabric.enabledTooltip',
+                    'Keeps Skulk available as the fabric itself: ask about cluster health, models, and diagnostics from the Skulk page. Skulk can prepare basic actions, but each one requires your separate approval.',
+                  )}
+                />
+              </FieldLabel>
+              <Toggle aria-label={t('settings.common.enabled', 'Enabled')} $on={fabricDraft.enabled} onClick={() => setFabricDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
+            </Row>
+            {fabricDraft.enabled && (
+              <HintText>
+                {t(
+                  'settings.intelligentFabric.syncHint',
+                  'Skulk prepares its resident intelligence automatically after saving; the first start downloads its model. Turning it off removes that system placement.',
+                )}
+              </HintText>
+            )}
+          </CollapsibleSection>
 
           {/* Field telemetry: consent lives in skulk.yaml (survives restarts,
               synced like other settings). Both switches stay permanently
               available here; the first-run modal only acquires the initial
               choice. */}
           {telemetryDraft && (
-            <Fieldset>
-              <Legend>{t('settings.telemetry.legend', 'Telemetry')}</Legend>
+            <CollapsibleSection {...section('telemetry')} title={t('settings.telemetry.legend', 'Telemetry')} summary={telemetryDraft?.consent}>
               <Row>
                 <FieldLabel>
                   {t('settings.telemetry.perf', 'Performance telemetry')}
@@ -663,7 +705,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                   $on={telemetryDraft.consent === 'enabled'}
                   onClick={() =>
                     setTelemetryDraft(prev =>
@@ -687,7 +729,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     )}
                   />
                 </FieldLabel>
-                <Toggle
+                <Toggle aria-label={t('settings.common.enabled', 'Enabled')}
                   $on={telemetryDraft.diagnostics_consent === 'enabled'}
                   onClick={() =>
                     setTelemetryDraft(prev =>
@@ -737,21 +779,22 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   'Inspect exactly what would be sent at GET /v1/telemetry/preview.',
                 )}
               </HintText>
-            </Fieldset>
+            </CollapsibleSection>
           )}
 
+          </Sections>
+          {configPath && <ConfigPath style={{ marginTop: 16, overflowWrap: 'anywhere' }}>{t('settings.configPath', 'Config: {configPath}', { configPath })}</ConfigPath>}
         </Body>
 
-        <Footer>
+        <Footer style={{ display: devicesOpen ? 'none' : undefined }}>
           <Spacer />
           <Button variant="outline" size="md" onClick={onClose}>
             {t('common.cancel', 'Cancel')}
           </Button>
-          <Button variant="primary" size="md" loading={saving} onClick={handleSave} disabled={loading}>
-            {t('common.save', 'Save')}
+          <Button variant="solid" size="md" loading={saving} onClick={handleSave} disabled={loading || !fullConfig}>
+            {t('settings.saveChanges', 'Save changes')}
           </Button>
         </Footer>
-      </Drawer>
-    </>
+    </RightDrawer>
   );
 }

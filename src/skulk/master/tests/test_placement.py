@@ -1,8 +1,11 @@
 import pytest
 
+import skulk.master.placement as placement_module
+import skulk.shared.models.model_cards as model_cards_module
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    PlacementModelCardIdentityError,
     add_instance_to_placements,
     fallback_command_for_refused_instance,
     get_transition_events,
@@ -10,14 +13,37 @@ from skulk.master.placement import (
     replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
 )
+from skulk.master.placement_utils import (
+    carve_first_gpu_node_ids,
+    reserve_instance_system_ram,
+    reserve_system_ram_usage,
+    unified_memory_gpu_node_ids,
+    usable_vram_by_node,
+)
 from skulk.master.tests.conftest import (
     create_node_memory,
     create_node_network,
     create_rdma_connection,
     create_socket_connection,
 )
-from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    estimate_shard_footprint,
+)
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    PlacementCardConfig,
+    VisionCardConfig,
+)
+from skulk.shared.models.registry import (
+    RegistryCapabilityClaim,
+    RegistryEngineSupportClaim,
+)
+from skulk.shared.models.remote_code_approval import (
+    remote_code_approval_required as actual_remote_code_approval_required,
+)
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
@@ -29,10 +55,12 @@ from skulk.shared.types.events import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import (
+    AcceleratorMetrics,
     MemoryUsage,
     NetworkInterfaceInfo,
     NodeNetworkInfo,
     NodeResources,
+    SystemPerformanceProfile,
 )
 from skulk.shared.types.tasks import TaskId, TaskStatus, TextGeneration
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -163,6 +191,7 @@ def test_get_instance_placements_create_instance(
     # assert
     assert len(placements) == 1
     instance_id = list(placements.keys())[0]
+    assert instance_id == InstanceId(str(cic.command_id))
     instance = placements[instance_id]
     assert instance.shard_assignments.model_id == model_card.model_id
 
@@ -851,6 +880,333 @@ def _make_shard_metadata(model_card: ModelCard) -> PipelineShardMetadata:
     )
 
 
+def _served_gguf_card(
+    model_id: str = "served-gguf", context_length: int = 1048576
+) -> ModelCard:
+    """A GGUF card whose KV cost is known, so a served window can be sized."""
+    return ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_gb(16),
+        n_layers=32,
+        hidden_size=4096,
+        supports_tensor=True,
+        num_key_value_heads=8,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model-Q4_K_M.gguf",
+        context_length=context_length,
+    )
+
+
+def test_served_window_on_unified_memory_follows_live_ram_net_of_placements() -> None:
+    """Back-to-back served placements on one RAM-backed node share the node.
+
+    Without a live figure the window was the 8192 floor. With it, the first
+    placement takes the window that fits live memory; the second is sized
+    net of the first placement's footprint even though telemetry has not yet
+    moved, so the two cannot both claim the whole node.
+    """
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(120).in_bytes, ram_total=Memory.from_gb(128).in_bytes
+        )
+    }
+    node_network = {node_id: create_node_network()}
+    # The first card's advertised context caps its window, so it leaves room.
+    first_card = _served_gguf_card("served-gguf-first", context_length=32768)
+    second_card = _served_gguf_card("served-gguf-second")
+
+    first = place_instance(
+        place_instance_command(first_card), topology, {}, node_memory, node_network
+    )
+    first_instance = next(iter(first.values()))
+    assert first_instance.context_token_limit == 32768
+
+    alone = next(
+        iter(
+            place_instance(
+                place_instance_command(second_card),
+                topology,
+                {},
+                node_memory,
+                node_network,
+            ).values()
+        )
+    )
+    # The master hands placement memory already net of committed placements
+    # (reserve_system_ram_usage); the first placement is pending here.
+    second = place_instance(
+        place_instance_command(second_card),
+        topology,
+        first,
+        reserve_system_ram_usage(node_memory, first),
+        node_network,
+    )
+    second_instance = next(
+        instance
+        for instance_id, instance in second.items()
+        if instance_id not in first
+    )
+    assert alone.context_token_limit is not None
+    assert second_instance.context_token_limit is not None
+    assert (
+        KV_CONTEXT_BUDGET_TOKENS
+        <= second_instance.context_token_limit
+        < alone.context_token_limit
+    )
+
+
+def test_reserve_instance_system_ram_charges_only_ram_backed_shards() -> None:
+    """Pending RAM-backed shards reduce the live figure; VRAM-backed ones do not."""
+    ram_node = NodeId()
+    gpu_node = NodeId()
+    card = _served_gguf_card()
+    stamped_window = 32768
+
+    def instance_on(node_id: NodeId, backend: str | None) -> MlxRingInstance:
+        runner_id = RunnerId()
+        return MlxRingInstance(
+            instance_id=InstanceId(),
+            shard_assignments=ShardAssignments(
+                model_id=card.model_id,
+                runner_to_shard={
+                    runner_id: _make_shard_metadata(card).model_copy(
+                        update={"resolved_backend": backend}
+                    )
+                },
+                node_to_runner={node_id: runner_id},
+            ),
+            hosts_by_node={},
+            ephemeral_port=50000,
+            context_token_limit=stamped_window,
+        )
+
+    mlx_node = NodeId()
+    mlx_card = card.model_copy(update={"gguf_file": None})
+
+    def mlx_instance() -> MlxRingInstance:
+        runner_id = RunnerId()
+        return MlxRingInstance(
+            instance_id=InstanceId(),
+            shard_assignments=ShardAssignments(
+                model_id=mlx_card.model_id,
+                runner_to_shard={
+                    runner_id: _make_shard_metadata(mlx_card).model_copy(
+                        update={"resolved_backend": "mlx"}
+                    )
+                },
+                node_to_runner={mlx_node: runner_id},
+            ),
+            hosts_by_node={},
+            ephemeral_port=50000,
+            context_token_limit=230000,
+        )
+
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        )
+        for node_id in (ram_node, gpu_node, mlx_node)
+    }
+    node_vram = {gpu_node: Memory.from_gb(48)}
+    untouched = reserve_instance_system_ram(node_memory, {}, node_vram)
+    charged = reserve_instance_system_ram(
+        node_memory,
+        {
+            InstanceId(): instance_on(ram_node, "llama_server-cpu"),
+            InstanceId(): instance_on(gpu_node, "llama_server-cuda"),
+            InstanceId(): mlx_instance(),
+        },
+        node_vram,
+    )
+    footprint = estimate_shard_footprint(
+        card,
+        1.0,
+        resolved_backend="llama_server-cpu",
+        context_budget=stamped_window,
+    )
+    mlx_footprint = estimate_shard_footprint(
+        mlx_card,
+        1.0,
+        resolved_backend="mlx",
+        context_budget=KV_CONTEXT_BUDGET_TOKENS,
+    )
+
+    # Without commitments the observed figure stands untouched.
+    assert untouched[ram_node] == Memory.from_gb(60)
+    # The RAM-backed shard's footprint at its stamped window comes off the
+    # working-set ceiling (48 of 64 GB), the capacity admission caps at;
+    # observed memory that already reflects loads is never subtracted, so
+    # the figure is the smaller of the two.
+    assert charged[ram_node] == Memory.from_gb(48) - footprint
+    assert charged[ram_node] < untouched[ram_node]
+    # A GPU-offload shard on a discrete-VRAM node lives in VRAM, not here, and
+    # so does an unstamped one, which the VRAM reservation already charges.
+    assert charged[gpu_node] == untouched[gpu_node]
+    unstamped = reserve_instance_system_ram(
+        node_memory, {InstanceId(): instance_on(gpu_node, None)}, node_vram
+    )
+    assert unstamped[gpu_node] == untouched[gpu_node]
+    # A lazily growing MLX cache is charged at the admission floor, not at
+    # its stamped window, which is commonly the node's whole fit.
+    assert charged[mlx_node] == Memory.from_gb(48) - mlx_footprint
+    assert charged[mlx_node] > Memory.from_gb(20)
+
+    # A placement whose load telemetry has not shown yet also comes off the
+    # observed figure: an observed figure already lowered by other work would
+    # otherwise hide it behind the ceiling arithmetic.
+    busy = {
+        ram_node: create_node_memory(
+            Memory.from_gb(30).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        )
+    }
+    pending_id = InstanceId()
+    pending = {pending_id: instance_on(ram_node, "llama_server-cpu")}
+    reflected = reserve_instance_system_ram(busy, pending, node_vram)
+    not_reflected = reserve_instance_system_ram(
+        busy, pending, node_vram, unreflected=frozenset({pending_id})
+    )
+    assert reflected[ram_node] == min(
+        Memory.from_gb(30), Memory.from_gb(48) - footprint
+    )
+    assert not_reflected[ram_node] == Memory.from_gb(30) - footprint
+    assert not_reflected[ram_node] < reflected[ram_node]
+
+
+def _served_instance_on(
+    node_id: NodeId, backend: str, card: ModelCard, window: int
+) -> MlxRingInstance:
+    """One single-node served placement stamped with ``backend`` and ``window``."""
+    runner_id = RunnerId()
+    return MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={
+                runner_id: _make_shard_metadata(card).model_copy(
+                    update={"resolved_backend": backend}
+                )
+            },
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        context_token_limit=window,
+    )
+
+
+def test_a_loaded_vulkan_shard_in_a_strix_carve_is_not_charged_to_host_ram() -> None:
+    """The carve holds it and the GPU pool already nets it out; charging host
+    RAM as well counted it twice. While it loads it is still charged."""
+    node = NodeId()
+    card = _served_gguf_card()
+    window = 32768
+    node_memory = {
+        node: create_node_memory(
+            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        )
+    }
+    node_vram = {node: Memory.from_gb(90)}
+    steward_id = InstanceId()
+    steward = {steward_id: _served_instance_on(node, "llama_server-vulkan", card, window)}
+    footprint = estimate_shard_footprint(
+        card, 1.0, resolved_backend="llama_server-vulkan", context_budget=window
+    )
+
+    loaded = reserve_instance_system_ram(
+        node_memory,
+        steward,
+        node_vram,
+        unified_memory_gpu_nodes={node},
+        carve_first_nodes={node},
+    )
+    assert loaded[node] == Memory.from_gb(60)
+
+    loading = reserve_instance_system_ram(
+        node_memory,
+        steward,
+        node_vram,
+        unified_memory_gpu_nodes={node},
+        carve_first_nodes={node},
+        unreflected=frozenset({steward_id}),
+    )
+    assert loading[node] == Memory.from_gb(48) - footprint
+
+    # A unified node outside the carve-first set (GB10, or no vendor proof)
+    # keeps the charge it had before.
+    uncarved = reserve_instance_system_ram(
+        node_memory, steward, node_vram, unified_memory_gpu_nodes={node}
+    )
+    assert uncarved[node] == Memory.from_gb(48) - footprint
+
+    # A HIP engine on the same APU allocates from GTT, which is host RAM.
+    rocm = reserve_instance_system_ram(
+        node_memory,
+        {InstanceId(): _served_instance_on(node, "llama_cpp-rocm", card, window)},
+        node_vram,
+        unified_memory_gpu_nodes={node},
+        carve_first_nodes={node},
+    )
+    assert rocm[node] < Memory.from_gb(60)
+
+
+def test_a_strix_apu_keeps_its_pool_beside_a_loaded_vulkan_steward() -> None:
+    """Regression from a Strix Halo node: with a Vulkan steward loaded in the
+    carve, admission offered about 48 GB and refused a 40 GB video engine the
+    node held beside it all afternoon. The pool is the free carve plus host
+    RAM past the OS headroom, with the steward counted once, in the carve."""
+    node = NodeId()
+    gib = 1024**3
+    node_system = {
+        node: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=64 * gib,
+                vram_used_bytes=23_636_774_912,
+                gtt_total_bytes=124 * gib,
+            )
+        )
+    }
+    memory = {
+        node: create_node_memory(61_988_380_672, ram_total=65_957_404_672)
+    }
+    resources = {
+        node: NodeResources(
+            backends=frozenset(
+                {"llama_server", "llama_server-vulkan", "comfy", "comfy-rocm"}
+            )
+        )
+    }
+    steward = {
+        InstanceId(): _served_instance_on(
+            node,
+            "llama_server-vulkan",
+            _served_gguf_card("steward", context_length=262144),
+            65536,
+        )
+    }
+    reserved = reserve_system_ram_usage(
+        memory,
+        steward,
+        usable_vram_by_node(node_system, resources, node_memory=memory),
+        unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+            node_system, resources, node_memory=memory
+        ),
+        carve_first_nodes=carve_first_gpu_node_ids(
+            node_system, resources, node_memory=memory
+        ),
+    )
+    pool = usable_vram_by_node(
+        node_system, resources, node_memory=reserved, current_instances=steward
+    )
+    free_carve = 64 * gib - 23_636_774_912
+    host_share = 61_988_380_672 - Memory.from_gb(16).in_bytes
+    assert pool[node].in_bytes == free_carve + host_share
+    assert pool[node] > Memory.from_gb(80)
+
+
 def test_legacy_instance_backfills_context_token_limit_from_card() -> None:
     # An instance hydrated without a stamped ceiling (pre-#279 slice 2 snapshot
     # / event / older CreateInstance) must fall back to the card's context
@@ -941,7 +1297,13 @@ def test_legacy_gguf_instance_backfill_floor_when_context_length_unknown() -> No
     assert instance.context_token_limit == KV_CONTEXT_BUDGET_TOKENS
 
 
-def test_create_instance_restamps_context_token_limit() -> None:
+@pytest.mark.parametrize(
+    "requested,expected",
+    [(512, 512), (4096, 4096), (999_999, 4096), (0, None), (-1, None)],
+)
+def test_create_instance_restamps_context_token_limit(
+    requested: int, expected: int | None
+) -> None:
     # The exact-control POST /instance path must stamp the master's
     # memory-derived ceiling too (#292 review) — runners trust the stamped
     # field now, so a client-supplied placement can't smuggle in an inflated
@@ -966,13 +1328,113 @@ def test_create_instance_restamps_context_token_limit() -> None:
         ),
         hosts_by_node={},
         ephemeral_port=50000,
-        context_token_limit=999_999,  # client-inflated; must be overridden
+        context_token_limit=requested,
     )
     command = CreateInstance(command_id=CommandId(), instance=client_instance)
     node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    if expected is None:
+        with pytest.raises(PlacementError, match="must be positive"):
+            add_instance_to_placements(command, Topology(), {}, node_memory)
+        return
     result = add_instance_to_placements(command, Topology(), {}, node_memory)
     stamped = next(iter(result.values())).context_token_limit
-    assert stamped is not None and stamped <= 4096
+    assert stamped == expected
+
+
+def test_exact_served_placement_preserves_requested_window() -> None:
+    """A generous GPU preview cannot inflate a caller's load-time KV allocation."""
+    node_id, runner_id = NodeId(), RunnerId()
+    card = ModelCard(
+        model_id=ModelId("bounded-gguf"),
+        storage_size=Memory.from_gb(6),
+        n_layers=32,
+        hidden_size=4096,
+        num_key_value_heads=4,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model.gguf",
+        context_length=262144,
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            node_to_runner={node_id: runner_id},
+            runner_to_shard={
+                runner_id: _make_shard_metadata(card).model_copy(
+                    update={"resolved_backend": "llama_cpp-cuda"}
+                )
+            },
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        context_token_limit=8192,
+    )
+    node_memory = {node_id: create_node_memory(Memory.from_gb(64).in_bytes)}
+    result = add_instance_to_placements(
+        CreateInstance(command_id=CommandId(), instance=instance),
+        Topology(),
+        {},
+        node_memory,
+        node_vram={node_id: Memory.from_gb(22)},
+    )
+    assert result[instance.instance_id].context_token_limit == 8192
+
+
+def test_create_instance_reserves_pinned_projector_on_exact_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact-control path cannot spend projector bytes on KV admission."""
+
+    node_id = NodeId("served-driver")
+    runner_id = RunnerId("served-runner")
+    projector_size = Memory.from_gb(1).in_bytes
+    card = ModelCard(
+        model_id=ModelId("org/served-vision"),
+        storage_size=Memory.from_gb(4),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        gguf_file="model-Q4_K_M.gguf",
+        source_revision="a" * 40,
+        vision=VisionCardConfig(
+            projector_file="mmproj-F16.gguf",
+            projector_size=projector_size,
+        ),
+    )
+    client_instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_context_limit(*_args: object, **kwargs: object) -> int:
+        captured.update(kwargs)
+        return 2048
+
+    monkeypatch.setattr(
+        placement_module,
+        "instance_context_token_limit",
+        fake_context_limit,
+    )
+
+    add_instance_to_placements(
+        CreateInstance(command_id=CommandId(), instance=client_instance),
+        Topology(),
+        {},
+        {node_id: create_node_memory(Memory.from_gb(8).in_bytes)},
+    )
+
+    assert captured["fixed_memory_by_node"] == {
+        node_id: Memory.from_bytes(projector_size)
+    }
 
 
 def test_placement_prefers_cycle_with_downloaded_model(
@@ -1211,6 +1673,115 @@ def test_backend_incompatible_node_is_excluded() -> None:
     assert set(instance.shard_assignments.node_to_runner.keys()) == {node_b}
 
 
+def test_signed_engine_support_adds_backend_without_card_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact matrix claim makes an already-known empty-projection card placeable."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    capability = RegistryCapabilityClaim.model_validate(
+        {
+            "capability_id": "text.generate",
+            "scope": "model",
+            "status": "observed",
+            "source": "upstream_structured",
+            "confidence": 1,
+        },
+        strict=False,
+    )
+    card = _small_model_card().model_copy(
+        update={
+            "model_id": ModelId("org/future-model"),
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "registry_architecture": "future_architecture_v1",
+            "registry_artifact_format": "safetensors",
+            "registry_capability_claims": (capability,),
+            "placement": PlacementCardConfig(compatible_backends=frozenset()),
+        }
+    )
+    support = RegistryEngineSupportClaim.model_validate(
+        {
+            "claim_id": "support_" + "b" * 52,
+            "engine": "vllm",
+            "engine_build": "vllm@9.9.9",
+            "architecture": "future_architecture_v1",
+            "artifact_format": "safetensors",
+            "artifact_card_id": "card_" + "a" * 52,
+            "quantization": "",
+            "capability_id": "text.generate",
+            "status": "supported",
+            "evidence_kind": "load_qualification",
+            "evidence_trust": "foxlight_observed",
+            "source_url": "https://evidence.example/load",
+            "source_sha256": "c" * 64,
+            "rationale": "Exact engine build loaded the exact artifact.",
+            "hardware_classes": ["nvidia"],
+            "supersedes_claim_id": None,
+            "recorded_by": "operator@example.com",
+            "created_at": "2026-08-16T12:00:00Z",
+        },
+        strict=False,
+    )
+    monkeypatch.setattr(model_cards_module, "_registry_engine_support", (support,))
+
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={
+            node_a: NodeResources(
+                backends=frozenset({"vllm", "vllm-cuda"}),
+                engine_builds={"vllm": "vllm@9.9.9", "vllm-cuda": "vllm@9.9.9"},
+                hardware_classes=frozenset({"nvidia"}),
+            ),
+            node_b: NodeResources(
+                backends=frozenset({"vllm", "vllm-cuda"}),
+                engine_builds={"vllm": "vllm@9.9.8", "vllm-cuda": "vllm@9.9.8"},
+                hardware_classes=frozenset({"nvidia"}),
+            ),
+        },
+    )
+
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner) == {node_a}
+    assert {
+        shard.resolved_backend
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    } <= {"vllm", "vllm-cuda"}
+
+    with pytest.raises(PlacementError, match="No candidate cycle"):
+        place_instance(
+            place_instance_command(card),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            required_nodes={node_b},
+            node_resources={
+                node_a: NodeResources(
+                    backends=frozenset({"vllm", "vllm-cuda"}),
+                    engine_builds={
+                        "vllm": "vllm@9.9.9",
+                        "vllm-cuda": "vllm@9.9.9",
+                    },
+                    hardware_classes=frozenset({"nvidia"}),
+                ),
+                node_b: NodeResources(
+                    backends=frozenset({"vllm", "vllm-cuda"}),
+                    engine_builds={
+                        "vllm": "vllm@9.9.8",
+                        "vllm-cuda": "vllm@9.9.8",
+                    },
+                    hardware_classes=frozenset({"nvidia"}),
+                ),
+            },
+        )
+
+
 def test_missing_node_resources_is_treated_as_eligible() -> None:
     """Nodes with no resources entry yet (gossip still warming up) must remain
     placeable, matching the pre-#149 full/mlx default — no regression."""
@@ -1229,7 +1800,244 @@ def test_missing_node_resources_is_treated_as_eligible() -> None:
     assert len(placements) == 1
 
 
-def _fully_connected_three_nodes(
+def test_published_repository_code_card_is_adaptively_placeable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publication authorization does not constrain planner node choice."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        actual_remote_code_approval_required,
+    )
+
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        approved_remote_code_identities=frozenset(),
+    )
+
+    assert len(placements) == 1
+
+
+def test_placement_needs_no_secondary_model_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact published registry card remains placeable with no allow-list."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        actual_remote_code_approval_required,
+    )
+
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        approved_remote_code_identities=frozenset(),
+    )
+
+    assert len(placements) == 1
+
+
+def test_exact_instance_creation_needs_no_secondary_model_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact-placement path accepts publication-authorized shard cards."""
+
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "c" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "agent",
+            "trust_remote_code": True,
+        }
+    )
+    monkeypatch.setattr(
+        placement_module,
+        "remote_code_approval_required",
+        actual_remote_code_approval_required,
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    command = CreateInstance(instance=instance)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+
+    placements = add_instance_to_placements(
+        command,
+        Topology(),
+        {},
+        node_memory,
+        approved_remote_code_identities=frozenset(),
+    )
+    assert instance.instance_id in placements
+
+
+def test_exact_instance_creation_rejects_mismatched_shard_card() -> None:
+    """The master independently rejects inconsistent exact placements."""
+
+    node_id = NodeId()
+    runner_id = RunnerId()
+    assignment_card = _small_model_card()
+    shard_card = assignment_card.model_copy(
+        update={"model_id": ModelId("other-org/other-model")}
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=assignment_card.model_id,
+            runner_to_shard={runner_id: _make_shard_metadata(shard_card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+
+    with pytest.raises(
+        PlacementModelCardIdentityError,
+        match="other-org/other-model",
+    ):
+        add_instance_to_placements(
+            CreateInstance(instance=instance),
+            Topology(),
+            {},
+            {node_id: create_node_memory(Memory.from_gb(8).in_bytes)},
+        )
+
+
+def test_foxlight_signed_card_needs_no_separate_operator_approval() -> None:
+    """The signed pinned card remains the complete Foxlight trust decision."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    card = _small_model_card().model_copy(
+        update={
+            "source_revision": "a" * 40,
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot-test",
+            "registry_provenance": "foxlight",
+        }
+    )
+
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+    )
+
+    assert len(placements) == 1
+
+
+def test_zenoh_isolated_node_is_excluded_from_placement() -> None:
+    """Positive data-plane isolation routes work to a connected peer."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={
+            node_a: NodeResources(
+                data_transport="zenoh", zenoh_connected_peers=0
+            ),
+            node_b: NodeResources(
+                data_transport="zenoh", zenoh_connected_peers=1
+            ),
+        },
+    )
+
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner) == {node_b}
+
+
+def test_all_zenoh_isolated_nodes_fail_to_place() -> None:
+    """Never create a runner when every candidate data plane is isolated."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(PlacementError, match="Zenoh inference data plane is isolated"):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(
+                    data_transport="zenoh", zenoh_connected_peers=0
+                ),
+                node_b: NodeResources(
+                    data_transport="zenoh", zenoh_connected_peers=0
+                ),
+            },
+        )
+
+
+def test_unknown_zenoh_peer_count_remains_placement_eligible() -> None:
+    """Startup telemetry unknowns must not create a false hard failure."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        required_nodes={node_a},
+        node_resources={
+            node_a: NodeResources(
+                data_transport="zenoh", zenoh_connected_peers=None
+            ),
+            node_b: NodeResources(
+                data_transport="zenoh", zenoh_connected_peers=1
+            ),
+        },
+    )
+
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner) == {node_a}
+
+
+def fully_connected_three_nodes(
     available_memory: tuple[float, float, float],
 ) -> tuple[
     Topology,
@@ -1269,7 +2077,7 @@ def _fully_connected_three_nodes(
 
 def test_replacement_command_widens_refused_instance_by_one_node() -> None:
     """A refused instance re-places one node wider, preserving model + backend (#290)."""
-    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+    topology, node_memory, node_network, _ = fully_connected_three_nodes(
         (10.0, 10.0, 10.0)
     )
     card = ModelCard(
@@ -1302,7 +2110,7 @@ def test_refusal_fallback_excludes_refuser_at_any_width() -> None:
     anywhere but the refusing node at min_nodes=1 (#290 on a heterogeneous
     fleet: an MLX model refused at the full Mac width cannot go wider, but a
     remaining node can hold it alone)."""
-    topology, node_memory, node_network, node_ids = _fully_connected_three_nodes(
+    topology, node_memory, node_network, node_ids = fully_connected_three_nodes(
         (10.0, 10.0, 24.0)
     )
     card = ModelCard(
@@ -1355,7 +2163,7 @@ def test_refused_instance_replaces_onto_a_wider_split() -> None:
     Bumping ``min_nodes`` to 3 forces the wider floor, so the re-placement lands
     a 3-node split (smaller per-node share) instead of the doomed 2-node one.
     """
-    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+    topology, node_memory, node_network, _ = fully_connected_three_nodes(
         (10.0, 10.0, 10.0)
     )
     card = ModelCard(
@@ -1391,7 +2199,7 @@ def test_replacement_at_full_cluster_width_is_terminal() -> None:
     satisfied — place_instance raises, and the master treats that as the terminal
     "cannot fit anywhere" outcome that stops the refuse→re-place loop.
     """
-    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+    topology, node_memory, node_network, _ = fully_connected_three_nodes(
         (10.0, 10.0, 10.0)
     )
     card = ModelCard(
@@ -1554,7 +2362,7 @@ def test_repair_commands_preserve_original_exclusions() -> None:
     the caller excluded (observed live: a placement pinned off five nodes
     was repaired onto one of them).
     """
-    topology, node_memory, node_network, node_ids = _fully_connected_three_nodes(
+    topology, node_memory, node_network, node_ids = fully_connected_three_nodes(
         (10.0, 10.0, 10.0)
     )
     operator_excluded = node_ids[2]

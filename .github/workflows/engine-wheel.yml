@@ -1,15 +1,16 @@
 # Builds the pip-installable llama-server engine wheels
 # (skulk-llama-server-cuda, skulk-llama-server-vulkan; packaging/) and
-# publishes them to PyPI via trusted publishing. Same principle as
-# cuda-image.yml: the compilers run on plain amd64 runners without a GPU,
-# inside pinned containers, so each wheel's glibc/toolkit lineage is known.
+# publishes them to the Foxlight PEP 503 index on Cloudflare R2, which is the
+# sole wheel channel. Same principle as
+# cuda-image.yml: the compilers run on plain amd64 or arm64 runners without a
+# GPU, inside pinned containers, so each wheel's glibc/toolkit lineage is known.
 # Building from the pinned upstream SOURCE (not upstream's binaries) is the
 # supply-chain posture: we trust llama.cpp's code at a tag, built by us.
 #
 # Build runs on dispatch and on packaging changes; PUBLISH runs only on manual
 # dispatch with publish=true (cutting a wheel release is a deliberate act).
-# One-time setup on PyPI (account owner): create both projects and register
-# this repository + workflow as a trusted publisher.
+# The PyPI mirror was retired 2026-08-30: versions already published there stay
+# up (the index is append-only), but new versions go only to the R2 index.
 #
 # Advancing the engine pin is a checklist (architecture-reference.md
 # "Engine pin advancement"); the guard step enforces the mechanical parts.
@@ -22,24 +23,28 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish the wheels (Foxlight R2 index + Vulkan PyPI mirror)"
+        description: "Publish the wheels to the Foxlight R2 index"
         type: boolean
         default: false
+      publish_variant:
+        description: "Publish only the package family whose version was advanced"
+        type: choice
+        options: [all, cuda, vulkan]
+        default: all
   push:
     branches: [dev]
     paths:
-      - "packaging/**"
+      - "packaging/skulk-llama-server-cuda/**"
+      - "packaging/skulk-llama-server-vulkan/**"
       - ".github/workflows/engine-wheel.yml"
 
 env:
   # Must match src/skulk/provisioning/manifest.py LLAMA_SERVER_PIN and both
   # packaging versions (0.<build>.<rev>); the guard step enforces all of them.
-  LLAMA_CPP_PIN: b10092
-  CUDA_ARCHITECTURES: "80-real;86-real;89-real;90"
-
+  LLAMA_CPP_PIN: b10753
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       id-token: write
@@ -53,20 +58,42 @@ jobs:
       matrix:
         include:
           - variant: cuda
+            runner: ubuntu-22.04
             container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+            cuda_architectures: "80-real;86-real;89-real;90"
             package: skulk-llama-server-cuda
             module: skulk_llama_server_cuda
+            artifact: skulk-llama-server-cuda-amd64-wheel
+          - variant: cuda
+            # Grace Blackwell / GB10 is an arm64 host with compute capability
+            # 12.1. CUDA 12.9 is the first toolkit lane we support for sm_121.
+            runner: ubuntu-22.04-arm
+            container: nvidia/cuda:12.9.1-devel-ubuntu22.04
+            cuda_architectures: "121-real"
+            package: skulk-llama-server-cuda
+            module: skulk_llama_server_cuda
+            artifact: skulk-llama-server-cuda-arm64-wheel
           - variant: vulkan
+            runner: ubuntu-22.04
             container: ubuntu:22.04
+            cuda_architectures: ""
             package: skulk-llama-server-vulkan
             module: skulk_llama_server_vulkan
+            artifact: skulk-llama-server-vulkan-wheel
     container: ${{ matrix.container }}
     steps:
       - name: Install build prerequisites
         run: |
           set -euo pipefail
-          apt-get update -qq
-          apt-get install -y -qq git cmake build-essential libcurl4-openssl-dev curl ca-certificates binutils gnupg
+          install_prerequisites() {
+            # Ubuntu can retire a security-package revision while a container
+            # or mirror still holds its old index, causing a package 404.
+            rm -rf /var/lib/apt/lists/*
+            apt-get update -qq -o APT::Update::Error-Mode=any -o Acquire::Retries=3 || return
+            apt-get install -y -qq -o Acquire::Retries=3 "$@"
+          }
+          install_prerequisites git cmake build-essential libcurl4-openssl-dev curl ca-certificates binutils gnupg \
+            || install_prerequisites git cmake build-essential libcurl4-openssl-dev curl ca-certificates binutils gnupg
           if [ "${{ matrix.variant }}" = "vulkan" ]; then
             # LunarG Vulkan SDK for glslc + headers, the same source upstream
             # llama.cpp CI uses for its Vulkan builds.
@@ -74,8 +101,7 @@ jobs:
               | gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
             echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan jammy main" \
               > /etc/apt/sources.list.d/lunarg-vulkan.list
-            apt-get update -qq
-            apt-get install -y -qq vulkan-sdk
+            install_prerequisites vulkan-sdk || install_prerequisites vulkan-sdk
           fi
 
       - uses: actions/checkout@v4
@@ -87,11 +113,16 @@ jobs:
           BUILD_NUM="${LLAMA_CPP_PIN#b}"
           grep -q "version = \"0.${BUILD_NUM}\." packaging/skulk-llama-server-cuda/pyproject.toml
           grep -q "version = \"0.${BUILD_NUM}\." packaging/skulk-llama-server-vulkan/pyproject.toml
+          grep -q "ARG LLAMA_CPP_REF=$LLAMA_CPP_PIN" deployment/cuda/Dockerfile
           # The installer derives the wheel version from the checkout's
           # manifest; guard the derivation wiring rather than a literal.
           grep -q 'skulk-llama-server-cuda==0.${ENGINE_BUILD}' install.sh
           grep -q 'skulk-llama-server-vulkan==0.${ENGINE_BUILD}' install.sh
           grep -q 'LLAMA_SERVER_PIN' install.sh
+          MIN_REV="$(grep -oE 'LLAMA_SERVER_CUDA_MIN_REVISION: Final = [0-9]+' src/skulk/provisioning/manifest.py | grep -oE '[0-9]+')"
+          PACKAGE_REV="$(sed -n 's/^version = "0\.[0-9]*\.\([0-9]*\)"/\1/p' packaging/skulk-llama-server-cuda/pyproject.toml)"
+          test "$PACKAGE_REV" -ge "$MIN_REV"
+          grep -q 'LLAMA_SERVER_CUDA_MIN_REVISION' install.sh
 
       - name: Build llama-server (${{ matrix.variant }})
         run: |
@@ -108,7 +139,9 @@ jobs:
             # driver-API reference; llama-server commits its KV window up
             # front at a fixed -c, so the VMM pool allocator's benefit is
             # marginal for this serving shape.
-            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES -DGGML_CUDA_NO_VMM=ON"
+            # CUDA wheels must not inherit the runner's CPU instruction set:
+            # a native AMX build can SIGILL during model load on a GPU host.
+            BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_architectures }} -DGGML_CUDA_NO_VMM=ON -DGGML_NATIVE=OFF"
           else
             BACKEND_FLAGS="-DGGML_VULKAN=ON"
           fi
@@ -167,7 +200,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.package }}-wheel
+          name: ${{ matrix.artifact }}
           path: packaging/${{ matrix.package }}/dist/*.whl
           if-no-files-found: error
 
@@ -182,6 +215,9 @@ jobs:
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
+    concurrency:
+      group: foxlight-engine-wheel-index-publication
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -196,26 +232,16 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          PUBLISH_VARIANT: ${{ inputs.publish_variant || 'all' }}
         run: |
           set -euo pipefail
-          uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/*.whl
-
-  # PyPI mirror for the Vulkan wheel only (it fits PyPI's limits): keeps the
-  # project name claimed and reachable for plain-PyPI users. skip-existing
-  # makes re-dispatches idempotent for an already-published version.
-  publish-vulkan-pypi:
-    needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
-    runs-on: ubuntu-latest
-    environment: pypi-vulkan
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: skulk-llama-server-vulkan-wheel
-          path: dist
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-          skip-existing: true
+          # Packaging-only CUDA revisions must not overwrite the existing Vulkan
+          # version with newly rebuilt bytes. All architectures of the selected
+          # package still publish together from this attested workflow run.
+          case "$PUBLISH_VARIANT" in
+            all) WHEEL_PREFIX=skulk_llama_server_ ;;
+            cuda) WHEEL_PREFIX=skulk_llama_server_cuda- ;;
+            vulkan) WHEEL_PREFIX=skulk_llama_server_vulkan- ;;
+            *) echo "unsupported publication variant" >&2; exit 1 ;;
+          esac
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/"$WHEEL_PREFIX"*.whl

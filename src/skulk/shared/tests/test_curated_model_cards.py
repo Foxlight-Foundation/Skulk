@@ -1,0 +1,407 @@
+"""Invariant gate over the curated model cards the tests carry.
+
+The 2026-07-05 card audit found bad cards that had shipped silently: a card
+whose HF repo no longer existed, cards missing their context length (losing
+the card-side context-admission bound), and instruct-only Qwen3 cards whose
+resolved capability profile advertised a thinking contract the model cannot
+honor. The repo-existence check needs the network and stays an operational
+script, but every static invariant it applied lives here so a bad card fails
+CI instead of shipping.
+
+Skulk ships no model cards; the curated corpus is the model registry's
+seed, which validates every card it publishes. These checks run over the
+fixture copies of registry cards the tests carry (text generation and
+speech), which exercise Skulk's own reading of card truth: backend tags,
+capability resolution, and the steward's preferred models.
+"""
+
+import tomllib
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+from skulk.shared.backends import engine_of
+from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.models.reference_voices import bundled_reference_voice_profiles
+from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR, fixture_card_paths
+
+# Every fixture card lives in one directory; the kind is read from its tasks.
+_CARD_DIRS = {"inference": FIXTURE_CARDS_DIR, "speech": FIXTURE_CARDS_DIR}
+
+# Mirrors _ENGINES x _COMPUTE_BACKENDS in skulk.shared.backends. If an engine
+# or compute backend is added there, extend this and the assertions below.
+_VALID_TAGS = frozenset(
+    {"mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm"}
+) | frozenset(
+    f"{engine}-{compute}"
+    for engine in ("mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm")
+    for compute in ("metal", "vulkan", "rocm", "cuda", "cpu")
+)
+
+
+def _kind_of(path: Path) -> str | None:
+    """The family a card belongs to, from its tasks; ``None`` when out of scope.
+
+    Video and music cards name engines outside the tag set this gate checks,
+    and have their own suites.
+    """
+
+    tasks = set(cast("list[str]", tomllib.loads(path.read_text()).get("tasks", [])))
+    if "TextGeneration" in tasks:
+        return "inference"
+    if tasks & {"TextToSpeech", "SpeechToText"}:
+        return "speech"
+    return None
+
+
+def _all_card_files() -> list[tuple[str, Path]]:
+    files = [
+        (kind, path)
+        for path in fixture_card_paths()
+        if (kind := _kind_of(path)) is not None
+    ]
+    assert files, f"no fixture cards found under {FIXTURE_CARDS_DIR}"
+    return files
+
+
+_CARD_FILES = _all_card_files()
+_CARD_IDS = [path.stem for _, path in _CARD_FILES]
+
+
+def _load(path: Path) -> ModelCard:
+    return ModelCard.model_validate(tomllib.loads(path.read_text()))
+
+
+def test_no_duplicate_model_ids() -> None:
+    seen: dict[str, str] = {}
+    for _, path in _CARD_FILES:
+        model_id = str(_load(path).model_id)
+        assert model_id not in seen, (
+            f"duplicate model_id {model_id}: {seen[model_id]} and {path.name}"
+        )
+        seen[model_id] = path.name
+
+
+def test_gemma4_12b_card_does_not_advertise_missing_vision_tower() -> None:
+    """Keep the incomplete upstream 12B artifact out of vision placement."""
+    card = _load(
+        _CARD_DIRS["inference"]
+        / "mlx-community--gemma-4-12B-it-4bit.toml"
+    )
+
+    assert "vision" not in card.capabilities
+    assert card.vision is None
+    assert card.modalities is None
+
+
+def test_qwen3_vl_4b_card_pins_the_measured_artifact() -> None:
+    """Keep disk admission aligned with the complete pinned upstream artifact."""
+    card = _load(
+        _CARD_DIRS["inference"]
+        / "mlx-community--Qwen3-VL-4B-Instruct-4bit.toml"
+    )
+
+    assert card.source_revision == "2fd8dacbdb8f1e54b8c005f081ec5bf79c56376b"
+    assert card.storage_size.in_bytes == 3_109_732_071
+
+
+def test_qwen35_2b_card_keeps_unstable_mtp_disabled() -> None:
+    """Do not re-enable the sidecar that loops in clean user journeys."""
+    card = _load(
+        _CARD_DIRS["inference"] / "mlx-community--Qwen3.5-2B-4bit.toml"
+    )
+
+    assert card.runtime is not None
+    assert card.runtime.mtp_heads is False
+    assert card.runtime.mtp_sidecar_repo is None
+
+
+@pytest.mark.parametrize(("kind", "path"), _CARD_FILES, ids=_CARD_IDS)
+def test_bundled_card_invariants(kind: str, path: Path) -> None:
+    card = _load(path)  # validation itself is the first gate
+
+    # Filename convention: the loader saves custom cards as
+    # model_id.normalize() + ".toml"; bundled cards follow the same rule so a
+    # filename always names the model it configures.
+    assert path.stem == card.model_id.normalize(), (
+        f"filename {path.stem} != model_id.normalize() "
+        f"({card.model_id.normalize()})"
+    )
+
+    assert card.storage_size.in_bytes > 0
+    assert card.tasks, "card declares no tasks"
+    assert card.family, "family must be set on bundled cards"
+
+    compatible = set(card.placement.compatible_backends)
+    unknown = compatible - _VALID_TAGS
+    assert not unknown, f"unknown backend tags: {sorted(unknown)}"
+    missing_preference = [
+        tag for tag in card.placement.backend_preference if tag not in compatible
+    ]
+    assert not missing_preference, (
+        f"backend_preference not in compatible_backends: {missing_preference}"
+    )
+    engines = {engine for tag in compatible if (engine := engine_of(tag))}
+    is_gguf = card.gguf_file is not None or "gguf" in str(card.model_id).lower()
+    if kind == "inference":
+        # Model truth: a GGUF artifact can never run in-process MLX and a
+        # safetensors artifact can never run the llama engines.
+        if is_gguf:
+            assert "mlx" not in engines, "GGUF card lists the mlx engine"
+            assert {"llama_cpp", "llama_server"} & engines, (
+                "GGUF card lists no llama engine"
+            )
+        else:
+            assert not ({"llama_cpp", "llama_server"} & engines), (
+                "safetensors card lists llama engines"
+            )
+
+        # The context-admission ceiling and the KV estimate both degrade to
+        # fallbacks without these; the audit found shipped cards missing them.
+        assert card.context_length > 0, "inference card must set context_length"
+        assert card.num_key_value_heads is not None, (
+            "inference card must set num_key_value_heads"
+        )
+        assert card.quantization, "inference card must set quantization"
+
+    # Vision declarations must be coherent: the capability string is what the
+    # resolver and placement gating read, the section is what the loader reads.
+    if card.vision is not None:
+        assert "vision" in card.capabilities, (
+            "[vision] section without the 'vision' capability"
+        )
+    if card.audio is not None:
+        assert {"tts", "stt"} & set(card.capabilities), (
+            "[audio] section without a speech capability"
+        )
+        assert "mlx_audio" in engines, (
+            "speech card must list the mlx_audio engine until another speech "
+            "runner exists"
+        )
+
+    runtime = card.runtime
+    if runtime is not None:
+        mlx_spec_fields = {
+            "mtp_heads": runtime.mtp_heads,
+            "mtp_max_depth": runtime.mtp_max_depth,
+            "mtp_sidecar_repo": runtime.mtp_sidecar_repo,
+            "assistant_model_repo": runtime.assistant_model_repo,
+        }
+        dead_mlx_spec = {k for k, v in mlx_spec_fields.items() if v not in (None, False)}
+        if dead_mlx_spec:
+            assert "mlx" in engines, (
+                f"MLX speculation fields {sorted(dead_mlx_spec)} on a card "
+                "without the mlx engine (dead config)"
+            )
+        if runtime.served_spec_type is not None:
+            assert "llama_server" in engines, (
+                "served_spec_type without the llama_server engine (dead config)"
+            )
+        if runtime.served_spec_type in ("draft_simple", "draft_eagle3", "draft_dflash"):
+            assert runtime.served_spec_draft_repo and runtime.served_spec_draft_file, (
+                f"served_spec_type={runtime.served_spec_type} requires a draft "
+                "repo and file"
+            )
+        if runtime.served_spec_draft_repo:
+            assert runtime.served_spec_type is not None, (
+                "served draft repo without served_spec_type"
+            )
+        if runtime.vllm_spec_method is not None:
+            assert "vllm" in engines, (
+                "vllm_spec_method without the vllm engine (dead config)"
+            )
+        if runtime.vllm_spec_num_tokens is not None:
+            assert runtime.vllm_spec_method is not None, (
+                "vllm_spec_num_tokens without vllm_spec_method (dead config)"
+            )
+        # The method/draft-repo pairing itself (dflash requires a draft repo,
+        # mtp forbids one) is enforced by the card model validator, so an
+        # inconsistent bundled card already fails at parse above.
+
+
+def test_nonempty_placement_tables_declare_model_backend_truth() -> None:
+    """Keep serialized cards complete for external registry validation."""
+    for _, path in _CARD_FILES:
+        raw = cast("dict[str, object]", tomllib.loads(path.read_text()))
+        placement = raw.get("placement")
+        if isinstance(placement, dict):
+            typed_placement = cast("dict[str, object]", placement)
+            compatible = typed_placement.get("compatible_backends")
+            assert isinstance(compatible, list) and compatible, (
+                f"{path.name} has a placement table without compatible_backends"
+            )
+
+
+@pytest.mark.parametrize(
+    ("kind", "path"),
+    [(kind, path) for kind, path in _CARD_FILES if kind == "inference"],
+    ids=[path.stem for kind, path in _CARD_FILES if kind == "inference"],
+)
+def test_bundled_card_capability_resolution_is_coherent(kind: str, path: Path) -> None:
+    """The resolved profile must agree with the card's thinking declaration.
+
+    This is the gate the audit derived the qwen3 finding from: a family
+    default forcing a thinking contract onto a card that explicitly declares
+    no thinking (or the reverse) means either the resolver or the card is
+    wrong, and both are ship blockers.
+    """
+    card = _load(path)
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    declares_thinking = "thinking" in card.capabilities or card.reasoning is not None
+    assert profile.supports_thinking == declares_thinking, (
+        f"resolver supports_thinking={profile.supports_thinking} but card "
+        f"declaration says {declares_thinking} (family={profile.family})"
+    )
+
+
+def test_qwen_base_card_pins_validated_six_bit_artifact() -> None:
+    """Ship the smallest Qwen Base conversion validated for stable cloning."""
+
+    path = FIXTURE_CARDS_DIR / "mlx-community--Qwen3-TTS-12Hz-0.6B-Base-6bit.toml"
+    card = _load(path)
+
+    assert card.quantization == "6bit"
+    assert card.source_revision == "4e44ed4bcee28a0f89a493e07bde16e6dccd43eb"
+    assert card.storage_size.in_bytes == 1_851_314_126
+
+
+@pytest.mark.parametrize(
+    "card_name",
+    (
+        "mlx-community--Qwen3-TTS-12Hz-0.6B-Base-6bit.toml",
+        "mlx-community--LongCat-AudioDiT-1B-4bit.toml",
+        "mlx-community--fish-audio-s2-pro-8bit.toml",
+    ),
+)
+def test_reference_capable_cards_expose_shared_voice_catalog(card_name: str) -> None:
+    """Every validated cloning model must expose the same packaged profiles.
+
+    The default is the product's signature voice: ``skulk`` speaks for the
+    steward and for any caller that does not choose a voice, so all three
+    cloning cards must agree on it.
+    """
+
+    profiles = bundled_reference_voice_profiles()
+    card = _load(FIXTURE_CARDS_DIR / card_name)
+
+    assert card.audio is not None
+    assert card.audio.supports_reference_audio is True
+    assert card.audio.supports_voice_listing is True
+    assert card.audio.default_voice == "skulk"
+    assert card.audio.voices == tuple(profile.id for profile in profiles)
+    assert tuple(voice.id for voice in card.audio.voice_catalog) == card.audio.voices
+    assert tuple(voice.name for voice in card.audio.voice_catalog) == tuple(
+        profile.name for profile in profiles
+    )
+    assert tuple(voice.reference_profile for voice in card.audio.voice_catalog) == (
+        card.audio.voices
+    )
+
+
+@pytest.mark.parametrize(
+    "card_name",
+    (
+        "mlx-community--LongCat-AudioDiT-1B-4bit.toml",
+        "mlx-community--fish-audio-s2-pro-8bit.toml",
+    ),
+)
+def test_voice_cloning_cards_expose_managed_reference_audio(card_name: str) -> None:
+    """Bundled cloning models must expose the conditioning path Skulk serves."""
+
+    card = _load(FIXTURE_CARDS_DIR / card_name)
+
+    assert card.audio is not None
+    assert card.audio.supports_reference_audio is True
+
+def test_default_steward_models_are_tool_calling_text_cards() -> None:
+    """Every default steward brain must exist, place, and call tools.
+
+    The master walks ``steward_models`` in order and places the first card
+    the cluster can serve, so an entry whose card the registry lacks is a
+    silent skip that costs a fleet its best brain, and an entry whose card
+    cannot call tools would place a steward that can never investigate. The
+    fixtures carry a copy of each default's registry card; refresh them when
+    the list or the registry cards change.
+    """
+    from skulk.shared.backends import platform_compatible_backends
+    from skulk.store.config import IntelligentFabricConfig
+
+    bundled = {
+        str(_load(path).model_id): path
+        for kind, path in _CARD_FILES
+        if kind == "inference"
+    }
+    for model_ref in IntelligentFabricConfig().steward_models:
+        assert model_ref in bundled, f"steward model {model_ref} has no fixture card"
+        card = _load(bundled[model_ref])
+        profile = resolve_model_capability_profile(card.model_id, model_card=card)
+        assert profile.supports_tool_calling, (
+            f"steward model {model_ref} cannot call tools"
+        )
+        # The platform filter is what placement actually applies; a card that
+        # loses every backend to it is unplaceable no matter what it declares.
+        assert platform_compatible_backends(
+            card.placement.compatible_backends,
+            card_serves_vision=card.vision is not None,
+            card_serves_speech=False,
+        ), f"steward model {model_ref} has no platform-servable backend"
+
+
+def test_steward_gguf_brains_stay_eligible_for_the_served_lanes() -> None:
+    """A vision declaration would gate the GGUF brains off llama_server.
+
+    The served runner cannot load an mmproj projector, so ``[vision]`` on a
+    GGUF card removes every ``llama_server-*`` tag at placement time. Both
+    Qwen3.6 and Qwen3.5 GGUF steward cards are deliberately text-only for
+    this reason, and the base models being natively multimodal makes that an
+    easy thing to "fix" back into a break.
+    """
+    from skulk.shared.backends import engine_of, platform_compatible_backends
+    from skulk.store.config import IntelligentFabricConfig
+
+    bundled = {
+        str(_load(path).model_id): path
+        for kind, path in _CARD_FILES
+        if kind == "inference"
+    }
+    gguf_refs = [
+        ref for ref in IntelligentFabricConfig().steward_models if "GGUF" in ref
+    ]
+    assert gguf_refs, "the steward preference list lost its GGUF entries"
+    for model_ref in gguf_refs:
+        card = _load(bundled[model_ref])
+        assert card.vision is None, f"{model_ref} declares vision"
+        assert "vision" not in card.capabilities, f"{model_ref} declares vision"
+        servable = platform_compatible_backends(
+            card.placement.compatible_backends,
+            card_serves_vision=False,
+            card_serves_speech=False,
+        )
+        assert "llama_server" in {
+            engine for tag in servable if (engine := engine_of(tag))
+        }, f"{model_ref} lost the served lane"
+
+
+def test_skulk_ships_no_model_cards() -> None:
+    """A model card never goes back into the package.
+
+    A card comes with the model: from the signed registry when the model is
+    downloaded, then from the model's own installed record. A card file
+    under ``resources/`` would be shipped with every Skulk and quietly
+    compete with that truth, so none may exist there.
+    """
+    from skulk.shared.constants import RESOURCES_DIR
+
+    # Other TOML stays (the reference voices' catalog); a model card is any
+    # file that declares a model_id.
+    shipped = sorted(
+        str(path.relative_to(RESOURCES_DIR))
+        for path in Path(RESOURCES_DIR).rglob("*.toml")
+        if "model_id" in tomllib.loads(path.read_text())
+    )
+    assert shipped == [], (
+        "model cards belong in the registry seed, not in Skulk: " + ", ".join(shipped)
+    )
+

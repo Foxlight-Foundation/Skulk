@@ -31,7 +31,10 @@ from mlx_lm.models.deepseek_v3 import DeepseekV3Model
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from skulk.shared.constants import preferred_env_value
-from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.capabilities import (
+    muse_glimmer_template_kwargs,
+    resolve_model_capability_profile,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -57,6 +60,7 @@ from skulk.download.download_utils import (
     build_companion_model_path,
     build_model_path,
     build_sidecar_path,
+    companion_artifact_location,
 )
 from skulk.shared.types.common import Host
 from skulk.shared.types.memory import Memory
@@ -100,61 +104,6 @@ def _object_dict(value: object) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
-class _Gemma4PatchEmbedder(Protocol):
-    """Typed callable surface for Gemma 4 patch embedding."""
-
-    def __call__(
-        self,
-        pixel_values: mx.array,
-        patch_positions: mx.array,
-        padding_positions: mx.array,
-    ) -> mx.array: ...
-
-
-class _Gemma4Encoder(Protocol):
-    """Typed callable surface for Gemma 4 vision encoding."""
-
-    def __call__(
-        self,
-        inputs_embeds: mx.array,
-        patch_positions: mx.array,
-        attn_mask: mx.array,
-    ) -> mx.array: ...
-
-
-class _Gemma4Pooler(Protocol):
-    """Typed callable surface for Gemma 4 pooled patch selection."""
-
-    def __call__(
-        self,
-        hidden_states: mx.array,
-        patch_positions: mx.array,
-        padding_positions: mx.array,
-        *,
-        output_length: int,
-    ) -> tuple[mx.array, mx.array]: ...
-
-
-class _Gemma4Config(Protocol):
-    """Subset of Gemma 4 config used by the dynamic native-vision wrapper."""
-
-    standardize: bool
-
-
-class _Gemma4NativeVisionTower(Protocol):
-    """Typed view of the Gemma 4 vision tower fields used by Skulk."""
-
-    patch_size: int
-    pooling_kernel_size: int
-    max_patches: int
-    patch_embedder: _Gemma4PatchEmbedder
-    encoder: _Gemma4Encoder
-    pooler: _Gemma4Pooler
-    config: _Gemma4Config | None
-    std_bias: mx.array
-    std_scale: mx.array
-
-
 class _HasLogits(Protocol):
     """Minimal model output that exposes logits."""
 
@@ -171,7 +120,11 @@ class _MlxLmLoadModel(Protocol):
     """Typed callable surface for mlx-lm's model loader."""
 
     def __call__(
-        self, model_path: Path, **kwargs: object
+        self,
+        model_path: Path,
+        *,
+        trust_remote_code: bool = ...,
+        **kwargs: object,
     ) -> tuple[nn.Module, object]: ...
 
 
@@ -370,219 +323,6 @@ def log_request_shape(
     logger.info(f"[request-shape] prompt label={label}\n{prompt}")
 
 
-def _gemma4_output_length_for_pixel_values(
-    pixel_values: mx.array,
-    patch_size: int,
-    pooling_kernel_size: int,
-) -> int:
-    """Compute Gemma 4's pooled visual token count for a preprocessed image batch.
-
-    Gemma 4's processor resizes images so the patch grid is divisible by the
-    pooling kernel size. The number of pooled visual tokens is therefore the
-    number of patches divided by ``pooling_kernel_size ** 2``.
-    """
-    if pixel_values.ndim != 4:
-        raise ValueError(
-            "Gemma 4 vision expects pixel values shaped [batch, channels, height, width]"
-        )
-
-    _, _, height, width = pixel_values.shape
-    patches_per_image = (height // patch_size) * (width // patch_size)
-    pooled_tokens, remainder = divmod(
-        patches_per_image, pooling_kernel_size * pooling_kernel_size
-    )
-    if remainder != 0:
-        raise ValueError(
-            "Gemma 4 preprocessing produced a patch grid that cannot be pooled "
-            f"cleanly: {patches_per_image=} is not divisible by "
-            f"{pooling_kernel_size ** 2=}"
-        )
-    return pooled_tokens
-
-
-def _gemma4_patch_positions_and_padding(
-    pixel_values: mx.array,
-    patch_size: int,
-    max_patches: int,
-) -> tuple[mx.array, mx.array]:
-    """Build Gemma 4 patch positions with padding that matches the real sequence length.
-
-    MLX-VLM's Gemma 4 implementation pads patch positions up to ``max_patches`` when
-    the processed image is small enough, but some higher token budgets produce more
-    real patches than that default cap. In that case we must stop padding entirely
-    so the patch positions, attention mask, and hidden-state sequence all agree on
-    the same length.
-    """
-    if pixel_values.ndim != 4:
-        raise ValueError(
-            "Gemma 4 vision expects pixel values shaped [batch, channels, height, width]"
-        )
-
-    batch_size, _, height, width = pixel_values.shape
-    patch_height = height // patch_size
-    patch_width = width // patch_size
-    num_real_patches = patch_height * patch_width
-
-    grid_x = mx.arange(patch_width, dtype=mx.int32)
-    grid_y = mx.arange(patch_height, dtype=mx.int32)
-    mesh_x, mesh_y = mx.meshgrid(grid_x, grid_y, indexing="xy")
-    real_positions = mx.stack([mesh_x.reshape(-1), mesh_y.reshape(-1)], axis=-1)
-    real_positions = mx.broadcast_to(
-        mx.expand_dims(real_positions, axis=0),
-        (batch_size, num_real_patches, 2),
-    )
-
-    if num_real_patches >= max_patches:
-        padding_positions = mx.zeros((batch_size, num_real_patches), dtype=mx.bool_)
-        return real_positions, padding_positions
-
-    num_padding = max_patches - num_real_patches
-    pad_positions = mx.full((batch_size, num_padding, 2), -1, dtype=mx.int32)
-    patch_positions = mx.concatenate([real_positions, pad_positions], axis=1)
-    padding_positions = mx.concatenate(
-        [
-            mx.zeros((batch_size, num_real_patches), dtype=mx.bool_),
-            mx.ones((batch_size, num_padding), dtype=mx.bool_),
-        ],
-        axis=1,
-    )
-    return patch_positions, padding_positions
-
-
-class _Gemma4DynamicVisionTower(nn.Module):
-    """Wrap Gemma 4's vision tower so pooling matches the processor's token count.
-
-    The current MLX-VLM Gemma 4 encoder always pools to
-    ``config.default_output_length`` (280), even when the processor resized the
-    image to produce a different number of soft tokens. Wide images can therefore
-    lose a large fraction of their patches during pooling and produce unrelated
-    captions. This wrapper keeps the existing encoder path intact but derives the
-    pooling length from the actual preprocessed image size.
-    """
-
-    _inner: _Gemma4NativeVisionTower
-
-    def __init__(self, inner: _Gemma4NativeVisionTower) -> None:
-        super().__init__()
-        object.__setattr__(self, "_inner", inner)
-
-    def _encode_one(self, pixel_values: mx.array) -> mx.array:
-        if pixel_values.ndim != 4:
-            raise ValueError(
-                "Gemma 4 vision tower expects batched pixel values for native vision"
-            )
-
-        patch_size = int(self._inner.patch_size)
-        pooling_kernel_size = int(self._inner.pooling_kernel_size)
-        output_length = _gemma4_output_length_for_pixel_values(
-            pixel_values,
-            patch_size=patch_size,
-            pooling_kernel_size=pooling_kernel_size,
-        )
-        logger.info(
-            "Gemma 4 native vision pooling: "
-            f"image_shape={tuple(pixel_values.shape)} "
-            f"patch_size={patch_size} "
-            f"pooling_kernel_size={pooling_kernel_size} "
-            f"default_output_length={getattr(self._inner, 'default_output_length', 'unknown')} "
-            f"dynamic_output_length={output_length}"
-        )
-
-        batch_size, _, height, width = pixel_values.shape
-        num_real_patches = (height // patch_size) * (width // patch_size)
-        patch_positions, padding_positions = _gemma4_patch_positions_and_padding(
-            pixel_values,
-            patch_size=patch_size,
-            max_patches=int(self._inner.max_patches),
-        )
-        sequence_length = patch_positions.shape[1]
-
-        inputs_embeds = self._inner.patch_embedder(
-            pixel_values,
-            patch_positions[:, :num_real_patches],
-            padding_positions[:, :num_real_patches],
-        )
-
-        num_padding = sequence_length - num_real_patches
-        if num_padding > 0:
-            pad_embeds = mx.zeros(
-                (batch_size, num_padding, inputs_embeds.shape[-1]),
-                dtype=inputs_embeds.dtype,
-            )
-            inputs_embeds = mx.concatenate([inputs_embeds, pad_embeds], axis=1)
-
-        valid_mask = ~padding_positions
-        attn_mask = mx.expand_dims(valid_mask, 1) * mx.expand_dims(valid_mask, 2)
-        neg_inf = mx.array(float("-inf"), dtype=inputs_embeds.dtype)
-        attn_mask = mx.where(
-            attn_mask, mx.array(0.0, dtype=inputs_embeds.dtype), neg_inf
-        )
-        attn_mask = mx.expand_dims(attn_mask, 1)
-
-        hidden_states = self._inner.encoder(inputs_embeds, patch_positions, attn_mask)
-        pooled, pool_mask = self._inner.pooler(
-            hidden_states,
-            patch_positions,
-            padding_positions,
-            output_length=output_length,
-        )
-
-        pooled_mask = pool_mask if pool_mask.shape[1] == output_length else ~pool_mask
-        all_real: list[mx.array] = []
-        for batch_idx in range(batch_size):
-            n_valid = int(pooled_mask[batch_idx].astype(mx.int32).sum().item())
-            all_real.append(pooled[batch_idx, :n_valid])
-
-        hidden_states = mx.concatenate(all_real, axis=0)[None]
-
-        config = self._inner.config
-        if config is not None and config.standardize:
-            hidden_states = (
-                hidden_states - self._inner.std_bias
-            ) * self._inner.std_scale
-
-        return hidden_states
-
-    def __call__(self, pixel_values: mx.array | list[mx.array]) -> mx.array:
-        if isinstance(pixel_values, list):
-            features: list[mx.array] = []
-            for pixel_value in pixel_values:
-                batched = pixel_value[None] if pixel_value.ndim == 3 else pixel_value
-                encoded = self._encode_one(batched)
-                features.append(encoded[0] if encoded.ndim == 3 else encoded)
-            return mx.concatenate(features, axis=0)[None]
-        return self._encode_one(_batch_gemma4_pixel_values(pixel_values))
-
-    def __getattr__(self, name: str) -> object:
-        if name == "_inner":
-            return cast(object, object.__getattribute__(self, name))
-        return cast(object, getattr(self._inner, name))
-
-
-def _batch_gemma4_pixel_values(pixel_values: mx.array) -> mx.array:
-    """Add the image batch dimension omitted by single-image processors."""
-
-    return pixel_values[None] if pixel_values.ndim == 3 else pixel_values
-
-
-def _patch_gemma4_native_vision(model: nn.Module) -> nn.Module:
-    """Patch Gemma 4's native vision tower to pool using the real image grid size."""
-    if getattr(getattr(model, "config", None), "model_type", None) != "gemma4":
-        return model
-
-    vision_tower = getattr(model, "vision_tower", None)
-    if vision_tower is None or isinstance(vision_tower, _Gemma4DynamicVisionTower):
-        return model
-
-    logger.info(
-        "Patching Gemma 4 vision tower to use dynamic pooling lengths for native vision"
-    )
-    model.vision_tower = _Gemma4DynamicVisionTower(
-        cast(_Gemma4NativeVisionTower, vision_tower)
-    )
-    return model
-
-
 class _VlmModelWrapper(nn.Module):
     """Wrapper that unwraps LanguageModelOutput → mx.array for mlx-lm compat.
 
@@ -713,7 +453,6 @@ def _load_vlm_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, obje
             if patch is not None:
                 model_class, original = patch
                 type.__setattr__(model_class, "sanitize", original)
-    model = _patch_gemma4_native_vision(model)
     return _VlmModelWrapper(model), None
 
 
@@ -721,6 +460,7 @@ def load_model(
     model_path: Path,
     *,
     prefer_vlm: bool = False,
+    trust_remote_code: bool = False,
     **kwargs: object,
 ) -> tuple[nn.Module, object]:
     """Load a text or native multimodal model.
@@ -731,6 +471,11 @@ def load_model(
             type. MLX-LM intentionally strips vision towers from Qwen VLM
             checkpoints, so vision placements must opt into the native model to
             preserve their image-grid-aware embeddings and RoPE.
+        trust_remote_code: Allow mlx-lm to execute a custom architecture file
+            named by the config's ``model_file`` key (CVE-2026-5843 gate).
+            Callers pass the card's own ``trust_remote_code``, so only a card
+            authorized as executable can reach that path; the mlx-vlm loaders
+            manage repository code internally and do not take this flag.
         **kwargs: Loader options forwarded to the selected upstream loader.
 
     Returns:
@@ -745,7 +490,9 @@ def load_model(
 
     mlx_lm_load_model = cast(_MlxLmLoadModel, _mlx_lm_load_model)
     try:
-        return mlx_lm_load_model(model_path, **kwargs)
+        return mlx_lm_load_model(
+            model_path, trust_remote_code=trust_remote_code, **kwargs
+        )
     except ValueError as exc:
         if "not supported" not in str(exc):
             raise
@@ -922,13 +669,18 @@ def load_mlx_items(
     if group is None:
         logger.info(f"Single device used for {bound_instance.instance}")
         card = bound_instance.bound_shard.model_card
-        model_path = build_model_path(card.model_id, card.source_revision)
+        model_path = build_model_path(
+            card.model_id,
+            card.source_revision,
+            card.artifact_bundle.root if card.artifact_bundle is not None else None,
+        )
         start_time = time.perf_counter()
         model, _ = load_model(
             model_path,
             lazy=True,
             strict=False,
             prefer_vlm=_prefers_native_vlm(card),
+            trust_remote_code=card.trust_remote_code,
         )
         # Eval layers one by one for progress reporting
         try:
@@ -980,6 +732,12 @@ def load_mlx_items(
             vision_config,
             bound_instance.bound_shard.model_card.model_id,
             bound_instance.bound_shard.model_card.source_revision,
+            bound_instance.bound_shard.model_card.artifact_repository,
+            (
+                bound_instance.bound_shard.model_card.artifact_bundle.root
+                if bound_instance.bound_shard.model_card.artifact_bundle is not None
+                else None
+            ),
         )
     else:
         vision_processor = None
@@ -1039,8 +797,15 @@ def load_mlx_items(
         # Sidecar repos carry only mtp.safetensors (no config.json), so they
         # must be resolved with the sidecar resolver — build_model_path's
         # model-completeness check rejects their directories.
+        sidecar_model_id, sidecar_revision = companion_artifact_location(
+            bound_instance.bound_shard.model_card,
+            runtime.mtp_sidecar_repo,
+            runtime.mtp_sidecar_revision,
+        )
         mtp_safetensors = build_sidecar_path(
-            ModelId(runtime.mtp_sidecar_repo), "mtp.safetensors"
+            sidecar_model_id,
+            "mtp.safetensors",
+            sidecar_revision,
         )
         if mtp_safetensors is not None:
             mtp_weights = cast("dict[str, mx.array]", mx.load(str(mtp_safetensors)))
@@ -1066,8 +831,14 @@ def load_mlx_items(
     if runtime and runtime.assistant_model_repo and assistant_placement_ok:
         # Gemma 4 assistant drafter (gemma4-mtp Phase C). Same placement
         # envelope as MTP sidecars (#200/#201).
+        assistant_model_id, assistant_revision = companion_artifact_location(
+            bound_instance.bound_shard.model_card,
+            runtime.assistant_model_repo,
+            runtime.assistant_model_revision,
+        )
         assistant_dir = build_companion_model_path(
-            ModelId(runtime.assistant_model_repo)
+            assistant_model_id,
+            assistant_revision,
         )
         if assistant_dir is not None:
             assistant_model = load_assistant_model(assistant_dir)
@@ -1097,6 +868,11 @@ def shard_and_load(
     model_path = build_model_path(
         shard_metadata.model_card.model_id,
         shard_metadata.model_card.source_revision,
+        (
+            shard_metadata.model_card.artifact_bundle.root
+            if shard_metadata.model_card.artifact_bundle is not None
+            else None
+        ),
     )
 
     model, _ = load_model(
@@ -1104,6 +880,7 @@ def shard_and_load(
         lazy=True,
         strict=False,
         prefer_vlm=_prefers_native_vlm(shard_metadata.model_card),
+        trust_remote_code=shard_metadata.model_card.trust_remote_code,
     )
     logger.debug(model)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
@@ -1328,6 +1105,39 @@ def load_tokenizer_for_model_id(
         else:
             tokenizer.eos_token_ids = [gemma_eos_id, gemma_end_of_turn_id]
 
+    # Llama 3.1+ ends a tool-calling turn with <|eom_id|> ("end of message",
+    # handing off to a tool) and a user-facing turn with <|eot_id|> ("end of
+    # turn"). Only <|eot_id|> reaches us from tokenizer_config, because
+    # generation_config carries no eos_token_id for these repos, so without
+    # this the model runs straight past the end of its own tool call: the
+    # scaffolding detokenizes into visible content and a second call begins.
+    # Upstream (Meta's reference, vLLM and llama.cpp) all stop on both.
+    # Detected by vocabulary rather than by the template mentioning the token:
+    # Llama 3.2's template never writes <|eom_id|> or <|python_tag|> literally,
+    # it only routes tool results through the "ipython" role, so a template
+    # substring check silently misses the family this exists for.
+    llama_eom_id = _token_id_or_none(tokenizer, "<|eom_id|>")
+    if llama_eom_id is not None:
+        # <|eom_id|> is "end of message, handing off to a tool". Llama declares
+        # only <|eot_id|> as its stop token, so without this the model runs
+        # straight past the end of its tool call and generates the next turn's
+        # header, and the caller sees control tokens in the answer text.
+        existing = list(tokenizer.eos_token_ids or [])
+        if llama_eom_id not in existing:
+            tokenizer.eos_token_ids = existing + [llama_eom_id]
+        if not getattr(tokenizer, "tool_parser", None):
+            # Llama writes the call as a bare object with no opening marker, so
+            # the block opens on "{" and is closed by the end of the message
+            # rather than by a closing marker. The whole-block dialect parser
+            # reads both that form and the <|python_tag|> variant.
+            object.__setattr__(tokenizer, "_tool_call_start", "{")
+            object.__setattr__(tokenizer, "_tool_call_end", "<|eom_id|>")
+            from skulk.worker.runner.llm_inference.tool_parsers import (
+                UNMARKED_TOOL_DIALECT,
+            )
+
+            object.__setattr__(tokenizer, "_tool_parser", UNMARKED_TOOL_DIALECT)
+
     if capability_profile.tool_call_format == ToolCallFormat.Gemma4:
         # mlx-lm exposes tool-call markers through read-only properties on
         # TokenizerWrapper. Configure the internal fields directly so Gemma 4
@@ -1337,7 +1147,105 @@ def load_tokenizer_for_model_id(
         object.__setattr__(tokenizer, "_tool_call_end", "<tool_call|>")
         object.__setattr__(tokenizer, "_tool_parser", _parse_gemma4_tool_calls)
 
+    if capability_profile.tool_call_format == ToolCallFormat.Generic and (
+        "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or "")
+    ):
+        # Mistral writes `[TOOL_CALLS] [{...}]` and closes the call by ending
+        # the message, not with a closing marker, so the end marker is an
+        # impossible sentinel that never appears in detokenized text, and the
+        # streaming parser's end-of-generation path parses the still-open
+        # block when the message finishes, the same mechanism that closes
+        # Llama's unmarked dialect.
+        #
+        # This wiring deliberately REPLACES a parser mlx-lm already assigned:
+        # the pinned mlx-lm auto-installs its own Mistral parser for any
+        # template containing [TOOL_CALLS], and that parser reads the
+        # `NAME[ARGS]{...}` form, rejecting the JSON-array form the 2410-era
+        # instruct models actually emit. The override tries the array form
+        # first and delegates to the displaced parser on a miss, so models
+        # writing the upstream form keep working.
+        displaced = cast(
+            "Callable[[str], list[dict[str, Any]]] | None",
+            getattr(tokenizer, "tool_parser", None),
+        )
+
+        def _mistral_with_fallback(text: str) -> list[dict[str, Any]]:
+            try:
+                return _parse_mistral_tool_calls(text)
+            except ValueError:
+                if displaced is None:
+                    raise
+                return displaced(text)
+
+        object.__setattr__(tokenizer, "_tool_call_start", "[TOOL_CALLS]")
+        # The end marker is an impossible sentinel, not the EOS literal: the
+        # streaming scanner closes a block at the FIRST occurrence of the end
+        # marker in accumulated text, and a model can emit a literal "</s>"
+        # inside arguments or prose, which would truncate a valid call. The
+        # sentinel can never occur in detokenized text, so the block closes
+        # only at end of generation.
+        object.__setattr__(
+            tokenizer, "_tool_call_end", _MISTRAL_IMPOSSIBLE_END
+        )
+        object.__setattr__(tokenizer, "_tool_parser", _mistral_with_fallback)
+
+    if (
+        capability_profile.tool_call_format == ToolCallFormat.Generic
+        and not getattr(tokenizer, "tool_parser", None)
+        and "<tool_call>" in (getattr(tokenizer, "chat_template", None) or "")
+    ):
+        # #728: tokenizers that reach this path without mlx-lm's inferred
+        # tool parser (notably the mlx-vlm native-vision loaders, which is
+        # every natively-multimodal family) silently pass tool-call markup
+        # through as text. When the chat template speaks the <tool_call>
+        # dialect, wire the repo's shared text parser (Qwen3 XML plus
+        # Hermes JSON, the same one the llama_cpp engine uses) through the
+        # standard marker mechanism. Template truth decides, so models
+        # whose templates use other dialects are untouched.
+        object.__setattr__(tokenizer, "_tool_call_start", "<tool_call>")
+        object.__setattr__(tokenizer, "_tool_call_end", "</tool_call>")
+        object.__setattr__(tokenizer, "_tool_parser", _parse_generic_text_tool_calls)
+
     return tokenizer
+
+
+# Never occurs in detokenized text; see the wiring comment above.
+_MISTRAL_IMPOSSIBLE_END = "\x00skulk:mistral:end-of-message\x00"
+
+
+def _mistral_tool_call_id(raw: str) -> str:
+    """Map any tool-call id onto Mistral's required nine-alphanumeric form.
+
+    Mistral's chat template hard-fails rendering ("Tool call IDs should be
+    alphanumeric strings with length 9!") on any other shape, and Skulk mints
+    UUID-style ids, so a tool-result round trip could never render: the
+    template raised and killed the runner, observed live at the first
+    round-trip request. A digest rather than a truncation: ids differing only
+    past the ninth character (parallel calls with sequential caller-minted
+    ids) must not collide, and the mapping must be deterministic ACROSS
+    requests, because callers echo ids back in later turns, which rules out
+    request-local bijections.
+    """
+    import hashlib
+
+    return hashlib.sha256(raw.encode()).hexdigest()[:9]
+
+
+def _normalize_mistral_tool_call_ids(messages: list[dict[str, Any]]) -> None:
+    """Rewrite tool-call ids in history messages for a Mistral template."""
+    for msg in messages:
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:  # pyright: ignore[reportUnknownVariableType]
+                if isinstance(tool_call, dict) and isinstance(
+                    tool_call.get("id"), str  # pyright: ignore[reportUnknownMemberType]
+                ):
+                    tool_call["id"] = _mistral_tool_call_id(
+                        cast("str", tool_call["id"])
+                    )
+        tool_call_id = msg.get("tool_call_id")
+        if isinstance(tool_call_id, str):
+            msg["tool_call_id"] = _mistral_tool_call_id(tool_call_id)
 
 
 def _normalize_tool_calls(msg_dict: dict[str, Any]) -> None:
@@ -1514,6 +1422,9 @@ def apply_chat_template(
     for msg in formatted_messages:
         _normalize_tool_calls(msg)
 
+    if "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or ""):
+        _normalize_mistral_tool_call_ids(formatted_messages)
+
     extra_kwargs: dict[str, Any] = {}
     if task_params.enable_thinking is not None:
         # Qwen3 and GLM use "enable_thinking"; DeepSeek uses "thinking".
@@ -1522,6 +1433,11 @@ def apply_chat_template(
         extra_kwargs["thinking"] = task_params.enable_thinking
     if task_params.reasoning_effort is not None:
         extra_kwargs["reasoning_effort"] = task_params.reasoning_effort
+    # Muse Glimmer steers its always-on reasoning with a strength level rather
+    # than a toggle or the harmony effort field.
+    extra_kwargs.update(
+        muse_glimmer_template_kwargs(capability_profile, task_params.reasoning_effort)
+    )
 
     patched_template: str | None = None
     if task_params.tools:
@@ -1732,61 +1648,86 @@ def mx_barrier(group: Group | None):
     )
 
 
+def _token_id_or_none(tokenizer: object, token: str) -> int | None:
+    """Return a special token's id, or None when the tokenizer lacks it.
+
+    Vocabularies differ across quantizations and conversions, so a missing
+    token is normal and must not raise.
+    """
+
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if convert is None:
+        return None
+    try:
+        token_id = cast("object", convert(token))
+    except Exception:  # noqa: BLE001 - tokenizer implementations vary
+        return None
+    if not isinstance(token_id, int):
+        return None
+    unknown = getattr(tokenizer, "unk_token_id", None)
+    if token_id < 0 or (unknown is not None and token_id == unknown):
+        return None
+    return token_id
+
+
+def _parse_generic_text_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Parse generic-format tool calls (Qwen3 XML or Hermes JSON) from text.
+
+    Receives the inner text between the ``<tool_call>`` markers (the runner's
+    marker mechanism strips them) and delegates to the shared text parser so
+    the MLX lane recognizes exactly the formats the llama_cpp engine does.
+    Argument values arrive as JSON strings, the shape ``ToolCallItem``
+    validation expects.
+    """
+    from skulk.worker.runner.llm_inference.tool_text_parser import (
+        parse_tool_calls_from_text,
+    )
+
+    items = parse_tool_calls_from_text(f"<tool_call>{text}</tool_call>")
+    if not items:
+        # Raising routes the runner to its malformed-tool-call fallback
+        # (raw text with finish_reason="error"), matching the behavior of
+        # every other parser instead of fabricating an empty success.
+        raise ValueError("no recognized tool calls in block")
+    return [{"name": item.name, "arguments": item.arguments} for item in items]
+
+
+def _parse_mistral_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Parse Mistral ``[TOOL_CALLS]`` arrays from model output.
+
+    Receives the text after the ``[TOOL_CALLS]`` marker (the runner's marker
+    mechanism strips it) and delegates to the shared text parser's Mistral
+    branch, so the MLX lane recognizes exactly the format the llama_cpp
+    engine's recovery path does. Argument values arrive as JSON strings, the
+    shape ``ToolCallItem`` validation expects.
+    """
+    from skulk.worker.runner.llm_inference.tool_text_parser import (
+        parse_tool_calls_from_text,
+    )
+
+    items = parse_tool_calls_from_text(f"[TOOL_CALLS]{text}")
+    if not items:
+        # Raising routes the runner to its malformed-tool-call fallback (raw
+        # text with finish_reason="error"), matching every other parser
+        # instead of fabricating an empty success.
+        raise ValueError("no recognized tool calls in block")
+    return [{"name": item.name, "arguments": item.arguments} for item in items]
+
+
 def _parse_gemma4_tool_calls(text: str) -> list[dict[str, Any]]:
     """Parse Gemma 4 tool calls from model output.
 
-    Gemma 4 emits ``call:FUNCTION{key1:value1,key2:<|"|>string<|"|>}``
-    where ``<|"|>`` delimits string values. Bare values keep their JSON
-    type (number, boolean, null); quoted values are always strings.
-
-    Uses the three-phase approach from ollama PR #15306:
-    1. Extract ``<|"|>``-delimited strings into placeholders
-    2. Quote bare keys
-    3. Restore strings via ``json.dumps()`` for correct escaping
+    Delegates to the shared text parser's Gemma 4 dialect
+    (``tool_text_parser.gemma4_calls``), so the MLX lane and the llama_cpp
+    recovery path read exactly the same format, and converts the JSON-string
+    arguments back to the dict shape this engine's marker mechanism expects.
     """
-    import regex as re
+    from skulk.worker.runner.llm_inference.tool_text_parser import gemma4_calls
 
-    _call_re = re.compile(r"call:(\w+)\{(.*?)\}", re.DOTALL)
-    _gemma_quote_re = re.compile(r'(?s)<\|"\|>(.*?)<\|"\|>')
-    _bare_key_re = re.compile(r"([,{])(\w+):")
-
-    def _args_to_json(raw_args: str) -> str:
-        # Phase 1: extract <|"|>-quoted strings into placeholders.
-        extracted: list[str] = []
-
-        def _replace_quoted(m: re.Match[str]) -> str:
-            extracted.append(m.group(1))
-            return f"\x00{len(extracted) - 1}\x00"
-
-        skeleton = _gemma_quote_re.sub(_replace_quoted, raw_args)
-
-        # Phase 2: quote bare keys — {key: or ,key: → {"key": or ,"key":
-        skeleton = "{" + skeleton  # ensure leading { for regex
-        skeleton = _bare_key_re.sub(r'\1"\2":', skeleton)
-        skeleton = skeleton[1:]  # remove added {
-
-        # Phase 3: restore extracted strings with proper JSON escaping.
-        for i, value in enumerate(extracted):
-            escaped = json.dumps(value)  # json.dumps handles all escaping
-            skeleton = skeleton.replace(f"\x00{i}\x00", escaped)
-
-        return skeleton
-
-    results: list[dict[str, Any]] = []
-    for match in _call_re.finditer(text):
-        func_name = match.group(1)
-        raw_args = match.group(2)
-        args_json = "{" + _args_to_json(raw_args) + "}"
-        try:
-            args_dict = cast(dict[str, object], json.loads(args_json))
-        except json.JSONDecodeError:
-            logger.warning(
-                "Failed to parse Gemma 4 tool call arguments "
-                f"(argument_chars={len(args_json)})"
-            )
-            args_dict = {}
-        results.append(dict(name=func_name, arguments=args_dict))
-
+    results: list[dict[str, Any]] = [
+        {"name": item.name, "arguments": cast(dict[str, object], json.loads(item.arguments))}
+        for item in gemma4_calls(text)
+    ]
     if not results:
         raise ValueError(
             f"No Gemma 4 tool calls found in generated text ({len(text)} chars)"

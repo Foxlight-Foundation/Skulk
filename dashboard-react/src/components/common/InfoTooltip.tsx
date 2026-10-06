@@ -32,6 +32,8 @@ export interface InfoTooltipProps {
   size?: number;
   /** Custom trigger element. Defaults to info icon. */
   children?: React.ReactNode;
+  /** Accessible name for an icon-only trigger. */
+  triggerLabel?: string;
   className?: string;
 }
 
@@ -40,14 +42,16 @@ const Trigger = styled.span`
   align-items: center;
   justify-content: center;
   cursor: help;
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.textMuted};
   transition: color 0.15s, opacity 0.15s;
 
   &:hover { opacity: 0.8; }
 `;
 
 const TooltipBox = styled.div`
-  max-width: 360px;
+  box-sizing: border-box;
+  max-width: min(360px, calc(100vw - 16px));
+  overflow-wrap: anywhere;
   padding: 10px 14px;
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
@@ -59,6 +63,12 @@ const TooltipBox = styled.div`
   line-height: 1.5;
   white-space: pre-line;
   z-index: 9999;
+`;
+
+const TooltipContent = styled.div`
+  max-height: calc(100vh - 36px);
+  overflow-x: hidden;
+  overflow-y: auto;
 `;
 
 const ARROW_SIZE = 8;
@@ -83,6 +93,7 @@ export function InfoTooltip({
   filled = false,
   size = 20,
   children,
+  triggerLabel,
   className,
 }: InfoTooltipProps) {
   const [isOpen, setIsOpen] = useState(false);
@@ -98,6 +109,7 @@ export function InfoTooltip({
       offset(ARROW_SIZE + 4),
       flip(),
       shift({ padding: 8 }),
+      // eslint-disable-next-line react-hooks/refs -- Floating UI consumes the ref in layout, not while rendering this component.
       arrow({ element: arrowRef }),
     ],
   });
@@ -120,9 +132,11 @@ export function InfoTooltip({
   return (
     <>
       <Trigger
+        aria-label={triggerLabel}
         ref={refs.setReference}
         {...getReferenceProps()}
         className={className}
+        role={triggerLabel ? 'button' : undefined}
         tabIndex={0}
       >
         {children ?? <InfoIcon filled={filled} size={size} />}
@@ -131,6 +145,7 @@ export function InfoTooltip({
       {isOpen && (
         <FloatingPortal>
           <TooltipBox
+            // eslint-disable-next-line react-hooks/refs -- Floating UI provides a callback ref, not a mutable ref value.
             ref={refs.setFloating}
             style={floatingStyles}
             {...getFloatingProps()}
@@ -144,7 +159,7 @@ export function InfoTooltip({
               stroke={theme.colors.goldDim}
               strokeWidth={1}
             />
-            {content}
+            <TooltipContent>{content}</TooltipContent>
           </TooltipBox>
         </FloatingPortal>
       )}

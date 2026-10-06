@@ -3,6 +3,7 @@ import pytest
 from skulk.master.placement_utils import (
     allocate_layers_proportionally,
     allocate_pipeline_layers,
+    carve_first_gpu_node_ids,
     filter_cycles_by_memory,
     get_mlx_jaccl_coordinators,
     get_shard_assignments,
@@ -627,6 +628,27 @@ def test_usable_vram_by_node_admits_served_engine_gpu_nodes():
     assert served_cpu not in gated  # CPU-only -> no VRAM admission
 
 
+def test_usable_vram_by_node_admits_audio_cpp_gpu_lanes() -> None:
+    """Music on CUDA, ROCm, or Vulkan must enter the discrete VRAM pool."""
+    acc = AcceleratorMetrics(vendor="amd", vram_total_bytes=Memory.from_gb(24).in_bytes)
+    for lane in ("audio_cpp-cuda", "audio_cpp-rocm", "audio_cpp-vulkan"):
+        node = NodeId(lane)
+        resources = {node: NodeResources(backends=frozenset({"audio_cpp", lane}))}
+        assert node in usable_vram_by_node(
+            {node: SystemPerformanceProfile(accelerator=acc)}, resources,
+        )
+    cpu_node = NodeId("music-cpu")
+    assert cpu_node not in usable_vram_by_node(
+        {cpu_node: SystemPerformanceProfile(accelerator=acc)},
+        {cpu_node: NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-cpu"}))},
+    )
+    metal_node = NodeId("music-metal")
+    assert metal_node not in usable_vram_by_node(
+        {metal_node: SystemPerformanceProfile(accelerator=acc)},
+        {metal_node: NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-metal"}))},
+    )
+
+
 def test_usable_vram_by_node_uma_counts_gtt():
     """A unified-memory APU (Strix Halo: GTT spans system RAM) must count the
     GPU's GTT-mapped system RAM, not just the BIOS VRAM carve-out. With 64 GiB
@@ -672,6 +694,31 @@ def test_usable_vram_by_node_uma_counts_gtt():
     )
     assert len(fitting) == 1, diagnostics.rejection_reasons
 
+
+def test_gb10_unified_cuda_pool_uses_live_gpu_and_host_free_memory() -> None:
+    """GB10 admission honors both CUDA free bytes and shared host headroom."""
+    node = NodeId("gb10")
+    total = Memory.from_gb(128).in_bytes
+    profile = SystemPerformanceProfile(
+        accelerator=AcceleratorMetrics(
+            vendor="nvidia", name="NVIDIA GB10", compute_capability="12.1",
+            vram_total_bytes=total, vram_used_bytes=Memory.from_gb(48).in_bytes,
+        )
+    )
+    memory = create_node_memory(
+        Memory.from_gb(96).in_bytes, ram_total=total
+    )
+    resources = NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-cuda"}))
+    observed = usable_vram_by_node(
+        {node: profile}, {node: resources}, node_memory={node: memory}
+    )
+    assert observed[node].in_bytes == Memory.from_gb(80).in_bytes
+    assert unified_memory_gpu_node_ids(
+        {node: profile}, {node: resources}, node_memory={node: memory}
+    ) == frozenset({node})
+    assert usable_vram_by_node(
+        {node: profile}, {node: resources}, node_memory={}
+    ) == {}
 
 def test_unified_memory_gpu_node_ids_requires_uma_and_gpu_backend():
     """Only an AMD APU with host-spanning GTT and GPU offload is classified UMA."""
@@ -829,6 +876,34 @@ def test_filter_cycles_reserves_kv_cache():
     )
     assert rejected == []
     assert "KV@32768tok" in diagnostics.rejection_reasons[0]
+
+
+def test_filter_cycles_reserves_driver_fixed_memory() -> None:
+    """A pinned projector must consume capacity beyond the base GGUF weights."""
+
+    node_id = NodeId()
+    topology = Topology()
+    topology.add_node(node_id)
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(12).in_bytes,
+            ram_total=Memory.from_gb(48).in_bytes,
+        )
+    }
+    cycles = topology.get_cycles()
+    card = _card(8, gguf_file="model-Q4_K_M.gguf")
+
+    fitting, _ = filter_cycles_by_memory(cycles, node_memory, card)
+    rejected, diagnostics = filter_cycles_by_memory(
+        cycles,
+        node_memory,
+        card,
+        fixed_memory_by_node={node_id: Memory.from_gb(4)},
+    )
+
+    assert len(fitting) == 1
+    assert rejected == []
+    assert "fixed headroom" in diagnostics.rejection_reasons[0]
 
 
 def test_get_smallest_cycles():
@@ -1370,3 +1445,75 @@ class TestCfgParallelPlacement:
         # First shard starts at 0, last shard ends at 57
         assert layer_ranges[0][0] == 0
         assert layer_ranges[-1][1] == 57
+
+
+def test_comfy_gpu_tags_count_as_vram_offload() -> None:
+    from skulk.master.placement_utils import (
+        _has_gpu_offload_backend,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert _has_gpu_offload_backend(frozenset({"comfy", "comfy-cuda"}))
+    assert not _has_gpu_offload_backend(frozenset({"comfy"}))
+
+
+def test_carve_first_nodes_are_the_amd_apus_only() -> None:
+    """GB10 is unified but has no carve; a discrete card is not unified at all;
+    a Strix that does not report carve usage keeps the conservative charge."""
+    strix, gb10, discrete = NodeId("strix"), NodeId("gb10"), NodeId("discrete")
+    unmeasured = NodeId("strix-unmeasured")
+    node_system = {
+        strix: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(64).in_bytes,
+                vram_used_bytes=Memory.from_gb(22).in_bytes,
+                gtt_total_bytes=Memory.from_gb(124).in_bytes,
+            )
+        ),
+        unmeasured: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(64).in_bytes,
+                gtt_total_bytes=Memory.from_gb(124).in_bytes,
+            )
+        ),
+        gb10: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="nvidia", name="NVIDIA GB10", compute_capability="12.1",
+                vram_total_bytes=Memory.from_gb(128).in_bytes,
+                vram_used_bytes=Memory.from_gb(48).in_bytes,
+            )
+        ),
+        discrete: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(32).in_bytes,
+                gtt_total_bytes=Memory.from_gb(16).in_bytes,
+            )
+        ),
+    }
+    memory = {
+        strix: create_node_memory(
+            Memory.from_gb(59).in_bytes, ram_total=Memory.from_gb(61).in_bytes
+        ),
+        unmeasured: create_node_memory(
+            Memory.from_gb(59).in_bytes, ram_total=Memory.from_gb(61).in_bytes
+        ),
+        gb10: create_node_memory(
+            Memory.from_gb(96).in_bytes, ram_total=Memory.from_gb(128).in_bytes
+        ),
+        discrete: create_node_memory(
+            Memory.from_gb(60).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+    }
+    resources = {
+        strix: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        unmeasured: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+        gb10: NodeResources(backends=frozenset({"audio_cpp", "audio_cpp-cuda"})),
+        discrete: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+    }
+    unified = unified_memory_gpu_node_ids(node_system, resources, node_memory=memory)
+    assert unified == frozenset({strix, unmeasured, gb10})
+    assert carve_first_gpu_node_ids(
+        node_system, resources, node_memory=memory
+    ) == frozenset({strix})

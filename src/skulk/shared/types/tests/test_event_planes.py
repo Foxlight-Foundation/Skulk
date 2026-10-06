@@ -6,6 +6,7 @@ from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import AudioInputChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import (
+    AudioCppPreparationRequested,
     InputChunkReceived,
     NodeGatheredInfo,
     TestEvent,
@@ -24,6 +25,16 @@ def test_event_census_separates_decisions_from_payloads_and_telemetry() -> None:
     now = datetime.now(tz=timezone.utc).isoformat()
     node_id = NodeId("node")
     assert is_persistable_control_event(TestEvent())
+    preparation = AudioCppPreparationRequested(
+        request_id=CommandId("prepare"),
+        target_node=node_id,
+        owner_node=NodeId("api"),
+        expires_at=1234567890.0,
+    )
+    assert is_persistable_control_event(preparation)
+    assert AudioCppPreparationRequested.model_validate_json(
+        preparation.model_dump_json()
+    ) == preparation
     assert is_persistable_control_event(
         NodeGatheredInfo(
             node_id=node_id,

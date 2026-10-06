@@ -22,9 +22,8 @@ The supported path from a fresh machine to a source-based node is:
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash
 ```
 
-The installer targets the stable branch (`main`) regardless of which docs
-channel you are reading. To install the development branch instead (matching
-the `/next/` docs), pass a ref:
+The installer selects `main` by default. Contributors can select another branch
+or exact commit with `--ref`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/install.sh | bash -s -- --ref dev
@@ -34,6 +33,14 @@ curl -fsSL https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/main/inst
 path used by release-candidate qualification: the installer fetches that exact
 object and checks it out detached, so a moving branch cannot change the code
 between approval and installation.
+
+Before syncing Python dependencies, the source installer checks that both `cargo`
+and `rustc` run successfully. A working Rust toolchain is retained; missing or
+unusable tools trigger Rust setup again. If an interrupted setup left only rustup
+proxies, rerun the installer after resolving its download, disk or memory error;
+you do not need to delete the toolchain directories. The installer stops before
+building Skulk if the compiler remains unavailable and reports the corrective
+action, including checking an explicit `RUSTUP_TOOLCHAIN` override.
 
 The installer fetches prerequisites (git, a C toolchain, rustup, uv), clones
 the repo into `~/skulk`, syncs the environment, and builds the dashboard with
@@ -47,7 +54,7 @@ includes the dashboard.
 
 Skulk releases qualify this same path on clean Apple Silicon, AMD Linux, and
 NVIDIA Linux environments. A candidate run pins the proposed commit; after
-promotion, the shipping run executes the literal `main` command above. Tests
+promotion, an optional shipping sanity check executes the literal `main` command above. Tests
 that attach to an already-configured fleet remain valuable regression coverage,
 but do not substitute for fresh-install qualification.
 
@@ -67,6 +74,11 @@ The installer wires an inference engine matched to the hardware it detects:
 - **AMD Linux**: installs the `skulk-llama-server-vulkan` wheel, with the same
   managed-tarball fallback.
 - **macOS**: needs nothing; Apple Silicon serves through in-process MLX.
+
+Managed engine wheels are intentionally installed outside the project's locked
+dependency set. Once one is present, the supervised startup wrapper uses
+`uv sync --inexact` so routine service restarts preserve that platform wheel
+instead of pruning it before Skulk starts.
 
 Skulk also auto-provisions a pinned, checksum-verified `llama-server` at node
 startup on Linux when no engine is configured. Setting
@@ -165,5 +177,4 @@ For local development on Apple Silicon:
 
 Once a node is up, the [API guide](api-guide) walks from placing a model to your
 first token. If you are standing up nodes, treat `uv` as the path that must work first.
-Treat Nix as a developer convenience and CI reproducibility layer unless the
-project explicitly documents otherwise in a future release note.
+Use Nix for development tooling and CI validation around that runtime contract.

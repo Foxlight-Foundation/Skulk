@@ -1,19 +1,140 @@
+from datetime import datetime
 from enum import Enum
+from hashlib import sha256
+from typing import Final, Literal, cast
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS,
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
     shard_preallocates_kv_upfront,
 )
 from skulk.shared.models.model_cards import ModelTask
-from skulk.shared.types.common import Host, Id, NodeId
+from skulk.shared.types.common import Host, Id, ModelId, NodeId
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments, ShardMetadata
-from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
+from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel, TaggedModel
+
+INSTANCE_FAILURE_HISTORY_LIMIT = 64
+"""Maximum recent instance failures retained in replicated cluster state."""
+
+INSTANCE_FAILURE_ID_MAX_BYTES: Final = 256
+"""Maximum raw identifier size retained in terminal failure history."""
+
+InstanceFailureCode = Literal[
+    "model_trust_rejected",
+    "runner_crashed",
+    "runner_unresponsive",
+    "runner_wedged",
+    "node_unavailable",
+    "placement_failed",
+    "download_failed",
+]
+"""Stable operator-facing categories for terminal instance failures."""
+
+
+def _bounded_failure_reference(identifier: str) -> str:
+    """Retain an identifier or replace oversized input with a stable reference."""
+    encoded = identifier.encode("utf-8")
+    if len(encoded) <= INSTANCE_FAILURE_ID_MAX_BYTES:
+        return identifier
+    return f"sha256:{sha256(encoded).hexdigest()}"
 
 
 class InstanceId(Id):
     pass
+
+
+class InstanceFailure(FrozenModel):
+    """Bounded operator truth retained after a failed instance is torn down."""
+
+    instance_id: InstanceId = Field(
+        description=(
+            "The failed placement identity, unique for its lifetime. An identity "
+            "over 256 UTF-8 bytes is retained as a stable sha256 reference."
+        )
+    )
+    model_id: ModelId = Field(
+        description=(
+            "Model served by the failed placement. An identifier over 256 UTF-8 "
+            "bytes is retained as a stable sha256 reference."
+        )
+    )
+    system_role: Literal["steward"] | None = Field(
+        default=None,
+        description="Fabric-maintained role when the failed placement was systemic.",
+    )
+    error_code: InstanceFailureCode = Field(
+        description="Stable machine-readable terminal failure category."
+    )
+    error_message: str = Field(
+        min_length=1,
+        max_length=2048,
+        description=(
+            "Bounded operator-safe explanation captured before teardown; never "
+            "contains prompts or generated content."
+        ),
+    )
+    affected_node_ids: tuple[NodeId, ...] = Field(
+        default_factory=tuple,
+        max_length=64,
+        description=(
+            "Up to 64 canonically ordered nodes assigned to the placement when "
+            "failure was recorded. Larger placements are truncated; individual "
+            "identifiers over 256 UTF-8 bytes are represented by a sha256 digest "
+            "so failure retention can never prevent teardown or state sync."
+        ),
+    )
+    recorded_at: datetime = Field(
+        description="UTC time at which the master accepted the terminal failure."
+    )
+
+    @field_validator("recorded_at", mode="before")
+    @classmethod
+    def _coerce_recorded_at(cls, value: object) -> object:
+        """Restore ISO timestamps when a strict state snapshot is replayed."""
+        if isinstance(value, str):
+            return datetime.fromisoformat(value)
+        return value
+
+    @field_validator("instance_id", mode="before")
+    @classmethod
+    def _bound_instance_id(cls, value: object) -> object:
+        """Bound a valid string identity before it enters replicated history."""
+        if isinstance(value, str):
+            return InstanceId(_bounded_failure_reference(value))
+        return value
+
+    @field_validator("model_id", mode="before")
+    @classmethod
+    def _bound_model_id(cls, value: object) -> object:
+        """Bound a valid string model identity before it enters replicated history."""
+        if isinstance(value, str):
+            return ModelId(_bounded_failure_reference(value))
+        return value
+
+    @field_validator("affected_node_ids", mode="before")
+    @classmethod
+    def _sort_affected_nodes(cls, value: object) -> object:
+        """Canonicalize and bound nodes so failure capture cannot block teardown."""
+        if isinstance(value, (list, tuple, set, frozenset)):
+            raw_nodes = cast(
+                "list[object] | tuple[object, ...] | set[object] | frozenset[object]",
+                value,
+            )
+            if not all(isinstance(node_id, str) for node_id in raw_nodes):
+                raise ValueError("affected_node_ids entries must be strings")
+            node_identifiers = cast(
+                "list[str] | tuple[str, ...] | set[str] | frozenset[str]",
+                raw_nodes,
+            )
+            nodes = {
+                NodeId(_bounded_failure_reference(node_id))
+                for node_id in node_identifiers
+            }
+            return tuple(sorted(nodes)[:64])
+        return value
 
 
 class InstanceMeta(str, Enum):
@@ -47,6 +168,30 @@ class BaseInstance(TaggedModel):
             "honoring these instead of widening eligibility back to the "
             "full topology. Sorted for deterministic replicated events; "
             "empty for instances replayed from older event logs."
+        ),
+    )
+    system_role: Literal["steward"] | None = Field(
+        default=None,
+        description=(
+            "Marks a fabric-maintained system placement. ``\"steward\"`` is "
+            "the intelligent-fabric resident: the master re-establishes "
+            "exactly one such placement while intelligent-fabric mode is "
+            "enabled, the dashboard hides it from ordinary instance "
+            "surfaces, and the API refuses ordinary deletion while the mode "
+            "is on. ``None`` (the default, and the value on every instance "
+            "replayed from older event logs) means a normal user placement. "
+            "Repair re-placements re-stamp the role so it survives node "
+            "loss."
+        ),
+    )
+    requested_context_tokens: int | None = Field(
+        default=None,
+        ge=MIN_REQUESTED_CONTEXT_TOKENS,
+        le=MAX_REQUESTED_CONTEXT_TOKENS,
+        description=(
+            "The caller's requested context window at placement, if any. Repair "
+            "re-placements carry it forward so a replacement keeps the window "
+            "the operator chose rather than falling back to the fleet default."
         ),
     )
 
@@ -173,6 +318,19 @@ class BoundInstance(CamelCaseModel):
             ModelTask.TextToImage in self.bound_shard.model_card.tasks
             or ModelTask.ImageToImage in self.bound_shard.model_card.tasks
         )
+
+    @property
+    def is_video_model(self) -> bool:
+        return (
+            ModelTask.TextToVideo in self.bound_shard.model_card.tasks
+            or ModelTask.ImageToVideo in self.bound_shard.model_card.tasks
+            or ModelTask.ReferenceToVideo in self.bound_shard.model_card.tasks
+        )
+
+    @property
+    def is_music_model(self) -> bool:
+        """Whether this instance runs a separate text-to-music engine."""
+        return ModelTask.TextToMusic in self.bound_shard.model_card.tasks
 
     @property
     def is_embedding_model(self) -> bool:

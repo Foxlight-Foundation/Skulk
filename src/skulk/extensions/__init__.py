@@ -22,11 +22,38 @@ from skulk.extensions.capabilities import (
     CapabilityIoMode,
     descriptor_revision,
 )
+from skulk.extensions.configuration import (
+    ConfigurableNode,
+    ConfigurationMutation,
+    ConfigurationResult,
+    NodeConfiguration,
+    NodeConfigurationProvider,
+)
+from skulk.extensions.credentials import (
+    CredentialMutation,
+    CredentialStatus,
+    NodeCredentialProvider,
+    NodeCredentials,
+)
 from skulk.extensions.loader import (
     ENTRY_POINT_GROUP,
     LoadedExtensions,
     load_extensions,
     resolve_skulk_version,
+)
+from skulk.extensions.proposal_actions import (
+    NodeProposalActionsProvider,
+    ProposalApproval,
+    ProposalOperation,
+    ProposalOperationId,
+)
+from skulk.extensions.proposal_review import (
+    NodeProposalReviewProvider,
+    ProposalField,
+    ProposalPage,
+    ProposalReference,
+    ProposalReview,
+    ProposalSummary,
 )
 from skulk.extensions.speech import (
     REALTIME_STT_CAPABILITY_DESCRIPTOR,
@@ -34,6 +61,7 @@ from skulk.extensions.speech import (
     TTS_CAPABILITY_DESCRIPTOR,
     BuiltinSpeechProvider,
 )
+from skulk.extensions.steward import StewardTool, StewardToolProvider
 from skulk.extensions.streams import (
     MAX_INLINE_MEDIA_BYTES,
     BlobMediaAttachment,
@@ -59,18 +87,23 @@ from skulk.extensions.types import (
     CapabilityCallHandler,
     CapabilityInputStreamHandler,
     CapabilityProvider,
+    CapabilityReadiness,
     CapabilityStreamAdmissionHandler,
     CapabilityStreamHandler,
     ChatMiddleware,
     ChatResponseSummary,
     DescribeNode,
+    DynamicCapabilityProvider,
     EmbedTexts,
     ExtensionContext,
+    PublishCapabilityNode,
     ReadClusterTelemetry,
     SkulkExtension,
     StreamCapability,
+    SupportsExtensionShutdown,
     SupportsExtensionStartup,
     WithdrawCapability,
+    WithdrawCapabilityNode,
 )
 from skulk.extensions.vad import (
     VAD_CAPABILITY_DESCRIPTOR,
@@ -83,12 +116,36 @@ from skulk.extensions.vad import (
 from skulk.extensions.validation import validate_against_schema
 
 __all__ = [
+    "DynamicCapabilityProvider",
+    "ConfigurableNode",
+    "ConfigurationMutation",
+    "ConfigurationResult",
+    "NodeConfiguration",
+    "NodeConfigurationProvider",
+    "CredentialMutation",
+    "CredentialStatus",
+    "NodeCredentials",
+    "NodeCredentialProvider",
+    "StewardTool",
+    "StewardToolProvider",
+    "NodeProposalReviewProvider",
+    "NodeProposalActionsProvider",
+    "ProposalApproval",
+    "ProposalOperation",
+    "ProposalOperationId",
+    "ProposalField",
+    "ProposalPage",
+    "ProposalReference",
+    "ProposalReview",
+    "ProposalSummary",
     "DEFAULT_CALL_TIMEOUT_SECONDS",
     "ENTRY_POINT_GROUP",
     "MAX_CALL_PAYLOAD_BYTES",
     "MAX_CALL_TIMEOUT_SECONDS",
     "MAX_INLINE_MEDIA_BYTES",
     "AdvertiseCapability",
+    "PublishCapabilityNode",
+    "WithdrawCapabilityNode",
     "BaseChatMiddleware",
     "BlobMediaAttachment",
     "BuiltinSpeechProvider",
@@ -103,6 +160,7 @@ __all__ = [
     "CapabilityResult",
     "CapabilityIoMode",
     "CapabilityProvider",
+    "CapabilityReadiness",
     "CapabilityStreamError",
     "CapabilityStreamErrorCode",
     "CapabilityStreamFrame",
@@ -128,6 +186,7 @@ __all__ = [
     "StreamingPcm16Resampler",
     "SkulkExtension",
     "SupportsExtensionStartup",
+    "SupportsExtensionShutdown",
     "TTS_CAPABILITY_DESCRIPTOR",
     "VAD_CAPABILITY_DESCRIPTOR",
     "VadConfig",

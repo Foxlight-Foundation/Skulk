@@ -155,6 +155,8 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
         engines.append(f"llama_server ({facts.llama_server_binary.configured_path})")
     if "vllm" in derived:
         engines.append(f"vllm ({facts.vllm_binary.configured_path})")
+    if "comfy" in derived:
+        engines.append(f"comfy ({facts.comfy_root})")
     if engines:
         return [_ok(check_id, title, "available: " + ", ".join(engines))]
     # A wheel-provisioned or previously provisioned managed engine derives no
@@ -270,6 +272,144 @@ def _fix_engine_available(facts: NodeFacts) -> str | None:
             "opted out, or download failed; see the log)"
         )
     return f"provisioned pinned llama-server at {binary}"
+
+
+# --- comfy video engine ------------------------------------------------------
+
+
+def _comfy_fix_applicable(facts: NodeFacts) -> bool:
+    """Whether --fix can provision the managed ComfyUI install on this node.
+
+    Mirrors ensure_comfy's gates: full participation, no explicit override,
+    auto-provisioning not opted out, video models enabled, and a recorded
+    wheel set for this machine and GPU vendor.
+    """
+    from skulk.provisioning.comfy import (
+        _gates_pass,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    return _declared_participation() == "full" and _gates_pass(facts)
+
+
+def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
+    """The served video engine is present when video models are enabled."""
+    from skulk.provisioning.comfy import dormant_comfy
+    from skulk.shared.constants import SKULK_ENABLE_VIDEO_MODELS
+
+    check_id = "comfy-engine"
+    title = "ComfyUI video engine"
+    if _declared_participation() != "full":
+        return [_ok(check_id, title, "management node; no video engine expected")]
+    derivation = derive_node_backends(facts)
+    derived = derivation.backends
+    if "comfy" in derived:
+        from skulk.facts.inventory import engine_build_inventory
+
+        # The build identity is what a signed engine-support claim must name
+        # exactly; print it so an operator can copy it into a submission.
+        # Only the comfy tags: the inventory hashes the other engines' binaries,
+        # which this check has no reason to do.
+        comfy_tags = frozenset(
+            tag for tag in derived if tag == "comfy" or tag.startswith("comfy-")
+        )
+        # Placement reads the build per backend tag before the engine entry,
+        # and SKULK_ENGINE_BUILDS can override one tag alone, so print every
+        # tag's effective build: a claim copied from the engine entry would
+        # not match a tag whose build was overridden.
+        inventory = engine_build_inventory(comfy_tags, facts, environ=os.environ)
+        builds = ", ".join(
+            f"{tag}={inventory[tag]}" for tag in sorted(comfy_tags) if tag in inventory
+        )
+        return [
+            _ok(
+                check_id,
+                title,
+                f"comfy ({facts.comfy_root}) advertises "
+                f"{sorted(tag for tag in derived if tag.startswith('comfy-'))}"
+                + (f"; engine build {builds}" if builds else ""),
+            )
+        ]
+    if facts.comfy_binary.state != "not_configured" or facts.comfy_root is not None:
+        return [
+            CheckResult(
+                check_id=check_id,
+                title=title,
+                verdict="fail",
+                detail=(
+                    f"{facts.comfy_binary.env_var} is set but the comfy engine derives "
+                    "no backend; see the capability-conflicts check for the reason"
+                ),
+                consequence="video cards never place on this node",
+                remediation=(
+                    "Fix SKULK_COMFY_BIN and SKULK_COMFY_ROOT so they name the "
+                    "environment's interpreter and the ComfyUI checkout, or unset "
+                    "both and let the node provision the managed install"
+                ),
+            )
+        ]
+    if not SKULK_ENABLE_VIDEO_MODELS:
+        return [
+            _ok(
+                check_id,
+                title,
+                "video models are disabled on this node (SKULK_ENABLE_VIDEO_MODELS); "
+                "no video engine is expected",
+            )
+        ]
+    dormant = dormant_comfy(facts)
+    if dormant is not None:
+        return [
+            _ok(
+                check_id,
+                title,
+                f"managed ComfyUI at {dormant} is installed; node startup wires it "
+                "into this node's facts",
+            )
+        ]
+    fix_available = _comfy_fix_applicable(facts)
+    return [
+        CheckResult(
+            check_id=check_id,
+            title=title,
+            verdict="degraded",
+            detail=(
+                "video models are enabled but no ComfyUI install is configured or "
+                "provisioned on this node"
+            ),
+            consequence=(
+                "video cards never place here; only the deterministic test engine "
+                "can render (SKULK_TEST_VIDEO_ENGINE)"
+            ),
+            remediation=(
+                "`skulk doctor --fix` provisions the pinned ComfyUI checkout and "
+                "torch wheel set on a Linux NVIDIA or AMD node (several gigabytes); "
+                "alternatively set SKULK_COMFY_BIN and SKULK_COMFY_ROOT to a "
+                "hand-built install"
+                if fix_available
+                else "this machine has no recorded ComfyUI wheel set (Linux NVIDIA "
+                "aarch64 or x86_64, or Linux AMD x86_64 today); set SKULK_COMFY_BIN "
+                "and SKULK_COMFY_ROOT to a hand-built install"
+            ),
+            fix_available=fix_available,
+        )
+    ]
+
+
+def _fix_comfy_engine(facts: NodeFacts) -> str | None:
+    """Provision the managed ComfyUI install when video models are enabled."""
+    if not _comfy_fix_applicable(facts):
+        return None
+    if "comfy" in derive_node_backends(facts).backends:
+        return None
+    from skulk.provisioning import ensure_comfy
+
+    root = ensure_comfy(facts)
+    if root is None:
+        raise RuntimeError(
+            "ComfyUI provisioning did not produce an install (override present, "
+            "opted out, video models disabled, or the install failed; see the log)"
+        )
+    return f"provisioned pinned ComfyUI at {root}"
 
 
 # --- capability conflicts --------------------------------------------------
@@ -434,6 +574,113 @@ def _fix_models_storage(facts: NodeFacts) -> str | None:
     return f"created models directory {models_dir}"
 
 
+# --- installed card records ------------------------------------------------
+
+
+_UNRECORDED_NAMES_SHOWN = 5
+
+
+def _configured_store_roots() -> tuple[Path, ...]:
+    """Every model-store directory this node's config names.
+
+    Store-staged models live in the staging cache, which by default sits
+    outside the model directories, and a store host keeps its canonical
+    copies under ``store_path``; a card audit that skipped either would miss
+    them. The running node resolves staging by its libp2p ID, which doctor
+    does not have, so every staging path the config names is included rather
+    than guessing which override applies. A named directory absent on this
+    machine is skipped by the audit, so including another node's path costs
+    nothing.
+    """
+    from skulk.store.config import (
+        StagingNodeConfig,
+        load_skulk_config,
+        resolve_config_path,
+    )
+
+    if not resolve_config_path().exists():
+        return ()
+    try:
+        config = load_skulk_config()
+    except Exception:  # noqa: BLE001 - a broken config is another check's job
+        return ()
+    store = config.model_store if config is not None else None
+    if store is None or not store.enabled:
+        return ()
+    stagings = [store.staging]
+    for override in store.node_overrides.values():
+        if override.staging is not None:
+            # Overrides are partial: resolve_node_staging merges the fields an
+            # override sets over the base config, and so does this.
+            merged = store.staging.model_dump()
+            merged.update(override.staging.model_dump(exclude_unset=True))
+            stagings.append(StagingNodeConfig.model_validate(merged))
+    return (
+        Path(store.store_path).expanduser(),
+        *(
+            Path(staging.node_cache_path).expanduser()
+            for staging in stagings
+            if staging.enabled
+        ),
+    )
+
+
+def _check_installed_card_records(facts: NodeFacts) -> Sequence[CheckResult]:
+    """Every complete installed model should carry its card record."""
+    del facts
+    check_id = "installed-card-records"
+    title = "Installed model cards"
+    from skulk.store.artifact_inventory import installed_artifact_roots
+    from skulk.store.installed_cards import find_unrecorded_artifacts
+
+    roots_by_path: dict[Path, Path] = {}
+    for root in (*installed_artifact_roots(None), *_configured_store_roots()):
+        roots_by_path.setdefault(root.resolve(), root)
+    found = find_unrecorded_artifacts(roots_by_path.values())
+    ignored = (
+        f"; {len(found.incomplete)} incomplete download"
+        f"{'' if len(found.incomplete) == 1 else 's'} ignored"
+        if found.incomplete
+        else ""
+    )
+    if not found.complete:
+        return [
+            _ok(
+                check_id,
+                title,
+                f"{found.recorded} installed model"
+                f"{'' if found.recorded == 1 else 's'}, each with its card "
+                f"record{ignored}",
+            )
+        ]
+    names = ", ".join(path.name for path in found.complete[:_UNRECORDED_NAMES_SHOWN])
+    more = len(found.complete) - _UNRECORDED_NAMES_SHOWN
+    return [
+        CheckResult(
+            check_id=check_id,
+            title=title,
+            verdict="degraded",
+            detail=(
+                f"{len(found.complete)} complete model"
+                f"{'' if len(found.complete) == 1 else 's'} without a card record: "
+                f"{names}{f' and {more} more' if more > 0 else ''}{ignored}"
+            ),
+            consequence=(
+                "offline, this node cannot serve these: Skulk ships no model "
+                "cards, so a model's own card record is what keeps it "
+                "servable without the network"
+            ),
+            remediation=(
+                "start Skulk once with network access, or offline with a "
+                "cached registry catalog: it records the card for every "
+                "complete model a current or cached signed card recognizes. A "
+                "model no card recognizes can be downloaded again or added as "
+                "a custom card"
+            ),
+        )
+    ]
+
+
 # --- dashboard -------------------------------------------------------------
 
 
@@ -464,6 +711,325 @@ def _check_dashboard_assets(facts: NodeFacts) -> Sequence[CheckResult]:
     ]
 
 
+# --- hugging face token ----------------------------------------------------
+
+
+def _is_peer_id_store_host(store_host: str) -> bool:
+    """Whether ``store_host`` looks like a libp2p peer ID rather than a hostname.
+
+    Peer IDs are base58 and carry no dots; hostnames in this field are short
+    names or ``.local`` spellings. The distinction matters because hostname
+    matching is decidable from doctor while peer-ID matching is not.
+    """
+    return "." not in store_host and store_host.startswith(("12D3KooW", "Qm"))
+
+
+def _fetching_role(facts: NodeFacts) -> tuple[bool, str]:
+    """Whether this node performs Hugging Face fetches, and why.
+
+    A token only matters on the node that actually reaches out to Hugging
+    Face. With a model store enabled that is the store host; without one,
+    every node downloads for itself. Returning the reason lets the verdict
+    explain itself instead of asserting a role the operator cannot see.
+    """
+    del facts
+    from skulk.shared.constants import SKULK_OFFLINE
+    from skulk.store.config import (
+        load_skulk_config,
+        node_matches_store_host,
+        resolve_config_path,
+    )
+
+    if SKULK_OFFLINE:
+        # Offline mode is an explicit declaration that this node fetches
+        # nothing from the network, so a missing token cannot bite.
+        return False, "this node runs in offline mode and downloads nothing"
+
+    participation = _declared_participation()
+
+    def _participation_exempt() -> tuple[bool, str]:
+        # placement.py hard-filters every participation value other than
+        # "full", so neither a management node nor an ffn_only one is ever
+        # assigned an inference shard, and neither downloads weights. A
+        # permanent degraded verdict there would be pure noise. Checked only
+        # after the store-host question, because a non-serving node can still
+        # be the configured store host and would then fetch for the fleet.
+        return False, (
+            f"this node declares {participation} participation, so the planner "
+            "assigns it no inference shard and it downloads no models"
+        )
+
+    config_path = resolve_config_path()
+    if not config_path.exists():
+        if participation != "full":
+            return _participation_exempt()
+        # skulk.yaml is resolved relative to the working directory, so this is
+        # either a genuinely zero-config node (which does download for itself)
+        # or doctor being run from somewhere other than the install directory.
+        # Say which, rather than asserting a store layout we cannot see.
+        return True, (
+            f"no {config_path} in the working directory, so this reads as a "
+            "zero-config node that downloads directly; if this node uses a "
+            "model store, re-run doctor from its install directory"
+        )
+    try:
+        config = load_skulk_config()
+    except Exception:  # noqa: BLE001 - a broken config is another check's job
+        # Unreadable config: assume this node fetches, because warning about a
+        # token that turns out to be unnecessary is far cheaper than staying
+        # silent on the node that actually needed one.
+        return True, f"{config_path} could not be read, assuming direct downloads"
+    store = config.model_store if config is not None else None
+    if store is None or not store.enabled:
+        if participation != "full":
+            return _participation_exempt()
+        return True, "no model store is configured, so this node downloads directly"
+    if node_matches_store_host(store.store_host, node_id="", hostname=None):
+        # Deliberately ahead of the participation exemption: hosting the store
+        # is not an inference role, so a management or ffn_only node can be the
+        # store host and would then fetch for the whole fleet.
+        return True, f"this node is the model store host ({store.store_host})"
+    if _is_peer_id_store_host(store.store_host):
+        # store_host may be a libp2p peer ID, which only the running node can
+        # match against its own ephemeral ID. Doctor has no node ID, so it
+        # cannot rule out that this node is the store host. Claiming "a worker,
+        # no token needed" here would reintroduce exactly the silent gap this
+        # check exists to close, so report the ambiguity instead.
+        return True, (
+            f"the model store host is configured as a node ID "
+            f"({store.store_host}), which doctor cannot match against this "
+            "node; if this node is the store host, it needs the token"
+        )
+    if participation != "full":
+        return _participation_exempt()
+    if store.download.allow_hf_fallback:
+        # #657: a worker that cannot reach the store falls back to downloading
+        # from Hugging Face itself, so "only the store host fetches" is not
+        # strictly true. Not a warning, because that fallback may never fire
+        # and yellowing every worker in the fleet would drown the signal, but
+        # the caveat belongs in the detail.
+        return False, (
+            f"the model store host ({store.store_host}) performs downloads; "
+            "this node would need its own token only if it falls back to "
+            "downloading directly because the store host is unreachable "
+            "(allow_hf_fallback is on)"
+        )
+    return False, f"the model store host ({store.store_host}) performs downloads"
+
+
+def _check_hf_token(facts: NodeFacts) -> Sequence[CheckResult]:
+    """Whether this node can authenticate to Hugging Face, if it needs to."""
+    check_id = "hf-token"
+    title = "Hugging Face token"
+    from skulk.download.huggingface_utils import (
+        get_hf_token_path,
+        resolve_hf_token_source,
+    )
+
+    _token, source = resolve_hf_token_source()
+    fetches, reason = _fetching_role(facts)
+
+    if source == "env":
+        return [
+            _ok(
+                check_id,
+                title,
+                "token configured via the HF_TOKEN environment variable "
+                "(set directly, or from hf_token in skulk.yaml at startup)",
+            )
+        ]
+    if source == "service_env":
+        from skulk.download.huggingface_utils import get_service_env_path
+
+        return [
+            _ok(
+                check_id,
+                title,
+                f"token configured as HF_TOKEN in {get_service_env_path()}, "
+                "which the service startup wrapper exports; a node launched "
+                "directly with `uv run skulk` does not read that file and "
+                "would need HF_TOKEN in its own environment",
+            )
+        ]
+    if source == "config":
+        return [
+            _ok(
+                check_id,
+                title,
+                "token configured via hf_token in skulk.yaml (what the "
+                "dashboard writes); node startup copies it into HF_TOKEN",
+            )
+        ]
+    if source == "file":
+        return [_ok(check_id, title, f"token configured at {get_hf_token_path()}")]
+
+    if not fetches:
+        # No token here is entirely normal on a worker: it never talks to
+        # Hugging Face. Saying so beats a warning the operator cannot act on.
+        return [
+            _ok(
+                check_id,
+                title,
+                f"no token on this node, which is expected: {reason}",
+            )
+        ]
+    return [
+        CheckResult(
+            check_id=check_id,
+            title=title,
+            verdict="degraded",
+            detail=f"no Hugging Face token is configured, and {reason}",
+            consequence=(
+                "public models download normally, but every gated or private "
+                "repository (Llama and Gemma among them) fails to download "
+                "on this node"
+            ),
+            remediation=(
+                "on a formed cluster, enter the token once in any node's "
+                "dashboard Settings; it propagates to every node including "
+                "this one. On a single node, run `hf auth login` (writes "
+                f"{get_hf_token_path()} and is picked up without a restart) "
+                "or set HF_TOKEN in ~/.skulk/skulk.env and restart."
+            ),
+        )
+    ]
+
+
+# --- vllm prerequisites ------------------------------------------------------
+
+_CXX_COMPILERS = ("g++", "clang++", "c++")
+"""C++ compiler names Inductor will look for on PATH, in no particular order.
+
+Inductor drives a **C++** compiler, not a C one: ``torch._inductor.cpp_builder``
+resolves ``$CXX`` and otherwise joins ``bin/g++``. A box carrying ``gcc`` with
+no ``g++`` therefore still fails, which is why checking for ``cc``/``gcc``
+would report a toolchain that cannot actually build the kernels.
+"""
+
+
+def _vllm_interpreter(vllm_binary_path: str) -> Path | None:
+    """Locate the interpreter that runs the configured vLLM entry point.
+
+    The adjacent ``python`` covers the venv layout the installer creates. A
+    console script installed elsewhere (a user install under ``~/.local/bin``,
+    a pipx shim) has no sibling interpreter, so fall back to the shebang pip
+    wrote into the script, which names the real one.
+    """
+    adjacent = Path(vllm_binary_path).with_name("python")
+    if adjacent.exists():
+        return adjacent
+    try:
+        with Path(vllm_binary_path).open("rb") as handle:
+            first_line = handle.readline(512).decode("utf-8", "replace").strip()
+    except OSError:
+        return None
+    if not first_line.startswith("#!"):
+        return None
+    tokens = first_line[2:].split()
+    if not tokens:
+        return None
+    first = Path(tokens[0])
+    # "#!/usr/bin/env python3" and its "env -S" form name the interpreter as an
+    # argument, so the leading path is env itself. Returning that would probe
+    # `env -c ...`, which fails and silently skips header verification.
+    if first.name == "env":
+        for argument in tokens[1:]:
+            if argument.startswith("-"):
+                continue
+            resolved = shutil.which(argument)
+            return Path(resolved) if resolved else None
+        return None
+    return first if first.is_absolute() and first.exists() else None
+
+
+def _vllm_include_dir(vllm_binary_path: str) -> Path | None:
+    """Ask the vLLM venv's own interpreter where its C headers would live.
+
+    The vLLM engine runs in its own virtualenv with its own Python version, so
+    the headers that matter are that interpreter's, not the ones Skulk is
+    running under. Asking the interpreter itself avoids guessing a version.
+    """
+    interpreter = _vllm_interpreter(vllm_binary_path)
+    if interpreter is None:
+        return None
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed, known-safe command
+            [str(interpreter), "-c", "import sysconfig;print(sysconfig.get_paths()['include'])"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    include = completed.stdout.strip()
+    return Path(include) if include else None
+
+
+def _check_vllm_prerequisites(facts: NodeFacts) -> Sequence[CheckResult]:
+    """vLLM's Triton JIT needs a C toolchain that the wheel does not install."""
+    check_id = "vllm-prerequisites"
+    title = "vLLM build prerequisites"
+
+    binary = facts.vllm_binary
+    if binary.state != "ok" or binary.configured_path is None:
+        # No usable vLLM on this node: engine-available already reports on the
+        # configured-but-broken states, and there is nothing to prepare for.
+        return [_ok(check_id, title, "no vLLM engine configured on this node")]
+
+    missing: list[str] = []
+    if not any(shutil.which(compiler) for compiler in _CXX_COMPILERS):
+        missing.append("a C++ compiler (g++/clang++/c++) on PATH")
+    include_dir = _vllm_include_dir(binary.configured_path)
+    if include_dir is None:
+        # Not knowing is not the same as knowing it is broken. Reporting fail
+        # here would tell an operator their working node cannot serve, which is
+        # worse than staying quiet about the half we could not determine.
+        if not missing:
+            return [
+                _ok(
+                    check_id,
+                    title,
+                    "C++ toolchain present; could not resolve the vLLM "
+                    "interpreter's include directory, so headers were not "
+                    "verified",
+                )
+            ]
+    elif not (include_dir / "Python.h").exists():
+        missing.append(f"Python development headers (no Python.h in {include_dir})")
+
+    if not missing:
+        return [
+            _ok(
+                check_id,
+                title,
+                "C++ toolchain and Python development headers present for the "
+                "vLLM engine",
+            )
+        ]
+    return [
+        CheckResult(
+            check_id=check_id,
+            title=title,
+            verdict="fail",
+            detail="vLLM cannot JIT-compile its kernels: missing " + "; ".join(missing),
+            consequence=(
+                "the node advertises vLLM capacity and accepts placements, but "
+                "every engine start fails during initialization with an "
+                "InductorError, so the model never serves"
+            ),
+            remediation=(
+                "install the Python development headers and a C++ compiler "
+                "for the vLLM interpreter (Debian and Ubuntu: "
+                "`sudo apt install python3-dev build-essential`; RHEL family: "
+                "`sudo dnf install python3-devel gcc-c++`), then retry the "
+                "placement"
+            ),
+        )
+    ]
+
+
 # --- registry --------------------------------------------------------------
 
 REGISTRY: tuple[DoctorCheck, ...] = (
@@ -479,6 +1045,20 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         ),
         run=_check_engine_available,
         fix=_fix_engine_available,
+    ),
+    DoctorCheck(
+        check_id="comfy-engine",
+        title="ComfyUI video engine",
+        docs=(
+            "When video models are enabled (SKULK_ENABLE_VIDEO_MODELS), verifies "
+            "the served ComfyUI video engine is configured (SKULK_COMFY_BIN plus "
+            "SKULK_COMFY_ROOT) or provisioned as the managed install under the "
+            "engines directory. A Linux NVIDIA or AMD node without one is degraded: "
+            "video cards never place there. Management nodes and nodes with "
+            "video models disabled pass."
+        ),
+        run=_check_comfy_engine,
+        fix=_fix_comfy_engine,
     ),
     DoctorCheck(
         check_id="capability-conflicts",
@@ -505,6 +1085,23 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         fix=_fix_models_storage,
     ),
     DoctorCheck(
+        check_id="installed-card-records",
+        title="Installed model cards",
+        docs=(
+            "Verifies every complete model in the model directories and in "
+            "the model store's canonical and staging directories carries its "
+            "card record "
+            "(`.skulk/installed-card.json`, or the detached record kept for a "
+            "read-only model directory), the record that keeps a downloaded "
+            "model servable without the network. Records are checked by file "
+            "size, never hashed, so the check stays fast on large stores. A model "
+            "downloaded before these records existed gets one when Skulk "
+            "starts with network access and recognizes it. Incomplete "
+            "downloads are counted, not flagged."
+        ),
+        run=_check_installed_card_records,
+    ),
+    DoctorCheck(
         check_id="dashboard-assets",
         title="Dashboard assets",
         docs=(
@@ -512,6 +1109,36 @@ REGISTRY: tuple[DoctorCheck, ...] = (
             "serves without it; headless workers are expected to run this way."
         ),
         run=_check_dashboard_assets,
+    ),
+    DoctorCheck(
+        check_id="hf-token",
+        title="Hugging Face token",
+        docs=(
+            "Reports whether this node can authenticate to Hugging Face, and "
+            "whether it is the node that needs to. A token entered in any "
+            "node's dashboard Settings propagates over the encrypted cluster "
+            "fabric to every node, and joining nodes adopt it at bootstrap, "
+            "so one entry covers the fleet; this check verifies it actually "
+            "arrived on the node that performs downloads (the model store "
+            "host when a store is configured, otherwise this node itself). "
+            "Without one, public models still download and only gated or "
+            "private repositories fail."
+        ),
+        run=_check_hf_token,
+    ),
+    DoctorCheck(
+        check_id="vllm-prerequisites",
+        title="vLLM build prerequisites",
+        docs=(
+            "When a vLLM engine is configured, verifies the node can actually "
+            "compile its kernels. vLLM JITs Triton and torch.compile kernels "
+            "at runtime, shelling out to a C++ compiler (Inductor drives g++, "
+            "so gcc alone is not enough) against the Python development "
+            "headers; neither is a dependency of the vLLM wheel. Without them "
+            "the node advertises vLLM capacity and accepts placements, then "
+            "fails every engine start with an InductorError."
+        ),
+        run=_check_vllm_prerequisites,
     ),
 )
 

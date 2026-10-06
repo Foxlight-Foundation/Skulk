@@ -32,7 +32,7 @@ const meta: Meta<typeof ModelCard> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 320, background: '#000', padding: 16 }}>
+      <div style={{ width: 'min(320px, calc(100vw - 48px))', padding: 16 }}>
         <Story />
       </div>
     ),

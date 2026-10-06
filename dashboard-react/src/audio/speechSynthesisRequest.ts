@@ -6,6 +6,20 @@ export const MAX_REFERENCE_AUDIO_BYTES = 25 * 1024 * 1024;
 /** Stable seed used for every dashboard sentence and replay generation. */
 export const DASHBOARD_SPEECH_SEED = 42;
 
+/**
+ * Lower-variance sampling used for interactive dashboard speech.
+ *
+ * These values mirror mlx-audio's speech-serving preset. Sending them on every
+ * request keeps a model package's defaults from changing the selected voice's
+ * character between sentences or releases.
+ */
+export const DASHBOARD_SPEECH_SAMPLING = {
+  temperature: 0.7,
+  topP: 0.95,
+  topK: 40,
+  repetitionPenalty: 1,
+} as const;
+
 /** Default omitted server budget and bounded ceiling for dashboard batch playback. */
 const DEFAULT_BATCH_SPEECH_MAX_TOKENS = 4096;
 const MAX_BATCH_SPEECH_MAX_TOKENS = 131_072;
@@ -94,6 +108,13 @@ export function buildSpeechSynthesisRequest(
     formData.set('lang_code', language);
     formData.set('response_format', responseFormat);
     formData.set('seed', String(seed));
+    formData.set('temperature', String(DASHBOARD_SPEECH_SAMPLING.temperature));
+    formData.set('top_p', String(DASHBOARD_SPEECH_SAMPLING.topP));
+    formData.set('top_k', String(DASHBOARD_SPEECH_SAMPLING.topK));
+    formData.set(
+      'repetition_penalty',
+      String(DASHBOARD_SPEECH_SAMPLING.repetitionPenalty),
+    );
     if (maxTokens !== null) formData.set('max_tokens', String(maxTokens));
     if (stream) formData.set('stream', 'true');
     // The uploaded clip is the voice condition for this request. Sending the
@@ -118,6 +139,10 @@ export function buildSpeechSynthesisRequest(
       lang_code: language,
       response_format: responseFormat,
       seed,
+      temperature: DASHBOARD_SPEECH_SAMPLING.temperature,
+      top_p: DASHBOARD_SPEECH_SAMPLING.topP,
+      top_k: DASHBOARD_SPEECH_SAMPLING.topK,
+      repetition_penalty: DASHBOARD_SPEECH_SAMPLING.repetitionPenalty,
       ...(maxTokens !== null ? { max_tokens: maxTokens } : {}),
       ...(stream ? { stream: true } : {}),
       ...(voice ? { voice } : {}),

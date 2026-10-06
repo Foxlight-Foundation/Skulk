@@ -13,6 +13,7 @@ from skulk.download.impl_shard_downloader import (
     DirectDownloadCapacityError,
     ResumableShardDownloader,
     _remaining_direct_download_bytes,
+    _replacement_identity_for_installed_card,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
@@ -21,6 +22,11 @@ from skulk.shared.types.worker.downloads import (
     RepoDownloadProgress,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+from skulk.store.installed_cards import (
+    InstalledCardRecord,
+    build_installed_card_record,
+    write_installed_card,
+)
 
 
 def _shard(model_id: str) -> PipelineShardMetadata:
@@ -61,6 +67,99 @@ def test_remaining_bytes_reject_unknown_manifest_sizes(tmp_path: Path) -> None:
             tmp_path,
             [FileListEntry(type="file", path="missing.safetensors", size=None)],
         )
+
+
+def test_changed_custom_card_requires_new_direct_generation(tmp_path: Path) -> None:
+    """A sidecar mismatch must force a separate direct-download generation."""
+
+    model_directory = tmp_path / "org--model"
+    model_directory.mkdir()
+    (model_directory / "weights.bin").write_bytes(b"old")
+    old_card = _shard("org/model").model_card.model_copy(
+        update={"is_custom": True}
+    )
+    new_card = old_card.model_copy(update={"hidden_size": 2})
+    write_installed_card(
+        model_directory,
+        build_installed_card_record(model_directory, old_card),
+    )
+
+    assert (
+        _replacement_identity_for_installed_card(
+            model_directory,
+            old_card,
+            artifact_model_id="org/model",
+            artifact_role="base",
+        )
+        is None
+    )
+    replacement_identity = _replacement_identity_for_installed_card(
+        model_directory,
+        new_card,
+        artifact_model_id="org/model",
+        artifact_role="base",
+    )
+    assert replacement_identity is not None
+    assert replacement_identity == _replacement_identity_for_installed_card(
+        model_directory,
+        new_card,
+        artifact_model_id="org/model",
+        artifact_role="base",
+    )
+
+
+@pytest.mark.anyio
+async def test_config_only_card_change_never_starts_generation_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config probe cannot atomically replace complete installed weights."""
+
+    model_directory = tmp_path / "org--model"
+    model_directory.mkdir()
+    (model_directory / "config.json").write_text("{}")
+    (model_directory / "weights.bin").write_bytes(b"installed-weights")
+    old_card = _shard("org/model").model_card.model_copy(
+        update={"is_custom": True}
+    )
+    new_card = old_card.model_copy(update={"hidden_size": 2})
+    write_installed_card(
+        model_directory,
+        build_installed_card_record(model_directory, old_card),
+    )
+    monkeypatch.setattr(impl_shard_downloader, "SKULK_MODELS_DIR", tmp_path)
+    observed: dict[str, object] = {}
+
+    class ProbeCompleteError(RuntimeError):
+        """Stop after observing direct-download call arguments."""
+
+    async def observe_download(
+        _self: ResumableShardDownloader,
+        _shard_metadata: ShardMetadata,
+        *,
+        allow_patterns: list[str] | None = None,
+        replacement_identity: str | None = None,
+    ) -> tuple[Path, RepoDownloadProgress]:
+        observed["allow_patterns"] = allow_patterns
+        observed["replacement_identity"] = replacement_identity
+        raise ProbeCompleteError
+
+    monkeypatch.setattr(
+        ResumableShardDownloader,
+        "_download_with_capacity",
+        observe_download,
+    )
+    downloader = ResumableShardDownloader()
+    shard = _shard("org/model").model_copy(update={"model_card": new_card})
+
+    with pytest.raises(ProbeCompleteError):
+        await downloader.ensure_shard(shard, config_only=True)
+
+    assert observed == {
+        "allow_patterns": ["config.json"],
+        "replacement_identity": None,
+    }
+    assert (model_directory / "weights.bin").read_bytes() == b"installed-weights"
 
 
 @pytest.mark.anyio
@@ -125,6 +224,10 @@ async def test_direct_download_admission_and_transfer_are_serialized(
     downloader = ResumableShardDownloader()
     active_transfers = 0
     maximum_active_transfers = 0
+    registered_model_ids: list[ModelId] = []
+
+    def register_installed_card(record: InstalledCardRecord) -> None:
+        registered_model_ids.append(record.model_card.model_id)
 
     async def fake_download_shard(
         shard: ShardMetadata,
@@ -158,8 +261,11 @@ async def test_direct_download_admission_and_transfer_are_serialized(
         maximum_active_transfers = max(maximum_active_transfers, active_transfers)
         await asyncio.sleep(0.01)
         active_transfers -= 1
+        model_path = tmp_path / str(shard.model_card.model_id).replace("/", "--")
+        model_path.mkdir(parents=True, exist_ok=True)
+        (model_path / "weights.bin").write_bytes(b"complete")
         return (
-            tmp_path / str(shard.model_card.model_id).replace("/", "--"),
+            model_path,
             RepoDownloadProgress(
                 repo_id=shard.model_card.model_id,
                 repo_revision="main",
@@ -177,6 +283,11 @@ async def test_direct_download_admission_and_transfer_are_serialized(
         )
 
     monkeypatch.setattr(impl_shard_downloader, "download_shard", fake_download_shard)
+    monkeypatch.setattr(
+        impl_shard_downloader,
+        "register_installed_card_record",
+        register_installed_card,
+    )
 
     await asyncio.gather(
         downloader.ensure_shard(_shard("org/first")),
@@ -184,3 +295,4 @@ async def test_direct_download_admission_and_transfer_are_serialized(
     )
 
     assert maximum_active_transfers == 1
+    assert registered_model_ids == [ModelId("org/first"), ModelId("org/second")]

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, final
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, model_validator
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Connection
@@ -14,7 +14,9 @@ from skulk.shared.types.common import (
     SessionId,
     SystemId,
 )
+from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.state import State
+from skulk.shared.types.steward_actions import StewardActionProposal
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -22,7 +24,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadPending,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import Instance, InstanceId
+from skulk.shared.types.worker.instances import Instance, InstanceFailure, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
 from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
@@ -74,6 +76,43 @@ class TaskFailed(BaseEvent):
     error_message: str
 
 
+class AudioCppPreparationRequested(BaseEvent):
+    """Master-ordered request for a single worker to prepare the music engine."""
+
+    request_id: CommandId
+    target_node: NodeId
+    owner_node: NodeId
+    variant: Literal["cpu", "vulkan", "cuda"] = Field(
+        default="cpu",
+        description="Pinned engine package variant selected by the requesting API node.",
+    )
+    expires_at: float = Field(
+        description="Unix deadline after which replay must not trigger package acquisition."
+    )
+
+
+class AudioCppPreparationCompleted(BaseEvent):
+    """Target worker's verified readiness snapshot, ordered before mount."""
+
+    request_id: CommandId
+    target_node: NodeId
+    owner_node: NodeId
+    success: bool
+    error: str | None = Field(default=None, max_length=1024)
+    resources: NodeResources | None = Field(
+        default=None,
+        description="Fresh worker-verified resources on success, used as a placement barrier.",
+    )
+
+    @model_validator(mode="after")
+    def _require_success_resources(self) -> "AudioCppPreparationCompleted":
+        """A successful preparation must carry the exact verified resource facts."""
+
+        if self.success and self.resources is None:
+            raise ValueError("Successful audio.cpp preparation requires resources")
+        return self
+
+
 class InstanceCreated(BaseEvent):
     instance: Instance
 
@@ -86,6 +125,14 @@ class InstanceCreated(BaseEvent):
 
 class InstanceDeleted(BaseEvent):
     instance_id: InstanceId
+
+
+class InstanceFailureRecorded(BaseEvent):
+    """Retain why a terminally failed placement vanished before deleting it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    failure: InstanceFailure
 
 
 class RunnerStatusUpdated(BaseEvent):
@@ -171,10 +218,14 @@ class TopologyEdgeDeleted(BaseEvent):
 
 class CustomModelCardAdded(BaseEvent):
     model_card: ModelCard
+    mutation_command_id: CommandId | None = None
+    """Command acknowledged by this applied card mutation, when available."""
 
 
 class CustomModelCardDeleted(BaseEvent):
     model_id: ModelId
+    mutation_command_id: CommandId | None = None
+    """Command acknowledged by this applied card mutation, when available."""
 
 
 class StagedModelEvicted(BaseEvent):
@@ -230,14 +281,35 @@ class TracingStateChanged(BaseEvent):
     enabled: bool
 
 
+class ModelTrustApprovalChanged(BaseEvent):
+    """One master-ordered exact-card repository-code trust decision."""
+
+    trust_identity: str = Field(
+        pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        description="Immutable signed-card or content-derived model trust identity.",
+    )
+    approved: bool = Field(
+        description="Whether repository code for the exact identity is authorized."
+    )
+
+
+class StewardActionProposalChanged(BaseEvent):
+    """Create or replace one authoritative steward proposal record."""
+
+    proposal: StewardActionProposal
+
+
 Event = (
     TestEvent
     | TaskCreated
     | TaskStatusUpdated
     | TaskFailed
+    | AudioCppPreparationRequested
+    | AudioCppPreparationCompleted
     | TaskDeleted
     | TaskAcknowledged
     | InstanceCreated
+    | InstanceFailureRecorded
     | InstanceDeleted
     | RunnerStatusUpdated
     | NodeTimedOut
@@ -250,6 +322,8 @@ Event = (
     | TracesCollected
     | TracesMerged
     | TracingStateChanged
+    | ModelTrustApprovalChanged
+    | StewardActionProposalChanged
     | CustomModelCardAdded
     | CustomModelCardDeleted
     | StagedModelEvicted
@@ -259,18 +333,23 @@ Event = (
 
 _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TestEvent,
+    AudioCppPreparationRequested,
+    AudioCppPreparationCompleted,
     TaskCreated,
     TaskStatusUpdated,
     TaskFailed,
     TaskDeleted,
     TaskAcknowledged,
     InstanceCreated,
+    InstanceFailureRecorded,
     InstanceDeleted,
     RunnerStatusUpdated,
     NodeTimedOut,
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
     TracingStateChanged,
+    ModelTrustApprovalChanged,
+    StewardActionProposalChanged,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     StagedModelEvicted,

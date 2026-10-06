@@ -1,8 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
-import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
-import styled, { keyframes } from 'styled-components';
-import { FiX } from 'react-icons/fi';
-import { Button } from '../common/Button';
+import { useCallback } from 'react';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import {
   uiActions,
@@ -10,6 +6,8 @@ import {
   OBSERVABILITY_WIDTH_MIN,
   OBSERVABILITY_WIDTH_MAX,
 } from '../../store/slices/uiSlice';
+import { RightDrawer } from '../common/RightDrawer';
+import { DrawerBody, DrawerTabBar, DrawerTabButton } from '../common/drawerParts';
 import { LiveTab } from './LiveTab';
 import { NodeTab } from './NodeTab';
 import { TracesTab } from './TracesTab';
@@ -17,161 +15,18 @@ import { PerformanceTab } from './PerformanceTab';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /**
- * Right-side resizable panel that hosts every observability surface — live cluster
- * health, per-node deep dive, saved trace browsing — under one nav entry.
+ * Right-side resizable panel that hosts every observability surface: live
+ * cluster health, per-node deep dive, saved trace browsing, and performance
+ * envelopes, under one nav entry.
  *
- * Architecture decisions worth knowing:
- *
- * - The panel **overlays** the current route's content with a dimmed + blurred
- *   backdrop, matching `SettingsPanel`'s modal-drawer pattern. Click the backdrop
- *   or press Esc to close.
- * - Width is **operator-controlled** (drag the left edge) and **persisted to
- *   localStorage** outside the sessionStorage UI state — operators settle on a width
- *   and shouldn't redo it on every refresh.
- * - All panel state lives on the global Zustand store so any component can open the
- *   panel to a specific tab/node. The toolbar nav button calls `openObservability()`
- *   without args; per-node bug icons call `openObservability('node', nodeId)`.
+ * The drawer chrome (backdrop, slide-in, drag-resize, Escape) lives in
+ * `RightDrawer` and is shared with the capability panel. Width is
+ * operator-controlled and persisted to localStorage outside the
+ * sessionStorage UI state, so operators settle on a width once. All panel
+ * state lives on the Redux UI slice so any component can open the panel to
+ * a specific tab or node: the toolbar calls `openObservability()` without
+ * args; per-node actions call `openObservability('node', nodeId)`.
  */
-
-const fadeIn = keyframes`
-  from { opacity: 0; }
-  to   { opacity: 1; }
-`;
-
-const slideIn = keyframes`
-  from { transform: translateX(100%); }
-  to   { transform: translateX(0); }
-`;
-
-/**
- * Click-to-close dim + blur layer behind the drawer. Matches `SettingsPanel`
- * (z=40 backdrop / z=50 drawer) so the visual treatment is consistent across
- * modal-style panels in the dashboard.
- */
-const Backdrop = styled.div`
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  background: ${({ theme }) => theme.colors.shadowStrong};
-  backdrop-filter: blur(2px);
-  animation: ${fadeIn} 0.2s ease-out;
-`;
-
-const Aside = styled.aside<{ $width: number }>`
-  position: fixed;
-  top: 0;
-  right: 0;
-  /* dvh tracks the ACTUAL visible viewport on mobile browsers; 100vh
-   * includes the area behind Safari's URL/tool bars, which pushed the
-   * panel's bottom (and the scrolled list's tail) off screen and centered
-   * spinners against the wrong height. Plain vh stays as the fallback for
-   * engines without dvh. */
-  height: 100vh;
-  height: 100dvh;
-  width: ${({ $width }) => $width}px;
-  background: ${({ theme }) => theme.colors.surfaceElevated};
-  border-left: 1px solid ${({ theme }) => theme.colors.borderStrong};
-  box-shadow: -18px 0 48px ${({ theme }) => theme.colors.shadowStrong};
-  display: flex;
-  flex-direction: column;
-  z-index: 50;
-  animation: ${slideIn} 0.25s cubic-bezier(0.33, 1, 0.68, 1);
-
-  /* Phone width: the drawer becomes a full-viewport sheet. The persisted
-   * desktop width (which can exceed a phone viewport and clip the
-   * header/tabs) is ignored; !important beats the drag-resize inline
-   * style if one was left behind by a desktop session. */
-  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
-    width: 100vw !important;
-    border-left: none;
-  }
-`;
-
-/**
- * Drag handle on the left edge of the panel. Sits in front of `Aside`'s left border
- * with a slightly wider hit area than its visible footprint so the cursor catches it
- * reliably.
- */
-const ResizeHandle = styled.div`
-  position: absolute;
-  left: -4px;
-  top: 0;
-  bottom: 0;
-  width: 8px;
-  cursor: ew-resize;
-  /* Subtle hover hint without being distracting. */
-  &:hover {
-    background: ${({ theme }) => theme.colors.goldDim};
-    opacity: 0.4;
-  }
-
-  /* No drag-resize on a full-viewport phone sheet. */
-  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
-    display: none;
-  }
-`;
-
-const Header = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 18px 10px;
-  gap: 12px;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
-`;
-
-const Title = styled.h2`
-  margin: 0;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.lg};
-  color: ${({ theme }) => theme.colors.text};
-`;
-
-const TabBar = styled.div`
-  display: flex;
-  gap: 4px;
-  padding: 8px 12px 0;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
-`;
-
-const TabButton = styled.button<{ $active: boolean }>`
-  all: unset;
-  cursor: pointer;
-  padding: 6px 14px 8px;
-  border-radius: ${({ theme }) => theme.radii.sm} ${({ theme }) => theme.radii.sm} 0 0;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.sm};
-  color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.textSecondary)};
-  border-bottom: 2px solid
-    ${({ $active, theme }) => ($active ? theme.colors.gold : 'transparent')};
-  transition: color 0.15s, border-color 0.15s;
-
-  &:hover {
-    color: ${({ theme }) => theme.colors.text};
-  }
-
-  /* Visible focus ring for keyboard users — 'all: unset' strips the default. */
-  &:focus-visible {
-    outline: 2px solid ${({ theme }) => theme.colors.goldDim};
-    outline-offset: 2px;
-  }
-`;
-
-/**
- * Tab content host. Becomes a flex column with `overflow: hidden` so each
- * tab can decide its own internal layout — LiveTab needs the timeline to
- * fill remaining vertical space and scroll inside the panel, NodeTab needs
- * the entire body to scroll. Each tab provides its own scroll surface so
- * Body never owns one for everyone.
- */
-const Body = styled.div`
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  padding: 16px 18px;
-  display: flex;
-  flex-direction: column;
-`;
 
 const TAB_ORDER: { key: ObservabilityTab }[] = [
   { key: 'live' },
@@ -188,137 +43,57 @@ export function ObservabilityPanel() {
   const width = useAppSelector((s) => s.ui.observabilityPanelWidth);
   const selectedNodeId = useAppSelector((s) => s.ui.observabilitySelectedNodeId);
   const setTab = (tab: ObservabilityTab) => dispatch(uiActions.setObservabilityTab(tab));
-  const setWidth = (next: number) => dispatch(uiActions.setObservabilityPanelWidth(next));
-  const close = () => dispatch(uiActions.closeObservability());
-
-  // Drag-to-resize: capture pointer at the handle; resizing computes width from
-  // the cursor's distance from the right edge of the viewport. We hold an Aside
-  // ref instead of looking the element up via getElementById in the pointermove
-  // hot path, both to avoid the lookup cost and to keep the contract local
-  // (this component owns the element it mutates during drag).
-  const asideRef = useRef<HTMLElement | null>(null);
-  const draggingRef = useRef(false);
-  const dragWidthRef = useRef<number>(width);
-
-  // Begin a resize drag. Store-side commit happens on pointerup; in-flight
-  // updates set the panel width via DOM directly to keep things smooth.
-  const onResizeStart = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      draggingRef.current = true;
-      dragWidthRef.current = width;
-      // Capture the pointer so we keep getting events even if the cursor
-      // briefly leaves the handle's hitbox during fast drags.
-      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-    },
-    [width],
+  const setWidth = useCallback(
+    (next: number) => dispatch(uiActions.setObservabilityPanelWidth(next)),
+    [dispatch],
   );
-
-  useEffect(() => {
-    if (!open) return;
-    const onMove = (event: PointerEvent) => {
-      if (!draggingRef.current) return;
-      // Clamp during live preview, not just at commit time. Without this the
-      // pointer leaving the viewport would set the inline width to negative or
-      // wildly large values and the panel would visibly flicker off-screen
-      // even though the eventual store commit clamps. Using the same range
-      // here keeps the live preview and the persisted state visually identical.
-      const raw = window.innerWidth - event.clientX;
-      const next = Math.max(
-        OBSERVABILITY_WIDTH_MIN,
-        Math.min(OBSERVABILITY_WIDTH_MAX, raw),
-      );
-      dragWidthRef.current = next;
-      // Live preview via inline style on the panel; final commit lands on up.
-      if (asideRef.current) asideRef.current.style.width = `${next}px`;
-    };
-    const onUp = () => {
-      if (!draggingRef.current) return;
-      draggingRef.current = false;
-      // Clear the inline style BEFORE committing the store update. Inline
-      // styles beat styled-components' generated CSS rules on specificity, so
-      // leaving an inline width here would silently override every subsequent
-      // state-driven width change (including from `setObservabilityPanelWidth`
-      // and from any other component that touches the store). Clearing first
-      // hands width control back to the styled-component template literal.
-      if (asideRef.current) asideRef.current.style.width = '';
-      setWidth(dragWidthRef.current);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
-    return () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
-    };
-  }, [open, setWidth]);
-
-  // Esc closes the panel — operators expect this for any modal-like surface.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, close]);
-
-  if (!open) return null;
+  const close = useCallback(() => dispatch(uiActions.closeObservability()), [dispatch]);
 
   return (
-    <>
-      <Backdrop onClick={close} />
-      <Aside
-        $width={width}
-        ref={asideRef}
-        id="observability-panel"
-        aria-label={t('observability.panelAria', 'Observability panel')}
+    <RightDrawer
+      ariaLabel={t('observability.panelAria', 'Observability panel')}
+      closeLabel={t('observability.closePanel', 'Close observability panel')}
+      id="observability-panel"
+      maxWidth={OBSERVABILITY_WIDTH_MAX}
+      minWidth={OBSERVABILITY_WIDTH_MIN}
+      onClose={close}
+      onWidthChange={setWidth}
+      open={open}
+      resizeLabel={t('observability.resizePanel', 'Resize observability panel')}
+      title={t('header.observability', 'Observability')}
+      width={width}
+    >
+      <DrawerTabBar role="tablist" aria-label={t('observability.views', 'Observability views')}>
+        {TAB_ORDER.map((tab) => (
+          <DrawerTabButton
+            key={tab.key}
+            $active={activeTab === tab.key}
+            role="tab"
+            aria-selected={activeTab === tab.key}
+            aria-controls={`observability-panel-${tab.key}`}
+            id={`observability-tab-${tab.key}`}
+            onClick={() => setTab(tab.key)}
+          >
+            {tab.key === 'live'
+              ? t('observability.tabs.live', 'Live')
+              : tab.key === 'node'
+                ? t('observability.tabs.node', 'Node')
+                : tab.key === 'traces'
+                  ? t('observability.tabs.traces', 'Traces')
+                  : t('observability.tabs.performance', 'Performance')}
+          </DrawerTabButton>
+        ))}
+      </DrawerTabBar>
+      <DrawerBody
+        role="tabpanel"
+        id={`observability-panel-${activeTab}`}
+        aria-labelledby={`observability-tab-${activeTab}`}
       >
-        <ResizeHandle
-          onPointerDown={onResizeStart}
-          role="separator"
-          aria-orientation="vertical"
-          aria-label={t('observability.resizePanel', 'Resize observability panel')}
-        />
-        <Header>
-          <Title>{t('header.observability', 'Observability')}</Title>
-          <Button variant="ghost" size="sm" onClick={close} aria-label={t('observability.closePanel', 'Close observability panel')}>
-            <FiX size={16} />
-          </Button>
-        </Header>
-        <TabBar role="tablist" aria-label={t('observability.views', 'Observability views')}>
-          {TAB_ORDER.map((tab) => (
-            <TabButton
-              key={tab.key}
-              $active={activeTab === tab.key}
-              role="tab"
-              aria-selected={activeTab === tab.key}
-              aria-controls={`observability-panel-${tab.key}`}
-              id={`observability-tab-${tab.key}`}
-              onClick={() => setTab(tab.key)}
-            >
-              {tab.key === 'live'
-                ? t('observability.tabs.live', 'Live')
-                : tab.key === 'node'
-                  ? t('observability.tabs.node', 'Node')
-                  : tab.key === 'traces'
-                    ? t('observability.tabs.traces', 'Traces')
-                    : t('observability.tabs.performance', 'Performance')}
-            </TabButton>
-          ))}
-        </TabBar>
-        <Body
-          role="tabpanel"
-          id={`observability-panel-${activeTab}`}
-          aria-labelledby={`observability-tab-${activeTab}`}
-        >
-          {activeTab === 'live' && <LiveTab />}
-          {activeTab === 'node' && <NodeTab nodeId={selectedNodeId} />}
-          {activeTab === 'traces' && <TracesTab />}
-          {activeTab === 'performance' && <PerformanceTab />}
-        </Body>
-      </Aside>
-    </>
+        {activeTab === 'live' && <LiveTab />}
+        {activeTab === 'node' && <NodeTab nodeId={selectedNodeId} />}
+        {activeTab === 'traces' && <TracesTab />}
+        {activeTab === 'performance' && <PerformanceTab />}
+      </DrawerBody>
+    </RightDrawer>
   );
 }

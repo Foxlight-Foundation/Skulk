@@ -2,14 +2,15 @@ import asyncio
 import hashlib
 import os
 import shutil
+import socket
 import ssl
 import time
 import traceback
 from collections.abc import Awaitable
 from contextlib import suppress
 from datetime import timedelta
-from pathlib import Path
-from typing import Callable, Literal
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Callable, Literal
 from urllib.parse import urljoin
 
 import aiofiles
@@ -25,14 +26,17 @@ from pydantic import (
 )
 
 from skulk.download.huggingface_utils import (
+    HfTokenSource,
     filter_repo_objects,
     get_allow_patterns,
     get_auth_headers,
     get_hf_endpoint,
-    get_hf_token,
+    get_hf_token_path,
+    resolve_hf_token_source,
 )
 from skulk.shared.constants import SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.worker.downloads import (
@@ -43,6 +47,9 @@ from skulk.shared.types.worker.downloads import (
     RepoFileDownloadProgress,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+
+if TYPE_CHECKING:
+    from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
@@ -62,21 +69,113 @@ class HuggingFaceRateLimitError(Exception):
     """429 Huggingface code"""
 
 
-async def _build_auth_error_message(status_code: int, model_id: ModelId) -> str:
-    token = await get_hf_token()
-    if status_code == 401 and token is None:
+_HF_TOKEN_SOURCE_LABELS: dict[HfTokenSource, str] = {
+    "env": "the HF_TOKEN environment variable",
+    "service_env": "HF_TOKEN in ~/.skulk/skulk.env",
+    "config": "hf_token in skulk.yaml",
+    "file": "the Hugging Face token file",
+    "absent": "no configured source",
+}
+"""Operator-facing names for each token source, so messages name the
+mechanism the operator must actually go and change."""
+
+
+def _unloaded_token_hint() -> str:
+    """Point at a configured token this process never loaded, if there is one.
+
+    Both the service env file and ``hf_token:`` only reach downloads by way of
+    ``HF_TOKEN`` at startup. Editing either without restarting leaves the node
+    authenticating with nothing, and "no token configured" would be actively
+    wrong advice for an operator who just set one.
+    """
+    _token, source = resolve_hf_token_source()
+    if source in ("service_env", "config"):
         return (
-            f"Model '{model_id}' requires authentication. "
-            f"Set HF_TOKEN in the app's Advanced settings, set the HF_TOKEN environment variable, or run `hf auth login`. "
-            f"Get a token at https://huggingface.co/settings/tokens"
+            f" A token is configured in {_HF_TOKEN_SOURCE_LABELS[source]}, but "
+            "this process has not loaded it; restart the node to apply it."
         )
-    elif status_code == 403:
+    return ""
+
+
+def _hf_token_remediation() -> str:
+    """Say how to get a token onto this node, naming the node.
+
+    On a formed cluster the dashboard is the easy path: a token entered in any
+    node's Settings propagates over the encrypted fabric to every node,
+    including this one. The per-node mechanisms remain for a machine that has
+    not formed a cluster.
+    """
+    node = socket.gethostname()
+    return (
+        f"Give this node ({node}) a Hugging Face token: enter it once in any "
+        f"node's dashboard Settings (it propagates to the whole cluster), run "
+        f"`hf auth login` here (writes {get_hf_token_path()}, picked up "
+        f"without a restart), or set HF_TOKEN in ~/.skulk/skulk.env and "
+        f"restart the node. Get a token at "
+        f"https://huggingface.co/settings/tokens"
+    )
+
+
+async def build_auth_error_message(status_code: int, model_id: ModelId) -> str:
+    """Explain an HF 401/403 in terms of what the operator must actually do.
+
+    Distinguishes the four cases that look identical in the raw status code:
+    no token at all, a token that Hugging Face rejected, gated terms not yet
+    accepted, and terms that may be accepted under a *different* account than
+    the token belongs to.
+
+    Args:
+        status_code: The HTTP status Hugging Face answered with; 401 and 403
+            get case-specific remediation, any other value a generic line.
+        model_id: The repository the request was for, named in the message.
+
+    Returns:
+        A human-readable explanation naming the concrete fix for this node
+        (configure a token, accept the model terms, or align the accepting
+        account with the token).
+
+    Side effects:
+        Reads this process's ``HF_TOKEN`` environment variable and the
+        Hugging Face token file to report which token source (if any) the
+        failing request would have used. The no-token remediation
+        additionally consults ``~/.skulk/skulk.env`` and ``skulk.yaml``
+        (via :func:`resolve_hf_token_source`) to mention a configured token
+        this process has not loaded. Nothing is written.
+    """
+    # In-process resolution deliberately: the Authorization header this status
+    # code answers came from get_hf_token(), which reads only the environment
+    # and the token file. Consulting skulk.env or skulk.yaml here would let a
+    # token this process never loaded be described as "sent and rejected".
+    _token, source = resolve_hf_token_source(include_config=False)
+    if status_code == 401:
+        if source == "absent":
+            return (
+                f"Model '{model_id}' requires authentication and this node sent "
+                f"no Hugging Face token.{_unloaded_token_hint()} "
+                f"{_hf_token_remediation()}"
+            )
         return (
-            f"Access denied to '{model_id}'. "
-            f"Please accept the model terms at https://huggingface.co/{model_id}"
+            f"Hugging Face rejected the configured token (from "
+            f"{_HF_TOKEN_SOURCE_LABELS[source]}) for '{model_id}' (HTTP 401). "
+            f"The token is likely expired, revoked, or mistyped. Replace it, "
+            f"then retry. Manage tokens at https://huggingface.co/settings/tokens"
         )
-    else:
-        return f"Authentication failed for '{model_id}' (HTTP {status_code})"
+    if status_code == 403:
+        if source == "absent":
+            return (
+                f"Access to '{model_id}' is restricted and this node sent no "
+                f"Hugging Face token.{_unloaded_token_hint()} Accept the model "
+                f"terms at https://huggingface.co/{model_id}, then "
+                f"{_hf_token_remediation()}"
+            )
+        return (
+            f"Access denied to '{model_id}' (HTTP 403) even though a token "
+            f"(from {_HF_TOKEN_SOURCE_LABELS[source]}) was sent. Accept the "
+            f"model terms at https://huggingface.co/{model_id} using the same "
+            f"Hugging Face account the token belongs to, and confirm the token "
+            f"grants read access to gated repositories."
+        )
+    return f"Authentication failed for '{model_id}' (HTTP {status_code})"
 
 
 def trim_etag(etag: str) -> str:
@@ -150,9 +249,7 @@ def _source_revision_matches(path: Path, source_revision: str | None) -> bool:
     return actual_revision == source_revision
 
 
-def _source_revision_staging_matches(
-    path: Path, source_revision: str | None
-) -> bool:
+def _source_revision_staging_matches(path: Path, source_revision: str | None) -> bool:
     """Return whether ``path`` is an interrupted download of the revision."""
 
     if source_revision is None:
@@ -200,11 +297,15 @@ def write_source_revision_marker(path: Path, source_revision: str | None) -> Non
     staging_marker.unlink(missing_ok=True)
 
 
-def _replacement_model_dir(target_dir: Path, source_revision: str | None) -> Path:
-    """Return the resumable sibling directory for a replacement revision."""
+def _replacement_model_dir(
+    target_dir: Path,
+    source_revision: str | None,
+    replacement_identity: str | None = None,
+) -> Path:
+    """Return the resumable sibling directory for one replacement generation."""
 
-    revision = source_revision or "main"
-    return target_dir.with_name(f".{target_dir.name}.revision-{revision}.partial")
+    generation = replacement_identity or source_revision or "main"
+    return target_dir.with_name(f".{target_dir.name}.generation-{generation}.partial")
 
 
 def _recover_interrupted_model_swap(target_dir: Path) -> None:
@@ -244,19 +345,30 @@ def _commit_replacement_model_dir(replacement_dir: Path, target_dir: Path) -> No
 
 
 def resolve_model_in_path(
-    model_id: ModelId, source_revision: str | None = None
+    model_id: ModelId,
+    source_revision: str | None = None,
+    *,
+    expected_card: ModelCard | None = None,
+    artifact_root: str | None = None,
 ) -> Path | None:
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
     Checks each directory for the normalized name (org--model) and, for pinned
     artifacts, the store's revision-qualified sibling name. A candidate is only
     returned if ``is_model_directory_complete`` confirms all weight files are
-    present and its revision marker matches.
+    present and its revision marker matches. When ``expected_card`` is a signed
+    registry card, the installed-card sidecar must also prove that exact card
+    identity. This prevents a same-revision card replacement from bypassing the
+    normal card-only refresh transaction and then failing at runner load.
 
     Args:
         model_id: Model repository identifier to resolve.
         source_revision: Full immutable Hugging Face commit required by the
             card. When set, the directory must carry a matching revision marker.
+        expected_card: Optional complete card whose signed installed identity
+            must match the resolved directory.
+        artifact_root: Optional repository-relative loader root whose contents
+            determine runtime completeness for a directory-scoped bundle.
 
     Returns:
         The first complete matching model directory, or ``None``.
@@ -274,16 +386,41 @@ def resolve_model_in_path(
     for search_dir in search_path:
         for candidate_name in candidate_names:
             candidate = search_dir / candidate_name
+            load_candidate = (
+                candidate / artifact_root if artifact_root is not None else candidate
+            )
+            load_candidate_is_complete = (
+                is_model_directory_complete(load_candidate)
+                if artifact_root is None
+                else _rooted_bundle_is_complete(candidate, load_candidate)
+            )
             if (
                 candidate.is_dir()
-                and is_model_directory_complete(candidate)
+                and load_candidate.is_dir()
+                and load_candidate_is_complete
                 and _source_revision_matches(candidate, source_revision)
             ):
+                if (
+                    expected_card is not None
+                    and expected_card.registry_card_id is not None
+                ):
+                    from skulk.store.installed_cards import (
+                        require_registry_installed_artifact,
+                    )
+
+                    try:
+                        require_registry_installed_artifact(candidate, expected_card)
+                    except PermissionError:
+                        continue
                 return candidate
     return None
 
 
-def build_sidecar_path(model_id: ModelId, sidecar_filename: str) -> Path | None:
+def build_sidecar_path(
+    model_id: ModelId,
+    sidecar_filename: str,
+    source_revision: str | None = None,
+) -> Path | None:
     """Resolve a companion-artifact file (e.g. an ``mtp.safetensors`` sidecar).
 
     Sidecar repos are not models: they ship a single weights file and no
@@ -297,15 +434,24 @@ def build_sidecar_path(model_id: ModelId, sidecar_filename: str) -> Path | None:
     import skulk.shared.constants as _constants
 
     normalized = model_id.normalize()
+    candidate_names = [normalized]
+    if source_revision is not None:
+        candidate_names.append(f"{normalized}--revision-{source_revision}")
     search_dirs = [*(_constants.SKULK_MODELS_PATH or ()), SKULK_MODELS_DIR]
     for search_dir in search_dirs:
-        candidate = search_dir / normalized / sidecar_filename
-        if candidate.exists():
-            return candidate
+        for candidate_name in candidate_names:
+            directory = search_dir / candidate_name
+            candidate = directory / sidecar_filename
+            if candidate.exists() and _source_revision_matches(
+                directory, source_revision
+            ):
+                return candidate
     return None
 
 
-def build_companion_model_path(model_id: ModelId) -> Path | None:
+def build_companion_model_path(
+    model_id: ModelId, source_revision: str | None = None
+) -> Path | None:
     """Resolve a companion *model* directory (e.g. a Gemma 4 assistant).
 
     Companion model repos ship a single ``model.safetensors`` plus
@@ -319,14 +465,31 @@ def build_companion_model_path(model_id: ModelId) -> Path | None:
     import skulk.shared.constants as _constants
 
     normalized = model_id.normalize()
+    candidate_names = [normalized]
+    if source_revision is not None:
+        candidate_names.append(f"{normalized}--revision-{source_revision}")
     search_dirs = [*(_constants.SKULK_MODELS_PATH or ()), SKULK_MODELS_DIR]
     for search_dir in search_dirs:
-        candidate = search_dir / normalized
-        if (candidate / "config.json").is_file() and (
-            candidate / "model.safetensors"
-        ).is_file():
-            return candidate
+        for candidate_name in candidate_names:
+            candidate = search_dir / candidate_name
+            if (
+                (candidate / "config.json").is_file()
+                and (candidate / "model.safetensors").is_file()
+                and _source_revision_matches(candidate, source_revision)
+            ):
+                return candidate
     return None
+
+
+def companion_artifact_location(
+    model_card: ModelCard,
+    repository: str,
+    companion_revision: str | None,
+) -> tuple[ModelId, str | None]:
+    """Resolve a companion repo to its staged identity and immutable revision."""
+    if repository == str(model_card.artifact_repository):
+        return model_card.model_id, model_card.source_revision
+    return ModelId(repository), companion_revision
 
 
 def companion_download_specs(
@@ -336,8 +499,9 @@ def companion_download_specs(
 
     Companions are the artifacts a model needs beyond its own repo: a
     separate vision-weights repo, an MTP sidecar (``mtp_sidecar_repo``), a
-    speculative-decoding assistant model (``assistant_model_repo``), or a
-    served-engine draft model (``served_spec_draft_repo``).
+    speculative-decoding assistant model (``assistant_model_repo``), a
+    served-engine draft model (``served_spec_draft_repo``), or a video card's
+    externally hosted companions (preprocessor weights).
     Every downloader path that resolves a base model MUST also ensure its
     companions — a base model present on disk without its companion is the
     "model loads, speculative decoding silently unavailable" failure mode
@@ -346,16 +510,29 @@ def companion_download_specs(
     Returns ``(shard, allow_patterns, required)`` triples; the shards carry
     bare model cards (no ``runtime``/``vision`` sections), so recursively
     ensuring a companion never yields further companions. ``required``
-    distinguishes criticality: split vision weights are load-bearing (a
-    vision model without them is broken — fetch failures must fail the
-    base), while MTP sidecars and assistants degrade gracefully to
+    distinguishes criticality: split vision weights and video preprocessor
+    weights are load-bearing (a vision model without them is broken, and a
+    video card would advertise guides it cannot derive — fetch failures must
+    fail the base), while MTP sidecars and assistants degrade gracefully to
     run-without-speculation (best-effort).
     """
 
-    def _bare_shard(repo: str) -> PipelineShardMetadata:
+    def _bare_shard(
+        repo: str,
+        source_revision: str | None,
+        gguf_file: str | None = None,
+    ) -> PipelineShardMetadata:
+        companion_model_id, effective_revision = companion_artifact_location(
+            model_card,
+            repo,
+            source_revision,
+        )
         return PipelineShardMetadata(
             model_card=ModelCard(
-                model_id=ModelId(repo),
+                model_id=companion_model_id,
+                source_repository=ModelId(repo),
+                source_revision=effective_revision,
+                gguf_file=gguf_file,
                 storage_size=Memory.from_bytes(0),
                 n_layers=1,
                 hidden_size=1,
@@ -370,32 +547,66 @@ def companion_download_specs(
         )
 
     specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
-    if model_card.vision and model_card.vision.weights_repo != str(model_card.model_id):
+    if model_card.vision and model_card.vision.weights_repo != str(
+        model_card.artifact_repository
+    ):
         specs.append(
             (
-                _bare_shard(model_card.vision.weights_repo),
+                _bare_shard(
+                    model_card.vision.weights_repo,
+                    model_card.vision.weights_revision,
+                ),
                 ["*.safetensors", "config.json"],
                 True,
             )
         )
+    if model_card.video is not None:
+        # A video card's companions from other repositories (preprocessor
+        # weights such as the pose estimator) are fetched as exact files at
+        # their pinned revisions, keeping the repository's layout so the
+        # engine finds each under the folder its loader reads.
+        for repository, revision in model_card.external_video_companions():
+            files = [
+                item.path
+                for item in model_card.video.companions
+                if item.repo is not None
+                and str(item.repo) == repository
+                and item.revision == revision
+            ]
+            specs.append((_bare_shard(repository, revision), files, True))
     runtime = model_card.runtime
     # The runner only loads the sidecar when mtp_heads is also set (see
     # load_mlx_items); downloading one the runner will never load wastes
     # bandwidth and produces misleading speculation warnings.
-    if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
+    if (
+        runtime
+        and runtime.mtp_sidecar_repo
+        and runtime.mtp_sidecar_repo != str(model_card.artifact_repository)
+        and runtime.mtp_heads
+    ):
         specs.append(
             (
-                _bare_shard(runtime.mtp_sidecar_repo),
+                _bare_shard(
+                    runtime.mtp_sidecar_repo,
+                    runtime.mtp_sidecar_revision,
+                ),
                 ["mtp.safetensors", "config.json"],
                 False,
             )
         )
-    if runtime and runtime.assistant_model_repo:
+    if (
+        runtime
+        and runtime.assistant_model_repo
+        and runtime.assistant_model_repo != str(model_card.artifact_repository)
+    ):
         # The assistant is a small full model (config + a single
         # safetensors), so pull the weights and config alongside the target.
         specs.append(
             (
-                _bare_shard(runtime.assistant_model_repo),
+                _bare_shard(
+                    runtime.assistant_model_repo,
+                    runtime.assistant_model_revision,
+                ),
                 ["*.safetensors", "config.json"],
                 False,
             )
@@ -408,14 +619,18 @@ def companion_download_specs(
     if (
         runtime
         and runtime.served_spec_draft_repo
-        and runtime.served_spec_draft_repo != str(model_card.model_id)
+        and runtime.served_spec_draft_repo != str(model_card.artifact_repository)
         and runtime.served_spec_draft_file
     ):
         # Just the pinned draft file -- a draft GGUF is single-file and is not a
         # vision model, so do not pull mmproj projectors or sibling quants.
         specs.append(
             (
-                _bare_shard(runtime.served_spec_draft_repo),
+                _bare_shard(
+                    runtime.served_spec_draft_repo,
+                    runtime.served_spec_draft_revision,
+                    runtime.served_spec_draft_file,
+                ),
                 [runtime.served_spec_draft_file],
                 False,
             )
@@ -429,11 +644,43 @@ def same_repo_served_draft_files(model_card: ModelCard) -> list[str]:
     runtime = model_card.runtime
     if (
         runtime is not None
-        and runtime.served_spec_draft_repo == str(model_card.model_id)
+        and runtime.served_spec_draft_repo == str(model_card.artifact_repository)
         and runtime.served_spec_draft_file
     ):
         return [runtime.served_spec_draft_file]
     return []
+
+
+def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
+    """The card's artifact on ``SKULK_MODELS_PATH`` when nothing is left to fetch.
+
+    A base found on the search path is installed only if every companion the
+    card declares is on disk too. A card that gains a companion after its base
+    was staged (video preprocessors, an MTP sidecar) finds the old base
+    complete; answering with it would skip the download that fetches the
+    companion and the runner would then refuse the card. ``None`` sends the
+    caller down the download path, where the coordinator fetches what is
+    missing and, offline, decides which companions are load-bearing.
+
+    Args:
+        model_card: The card whose artifact and companions must be present.
+
+    Returns:
+        The complete matching model directory, or ``None``.
+    """
+    found = resolve_model_in_path(
+        ModelId(model_card.model_id),
+        model_card.source_revision,
+        expected_card=model_card,
+        artifact_root=(
+            model_card.artifact_bundle.root
+            if model_card.artifact_bundle is not None
+            else None
+        ),
+    )
+    if found is None or not model_companions_present_on_disk(model_card):
+        return None
+    return found
 
 
 def model_companions_present_on_disk(
@@ -458,7 +705,9 @@ def model_companions_present_on_disk(
     model complete after ensure_shard returns, so the gate cannot loop
     within a session.
     """
-    if model_card.vision and model_card.vision.weights_repo != str(model_card.model_id):
+    if model_card.vision and model_card.vision.weights_repo != str(
+        model_card.artifact_repository
+    ):
         vision_repo = ModelId(model_card.vision.weights_repo)
         # Probe BOTH search roots: SKULK_MODELS_PATH (staging/store) and
         # SKULK_MODELS_DIR (where download_shard writes) — a vision repo
@@ -466,44 +715,87 @@ def model_companions_present_on_disk(
         # would degrade the cached base to in_progress forever.
         import skulk.shared.constants as _constants
 
-        vision_present = build_companion_model_path(vision_repo) is not None
+        vision_present = (
+            build_companion_model_path(vision_repo, model_card.vision.weights_revision)
+            is not None
+        )
         if not vision_present:
             normalized = vision_repo.normalize()
+            candidate_names = [normalized]
+            if model_card.vision.weights_revision is not None:
+                candidate_names.append(
+                    f"{normalized}--revision-{model_card.vision.weights_revision}"
+                )
             for search_dir in [*(_constants.SKULK_MODELS_PATH or ()), SKULK_MODELS_DIR]:
-                candidate = search_dir / normalized
-                if candidate.is_dir() and is_model_directory_complete(candidate):
-                    vision_present = True
+                for candidate_name in candidate_names:
+                    candidate = search_dir / candidate_name
+                    if (
+                        candidate.is_dir()
+                        and is_model_directory_complete(candidate)
+                        and _source_revision_matches(
+                            candidate, model_card.vision.weights_revision
+                        )
+                    ):
+                        vision_present = True
+                        break
+                if vision_present:
                     break
         if not vision_present:
             return False
+    if model_card.video is not None:
+        # Preprocessor weights are load-bearing: a card that advertises a
+        # guide it cannot derive would fail the render, not degrade it.
+        for item in model_card.video.companions:
+            if item.repo is None or str(item.repo) == str(model_card.artifact_repository):
+                continue
+            if build_sidecar_path(ModelId(item.repo), item.path, item.revision) is None:
+                return False
     if required_only:
         return True
     runtime = model_card.runtime
     if runtime is None:
         return True
-    if (
-        runtime.mtp_sidecar_repo
-        and runtime.mtp_heads
-        and build_sidecar_path(ModelId(runtime.mtp_sidecar_repo), "mtp.safetensors")
-        is None
-    ):
-        return False
-    if runtime.assistant_model_repo and (
-        build_companion_model_path(ModelId(runtime.assistant_model_repo)) is None
-    ):
-        return False
+    if runtime.mtp_sidecar_repo and runtime.mtp_heads:
+        sidecar_model_id, sidecar_revision = companion_artifact_location(
+            model_card,
+            runtime.mtp_sidecar_repo,
+            runtime.mtp_sidecar_revision,
+        )
+        if (
+            build_sidecar_path(
+                sidecar_model_id,
+                "mtp.safetensors",
+                sidecar_revision,
+            )
+            is None
+        ):
+            return False
+    if runtime.assistant_model_repo:
+        assistant_model_id, assistant_revision = companion_artifact_location(
+            model_card,
+            runtime.assistant_model_repo,
+            runtime.assistant_model_revision,
+        )
+        if build_companion_model_path(assistant_model_id, assistant_revision) is None:
+            return False
     # Served draft GGUF: the specific file must be on disk (it may share the
     # base's directory or live in its own repo dir).
     if runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
         try:
+            draft_shares_repository = runtime.served_spec_draft_repo == str(
+                model_card.artifact_repository
+            )
             draft_revision = (
                 model_card.source_revision
-                if runtime.served_spec_draft_repo == str(model_card.model_id)
-                else None
+                if draft_shares_repository
+                else runtime.served_spec_draft_revision
             )
-            draft_dir = build_model_path(
-                ModelId(runtime.served_spec_draft_repo), draft_revision
+            draft_model_id = (
+                model_card.model_id
+                if draft_shares_repository
+                else ModelId(runtime.served_spec_draft_repo)
             )
+            draft_dir = build_model_path(draft_model_id, draft_revision)
         except FileNotFoundError:
             return False
         if not (draft_dir / runtime.served_spec_draft_file).is_file():
@@ -511,8 +803,83 @@ def model_companions_present_on_disk(
     return True
 
 
+def _apply_artifact_root(model_directory: Path, artifact_root: str | None) -> Path:
+    """Resolve a declared loader root without permitting filesystem escape."""
+
+    if artifact_root is None:
+        return model_directory
+    resolved_directory = model_directory.resolve()
+    resolved_root = (resolved_directory / artifact_root).resolve()
+    if not resolved_root.is_relative_to(resolved_directory) or not resolved_root.is_dir():
+        raise FileNotFoundError(
+            f"Artifact root {artifact_root!r} is absent beneath {model_directory}"
+        )
+    return resolved_root
+
+
+def artifact_install_directory(
+    load_directory: Path, artifact_root: str | None
+) -> Path:
+    """Recover the staged generation root from its bundle loader directory.
+
+    Args:
+        load_directory: Directory returned by :func:`build_model_path`.
+        artifact_root: Repository-relative loader root from the signed card.
+
+    Returns:
+        The directory beneath which repository-relative bundle paths and the
+        installed-card sidecar are stored.
+
+    Raises:
+        ValueError: If the supplied loader directory cannot correspond to the
+            declared artifact root.
+    """
+
+    resolved_load = load_directory.resolve()
+    if artifact_root is None:
+        return resolved_load
+    install_directory = resolved_load
+    for _ in PurePosixPath(artifact_root).parts:
+        install_directory = install_directory.parent
+    if _apply_artifact_root(install_directory, artifact_root) != resolved_load:
+        raise ValueError("artifact loader directory does not match its signed root")
+    return install_directory
+
+
+def resolve_artifact_file(
+    load_directory: Path,
+    artifact_root: str | None,
+    repository_path: str,
+) -> Path:
+    """Resolve one signed repository path beneath its staged generation.
+
+    Args:
+        load_directory: Engine working directory returned by
+            :func:`build_model_path`.
+        artifact_root: Optional signed repository-relative loader root.
+        repository_path: Canonical repository-relative file path.
+
+    Returns:
+        The resolved file path, whether the bundle root is the repository root
+        or a nested directory.
+
+    Raises:
+        FileNotFoundError: If the path is absent or leaves the generation.
+    """
+
+    install_directory = artifact_install_directory(load_directory, artifact_root)
+    candidate = (install_directory / repository_path).resolve()
+    if not candidate.is_relative_to(install_directory) or not candidate.is_file():
+        raise FileNotFoundError(
+            f"Artifact file {repository_path!r} is absent beneath {install_directory}"
+        )
+    return candidate
+
+
 def build_model_path(
-    model_id: ModelId, source_revision: str | None = None
+    model_id: ModelId,
+    source_revision: str | None = None,
+    artifact_root: str | None = None,
 ) -> Path:
     """Resolve a local filesystem path for *model_id*.
 
@@ -525,6 +892,8 @@ def build_model_path(
         model_id: Model repository identifier to resolve.
         source_revision: Immutable source revision required by the model card,
             or ``None`` for an unpinned mutable-main cache.
+        artifact_root: Optional repository-relative working directory declared
+            by a bundle-aware card.
 
     Returns:
         The complete local model directory.
@@ -532,27 +901,44 @@ def build_model_path(
     Raises:
         FileNotFoundError: If no complete revision-matching directory exists.
     """
-    found = resolve_model_in_path(model_id, source_revision)
+    found = (
+        resolve_model_in_path(model_id, source_revision)
+        if artifact_root is None
+        else resolve_model_in_path(
+            model_id, source_revision, artifact_root=artifact_root
+        )
+    )
     if found is not None:
-        return found
+        return _apply_artifact_root(found, artifact_root)
     # A safetensors/MLX repo is identified by its config.json; a bare GGUF repo
     # (no config.json) is identified by a complete GGUF shard group on disk. Both
     # must be accepted here or a bare GGUF model that downloaded fine would fail
     # to load with FileNotFoundError (#327).
     default = SKULK_MODELS_DIR / model_id.normalize()
-    if default.is_dir() and (
-        (default / "config.json").exists() or directory_has_gguf_weights(default)
-    ) and _source_revision_matches(default, source_revision):
-        return default
+    default_load_root = default / artifact_root if artifact_root is not None else default
+    if (
+        default.is_dir()
+        and default_load_root.is_dir()
+        and _rooted_bundle_is_complete(default, default_load_root)
+        and _source_revision_matches(default, source_revision)
+    ):
+        return _apply_artifact_root(default, artifact_root)
     # Fallback: check the default staging directory directly.
     # This covers cases where the staging path wasn't registered in
     # SKULK_MODELS_PATH (e.g., config not yet synced) but files exist.
     staging_fallback = Path.home() / ".skulk" / "staging" / model_id.normalize()
-    if staging_fallback.is_dir() and (
-        (staging_fallback / "config.json").exists()
-        or directory_has_gguf_weights(staging_fallback)
-    ) and _source_revision_matches(staging_fallback, source_revision):
-        return staging_fallback
+    staging_load_root = (
+        staging_fallback / artifact_root
+        if artifact_root is not None
+        else staging_fallback
+    )
+    if (
+        staging_fallback.is_dir()
+        and staging_load_root.is_dir()
+        and _rooted_bundle_is_complete(staging_fallback, staging_load_root)
+        and _source_revision_matches(staging_fallback, source_revision)
+    ):
+        return _apply_artifact_root(staging_fallback, artifact_root)
     raise FileNotFoundError(
         f"Model {model_id} not found on disk. "
         f"Checked SKULK_MODELS_PATH, {default}, and {staging_fallback}. "
@@ -716,6 +1102,12 @@ def _gguf_shard_info(name: str) -> "tuple[str, int] | None":
 
 def is_model_directory_complete(model_dir: Path) -> bool:
     """Check if a model directory contains all required weight files."""
+    # A bundle's installed manifest is the store-verified file list and
+    # outranks the layout heuristics below: a truncated companion file the
+    # safetensors index never mentions still makes the artifact incomplete.
+    manifest_verdict = _installed_bundle_verdict(model_dir)
+    if manifest_verdict is not None:
+        return manifest_verdict
     file_list = _scan_model_directory(model_dir, recursive=True)
     if file_list is not None:
         # A safetensors index is present: completeness is governed entirely by it
@@ -724,6 +1116,77 @@ def is_model_directory_complete(model_dir: Path) -> bool:
     # No safetensors index -> this may be a GGUF repo; complete once its weights
     # (the full shard group) are present.
     return directory_has_gguf_weights(model_dir)
+
+
+def _rooted_bundle_is_complete(install_dir: Path, load_dir: Path) -> bool:
+    """Completeness for an artifact whose loader root sits beneath its install root.
+
+    The installed manifest at the install root is final when present (it
+    covers files outside the loader root too); without one, the loader root
+    is complete when it carries a config or GGUF weights.
+    """
+    verdict = _installed_bundle_verdict(install_dir)
+    if verdict is not None:
+        return verdict
+    return (load_dir / "config.json").is_file() or directory_has_gguf_weights(load_dir)
+
+
+_verified_detached_records: "VerifiedDetachedInstalledCardCache | None" = None
+
+
+def _detached_record_cache() -> "VerifiedDetachedInstalledCardCache":
+    """The process-lifetime cache of hash-verified detached installed records."""
+    global _verified_detached_records  # noqa: PLW0603 - one cache per process
+    if _verified_detached_records is None:
+        from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
+
+        _verified_detached_records = VerifiedDetachedInstalledCardCache()
+    return _verified_detached_records
+
+
+def _installed_bundle_verdict(model_dir: Path) -> bool | None:
+    """Completeness by the installed bundle manifest, or ``None`` without one.
+
+    A bundle-scoped artifact (a diffusion stack laid out by model folder, for
+    example) carries neither a safetensors index nor GGUF weights, so the
+    layout probes cannot see it. Its installed-card sidecar holds the file
+    manifest the store verified when it registered the bytes, and that
+    manifest is the completeness truth: every listed file present at its
+    recorded size. A legacy sidecar without a manifest proves nothing here.
+    """
+    from skulk.store import installed_cards
+
+    try:
+        # The adjacent sidecar, or the path-bound detached record a read-only
+        # model root keeps under the Skulk data directory. A detached record
+        # is trusted only after a full hash pass; the process-lifetime cache
+        # keeps that pass to once per unchanged artifact (file-stat changes
+        # invalidate it), since completeness is probed on every resolution.
+        record = installed_cards.read_installed_card_with_fallback(
+            model_dir,
+            fallback_root=installed_cards.SKULK_INSTALLED_CARD_RECORDS_DIR,
+            verified_detached_cache=_detached_record_cache(),
+        )
+    except (OSError, ValueError):
+        return None
+    if record is None or record.schema_version != 2 or not record.files:
+        return None
+    # Same containment rule as verify_installed_file: a manifest entry must
+    # resolve to a regular file beneath the artifact root, so an equal-sized
+    # symlink pointing outside the artifact never reads as its bytes.
+    resolved_root = model_dir.resolve()
+    for entry in record.files:
+        try:
+            candidate = (resolved_root / entry.path).resolve()
+            if (
+                not candidate.is_relative_to(resolved_root)
+                or not candidate.is_file()
+                or candidate.stat().st_size != entry.size_bytes
+            ):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 async def _build_file_list_from_local_directory(
@@ -883,7 +1346,7 @@ async def _fetch_file_list(
         session.get(url, headers=headers) as response,
     ):
         if response.status in [401, 403]:
-            msg = await _build_auth_error_message(response.status, model_id)
+            msg = await build_auth_error_message(response.status, model_id)
             raise HuggingFaceAuthenticationError(msg)
         elif response.status == 429:
             raise HuggingFaceRateLimitError(
@@ -989,7 +1452,7 @@ async def file_meta(
             redirected_location = r.headers.get("location")
             return await file_meta(model_id, revision, path, redirected_location)
         if r.status in [401, 403]:
-            msg = await _build_auth_error_message(r.status, model_id)
+            msg = await build_auth_error_message(r.status, model_id)
             raise HuggingFaceAuthenticationError(msg)
         content_length = int(
             r.headers.get("x-linked-size") or r.headers.get("content-length") or 0
@@ -1038,12 +1501,10 @@ async def range_read(
     ):
         if r.status in (401, 403):
             raise HuggingFaceAuthenticationError(
-                await _build_auth_error_message(r.status, model_id)
+                await build_auth_error_message(r.status, model_id)
             )
         if r.status == 404:
-            raise FileNotFoundError(
-                f"File {path} not found in {model_id}@{revision}"
-            )
+            raise FileNotFoundError(f"File {path} not found in {model_id}@{revision}")
         # A range starting at/after EOF yields 416; surface it as an empty read
         # so callers see a clean end-of-file instead of an HTTP error.
         if r.status == 416:
@@ -1064,12 +1525,22 @@ async def download_file_with_retry(
     on_progress: Callable[[int, int, bool], None] = lambda _, __, ___: None,
     on_connection_lost: Callable[[], None] = lambda: None,
     skip_internet: bool = False,
+    expected_size: int | None = None,
+    expected_object_id: str | None = None,
 ) -> Path:
+    """Download one immutable repository file with optional card assertions."""
     n_attempts = 3
     for attempt in range(n_attempts):
         try:
             return await _download_file(
-                model_id, revision, path, target_dir, on_progress, skip_internet
+                model_id,
+                revision,
+                path,
+                target_dir,
+                on_progress,
+                skip_internet,
+                expected_size,
+                expected_object_id,
             )
         except HuggingFaceAuthenticationError:
             raise
@@ -1104,7 +1575,10 @@ async def _download_file(
     target_dir: Path,
     on_progress: Callable[[int, int, bool], None] = lambda _, __, ___: None,
     skip_internet: bool = False,
+    expected_size: int | None = None,
+    expected_object_id: str | None = None,
 ) -> Path:
+    """Download a file and reject metadata that disagrees with a signed bundle."""
     target_path = target_dir / path
 
     if await aios.path.exists(target_path):
@@ -1113,21 +1587,31 @@ async def _download_file(
 
         local_size = (await aios.stat(target_path)).st_size
 
-        # Try to verify against remote, but allow offline operation
+        # Transport failure may use a complete cached file for offline operation.
+        # A successful metadata lookup followed by a signed identity mismatch is
+        # deterministic evidence that the cache is not the requested object and
+        # must never be downgraded to an offline fallback.
         try:
-            remote_size, _ = await file_meta(model_id, revision, path)
-            if local_size != remote_size:
-                logger.info(
-                    f"File {path} size mismatch (local={local_size}, remote={remote_size}), re-downloading"
-                )
-                await aios.remove(target_path)
-            else:
-                return target_path
+            remote_size, remote_etag = await file_meta(model_id, revision, path)
         except Exception as e:
             # Offline or network error - trust local file
             logger.debug(
                 f"Could not verify {path} against remote (offline?): {e}, using local file"
             )
+            return target_path
+        _require_expected_remote_identity(
+            path,
+            remote_size,
+            remote_etag,
+            expected_size=expected_size,
+            expected_object_id=expected_object_id,
+        )
+        if local_size != remote_size:
+            logger.info(
+                f"File {path} size mismatch (local={local_size}, remote={remote_size}), re-downloading"
+            )
+            await aios.remove(target_path)
+        else:
             return target_path
 
     if skip_internet:
@@ -1137,6 +1621,13 @@ async def _download_file(
 
     await aios.makedirs((target_dir / path).parent, exist_ok=True)
     length, etag = await file_meta(model_id, revision, path)
+    _require_expected_remote_identity(
+        path,
+        length,
+        etag,
+        expected_size=expected_size,
+        expected_object_id=expected_object_id,
+    )
     remote_hash = etag[:-5] if etag.endswith("-gzip") else etag
     partial_path = target_dir / f"{path}.partial"
     resume_byte_pos = (
@@ -1157,7 +1648,7 @@ async def _download_file(
             if r.status == 404:
                 raise FileNotFoundError(f"File not found: {url}")
             if r.status in [401, 403]:
-                msg = await _build_auth_error_message(r.status, model_id)
+                msg = await build_auth_error_message(r.status, model_id)
                 raise HuggingFaceAuthenticationError(msg)
             assert r.status in [200, 206], (
                 f"Failed to download {path} from {url}: {r.status}"
@@ -1195,6 +1686,32 @@ async def _download_file(
     await aios.rename(partial_path, target_dir / path)
     on_progress(length, length, True)
     return target_dir / path
+
+
+def _require_expected_remote_identity(
+    path: str,
+    remote_size: int,
+    remote_etag: str,
+    *,
+    expected_size: int | None,
+    expected_object_id: str | None,
+) -> None:
+    """Fail closed when immutable Hub metadata differs from signed card truth."""
+
+    if expected_size is not None and remote_size != expected_size:
+        raise ValueError(
+            f"Signed artifact bundle size mismatch for {path}: "
+            f"expected {expected_size}, Hub reports {remote_size}"
+        )
+    if expected_object_id is None:
+        return
+    _, _, expected_digest = expected_object_id.partition(":")
+    observed_digest = trim_etag(remote_etag.removesuffix("-gzip"))
+    if observed_digest != expected_digest:
+        raise ValueError(
+            f"Signed artifact bundle object mismatch for {path}: "
+            f"expected {expected_object_id}, Hub reports {observed_digest}"
+        )
 
 
 def calculate_repo_progress(
@@ -1279,6 +1796,12 @@ async def get_weight_map(model_id: ModelId, revision: str = "main") -> dict[str,
 
 
 async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
+    bundle = shard.model_card.artifact_bundle
+    if bundle is not None:
+        # A v2 signed card is an exact immutable file transaction. Broad config
+        # or tokenizer globs would recreate the repository-wide ambiguity this
+        # contract removes.
+        return [item.path for item in bundle.files]
     # GGUF: the card pins the one quant to load (model_card.gguf_file), so fetch
     # only that shard group + config.json instead of every quant the repo hosts
     # (#332). Multi-quant repos otherwise download tens of GB of unused weights.
@@ -1286,9 +1809,20 @@ async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
     if gguf_file:
         from skulk.shared.models.model_cards import gguf_allow_patterns
 
-        patterns = [*gguf_allow_patterns(gguf_file), "config.json"]
+        projector_file = (
+            shard.model_card.vision.projector_file
+            if shard.model_card.vision is not None
+            else None
+        )
+        patterns = [
+            *gguf_allow_patterns(gguf_file, projector_file),
+            "config.json",
+        ]
         for draft_file in same_repo_served_draft_files(shard.model_card):
-            patterns.extend(gguf_allow_patterns(draft_file))
+            # A draft contributes only its own shard group. Passing the base
+            # card's projector pin prevents the legacy projector glob from
+            # widening an otherwise exact served-vision download.
+            patterns.extend(gguf_allow_patterns(draft_file, projector_file))
         return list(dict.fromkeys(patterns))
     # Non-GGUF (safetensors/MLX): 'Smart' downloads stay disabled because
     #  (i) we don't handle all kinds of files; (ii) no sticky sessions;
@@ -1326,33 +1860,41 @@ async def download_shard(
     allow_patterns: list[str] | None = None,
     on_connection_lost: Callable[[], None] = lambda: None,
     capacity_preflight: DownloadCapacityPreflight | None = None,
+    replacement_identity: str | None = None,
 ) -> tuple[Path, RepoDownloadProgress]:
     if not skip_download:
+        require_remote_code_approval(shard.model_card)
         logger.debug(f"Downloading {shard.model_card.model_id=}")
 
     revision = shard.model_card.source_revision or "main"
     canonical_target_dir = await ensure_models_dir() / str(
         shard.model_card.model_id
-    ).replace(
-        "/", "--"
-    )
+    ).replace("/", "--")
     if not skip_download:
-        await asyncio.to_thread(
-            _recover_interrupted_model_swap, canonical_target_dir
-        )
+        await asyncio.to_thread(_recover_interrupted_model_swap, canonical_target_dir)
     resuming_staged_revision = (
         canonical_target_dir.exists()
         and _source_revision_staging_matches(
             canonical_target_dir, shard.model_card.source_revision
         )
     )
-    replacing_revision = canonical_target_dir.exists() and not (
-        _source_revision_matches(canonical_target_dir, shard.model_card.source_revision)
-        or resuming_staged_revision
+    replacing_generation = canonical_target_dir.exists() and (
+        replacement_identity is not None
+        or not (
+            _source_revision_matches(
+                canonical_target_dir,
+                shard.model_card.source_revision,
+            )
+            or resuming_staged_revision
+        )
     )
     target_dir = (
-        _replacement_model_dir(canonical_target_dir, shard.model_card.source_revision)
-        if replacing_revision
+        _replacement_model_dir(
+            canonical_target_dir,
+            shard.model_card.source_revision,
+            replacement_identity,
+        )
+        if replacing_generation
         else canonical_target_dir
     )
     if not skip_download:
@@ -1376,7 +1918,7 @@ async def download_shard(
     all_start_time = time.time()
     try:
         file_list = await fetch_file_list_with_cache(
-            shard.model_card.model_id,
+            shard.model_card.artifact_repository,
             revision,
             recursive=True,
             skip_internet=skip_internet,
@@ -1406,20 +1948,33 @@ async def download_shard(
             key=lambda x: x.path,
         )
     )
+    bundle = shard.model_card.artifact_bundle
+    if bundle is not None:
+        listed_by_path = {item.path: item for item in filtered_file_list}
+        exact_files: list[FileListEntry] = []
+        for expected in bundle.files:
+            observed = listed_by_path.get(expected.path)
+            if observed is None:
+                raise FileNotFoundError(
+                    f"Signed artifact bundle file is absent: {expected.path}"
+                )
+            if observed.size != expected.size_bytes:
+                raise ValueError(
+                    f"Signed artifact bundle size mismatch for {expected.path}: "
+                    f"expected {expected.size_bytes}, listing reports {observed.size}"
+                )
+            exact_files.append(observed)
+        filtered_file_list = exact_files
 
     # For image models, skip root-level safetensors files since weights
     # are stored in component subdirectories (e.g., transformer/, vae/)
-    if is_image_model(shard):
+    if bundle is None and is_image_model(shard):
         filtered_file_list = [
             f
             for f in filtered_file_list
             if "/" in f.path or not f.path.endswith(".safetensors")
         ]
-    if (
-        not skip_download
-        and not skip_internet
-        and capacity_preflight is not None
-    ):
+    if not skip_download and not skip_internet and capacity_preflight is not None:
         await capacity_preflight(target_dir, filtered_file_list)
     file_progress: dict[str, RepoFileDownloadProgress] = {}
 
@@ -1532,16 +2087,33 @@ async def download_shard(
 
     async def download_with_semaphore(file: FileListEntry) -> None:
         async with semaphore:
+            def progress(
+                curr_bytes: int, total_bytes: int, is_renamed: bool
+            ) -> None:
+                schedule_progress(file, curr_bytes, total_bytes, is_renamed)
+
+            if bundle is None:
+                await download_file_with_retry(
+                    shard.model_card.artifact_repository,
+                    revision,
+                    file.path,
+                    target_dir,
+                    progress,
+                    on_connection_lost=on_connection_lost,
+                    skip_internet=skip_internet,
+                )
+                return
+            expected = next(item for item in bundle.files if item.path == file.path)
             await download_file_with_retry(
-                shard.model_card.model_id,
+                shard.model_card.artifact_repository,
                 revision,
                 file.path,
                 target_dir,
-                lambda curr_bytes, total_bytes, is_renamed: schedule_progress(
-                    file, curr_bytes, total_bytes, is_renamed
-                ),
+                progress,
                 on_connection_lost=on_connection_lost,
                 skip_internet=skip_internet,
+                expected_size=expected.size_bytes,
+                expected_object_id=expected.object_id,
             )
 
     download_cancelled = False
@@ -1580,7 +2152,7 @@ async def download_shard(
     )
     if (
         skip_download
-        and (replacing_revision or resuming_staged_revision)
+        and (replacing_generation or resuming_staged_revision)
         and final_repo_progress.status == "complete"
     ):
         # All replacement bytes may have landed before a restart, but they are
@@ -1595,7 +2167,7 @@ async def download_shard(
             target_dir,
             shard.model_card.source_revision,
         )
-        if replacing_revision:
+        if replacing_generation:
             await asyncio.to_thread(
                 _commit_replacement_model_dir, target_dir, canonical_target_dir
             )

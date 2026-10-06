@@ -68,20 +68,34 @@ Example ``skulk.yaml``::
 
 from __future__ import annotations
 
+import os
+import re
 import socket
+import tempfile
+import threading
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Final, Literal, final
+from typing import Final, Literal, cast, final
 
 import yaml
-from pydantic import Field
+from loguru import logger
+from pydantic import Field, field_validator, model_validator
 
+from skulk.shared.constants import SKULK_DATA_HOME
+from skulk.shared.models.memory_estimate import (
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
+    SERVED_CONTEXT_DEFAULT_TOKENS,
+)
 from skulk.utils.pydantic_ext import FrozenModel
+from skulk.utils.relay_origin import validate_relay_origin
 
 # Keep the shipped listener outside the IANA dynamic/private range and the
 # lower ephemeral ranges commonly used by Linux. A fresh macOS install failed
 # to restart when mDNSResponder legitimately acquired the old 58080 default as
 # an outbound source port before Skulk could bind it.
 DEFAULT_MODEL_STORE_PORT: Final = 12415
+_CONFIG_UPDATE_LOCK: Final = threading.RLock()
 
 
 def _normalize_hostname(hostname: str) -> str:
@@ -115,6 +129,70 @@ def hostname_aliases(hostname: str) -> set[str]:
         aliases.add(short_hostname)
         aliases.add(f"{short_hostname}.local")
     return aliases
+
+
+def normalized_hf_token(value: object) -> str | None:
+    """Return a usable Hugging Face token from a config value, else ``None``.
+
+    Whitespace is not a credential: downstream resolution strips tokens before
+    use, so a whitespace-only value would ride the wire as "present", clobber
+    a real local token on merge, and then resolve as blank. Every propagation
+    guard (send and receive) must therefore treat it as absent.
+    """
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+HF_TOKEN_USER_SET_MARKER = "_SKULK_HF_TOKEN_USER_SET"
+"""Internal marker: ``HF_TOKEN`` was supplied by the operator at launch.
+
+Same pattern as ``_SKULK_KV_BACKEND_USER_SET``: an operator-exported value
+outranks config sync forever, while a value merely promoted from config may be
+replaced when a newer fleet token arrives, so token rotation through Settings
+actually converges without restarts.
+"""
+
+
+def stamp_hf_token_provenance() -> None:
+    """Record at startup whether ``HF_TOKEN`` was operator-supplied.
+
+    An inherited marker is trusted rather than recomputed: an in-place restart
+    (``os.execv``) carries the previous process's environment, so a
+    config-promoted ``HF_TOKEN`` would otherwise look operator-supplied after
+    every ``/admin/restart`` and block rotation forever.
+    """
+    if HF_TOKEN_USER_SET_MARKER not in os.environ:
+        os.environ[HF_TOKEN_USER_SET_MARKER] = (
+            "1" if "HF_TOKEN" in os.environ else ""
+        )
+
+
+def promote_hf_token(value: object, *, source: str) -> bool:
+    """Promote a config-carried token into ``HF_TOKEN`` when allowed.
+
+    Normalizes first (whitespace never lands in the environment), refuses to
+    touch an operator-supplied launch value, and otherwise replaces the
+    current config-derived value so rotation takes effect without a restart.
+
+    Args:
+        value: The raw ``hf_token`` config value.
+        source: Human-readable origin for the log line.
+
+    Returns:
+        Whether the environment was updated.
+    """
+    token = normalized_hf_token(value)
+    if token is None:
+        return False
+    if os.environ.get(HF_TOKEN_USER_SET_MARKER) == "1":
+        return False
+    if os.environ.get("HF_TOKEN") == token:
+        return False
+    os.environ["HF_TOKEN"] = token
+    logger.info(f"HF token updated from {source}")
+    return True
 
 
 def node_matches_store_host(
@@ -196,6 +274,15 @@ class DownloadStoreConfig(FrozenModel):
 
 
 @final
+class ReconciliationStoreConfig(FrozenModel):
+    """Automatic node-cache inventory and canonical-store import policy."""
+
+    enabled: bool = True
+    inventory_only: bool = False
+    interval_seconds: int = Field(default=300, ge=30)
+
+
+@final
 class NodeOverrideConfig(FrozenModel):
     """Per-node configuration overrides.
 
@@ -258,7 +345,31 @@ class ModelStoreConfig(FrozenModel):
     store_path: str
     download: DownloadStoreConfig = DownloadStoreConfig()
     staging: StagingNodeConfig = StagingNodeConfig()
+    reconciliation: ReconciliationStoreConfig = ReconciliationStoreConfig()
     node_overrides: dict[str, NodeOverrideConfig] = {}
+
+    @model_validator(mode="after")
+    def _enabled_requires_identity(self) -> "ModelStoreConfig":  # pyright: ignore[reportUnusedFunction]
+        """Refuse an enabled store whose identity fields are blank.
+
+        ``store_host: ''`` matches no node, so no store server ever starts,
+        and every client interpolates the empty host into ``http://:12415``
+        URLs whose failure defeated the direct-HF fallback: nothing on the
+        cluster could place a model that was not already staged, while every
+        node looked healthy (#888). The shape reached real fleets through a
+        dashboard settings save that materialized empty defaults, so the
+        refusal fires at validation, which is both node startup and the
+        Settings API's pre-persist check. Disagreement is loud by doctrine;
+        running without a store is spelled ``enabled: false``.
+        """
+        if self.enabled and (not self.store_host.strip() or not self.store_path.strip()):
+            raise ValueError(
+                "model_store.enabled is true but "
+                + ("store_host" if not self.store_host.strip() else "store_path")
+                + " is empty. Name the store host and its store_path, or set "
+                "model_store.enabled: false to run without a store."
+            )
+        return self
 
 
 @final
@@ -279,11 +390,53 @@ class TailscaleConnectivityConfig(FrozenModel):
             ``SKULK_BOOTSTRAP_PEERS``.
     """
 
-    enabled: bool = Field(default=True, description="Master switch for Tailscale-aware behaviour.")
+    enabled: bool = Field(
+        default=True, description="Master switch for Tailscale-aware behaviour."
+    )
     bootstrap_peers: list[str] = Field(
         default_factory=list,
         description="libp2p multiaddrs with Tailscale IPs, e.g. /ip4/100.x.x.x/tcp/52416.",
     )
+
+
+@final
+class RelayConnectivityConfig(FrozenModel):
+    """Self-service relay registration for phone pairing.
+
+    The pairing gateway registers one on-demand route with this relay the first
+    time an operator pairs a phone, so the Skulk Operator app can reach the
+    cluster from any network. The relay is content-blind: app traffic stays in
+    TLS that terminates on the gateway.
+
+    Attributes:
+        enabled: Allow the gateway to register a route. ``False`` limits phone
+            pairing to direct LAN or Tailscale URLs and hand-provisioned relay
+            routes.
+        registration_url: Relay origin to register with, such as
+            ``https://relay.example``. ``None`` uses the build's default relay.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Allow the pairing gateway to register an on-demand relay route "
+            "when an operator first pairs a phone."
+        ),
+    )
+    registration_url: str | None = Field(
+        default=None,
+        description=(
+            "Relay origin (https://host[:port]) to register with; unset uses "
+            "the build's default relay."
+        ),
+    )
+
+    @field_validator("registration_url")
+    @classmethod
+    def validate_registration_url(cls, value: str | None) -> str | None:
+        """Accept only an HTTPS origin, or HTTP on loopback for development."""
+
+        return None if value is None else validate_relay_origin(value)
 
 
 @final
@@ -293,9 +446,12 @@ class ConnectivityConfig(FrozenModel):
     Attributes:
         tailscale: Tailscale overlay network settings.  ``None`` means the
             Tailscale integration is disabled.
+        relay: Self-service relay registration for phone pairing. ``None``
+            uses the defaults: registration allowed, build's default relay.
     """
 
     tailscale: TailscaleConnectivityConfig | None = None
+    relay: RelayConnectivityConfig | None = None
 
 
 @final
@@ -364,6 +520,11 @@ class SkulkConfig(FrozenModel):
             the node.
         telemetry: Field-telemetry consent and settings.  ``None`` means the
             operator has never been asked (nothing is queued or sent).
+        intelligent_fabric: Intelligent-fabric (resident steward) settings.
+            ``None`` means the mode is off.
+        model_trust: Deprecated persisted compatibility state from the retired
+            secondary repository-code approval ceremony. Current execution
+            authorization does not consult it.
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
@@ -375,7 +536,85 @@ class SkulkConfig(FrozenModel):
     connectivity: ConnectivityConfig | None = None
     experiments: ExperimentsConfig | None = None
     telemetry: "TelemetryConfig | None" = None
+    intelligent_fabric: "IntelligentFabricConfig | None" = None
+    model_trust: "ModelTrustConfig | None" = None
     hf_token: str | None = None
+
+
+@final
+class ModelTrustConfig(FrozenModel):
+    """Deprecated exact-card approval state retained for compatibility.
+
+    Signed publication, explicit model addition, or bundled distribution is the
+    current repository-code authorization boundary. Older nodes and clients may
+    still persist this structure during a rolling upgrade, so the strict config
+    reader accepts and preserves it without consulting it for execution.
+
+    Attributes:
+        approved_remote_code_identities: Historical signed ``card_...`` or
+            content-derived ``local_...`` identities retained during upgrade.
+    """
+
+    approved_remote_code_identities: list[str] = Field(default_factory=list)
+
+    @field_validator("approved_remote_code_identities")
+    @classmethod
+    def validate_approved_remote_code_identities(cls, values: list[str]) -> list[str]:
+        """Validate, deduplicate, and deterministically order trust identities."""
+        identity_pattern = re.compile(r"^(?:card|local)_[a-z2-7]{52}$")
+        invalid = [value for value in values if identity_pattern.fullmatch(value) is None]
+        if invalid:
+            raise ValueError("model trust identities must be immutable card_ or local_ ids")
+        return sorted(set(values))
+
+
+@final
+class IntelligentFabricConfig(FrozenModel):
+    """Intelligent-fabric mode: the resident steward (cluster-synced).
+
+    When ``enabled`` is ``True``, the master maintains exactly one hidden
+    steward placement as a planner invariant: it places the steward model on
+    the best available nodes, re-places it after node loss or master
+    failover, and protects it from ordinary deletion. The steward answers
+    operator questions about the cluster through the steward chat surface.
+
+    Attributes:
+        enabled: Master switch for intelligent-fabric mode. Off by default
+            while the feature hardens; flipping it on makes the master
+            establish the steward placement within one planning cycle.
+        steward_models: Ordered model-card preference list for the steward
+            brain. The master places the first card the cluster can serve,
+            so the list descends from the best brain to the universal
+            floor and a fleet simply falls through to the largest model it
+            can host. Qwen3.6-35B-A3B (GGUF first, then MLX) is the benched
+            v1 brain; Qwen3.5-4B in GGUF and MLX form is the small-fleet
+            tier; the Qwen3.5-0.8B GGUF is the floor that lets a CPU-only
+            fleet place a steward at all. Operators may override with any
+            bundled or custom text model that supports tool calling.
+    """
+
+    enabled: bool = False
+    # list (not tuple): strict validation rejects YAML sequences for tuple
+    # fields, which would make the documented override unloadable; matches
+    # the convention of other config lists (e.g. bootstrap_peers).
+    #
+    # The 35B brain leads with its GGUF card because that card is text-only
+    # and therefore eligible for the served lanes as well as the in-process
+    # ones, so it is placeable on strictly more node classes than its MLX
+    # sibling; an Apple-only fleet has no GGUF engine at all and falls
+    # through to the MLX entry on the next line. The 4B and 0.8B tiers keep
+    # the order they already shipped with, so a fleet that cannot host the
+    # 35B brain behaves exactly as it did before.
+    steward_models: list[str] = Field(
+        default_factory=lambda: [
+            "unsloth/Qwen3.6-35B-A3B-GGUF",
+            "mlx-community/Qwen3.6-35B-A3B-4bit",
+            "Qwen/Qwen3.6-35B-A3B-FP8",
+            "mlx-community/Qwen3.5-4B-MLX-4bit",
+            "unsloth/Qwen3.5-4B-GGUF",
+            "unsloth/Qwen3.5-0.8B-GGUF",
+        ]
+    )
 
 
 @final
@@ -466,16 +705,274 @@ class InferenceConfig(FrozenModel):
 
     Attributes:
         kv_cache_backend: KV cache backend to use.
+        served_context_tokens: Fleet default context window for engines that
+            reserve their whole KV cache at load (llama-server, in-process
+            llama.cpp, vLLM) when a placement names none.
     """
 
     kv_cache_backend: Literal[
         "default", "mlx_quantized", "turboquant", "turboquant_adaptive", "optiq"
     ] = "default"
+    served_context_tokens: int = Field(
+        default=SERVED_CONTEXT_DEFAULT_TOKENS,
+        ge=MIN_REQUESTED_CONTEXT_TOKENS,
+        le=MAX_REQUESTED_CONTEXT_TOKENS,
+        description=(
+            "Context window, in tokens, that llama-server, in-process llama.cpp "
+            "and vLLM placements get when the placement names none. These "
+            "engines reserve the whole window's memory when the model loads, so "
+            "the default keeps them from committing memory for the card's full "
+            "context. A placement may request more, up to what its nodes hold; "
+            "MLX grows its cache per request and is not affected."
+        ),
+    )
+
+
+def served_context_default(config: "SkulkConfig | None") -> int:
+    """Return the fleet's served context default from a loaded config.
+
+    Args:
+        config: The loaded ``skulk.yaml``, or ``None`` when none exists.
+
+    Returns:
+        ``inference.served_context_tokens``, or the built-in default when the
+        section is absent.
+    """
+    if config is None or config.inference is None:
+        return SERVED_CONTEXT_DEFAULT_TOKENS
+    return config.inference.served_context_tokens
 
 
 def resolve_config_path() -> Path:
     """Return the cluster config path (``skulk.yaml`` in the working directory)."""
     return Path("skulk.yaml")
+
+
+BOOTSTRAP_STORE_DIRECTORY_NAME: Final = "model-store"
+"""Folder under Skulk's data directory that holds a fresh node's model store."""
+
+BOOTSTRAP_STORE_HTTP_HOST: Final = "127.0.0.1"
+"""Loopback keeps a single node's own store client working even when its short
+hostname does not resolve locally. The store host replaces a loopback literal
+with its best routable IPv4 before broadcasting, so the value stays correct if
+the node later joins a cluster."""
+
+_BOOTSTRAP_CONFIG_HEADER: Final = """\
+# Written by Skulk at first start: a single-node model store so downloads work
+# immediately. Safe to edit or delete. If other nodes join, Skulk converges
+# them on the elected master's store. Set an explicit shared store_host on
+# every node to override that choice (see the Model Store page in the docs).
+"""
+
+
+def bootstrap_model_store_config() -> ModelStoreConfig:
+    """Return the single-node model store a fresh node starts with.
+
+    This machine hosts the store in Skulk's data directory, the same default
+    ``install.sh`` writes for source installs. When nodes form a cluster,
+    followers adopt the elected master's store through config sync, so the
+    default never splits a fleet across stores.
+
+    Returns:
+        The store configuration naming this host and its default store path.
+    """
+    return ModelStoreConfig(
+        store_host=socket.gethostname().split(".", 1)[0],
+        store_http_host=BOOTSTRAP_STORE_HTTP_HOST,
+        store_port=DEFAULT_MODEL_STORE_PORT,
+        store_path=str(SKULK_DATA_HOME / BOOTSTRAP_STORE_DIRECTORY_NAME),
+    )
+
+
+def write_bootstrap_config_if_absent(
+    path: Path | None = None,
+    *,
+    offline: bool = False,
+) -> ModelStoreConfig | None:
+    """Give a node that starts without ``skulk.yaml`` the single-node store.
+
+    A node without a config has no model store, so the store-first download
+    flow answers ``Store not configured`` (#629). The source installer writes
+    this default, but the packaged apps never run it, so the runtime writes
+    the same file when none exists. An existing config is never touched, and
+    neither is a node that still has a legacy ``exo.yaml`` awaiting its rename
+    (loading refuses that case loudly). An offline node gets no store: the
+    store's own downloader would fetch from Hugging Face, and offline means no
+    model downloads at all.
+
+    Args:
+        path: Config path override; defaults to :func:`resolve_config_path`.
+        offline: Whether the node runs with ``--offline`` or ``SKULK_OFFLINE``.
+
+    Returns:
+        The store written, or ``None`` when a config file already exists or
+        the node is offline.
+    """
+    if offline:
+        return None
+    if path is None:
+        path = resolve_config_path()
+    if path.exists() or path.with_name("exo.yaml").exists():
+        return None
+    store = bootstrap_model_store_config()
+    Path(store.store_path).mkdir(parents=True, exist_ok=True)
+    body = yaml.safe_dump(
+        {
+            "model_store": {
+                "store_host": store.store_host,
+                "store_port": store.store_port,
+                "store_http_host": store.store_http_host,
+                "store_path": store.store_path,
+            }
+        },
+        sort_keys=False,
+    )
+    write_skulk_config_atomic(path, _BOOTSTRAP_CONFIG_HEADER + body)
+    return store
+
+
+def fill_model_store_defaults(raw_store: Mapping[str, object]) -> dict[str, object]:
+    """Fill the blank identity fields of an enabled store with this node's.
+
+    Turning the store on from Settings used to leave ``store_host`` and
+    ``store_path`` empty and then refuse the save (#888), so a new user could
+    not enable it without knowing their hostname and choosing a path. An
+    enabled store now takes the same defaults a fresh node starts with: this
+    node as the store host and the default store path. Explicit values are
+    kept, and a disabled store is returned unchanged.
+
+    Args:
+        raw_store: The ``model_store`` mapping from a config update.
+
+    Returns:
+        A copy with blank identity fields replaced by the defaults.
+    """
+    store = dict(raw_store)
+    if store.get("enabled", True) is False:
+        return store
+    defaults = bootstrap_model_store_config()
+    host = store.get("store_host")
+    if not isinstance(host, str) or not host.strip():
+        store["store_host"] = defaults.store_host
+        http_host = store.get("store_http_host")
+        if not isinstance(http_host, str) or not http_host.strip():
+            store["store_http_host"] = defaults.store_http_host
+    store_path = store.get("store_path")
+    if not isinstance(store_path, str) or not store_path.strip():
+        store["store_path"] = defaults.store_path
+    return store
+
+
+def write_skulk_config_atomic(path: Path, config_yaml: str) -> None:
+    """Atomically replace a cluster config with owner-only permissions.
+
+    Args:
+        path: Destination ``skulk.yaml`` path.
+        config_yaml: Complete serialized configuration.
+
+    Side effects:
+        Creates the parent directory, fsyncs a private temporary file, and
+        atomically replaces the destination. The resulting file is always
+        mode ``0o600`` because it may contain local credentials.
+    """
+    with _CONFIG_UPDATE_LOCK:
+        _write_skulk_config_atomic_unlocked(path, config_yaml)
+
+
+def update_skulk_config_atomic(
+    path: Path,
+    update: Callable[[dict[str, object]], dict[str, object]],
+) -> dict[str, object]:
+    """Read, transform, and atomically replace cluster config under one lock.
+
+    Args:
+        path: Destination ``skulk.yaml`` path.
+        update: Pure transformation receiving the current YAML object.
+
+    Returns:
+        The complete object written to disk.
+
+    Side effects:
+        Serializes in-process config read-modify-write operations and writes an
+        owner-only atomic replacement.
+    """
+    with _CONFIG_UPDATE_LOCK:
+        current: dict[str, object] = {}
+        if path.exists():
+            decoded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if decoded is not None:
+                if not isinstance(decoded, dict):
+                    raise ValueError("Skulk config must be a YAML object")
+                decoded_mapping = cast("Mapping[object, object]", decoded)
+                current = {
+                    str(key): value
+                    for key, value in decoded_mapping.items()
+                }
+        updated = update(current)
+        config_yaml = yaml.safe_dump(
+            updated,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+        _write_skulk_config_atomic_unlocked(path, config_yaml)
+        return updated
+
+
+def persist_model_trust_config(
+    path: Path,
+    approved_identities: Iterable[str],
+) -> SkulkConfig:
+    """Persist legacy approval state while preserving every other setting.
+
+    Args:
+        path: Destination ``skulk.yaml`` path.
+        approved_identities: Complete legacy set from replicated State.
+
+    Returns:
+        The validated complete configuration written to disk.
+
+    Side effects:
+        Atomically updates only ``model_trust`` under the process-wide config
+        transaction lock.
+    """
+    model_trust = ModelTrustConfig(
+        approved_remote_code_identities=sorted(set(approved_identities))
+    )
+
+    def apply_trust(current: dict[str, object]) -> dict[str, object]:
+        updated = dict(current)
+        updated["model_trust"] = model_trust.model_dump(mode="python")
+        SkulkConfig.model_validate(updated)
+        return updated
+
+    written = update_skulk_config_atomic(path, apply_trust)
+    return SkulkConfig.model_validate(written)
+
+
+def _write_skulk_config_atomic_unlocked(path: Path, config_yaml: str) -> None:
+    """Replace one config while the caller holds ``_CONFIG_UPDATE_LOCK``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+            file_descriptor_chmod = getattr(os, "fchmod", None)
+            if file_descriptor_chmod is not None:
+                # Windows has no descriptor chmod. Its mkstemp permissions are
+                # already owner-scoped by the process ACL; Unix tightens the
+                # temporary before any secret-bearing bytes are written.
+                file_descriptor_chmod(temporary.fileno(), 0o600)
+            temporary.write(config_yaml)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def load_skulk_config(
@@ -552,10 +1049,7 @@ def resolve_node_staging(
     for key, override in config.node_overrides.items():
         key_matches_node = key == node_id
         key_matches_hostname = _normalize_hostname(key) in local_hostname_aliases
-        if (
-            override.staging is not None
-            and (key_matches_node or key_matches_hostname)
-        ):
+        if override.staging is not None and (key_matches_node or key_matches_hostname):
             # Merge: start from the base config and overlay only the fields
             # that the override explicitly sets, so a partial override like
             # ``cleanup_on_deactivate: false`` inherits node_cache_path etc.

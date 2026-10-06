@@ -1,0 +1,39 @@
+# Qwen3.5-4B (dense) GGUF Q4_K_M, quantized from the instruct model. The
+# intelligent-fabric steward's full-brain artifact on GPU/Linux nodes, and a
+# general small chat/agent model for GGUF lanes. Architecture matches the
+# MLX card (arch qwen3_5: 32 layers, hidden 2560, 4 KV heads, 262144 ctx).
+# Text-only through Skulk: the base model is natively multimodal, but the
+# served llama_server runner does not load the mmproj projector, and this
+# card deliberately omits vision so placement can route it to served lanes
+# (vision cards are gated to in-process engines by platform truth).
+# supports_tensor = false: single-node on either GGUF engine.
+model_id = "unsloth/Qwen3.5-4B-GGUF"
+n_layers = 32
+hidden_size = 2560
+num_key_value_heads = 4
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "Q4_K_M"
+base_model = "Qwen3.5 4B"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+gguf_file = "Qwen3.5-4B-Q4_K_M.gguf"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[placement]
+compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu", "llama_cpp-vulkan", "llama_cpp-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_cpp-vulkan", "llama_server-cpu", "llama_cpp-cpu"]
+
+[storage_size]
+in_bytes = 2740937888

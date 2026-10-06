@@ -2,6 +2,8 @@ import base64
 import hashlib
 import io
 import ipaddress
+import mimetypes
+import shutil
 import sys
 import time
 from collections import defaultdict, deque
@@ -11,15 +13,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
-from anyio import BrokenResourceError, ClosedResourceError, fail_after, to_thread
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    WouldBlock,
+    fail_after,
+    to_thread,
+)
 from loguru import logger
 from PIL import Image
 
 from skulk.download.download_utils import (
+    build_model_path,
     companion_download_specs,
-    resolve_model_in_path,
+    installed_artifact_in_path,
 )
 from skulk.routing.connection_message import ConnectionMessage
+from skulk.routing.output_media import OutputMediaPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.routing.router import TelemetrySender
 from skulk.routing.speech_media import SpeechMediaPacket
@@ -27,26 +37,45 @@ from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.apply import apply
-from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
+from skulk.shared.constants import (
+    SKULK_IMAGE_TRANSPORT_DEBUG,
+    SKULK_MAX_CHUNK_SIZE,
+    SKULK_MUSIC_OUTPUT_DIR,
+    SKULK_VIDEO_INPUT_DIR,
+    SKULK_VIDEO_OUTPUT_DIR,
+)
 from skulk.shared.log_summaries import summarize_task_for_log
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     KV_CONTEXT_BUDGET_TOKENS,
+    LOAD_FIT_TOLERANCE,
     UMA_GPU_OS_HEADROOM,
+    backend_offloads_to_vram,
     estimate_shard_footprint,
+    gb10_unified_memory_pool,
     gpu_working_set_ceiling,
+    is_gb10_accelerator,
     shard_preallocates_kv_upfront,
+    vulkan_fills_carve_first,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     add_to_card_cache,
     delete_custom_card,
+    get_current_registry_card,
+    record_custom_card_mutation_applied,
+    register_installed_card_record,
+)
+from skulk.shared.models.remote_code_approval import (
+    MODEL_TRUST_FAILURE_MARKER,
+    require_remote_code_approval,
 )
 from skulk.shared.types.audio import RealtimeAudioInputFrame
-from skulk.shared.types.chunks import DataChunk, InputImageChunk
+from skulk.shared.types.capability_nodes import CapabilityNodeSummary
+from skulk.shared.types.chunks import DataChunk, InputImageChunk, MusicChunk, VideoChunk
 from skulk.shared.types.commands import (
-    DeleteInstance,
+    FailInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
     RefuseInstancePlacement,
@@ -60,13 +89,17 @@ from skulk.shared.types.diagnostics import (
     VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
+    AudioCppPreparationCompleted,
+    AudioCppPreparationRequested,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     Event,
     IndexedEvent,
+    ModelTrustApprovalChanged,
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
+    RunnerStatusUpdated,
     StagedModelEvicted,
     StateSnapshotHydrated,
     TaskCreated,
@@ -78,7 +111,7 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import MemoryUsage, NodeDataTransport
+from skulk.shared.types.profiling import MemoryUsage, NodeDataTransport, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     AudioTranscription,
@@ -94,6 +127,7 @@ from skulk.shared.types.tasks import (
     TaskId,
     TaskStatus,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.telemetry import (
     TELEMETRY_PLANE_INFO,
@@ -102,6 +136,12 @@ from skulk.shared.types.telemetry import (
     record_membership_from_event,
 )
 from skulk.shared.types.topology import Connection, SocketConnection
+from skulk.shared.types.video import (
+    VIDEO_OUTPUT_FILENAME,
+    VIDEO_THUMBNAIL_FILENAME,
+    VideoOutputManifest,
+    VideoReferenceSpec,
+)
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadCompleted,
@@ -109,13 +149,30 @@ from skulk.shared.types.worker.downloads import (
     DownloadPending,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import InstanceId, LlamaRpcInstance
+from skulk.shared.types.worker.instances import (
+    InstanceFailureCode,
+    InstanceId,
+    LlamaRpcInstance,
+)
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
-from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
-from skulk.store.config import StagingNodeConfig
+from skulk.shared.types.worker.shards import (
+    RpcDonorShardMetadata,
+    ShardMetadata,
+    TensorShardMetadata,
+)
+from skulk.store.config import (
+    StagingNodeConfig,
+    persist_model_trust_config,
+    resolve_config_path,
+)
+from skulk.store.installed_cards import (
+    refresh_registry_installed_card_if_same_artifact,
+    require_registry_installed_artifact,
+)
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.staging_eviction import (
     MINIMUM_STAGING_FREE_DISK_BYTES,
+    STARTUP_RECENT_USE_GRACE_SECONDS,
     StagingCapacityError,
     StagingEvictionReport,
     enforce_staging_budget,
@@ -133,6 +190,7 @@ from skulk.utils.keyed_backoff import KeyedBackoff
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.plan import plan
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
+from skulk.worker.runner.comfy.orphan_sweep import sweep_orphaned_comfy_servers
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
 
@@ -143,6 +201,10 @@ masterless interval cannot freeze the worker forever - past it, planning
 resumes and the download coordinator's missing-directory self-heal covers
 the residual risk."""
 
+_IN_USE_MARKER_REFRESH_SECONDS = 60.0
+"""How often the recency markers of in-use staged models are refreshed, so
+they stay well inside ``STARTUP_RECENT_USE_GRACE_SECONDS`` while serving."""
+
 
 _RUNNER_CRASH_THRESHOLD = 3
 """Runner failures (crashes + local fit-refusals) for one instance within
@@ -152,9 +214,10 @@ _RUNNER_CRASH_WINDOW_SECONDS = 60.0
 """Rolling window for ``_RUNNER_CRASH_THRESHOLD`` (see CrashWindow)."""
 
 
-_LOAD_FIT_TOLERANCE = 0.10
+_LOAD_FIT_TOLERANCE = LOAD_FIT_TOLERANCE
 """Fraction by which a shard's estimated footprint may exceed live usable memory
-before the pre-load guard refuses (#383).
+before the pre-load guard refuses (#383). Shared with the estimator, which
+leaves the same headroom when it sizes a live-RAM served window.
 
 The footprint from ``estimate_shard_footprint`` already bakes in the engine
 overhead factor (1.30 for MLX), a full ``KV_CONTEXT_BUDGET_TOKENS`` KV
@@ -180,7 +243,16 @@ _SPEECH_MEDIA_PENDING_TTL_SECONDS = 30.0
 _VISION_MEDIA_PENDING_STREAMS = 64
 _VISION_MEDIA_PENDING_FRAMES = 64
 _VISION_MEDIA_PENDING_BYTES = 32 * 1024 * 1024
-_VISION_MEDIA_PENDING_TOTAL_BYTES = 512 * 1024 * 1024
+# Video reference media (clips, audio, keyframes) is far larger than an image
+# edit input. It shares the ingress machinery with its own per-stream bounds
+# and a larger shared total so one render's attachments cannot starve images.
+_REFERENCE_MEDIA_PENDING_FRAMES = 512
+_REFERENCE_MEDIA_PENDING_BYTES = 256 * 1024 * 1024
+_VISION_MEDIA_PENDING_TOTAL_BYTES = 1024 * 1024 * 1024
+# Finished video containers stream back to the owning API in bounded raw
+# chunks; the API acknowledges verification before the worker deletes its copy.
+_OUTPUT_MEDIA_ACK_TIMEOUT_SECONDS = 5 * 60.0
+_OUTPUT_MEDIA_SEND_TIMEOUT_SECONDS = 30.0
 _VISION_MEDIA_PENDING_TTL_SECONDS = 5 * 60.0
 _VISION_MEDIA_ACK_SEND_TIMEOUT_SECONDS = 2.0
 
@@ -193,6 +265,77 @@ pre-init coordination forever: ``_init_distributed_backend`` only plans
 ``ConnectToGroup`` once every rank has reported, and the crash breaker never
 trips because the process is alive. Generous enough to cover slow Python imports
 and weight mmaps, far under an indefinite hang."""
+
+_INSTANCE_FAILURE_MESSAGE_LIMIT = 2048
+
+
+def already_present_download_events(
+    *,
+    node_id: NodeId,
+    shard: ShardMetadata,
+    model_directory: str,
+) -> tuple[NodeDownloadProgress, NodeDownloadProgress]:
+    """Build the events announcing a model that is already staged on disk.
+
+    This path never reaches the download coordinator, so nothing applies the
+    attempt stamping that `DownloadCoordinator._prepare_status` gives
+    coordinator-routed statuses. An unattributed terminal outcome is treated as
+    an unorderable legacy replay by `TelemetryView.record_download_event` and
+    ignored whenever a live attempt exists, which leaves the live `Pending`
+    overlaying the durable completion forever: the planner never sees the model
+    as downloaded and re-issues `DownloadModel` every tick while the instance
+    sits idle.
+
+    So this opens an attempt and closes it under one identity, which is exactly
+    the documented contract of the two events: a `Pending` establishes the
+    attempt subsequent telemetry belongs to, and a terminal outcome carrying
+    that attempt retires it.
+
+    Returns:
+        The pending and completed events, in the order they must be sent.
+    """
+
+    attempt_id = DownloadAttemptId()
+    return (
+        NodeDownloadProgress(
+            download_progress=DownloadPending(
+                node_id=node_id,
+                shard_metadata=shard,
+                model_directory=model_directory,
+                attempt_id=attempt_id,
+            )
+        ),
+        NodeDownloadProgress(
+            download_progress=DownloadCompleted(
+                node_id=node_id,
+                shard_metadata=shard,
+                model_directory=model_directory,
+                total=shard.model_card.storage_size,
+                read_only=True,
+                attempt_id=attempt_id,
+            )
+        ),
+    )
+
+
+def _instance_failure_message(reason: str) -> str:
+    """Return bounded classified failure text suitable for replicated state.
+
+    ``RunnerFailed.error_message`` is deliberately excluded: it originates in
+    raw exception text and may contain local paths, URLs, or payload-derived
+    details. Those diagnostics remain transient log evidence, while durable
+    operator truth retains only the worker-authored safe reason.
+    """
+    normalized = " ".join(reason.split())
+    return normalized[:_INSTANCE_FAILURE_MESSAGE_LIMIT]
+
+
+def _model_trust_instance_failure_message(model_id: ModelId) -> str:
+    """Return safe operator guidance for a terminal model-trust rejection."""
+    return _instance_failure_message(
+        f"runner for {model_id} was refused by immutable model trust policy; "
+        "not retrying until the card approval or installed artifact identity changes."
+    )
 
 
 def _wedged_live_instances(
@@ -215,6 +358,127 @@ def _wedged_live_instances(
         if supervisor.bound_instance.instance.instance_id in live_instances
         and _runner_failed_wedged(supervisor.status)
     ]
+
+
+def model_trust_failed_live_instances(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+) -> list[tuple[InstanceId, ModelId, str]]:
+    """Return live instances with a deterministic model-trust denial.
+
+    Unlike a transient engine crash, a missing approval or mismatched installed
+    identity cannot heal by spawning the same runner again. The caller deletes
+    these instances immediately, preserving the actionable failure message and
+    preventing an endless create/fail loop.
+    """
+    failed: list[tuple[InstanceId, ModelId, str]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        status = supervisor.status
+        if (
+            instance_id in live_instances
+            and isinstance(status, RunnerFailed)
+            and status.error_message is not None
+            and MODEL_TRUST_FAILURE_MARKER in status.error_message
+        ):
+            failed.append(
+                (
+                    instance_id,
+                    supervisor.shard_metadata.model_card.model_id,
+                    status.error_message,
+                )
+            )
+    return failed
+
+
+async def _require_installed_artifact_for_load(
+    model_directory: Path, model_card: ModelCard
+) -> None:
+    """Verify the copy the runner will open against the exact signed card.
+
+    A node can hold more than one copy of one artifact revision, such as a
+    store host's canonical copy beside an older staged copy. The download path
+    adopts a replacement signed card for unchanged bytes in the copy it finds,
+    but the runner opens the copy ``build_model_path`` resolves, which may still
+    carry the previous card's sidecar. When the requested card is the current
+    signed catalog card, adopt it for that copy under the same proof the
+    download path uses (same repository, revision and selected files, covered
+    by its verified manifest), so the verified copy is the loaded copy.
+    Adoption only ever moves a copy to current signed truth: a load stamped
+    with a superseded card, an adoption the proof cannot cover, and a sidecar
+    that cannot be persisted all keep the original terminal refusal.
+
+    Args:
+        model_directory: Artifact directory the runner resolves for this card.
+        model_card: Exact signed shard card about to load.
+
+    Raises:
+        FileNotFoundError: If the directory holds no installed record.
+        PermissionError: If the installed artifact does not match the card.
+
+    Side effects:
+        May atomically replace the directory's installed-card sidecar and
+        register the refreshed record. Verification and adoption run in a
+        worker thread because a detached record can require a full hash pass.
+    """
+    try:
+        await to_thread.run_sync(
+            require_registry_installed_artifact, model_directory, model_card
+        )
+    except PermissionError as refusal:
+        current = get_current_registry_card(model_card.model_id)
+        if current is None or current.registry_card_id != model_card.registry_card_id:
+            raise
+        try:
+            refreshed = await to_thread.run_sync(
+                refresh_registry_installed_card_if_same_artifact,
+                model_directory,
+                model_card,
+            )
+        except OSError:
+            # The copy still names the previous card; refusing is the honest
+            # outcome, and an unhandled OSError would end the task loop.
+            refreshed = None
+        if refreshed is None:
+            raise refusal
+        register_installed_card_record(refreshed)
+        logger.info(
+            "Worker: adopted the current signed card for unchanged local bytes "
+            f"of {model_card.model_id} before load"
+        )
+        await to_thread.run_sync(
+            require_registry_installed_artifact, model_directory, model_card
+        )
+
+
+def _model_load_trust_failure_message(error: Exception) -> str:
+    """Return a terminal runner failure for a pre-load trust rejection."""
+    return (
+        f"{MODEL_TRUST_FAILURE_MARKER}: Model load refused before repository "
+        f"code execution: {error}. Re-download the exact signed artifact so "
+        "its installed-card sidecar and pinned revision can be verified."
+    )
+
+
+def _require_worker_model_execution_identity(card: ModelCard, state: State) -> None:
+    """Validate immutable repository-code identity before runner creation.
+
+    Publication or explicit model addition already authorizes execution. The
+    retained State argument preserves the rolling-upgrade call contract; its
+    legacy approval values do not participate in the decision.
+
+    Args:
+        card: Exact shard card the worker is about to create or load.
+        state: Current replicated cluster State, retained for compatibility.
+
+    Raises:
+        PermissionError: If signed executable repository content is mutable.
+    """
+
+    require_remote_code_approval(
+        card,
+        frozenset(state.model_trust_approved_remote_code_identities),
+    )
 
 
 def runners_never_reported(
@@ -240,9 +504,7 @@ def runners_never_reported(
         if supervisor.has_reported_status:
             continue
         if supervisor.seconds_since_created(now_monotonic) >= deadline_seconds:
-            stalled.append(
-                (instance_id, supervisor.shard_metadata.model_card.model_id)
-            )
+            stalled.append((instance_id, supervisor.shard_metadata.model_card.model_id))
     return stalled
 
 
@@ -293,8 +555,9 @@ def _local_usable_vram() -> Memory | None:
       GPU's GTT-mapped system RAM counts toward the pool. The live GPU-wireable
       snapshot matches the ceiling the master derives from gossiped telemetry.
 
-    NVIDIA nodes (no amdgpu sysfs, NVML present) take the same discrete-GPU
-    path from NVML readings; NVIDIA exposes no UMA/GTT signature here.
+    NVIDIA GB10 nodes use the CUDA-memory fallback when NVML lacks memory and
+    bound their shared pool by current host RAM. Other NVIDIA GPUs take the
+    discrete-GPU path from NVML readings.
     Returns ``None`` on Apple unified-memory nodes (no amdgpu device), which keep
     the system-RAM path. The master is the backend authority that decides a shard
     belongs on this GPU node in the first place.
@@ -322,33 +585,24 @@ def _local_usable_vram() -> Memory | None:
         # NVIDIA fallthrough (rented CUDA nodes): same discrete-VRAM sizing so
         # the worker's last-minute guard agrees with the master's admission.
         # NVIDIA reports no UMA/GTT signature, so the discrete path applies.
-        # Gated on the node actually ADVERTISING a CUDA llama.cpp backend:
-        # with pynvml present but only llama_cpp-cpu advertised (env unset,
-        # or the GPU wheel clobbered so the probe dropped the tag), the
-        # master admits against system RAM, and sizing the local guard
-        # against VRAM would falsely refuse CPU placements that fit.
+        # Require an advertised GPU offload lane: pynvml can be present even
+        # when every ready engine is CPU-only, in which case the master admits
+        # against system RAM.
         from skulk.shared.backends import probe_node_backends
 
-        # Gated on the node advertising a CUDA GPU-offload backend. All three CUDA
-        # served/in-process engines allocate weights + KV from VRAM (they join the
-        # GPU-offload prefixes in placement, so the master admits them against VRAM):
-        # the in-process llama.cpp runner (`llama_cpp-cuda`), the served llama-server
-        # engine (`llama_server-cuda`, launched `-ngl 99`), and vLLM (`vllm-cuda`).
-        # A node advertising any of them -- even a SERVED-only CUDA node that lacks
-        # the in-process llama_cpp binding -- must size the local guard against VRAM,
-        # else it would refuse the very placement the master admitted against VRAM
-        # (made worse now that the guard sizes to the full stamped context). A node
-        # advertising only `*-cpu` was admitted against system RAM and keeps it.
+        # Use the same offload classifier as placement so a standalone
+        # audio.cpp CUDA or Vulkan lane can use its NVIDIA VRAM budget.
         backends = probe_node_backends()
-        if not any(
-            tag in backends
-            for tag in ("llama_cpp-cuda", "llama_server-cuda", "vllm-cuda")
-        ):
+        if not any(backend_offloads_to_vram(tag) for tag in backends):
             return None
         nvml = load_nvml()
         if nvml is None or not has_nvidia_gpu(nvml):
             return None
         nvidia = read_nvidia_accelerator_metrics(nvml)
+        if is_gb10_accelerator(nvidia):
+            return gb10_unified_memory_pool(
+                nvidia, MemoryUsage.from_local_gpu_wireable()
+            )
         if not nvidia.vram_total_bytes or nvidia.vram_total_bytes <= 0:
             return None
         nvidia_available = max(
@@ -379,18 +633,103 @@ def _local_usable_vram() -> Memory | None:
         # so count current free system RAM (minus OS headroom, capped by GTT).
         # The VRAM portion keeps its working-set headroom.
         sys_for_gpu = min(
-            max(
-                0, local_memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes
-            ),
+            max(0, local_memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
             gtt_total,
         )
         return Memory.from_bytes(vram_usable + sys_for_gpu)
     return Memory.from_bytes(vram_usable)
 
 
+def _local_unified_memory_gpu() -> bool:
+    """Whether this node's GPU pool shares physical memory with host RAM.
+
+    AMD APUs qualify when their GTT aperture spans host RAM. NVIDIA GB10
+    qualifies when CUDA and host memory measurements confirm one shared pool.
+    A fixed-window engine's KV allocation takes host pages on either device,
+    so its stamped window must also fit current host RAM.
+    """
+    if sys.platform != "linux":
+        return False
+    from skulk.utils.info_gatherer.linux_gpu import (
+        find_amd_gpu_device,
+        read_accelerator_metrics,
+    )
+    from skulk.utils.info_gatherer.nvidia_gpu import prefer_nvidia_telemetry
+
+    device = None if prefer_nvidia_telemetry() else find_amd_gpu_device()
+    if device is None:
+        from skulk.utils.info_gatherer.nvidia_gpu import (
+            has_nvidia_gpu,
+            load_nvml,
+        )
+        from skulk.utils.info_gatherer.nvidia_gpu import (
+            read_accelerator_metrics as read_nvidia_accelerator_metrics,
+        )
+
+        nvml = load_nvml()
+        if nvml is None or not has_nvidia_gpu(nvml):
+            return False
+        accelerator = read_nvidia_accelerator_metrics(nvml)
+        return (
+            gb10_unified_memory_pool(
+                accelerator, MemoryUsage.from_local_gpu_wireable()
+            )
+            is not None
+        )
+    accelerator = read_accelerator_metrics(device)
+    total = accelerator.vram_total_bytes
+    gtt_total = accelerator.gtt_total_bytes
+    if not total or total <= 0 or gtt_total is None or gtt_total <= total:
+        return False
+    return gtt_total >= MemoryUsage.from_local_gpu_wireable().ram_total.in_bytes
+
+
+def _local_carve_first_gpu() -> bool:
+    """Whether this node is a unified-memory AMD APU that reports its carve usage.
+
+    On such a node a Vulkan engine fills the BIOS VRAM carve before it takes
+    host pages, so the combined pool (free carve plus host share) bounds its
+    load. GB10 has no carve and is excluded, as is an AMD node whose carve
+    usage is unreported, since the pool would then read the carve as empty.
+    """
+    if sys.platform != "linux":
+        return False
+    from skulk.utils.info_gatherer.linux_gpu import (
+        find_amd_gpu_device,
+        read_accelerator_metrics,
+    )
+    from skulk.utils.info_gatherer.nvidia_gpu import prefer_nvidia_telemetry
+
+    if prefer_nvidia_telemetry():
+        return False
+    device = find_amd_gpu_device()
+    if device is None:
+        return False
+    accelerator = read_accelerator_metrics(device)
+    total = accelerator.vram_total_bytes
+    gtt_total = accelerator.gtt_total_bytes
+    if not total or total <= 0 or gtt_total is None or gtt_total <= total:
+        return False
+    return (
+        accelerator.vram_used_bytes is not None
+        and gtt_total >= MemoryUsage.from_local_gpu_wireable().ram_total.in_bytes
+    )
+
+
 def _summarize_worker_task(task: Task) -> str:
     """Return a compact task summary for worker lifecycle logs."""
     return summarize_task_for_log(task)
+
+
+def _staged_model_ids_for(shard: ShardMetadata) -> frozenset[str]:
+    """Return the staged repo IDs this node reads for ``shard``.
+
+    An RPC donor lends memory to the driver and never reads the model, so a
+    donor shard needs nothing staged here.
+    """
+    if isinstance(shard, RpcDonorShardMetadata):
+        return frozenset()
+    return _staging_model_ids(shard.model_card)
 
 
 def _staging_model_ids(card: ModelCard) -> frozenset[str]:
@@ -471,21 +810,160 @@ def _vision_media_cleanup_command_id(
     previous_tasks: Mapping[TaskId, Task],
     current_tasks: Mapping[TaskId, Task],
 ) -> CommandId | None:
-    """Return the vision command whose ephemeral input can be released."""
+    """Return the vision command whose ephemeral input can be released.
+
+    ``TaskFailed`` is a terminal event in its own right (the master emits it,
+    for example, when no instance serves a video mode), so staged or written
+    media for that command must not wait for a later status update.
+    """
 
     task: Task | None = None
     if isinstance(event, TaskDeleted):
         task = previous_tasks.get(event.task_id)
-    elif isinstance(event, TaskStatusUpdated) and event.task_status in {
-        TaskStatus.Cancelled,
-        TaskStatus.Complete,
-        TaskStatus.Failed,
-        TaskStatus.TimedOut,
-    }:
+    elif isinstance(event, TaskFailed) or (
+        isinstance(event, TaskStatusUpdated)
+        and event.task_status
+        in {
+            TaskStatus.Cancelled,
+            TaskStatus.Complete,
+            TaskStatus.Failed,
+            TaskStatus.TimedOut,
+        }
+    ):
         task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
-    if isinstance(task, (TextGeneration, ImageEdits)):
+    if isinstance(task, (TextGeneration, ImageEdits, VideoGeneration)):
         return task.command_id
     return None
+
+
+def _media_frame_limit(packet: VisionMediaPacket) -> int:
+    """Per-stream frame bound for the packet's payload family."""
+
+    if packet.payload == "reference_media":
+        return _REFERENCE_MEDIA_PENDING_FRAMES
+    return _VISION_MEDIA_PENDING_FRAMES
+
+
+def _media_byte_limit(packet: VisionMediaPacket) -> int:
+    """Per-stream byte bound for the packet's payload family."""
+
+    if packet.payload == "reference_media":
+        return _REFERENCE_MEDIA_PENDING_BYTES
+    return _VISION_MEDIA_PENDING_BYTES
+
+
+def _write_reference_media(
+    directory: Path,
+    expected: Mapping[int, VideoReferenceSpec],
+    slots: Mapping[int, bytes],
+) -> None:
+    """Write verified attachment bytes to task-local files, atomically per slot."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    for slot, spec in expected.items():
+        target = directory / f"{slot}{_reference_media_extension(spec)}"
+        staging = target.with_suffix(target.suffix + ".part")
+        staging.write_bytes(slots[slot])
+        staging.replace(target)
+
+
+async def _provision_test_video_engine() -> None:
+    """Give the test video engine its stand-in weights and card when advertised."""
+
+    from skulk.shared.backends import probe_node_backends
+
+    if "test_video" not in probe_node_backends():
+        return
+    from skulk.worker.runner.test_video.provision import (
+        install_test_video_card,
+        provision_test_video_model,
+    )
+
+    directory = provision_test_video_model()
+    card = await install_test_video_card()
+    logger.info(
+        f"test video engine advertised; stand-in model at {directory}, "
+        f"card {card.model_id} registered"
+    )
+
+
+def _purge_stale_video_directories() -> None:
+    """Delete task-local video media left behind by an earlier worker process."""
+
+    for root in (SKULK_VIDEO_INPUT_DIR, SKULK_VIDEO_OUTPUT_DIR, SKULK_MUSIC_OUTPUT_DIR):
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+
+
+def _verify_file_digest(path: Path, sha256: str) -> int:
+    """Return the file size when its digest matches, else -1."""
+
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return size if digest.hexdigest() == sha256 else -1
+
+
+_REFERENCE_MEDIA_EXTENSIONS: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/flac": ".flac",
+    "audio/ogg": ".ogg",
+}
+
+
+def _reference_media_extension(spec: VideoReferenceSpec) -> str:
+    """Pick a file extension a runner can hand to a media decoder.
+
+    The common types are mapped explicitly so every node names files the same
+    way; the platform ``mimetypes`` table differs between hosts and is only a
+    fallback.
+    """
+
+    known = _REFERENCE_MEDIA_EXTENSIONS.get(spec.media_type)
+    if known is not None:
+        return known
+    guessed = mimetypes.guess_extension(spec.media_type)
+    if guessed:
+        return guessed
+    return {"image": ".img", "video": ".video", "audio": ".audio"}[spec.kind]
+
+
+def _inject_reference_paths(
+    task: VideoGeneration, paths: Mapping[int, Path]
+) -> VideoGeneration:
+    """Return the task with worker-local attachment paths filled in."""
+
+    references = tuple(
+        spec.model_copy(update={"local_path": str(paths[spec.slot])})
+        for spec in task.task_params.references
+    )
+    return task.model_copy(
+        update={
+            "task_params": task.task_params.model_copy(
+                update={"references": references}
+            )
+        }
+    )
 
 
 def _log_image_transport(message: str) -> None:
@@ -572,6 +1050,8 @@ class Worker:
         download_command_sender: Sender[ForwarderDownloadCommand],
         telemetry_sender: TelemetrySender | Sender[NodeTelemetry] | None = None,
         telemetry_view: TelemetryView | None = None,
+        offline: bool = False,
+        api_available: bool = True,
         data_transport: NodeDataTransport = "gossipsub",
         zenoh_peer_sampler: ZenohPeerSampler | None = None,
         data_sender: Sender[DataChunk] | None = None,
@@ -581,6 +1061,8 @@ class Worker:
         speech_media_packet_receiver: Receiver[SpeechMediaPacket] | None = None,
         vision_media_packet_sender: Sender[VisionMediaPacket] | None = None,
         vision_media_packet_receiver: Receiver[VisionMediaPacket] | None = None,
+        output_media_packet_sender: Sender[OutputMediaPacket] | None = None,
+        output_media_packet_receiver: Receiver[OutputMediaPacket] | None = None,
         connection_message_receiver: Receiver[ConnectionMessage] | None = None,
         session_connection_snapshot: (
             Callable[[], dict[str, tuple[str, int, int]]] | None
@@ -594,6 +1076,8 @@ class Worker:
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
+        self._offline = offline
+        self._api_available = api_available
         self._data_transport: NodeDataTransport = data_transport
         # Data-plane connectivity sampler threaded into the InfoGatherer so
         # NodeResources advertisements carry live Zenoh peer counts (#680).
@@ -610,6 +1094,8 @@ class Worker:
         self._speech_media_packet_receiver = speech_media_packet_receiver
         self._vision_media_packet_sender = vision_media_packet_sender
         self._vision_media_packet_receiver = vision_media_packet_receiver
+        self._output_media_packet_sender = output_media_packet_sender
+        self._output_media_packet_receiver = output_media_packet_receiver
         self._connection_message_receiver = connection_message_receiver
         self._session_connection_snapshot = session_connection_snapshot
         # Live-session bookkeeping shared between the session-edge ingress
@@ -652,6 +1138,9 @@ class Worker:
         # are never advertised independently.
         self._stale_downloads_awaiting_completion: dict[str, int] = {}
         self._stale_reset_wait_ticks: int = 0
+        # Monotonic time the in-use staged models' recency markers were last
+        # refreshed; None until the first planning tick refreshes them.
+        self._in_use_markers_refreshed_at: float | None = None
         # Runtime eviction takes a filesystem snapshot on the event loop and
         # deletes from a worker thread. Keep that whole interval atomic with
         # stale-state reconciliation plus CreateRunner planning/registration:
@@ -665,16 +1154,12 @@ class Worker:
         # Buffer for input image chunks (for image editing)
         self.input_chunk_buffer: dict[CommandId, dict[int, InputImageChunk]] = {}
         self.input_chunk_counts: dict[CommandId, int] = {}
-        self._speech_media_chunks: dict[
-            CommandId, dict[int, SpeechMediaPacket]
-        ] = {}
+        self._speech_media_chunks: dict[CommandId, dict[int, SpeechMediaPacket]] = {}
         self._speech_media_completed: dict[CommandId, SpeechMediaPacket] = {}
         self._speech_media_ready: set[CommandId] = set()
         self._speech_media_pending_bytes: dict[CommandId, int] = {}
         self._speech_media_pending_since: dict[CommandId, float] = {}
-        self._vision_media_chunks: dict[
-            CommandId, dict[int, VisionMediaPacket]
-        ] = {}
+        self._vision_media_chunks: dict[CommandId, dict[int, VisionMediaPacket]] = {}
         self._vision_media_opened: dict[CommandId, VisionMediaPacket] = {}
         self._vision_media_completed: dict[CommandId, VisionMediaPacket] = {}
         self._vision_media_verified: dict[CommandId, VisionMediaPacket] = {}
@@ -691,6 +1176,17 @@ class Worker:
         self._vision_media_completed_streams = 0
         self._vision_media_rejected_streams = 0
         self._vision_media_expired_streams = 0
+        # Verified raw attachment bytes per slot for video renders, held only
+        # until they are written to task-local files and the plan gate opens.
+        self._reference_media_verified: dict[CommandId, dict[int, bytes]] = {}
+        self._reference_media_ready: set[CommandId] = set()
+        # When a video task with attachments was first observed without its
+        # media; the janitor fails tasks whose owning API never delivers.
+        self._reference_media_awaited: dict[CommandId, float] = {}
+        # Finished containers awaiting the owning API's verification, with the
+        # artifact purposes still unacknowledged.
+        self._output_media_pending: dict[CommandId, tuple[NodeId, float, set[str]]] = {}
+        self._output_media_aborted: set[CommandId] = set()
         self._realtime_audio_pending: dict[
             CommandId, list[RealtimeAudioInputFrame]
         ] = {}
@@ -709,7 +1205,80 @@ class Worker:
         self._crash_breaker: CrashWindow[InstanceId] = CrashWindow(
             _RUNNER_CRASH_THRESHOLD, _RUNNER_CRASH_WINDOW_SECONDS
         )
+        self._model_trust_failures_handled: set[InstanceId] = set()
         self._stopped: anyio.Event = anyio.Event()
+
+    async def _prepare_audio_cpp_engine(
+        self, request: AudioCppPreparationRequested
+    ) -> None:
+        """Prepare and verify the chosen node's pinned engine, then publish facts."""
+
+        if request.expires_at <= time.time():
+            return
+        from skulk.facts import refresh_node_facts
+        from skulk.provisioning.audio_cpp import prepare_audio_cpp
+
+        success = False
+        error: str | None = None
+        resources: NodeResources | None = None
+        try:
+            await to_thread.run_sync(
+                lambda: prepare_audio_cpp(
+                    allow_download=not self._offline, variant=request.variant
+                )
+            )
+            await to_thread.run_sync(refresh_node_facts)
+            peers = (
+                await self._zenoh_peer_sampler.advertised_count()
+                if self._zenoh_peer_sampler is not None
+                else None
+            )
+            resources = await NodeResources.gather(
+                api_available=self._api_available,
+                data_transport=self._data_transport,
+                zenoh_connected_peers=peers,
+            )
+            ready_lanes = {
+                backend for backend in resources.backends
+                if backend.startswith("audio_cpp-")
+                and backend in resources.engine_builds
+            }
+            requested_ready = bool(
+                ready_lanes
+                & {
+                    "cpu": {
+                        "audio_cpp-cpu", "audio_cpp-metal",
+                        "audio_cpp-cuda", "audio_cpp-rocm",
+                    },
+                    "vulkan": {"audio_cpp-vulkan"},
+                    "cuda": {"audio_cpp-cuda"},
+                }[request.variant]
+            )
+            if not requested_ready:
+                details = "; ".join(
+                    conflict.message for conflict in resources.capability_conflicts
+                    if "audio.cpp" in conflict.message.lower()
+                )
+                raise RuntimeError(
+                    details or f"prepared audio.cpp {request.variant} has no verified ready backend and build"
+                )
+            if self._telemetry_sender is None:
+                raise RuntimeError("node resources telemetry is unavailable")
+            await self._telemetry_sender.send(
+                NodeTelemetry(node_id=self.node_id, info=resources)
+            )
+            success = True
+        except Exception as failure:  # noqa: BLE001 - report preparation boundary
+            error = str(failure)[:1024]
+            logger.warning(f"audio.cpp preparation failed: {error}")
+        await self.event_sender.send(AudioCppPreparationCompleted(
+            request_id=request.request_id,
+            target_node=self.node_id,
+            owner_node=request.owner_node,
+            success=success,
+            error=error,
+            resources=resources if success else None,
+        ))
 
     def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:
         """Return durable outcomes overlaid with live download telemetry."""
@@ -776,15 +1345,55 @@ class Worker:
             shard.model_card,
             self._shard_memory_fraction(shard),
             context_budget=kv_context,
+            resolved_backend=shard.resolved_backend,
+            llama_server_settings=shard.llama_server_settings,
         )
         # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
         # so size the guard against local usable VRAM or it would falsely refuse
         # the very placement the (VRAM-aware) master just admitted. None on
-        # unified-memory (Apple) nodes, which keep the system-RAM path.
-        vram = _local_usable_vram()
+        # unified-memory (Apple) nodes, which keep the system-RAM path. A shard
+        # the master resolved to a backend that does not offload (``-cpu``, a
+        # bare tag) lives in system RAM even beside a discrete GPU, so it is
+        # checked against RAM, the pool its stamped window was sized from.
+        in_system_ram = (
+            shard.resolved_backend is not None
+            and not backend_offloads_to_vram(shard.resolved_backend)
+        )
+        vram = None if in_system_ram else _local_usable_vram()
         if vram is not None:
             usable = vram
             pool = f"{vram.in_gb:.1f}GB usable GPU VRAM"
+            # On a unified-memory APU the combined pool keeps the VRAM carve-out
+            # in its figure even as host RAM falls, but a fixed-window engine's
+            # KV allocation takes host pages and its window was sized from host
+            # RAM; check that window against host RAM as well, or the guard
+            # could pass an allocation host memory no longer holds. A Vulkan
+            # engine on an AMD APU is the exception: it fills the carve first,
+            # which the combined pool already nets out, and a host-only check
+            # refused a steward beside a video engine holding host RAM while
+            # the carve sat empty.
+            carve_resident = (
+                vulkan_fills_carve_first(shard.resolved_backend)
+                and _local_carve_first_gpu()
+            )
+            if (
+                shard_preallocates_kv_upfront(shard)
+                and _local_unified_memory_gpu()
+                and not carve_resident
+            ):
+                local = MemoryUsage.from_local_gpu_wireable()
+                host = min(
+                    local.ram_available, gpu_working_set_ceiling(local.ram_total)
+                )
+                if footprint_exceeds_usable(footprint, host, _LOAD_FIT_TOLERANCE):
+                    return (
+                        f"Refusing to load a shard of {shard.model_card.model_id} on "
+                        f"{self.node_id}: ~{footprint.in_gb:.1f}GB needed for its "
+                        f"fixed context window but only ~{host.in_gb:.1f}GB of host "
+                        "RAM is usable on this unified-memory node, beyond the "
+                        f"{_LOAD_FIT_TOLERANCE:.0%} fit tolerance. Refusing before "
+                        "load to avoid an OOM abort."
+                    )
         else:
             local = MemoryUsage.from_local_gpu_wireable()
             usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
@@ -806,23 +1415,34 @@ class Worker:
             )
         return None
 
-    async def _give_up_on_instance(self, instance_id: InstanceId, reason: str) -> None:
+    async def _give_up_on_instance(
+        self,
+        instance_id: InstanceId,
+        reason: str,
+        *,
+        error_code: InstanceFailureCode,
+    ) -> None:
         """Tear down a repeatedly-failing instance instead of relaunching it.
 
-        Sends ``DeleteInstance`` to the master so the doomed instance stops
-        being reconciled into fresh runners - each relaunch risks another
-        leak-on-abort. The crash window is deliberately NOT cleared: the trip is
+        Sends ``FailInstance`` so the master records why the placement vanished
+        before deleting it; each relaunch risks another leak-on-abort. The crash
+        window is deliberately NOT cleared: the trip is
         edge-triggered, so leaving the failure history in place keeps the latch
-        set and suppresses re-tripping (and duplicate ``DeleteInstance``) while
+        set and suppresses re-tripping (and duplicate ``FailInstance``) while
         the instance lingers in replicated state before the deletion lands.
         ``InstanceId``s are unique, so the stale entry can never collide with a
         future instance.
         """
-        logger.error(f"Worker: giving up on instance {instance_id}: {reason}")
+        message = _instance_failure_message(reason)
+        logger.error(f"Worker: giving up on instance {instance_id}: {message}")
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
-                command=DeleteInstance(instance_id=instance_id),
+                command=FailInstance(
+                    instance_id=instance_id,
+                    error_code=error_code,
+                    error_message=message,
+                ),
             )
         )
 
@@ -876,6 +1496,31 @@ class Worker:
             return frozenset()
         return frozenset(self._telemetry_view.local_advertised_capabilities)
 
+    def _local_pairing_gateway_provider(self) -> bool:
+        """Return whether this node holds the cluster's phone-pairing relay route.
+
+        The API sets the flag on the shared :class:`TelemetryView`; a worker
+        without a view (no API on this node) is never the pairing gateway.
+        """
+        if self._telemetry_view is None:
+            return False
+        return self._telemetry_view.local_pairing_gateway_active
+
+    def _local_capability_nodes_provider(self) -> tuple[CapabilityNodeSummary, ...]:
+        """Snapshot the capability-node summaries published on this node.
+
+        Same shape as :meth:`_local_capabilities_provider`: the API-side
+        extension surface writes summaries onto the shared view, and the
+        gatherer gossips this immutable snapshot. Order is publication order,
+        which keeps consecutive snapshots comparable for change detection.
+
+        Returns:
+            The summaries this node currently publishes, oldest first.
+        """
+        if self._telemetry_view is None:
+            return ()
+        return tuple(self._telemetry_view.local_capability_nodes.values())
+
     async def run(self):
         logger.info("Starting Worker")
         self._reconcile_staging_on_startup()
@@ -884,10 +1529,14 @@ class Worker:
         # someone kills it (#653); reap exactly that shape before this
         # incarnation starts advertising capacity. No-op off Linux.
         sweep_orphaned_vllm_engines()
+        # Same shape for the video engine: a ComfyUI server whose runner died
+        # keeps the diffusion weights resident on the GPU.
+        sweep_orphaned_comfy_servers()
 
         info_send, info_recv = channel[GatheredInfo]()
         info_gatherer: InfoGatherer = InfoGatherer(
             info_send,
+            api_available=self._api_available,
             data_transport=self._data_transport,
             # Fabric-citizenship: the gatherer publishes whatever the API-side
             # extension surface has advertised on the shared TelemetryView. The
@@ -895,10 +1544,18 @@ class Worker:
             # published), so a plugin advertising a capability rides the same
             # telemetry emit path as native node readings.
             capabilities_provider=self._local_capabilities_provider,
+            capability_nodes_provider=self._local_capability_nodes_provider,
+            # The API sets this on the shared view when this node holds the
+            # phone-pairing relay route.
+            pairing_gateway_provider=self._local_pairing_gateway_provider,
             zenoh_peer_sampler=self._zenoh_peer_sampler,
         )
 
         try:
+            # Reference files and unacknowledged containers from a previous
+            # process have no tracking record; nothing can ever release them.
+            _purge_stale_video_directories()
+            await _provision_test_video_engine()
             async with self._tg as tg:
                 tg.start_soon(info_gatherer.run)
                 tg.start_soon(self._forward_info, info_recv)
@@ -917,6 +1574,10 @@ class Worker:
                 if self._vision_media_packet_receiver is not None:
                     tg.start_soon(self._vision_media_packet_ingress)
                     tg.start_soon(self._vision_media_janitor)
+                    tg.start_soon(self._reference_media_janitor)
+                if self._output_media_packet_receiver is not None:
+                    tg.start_soon(self._output_media_packet_ingress)
+                    tg.start_soon(self._output_media_janitor)
                 if (
                     self._realtime_audio_receiver is not None
                     or self._realtime_audio_packet_receiver is not None
@@ -946,7 +1607,10 @@ class Worker:
         assert self._realtime_audio_packet_receiver is not None
         with self._realtime_audio_packet_receiver as packets:
             async for packet in packets:
-                if packet.target_node != self.node_id or packet.kind == "transport_failed":
+                if (
+                    packet.target_node != self.node_id
+                    or packet.kind == "transport_failed"
+                ):
                     continue
                 await self._route_realtime_audio_frame(packet.to_input_frame())
 
@@ -956,7 +1620,10 @@ class Worker:
         assert self._speech_media_packet_receiver is not None
         with self._speech_media_packet_receiver as packets:
             async for packet in packets:
-                if packet.target_node != self.node_id or packet.kind == "transport_failed":
+                if (
+                    packet.target_node != self.node_id
+                    or packet.kind == "transport_failed"
+                ):
                     continue
                 command_id = packet.command_id
                 if packet.kind in ("cancelled",):
@@ -988,8 +1655,7 @@ class Worker:
                     continue
                 if (
                     packet.sequence >= _SPEECH_MEDIA_PENDING_FRAMES
-                    or
-                    len(chunks) >= _SPEECH_MEDIA_PENDING_FRAMES
+                    or len(chunks) >= _SPEECH_MEDIA_PENDING_FRAMES
                     or pending_bytes + len(packet.data) > _SPEECH_MEDIA_PENDING_BYTES
                 ):
                     await self._reject_speech_media(command_id)
@@ -998,8 +1664,8 @@ class Worker:
                     command_id, time.monotonic()
                 )
                 chunks[packet.sequence] = packet
-                self._speech_media_pending_bytes[command_id] = (
-                    pending_bytes + len(packet.data)
+                self._speech_media_pending_bytes[command_id] = pending_bytes + len(
+                    packet.data
                 )
                 self._refresh_speech_media_ready(command_id)
 
@@ -1048,9 +1714,7 @@ class Worker:
                         or self._vision_media_completed.get(command_id)
                         or next(
                             iter(
-                                self._vision_media_chunks.get(
-                                    command_id, {}
-                                ).values()
+                                self._vision_media_chunks.get(command_id, {}).values()
                             ),
                             None,
                         )
@@ -1059,7 +1723,9 @@ class Worker:
                         (
                             candidate
                             for candidate in self.state.tasks.values()
-                            if isinstance(candidate, (TextGeneration, ImageEdits))
+                            if isinstance(
+                                candidate, (TextGeneration, ImageEdits, VideoGeneration)
+                            )
                             and candidate.command_id == command_id
                         ),
                         None,
@@ -1100,7 +1766,7 @@ class Worker:
                         continue
                     if (
                         packet.total_chunks is None
-                        or packet.total_chunks > _VISION_MEDIA_PENDING_FRAMES
+                        or packet.total_chunks > _media_frame_limit(packet)
                         or packet.image_count is None
                         or packet.image_count > packet.total_chunks
                     ):
@@ -1150,7 +1816,7 @@ class Worker:
                 opened = self._vision_media_opened.get(command_id)
                 if (
                     packet.total_chunks is None
-                    or packet.total_chunks > _VISION_MEDIA_PENDING_FRAMES
+                    or packet.total_chunks > _media_frame_limit(packet)
                     or (
                         packet.kind == "completed"
                         and (
@@ -1176,16 +1842,15 @@ class Worker:
                     self._vision_media_pending_since[command_id] = time.monotonic()
                 existing_completion = self._vision_media_completed.get(command_id)
                 existing_chunks = self._vision_media_chunks.get(command_id, {})
-                reference = opened or existing_completion or next(
-                    iter(existing_chunks.values()), None
+                reference = (
+                    opened
+                    or existing_completion
+                    or next(iter(existing_chunks.values()), None)
                 )
-                if (
-                    reference is not None
-                    and (
-                        packet.source_node != reference.source_node
-                        or packet.model != reference.model
-                        or packet.total_chunks != reference.total_chunks
-                    )
+                if reference is not None and (
+                    packet.source_node != reference.source_node
+                    or packet.model != reference.model
+                    or packet.total_chunks != reference.total_chunks
                 ):
                     await self._reject_vision_media(
                         packet, "Vision media frame metadata changed in flight"
@@ -1197,7 +1862,10 @@ class Worker:
                             packet, "Vision media completion does not match its open"
                         )
                         continue
-                    if existing_completion is not None and existing_completion != packet:
+                    if (
+                        existing_completion is not None
+                        and existing_completion != packet
+                    ):
                         await self._reject_vision_media(
                             packet, "Vision media completion metadata changed in flight"
                         )
@@ -1213,14 +1881,15 @@ class Worker:
                 if existing is not None:
                     if existing != packet:
                         await self._reject_vision_media(
-                            packet, "Vision media sequence was reused with different data"
+                            packet,
+                            "Vision media sequence was reused with different data",
                         )
                     continue
                 pending_bytes = self._vision_media_pending_bytes.get(command_id, 0)
                 packet_bytes = len(packet.data)
                 if (
-                    len(chunks) >= _VISION_MEDIA_PENDING_FRAMES
-                    or pending_bytes + packet_bytes > _VISION_MEDIA_PENDING_BYTES
+                    len(chunks) >= _media_frame_limit(packet)
+                    or pending_bytes + packet_bytes > _media_byte_limit(packet)
                     or self._vision_media_pending_total_bytes + packet_bytes
                     > _VISION_MEDIA_PENDING_TOTAL_BYTES
                 ):
@@ -1261,11 +1930,40 @@ class Worker:
                 completed, "Vision media completion does not match its chunks"
             )
             return
-        payload = b"".join(packet.data for packet in ordered)
-        if hashlib.sha256(payload).hexdigest() != completed.sha256:
+        # Hash the frames in place: a joined copy of a 256 MiB reference
+        # stream is a second full-size allocation on a worker whose memory
+        # belongs to the model it hosts.
+        digest = hashlib.sha256()
+        for packet in ordered:
+            digest.update(packet.data)
+        if digest.hexdigest() != completed.sha256:
             await self._reject_vision_media(
                 completed, "Vision media failed SHA-256 integrity verification"
             )
+            return
+        if completed.payload == "reference_media":
+            if any(packet.payload != "reference_media" for packet in ordered):
+                await self._reject_vision_media(
+                    completed, "Reference media stream mixes payload encodings"
+                )
+                return
+            # One join per slot is the only copy made during assembly, so a
+            # stream peaks at twice its size (frames plus assembled slots)
+            # rather than four times; the frames are released on return.
+            slot_frames: dict[int, list[bytes]] = {}
+            for packet in ordered:
+                slot_frames.setdefault(packet.image_index or 0, []).append(packet.data)
+            self._reference_media_verified[command_id] = {
+                slot: b"".join(frames) for slot, frames in slot_frames.items()
+            }
+            self._vision_media_verified[command_id] = completed
+            self._vision_media_completed_streams += 1
+            self._clear_pending_vision_media(
+                command_id,
+                release_bytes=False,
+                clear_age=False,
+            )
+            await self._acknowledge_vision_media_if_admitted(command_id)
             return
         try:
             verified_chunks = {
@@ -1311,12 +2009,15 @@ class Worker:
             (
                 candidate
                 for candidate in self.state.tasks.values()
-                if isinstance(candidate, (TextGeneration, ImageEdits))
+                if isinstance(candidate, (TextGeneration, ImageEdits, VideoGeneration))
                 and candidate.command_id == command_id
             ),
             None,
         )
         if task is None:
+            return
+        if isinstance(task, VideoGeneration):
+            await self._acknowledge_reference_media(command_id, task, completed)
             return
         chunks = self._vision_media_verified_chunks.get(command_id, {})
         image_indexes = {chunk.image_index for chunk in chunks.values()}
@@ -1380,6 +2081,90 @@ class Worker:
         finally:
             self._vision_media_ack_inflight.discard(command_id)
 
+    async def _acknowledge_reference_media(
+        self,
+        command_id: CommandId,
+        task: VideoGeneration,
+        completed: VisionMediaPacket,
+    ) -> None:
+        """Verify every attachment slot against the task, then expose files.
+
+        The authoritative task carries each attachment's slot, size, and digest.
+        Bytes reach a runner only after all of them match, and only through
+        task-local files the worker owns and deletes at task end.
+        """
+
+        slots = self._reference_media_verified.get(command_id)
+        params = task.task_params
+        expected = {spec.slot: spec for spec in params.references}
+        matches_task = (
+            slots is not None
+            and completed.payload == "reference_media"
+            and completed.model == ModelId(params.model)
+            and task.owner_node is not None
+            and completed.source_node == task.owner_node
+            and completed.total_chunks == params.total_input_chunks
+            and completed.image_count == len(expected)
+            and set(slots) == set(expected)
+            and all(
+                len(slots[slot]) == spec.size_bytes
+                and hashlib.sha256(slots[slot]).hexdigest() == spec.sha256
+                for slot, spec in expected.items()
+            )
+        )
+        if not matches_task or slots is None:
+            await self._reject_vision_media(
+                completed,
+                "Verified reference media does not match the authoritative task",
+            )
+            return
+        sender = self._vision_media_packet_sender
+        if sender is None:
+            await self._reject_vision_media(
+                completed, "Vision media acknowledgement transport is unavailable"
+            )
+            return
+        self._vision_media_ack_inflight.add(command_id)
+        try:
+            # Persist first: the acknowledgement releases the API's only staged
+            # copy, so the bytes must already be durable on this node.
+            directory = SKULK_VIDEO_INPUT_DIR / str(command_id)
+            try:
+                await to_thread.run_sync(
+                    _write_reference_media, directory, expected, slots
+                )
+            except OSError as error:
+                await self._reject_vision_media(
+                    completed, f"Reference media could not be written locally: {error}"
+                )
+                return
+            try:
+                with anyio.move_on_after(
+                    _VISION_MEDIA_ACK_SEND_TIMEOUT_SECONDS, shield=True
+                ) as acknowledgement_scope:
+                    await sender.send(completed.accepted())
+            except (BrokenResourceError, ClosedResourceError):
+                shutil.rmtree(directory, ignore_errors=True)
+                return
+            if (
+                acknowledgement_scope.cancel_called
+                or command_id not in self._reference_media_verified
+            ):
+                shutil.rmtree(directory, ignore_errors=True)
+                return
+            # The bytes now live on disk; drop the in-memory copy and release
+            # the ingress accounting the same way image input does.
+            self._reference_media_verified.pop(command_id, None)
+            released = self._vision_media_pending_bytes.pop(command_id, 0)
+            self._vision_media_pending_total_bytes = max(
+                0, self._vision_media_pending_total_bytes - released
+            )
+            self._reference_media_ready.add(command_id)
+            self._vision_media_accepted.add(command_id)
+            self._vision_media_pending_since.pop(command_id, None)
+        finally:
+            self._vision_media_ack_inflight.discard(command_id)
+
     async def _reject_vision_media(
         self, packet: VisionMediaPacket, message: str
     ) -> None:
@@ -1409,7 +2194,7 @@ class Worker:
             (
                 task
                 for task in self.state.tasks.values()
-                if isinstance(task, (TextGeneration, ImageEdits))
+                if isinstance(task, (TextGeneration, ImageEdits, VideoGeneration))
                 and task.command_id == command_id
             ),
             None,
@@ -1457,6 +2242,365 @@ class Worker:
         self._vision_media_failure_since.pop(command_id, None)
         self.input_chunk_buffer.pop(command_id, None)
         self.input_chunk_counts.pop(command_id, None)
+        self._reference_media_verified.pop(command_id, None)
+        if command_id in self._reference_media_ready:
+            self._reference_media_ready.discard(command_id)
+            shutil.rmtree(SKULK_VIDEO_INPUT_DIR / str(command_id), ignore_errors=True)
+
+    def _schedule_video_output_transfer(
+        self, command_id: CommandId, owner_node: NodeId | None, chunk: VideoChunk
+    ) -> None:
+        """Start streaming a finished container to the owning API node."""
+
+        manifest = chunk.output
+        if manifest is None:
+            return
+        if owner_node is None or self._output_media_packet_sender is None:
+            logger.error(
+                "Cannot deliver video output: no owner or OUTPUT_MEDIA transport "
+                f"(command_id={command_id})"
+            )
+            shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
+            return
+        expected = {"video"}
+        if manifest.thumbnail_sha256 is not None:
+            expected.add("thumbnail")
+        self._output_media_pending[command_id] = (
+            owner_node,
+            time.monotonic() + _OUTPUT_MEDIA_ACK_TIMEOUT_SECONDS,
+            expected,
+        )
+        self._tg.start_soon(
+            self._send_video_output, command_id, owner_node, chunk.model, manifest
+        )
+
+    def _schedule_music_output_transfer(
+        self, command_id: CommandId, owner_node: NodeId | None, chunk: MusicChunk
+    ) -> None:
+        """Send one completed WAV to its owning API over OUTPUT_MEDIA."""
+
+        manifest = chunk.output
+        if manifest is None:
+            return
+        if owner_node is None or self._output_media_packet_sender is None:
+            logger.error(f"Cannot deliver music output for {command_id}: no owner or transport")
+            shutil.rmtree(SKULK_MUSIC_OUTPUT_DIR / str(command_id), ignore_errors=True)
+            return
+        self._output_media_pending[command_id] = (
+            owner_node,
+            time.monotonic() + _OUTPUT_MEDIA_ACK_TIMEOUT_SECONDS,
+            {"music"},
+        )
+        self._tg.start_soon(
+            self._send_music_output, command_id, owner_node, chunk.model,
+            manifest.size_bytes, manifest.sha256,
+        )
+
+    async def _send_music_output(
+        self,
+        command_id: CommandId,
+        owner_node: NodeId,
+        model: ModelId,
+        size_bytes: int,
+        sha256: str,
+    ) -> None:
+        """Verify and stream one WAV as bounded, acknowledged raw frames."""
+
+        sender = self._output_media_packet_sender
+        assert sender is not None
+        path = SKULK_MUSIC_OUTPUT_DIR / str(command_id) / "output.wav"
+        try:
+            verified = await to_thread.run_sync(_verify_file_digest, path, sha256)
+            if verified != size_bytes or size_bytes > 64 * 1024 * 1024:
+                raise ValueError("music WAV does not match its bounded manifest")
+            total_chunks = max(1, -(-size_bytes // SKULK_MAX_CHUNK_SIZE))
+            await self._send_output_packet(
+                sender,
+                OutputMediaPacket(
+                    source_node=self.node_id, target_node=owner_node,
+                    command_id=command_id, model=model, purpose="music",
+                    sequence=0, kind="opened", total_chunks=total_chunks,
+                    total_bytes=size_bytes, content_type="audio/wav",
+                ),
+            )
+            sequence = 0
+            with path.open("rb") as handle:
+                while data := await to_thread.run_sync(handle.read, SKULK_MAX_CHUNK_SIZE):
+                    if command_id in self._output_media_aborted:
+                        return
+                    sequence += 1
+                    await self._send_output_packet(
+                        sender,
+                        OutputMediaPacket(
+                            source_node=self.node_id, target_node=owner_node,
+                            command_id=command_id, model=model, purpose="music",
+                            sequence=sequence, kind="chunk", data=data,
+                            total_chunks=total_chunks,
+                        ),
+                    )
+            if sequence != total_chunks:
+                raise ValueError("music WAV changed while streaming")
+            await self._send_output_packet(
+                sender,
+                OutputMediaPacket(
+                    source_node=self.node_id, target_node=owner_node,
+                    command_id=command_id, model=model, purpose="music",
+                    sequence=total_chunks + 1, kind="completed",
+                    total_chunks=total_chunks, total_bytes=size_bytes, sha256=sha256,
+                ),
+            )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as error:  # noqa: BLE001 - transport boundary
+            logger.opt(exception=error).warning(f"Music output delivery failed for {command_id}")
+            with suppress(BrokenResourceError, ClosedResourceError, WouldBlock):
+                with anyio.move_on_after(2, shield=True):
+                    await sender.send(OutputMediaPacket(
+                        source_node=self.node_id, target_node=owner_node,
+                        command_id=command_id, model=model, purpose="music",
+                        sequence=0, kind="transport_failed",
+                        error_message=f"music output delivery failed: {error}"[:1024],
+                    ))
+            self._finish_video_output(command_id)
+        finally:
+            self._output_media_aborted.discard(command_id)
+
+    async def _send_video_output(
+        self,
+        command_id: CommandId,
+        owner_node: NodeId,
+        model: ModelId,
+        manifest: VideoOutputManifest,
+    ) -> None:
+        """Stream the container and optional thumbnail as ordered raw chunks."""
+
+        directory = SKULK_VIDEO_OUTPUT_DIR / str(command_id)
+        sender = self._output_media_packet_sender
+        assert sender is not None
+        artifacts: list[tuple[str, Path, str, int, str]] = [
+            (
+                "video",
+                directory / VIDEO_OUTPUT_FILENAME,
+                manifest.content_type,
+                manifest.size_bytes,
+                manifest.sha256,
+            )
+        ]
+        if manifest.thumbnail_sha256 is not None and manifest.thumbnail_size_bytes:
+            artifacts.append(
+                (
+                    "thumbnail",
+                    directory / VIDEO_THUMBNAIL_FILENAME,
+                    "image/jpeg",
+                    manifest.thumbnail_size_bytes,
+                    manifest.thumbnail_sha256,
+                )
+            )
+        try:
+            for purpose, path, content_type, size_bytes, sha256 in artifacts:
+                if command_id in self._output_media_aborted:
+                    return
+                verified = await to_thread.run_sync(_verify_file_digest, path, sha256)
+                if verified != size_bytes:
+                    raise ValueError(
+                        f"{purpose} output does not match its manifest "
+                        f"(size {verified} vs {size_bytes} or digest mismatch)"
+                    )
+                total_chunks = max(1, -(-size_bytes // SKULK_MAX_CHUNK_SIZE))
+                await self._send_output_packet(
+                    sender,
+                    OutputMediaPacket(
+                        source_node=self.node_id,
+                        target_node=owner_node,
+                        command_id=command_id,
+                        model=model,
+                        purpose=purpose,  # pyright: ignore[reportArgumentType]
+                        sequence=0,
+                        kind="opened",
+                        total_chunks=total_chunks,
+                        total_bytes=size_bytes,
+                        content_type=content_type,
+                    ),
+                )
+                sequence = 0
+                with path.open("rb") as handle:
+                    while True:
+                        data = await to_thread.run_sync(handle.read, SKULK_MAX_CHUNK_SIZE)
+                        if not data:
+                            break
+                        sequence += 1
+                        if command_id in self._output_media_aborted:
+                            return
+                        await self._send_output_packet(
+                            sender,
+                            OutputMediaPacket(
+                                source_node=self.node_id,
+                                target_node=owner_node,
+                                command_id=command_id,
+                                model=model,
+                                purpose=purpose,  # pyright: ignore[reportArgumentType]
+                                sequence=sequence,
+                                kind="chunk",
+                                data=data,
+                                total_chunks=total_chunks,
+                            ),
+                        )
+                if sequence != total_chunks:
+                    raise ValueError("output file changed size while streaming")
+                await self._send_output_packet(
+                    sender,
+                    OutputMediaPacket(
+                        source_node=self.node_id,
+                        target_node=owner_node,
+                        command_id=command_id,
+                        model=model,
+                        purpose=purpose,  # pyright: ignore[reportArgumentType]
+                        sequence=total_chunks + 1,
+                        kind="completed",
+                        total_chunks=total_chunks,
+                        total_bytes=size_bytes,
+                        sha256=sha256,
+                    ),
+                )
+        except anyio.get_cancelled_exc_class():
+            self._output_media_aborted.discard(command_id)
+            raise
+        except Exception as error:  # noqa: BLE001 - transport boundary
+            logger.opt(exception=error).warning(
+                f"Video output delivery failed for command {command_id}"
+            )
+            with suppress(BrokenResourceError, ClosedResourceError, WouldBlock):
+                with anyio.move_on_after(2, shield=True):
+                    await sender.send(
+                        OutputMediaPacket(
+                            source_node=self.node_id,
+                            target_node=owner_node,
+                            command_id=command_id,
+                            model=model,
+                            purpose="video",
+                            sequence=0,
+                            kind="transport_failed",
+                            error_message=f"video output delivery failed: {error}"[
+                                :1024
+                            ],
+                        )
+                    )
+            self._finish_video_output(command_id)
+        finally:
+            self._output_media_aborted.discard(command_id)
+
+    async def _send_output_packet(
+        self, sender: Sender[OutputMediaPacket], packet: OutputMediaPacket
+    ) -> None:
+        """Send one frame with a bounded wait so a stuck owner cannot pin the worker."""
+
+        with fail_after(_OUTPUT_MEDIA_SEND_TIMEOUT_SECONDS):
+            await sender.send(packet)
+
+    def _finish_video_output(self, command_id: CommandId) -> None:
+        """Release the local copy of a delivered, failed, or abandoned output.
+
+        The abort marker is deliberately left in place: the sending coroutine
+        checks it between chunks and clears it itself when it exits, so a
+        cancelled multi-gigabyte stream actually stops instead of running to
+        the end against a receiver that ignores it.
+        """
+
+        self._output_media_pending.pop(command_id, None)
+        shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
+        shutil.rmtree(SKULK_MUSIC_OUTPUT_DIR / str(command_id), ignore_errors=True)
+
+    async def _output_media_packet_ingress(self) -> None:
+        """Consume the owning API's verification of delivered video output."""
+
+        assert self._output_media_packet_receiver is not None
+        with self._output_media_packet_receiver as packets:
+            async for packet in packets:
+                if packet.target_node != self.node_id:
+                    continue
+                pending = self._output_media_pending.get(packet.command_id)
+                if pending is None or pending[0] != packet.source_node:
+                    continue
+                if packet.kind == "accepted":
+                    # Every declared artifact must be acknowledged before the
+                    # local directory goes away, or a still-streaming thumbnail
+                    # loses its source file mid-transfer.
+                    pending[2].discard(packet.purpose)
+                    if not pending[2]:
+                        self._finish_video_output(packet.command_id)
+                elif packet.kind in ("transport_failed", "cancelled"):
+                    self._output_media_aborted.add(packet.command_id)
+                    self._finish_video_output(packet.command_id)
+
+    async def _output_media_janitor(self) -> None:
+        """Drop local output copies the owning API never acknowledged."""
+
+        while True:
+            await anyio.sleep(15)
+            now = time.monotonic()
+            for command_id, (_owner, deadline, _remaining) in list(
+                self._output_media_pending.items()
+            ):
+                if deadline <= now:
+                    logger.warning(
+                        "Video output for command "
+                        f"{command_id} was never acknowledged; releasing local copy"
+                    )
+                    self._output_media_aborted.add(command_id)
+                    self._finish_video_output(command_id)
+
+    async def _reference_media_janitor(self) -> None:
+        """Fail video tasks whose attachments never arrive from the owning API.
+
+        The vision janitor only sees streams that opened. A task whose owner
+        vanished after placement has no stream at all, so its lease is keyed
+        on the replicated task instead.
+        """
+
+        while True:
+            await anyio.sleep(5)
+            now = time.monotonic()
+            awaiting: set[CommandId] = set()
+            for task in self.state.tasks.values():
+                if (
+                    isinstance(task, VideoGeneration)
+                    and task.task_status == TaskStatus.Pending
+                    and task.task_params.total_input_chunks > 0
+                    and task.command_id not in self._reference_media_ready
+                    and task.instance_id in self.state.instances
+                    and self.node_id
+                    in self.state.instances[task.instance_id].shard_assignments.node_to_runner
+                ):
+                    awaiting.add(task.command_id)
+                    self._reference_media_awaited.setdefault(task.command_id, now)
+            for command_id in [key for key in self._reference_media_awaited if key not in awaiting]:
+                self._reference_media_awaited.pop(command_id, None)
+            for command_id, since in list(self._reference_media_awaited.items()):
+                if now - since < _VISION_MEDIA_PENDING_TTL_SECONDS:
+                    continue
+                self._reference_media_awaited.pop(command_id, None)
+                task = next(
+                    (
+                        candidate
+                        for candidate in self.state.tasks.values()
+                        if isinstance(candidate, VideoGeneration)
+                        and candidate.command_id == command_id
+                    ),
+                    None,
+                )
+                if task is None:
+                    continue
+                self._clear_vision_media(command_id)
+                await self.event_sender.send(
+                    TaskFailed(
+                        task_id=task.task_id,
+                        error_type="reference_media_timeout",
+                        error_message=(
+                            "Reference media for the video task never arrived from "
+                            "the owning API node"
+                        ),
+                    )
+                )
 
     async def _vision_media_janitor(self) -> None:
         """Reject incomplete image streams after their bounded lifetime."""
@@ -1517,8 +2661,7 @@ class Worker:
             active_api_bytes=0,
             pending_worker_acknowledgements=0,
             active_streams=len(
-                self._vision_media_pending_since.keys()
-                | self._vision_media_accepted
+                self._vision_media_pending_since.keys() | self._vision_media_accepted
             ),
             pending_frames=sum(
                 len(chunks) for chunks in self._vision_media_chunks.values()
@@ -1540,9 +2683,7 @@ class Worker:
         self._speech_media_pending_bytes.pop(command_id, None)
         self._speech_media_pending_since.pop(command_id, None)
 
-    def _track_pending_transcription_media(
-        self, task: AudioTranscription
-    ) -> None:
+    def _track_pending_transcription_media(self, task: AudioTranscription) -> None:
         """Start the media deadline for one active local batch STT task."""
 
         instance = self.state.instances.get(task.instance_id)
@@ -1614,9 +2755,7 @@ class Worker:
                         )
                     )
 
-    async def _route_realtime_audio_frame(
-        self, frame: RealtimeAudioInputFrame
-    ) -> None:
+    async def _route_realtime_audio_frame(self, frame: RealtimeAudioInputFrame) -> None:
         """Route one local or remote frame through shared bounded worker state."""
 
         if frame.command_id in self._realtime_finished_commands:
@@ -1755,6 +2894,27 @@ class Worker:
                 self.state = apply(self.state, event=event)
                 event = event.event
 
+                if (
+                    isinstance(event, AudioCppPreparationRequested)
+                    and event.target_node == self.node_id
+                    and event.expires_at > time.time()
+                ):
+                    self._tg.start_soon(self._prepare_audio_cpp_engine, event)
+
+                if isinstance(
+                    event, (ModelTrustApprovalChanged, StateSnapshotHydrated)
+                ):
+                    try:
+                        persist_model_trust_config(
+                            resolve_config_path(),
+                            self.state.model_trust_approved_remote_code_identities,
+                        )
+                    except (OSError, ValueError):
+                        logger.exception(
+                            "Worker failed to persist master-ordered model trust; "
+                            "replicated State still gates runner creation and load"
+                        )
+
                 # A confirmation is scoped to the event-log state that echoed
                 # it. Election bootstrap can briefly let this worker confirm a
                 # connectivity reading against a transient master, then replace
@@ -1782,7 +2942,6 @@ class Worker:
                 # and --no-worker nodes (#279 slice 2).
                 if self._telemetry_view is not None:
                     record_membership_from_event(self._telemetry_view, event)
-
 
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, (TextGeneration, ImageEdits)
@@ -1846,6 +3005,10 @@ class Worker:
                     try:
                         await event.model_card.save_to_custom_dir()
                         add_to_card_cache(event.model_card)
+                        if event.mutation_command_id is not None:
+                            record_custom_card_mutation_applied(
+                                event.mutation_command_id
+                            )
                     except Exception:
                         logger.exception(
                             f"Failed to save custom model card (model_id={event.model_card.model_id})"
@@ -1854,6 +3017,10 @@ class Worker:
                 if isinstance(event, CustomModelCardDeleted):
                     try:
                         await delete_custom_card(event.model_id)
+                        if event.mutation_command_id is not None:
+                            record_custom_card_mutation_applied(
+                                event.mutation_command_id
+                            )
                     except Exception:
                         logger.exception(
                             f"Failed to delete custom model card (model_id={event.model_id})"
@@ -1871,9 +3038,28 @@ class Worker:
             await anyio.sleep(0.1)
             # Bound the crash breaker's memory: drop entries for instances that
             # no longer exist. We deliberately don't clear on give-up (that would
-            # let a lingering instance re-trip and re-send DeleteInstance), so
+            # let a lingering instance re-trip and re-send FailInstance), so
             # this is where dead-instance keys are reclaimed.
             self._crash_breaker.retain(self.state.instances)
+            self._refresh_in_use_markers()
+            self._model_trust_failures_handled.intersection_update(self.state.instances)
+
+            for (
+                trust_instance_id,
+                trust_model_id,
+                trust_error,
+            ) in model_trust_failed_live_instances(self.runners, self.state.instances):
+                if trust_instance_id not in self._model_trust_failures_handled:
+                    self._model_trust_failures_handled.add(trust_instance_id)
+                    logger.error(
+                        f"Worker: model trust rejection for instance "
+                        f"{trust_instance_id}: {trust_error}"
+                    )
+                    await self._give_up_on_instance(
+                        trust_instance_id,
+                        _model_trust_instance_failure_message(trust_model_id),
+                        error_code="model_trust_rejected",
+                    )
 
             # Wedge-marked LOCAL runner deaths give their instance up here, on
             # observation (see _wedged_live_instances). The breaker's
@@ -1889,6 +3075,7 @@ class Worker:
                         "wedge attempt leaks wired GPU memory. If this node's "
                         "available memory dropped, a reboot is the only way "
                         "to reclaim it.",
+                        error_code="runner_wedged",
                     )
 
             # First-report deadline (#272): a runner frozen between spawn and its
@@ -1910,6 +3097,7 @@ class Worker:
                         f"within {_RUNNER_FIRST_REPORT_DEADLINE_SECONDS:.0f}s of "
                         "spawn (suspected frozen process); giving up so it does "
                         "not stall pre-init coordination forever.",
+                        error_code="runner_unresponsive",
                     )
 
             task = await self._plan_next_task_with_staging_guard()
@@ -1933,24 +3121,22 @@ class Worker:
                     model_id = shard.model_card.model_id
                     self._download_backoff.record_attempt(model_id)
 
-                    found_path = resolve_model_in_path(
-                        model_id, shard.model_card.source_revision
-                    )
+                    # Only a base whose declared companions are on disk too
+                    # is already installed; otherwise the coordinator's
+                    # download path fetches what is missing.
+                    found_path = installed_artifact_in_path(shard.model_card)
                     if found_path is not None:
                         logger.info(
                             f"Model {model_id} found in SKULK_MODELS_PATH at {found_path}"
                         )
-                        await self.event_sender.send(
-                            NodeDownloadProgress(
-                                download_progress=DownloadCompleted(
-                                    node_id=self.node_id,
-                                    shard_metadata=shard,
-                                    model_directory=str(found_path),
-                                    total=shard.model_card.storage_size,
-                                    read_only=True,
-                                )
-                            )
-                        )
+                        # Attempt-identity stamping matters here; see
+                        # already_present_download_events.
+                        for event in already_present_download_events(
+                            node_id=self.node_id,
+                            shard=shard,
+                            model_directory=str(found_path),
+                        ):
+                            await self.event_sender.send(event)
                         await self.event_sender.send(
                             TaskStatusUpdated(
                                 task_id=task.task_id,
@@ -1981,13 +3167,28 @@ class Worker:
                     # be retried), keep the files so the next runner can find them.
                     instance_deleted = task.instance_id not in self.state.instances
                     try:
-                        # Acknowledgement only means the subprocess received the
-                        # shutdown task. Wait for its terminal status before
-                        # cancelling the supervisor; otherwise cancellation can
-                        # close the event pipe between ACK and Complete, leaving
-                        # a permanently running lifecycle task in cluster state.
-                        with fail_after(15):
-                            await runner.start_task(task, wait_for_terminal=True)
+                        if not runner.process_alive():
+                            # A runner that already died cannot acknowledge its
+                            # shutdown; record the task done rather than waiting
+                            # out the deadline, and go straight to the retry or
+                            # give-up decision below. Supervisor teardown may
+                            # already have closed the process object, which
+                            # process_alive() reads as dead rather than raising.
+                            await self.event_sender.send(
+                                TaskStatusUpdated(
+                                    task_id=task.task_id,
+                                    task_status=TaskStatus.Complete,
+                                )
+                            )
+                        else:
+                            # Acknowledgement only means the subprocess received
+                            # the shutdown task. Wait for its terminal status
+                            # before cancelling the supervisor; otherwise
+                            # cancellation can close the event pipe between ACK
+                            # and Complete, leaving a permanently running
+                            # lifecycle task in cluster state.
+                            with fail_after(15):
+                                await runner.start_task(task, wait_for_terminal=True)
                     except TimeoutError:
                         await self.event_sender.send(
                             TaskStatusUpdated(
@@ -2015,6 +3216,7 @@ class Worker:
                                 "wedge attempt leaks wired GPU memory. If this "
                                 "node's available memory dropped, a reboot is "
                                 "the only way to reclaim it.",
+                                error_code="runner_wedged",
                             )
                         elif self._crash_breaker.record(task.instance_id):
                             # Runner keeps crashing (e.g. OOM on load). Give up
@@ -2026,6 +3228,7 @@ class Worker:
                                 f"{_RUNNER_CRASH_THRESHOLD}x within "
                                 f"{_RUNNER_CRASH_WINDOW_SECONDS:.0f}s "
                                 "(likely insufficient memory)",
+                                error_code="runner_crashed",
                             )
                         else:
                             # Runner crashed but instance still exists and the
@@ -2065,8 +3268,7 @@ class Worker:
                         or completed.model != ModelId(task.task_params.model)
                         or task.owner_node is None
                         or completed.source_node != task.owner_node
-                        or completed.total_chunks
-                        != task.task_params.total_input_chunks
+                        or completed.total_chunks != task.task_params.total_input_chunks
                         or completed.image_count != 1
                         or {chunk.image_index for chunk in chunks.values()} != {0}
                     ):
@@ -2103,6 +3305,31 @@ class Worker:
                     self._vision_media_verified_chunks.pop(cmd_id, None)
                     self._clear_pending_vision_media(cmd_id)
                     await self._start_runner_task(modified_task)
+
+                case VideoGeneration() if task.task_params.total_input_chunks > 0:
+                    cmd_id = task.command_id
+                    directory = SKULK_VIDEO_INPUT_DIR / str(cmd_id)
+                    paths = {
+                        spec.slot: directory
+                        / f"{spec.slot}{_reference_media_extension(spec)}"
+                        for spec in task.task_params.references
+                    }
+                    if cmd_id not in self._reference_media_ready or not all(
+                        path.is_file() for path in paths.values()
+                    ):
+                        self._clear_vision_media(cmd_id)
+                        await self.event_sender.send(
+                            TaskFailed(
+                                task_id=task.task_id,
+                                error_type="invalid_reference_media",
+                                error_message=(
+                                    "Verified reference media is missing for the "
+                                    "admitted video task"
+                                ),
+                            )
+                        )
+                        continue
+                    await self._start_runner_task(_inject_reference_paths(task, paths))
 
                 case TextGeneration() if (
                     task.task_params.image_hashes
@@ -2142,8 +3369,7 @@ class Worker:
                         cached_image_indexes = set(task.task_params.image_hashes)
                         all_image_indexes = set(
                             range(
-                                task.task_params.image_count
-                                + len(cached_image_indexes)
+                                task.task_params.image_count + len(cached_image_indexes)
                             )
                         )
                         if (
@@ -2359,20 +3585,42 @@ class Worker:
                 self.state.tasks,
                 self.input_chunk_buffer,
                 self._speech_media_ready,
+                self._reference_media_ready,
             )
             if not isinstance(task, CreateRunner):
                 return task
 
             logger.info(f"Worker plan: {_summarize_worker_task(task)}")
             assert task.task_status
-            await self.event_sender.send(
-                TaskCreated(task_id=task.task_id, task=task)
-            )
+            await self.event_sender.send(TaskCreated(task_id=task.task_id, task=task))
             await self._execute_create_runner(task)
             return None
 
     async def _execute_create_runner(self, task: CreateRunner) -> None:
         """Validate and register one planned runner under the staging guard."""
+
+        try:
+            _require_worker_model_execution_identity(
+                task.bound_instance.bound_shard.model_card,
+                self.state,
+            )
+        except PermissionError as error:
+            message = _model_load_trust_failure_message(error)
+            logger.error(message)
+            await self.event_sender.send(
+                TaskStatusUpdated(
+                    task_id=task.task_id,
+                    task_status=TaskStatus.Failed,
+                )
+            )
+            await self._give_up_on_instance(
+                task.instance_id,
+                _model_trust_instance_failure_message(
+                    task.bound_instance.bound_shard.model_card.model_id
+                ),
+                error_code="model_trust_rejected",
+            )
+            return
 
         # The local fit guard sizes a shard's footprint against this node's
         # memory, but an RPC placement's shares are decided by llama.cpp at
@@ -2391,9 +3639,7 @@ class Worker:
         if fit_error is not None:
             logger.error(fit_error)
             await self.event_sender.send(
-                TaskStatusUpdated(
-                    task_id=task.task_id, task_status=TaskStatus.Failed
-                )
+                TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Failed)
             )
             # Memory refusal (not a crash/wedge): ask the master to re-place
             # wider instead of silently deleting (#290).
@@ -2414,6 +3660,39 @@ class Worker:
         if (instance := self.state.instances.get(task.instance_id)) is not None:
             runner_id = instance.shard_assignments.node_to_runner[self.node_id]
             shard = instance.shard(runner_id)
+            runner = self.runners[runner_id]
+            if isinstance(task, LoadModel) and shard is not None:
+                try:
+                    _require_worker_model_execution_identity(
+                        shard.model_card,
+                        self.state,
+                    )
+                    model_directory = build_model_path(
+                        shard.model_card.model_id,
+                        shard.model_card.source_revision,
+                    )
+                    await _require_installed_artifact_for_load(
+                        model_directory,
+                        shard.model_card,
+                    )
+                except (FileNotFoundError, PermissionError) as error:
+                    message = _model_load_trust_failure_message(error)
+                    logger.error(message)
+                    failed = RunnerFailed(error_message=message)
+                    runner.status = failed
+                    await self.event_sender.send(
+                        RunnerStatusUpdated(
+                            runner_id=runner_id,
+                            runner_status=failed,
+                        )
+                    )
+                    await self.event_sender.send(
+                        TaskStatusUpdated(
+                            task_id=task.task_id,
+                            task_status=TaskStatus.Failed,
+                        )
+                    )
+                    return
             if (
                 isinstance(task, LoadModel)
                 and shard is not None
@@ -2456,7 +3735,6 @@ class Worker:
                 f"device_rank={shard.device_rank if shard is not None else 'unknown'}, "
                 f"world_size={shard.world_size if shard is not None else 'unknown'})"
             )
-            runner = self.runners[runner_id]
             if isinstance(task, RealtimeAudioTranscription):
                 command_id = task.command_id
                 try:
@@ -2523,6 +3801,8 @@ class Worker:
             trace_sender=self._trace_data_sender.clone()
             if self._trace_data_sender is not None
             else None,
+            on_video_output=self._schedule_video_output_transfer,
+            on_music_output=self._schedule_music_output_transfer,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)
@@ -2578,17 +3858,32 @@ class Worker:
         )
 
     def _models_in_use(self) -> frozenset[str]:
-        """Repo-form IDs of every model a live runner depends on.
+        """Repo-form IDs of every model this node must keep staged.
 
-        Includes companion repos (MTP sidecar, assistant, split vision
-        weights) of active models: no instance names them directly, but
-        evicting one corrupts a live runner just the same - MLX loads
-        weights lazily.
+        A live runner's model, including companion repos (MTP sidecar,
+        assistant, split vision weights) of active models: no instance
+        names them directly, but evicting one corrupts a live runner just
+        the same - MLX loads weights lazily. Also every model, with its
+        companions, that an instance placed on this node will load, whether
+        or not its runner exists yet: a runner being retried comes back for
+        exactly these files. An RPC donor never reads the model, so its
+        shard protects nothing.
         """
 
         in_use: set[str] = set()
         for runner in self.runners.values():
-            in_use.update(_staging_model_ids(runner.shard_metadata.model_card))
+            in_use.update(_staged_model_ids_for(runner.shard_metadata))
+        for instance in self.state.instances.values():
+            placed_runner_id = instance.shard_assignments.node_to_runner.get(
+                self.node_id
+            )
+            placed_shard = (
+                instance.shard(placed_runner_id)
+                if placed_runner_id is not None
+                else None
+            )
+            if placed_shard is not None:
+                in_use.update(_staged_model_ids_for(placed_shard))
         # A store-backed download in progress has already created its
         # staging directory but no runner exists yet - a concurrent
         # teardown's budget pass must not delete a directory that is
@@ -2818,6 +4113,7 @@ class Worker:
         required_free_bytes: int = 0,
         enforce_recent_budget: bool = True,
         fail_on_error: bool = False,
+        protect_used_since: float | None = None,
     ) -> StagingEvictionReport | None:
         """Run one staging-budget or capacity enforcement pass.
 
@@ -2856,6 +4152,7 @@ class Worker:
                 models_in_use,
                 required_free_bytes=required_free_bytes,
                 enforce_recent_budget=enforce_recent_budget,
+                protect_used_since=protect_used_since,
             )
         except Exception as exc:
             logger.warning(f"Worker: staging budget enforcement failed: {exc}")
@@ -2951,22 +4248,54 @@ class Worker:
         if not self._stale_downloads_pending_reset:
             self._stale_reset_wait_ticks = 0
 
+    def _refresh_in_use_markers(self) -> None:
+        """Keep the recency marker of every in-use staged model current.
+
+        A runner that stops without a planned shutdown (a process restart, a
+        crash, or the election winner recreating its worker) never refreshes
+        its model's marker, which otherwise records only when it was loaded.
+        Refreshing while in use lets the next startup pass tell the models
+        that were serving from the idle tail
+        (``STARTUP_RECENT_USE_GRACE_SECONDS``).
+        """
+        if self._staging_config is None or not self._staging_config.enabled:
+            return
+        now = time.monotonic()
+        last_refresh = self._in_use_markers_refreshed_at
+        if (
+            last_refresh is not None
+            and now - last_refresh < _IN_USE_MARKER_REFRESH_SECONDS
+        ):
+            return
+        self._in_use_markers_refreshed_at = now
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        for model_id in self._models_in_use():
+            staged_dir = cache_path / staging_directory_name(model_id)
+            if staged_dir.is_dir():
+                touch_last_used(staged_dir)
+
     def _reconcile_staging_on_startup(self) -> None:
-        """Reconcile staging orphans left by a crashed or killed session.
+        """Reconcile staging orphans left by a crashed or replaced session.
 
         A node that dies never runs the deactivate-time eviction, so its
-        staged copies survive forever without this. At startup nothing is
-        in use yet, so every staged model is a candidate and the grace
-        budget alone decides what survives - which is exactly the crash
-        recovery behavior we want: recent models stay warm for the
-        restart, the old tail goes.
+        staged copies survive forever without this. At startup no runner
+        exists, and after a process restart the node id is new, so neither
+        live runners nor the placements in state can say what was serving.
+        The recency markers can: in-use models refresh theirs every minute,
+        so a model used within ``STARTUP_RECENT_USE_GRACE_SECONDS`` is kept
+        whatever its size, for the re-placement a restart or a master change
+        brings straight back. Every older staged model competes for the
+        grace budget, newest first, and the old tail goes.
         """
         if (
             self._staging_config is None
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
-        report = self._enforce_staging_budget(self._models_in_use())
+        report = self._enforce_staging_budget(
+            self._models_in_use(),
+            protect_used_since=time.time() - STARTUP_RECENT_USE_GRACE_SECONDS,
+        )
         if report is not None and report.evicted_model_ids:
             logger.info(
                 "Worker: startup staging reconciliation evicted "
@@ -3010,9 +4339,7 @@ class Worker:
         if isinstance(parsed, ipaddress.IPv4Address):
             return Multiaddr(address=f"/ip4/{ip}/tcp/{port}")
         return Multiaddr(
-            address=(
-                f"/ip6/{ip}/tcp/{port}" if ":" in ip else f"/ip4/{ip}/tcp/{port}"
-            )
+            address=(f"/ip6/{ip}/tcp/{port}" if ":" in ip else f"/ip4/{ip}/tcp/{port}")
         )
 
     def _session_edge_may_emit(self, peer: NodeId) -> bool:
@@ -3025,9 +4352,7 @@ class Worker:
         endpoint memory is emitted by the self-heal sweep once membership
         (re)appears on both ends (PR #674 review).
         """
-        return (
-            self.node_id in self.state.last_seen and peer in self.state.last_seen
-        )
+        return self.node_id in self.state.last_seen and peer in self.state.last_seen
 
     def _session_edges_missing_from_state(self) -> list[Connection]:
         """Live session edges this worker emitted that replicated state lost.
@@ -3085,6 +4410,20 @@ class Worker:
         return stale
 
     async def _session_edge_ingress(self) -> None:
+        """Record libp2p sessions as topology paths until the event channel closes.
+
+        See ``_session_edge_ingress_loop``. On a master change the node shuts
+        this worker's event router down before replacing the worker, and a
+        peer restart is exactly when connection updates arrive; a send in
+        that window finds the channel closed. That ends this task quietly
+        instead of failing the worker's task group and, with it, the node.
+        """
+        try:
+            await self._session_edge_ingress_loop()
+        except (BrokenResourceError, ClosedResourceError):
+            logger.debug("session-edge ingress stopped: worker event channel closed")
+
+    async def _session_edge_ingress_loop(self) -> None:
         """Record authenticated libp2p sessions as topology paths (#662).
 
         The connectivity graph was built exclusively from HTTP probes of
@@ -3169,9 +4508,7 @@ class Worker:
                         continue
                     await self.event_sender.send(
                         TopologyEdgeCreated(
-                            conn=Connection(
-                                source=self.node_id, sink=peer, edge=edge
-                            )
+                            conn=Connection(source=self.node_id, sink=peer, edge=edge)
                         )
                     )
                 else:
@@ -3204,7 +4541,22 @@ class Worker:
     _PROBE_BACKOFF_AFTER_FAILURES = 3
     _PROBE_BACKOFF_RETRY_ROUNDS = 6
 
-    async def _poll_connection_updates(self):
+    async def _poll_connection_updates(self) -> None:
+        """Probe and heal topology edges until the worker's event channel closes.
+
+        See ``_poll_connection_updates_loop``. The node closes this worker's
+        event router before replacing the worker on a master change; a sweep
+        that sends in that window ends here quietly rather than failing the
+        worker's task group, which took the whole node down on a peer
+        restart and dropped every instance it hosted.
+        """
+        try:
+            await self._poll_connection_updates_loop()
+        except (BrokenResourceError, ClosedResourceError):
+            logger.debug("topology probing stopped: worker event channel closed")
+
+    async def _poll_connection_updates_loop(self) -> None:
+        """Probe advertised peer addresses and reconcile this node's topology edges."""
         probe_failures: defaultdict[str, int] = defaultdict(int)
         sweep_index = 0
         while True:
@@ -3313,9 +4665,7 @@ class Worker:
                     or not self._session_edge_may_emit(healed.sink)
                 ):
                     continue
-                logger.debug(
-                    f"re-emitting live session edge lost from state: {healed}"
-                )
+                logger.debug(f"re-emitting live session edge lost from state: {healed}")
                 await self.event_sender.send(TopologyEdgeCreated(conn=healed))
             for stale in self._session_edges_stale_in_state():
                 logger.debug(f"deleting session edge no longer backed: {stale}")

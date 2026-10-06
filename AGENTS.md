@@ -108,7 +108,12 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`**: in-process MLX on Apple Silicon; owns the generation loop,
-  multi-node ring, and MTP/speculative decoding.
+  multi-node ring, and MTP/speculative decoding. Tool-call recovery wires
+  per-dialect parsers onto the tokenizer by template truth (generic
+  `<tool_call>`, Llama's unmarked form, gemma4, and Mistral `[TOOL_CALLS]`,
+  which replaces mlx-lm's preinstalled family parser and falls back to it for
+  the upstream call form; ids are digest-normalized to Mistral's
+  nine-alphanumeric template requirement at render time).
 - **`mlx_audio`**: single-node speech backend vocabulary for upstream
   `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
   `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve
@@ -215,14 +220,20 @@ TTS cards may declare `audio.voices`, optional bundled `reference_profile`
 identifiers, plus a validated `audio.default_voice`, which the API applies only
 when callers omit `voice`.
 
-**Model truth vs platform truth:** a card's `compatible_backends` declares which
-engines the model's artifacts run on (MODEL truth) and must never encode a gap
-in Skulk's own runners (PLATFORM truth). Platform limitations live in code:
-`platform_compatible_backends` in `src/skulk/shared/backends.py` (currently:
-served `llama_server` vision cards are gated off served engines; TTS/STT cards
-are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the
-worker's fallback probe both apply the filter. When a runner gains a
-capability, flip the code table; do not sweep cards.
+**Four compatibility truth layers:** signed registry capability claims describe
+intrinsic model behavior and selected-artifact completeness; signed engine
+support claims establish compatibility for one exact architecture, artifact,
+quantization, capability, engine build, and optional hardware class;
+`NodeResources.engine_builds` / `hardware_classes` prove the live node match;
+and `platform_compatible_backends` applies Skulk runner limitations last.
+Empirical load/feature claims also bind the immutable card tested, and an
+artifact-scoped `incomplete` capability claim blocks matrix admission.
+Legacy card `compatible_backends` remain valid and are unioned with exact active
+`supported` matrix matches. Experimental, unsupported, stale-build, and
+hardware-mismatched claims never expand placement. The master stamps the
+resolved backend; the worker repeats the matrix check only for unstamped
+fallback. When a runner gains a capability, flip the code table; do not shrink
+model capability truth.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:
@@ -233,6 +244,70 @@ Centralized logging uses a three-layer stack:
 ## Mandatory Workflow Rules
 
 These rules apply to every change. No exceptions.
+
+### Work from `dev`, always
+
+`dev` is the baseline for day-to-day work. Cut branches from it, open pull
+requests against it, and read it whenever you need current truth:
+
+```bash
+git fetch origin dev && git checkout -b <branch> origin/dev
+```
+
+`main` is the release branch and trails `dev` by an entire release cycle -
+routinely hundreds of commits. Anything read from `main` may therefore be
+stale: file paths and line anchors, where a function lives, which subsystems
+exist at all, and whether an architectural claim still holds. This is a
+recorded failure mode, not a theoretical one - a planning pass was once
+researched entirely against `main` and had to be redone when `dev` turned out
+to be 305 commits and a minor version ahead, with a whole subsystem the
+research never saw.
+
+So: when a claim about this codebase matters, verify it on `dev`, and say which
+branch you checked.
+
+The one exception is the release cut itself: promotion pull requests from `dev`
+to `main` are opened by maintainers. This rule restates, for agents, the
+branching model already documented in
+[`CONTRIBUTING.md`](CONTRIBUTING.md) - keep the two in step if either changes.
+
+### Experimental code stays out of dev
+
+Unproven, demo-bound, or design-in-motion work never merges to dev. It lives
+on a long-lived `initiative/<name>` branch, deploys only to an isolated
+cluster segment for validation, and merges to dev only after its acceptance
+gate passes (a working demo, an explicit design sign-off, or both). "The code
+is inert" and "nothing imports it yet" are not exemptions: if the design is
+still moving, the code is experimental and dev must not carry it. Cutting the
+initiative branch, deploying it to the isolated segment, and gating the
+merge-back are part of starting the work, not cleanup afterward.
+
+### User-outcome completion gate
+
+Before implementation, state the intended user, starting state, public entry
+point, and observable successful outcome. A component milestone is not a
+completed product journey. Use the
+[release evidence checklist](website/docs/human-release-qualification.md#user-outcome-evidence-checklist)
+before claiming a feature is ready for users.
+
+- Test onboarding from an unconfigured installation, using public instructions
+  and the intended distributed artifacts. Existing internal credentials,
+  pre-enrolled clusters, private wrappers, or staff-created provisioning files
+  cannot establish self-service readiness.
+- A prerequisite counts only if the intended user can obtain it through a
+  documented, available path. Missing enrollment, permissions, provisioning,
+  packaging, or deployment blocks the corresponding user-readiness claim;
+  do not skip the journey because that prerequisite is unavailable.
+- For cross-repository delivery, keep one owner-maintained dependency/evidence
+  record in private `foxlight-docs`: each required component, accountable owner,
+  exact artifact, merge status, deployment/distribution status, acceptance
+  result, and blocker. Keep public PR summaries sanitized.
+- Report implementation, source integration, deployment, and fresh-user
+  acceptance separately. Green CI, an internal deployment, or a successful
+  preconfigured demo does not imply customer availability.
+- Component PRs may merge after their own acceptance gate passes, but must name
+  remaining user-journey blockers. This does not relax the experimental-code
+  rule or authorize deployments, spending, or tests on shared infrastructure.
 
 ### Documentation
 

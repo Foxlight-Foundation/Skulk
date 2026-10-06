@@ -107,13 +107,23 @@ if [[ "$OS" == "Linux" ]] && command -v ldconfig >/dev/null 2>&1 \
     fi
 fi
 
-if ! command -v cargo >/dev/null 2>&1 && [[ ! -x "$HOME/.cargo/bin/cargo" ]]; then
-    log "installing Rust (rustup) for the skulk networking bindings"
-    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain stable --profile minimal
-fi
-# The rustup installer puts cargo here; make it visible to uv's build backend.
+# --- Rust toolchain ---------------------------------------------------------
+
+# Interrupted rustup setup can leave executable proxies without a compiler.
+# Probe both tools before keeping the existing installation or starting uv.
 export PATH="$HOME/.cargo/bin:$PATH"
+if ! cargo --version >/dev/null 2>&1 || ! rustc --version >/dev/null 2>&1; then
+    log "installing or repairing Rust (rustup) for the skulk networking bindings"
+    if ! curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal; then
+        die "Rust toolchain setup failed; resolve the download, disk or memory error above and rerun this installer."
+    fi
+fi
+if ! cargo --version >/dev/null 2>&1 || ! rustc --version >/dev/null 2>&1; then
+    die "Rust remains unavailable after setup; inspect 'rustup show' and any RUSTUP_TOOLCHAIN override, select a working toolchain, then rerun this installer."
+fi
+
+# --- uv ---------------------------------------------------------------------
 
 if ! command -v uv >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/uv" ]]; then
     log "installing uv"
@@ -126,6 +136,15 @@ command -v uv >/dev/null 2>&1 || die "uv installation failed; see https://docs.a
 
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     log "updating existing checkout at $INSTALL_DIR (ref: $INSTALL_REF)"
+    # The dashboard build runs `npm install`, which can rewrite the lock file
+    # inside the checkout. git then refuses to switch to any release whose
+    # lock file differs, so an install that built its dashboard could never
+    # be updated by rerunning this installer. The file is a build by-product,
+    # not an operator edit, so restore it before switching.
+    if ! git -C "$INSTALL_DIR" diff --quiet HEAD -- dashboard-react/package-lock.json 2>/dev/null; then
+        log "restoring dashboard-react/package-lock.json (rewritten by the dashboard build) before switching versions"
+        git -C "$INSTALL_DIR" checkout HEAD -- dashboard-react/package-lock.json
+    fi
     git -C "$INSTALL_DIR" fetch origin "$INSTALL_REF"
     # A tag or remote-only ref may not be checkout-able by name after a bare
     # fetch; FETCH_HEAD always is, keeping re-runs idempotent for any ref.
@@ -203,6 +222,9 @@ uv sync
 # of a hardcoded one the runtime would then ignore as a pin mismatch.
 ENGINE_BUILD="$(grep -oE 'LLAMA_SERVER_PIN: Final = "b[0-9]+"' src/skulk/provisioning/manifest.py | grep -oE '[0-9]+' || true)"
 
+# Reject broken packaging revisions even when the engine build itself matches.
+CUDA_MIN_REVISION="$(grep -oE 'LLAMA_SERVER_CUDA_MIN_REVISION: Final = [0-9]+' src/skulk/provisioning/manifest.py | grep -oE '[0-9]+' || true)"
+
 # The Foxlight wheel index is the source of truth for engine wheels (the
 # CUDA wheel exceeds PyPI's per-file limit); wheels carry sigstore build
 # provenance (gh attestation verify <wheel> --owner Foxlight-Foundation).
@@ -219,11 +241,11 @@ FOXLIGHT_WHEEL_INDEX="https://wheels.foxlight.ai/simple/"
 # fallback that supplies the NVIDIA runtime dependencies.
 ENGINE_INDEX_FLAGS=(--extra-index-url "$FOXLIGHT_WHEEL_INDEX" --index-url "https://pypi.org/simple/")
 
-if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" ]]; then
+if [[ "$OS" == "Linux" ]] && [[ -z "$ENGINE_BUILD" || -z "$CUDA_MIN_REVISION" ]]; then
     warn "could not read the engine pin from the checkout; skipping engine wheel install (skulk doctor will report the outcome)"
 elif [[ "$OS" == "Linux" ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q GPU; then
     log "installing the CUDA llama-server engine wheel (engine build b$ENGINE_BUILD)"
-    if ! uv pip install "${ENGINE_INDEX_FLAGS[@]}" "skulk-llama-server-cuda==0.${ENGINE_BUILD}.*"; then
+    if ! uv pip install "${ENGINE_INDEX_FLAGS[@]}" "skulk-llama-server-cuda==0.${ENGINE_BUILD}.*,>=0.${ENGINE_BUILD}.${CUDA_MIN_REVISION}"; then
         warn "the CUDA engine wheel is unavailable (index not yet live, no network, or unsupported platform);"
         warn "trying the Vulkan engine wheel (NVIDIA GPUs run the Vulkan build on bare metal)"
         # Mirrors runtime preference: cuda wheel, then vulkan wheel, then the
@@ -277,29 +299,30 @@ if [[ "$WITH_VLLM" == "1" ]]; then
         uv venv "$VLLM_ENV" --python 3.12 --allow-existing
         # vLLM lives in its own venv and Skulk drives its CLI as an external
         # served engine (SKULK_VLLM_BIN). Validated matrix notes:
-        # - vllm 0.25.x publishes only cpu/cu129/cu130 wheels on PyPI, and the
-        #   default wheel links libcudart.so.13, which cannot import on the
-        #   CUDA 12.x drivers common on GPU clouds; the cu129 VARIANT wheel
-        #   from wheels.vllm.ai is the one that runs there (probe-validated).
-        #   0.25.1 (from 0.24.0) is the floor for the DFlash speculator
-        #   architectures (Laguna cards); the DFlash spec method itself
-        #   predates it.
+        # - vLLM's PyPI default wheel links CUDA 13 runtime libraries
+        #   (libcudart.so.13), which cannot import on the CUDA 12.x drivers
+        #   common on GPU clouds; the cu129 VARIANT wheel from wheels.vllm.ai
+        #   is the one that runs there (probe-validated on 0.25.1; 0.28.0
+        #   keeps publishing the cu129 variant). 0.25.1 remains the floor
+        #   for the DFlash speculator architectures (Laguna cards); 0.28.0
+        #   adds DFlash2 drafter checkpoints (selected by the checkpoint,
+        #   same "dflash" method string, V2 model runner auto-engaged).
         # - ninja must be resolvable by the vllm server process (FlashInfer
         #   JIT sampling kernels shell out to it); installing it into the
         #   venv suffices because the runner prepends the venv bin dir to the
         #   server's PATH.
-        # - torch backend must be cu129: vllm 0.25.1 requires
-        #   torchcodec>=0.14, which the cu128 torch index does not carry
-        #   (tops out at 0.11.1+cu128), so cu128 fails resolution outright
-        #   (fresh-box validated). DFlash cards additionally JIT their
-        #   speculator kernels through nvrtc and need a CUDA >= 12.8
-        #   toolchain on the node (12.4 headers lack __nv_fp8_e8m0).
+        # - torch backend must be cu129 (0.28.0 pairs with torch 2.13): the
+        #   cu128 torch index historically failed resolution outright
+        #   (torchcodec too old, fresh-box validated on 0.25.1). DFlash
+        #   cards additionally JIT their speculator kernels through nvrtc
+        #   and need a CUDA >= 12.8 toolchain on the node (12.4 headers
+        #   lack __nv_fp8_e8m0).
         # Default index pinned explicitly (mirroring ENGINE_INDEX_FLAGS
         # above): a host exporting UV_INDEX_URL/UV_DEFAULT_INDEX would
         # otherwise redirect dependency resolution to its own mirror.
         uv pip install --python "$VLLM_ENV/bin/python" \
-            "vllm==0.25.1+cu129" ninja \
-            --extra-index-url "https://wheels.vllm.ai/0.25.1/cu129/" \
+            "vllm==0.28.0+cu129" ninja \
+            --extra-index-url "https://wheels.vllm.ai/0.28.0/cu129/" \
             --index-url "https://pypi.org/simple/" \
             --torch-backend=cu129
         mkdir -p "$HOME/.skulk"

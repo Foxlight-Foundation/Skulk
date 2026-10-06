@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
+import { useSyncExternalStore } from 'react';
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
 

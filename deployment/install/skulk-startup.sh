@@ -96,6 +96,14 @@ run_prep() {
     # auth prompt, dirty tree) shouldn't block service start. Log the
     # exit code so an operator can spot a long-running silent failure.
     if [[ -d .git ]]; then
+        # The dashboard build below runs `npm install`, which can rewrite the
+        # lock file in this checkout. `git pull` then refuses any update that
+        # changes it, and the node silently stays on its old version. The file
+        # is a build by-product, not an operator edit, so restore it first.
+        if ! git diff --quiet HEAD -- dashboard-react/package-lock.json 2>/dev/null; then
+            log "restoring dashboard-react/package-lock.json (rewritten by the dashboard build) before git pull"
+            git checkout HEAD -- dashboard-react/package-lock.json 2>&1 | tee -a "$PREP_LOG" >&2 || true
+        fi
         log "git pull (non-fatal)"
         PRE_PULL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
         if ! git pull --ff-only 2>&1 | tee -a "$PREP_LOG" >&2; then
@@ -145,6 +153,28 @@ run_prep() {
         log "GPU llama.cpp node: 'uv sync --inexact' to preserve the source-built wheel"
         ;;
     esac
+    # install.sh deliberately installs the large, platform-specific served
+    # engine wheels after the locked project sync. They are not project
+    # dependencies, so a later exact supervised sync would otherwise prune the
+    # working engine on the first restart and silently fall back to a tarball.
+    # Detect the already-installed distributions before syncing and preserve
+    # the venv extras just as we do for source-built GPU bindings and plugins.
+    ENGINE_WHEEL_PROBE='import importlib.metadata as m, sys; names = {"skulk-llama-server-cuda", "skulk-llama-server-vulkan"}; sys.exit(0 if any((distribution.metadata.get("Name") or "").lower() in names for distribution in m.distributions()) else 1)'
+    if [ -x .venv/bin/python ] \
+        && .venv/bin/python -c "$ENGINE_WHEEL_PROBE" >/dev/null 2>&1; then
+        SYNC_FLAGS="--inexact"
+        log "managed llama-server engine wheel installed: 'uv sync --inexact' to preserve it"
+    fi
+    # Nodes carrying separately installed skulk.extensions plugins (for
+    # example the den's fabric-memory plugin) have the same shape as the
+    # GPU wheel: correct packages outside uv's locked resolution that a
+    # plain sync would prune, silently unloading the extension on every
+    # service restart. SKULK_PRESERVE_VENV_EXTRAS=1 opts the node into
+    # --inexact explicitly.
+    if [ "${SKULK_PRESERVE_VENV_EXTRAS:-}" = "1" ]; then
+        SYNC_FLAGS="--inexact"
+        log "SKULK_PRESERVE_VENV_EXTRAS=1: 'uv sync --inexact' to preserve plugin installs"
+    fi
     log "uv sync (non-fatal)"
     # shellcheck disable=SC2086
     if ! uv sync $SYNC_FLAGS 2>&1 | tee -a "$PREP_LOG" >&2; then

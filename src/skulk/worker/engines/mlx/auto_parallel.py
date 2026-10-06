@@ -281,6 +281,63 @@ class _LayerCallable(Protocol):
     def __call__(self, x: mx.array, *args: object, **kwargs: object) -> mx.array: ...
 
 
+class _ShardedQwenAttention(Protocol):
+    """Attention attributes auto-parallel rewrites when tensor-sharding Qwen MoE.
+
+    Upstream mlx-lm 0.32 leaves these attributes unannotated, so the seam
+    declares exactly what sharding reads and writes.
+    """
+
+    q_proj: nn.Module
+    k_proj: nn.Module
+    v_proj: nn.Module
+    o_proj: nn.Module
+    n_heads: int
+    n_kv_heads: int
+
+
+class _ShardedDenseAttention(Protocol):
+    """Dense Qwen attention surface for the non-MoE sharding branch."""
+
+    q_proj: nn.Module
+    k_proj: nn.Module
+    v_proj: nn.Module
+    o_proj: nn.Module
+    num_attention_heads: int
+    num_key_value_heads: int
+
+
+class _ShardedConv1d(Protocol):
+    """Depthwise conv the GDN sharding reslices channel-wise."""
+
+    weight: mx.array
+    groups: int
+
+
+class _ShardedDenseMlp(Protocol):
+    """Dense MLP surface for the non-MoE sharding branch."""
+
+    gate_proj: nn.Module
+    down_proj: nn.Module
+    up_proj: nn.Module
+
+
+class _ShardedGdnModule(Protocol):
+    """Gated-delta-net surface shared by Qwen3.5 and Qwen3-Next linear attention."""
+
+    out_proj: nn.Module
+    key_dim: int
+    value_dim: int
+    conv1d: _ShardedConv1d
+    conv_dim: int
+    num_k_heads: int
+    num_v_heads: int
+    head_k_dim: int
+    head_v_dim: int
+    A_log: mx.array
+    dt_bias: mx.array
+
+
 class _CacheContainer(Protocol):
     """Cache wrapper whose first item carries the tensor dependency."""
 
@@ -1692,29 +1749,23 @@ class QwenShardingStrategy(TensorParallelShardingStrategy):
             Qwen3MoeModel | Qwen3NextModel | Qwen3_5TextModel | Qwen3_5MoeModel,
             model,
         )
-        total = len(model.layers)
-        for i, layer in enumerate(model.layers):
+        model_layers = cast(list[nn.Module], model.layers)
+        total = len(model_layers)
+        for i, layer in enumerate(model_layers):
             eval_with_timeout(layer.parameters(), timeout_seconds / total, on_timeout)
             # Shard the self attention
             if isinstance(layer, Qwen3MoeDecoderLayer):
-                layer.self_attn.q_proj = self.all_to_sharded_linear(
-                    layer.self_attn.q_proj
-                )
-                layer.self_attn.k_proj = self.all_to_sharded_linear(
-                    layer.self_attn.k_proj
-                )
-                layer.self_attn.v_proj = self.all_to_sharded_linear(
-                    layer.self_attn.v_proj
-                )
-                layer.self_attn.o_proj = self.sharded_to_all_linear(
-                    layer.self_attn.o_proj
-                )
-                layer.self_attn.n_heads //= self.N
-                layer.self_attn.n_kv_heads //= self.N
+                attention = cast(_ShardedQwenAttention, cast(object, layer.self_attn))
+                attention.q_proj = self.all_to_sharded_linear(attention.q_proj)
+                attention.k_proj = self.all_to_sharded_linear(attention.k_proj)
+                attention.v_proj = self.all_to_sharded_linear(attention.v_proj)
+                attention.o_proj = self.sharded_to_all_linear(attention.o_proj)
+                attention.n_heads //= self.N
+                attention.n_kv_heads //= self.N
             else:
                 qwen_layer = layer
                 if hasattr(qwen_layer, "linear_attn"):
-                    linear_attn = qwen_layer.linear_attn
+                    linear_attn = cast(object, qwen_layer.linear_attn)
 
                     if hasattr(linear_attn, "in_proj_qkvz"):
                         next_linear_attn = cast(Qwen3NextGatedDeltaNet, linear_attn)
@@ -1749,7 +1800,9 @@ class QwenShardingStrategy(TensorParallelShardingStrategy):
                         qwen35_linear_attn.in_proj_a = self.all_to_sharded_linear(
                             qwen35_linear_attn.in_proj_a
                         )
-                    qwen35_or_next_linear_attn = linear_attn
+                    qwen35_or_next_linear_attn = cast(
+                        _ShardedGdnModule, linear_attn
+                    )
                     qwen35_or_next_linear_attn.out_proj = (
                         self.sharded_to_all_linear(
                             qwen35_or_next_linear_attn.out_proj
@@ -1806,31 +1859,35 @@ class QwenShardingStrategy(TensorParallelShardingStrategy):
                         + qwen35_or_next_linear_attn.value_dim
                     )
                 else:
-                    qwen_layer.self_attn.q_proj = self.all_to_sharded_linear(
-                        qwen_layer.self_attn.q_proj
+                    dense_attention = cast(
+                        _ShardedDenseAttention, cast(object, qwen_layer.self_attn)
                     )
-                    qwen_layer.self_attn.k_proj = self.all_to_sharded_linear(
-                        qwen_layer.self_attn.k_proj
+                    dense_attention.q_proj = self.all_to_sharded_linear(
+                        dense_attention.q_proj
                     )
-                    qwen_layer.self_attn.v_proj = self.all_to_sharded_linear(
-                        qwen_layer.self_attn.v_proj
+                    dense_attention.k_proj = self.all_to_sharded_linear(
+                        dense_attention.k_proj
                     )
-                    qwen_layer.self_attn.o_proj = self.sharded_to_all_linear(
-                        qwen_layer.self_attn.o_proj
+                    dense_attention.v_proj = self.all_to_sharded_linear(
+                        dense_attention.v_proj
                     )
-                    qwen_layer.self_attn.num_attention_heads //= self.N
-                    qwen_layer.self_attn.num_key_value_heads //= self.N
+                    dense_attention.o_proj = self.sharded_to_all_linear(
+                        dense_attention.o_proj
+                    )
+                    dense_attention.num_attention_heads //= self.N
+                    dense_attention.num_key_value_heads //= self.N
 
             # Shard the MoE.
+            layer_mlp = cast(object, layer.mlp)
             if isinstance(
-                layer.mlp,
+                layer_mlp,
                 (
                     Qwen3MoeSparseMoeBlock,
                     Qwen3NextSparseMoeBlock,
                     Qwen3_5SparseMoeBlock,
                 ),
-            ) or hasattr(layer.mlp, "switch_mlp"):
-                sparse_mlp = cast(Qwen3NextSparseMoeBlock, layer.mlp)
+            ) or hasattr(layer_mlp, "switch_mlp"):
+                sparse_mlp = cast(Qwen3NextSparseMoeBlock, layer_mlp)
                 self.all_to_sharded_linear_in_place(sparse_mlp.switch_mlp.gate_proj)
                 self.sharded_to_all_linear_in_place(sparse_mlp.switch_mlp.down_proj)
                 self.all_to_sharded_linear_in_place(sparse_mlp.switch_mlp.up_proj)
@@ -1852,9 +1909,10 @@ class QwenShardingStrategy(TensorParallelShardingStrategy):
 
             # Shard the MLP
             else:
-                layer.mlp.gate_proj = self.all_to_sharded_linear(layer.mlp.gate_proj)
-                layer.mlp.down_proj = self.sharded_to_all_linear(layer.mlp.down_proj)
-                layer.mlp.up_proj = self.all_to_sharded_linear(layer.mlp.up_proj)
+                dense_mlp = cast(_ShardedDenseMlp, cast(object, layer.mlp))
+                dense_mlp.gate_proj = self.all_to_sharded_linear(dense_mlp.gate_proj)
+                dense_mlp.down_proj = self.sharded_to_all_linear(dense_mlp.down_proj)
+                dense_mlp.up_proj = self.all_to_sharded_linear(dense_mlp.up_proj)
 
             mx.eval(layer)
             if on_layer_loaded is not None:

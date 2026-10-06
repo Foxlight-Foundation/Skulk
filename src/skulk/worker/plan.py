@@ -3,6 +3,8 @@
 from collections.abc import Mapping, Sequence, Set
 
 from skulk.shared.models.capabilities import is_gemma4_family
+from skulk.shared.models.model_cards import same_model_artifact
+from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.tasks import (
@@ -14,6 +16,7 @@ from skulk.shared.types.tasks import (
     ImageEdits,
     ImageGeneration,
     LoadModel,
+    MusicGeneration,
     RealtimeAudioTranscription,
     Shutdown,
     SpeechSynthesis,
@@ -23,6 +26,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextEmbedding,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -50,6 +54,7 @@ from skulk.shared.types.worker.runners import (
     RunnerWarmingUp,
 )
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata, ShardMetadata
+from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 
 
@@ -70,6 +75,7 @@ def plan(
     tasks: Mapping[TaskId, Task],
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None = None,
     speech_media_ready: Set[CommandId] | None = None,
+    reference_media_ready: Set[CommandId] | None = None,
 ) -> Task | None:
     # Python short circuiting OR logic should evaluate these sequentially.
     return (
@@ -90,8 +96,24 @@ def plan(
             all_runners,
             input_chunk_buffer or {},
             speech_media_ready or set(),
+            reference_media_ready or set(),
         )
     )
+
+
+def _retried_on_failure(status: RunnerStatus) -> bool:
+    """Whether a local runner's failure goes through shutdown and relaunch.
+
+    A GPU wedge and a model-trust refusal are terminal for the instance: the
+    worker gives the instance up as soon as it observes them, because
+    relaunching into either repeats the failure (a wedge also leaks wired GPU
+    memory each time). Every other failure is a crash the worker's circuit
+    breaker relaunches and, past its threshold, gives up.
+    """
+    if not isinstance(status, RunnerFailed):
+        return False
+    message = status.error_message or ""
+    return WEDGE_FAILURE_MARKER not in message and MODEL_TRUST_FAILURE_MARKER not in message
 
 
 def _kill_runner(
@@ -102,6 +124,13 @@ def _kill_runner(
     for runner in runners.values():
         runner_id = runner.bound_instance.bound_runner_id
         if (instance_id := runner.bound_instance.instance.instance_id) not in instances:
+            return Shutdown(instance_id=instance_id, runner_id=runner_id)
+
+        # This node's own runner failed. Nothing else would shut it down: the
+        # peer check below skips the runner itself, so a single-node instance
+        # whose runner died kept a dead supervisor behind a live instance,
+        # never relaunched and never failed.
+        if _retried_on_failure(runner.status):
             return Shutdown(instance_id=instance_id, runner_id=runner_id)
 
         for (
@@ -147,9 +176,6 @@ def _model_needs_download(
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
 ) -> DownloadModel | None:
     local_downloads = global_download_status.get(node_id, [])
-    download_status = {
-        dp.shard_metadata.model_card.model_id: dp for dp in local_downloads
-    }
 
     for runner in runners.values():
         # An RPC donor never touches the model file: the driver reads the GGUF
@@ -157,13 +183,21 @@ def _model_needs_download(
         # RunnerIdle window would plan a multi-GB download for nothing (#328).
         if _is_rpc_donor(runner):
             continue
-        model_id = runner.bound_instance.bound_shard.model_card.model_id
-        if isinstance(runner.status, RunnerIdle) and (
-            model_id not in download_status
-            or not isinstance(
-                download_status[model_id],
-                (DownloadOngoing, DownloadCompleted, DownloadFailed),
-            )
+        expected_shard = runner.bound_instance.bound_shard
+        matching_status = next(
+            (
+                progress
+                for progress in local_downloads
+                if same_model_artifact(
+                    progress.shard_metadata.model_card,
+                    expected_shard.model_card,
+                )
+            ),
+            None,
+        )
+        if isinstance(runner.status, RunnerIdle) and not isinstance(
+            matching_status,
+            (DownloadOngoing, DownloadCompleted, DownloadFailed),
         ):
             # We don't invalidate download_status randomly in case a file gets deleted on disk
             return DownloadModel(
@@ -248,7 +282,10 @@ def _load_model(
             driver_node = runner.bound_instance.bound_node_id
             driver_download_complete = driver_node in global_download_status and any(
                 isinstance(dp, DownloadCompleted)
-                and dp.shard_metadata.model_card.model_id == shard_assignments.model_id
+                and same_model_artifact(
+                    dp.shard_metadata.model_card,
+                    runner.bound_instance.bound_shard.model_card,
+                )
                 for dp in global_download_status[driver_node]
             )
             donors_ready = all(
@@ -268,7 +305,12 @@ def _load_model(
             nid in global_download_status
             and any(
                 isinstance(dp, DownloadCompleted)
-                and dp.shard_metadata.model_card.model_id == shard_assignments.model_id
+                and same_model_artifact(
+                    dp.shard_metadata.model_card,
+                    shard_assignments.runner_to_shard[
+                        shard_assignments.node_to_runner[nid]
+                    ].model_card,
+                )
                 for dp in global_download_status[nid]
             )
             for nid in shard_assignments.node_to_runner
@@ -372,6 +414,7 @@ def _pending_tasks(
     all_runners: Mapping[RunnerId, RunnerStatus],
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None,
     speech_media_ready: Set[CommandId],
+    reference_media_ready: Set[CommandId],
 ) -> Task | None:
     for task in tasks.values():
         # Forward inference tasks to runners
@@ -381,6 +424,8 @@ def _pending_tasks(
                 TextGeneration,
                 ImageGeneration,
                 ImageEdits,
+                VideoGeneration,
+                MusicGeneration,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
@@ -401,6 +446,16 @@ def _pending_tasks(
             received = len(input_chunk_buffer.get(cmd_id, {}))
             if received < expected_image_chunks:
                 continue  # Wait for all chunks to arrive
+
+        # A video render sees its attachments only after the worker verified
+        # every reference slot against the authoritative task and wrote the
+        # bytes to task-local files.
+        if (
+            isinstance(task, VideoGeneration)
+            and task.task_params.total_input_chunks > 0
+            and task.command_id not in reference_media_ready
+        ):
+            continue
 
         if (
             (

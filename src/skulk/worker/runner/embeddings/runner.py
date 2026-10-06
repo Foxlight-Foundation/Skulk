@@ -191,6 +191,12 @@ class Runner:
                     build_model_path(
                         ModelId(model_id),
                         self.shard_metadata.model_card.source_revision,
+                        (
+                            self.shard_metadata.model_card.artifact_bundle.root
+                            if self.shard_metadata.model_card.artifact_bundle
+                            is not None
+                            else None
+                        ),
                     )
                 )
                 logger.info(f"loading from local path: {local_path}")

@@ -12,9 +12,11 @@ from pathlib import Path
 
 import pytest
 
+from skulk.shared.models.model_cards import ModelId
 from skulk.store.staging_eviction import (
     LAST_USED_MARKER_FILENAME,
     MINIMUM_STAGING_FREE_DISK_BYTES,
+    StagedModelInfo,
     enforce_staging_budget,
     list_staged_models,
     model_id_from_staging_directory_name,
@@ -69,6 +71,113 @@ def test_zero_budget_is_strict_eviction(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+def test_eviction_unregisters_deleted_installed_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_directory = _stage_model(
+        tmp_path, "org/model", size_bytes=10, last_used_age_seconds=10
+    )
+    installed_model = StagedModelInfo(
+        model_id="org/model",
+        directory=str(model_directory),
+        size_bytes=10,
+        last_used_epoch_seconds=time.time() - 10,
+        installed_identity="local_test",
+    )
+    unregistered: list[str] = []
+
+    def _staged_models(
+        _root: Path,
+        _in_use: frozenset[str] = frozenset(),
+    ) -> list[StagedModelInfo]:
+        return [installed_model]
+
+    def _unregister(model_id: ModelId) -> None:
+        unregistered.append(str(model_id))
+
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.list_staged_models",
+        _staged_models,
+    )
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.unregister_installed_card_record",
+        _unregister,
+    )
+
+    enforce_staging_budget(tmp_path, keep_recent_bytes=0)
+
+    assert unregistered == ["org/model"]
+
+
+def test_unresolved_eviction_preserves_installed_truth_from_other_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated unassociated directory cannot clear a resolved alias."""
+
+    _stage_model(tmp_path, "org/model", size_bytes=10, last_used_age_seconds=10)
+    unregistered: list[str] = []
+
+    def _unregister(model_id: ModelId) -> None:
+        unregistered.append(str(model_id))
+
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.unregister_installed_card_record",
+        _unregister,
+    )
+
+    enforce_staging_budget(tmp_path, keep_recent_bytes=0)
+
+    assert unregistered == []
+
+
+def test_companion_eviction_unregisters_only_companion_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Evicting a sidecar cannot discard its surviving base-card truth."""
+
+    companion = _stage_model(
+        tmp_path,
+        "org/model-mtp",
+        size_bytes=10,
+        last_used_age_seconds=10,
+    )
+    staged_companion = StagedModelInfo(
+        model_id="org/model-mtp",
+        directory=str(companion),
+        size_bytes=10,
+        last_used_epoch_seconds=time.time() - 10,
+        installed_identity="local_companion_test",
+        artifact_role="mtp_sidecar",
+        owner_model_id="org/model",
+    )
+    unregistered: list[str] = []
+
+    def _staged_models(
+        _root: Path,
+        _in_use: frozenset[str] = frozenset(),
+    ) -> list[StagedModelInfo]:
+        return [staged_companion]
+
+    def _unregister(model_id: ModelId) -> None:
+        unregistered.append(str(model_id))
+
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.list_staged_models",
+        _staged_models,
+    )
+    monkeypatch.setattr(
+        "skulk.store.staging_eviction.unregister_installed_card_record",
+        _unregister,
+    )
+
+    enforce_staging_budget(tmp_path, keep_recent_bytes=0)
+
+    assert unregistered == ["org/model-mtp"]
+
+
 def test_in_use_models_are_never_evicted(tmp_path: Path) -> None:
     """The crash-recovery and live-runner cases: in-use models survive a
     zero budget, including companions named only by the card."""
@@ -85,6 +194,25 @@ def test_in_use_models_are_never_evicted(tmp_path: Path) -> None:
     assert report.evicted_model_ids == ["org/idle"]
     assert (tmp_path / "org--base").exists()
     assert (tmp_path / "FoxlightAI--base-mtp").exists()
+
+
+def test_recently_used_models_survive_whatever_their_size(tmp_path: Path) -> None:
+    """The startup case: a model used within the window is kept even when it
+    alone exceeds the budget, while older models still compete for it."""
+    _stage_model(tmp_path, "org/serving", size_bytes=300, last_used_age_seconds=60)
+    _stage_model(tmp_path, "org/recent-idle", size_bytes=50, last_used_age_seconds=3000)
+    _stage_model(tmp_path, "org/old-idle", size_bytes=50, last_used_age_seconds=9000)
+
+    report = enforce_staging_budget(
+        tmp_path,
+        keep_recent_bytes=60,
+        protect_used_since=time.time() - 1800,
+    )
+
+    assert report.evicted_model_ids == ["org/old-idle"]
+    assert report.retained_candidate_bytes == 50
+    assert (tmp_path / "org--serving").exists()
+    assert (tmp_path / "org--recent-idle").exists()
 
 
 def test_touch_last_used_refreshes_lru_position(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import styled, { useTheme } from 'styled-components';
 import type { Theme } from '../../theme';
 
+/** Controls the decorative floating particle mesh. */
 export interface NetworkMeshProps {
   /** Number of particles. Default 60. */
   count?: number;
@@ -32,6 +33,7 @@ interface Particle {
   vy: number;
 }
 
+/** Draw drifting particles and distance-faded links, still when reduced motion is requested. */
 export function NetworkMesh({
   count = 60,
   linkDistance = 150,
@@ -54,6 +56,7 @@ export function NetworkMesh({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     let w = 0;
     let h = 0;
 
@@ -93,6 +96,7 @@ export function NetworkMesh({
 
       // Update positions
       for (const p of particles) {
+        if (reducedMotion.matches) continue;
         p.x += p.vx;
         p.y += p.vy;
 
@@ -134,18 +138,26 @@ export function NetworkMesh({
         ctx!.fill();
       }
 
-      rafRef.current = requestAnimationFrame(tick);
+      if (!reducedMotion.matches) rafRef.current = requestAnimationFrame(tick);
+    }
+
+    function refresh() {
+      cancelAnimationFrame(rafRef.current);
+      resize();
+      tick();
     }
 
     init();
-    rafRef.current = requestAnimationFrame(tick);
-    window.addEventListener('resize', resize);
+    tick();
+    window.addEventListener('resize', refresh);
+    reducedMotion.addEventListener('change', refresh);
 
     return () => {
       cancelAnimationFrame(rafRef.current);
-      window.removeEventListener('resize', resize);
+      window.removeEventListener('resize', refresh);
+      reducedMotion.removeEventListener('change', refresh);
     };
   }, [count, linkDistance, color, lineColor, radius, speed]);
 
-  return <Canvas ref={canvasRef} className={className} />;
+  return <Canvas ref={canvasRef} className={className} aria-hidden="true" />;
 }

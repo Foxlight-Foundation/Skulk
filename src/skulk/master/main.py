@@ -1,11 +1,12 @@
 import copy
+import os
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import cast, final
+from typing import Literal, cast, final
 
 import anyio
 import yaml
@@ -14,6 +15,7 @@ from loguru import logger
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    PlacementModelCardIdentityError,
     add_instance_to_placements,
     cancel_unnecessary_downloads,
     delete_instance,
@@ -22,57 +24,89 @@ from skulk.master.placement import (
     place_instance,
     replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
+    require_instance_model_card_identity,
 )
 from skulk.master.placement_utils import (
+    carve_first_gpu_node_ids,
+    reserve_instance_vram,
+    reserve_system_ram_usage,
     unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.log_summaries import summarize_command_for_log
+from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     shard_fraction_of_model,
 )
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    VideoMode,
+    card_serves_speech,
+    get_card,
+    get_current_registry_card,
+    get_custom_card_storage_collision,
+    get_model_cards,
+    same_authorized_model_card,
+)
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
+    CancelDownload,
     CreateInstance,
+    DecideStewardAction,
     DeleteCustomModelCard,
     DeleteInstance,
     EvictStagedModel,
+    FailInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
     ImageEdits,
     ImageGeneration,
+    MusicGeneration,
     PlaceInstance,
+    PrepareAudioCpp,
+    ProposeStewardAction,
     RealtimeAudioTranscription,
     RefuseInstancePlacement,
     RequestEventLog,
     SendInputChunk,
+    SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
+    StartDownload,
     TaskCancelled,
     TaskFinished,
     TestCommand,
     TextEmbedding,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.common import CommandId, NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
+    AudioCppPreparationCompleted,
+    AudioCppPreparationRequested,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
+    InstanceCreated,
     InstanceDeleted,
+    InstanceFailureRecorded,
     LocalForwarderEvent,
+    ModelTrustApprovalChanged,
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
     NodeTimeoutEvidence,
     StagedModelEvicted,
     StateSnapshotHydrated,
+    StewardActionProposalChanged,
     TaskCreated,
     TaskDeleted,
     TaskFailed,
@@ -81,9 +115,18 @@ from skulk.shared.types.events import (
     is_persistable_control_event,
 )
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage
+from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalId,
+    StewardCancelDownloadAction,
+    StewardPlaceModelAction,
+    StewardRestartInstanceAction,
+    StewardStopInstanceAction,
+    steward_action_proposal_is_prunable,
+)
 from skulk.shared.types.tasks import (
     AudioTranscription as AudioTranscriptionTask,
 )
@@ -92,6 +135,9 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.tasks import (
     ImageGeneration as ImageGenerationTask,
+)
+from skulk.shared.types.tasks import (
+    MusicGeneration as MusicGenerationTask,
 )
 from skulk.shared.types.tasks import (
     RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
@@ -109,6 +155,9 @@ from skulk.shared.types.tasks import (
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
+from skulk.shared.types.tasks import (
+    VideoGeneration as VideoGenerationTask,
+)
 from skulk.shared.types.telemetry import (
     NODE_LIVENESS_TIMEOUT,
     TelemetryView,
@@ -116,15 +165,41 @@ from skulk.shared.types.telemetry import (
 )
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
+    DownloadCompleted,
     DownloadFailed,
     DownloadOngoing,
     DownloadPending,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import Instance, InstanceId
-from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
-from skulk.shared.types.worker.shards import RpcDonorShardMetadata
-from skulk.store.config import resolve_config_path
+from skulk.shared.types.worker.instances import (
+    Instance,
+    InstanceFailure,
+    InstanceFailureCode,
+    InstanceId,
+    InstanceMeta,
+)
+from skulk.shared.types.worker.runners import (
+    RunnerFailed,
+    RunnerId,
+    RunnerLoaded,
+    RunnerReady,
+    RunnerRunning,
+    RunnerShutdown,
+    RunnerShuttingDown,
+    RunnerStatus,
+    RunnerWarmingUp,
+)
+from skulk.shared.types.worker.shards import (
+    RpcDonorShardMetadata,
+    Sharding,
+    ShardMetadata,
+)
+from skulk.store.config import (
+    load_skulk_config,
+    persist_model_trust_config,
+    resolve_config_path,
+    served_context_default,
+)
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.disk_event_log import DiskEventLog
 from skulk.utils.event_buffer import MultiSourceBuffer
@@ -141,6 +216,9 @@ EVENT_LOG_IDLE_GROWTH_WARNING_EVENTS_PER_MINUTE = 60.0
 EVENT_LOG_GROWTH_WARNING_COOLDOWN_SECONDS = 300.0
 NON_CONTROL_EVENT_WARNING_COOLDOWN_SECONDS = 60.0
 NON_CONTROL_EVENT_WARNING_KEY_LIMIT = 256
+STEWARD_UPGRADE_STABILITY_SECONDS = 300.0
+STEWARD_UPGRADE_IDLE_SECONDS = 30.0
+STEWARD_UPGRADE_RETRY_COOLDOWN_SECONDS = 1800.0
 
 
 @final
@@ -191,6 +269,7 @@ class EventLogGrowthMonitor:
         self._last_warning_at = now
         return rate
 
+
 TOPOLOGY_SETTLE_GRACE_SECONDS = 60.0
 """How long after master start the plan loop trusts topology for pruning.
 
@@ -215,6 +294,15 @@ crediting the freed footprint over-admits the next placement and leaves the
 worker to refuse it. Placement must prefer the observed telemetry over an
 optimistic teardown credit; the worker's local guard should be a last resort,
 not the normal correction path."""
+
+RESERVATION_SETTLE_SECONDS = 5.0
+"""How long a placement stays charged against observed memory after its runners
+report loaded. A runner publishes the status the moment the model is in
+memory, while node memory telemetry is sampled on its own cadence and can be
+coalesced, so for this long after a transition this master applied the
+placement's footprint is still taken off the observed figure; after it, and
+for a runner loaded before this master watched, only the working-set ceiling
+bound remains, so a load telemetry carries is never counted twice."""
 JsonObject = dict[str, object]
 
 # API-facing task types: the ones whose loss strands an open HTTP request.
@@ -228,10 +316,144 @@ _COMMAND_TASK_TYPES = (
     SpeechSynthesisTask,
     AudioTranscriptionTask,
     RealtimeAudioTranscriptionTask,
+    MusicGenerationTask,
 )
 
 
 NODE_HEARTBEAT_GAP_WARNING = timedelta(seconds=10)
+_INSTANCE_FAILURE_MESSAGE_LIMIT = 2048
+
+
+def _node_unavailable_failure_message(node_id: NodeId, reason: str) -> str:
+    """Return a bounded liveness explanation for an unconstrained node id."""
+    prefix = "The placement was torn down because assigned node "
+    suffix = f" {reason}."
+    available_node_characters = max(
+        0, _INSTANCE_FAILURE_MESSAGE_LIMIT - len(prefix) - len(suffix)
+    )
+    return f"{prefix}{str(node_id)[:available_node_characters]}{suffix}"
+
+
+def instance_failure_event(
+    instance: Instance,
+    *,
+    error_code: InstanceFailureCode,
+    error_message: str,
+    recorded_at: datetime | None = None,
+) -> InstanceFailureRecorded:
+    """Build durable operator truth while the failed placement still exists.
+
+    Args:
+        instance: Placement whose terminal failure is being retained.
+        error_code: Stable operator-facing category for the failure.
+        error_message: Bounded, payload-safe explanation shown to operators.
+        recorded_at: Optional authoritative occurrence time. Defaults to the
+            current UTC time when omitted.
+
+    Returns:
+        A new failure event containing the placement identity and assigned
+        nodes. Constructing the event does not mutate cluster state or emit it.
+    """
+    return InstanceFailureRecorded(
+        failure=InstanceFailure(
+            instance_id=instance.instance_id,
+            model_id=instance.shard_assignments.model_id,
+            system_role=instance.system_role,
+            error_code=error_code,
+            error_message=error_message,
+            affected_node_ids=tuple(instance.shard_assignments.node_to_runner),
+            recorded_at=recorded_at or datetime.now(tz=timezone.utc),
+        )
+    )
+
+
+def dead_node_instance_failure_events(
+    state: State,
+    connected_node_ids: AbstractSet[NodeId],
+    timed_out_node_ids: AbstractSet[NodeId],
+) -> list[InstanceFailureRecorded]:
+    """Return one retained failure for every placement affected by node loss.
+
+    A timed-out node can remain in the replicated topology until
+    :class:`NodeTimedOut` applies, so topology absence alone is insufficient.
+    This helper intentionally considers both signals and leaves event emission
+    and subsequent teardown to the planning loop.
+
+    Args:
+        state: Current immutable cluster state containing live placements.
+        connected_node_ids: Nodes currently present in topology.
+        timed_out_node_ids: Nodes whose liveness evidence has expired, even if
+            their topology entry has not yet been removed.
+
+    Returns:
+        One payload-safe failure event per affected placement. The helper does
+        not mutate state, emit events, or tear down placements.
+    """
+    failures: list[InstanceFailureRecorded] = []
+    for instance in state.instances.values():
+        unavailable_nodes = sorted(
+            node_id
+            for node_id in instance.shard_assignments.node_to_runner
+            if node_id not in connected_node_ids or node_id in timed_out_node_ids
+        )
+        if not unavailable_nodes:
+            continue
+        node_id = unavailable_nodes[0]
+        reason = (
+            "timed out" if node_id in timed_out_node_ids else "left the live topology"
+        )
+        failures.append(
+            instance_failure_event(
+                instance,
+                error_code="node_unavailable",
+                error_message=_node_unavailable_failure_message(node_id, reason),
+            )
+        )
+    return failures
+
+
+_SPECIALIZED_RUNNER_TASKS: frozenset[ModelTask] = frozenset(
+    {
+        ModelTask.TextToMusic,
+        ModelTask.TextToVideo,
+        ModelTask.ImageToVideo,
+        ModelTask.ReferenceToVideo,
+        ModelTask.TextToImage,
+        ModelTask.ImageToImage,
+        ModelTask.TextEmbedding,
+    }
+)
+"""Tasks whose cards the worker routes to a non-text runner.
+
+The worker's runner bootstrap dispatches music, video, image, and embedding
+cards (and speech cards, see ``card_serves_speech``) to their own runners
+before it selects a text engine, so a card declaring any of these never
+serves text generation, whatever else it declares.
+"""
+
+
+def steward_candidate_is_servable(card: ModelCard) -> bool:
+    """Whether a configured steward candidate can actually serve steward turns.
+
+    The steward harness always dispatches text generation with server-side
+    tools. A candidate must therefore be a text-generation card that the
+    worker routes to a text runner, and its resolved capability profile must
+    support tool calling. Any other card named in ``steward_models`` would
+    place a steward that fails every turn instead of letting the walk fall
+    through to the next candidate.
+
+    Args:
+        card: The candidate's model card.
+
+    Returns:
+        True when the card can serve tool-driven steward text generation.
+    """
+    if ModelTask.TextGeneration not in card.tasks:
+        return False
+    if _SPECIALIZED_RUNNER_TASKS.intersection(card.tasks) or card_serves_speech(card):
+        return False
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    return profile.supports_tool_calling
 
 
 def _aware_timestamp(when: datetime) -> datetime:
@@ -553,6 +775,118 @@ def instances_wedged_by_download_failure(
             wedged[instance_id] = (frozenset(failed_nodes), cause)
     return wedged
 
+def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
+    """Rank viable text placements by readiness, ordinary role and active load.
+
+    A failed or shutting-down rank cannot execute queued work. Keep cold placements
+    eligible only after their initial runner status arrives and behind ready
+    capacity, and do not divert ordinary requests into
+    a resident steward when an ordinary placement is ready. Completed lifecycle
+    tasks are retained state, not outstanding inference load.
+    """
+    ranked: list[tuple[bool, bool, int, InstanceId]] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if assignments.model_id != model_id or not assignments.runner_to_shard:
+            continue
+        statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
+        if any(
+            status is None
+            or isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
+            for status in statuses
+        ):
+            continue
+        ready = all(
+            isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses
+        )
+        active = sum(
+            isinstance(task, TextGenerationTask)
+            and task.instance_id == instance.instance_id
+            and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+            for task in state.tasks.values()
+        )
+        ranked.append(
+            (not ready, instance.system_role is not None, active, instance.instance_id)
+        )
+    return [identifier for _, _, _, identifier in sorted(ranked)]
+
+
+def video_generation_instances(
+    state: State, model_id: ModelId, mode: VideoMode
+) -> list[InstanceId]:
+    """Rank viable video placements for one generation mode.
+
+    An instance qualifies only when its card declares the mode and no rank is
+    failed, stopping, or unreported; a still-loading rank may queue behind
+    ready capacity, as text routing allows. Ties break on active render load
+    and then on the instance identifier so placement is deterministic.
+    """
+    ranked: list[tuple[bool, int, str, InstanceId]] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if (
+            assignments.model_id != model_id
+            or len(assignments.runner_to_shard) != 1
+            or len(assignments.node_to_runner) != 1
+        ):
+            # Video engines are single-host; a multi-rank instance has no
+            # single output owner and never qualifies.
+            continue
+        shard = next(iter(assignments.runner_to_shard.values()))
+        video = shard.model_card.video
+        if video is None or mode not in video.modes:
+            continue
+        statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
+        if any(
+            status is None
+            or isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
+            for status in statuses
+        ):
+            continue
+        ready = all(
+            isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses
+        )
+        active = sum(
+            isinstance(task, VideoGenerationTask)
+            and task.instance_id == instance.instance_id
+            and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+            for task in state.tasks.values()
+        )
+        ranked.append((not ready, active, str(instance.instance_id), instance.instance_id))
+    return [identifier for _, _, _, identifier in sorted(ranked)]
+
+
+def music_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
+    """Rank healthy single-host music instances by readiness and active load."""
+    ranked: list[tuple[bool, int, str, InstanceId]] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if (
+            assignments.model_id != model_id
+            or len(assignments.runner_to_shard) != 1
+            or len(assignments.node_to_runner) != 1
+        ):
+            continue
+        shard = next(iter(assignments.runner_to_shard.values()))
+        if shard.model_card.music is None:
+            continue
+        statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
+        if any(
+            status is None
+            or isinstance(status, (RunnerFailed, RunnerShuttingDown, RunnerShutdown))
+            for status in statuses
+        ):
+            continue
+        ready = all(isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses)
+        active = sum(
+            isinstance(task, MusicGenerationTask)
+            and task.instance_id == instance.instance_id
+            and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+            for task in state.tasks.values()
+        )
+        ranked.append((not ready, active, str(instance.instance_id), instance.instance_id))
+    return [identifier for _, _, _, identifier in sorted(ranked)]
+
 
 class Master:
     def __init__(
@@ -571,6 +905,7 @@ class Master:
         initial_state: State | None = None,
         telemetry_view: TelemetryView | None = None,
         state_sync_store_http_host: str | None = None,
+        initial_model_trust_identities: tuple[str, ...] = (),
     ):
         self.node_id = node_id
         self.session_id = session_id
@@ -597,8 +932,62 @@ class Master:
         # hydrating) passes None and starts empty exactly as before — a
         # stale-boot winner cannot resurrect a cluster view it does not
         # have.
-        self._seed_state = initial_state
-        self.state = State(tracing_enabled=SKULK_TRACING_ENABLED)
+        initial_trust_identities = (
+            initial_state.model_trust_approved_remote_code_identities
+            if initial_state is not None
+            else initial_model_trust_identities
+        )
+        # Commands are processed serially, but their indexed echoes return on a
+        # separate task. Keep the master's authoritative decision set here so
+        # back-to-back mutations cannot each read the same stale State snapshot
+        # and accidentally resurrect a revocation or discard an approval.
+        self._model_trust_approvals = set(initial_trust_identities)
+        # Custom-card events are pass-through State events, so authoritative
+        # ownership races need a master-local ordered view. Seed aliases lazily
+        # from this node's converged card cache, then update the view before the
+        # indexed event round-trips. Indexed echoes deliberately never rewrite
+        # this view: an older echo may arrive after a newer command decision.
+        # A promoted master starts a new view and lazily seeds each alias from
+        # its node's already converged card cache before the first new command.
+        self._ordered_model_cards: dict[ModelId, ModelCard | None] = {}
+        # Local placement effects reach indexed State on another task. Reserve
+        # their GPU capacity before queuing the event so consecutive decisions
+        # cannot spend the same memory while that echo is outstanding.
+        self._pending_instance_reservations: dict[InstanceId, Instance] = {}
+        self._runner_loaded_at: dict[RunnerId, float] = {}
+        self._ordered_steward_proposals = dict(
+            initial_state.steward_action_proposals if initial_state is not None else {}
+        )
+        # Restart approval and teardown are separate indexed steps. This
+        # process-local marker prevents duplicate teardown while allowing a
+        # promoted master to reissue it once when approval survived but the
+        # original master's deletion did not reach replicated State.
+        self._steward_restart_teardown_issued: set[StewardActionProposalId] = set()
+        # A dispatched proposal is indexed before its action transitions. Keep
+        # a process-local marker so the current master waits for that echo,
+        # while a promoted master can reissue the exact command once.
+        self._steward_dispatched_effect_issued: set[StewardActionProposalId] = set()
+        self._steward_reserved_placements: dict[
+            StewardActionProposalId, dict[InstanceId, Instance]
+        ] = {}
+        self.state = State(
+            tracing_enabled=SKULK_TRACING_ENABLED,
+            model_trust_approved_remote_code_identities=tuple(
+                sorted(self._model_trust_approvals)
+            ),
+        )
+        # A cold-start trust baseline needs the same indexed delivery path as
+        # failover state. Leaving non-empty approvals only in this idx=-1 State
+        # makes state-sync followers treat it as a fresh empty snapshot; their
+        # first unrelated event then replaces the config fallback with an empty
+        # replicated set. Index the baseline as event 0 before serving sync.
+        self._seed_state = (
+            initial_state
+            if initial_state is not None
+            else self.state
+            if self._model_trust_approvals
+            else None
+        )
         self._started_monotonic = time.monotonic()
         self._tg: TaskGroup = TaskGroup()
         self.command_task_mapping: dict[CommandId, TaskId] = {}
@@ -660,6 +1049,20 @@ class Master:
         # id makes recovery fire once per wedged instance. Grows only by wedged
         # ids (rare); never reused since InstanceIds are unique.
         self._download_failure_recovered: set[InstanceId] = set()
+        # Steward invariant pacing: at most one placement attempt per minute,
+        # so an unplaceable steward (no eligible node yet) logs and retries
+        # calmly instead of hammering the planner every 10s tick.
+        self._steward_last_attempt_monotonic: float = 0.0
+        self._steward_upgrade_model: ModelId | None = None
+        self._steward_upgrade_stable_since: float | None = None
+        self._steward_upgrade_prestaged_model: ModelId | None = None
+        self._steward_upgrade_idle_since: float | None = None
+        self._steward_upgrade_replacing_instance: InstanceId | None = None
+        self._steward_upgrade_retry_after: float = 0.0
+        # Steward candidates already reported as unservable. The upgrade walk
+        # revisits the preference list on every planning tick, so the warning
+        # is logged once per candidate rather than every ten seconds.
+        self._steward_unservable_warned: set[str] = set()
         # Per-node memory (bytes) freed by a just-deleted instance. The grace
         # window is zero by default, so entries are normally pruned without being
         # applied; keeping the structure preserves one place to revisit this if
@@ -704,8 +1107,322 @@ class Master:
     def _apply_indexed_event(self, indexed: IndexedEvent) -> None:
         """Apply one durable event and synchronize the master's telemetry view."""
 
+        before = self.state.runners
         self.state = apply(self.state, indexed)
+        self._record_runner_loaded_transitions(before)
+        if isinstance(indexed.event, InstanceCreated):
+            self._pending_instance_reservations.pop(indexed.event.instance.instance_id, None)
+        elif isinstance(indexed.event, InstanceDeleted):
+            self._pending_instance_reservations.pop(indexed.event.instance_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
+        if isinstance(indexed.event, AudioCppPreparationCompleted):
+            self._record_audio_cpp_preparation(indexed.event)
+
+    def _record_audio_cpp_preparation(
+        self, event: AudioCppPreparationCompleted
+    ) -> None:
+        """Make verified resources visible to placement before broadcasting success."""
+
+        resources = event.resources
+        if (
+            not event.success
+            or resources is None
+            or event.target_node not in self.state.topology.list_nodes()
+        ):
+            return
+        if not any(
+            backend.startswith("audio_cpp-")
+            and backend in resources.engine_builds
+            for backend in resources.backends
+        ):
+            return
+        # Telemetry is lossy and can reach API and master in either order. The
+        # worker's fresh verified snapshot rides the ordered completion event,
+        # so the master's planner has the exact build before the API can send
+        # its following placement command. Ordinary telemetry continues to
+        # refresh these facts after the preparation barrier.
+        self._telemetry_view.node_resources[event.target_node] = resources
+
+    def _placement_resources_for_command(
+        self, command: PlaceInstance | CreateInstance,
+    ) -> Mapping[NodeId, NodeResources]:
+        """Overlay one verified music preparation for this placement only.
+
+        Telemetry can deliver an older resource packet after the indexed
+        preparation event. Carrying its worker-verified snapshot on the
+        following command keeps placement ordered across that race.
+        """
+
+        prepared = command.prepared_node_resources
+        if not prepared:
+            return self._telemetry_view.node_resources
+        model_id = (
+            command.model_card.model_id
+            if isinstance(command, PlaceInstance)
+            else command.instance.shard_assignments.model_id
+        )
+        card = self._ordered_placement_model_card(model_id)
+        if card is None or ModelTask.TextToMusic not in card.tasks or len(prepared) != 1:
+            raise ValueError("Prepared audio.cpp resources require one music node")
+        node_id, resources = next(iter(prepared.items()))
+        if node_id not in self.state.topology.list_nodes():
+            raise ValueError("Prepared audio.cpp node is no longer a cluster member")
+        if isinstance(command, CreateInstance) and (
+            node_id not in command.instance.shard_assignments.node_to_runner
+        ):
+            raise ValueError("Prepared audio.cpp node does not match exact placement")
+        if not any(
+            backend.startswith("audio_cpp-")
+            and backend in resources.engine_builds
+            for backend in resources.backends
+        ):
+            raise ValueError("Prepared audio.cpp resources contain no ready build")
+        return {**self._telemetry_view.node_resources, node_id: resources}
+
+    def _place_requested_instance(
+        self, command: PlaceInstance,
+    ) -> dict[InstanceId, Instance]:
+        """Place one quick command using its prepared music snapshot if present."""
+
+        self._require_ordered_place_instance_card(command)
+        resources = self._placement_resources_for_command(command)
+        credited_memory, credited_vram = self._placement_memory_inputs(
+            node_resources=resources,
+        )
+        return place_instance(
+            command,
+            self.state.topology,
+            self.state.instances,
+            credited_memory,
+            self.state.node_network,
+            required_nodes=(
+                set(command.prepared_node_resources)
+                if command.prepared_node_resources
+                else None
+            ),
+            download_status=self._effective_downloads(),
+            excluded_nodes=set(command.excluded_nodes),
+            node_resources=resources,
+            node_vram=credited_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                resources,
+                node_memory=credited_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+            served_context_default=self._served_context_default(),
+        )
+
+    def _create_requested_instance(
+        self, command: CreateInstance,
+    ) -> Mapping[InstanceId, Instance]:
+        """Validate one exact placement with its prepared music snapshot."""
+
+        self._require_ordered_create_instance_card(command)
+        resources = self._placement_resources_for_command(command)
+        credited_memory, credited_vram = self._placement_memory_inputs(
+            node_resources=resources,
+        )
+        return add_instance_to_placements(
+            command,
+            self.state.topology,
+            self.state.instances,
+            credited_memory,
+            node_vram=credited_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                resources,
+                node_memory=credited_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+            node_resources=resources,
+        )
+
+    def _record_runner_loaded_transitions(
+        self, before: Mapping[RunnerId, RunnerStatus]
+    ) -> None:
+        """Note when a runner first reports loaded, for the reservation settle.
+
+        Only a transition this master saw counts: a runner already loaded
+        when the master started has no record, and its instance reads as
+        reflected in telemetry at once rather than being charged again.
+        """
+        loaded = (RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning)
+        now = time.monotonic()
+        for runner_id, status in self.state.runners.items():
+            if isinstance(status, loaded) and not isinstance(
+                before.get(runner_id), loaded
+            ):
+                self._runner_loaded_at[runner_id] = now
+        for runner_id in list(self._runner_loaded_at):
+            if runner_id not in self.state.runners:
+                del self._runner_loaded_at[runner_id]
+
+    def _ordered_model_card(self, model_id: ModelId) -> ModelCard | None:
+        """Return model-card truth at the master's current command order."""
+        if model_id not in self._ordered_model_cards:
+            self._ordered_model_cards[model_id] = get_card(model_id)
+        registry_card = get_current_registry_card(model_id)
+        ordered = self._ordered_model_cards[model_id]
+        if registry_card is not None and (
+            ordered is None
+            or ordered.qualification_only
+            or ordered.registry_card_id is not None
+        ):
+            # Registry refreshes do not traverse the command/event stream.  Pull
+            # newer signed truth into the service-ownership view without
+            # replacing an operator-owned custom override.  Signed truth always
+            # supersedes a lifecycle-owned temporary card for future mutations.
+            self._ordered_model_cards[model_id] = registry_card
+        return self._ordered_model_cards[model_id]
+
+    def _ordered_placement_model_card(self, model_id: ModelId) -> ModelCard | None:
+        """Return authorized card truth for a placement at command order.
+
+        Registry publication can advance from generation A to B while complete
+        installed bytes deliberately keep A active until B has been staged.
+        ``get_card`` exposes that effective installed generation. Preserve it
+        for placement revalidation without letting an out-of-band custom card
+        bypass the master's ordered add/delete ownership boundary.
+
+        Args:
+            model_id: Alias whose placement card is being revalidated.
+
+        Returns:
+            The command-ordered custom card, active signed installed card, or
+            current authorized catalog card; ``None`` after an ordered removal.
+        """
+        ordered_card = self._ordered_model_card(model_id)
+        if (
+            ordered_card is None
+            or ordered_card.is_custom
+            or ordered_card.qualification_only
+        ):
+            return ordered_card
+
+        effective_card = get_card(model_id)
+        if (
+            effective_card is not None
+            and not effective_card.is_custom
+            and effective_card.registry_card_id is not None
+        ):
+            return effective_card
+        return ordered_card
+
+    def _order_custom_model_card_add(
+        self, command: AddCustomModelCard
+    ) -> CustomModelCardAdded | None:
+        """Enforce service ownership before ordering a custom-card addition."""
+        model_id = command.model_card.model_id
+        storage_collision = get_custom_card_storage_collision(model_id)
+        if storage_collision is None:
+            storage_collision = next(
+                (
+                    ordered
+                    for ordered_model_id, ordered in self._ordered_model_cards.items()
+                    if ordered is not None
+                    and ordered.is_custom
+                    and ordered_model_id != model_id
+                    and ordered_model_id.normalize() == model_id.normalize()
+                ),
+                None,
+            )
+        if storage_collision is not None:
+            logger.warning(
+                "Rejected custom model card whose persistence key belongs to "
+                f"another alias (model_id={model_id}, "
+                f"owner={storage_collision.model_id})"
+            )
+            return None
+        existing = self._ordered_model_card(model_id)
+        if (
+            command.requires_qualification_ownership
+            and existing is not None
+            and not existing.qualification_only
+        ):
+            logger.warning(
+                "Rejected qualification card addition at authoritative ordering "
+                f"boundary (model_id={model_id})"
+            )
+            return None
+        self._ordered_model_cards[model_id] = command.model_card
+        return CustomModelCardAdded(
+            model_card=command.model_card,
+            mutation_command_id=command.command_id,
+        )
+
+    def _order_custom_model_card_delete(
+        self, command: DeleteCustomModelCard
+    ) -> CustomModelCardDeleted | None:
+        """Enforce service ownership before ordering a custom-card deletion."""
+        existing = self._ordered_model_card(command.model_id)
+        if command.requires_qualification_ownership and (
+            existing is None
+            or not existing.qualification_only
+            or command.expected_qualification_card is None
+            or existing != command.expected_qualification_card
+        ):
+            logger.warning(
+                "Rejected qualification card deletion at authoritative ordering "
+                f"boundary (model_id={command.model_id})"
+            )
+            return None
+        # A retirement names the exact card it saw; the ordering boundary is the
+        # one place a concurrent replacement is visible for certain, so a card
+        # that changed since the caller looked stays.
+        if command.expected_card is not None and (
+            existing is None or existing != command.expected_card
+        ):
+            logger.warning(
+                "Rejected custom card retirement at authoritative ordering "
+                f"boundary: the card changed (model_id={command.model_id})"
+            )
+            return None
+        self._ordered_model_cards[command.model_id] = None
+        return CustomModelCardDeleted(
+            model_id=command.model_id,
+            mutation_command_id=command.command_id,
+        )
+
+    def _require_ordered_place_instance_card(self, command: PlaceInstance) -> None:
+        """Require a quick-placement command to match master-ordered card truth.
+
+        Args:
+            command: Placement command carrying the API node's selected card.
+
+        Raises:
+            PlacementModelCardIdentityError: If the card was removed or replaced
+                before the command reached the master's serialized order.
+        """
+        ordered_card = self._ordered_placement_model_card(command.model_card.model_id)
+        if ordered_card is None or not same_authorized_model_card(
+            command.model_card, ordered_card
+        ):
+            raise PlacementModelCardIdentityError(
+                "Placement model-card identity no longer matches the authorized "
+                f"catalog card for {command.model_card.model_id}. Refresh model "
+                "truth and retry."
+            )
+
+    def _require_ordered_create_instance_card(self, command: CreateInstance) -> None:
+        """Require an exact placement to match master-ordered card truth.
+
+        Args:
+            command: Exact placement command containing embedded shard cards.
+
+        Raises:
+            PlacementModelCardIdentityError: If the card was removed or replaced
+                before the command reached the master's serialized order.
+        """
+        model_id = command.instance.shard_assignments.model_id
+        ordered_card = self._ordered_placement_model_card(model_id)
+        if ordered_card is None:
+            raise PlacementModelCardIdentityError(
+                "Exact placement model-card identity is no longer present in "
+                f"the authorized catalog for {model_id}. Refresh model truth "
+                "and retry."
+            )
+        require_instance_model_card_identity(command.instance, ordered_card)
 
     def _record_freed_instance(self, instance: Instance) -> None:
         """Record a deleted instance's per-node footprint for the grace window.
@@ -723,7 +1440,12 @@ class Master:
             fraction = shard_fraction_of_model(shard)
             if fraction is None or fraction <= 0.0:
                 continue
-            footprint = estimate_shard_footprint(shard.model_card, fraction)
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+            )
             self._recently_freed_bytes.setdefault(node_id, []).append(
                 (footprint.in_bytes, deadline)
             )
@@ -742,8 +1464,124 @@ class Master:
                 del self._recently_freed_bytes[node_id]
         return credit
 
+    async def _queue_control_event(self, event: Event) -> None:
+        """Reserve a new placement before its asynchronous indexed echo returns."""
+        if isinstance(event, InstanceCreated):
+            self._pending_instance_reservations[event.instance.instance_id] = event.instance
+        await self.event_sender.send(event)
+
+    def _placement_reservations(
+        self, instances: Mapping[InstanceId, Instance]
+    ) -> dict[InstanceId, Instance]:
+        """Overlay local committed creations on a real or hypothetical placement set."""
+        reservations = dict(self._pending_instance_reservations)
+        for reservation in self._steward_reserved_placements.values():
+            reservations.update(reservation)
+        reservations.update(instances)
+        return reservations
+
+    def _unreflected_placements(
+        self, placements: Mapping[InstanceId, Instance]
+    ) -> frozenset[InstanceId]:
+        """Placements whose load telemetry cannot have shown yet.
+
+        A placement awaiting its indexed echo has no runners in state, and a
+        replicated one is still loading until every runner reports loaded or
+        beyond; memory telemetry reflects neither, so the reservation takes
+        their footprints off the observed figure as well. A runner this
+        master saw report loaded less than ``RESERVATION_SETTLE_SECONDS``
+        ago is still unreflected, since memory telemetry is sampled on its
+        own cadence; a runner loaded before this master watched has no
+        transition on record and reads as reflected at once.
+        """
+        loaded = (RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning)
+        now = time.monotonic()
+        unreflected: set[InstanceId] = set()
+        for instance_id, instance in placements.items():
+            runners = instance.shard_assignments.runner_to_shard
+            if not all(
+                isinstance(self.state.runners.get(runner_id), loaded)
+                for runner_id in runners
+            ):
+                unreflected.add(instance_id)
+                continue
+            loaded_at = [
+                self._runner_loaded_at[runner_id]
+                for runner_id in runners
+                if runner_id in self._runner_loaded_at
+            ]
+            if loaded_at and now - max(loaded_at) < RESERVATION_SETTLE_SECONDS:
+                unreflected.add(instance_id)
+        return frozenset(unreflected)
+
+    def _served_context_default(self) -> int:
+        """Fleet default served window for placements that name none.
+
+        Read at placement time from the converged cluster config, so a change
+        in Settings applies to the next placement without a restart; an
+        unreadable config falls back to the built-in default rather than
+        blocking placement.
+        """
+        try:
+            return served_context_default(load_skulk_config())
+        except Exception:
+            return served_context_default(None)
+
+    def _reserved_placement_inputs(
+        self,
+        node_memory: Mapping[NodeId, MemoryUsage],
+        placements: Mapping[InstanceId, Instance],
+        node_resources: Mapping[NodeId, NodeResources] | None = None,
+    ) -> tuple[dict[NodeId, MemoryUsage], dict[NodeId, Memory]]:
+        """Node memory and usable GPU memory net of what ``placements`` committed.
+
+        The system-RAM counterpart of the VRAM reservation, applied first: a
+        placement whose indexed echo has not returned, or whose load
+        telemetry has not shown, is charged against its node so the next
+        placement neither admits nor sizes a served window against memory
+        that is spoken for. The GPU pool is then derived from the reserved
+        memory, so a unified-memory APU's host-RAM share of the pool reflects
+        the reservation too, and the discrete-VRAM reservation is applied on
+        top as before.
+        """
+        resources = (
+            self._telemetry_view.node_resources
+            if node_resources is None else node_resources
+        )
+        unified_nodes = unified_memory_gpu_node_ids(
+            self._telemetry_view.node_system,
+            resources,
+            node_memory=node_memory,
+        )
+        vram_membership = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            resources,
+            node_memory=node_memory,
+        )
+        memory = reserve_system_ram_usage(
+            node_memory,
+            placements,
+            vram_membership,
+            unified_memory_gpu_nodes=unified_nodes,
+            carve_first_nodes=carve_first_gpu_node_ids(
+                self._telemetry_view.node_system,
+                resources,
+                node_memory=node_memory,
+            ),
+            unreflected=self._unreflected_placements(placements),
+        )
+        vram = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            resources,
+            node_memory=memory,
+            current_instances=placements,
+        )
+        return memory, vram
+
     def _placement_memory_inputs(
         self,
+        current_instances: Mapping[InstanceId, Instance] | None = None,
+        node_resources: Mapping[NodeId, NodeResources] | None = None,
     ) -> tuple[
         Mapping[NodeId, MemoryUsage],
         Mapping[NodeId, Memory],
@@ -761,15 +1599,15 @@ class Master:
         ``ram_total`` is never credited, so context-ceiling math stays anchored
         to physical capacity.
         """
+        placements = self._placement_reservations(
+            self.state.instances if current_instances is None else current_instances
+        )
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
         if not credit:
-            base_vram = usable_vram_by_node(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=base_memory,
+            return self._reserved_placement_inputs(
+                base_memory, placements, node_resources,
             )
-            return base_memory, base_vram
         # Credit the freed bytes onto each node's ram_available, clamped to
         # ram_total so credited availability never exceeds capacity (telemetry
         # may already have partly caught up, or the footprint estimate may be
@@ -795,15 +1633,665 @@ class Master:
         # figure directly: usable_vram_by_node applies its own working-set /
         # GTT ceiling, so the credited VRAM is naturally capped and can never
         # exceed the ceiling or total VRAM.
-        vram = usable_vram_by_node(
-            self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
-            node_memory=memory,
+        return self._reserved_placement_inputs(
+            memory, placements, node_resources,
         )
-        return memory, vram
+
+    def _place_for_steward_action(
+        self,
+        command: PlaceInstance,
+        current_instances: Mapping[InstanceId, Instance],
+    ) -> dict[InstanceId, Instance]:
+        """Compute one approved steward placement using authoritative inputs."""
+        self._require_ordered_place_instance_card(command)
+        credited_memory, credited_vram = self._placement_memory_inputs(
+            current_instances
+        )
+        return place_instance(
+            command,
+            self.state.topology,
+            current_instances,
+            credited_memory,
+            self.state.node_network,
+            download_status=self._effective_downloads(),
+            excluded_nodes=set(command.excluded_nodes),
+            node_resources=self._telemetry_view.node_resources,
+            node_vram=credited_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=credited_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+            served_context_default=self._served_context_default(),
+        )
+
+    async def _execute_approved_steward_action(
+        self, proposal: StewardActionProposal
+    ) -> tuple[list[Event], CommandId, Literal["approved", "dispatched"]]:
+        """Execute one approved basic action through existing typed machinery.
+
+        This method owns no free-form effects. It translates the proposal's
+        validated action union into the same placement, deletion, and download
+        commands used by ordinary operator endpoints.
+        """
+        action = proposal.action
+        if isinstance(action, StewardPlaceModelAction):
+            command = PlaceInstance(
+                model_card=action.model_card,
+                sharding=action.sharding,
+                instance_meta=action.instance_meta,
+                min_nodes=action.min_nodes,
+                excluded_nodes=list(action.excluded_nodes),
+            )
+            ordered_instances = dict(self.state.instances)
+            for reservation in self._steward_reserved_placements.values():
+                ordered_instances.update(reservation)
+            placement = self._place_for_steward_action(command, ordered_instances)
+            self._steward_reserved_placements[proposal.proposal_id] = {
+                instance_id: instance
+                for instance_id, instance in placement.items()
+                if instance_id not in ordered_instances
+            }
+            self._steward_dispatched_effect_issued.add(proposal.proposal_id)
+            return (
+                list(
+                    get_transition_events(
+                        ordered_instances, placement, self.state.tasks
+                    )
+                ),
+                command.command_id,
+                "dispatched",
+            )
+
+        if isinstance(action, StewardCancelDownloadAction):
+            active_download = any(
+                isinstance(progress, (DownloadPending, DownloadOngoing))
+                and progress.shard_metadata.model_card.model_id == action.model_id
+                and progress.attempt_id == action.attempt_id
+                for progress in self._effective_downloads().get(action.node_id, ())
+            )
+            if not active_download:
+                raise ValueError("The proposed download is no longer active")
+            command = CancelDownload(
+                target_node_id=action.node_id,
+                model_id=action.model_id,
+                attempt_id=action.attempt_id,
+            )
+            return [], command.command_id, "approved"
+
+        instance_id = action.instance.instance_id
+        model_id = action.instance.shard_assignments.model_id
+        instance = self.state.instances.get(instance_id)
+        if instance is None:
+            raise ValueError("The proposed instance no longer exists")
+        if instance.system_role is not None:
+            raise ValueError("System placements cannot be changed by steward actions")
+        if instance.shard_assignments.model_id != model_id:
+            raise ValueError("The proposed instance now serves different model truth")
+        if instance != action.instance:
+            raise ValueError("The proposed instance intent no longer matches current state")
+        if any(
+            other.proposal_id != proposal.proposal_id
+            and other.status in {"approved", "dispatched"}
+            and isinstance(
+                other.action,
+                (StewardStopInstanceAction, StewardRestartInstanceAction),
+            )
+            and other.action.instance.instance_id == instance_id
+            for other in self._ordered_steward_proposals.values()
+        ):
+            raise ValueError("Another steward action already owns this instance")
+
+        delete_command = DeleteInstance(instance_id=instance_id)
+        if isinstance(action, StewardStopInstanceAction):
+            return [], delete_command.command_id, "dispatched"
+
+        assert isinstance(action, StewardRestartInstanceAction)
+        replacement_command = replacement_command_for_download_failed_instance(
+            action.instance, frozenset()
+        )
+        self._require_ordered_place_instance_card(replacement_command)
+        return [], delete_command.command_id, "approved"
+
+    def _prune_ordered_steward_action_proposals(self) -> None:
+        """Bound local proposals without dropping actionable recovery work."""
+        active_restart_ids = {
+            proposal.proposal_id
+            for proposal in self._ordered_steward_proposals.values()
+            if proposal.status in {"approved", "dispatched"}
+            and isinstance(proposal.action, StewardRestartInstanceAction)
+        }
+        self._steward_restart_teardown_issued.intersection_update(
+            active_restart_ids
+        )
+        dispatched_ids = {
+            proposal.proposal_id
+            for proposal in self._ordered_steward_proposals.values()
+            if proposal.status == "dispatched"
+        }
+        self._steward_dispatched_effect_issued.intersection_update(dispatched_ids)
+        self._steward_reserved_placements = {
+            proposal_id: reservation
+            for proposal_id, reservation in self._steward_reserved_placements.items()
+            if proposal_id in dispatched_ids
+        }
+        excess = len(self._ordered_steward_proposals) - 128
+        if excess <= 0:
+            return
+        terminal = sorted(
+            (
+                proposal
+                for proposal in self._ordered_steward_proposals.values()
+                if steward_action_proposal_is_prunable(
+                    proposal, datetime.now(tz=timezone.utc)
+                )
+            ),
+            key=lambda proposal: proposal.created_at,
+        )
+        for proposal in terminal[:excess]:
+            self._ordered_steward_proposals.pop(proposal.proposal_id, None)
+
+    def _expire_steward_action_proposals(
+        self, now: datetime
+    ) -> list[StewardActionProposalChanged]:
+        """Order terminal expiry for pending proposals whose deadline passed."""
+        changes: list[StewardActionProposalChanged] = []
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            if proposal.status != "pending" or proposal.expires_at > now:
+                continue
+            expired = proposal.model_copy(
+                update={
+                    "status": "expired",
+                    "decided_at": now,
+                    "decided_by": "fabric_expiry",
+                    "outcome": "The proposal expired without an operator decision.",
+                }
+            )
+            self._ordered_steward_proposals[proposal_id] = expired
+            changes.append(StewardActionProposalChanged(proposal=expired))
+        self._prune_ordered_steward_action_proposals()
+        return changes
+
+    async def _resume_approved_steward_restarts(self, now: datetime) -> None:
+        """Place approved restarts only after teardown and capacity converge."""
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            action = proposal.action
+            if proposal.status != "approved" or not isinstance(
+                action, StewardRestartInstanceAction
+            ):
+                continue
+            replicated_proposal = self.state.steward_action_proposals.get(proposal_id)
+            if (
+                replicated_proposal is None
+                or replicated_proposal.status != "approved"
+            ):
+                continue
+            decided_at = proposal.decided_at
+            if decided_at is None:
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": "Approved restart is missing its decision time.",
+                    }
+                )
+            elif os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": "Fabric actions are disabled by the global kill switch.",
+                    }
+                )
+            elif now > decided_at + timedelta(minutes=5):
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": (
+                            "Restart capacity did not become available within five minutes."
+                        ),
+                    }
+                )
+            elif action.instance.instance_id in self.state.instances:
+                current_instance = self.state.instances[action.instance.instance_id]
+                if current_instance.system_role is not None:
+                    failed = proposal.model_copy(
+                        update={
+                            "status": "failed",
+                            "outcome": (
+                                "System placements cannot be changed by steward actions."
+                            ),
+                        }
+                    )
+                elif current_instance != action.instance:
+                    failed = proposal.model_copy(
+                        update={
+                            "status": "failed",
+                            "outcome": (
+                                "The approved restart intent no longer matches current state."
+                            ),
+                        }
+                    )
+                elif proposal_id in self._steward_restart_teardown_issued:
+                    continue
+                else:
+                    replacement_command = (
+                        replacement_command_for_download_failed_instance(
+                            action.instance, frozenset()
+                        )
+                    )
+                    try:
+                        self._require_ordered_place_instance_card(replacement_command)
+                    except PlacementModelCardIdentityError as error:
+                        failed = proposal.model_copy(
+                            update={
+                                "status": "failed",
+                                "outcome": str(error)[:1024],
+                            }
+                        )
+                        self._ordered_steward_proposals[proposal_id] = failed
+                        await self._queue_control_event(
+                            StewardActionProposalChanged(proposal=failed)
+                        )
+                        continue
+                    # A promoted master can inherit the durable approval before
+                    # inheriting its predecessor's deletion. Reissue the exact
+                    # teardown once; its instance identity makes this safe and
+                    # preserves forward progress across that failover window.
+                    self._record_freed_instance(current_instance)
+                    delete_command = DeleteInstance(
+                        instance_id=current_instance.instance_id
+                    )
+                    after_delete = delete_instance(
+                        delete_command, self.state.instances
+                    )
+                    self._steward_restart_teardown_issued.add(proposal_id)
+                    for cancel_command in cancel_unnecessary_downloads(
+                        after_delete, self._effective_downloads()
+                    ):
+                        await self.download_command_sender.send(
+                            ForwarderDownloadCommand(
+                                origin=self._system_id, command=cancel_command
+                            )
+                        )
+                    for event in get_transition_events(
+                        self.state.instances, after_delete, self.state.tasks
+                    ):
+                        await self._queue_control_event(event)
+                    continue
+            else:
+                replace_command = replacement_command_for_download_failed_instance(
+                    action.instance, frozenset()
+                )
+                try:
+                    self._require_ordered_place_instance_card(replace_command)
+                    ordered_instances = dict(self.state.instances)
+                    for reservation in self._steward_reserved_placements.values():
+                        ordered_instances.update(reservation)
+                    replacement = self._place_for_steward_action(
+                        replace_command, ordered_instances
+                    )
+                    self._steward_reserved_placements[proposal_id] = {
+                        instance_id: instance
+                        for instance_id, instance in replacement.items()
+                        if instance_id not in ordered_instances
+                    }
+                except PlacementModelCardIdentityError as error:
+                    failed = proposal.model_copy(
+                        update={
+                            "status": "failed",
+                            "outcome": str(error)[:1024],
+                        }
+                    )
+                    self._ordered_steward_proposals[proposal_id] = failed
+                    await self._queue_control_event(
+                        StewardActionProposalChanged(proposal=failed)
+                    )
+                    continue
+                except PlacementError:
+                    # Teardown and memory telemetry converge independently. A
+                    # normal large model is temporarily unplaceable until the
+                    # old runner releases its allocation.
+                    continue
+                except ValueError as error:
+                    failed = proposal.model_copy(
+                        update={
+                            "status": "failed",
+                            "outcome": str(error)[:1024],
+                        }
+                    )
+                    self._ordered_steward_proposals[proposal_id] = failed
+                    await self._queue_control_event(
+                        StewardActionProposalChanged(proposal=failed)
+                    )
+                    continue
+                for cancel_command in cancel_unnecessary_downloads(
+                    replacement, self._effective_downloads()
+                ):
+                    await self.download_command_sender.send(
+                        ForwarderDownloadCommand(
+                            origin=self._system_id, command=cancel_command
+                        )
+                    )
+                dispatched = proposal.model_copy(
+                    update={
+                        "status": "dispatched",
+                        "dispatched_at": now,
+                        "command_id": replace_command.command_id,
+                        "outcome": (
+                            "Restart replacement was dispatched after teardown "
+                            "capacity became available."
+                        ),
+                    }
+                )
+                self._ordered_steward_proposals[proposal_id] = dispatched
+                self._steward_restart_teardown_issued.discard(proposal_id)
+                self._steward_dispatched_effect_issued.add(proposal_id)
+                await self._queue_control_event(
+                    StewardActionProposalChanged(proposal=dispatched)
+                )
+                for event in get_transition_events(
+                    ordered_instances, replacement, self.state.tasks
+                ):
+                    await self._queue_control_event(event)
+                continue
+            self._ordered_steward_proposals[proposal_id] = failed
+            self._steward_restart_teardown_issued.discard(proposal_id)
+            await self._queue_control_event(
+                StewardActionProposalChanged(proposal=failed)
+            )
+        self._prune_ordered_steward_action_proposals()
+
+    async def _reconcile_dispatched_steward_actions(self, now: datetime) -> None:
+        """Reissue an unreflected dispatched action once after master failover."""
+        for proposal_id, reservation in tuple(
+            self._steward_reserved_placements.items()
+        ):
+            if all(instance_id in self.state.instances for instance_id in reservation):
+                self._steward_reserved_placements.pop(proposal_id, None)
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            if (
+                proposal.status != "dispatched"
+                or proposal.command_id is None
+                or (
+                    (dispatch_started_at := proposal.dispatched_at or proposal.decided_at)
+                    is None
+                )
+                or now > dispatch_started_at + timedelta(minutes=5)
+                or proposal_id in self._steward_dispatched_effect_issued
+            ):
+                continue
+            replicated_proposal = self.state.steward_action_proposals.get(proposal_id)
+            if (
+                replicated_proposal is None
+                or replicated_proposal.status != "dispatched"
+            ):
+                continue
+            if os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": (
+                            "Fabric action recovery was blocked by the global "
+                            "kill switch."
+                        ),
+                    }
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                self._steward_reserved_placements.pop(proposal_id, None)
+                self._steward_restart_teardown_issued.discard(proposal_id)
+                self._steward_dispatched_effect_issued.add(proposal_id)
+                await self._queue_control_event(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
+            action = proposal.action
+            events: list[Event] = []
+            try:
+                if isinstance(action, StewardPlaceModelAction):
+                    expected_instance_id = InstanceId(str(proposal.command_id))
+                    if expected_instance_id in self.state.instances:
+                        continue
+                    command = PlaceInstance(
+                        command_id=proposal.command_id,
+                        model_card=action.model_card,
+                        sharding=action.sharding,
+                        instance_meta=action.instance_meta,
+                        min_nodes=action.min_nodes,
+                        excluded_nodes=list(action.excluded_nodes),
+                    )
+                    ordered_instances = dict(self.state.instances)
+                    for reservation in self._steward_reserved_placements.values():
+                        ordered_instances.update(reservation)
+                    placement = self._place_for_steward_action(command, ordered_instances)
+                    self._steward_reserved_placements[proposal_id] = {
+                        instance_id: instance
+                        for instance_id, instance in placement.items()
+                        if instance_id not in ordered_instances
+                    }
+                    events = list(
+                        get_transition_events(
+                            ordered_instances, placement, self.state.tasks
+                        )
+                    )
+                elif isinstance(action, StewardCancelDownloadAction):
+                    node_downloads = self._effective_downloads().get(
+                        action.node_id, ()
+                    )
+                    active_download = any(
+                        isinstance(progress, (DownloadPending, DownloadOngoing))
+                        and progress.shard_metadata.model_card.model_id
+                        == action.model_id
+                        and progress.attempt_id == action.attempt_id
+                        for progress in node_downloads
+                    )
+                    if not active_download:
+                        if any(
+                            isinstance(progress, (DownloadPending, DownloadOngoing))
+                            and progress.shard_metadata.model_card.model_id
+                            == action.model_id
+                            for progress in node_downloads
+                        ):
+                            raise ValueError(
+                                "The approved download attempt has been replaced"
+                            )
+                        continue
+                    self._steward_dispatched_effect_issued.add(proposal_id)
+                    await self.download_command_sender.send(
+                        ForwarderDownloadCommand(
+                            origin=self._system_id,
+                            command=CancelDownload(
+                                command_id=proposal.command_id,
+                                target_node_id=action.node_id,
+                                model_id=action.model_id,
+                                attempt_id=action.attempt_id,
+                            ),
+                        )
+                    )
+                    continue
+                elif isinstance(action, StewardStopInstanceAction):
+                    instance = self.state.instances.get(action.instance.instance_id)
+                    if instance is None:
+                        self._steward_dispatched_effect_issued.add(proposal_id)
+                        for cancel_command in cancel_unnecessary_downloads(
+                            self.state.instances, self._effective_downloads()
+                        ):
+                            await self.download_command_sender.send(
+                                ForwarderDownloadCommand(
+                                    origin=self._system_id, command=cancel_command
+                                )
+                            )
+                        continue
+                    if instance.system_role is not None:
+                        raise ValueError(
+                            "System placements cannot be changed by steward actions"
+                        )
+                    if instance != action.instance:
+                        raise ValueError(
+                            "The dispatched stop intent no longer matches current state"
+                        )
+                    after_delete = delete_instance(
+                        DeleteInstance(
+                            command_id=proposal.command_id,
+                            instance_id=action.instance.instance_id,
+                        ),
+                        self.state.instances,
+                    )
+                    self._steward_dispatched_effect_issued.add(proposal_id)
+                    for cancel_command in cancel_unnecessary_downloads(
+                        after_delete, self._effective_downloads()
+                    ):
+                        await self.download_command_sender.send(
+                            ForwarderDownloadCommand(
+                                origin=self._system_id, command=cancel_command
+                            )
+                        )
+                    events = list(
+                        get_transition_events(
+                            self.state.instances, after_delete, self.state.tasks
+                        )
+                    )
+                else:
+                    assert isinstance(action, StewardRestartInstanceAction)
+                    expected_instance_id = InstanceId(str(proposal.command_id))
+                    if expected_instance_id in self.state.instances:
+                        continue
+                    original = self.state.instances.get(action.instance.instance_id)
+                    if original is not None:
+                        if original.system_role is not None or original != action.instance:
+                            raise ValueError(
+                                "The dispatched restart intent no longer matches current state"
+                            )
+                        replacement_command = (
+                            replacement_command_for_download_failed_instance(
+                                action.instance, frozenset()
+                            ).model_copy(update={"command_id": proposal.command_id})
+                        )
+                        self._require_ordered_place_instance_card(replacement_command)
+                        if proposal_id in self._steward_restart_teardown_issued:
+                            continue
+                        after_delete = delete_instance(
+                            DeleteInstance(instance_id=original.instance_id),
+                            self.state.instances,
+                        )
+                        self._steward_restart_teardown_issued.add(proposal_id)
+                        for cancel_command in cancel_unnecessary_downloads(
+                            after_delete, self._effective_downloads()
+                        ):
+                            await self.download_command_sender.send(
+                                ForwarderDownloadCommand(
+                                    origin=self._system_id, command=cancel_command
+                                )
+                            )
+                        for event in get_transition_events(
+                            self.state.instances, after_delete, self.state.tasks
+                        ):
+                            await self._queue_control_event(event)
+                        continue
+                    replacement_command = (
+                        replacement_command_for_download_failed_instance(
+                            action.instance, frozenset()
+                        ).model_copy(update={"command_id": proposal.command_id})
+                    )
+                    ordered_instances = dict(self.state.instances)
+                    for reservation in self._steward_reserved_placements.values():
+                        ordered_instances.update(reservation)
+                    replacement = self._place_for_steward_action(
+                        replacement_command, ordered_instances
+                    )
+                    self._steward_reserved_placements[proposal_id] = {
+                        instance_id: instance
+                        for instance_id, instance in replacement.items()
+                        if instance_id not in ordered_instances
+                    }
+                    self._steward_dispatched_effect_issued.add(proposal_id)
+                    for cancel_command in cancel_unnecessary_downloads(
+                        replacement, self._effective_downloads()
+                    ):
+                        await self.download_command_sender.send(
+                            ForwarderDownloadCommand(
+                                origin=self._system_id, command=cancel_command
+                            )
+                        )
+                    events = list(
+                        get_transition_events(
+                            ordered_instances, replacement, self.state.tasks
+                        )
+                    )
+            except PlacementModelCardIdentityError as error:
+                failed = proposal.model_copy(
+                    update={"status": "failed", "outcome": str(error)[:1024]}
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                await self._queue_control_event(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
+            except PlacementError:
+                # Capacity telemetry can lag the state seed after promotion.
+                # Retry on a later planning tick within the bounded window.
+                continue
+            except ValueError as error:
+                failed = proposal.model_copy(
+                    update={"status": "failed", "outcome": str(error)[:1024]}
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                await self._queue_control_event(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
+            self._steward_dispatched_effect_issued.add(proposal_id)
+            for event in events:
+                await self._queue_control_event(event)
+        self._prune_ordered_steward_action_proposals()
+
+    async def _arm_approved_steward_download_cancellations(self) -> None:
+        """Persist cancel dispatch intent before forwarding its side effect."""
+        for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
+            if proposal.status != "approved" or not isinstance(
+                proposal.action, StewardCancelDownloadAction
+            ):
+                continue
+            replicated_proposal = self.state.steward_action_proposals.get(proposal_id)
+            if (
+                replicated_proposal is None
+                or replicated_proposal.status != "approved"
+            ):
+                # The local proposal map is updated before its event is indexed.
+                # Only arm the cancellation after approval is recoverable from
+                # replicated state, including across master promotion.
+                continue
+            if os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                failed = proposal.model_copy(
+                    update={
+                        "status": "failed",
+                        "outcome": (
+                            "Fabric actions are disabled by the global kill switch."
+                        ),
+                    }
+                )
+                self._ordered_steward_proposals[proposal_id] = failed
+                await self._queue_control_event(
+                    StewardActionProposalChanged(proposal=failed)
+                )
+                continue
+            dispatched = proposal.model_copy(
+                update={
+                    "status": "dispatched",
+                    "dispatched_at": datetime.now(tz=timezone.utc),
+                    "outcome": (
+                        "Approved cancellation was durably armed for exact-attempt "
+                        "dispatch."
+                    ),
+                }
+            )
+            self._ordered_steward_proposals[proposal_id] = dispatched
+            await self._queue_control_event(
+                StewardActionProposalChanged(proposal=dispatched)
+            )
+        self._prune_ordered_steward_action_proposals()
 
     async def _index_seed_event(self) -> None:
-        """Index the failover seed as the first event of this session (#273).
+        """Index failover or cold-start trust seed as this session's first event.
 
         Making the carried state an ordinary logged ``StateSnapshotHydrated``
         event gives every consumer exactly one delivery path: followers that
@@ -828,8 +2316,10 @@ class Master:
         self._append_event_log(indexed.event)
         await self._send_event(indexed)
         logger.info(
-            f"Indexed failover seed as event {idx}: "
-            f"{len(seed.instances)} carried instance(s)"
+            f"Indexed startup seed as event {idx}: "
+            f"{len(seed.instances)} carried instance(s), "
+            f"{len(seed.model_trust_approved_remote_code_identities)} "
+            "model trust decision(s)"
         )
 
     async def run(self):
@@ -869,35 +2359,50 @@ class Master:
                     match command:
                         case TestCommand():
                             pass
+                        case PrepareAudioCpp():
+                            if command.target_node not in self.state.topology.list_nodes():
+                                generated_events.append(AudioCppPreparationCompleted(
+                                    request_id=command.command_id,
+                                    target_node=command.target_node,
+                                    owner_node=command.owner_node,
+                                    success=False,
+                                    error="target node is not a live cluster member",
+                                ))
+                            else:
+                                generated_events.append(AudioCppPreparationRequested(
+                                    request_id=command.command_id,
+                                    target_node=command.target_node,
+                                    owner_node=command.owner_node,
+                                    variant=command.variant,
+                                    expires_at=time.time() + 300,
+                                ))
                         case TextGeneration():
-                            for instance in self.state.instances.values():
-                                if (
-                                    instance.shard_assignments.model_id
-                                    == command.task_params.model
-                                ):
-                                    task_count = sum(
-                                        1
-                                        for task in self.state.tasks.values()
-                                        if task.instance_id == instance.instance_id
-                                    )
-                                    instance_task_counts[instance.instance_id] = (
-                                        task_count
-                                    )
-
-                            if not instance_task_counts:
-                                raise ValueError(
-                                    f"No instance found for model {command.task_params.model}"
-                                )
-
-                            available_instance_ids = sorted(
-                                instance_task_counts.keys(),
-                                key=lambda instance_id: instance_task_counts[
-                                    instance_id
-                                ],
+                            eligible = text_generation_instances(
+                                self.state, command.task_params.model
                             )
-
                             task_id = TaskId()
-                            selected_instance_id = available_instance_ids[0]
+                            target_unavailable = False
+                            if command.target_instance_id is not None:
+                                selected_instance_id = command.target_instance_id
+                                target_unavailable = (
+                                    selected_instance_id not in eligible
+                                )
+                            elif eligible:
+                                selected_instance_id = eligible[0]
+                            else:
+                                # Even a vanished/all-failed model needs a terminal
+                                # task correlated to its caller. This identifier
+                                # does not create or advertise an instance.
+                                selected_instance_id = next(
+                                    (
+                                        instance.instance_id
+                                        for instance in self.state.instances.values()
+                                        if instance.shard_assignments.model_id
+                                        == command.task_params.model
+                                    ),
+                                    InstanceId(str(command.command_id)),
+                                )
+                                target_unavailable = True
                             trace_enabled = self.state.tracing_enabled
                             generated_events.append(
                                 TaskCreated(
@@ -911,7 +2416,11 @@ class Master:
                                         # Phase 2).
                                         owner_node=command.owner_node,
                                         instance_id=selected_instance_id,
-                                        task_status=TaskStatus.Pending,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if target_unavailable
+                                            else TaskStatus.Pending
+                                        ),
                                         task_params=command.task_params,
                                         trace_enabled=trace_enabled,
                                     ),
@@ -919,6 +2428,18 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
+                            if target_unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="instance_unavailable",
+                                        error_message=(
+                                            "Requested text-generation instance "
+                                            "is unavailable, has a terminal runner, "
+                                            "or does not serve the requested model"
+                                        ),
+                                    )
+                                )
                         case ImageGeneration():
                             for instance in self.state.instances.values():
                                 if (
@@ -965,6 +2486,105 @@ class Master:
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
+                        case VideoGeneration():
+                            # A video instance is single-host and serves only
+                            # the modes its card declares. Placement selects the
+                            # least-loaded instance that can serve the resolved
+                            # mode; no eligible instance yields a terminal
+                            # failed task so the caller's job ends promptly.
+                            requested_mode = command.task_params.implied_mode()
+                            video_candidates = video_generation_instances(
+                                self.state,
+                                ModelId(command.task_params.model),
+                                requested_mode,
+                            )
+                            task_id = TaskId()
+                            video_unavailable = not video_candidates
+                            selected_instance_id = (
+                                video_candidates[0]
+                                if video_candidates
+                                else next(
+                                    (
+                                        instance.instance_id
+                                        for instance in self.state.instances.values()
+                                        if instance.shard_assignments.model_id
+                                        == command.task_params.model
+                                    ),
+                                    InstanceId(str(command.command_id)),
+                                )
+                            )
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=VideoGenerationTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,
+                                        instance_id=selected_instance_id,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if video_unavailable
+                                            else TaskStatus.Pending
+                                        ),
+                                        task_params=command.task_params.model_copy(
+                                            update={"mode": requested_mode}
+                                        ),
+                                        trace_enabled=self.state.tracing_enabled,
+                                    ),
+                                )
+                            )
+                            self.command_task_mapping[command.command_id] = task_id
+                            if video_unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="video_mode_unavailable",
+                                        error_message=(
+                                            "No running instance of "
+                                            f"{command.task_params.model} serves "
+                                            f"the {requested_mode.value} mode"
+                                        ),
+                                    )
+                                )
+                        case MusicGeneration():
+                            candidates = music_generation_instances(
+                                self.state, ModelId(command.task_params.model)
+                            )
+                            task_id = TaskId()
+                            unavailable = not candidates
+                            selected_instance_id = (
+                                candidates[0]
+                                if candidates
+                                else InstanceId(str(command.command_id))
+                            )
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=MusicGenerationTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,
+                                        instance_id=selected_instance_id,
+                                        task_status=(
+                                            TaskStatus.Failed if unavailable else TaskStatus.Pending
+                                        ),
+                                        task_params=command.task_params,
+                                        trace_enabled=self.state.tracing_enabled,
+                                    ),
+                                )
+                            )
+                            self.command_task_mapping[command.command_id] = task_id
+                            if unavailable:
+                                generated_events.append(
+                                    TaskFailed(
+                                        task_id=task_id,
+                                        error_type="music_model_unavailable",
+                                        error_message=(
+                                            "No healthy single-host music instance serves "
+                                            f"{command.task_params.model}"
+                                        ),
+                                    )
+                                )
                         case ImageEdits():
                             for instance in self.state.instances.values():
                                 if (
@@ -1087,7 +2707,10 @@ class Master:
                             task_id = TaskId()
                             target_unavailable = False
                             if command.target_instance_id is not None:
-                                if command.target_instance_id not in instance_task_counts:
+                                if (
+                                    command.target_instance_id
+                                    not in instance_task_counts
+                                ):
                                     target_unavailable = True
                                 selected_instance_id = command.target_instance_id
                             else:
@@ -1259,6 +2882,172 @@ class Master:
                             generated_events.append(
                                 TracingStateChanged(enabled=command.enabled)
                             )
+                        case SetModelTrustApproval():
+                            if command.approved:
+                                self._model_trust_approvals.add(command.trust_identity)
+                            else:
+                                self._model_trust_approvals.discard(
+                                    command.trust_identity
+                                )
+                            try:
+                                persist_model_trust_config(
+                                    resolve_config_path(),
+                                    self._model_trust_approvals,
+                                )
+                            except (OSError, ValueError):
+                                # Replicated State is authoritative. A degraded
+                                # local disk must not kill the master command
+                                # processor; workers gate new runner creation
+                                # and loading from that State, while YAML remains
+                                # only the durable restart/child-process fallback.
+                                logger.exception(
+                                    "Master failed to persist model trust locally; "
+                                    "continuing with the indexed cluster decision"
+                                )
+                            generated_events.append(
+                                ModelTrustApprovalChanged(
+                                    trust_identity=command.trust_identity,
+                                    approved=command.approved,
+                                )
+                            )
+                        case ProposeStewardAction():
+                            proposal = command.proposal
+                            now = datetime.now(tz=timezone.utc)
+                            generated_events.extend(
+                                self._expire_steward_action_proposals(now)
+                            )
+                            existing = self._ordered_steward_proposals.get(
+                                proposal.proposal_id
+                            )
+                            if existing is not None:
+                                logger.info(
+                                    "Ignoring redelivered steward proposal "
+                                    f"{proposal.proposal_id}"
+                                )
+                            else:
+                                if proposal.status != "pending":
+                                    raise ValueError(
+                                        "A new steward proposal must be pending"
+                                    )
+                                if proposal.expires_at <= now:
+                                    raise ValueError(
+                                        "A new steward proposal must not already be expired"
+                                    )
+                                if proposal.created_at > now + timedelta(seconds=30):
+                                    raise ValueError(
+                                        "A new steward proposal cannot be future-dated"
+                                    )
+                                if (
+                                    proposal.expires_at - proposal.created_at
+                                    > timedelta(minutes=15)
+                                ):
+                                    raise ValueError(
+                                        "Steward proposals may live for at most 15 minutes"
+                                    )
+                                pending_count = sum(
+                                    item.status == "pending"
+                                    for item in self._ordered_steward_proposals.values()
+                                )
+                                if pending_count >= 32:
+                                    raise ValueError(
+                                        "Too many steward proposals are awaiting approval"
+                                    )
+                                self._ordered_steward_proposals[
+                                    proposal.proposal_id
+                                ] = proposal
+                                self._prune_ordered_steward_action_proposals()
+                                generated_events.append(
+                                    StewardActionProposalChanged(proposal=proposal)
+                                )
+                        case DecideStewardAction():
+                            proposal = self._ordered_steward_proposals.get(
+                                command.proposal_id
+                            )
+                            if proposal is None:
+                                raise ValueError("Steward proposal not found")
+                            if proposal.status != "pending":
+                                raise ValueError(
+                                    "Steward proposal has already been decided"
+                                )
+                            now = datetime.now(tz=timezone.utc)
+                            if proposal.expires_at <= now:
+                                decided = proposal.model_copy(
+                                    update={
+                                        "status": "expired",
+                                        "decided_at": now,
+                                        "decided_by": command.decided_by,
+                                        "outcome": "Approval arrived after proposal expiry.",
+                                    }
+                                )
+                            elif not command.approved:
+                                decided = proposal.model_copy(
+                                    update={
+                                        "status": "rejected",
+                                        "decided_at": now,
+                                        "decided_by": command.decided_by,
+                                        "outcome": "Rejected by the operator.",
+                                    }
+                                )
+                            elif os.getenv("SKULK_FABRIC_CAPABILITIES_DISABLE") == "1":
+                                decided = proposal.model_copy(
+                                    update={
+                                        "status": "failed",
+                                        "decided_at": now,
+                                        "decided_by": command.decided_by,
+                                        "outcome": "Fabric actions are disabled by the global kill switch.",
+                                    }
+                                )
+                            else:
+                                try:
+                                    action_events, action_command_id, action_status = (
+                                        await self._execute_approved_steward_action(
+                                            proposal
+                                        )
+                                    )
+                                except (PlacementError, ValueError) as error:
+                                    decided = proposal.model_copy(
+                                        update={
+                                            "status": "failed",
+                                            "decided_at": now,
+                                            "decided_by": command.decided_by,
+                                            "outcome": str(error)[:1024],
+                                        }
+                                    )
+                                else:
+                                    decided = proposal.model_copy(
+                                        update={
+                                            "status": action_status,
+                                            "decided_at": now,
+                                            "dispatched_at": (
+                                                now
+                                                if action_status == "dispatched"
+                                                else None
+                                            ),
+                                            "decided_by": command.decided_by,
+                                            "command_id": action_command_id,
+                                            "outcome": (
+                                                "Download cancellation was approved and awaits "
+                                                "durable dispatch."
+                                                if isinstance(
+                                                    proposal.action,
+                                                    StewardCancelDownloadAction,
+                                                )
+                                                else "Restart teardown was dispatched; replacement "
+                                                "waits for released capacity."
+                                                if action_status == "approved"
+                                                else "Approved action was dispatched through "
+                                                "the typed command path."
+                                            ),
+                                        }
+                                    )
+                                    generated_events.extend(action_events)
+                            self._ordered_steward_proposals[
+                                command.proposal_id
+                            ] = decided
+                            self._prune_ordered_steward_action_proposals()
+                            generated_events.insert(
+                                0, StewardActionProposalChanged(proposal=decided)
+                            )
                         case DeleteInstance():
                             # Credit the freed memory back to placement admission
                             # for a short grace window so a back-to-back placement
@@ -1281,6 +3070,48 @@ class Master:
                                     )
                                 )
                             generated_events.extend(transition_events)
+                        case FailInstance():
+                            # Failure teardown is deliberately distinct from an
+                            # operator stop. Capture model, nodes, and cause while
+                            # the instance still exists, then delete it through the
+                            # same lifecycle path as an ordinary stop.
+                            failed_instance = self.state.instances.get(
+                                command.instance_id
+                            )
+                            if failed_instance is None:
+                                logger.info(
+                                    "FailInstance for unknown instance "
+                                    f"{command.instance_id}; ignoring redelivery"
+                                )
+                            else:
+                                self._record_freed_instance(failed_instance)
+                                placement = delete_instance(
+                                    DeleteInstance(instance_id=command.instance_id),
+                                    self.state.instances,
+                                )
+                                generated_events.append(
+                                    instance_failure_event(
+                                        failed_instance,
+                                        error_code=command.error_code,
+                                        error_message=command.error_message,
+                                    )
+                                )
+                                for cancel_command in cancel_unnecessary_downloads(
+                                    placement, self._effective_downloads()
+                                ):
+                                    await self.download_command_sender.send(
+                                        ForwarderDownloadCommand(
+                                            origin=self._system_id,
+                                            command=cancel_command,
+                                        )
+                                    )
+                                generated_events.extend(
+                                    get_transition_events(
+                                        self.state.instances,
+                                        placement,
+                                        self.state.tasks,
+                                    )
+                                )
                         case RefuseInstancePlacement():
                             # A worker could not fit its shard at load time
                             # (#290). Delete the refused instance and re-place
@@ -1291,8 +3122,7 @@ class Master:
                             # the refuse→re-place loop to the cluster size.
                             refused = self.state.instances.get(command.instance_id)
                             if (
-                                command.instance_id
-                                in self._fallback_placed_instances
+                                command.instance_id in self._fallback_placed_instances
                                 and refused is not None
                             ):
                                 # Second recovery hop already used: tear down
@@ -1306,10 +3136,18 @@ class Master:
                                     "placement (two recovery hops used)."
                                 )
                                 after_delete = delete_instance(
-                                    DeleteInstance(
-                                        instance_id=command.instance_id
-                                    ),
+                                    DeleteInstance(instance_id=command.instance_id),
                                     self.state.instances,
+                                )
+                                await self._queue_control_event(
+                                    instance_failure_event(
+                                        refused,
+                                        error_code="placement_failed",
+                                        error_message=(
+                                            "Skulk exhausted placement recovery after "
+                                            f"a node refused its shard: {command.reason}"
+                                        )[:2048],
+                                    )
                                 )
                                 # Same download hygiene as every other delete
                                 # path: a rank still mid-download for the
@@ -1330,7 +3168,7 @@ class Master:
                                     after_delete,
                                     self.state.tasks,
                                 ):
-                                    await self.event_sender.send(event)
+                                    await self._queue_control_event(event)
                             elif command.instance_id in self._refusal_replaced:
                                 # Another rank of the same instance already
                                 # triggered re-placement (self.state lags command
@@ -1357,30 +3195,30 @@ class Master:
                                     replacement_command_for_refused_instance(refused)
                                 )
                                 try:
+                                    repair_memory, repair_vram = self._reserved_placement_inputs(
+                                        self._telemetry_view.node_memory,
+                                        self._placement_reservations(after_delete),
+                                    )
                                     final_placement = place_instance(
                                         replace_command,
                                         self.state.topology,
                                         after_delete,
-                                        self._telemetry_view.node_memory,
+                                        repair_memory,
                                         self.state.node_network,
                                         download_status=self._effective_downloads(),
                                         excluded_nodes=set(
                                             replace_command.excluded_nodes
                                         ),
-                                        stamped_exclusions=set(
-                                            refused.excluded_nodes
-                                        ),
+                                        stamped_exclusions=set(refused.excluded_nodes),
                                         node_resources=self._telemetry_view.node_resources,
-                                        node_vram=usable_vram_by_node(
-                                            self._telemetry_view.node_system,
-                                            self._telemetry_view.node_resources,
-                                            node_memory=self._telemetry_view.node_memory,
-                                        ),
+                                        node_vram=repair_vram,
                                         unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                             self._telemetry_view.node_system,
                                             self._telemetry_view.node_resources,
-                                            node_memory=self._telemetry_view.node_memory,
+                                            node_memory=repair_memory,
                                         ),
+                                        approved_remote_code_identities=self._model_trust_approvals,
+                                        served_context_default=self._served_context_default(),
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -1417,30 +3255,30 @@ class Master:
                                         refused, command.node_id
                                     )
                                     try:
+                                        repair_memory, repair_vram = self._reserved_placement_inputs(
+                                            self._telemetry_view.node_memory,
+                                            self._placement_reservations(after_delete),
+                                        )
                                         final_placement = place_instance(
                                             fallback,
                                             self.state.topology,
                                             after_delete,
-                                            self._telemetry_view.node_memory,
+                                            repair_memory,
                                             self.state.node_network,
                                             download_status=self._effective_downloads(),
-                                            excluded_nodes=set(
-                                                fallback.excluded_nodes
-                                            ),
+                                            excluded_nodes=set(fallback.excluded_nodes),
                                             stamped_exclusions=set(
                                                 refused.excluded_nodes
                                             ),
                                             node_resources=self._telemetry_view.node_resources,
-                                            node_vram=usable_vram_by_node(
-                                                self._telemetry_view.node_system,
-                                                self._telemetry_view.node_resources,
-                                                node_memory=self._telemetry_view.node_memory,
-                                            ),
+                                            node_vram=repair_vram,
                                             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                                                 self._telemetry_view.node_system,
                                                 self._telemetry_view.node_resources,
-                                                node_memory=self._telemetry_view.node_memory,
+                                                node_memory=repair_memory,
                                             ),
+                                            approved_remote_code_identities=self._model_trust_approvals,
+                                            served_context_default=self._served_context_default(),
                                         )
                                         for new_id in final_placement:
                                             if new_id not in after_delete:
@@ -1468,6 +3306,31 @@ class Master:
                                             f"excluding the refuser: {fallback_err}). "
                                             "Giving up on this placement."
                                         )
+                                replacement_created = any(
+                                    instance_id not in after_delete
+                                    for instance_id in final_placement
+                                )
+                                generated_events.append(
+                                    instance_failure_event(
+                                        refused,
+                                        error_code="placement_failed",
+                                        error_message=(
+                                            (
+                                                (
+                                                    "Skulk replaced this placement "
+                                                    "after a node refused its shard: "
+                                                )
+                                                if replacement_created
+                                                else (
+                                                    "Skulk could not recover a "
+                                                    "placement after a node refused "
+                                                    "its shard: "
+                                                )
+                                            )
+                                            + command.reason
+                                        )[:2048],
+                                    )
+                                )
                                 transition_events = get_transition_events(
                                     self.state.instances,
                                     final_placement,
@@ -1483,53 +3346,13 @@ class Master:
                                     )
                                 generated_events.extend(transition_events)
                         case PlaceInstance():
-                            # node_memory/node_vram come from the telemetry plane
-                            # (#279 slice 2). Recently-freed credit is pruned
-                            # here and disabled by default (#314); the usable-GPU
-                            # map admits discrete/UMA GPU nodes against the pool
-                            # their backend can actually allocate from.
-                            credited_memory, credited_vram = (
-                                self._placement_memory_inputs()
-                            )
-                            placement = place_instance(
-                                command,
-                                self.state.topology,
-                                self.state.instances,
-                                credited_memory,
-                                self.state.node_network,
-                                download_status=self._effective_downloads(),
-                                excluded_nodes=set(command.excluded_nodes),
-                                node_resources=self._telemetry_view.node_resources,
-                                node_vram=credited_vram,
-                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                                    self._telemetry_view.node_system,
-                                    self._telemetry_view.node_resources,
-                                    node_memory=credited_memory,
-                                ),
-                            )
+                            placement = self._place_requested_instance(command)
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
                             )
                             generated_events.extend(transition_events)
                         case CreateInstance():
-                            # Placement inputs come from telemetry (#279 slice 2);
-                            # the recently-freed bookkeeping path is pruned here
-                            # and normally contributes no speculative credit.
-                            credited_memory, credited_vram = (
-                                self._placement_memory_inputs()
-                            )
-                            placement = add_instance_to_placements(
-                                command,
-                                self.state.topology,
-                                self.state.instances,
-                                credited_memory,
-                                node_vram=credited_vram,
-                                unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
-                                    self._telemetry_view.node_system,
-                                    self._telemetry_view.node_resources,
-                                    node_memory=credited_memory,
-                                ),
-                            )
+                            placement = self._create_requested_instance(command)
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
                             )
@@ -1574,13 +3397,15 @@ class Master:
                                 )
 
                         case AddCustomModelCard():
-                            generated_events.append(
-                                CustomModelCardAdded(model_card=command.model_card)
-                            )
+                            if (
+                                event := self._order_custom_model_card_add(command)
+                            ) is not None:
+                                generated_events.append(event)
                         case DeleteCustomModelCard():
-                            generated_events.append(
-                                CustomModelCardDeleted(model_id=command.model_id)
-                            )
+                            if (
+                                event := self._order_custom_model_card_delete(command)
+                            ) is not None:
+                                generated_events.append(event)
                         case EvictStagedModel():
                             # Broadcast a fleet-wide eviction of the store-deleted
                             # model: apply() drops its download entries; workers
@@ -1591,7 +3416,45 @@ class Master:
                         case RequestEventLog():
                             self._schedule_event_log_replay(command.since_idx)
                     for event in generated_events:
-                        await self.event_sender.send(event)
+                        await self._queue_control_event(event)
+                except PlacementError as error:
+                    if (
+                        isinstance(forwarder_command.command, CreateInstance)
+                        and forwarder_command.command.instance.instance_id
+                        not in self._placement_reservations(self.state.instances)
+                    ):
+                        # Exact-create acknowledgements precede master admission.
+                        # Retain failure identity so controllers can clean up a
+                        # refused placement instead of waiting for a missing runner.
+                        await self._queue_control_event(
+                            instance_failure_event(
+                                forwarder_command.command.instance,
+                                error_code="placement_failed",
+                                error_message="Exact placement failed current admission checks.",
+                            )
+                        )
+                    elif isinstance(forwarder_command.command, PlaceInstance):
+                        # Quick-launch preflight also precedes ordered admission.
+                        # Its acknowledged instance ID is derived from the command,
+                        # even when no concrete placement could be constructed.
+                        refused = forwarder_command.command
+                        instance_id = InstanceId(str(refused.command_id))
+                        if instance_id not in self._placement_reservations(
+                            self.state.instances
+                        ):
+                            await self._queue_control_event(
+                                InstanceFailureRecorded(
+                                    failure=InstanceFailure(
+                                        instance_id=instance_id,
+                                        model_id=refused.model_card.model_id,
+                                        system_role=refused.system_role,
+                                        error_code="placement_failed",
+                                        error_message="Quick placement failed current admission checks.",
+                                        recorded_at=datetime.now(tz=timezone.utc),
+                                    )
+                                )
+                            )
+                    logger.opt(exception=error).warning("Placement command refused")
                 except ValueError as e:
                     logger.opt(exception=e).warning("Error in command processor")
 
@@ -1617,9 +3480,7 @@ class Master:
             self._telemetry_view.node_last_telemetry,
             now=now,
         )
-        for node_id in sorted(
-            gap_nodes - self._heartbeat_gap_warned_nodes, key=str
-        ):
+        for node_id in sorted(gap_nodes - self._heartbeat_gap_warned_nodes, key=str):
             evidence = observations[node_id]
             logger.bind(
                 liveness_event="heartbeat_gap",
@@ -1628,16 +3489,12 @@ class Master:
                 fallback_telemetry_age_seconds=(
                     evidence.fallback_telemetry_age_seconds
                 ),
-                last_logged_event_age_seconds=(
-                    evidence.last_logged_event_age_seconds
-                ),
+                last_logged_event_age_seconds=(evidence.last_logged_event_age_seconds),
             ).warning(
                 f"Dedicated heartbeat from node {node_id} is late or absent; "
                 "ordinary telemetry and logged events remain liveness fallbacks"
             )
-        recovered_nodes = (
-            self._heartbeat_gap_warned_nodes - gap_nodes
-        ) & current_nodes
+        recovered_nodes = (self._heartbeat_gap_warned_nodes - gap_nodes) & current_nodes
         for node_id in sorted(recovered_nodes, key=str):
             heartbeat_at = self._telemetry_view.node_last_heartbeat[node_id]
             logger.bind(
@@ -1654,6 +3511,8 @@ class Master:
         while True:
             connected_node_ids = set(self.state.topology.list_nodes())
             now = datetime.now(tz=timezone.utc)
+            for expiry_event in self._expire_steward_action_proposals(now):
+                await self._queue_control_event(expiry_event)
             self._report_heartbeat_gap_changes(now=now)
             # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master
@@ -1706,7 +3565,7 @@ class Master:
                     f"Failing orphaned task {task_failed.task_id}: "
                     f"{task_failed.error_message}"
                 )
-                await self.event_sender.send(task_failed)
+                await self._queue_control_event(task_failed)
 
             # Reap lifecycle tasks whose executor died with its old node
             # identity (#647): grace-based because instance deletion already
@@ -1722,15 +3581,26 @@ class Master:
                         f"Failing stale lifecycle task {task_failed.task_id}: "
                         f"{task_failed.error_message}"
                     )
-                    await self.event_sender.send(task_failed)
+                    await self._queue_control_event(task_failed)
 
-            # kill broken instances (suppressed during the topology-settle
-            # grace, same rationale as dying_instance_ids above)
+            # Retain the failure before either InstanceDeleted or NodeTimedOut
+            # removes the placement. Timed-out nodes may still be present in
+            # topology, so this must use the same combined liveness truth as
+            # dying_instance_ids rather than topology absence alone.
+            if topology_settled:
+                for failure_event in dead_node_instance_failure_events(
+                    self.state, connected_node_ids, timed_out_node_ids
+                ):
+                    await self._queue_control_event(failure_event)
+
+            # Kill instances whose assigned node has already left topology.
+            # NodeTimedOut below owns teardown for timed-out-but-still-present
+            # nodes, preventing duplicate deletion events.
             if topology_settled:
                 for instance_id, instance in self.state.instances.items():
                     for node_id in instance.shard_assignments.node_to_runner:
                         if node_id not in connected_node_ids:
-                            await self.event_sender.send(
+                            await self._queue_control_event(
                                 InstanceDeleted(instance_id=instance_id)
                             )
                             break
@@ -1754,7 +3624,7 @@ class Master:
                     f"Removing node {node_id}: all liveness signals exceeded "
                     f"the {evidence.timeout_seconds:.0f}s timeout"
                 )
-                await self.event_sender.send(
+                await self._queue_control_event(
                     NodeTimedOut(node_id=node_id, evidence=evidence)
                 )
 
@@ -1768,6 +3638,18 @@ class Master:
             # instance, not every tick while the events round-trip.
             if topology_settled:
                 await self._recover_download_failed_instances()
+
+            # Intelligent fabric (steward) invariant: while the mode is
+            # enabled, exactly one steward system placement exists. Behind
+            # the settle grace so a freshly failed-over master does not act
+            # on a stale seeded view; because this runs on every planning
+            # tick, a new master re-establishes the steward after election
+            # without any dedicated failover machinery.
+            if topology_settled:
+                await self._reconcile_dispatched_steward_actions(now)
+                await self._arm_approved_steward_download_cancellations()
+                await self._resume_approved_steward_restarts(now)
+                await self._maintain_steward_placement()
 
             await anyio.sleep(10)
 
@@ -1801,7 +3683,7 @@ class Master:
             # #223): get_transition_events below emits InstanceDeleted, whose
             # apply drops the instance's tasks.
             for task_failed in orphaned_task_failure_events(self.state, {instance_id}):
-                await self.event_sender.send(task_failed)
+                await self._queue_control_event(task_failed)
             after_delete = delete_instance(
                 DeleteInstance(instance_id=instance_id), self.state.instances
             )
@@ -1810,26 +3692,28 @@ class Master:
                 replace_command = replacement_command_for_download_failed_instance(
                     instance, failed_nodes
                 )
+                repair_memory, repair_vram = self._reserved_placement_inputs(
+                    self._telemetry_view.node_memory,
+                    self._placement_reservations(after_delete),
+                )
                 final_placement = place_instance(
                     replace_command,
                     self.state.topology,
                     after_delete,
-                    self._telemetry_view.node_memory,
+                    repair_memory,
                     self.state.node_network,
                     download_status=self._effective_downloads(),
                     excluded_nodes=set(replace_command.excluded_nodes),
                     stamped_exclusions=set(instance.excluded_nodes),
                     node_resources=self._telemetry_view.node_resources,
-                    node_vram=usable_vram_by_node(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                    ),
+                    node_vram=repair_vram,
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
+                        node_memory=repair_memory,
                     ),
+                    approved_remote_code_identities=self._model_trust_approvals,
+                    served_context_default=self._served_context_default(),
                 )
                 logger.warning(
                     f"Re-placing {replace_command.model_card.model_id} excluding "
@@ -1844,6 +3728,17 @@ class Master:
             transition_events = get_transition_events(
                 self.state.instances, final_placement, self.state.tasks
             )
+            await self._queue_control_event(
+                instance_failure_event(
+                    instance,
+                    error_code="download_failed",
+                    error_message=(
+                        "A node could not stage the model, so Skulk tore down "
+                        "this placement and attempted recovery. Inspect cluster "
+                        "logs for the underlying storage or transport error."
+                    ),
+                )
+            )
             for cmd in cancel_unnecessary_downloads(
                 final_placement, self._effective_downloads()
             ):
@@ -1851,7 +3746,7 @@ class Master:
                     ForwarderDownloadCommand(origin=self._system_id, command=cmd)
                 )
             for event in transition_events:
-                await self.event_sender.send(event)
+                await self._queue_control_event(event)
             # Recovery CONSUMES the terminal failure record: reset each failed
             # node's download status for this model back to Pending. Without
             # this, the stale DownloadFailed lingers in session state and this
@@ -1873,7 +3768,7 @@ class Master:
                 )
                 if shard is None:
                     continue
-                await self.event_sender.send(
+                await self._queue_control_event(
                     NodeDownloadProgress(
                         download_progress=DownloadPending(
                             node_id=node_id,
@@ -1888,6 +3783,445 @@ class Master:
                     f"{shard.model_card.model_id} on {node_id} (consumed by "
                     "recovery)"
                 )
+
+    async def _maintain_steward_placement(self) -> None:
+        """Re-establish the intelligent-fabric steward placement invariant.
+
+        While ``intelligent_fabric.enabled`` is set in the cluster config,
+        exactly one instance carrying ``system_role="steward"`` must exist.
+        This pass places the first card from the configured preference list
+        the cluster can serve, tears down accidental duplicates (possible
+        across master handoffs), and does nothing while a steward exists.
+        Node loss needs no special handling here: the dead steward's
+        instance is torn down by the liveness pass and this invariant
+        re-places it on the next tick. Attempts are paced to one per minute
+        so an unplaceable steward logs calmly instead of spamming.
+        """
+        try:
+            config = load_skulk_config()
+        except Exception:
+            # An unreadable config never breaks the planning loop; the mode
+            # simply stays off until the config loads again.
+            return
+        fabric = config.intelligent_fabric if config is not None else None
+        stewards = sorted(
+            (
+                instance_id
+                for instance_id, instance in self.state.instances.items()
+                if instance.system_role == "steward"
+            ),
+            key=str,
+        )
+        if fabric is None or not fabric.enabled:
+            # Disable is a lifecycle transition, not a shrug: a steward left
+            # behind would keep occupying memory while hidden from every
+            # ordinary instance surface. Symmetric with enable.
+            if stewards:
+                logger.info(
+                    "Intelligent fabric is disabled; removing the steward "
+                    f"placement(s) {[str(s) for s in stewards]}"
+                )
+                await self._teardown_steward_instances(stewards)
+            self._reset_steward_upgrade()
+            return
+
+        if len(stewards) > 1:
+            # Duplicate stewards can appear when two masters each placed one
+            # around a failover window. Keep the lowest id (stable across
+            # replicas), tear down the rest.
+            extras = stewards[1:]
+            logger.warning(
+                f"Removing duplicate steward placement(s) "
+                f"{[str(e) for e in extras]} (keeping {stewards[0]})"
+            )
+            await self._teardown_steward_instances(extras)
+            return
+        if stewards:
+            await self._maintain_steward_upgrade(
+                stewards[0], tuple(fabric.steward_models)
+            )
+            return
+
+        if self._steward_upgrade_replacing_instance is not None:
+            # The old placement has now left replicated state. Make the
+            # already-staged successor eligible immediately instead of waiting
+            # behind the ordinary one-minute no-placement retry pace.
+            self._steward_upgrade_replacing_instance = None
+            self._steward_last_attempt_monotonic = 0.0
+
+        now = time.monotonic()
+        if now - self._steward_last_attempt_monotonic < 60:
+            return
+        self._steward_last_attempt_monotonic = now
+
+        # The card cache is lazily filled; a fresh master process may not
+        # have loaded it yet.
+        await get_model_cards()
+        for model_ref in fabric.steward_models:
+            try:
+                final_placement = await self._place_steward_model(
+                    model_ref, self.state.instances
+                )
+            except (PlacementError, PlacementInfoPendingError) as err:
+                logger.warning(
+                    f"Steward placement with {model_ref} not possible yet: {err}"
+                )
+                continue
+            if final_placement is None:
+                continue
+            logger.info(
+                f"Establishing steward placement with {model_ref} (intelligent fabric)"
+            )
+            for event in get_transition_events(
+                self.state.instances, final_placement, self.state.tasks
+            ):
+                await self._queue_control_event(event)
+            return
+        logger.warning(
+            "Intelligent fabric is enabled but no configured steward model "
+            "can be placed on the current topology; will retry"
+        )
+
+    async def _place_steward_model(
+        self,
+        model_ref: str,
+        current_instances: Mapping[InstanceId, Instance],
+        node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+        node_vram: Mapping[NodeId, Memory] | None = None,
+    ) -> dict[InstanceId, Instance] | None:
+        """Return a steward placement for one exact brain, without emitting it."""
+        await get_model_cards()
+        card = get_card(ModelId(model_ref))
+        if card is None:
+            logger.warning(f"Steward model {model_ref} has no model card; skipping")
+            return None
+        # Both steward walks (the exactly-one placement and the best-brain
+        # upgrade) place candidates only through here, so this one check
+        # keeps either walk from committing a steward that cannot answer.
+        if not steward_candidate_is_servable(card):
+            if model_ref not in self._steward_unservable_warned:
+                self._steward_unservable_warned.add(model_ref)
+                logger.warning(
+                    f"Steward model {model_ref} is not a tool-calling text "
+                    "model; skipping it as a steward candidate"
+                )
+            return None
+        command = PlaceInstance(
+            model_card=card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+            system_role="steward",
+        )
+        if node_vram is not None:
+            # A caller handing in both maps (the replacement snapshot) has
+            # already reserved them.
+            placement_memory = node_memory or self._telemetry_view.node_memory
+            placement_vram = node_vram
+        else:
+            placement_memory, placement_vram = self._reserved_placement_inputs(
+                node_memory or self._telemetry_view.node_memory,
+                self._placement_reservations(current_instances),
+            )
+        return place_instance(
+            command,
+            self.state.topology,
+            current_instances,
+            placement_memory,
+            self.state.node_network,
+            download_status=self._effective_downloads(),
+            node_resources=self._telemetry_view.node_resources,
+            node_vram=placement_vram,
+            unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=placement_memory,
+            ),
+            approved_remote_code_identities=self._model_trust_approvals,
+            served_context_default=self._served_context_default(),
+        )
+
+    def _steward_replacement_memory_inputs(
+        self, current: Instance
+    ) -> tuple[Mapping[NodeId, MemoryUsage], Mapping[NodeId, Memory]]:
+        """Build hypothetical RAM and VRAM with only the steward reclaimed.
+
+        The snapshot is used only to decide whether replacement shards are
+        worth prestaging. Actual post-teardown placement still uses observed
+        telemetry, avoiding optimistic admission while a worker releases the
+        outgoing model asynchronously.
+        """
+        credit: dict[NodeId, int] = {}
+        assignments = current.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard.get(runner_id)
+            if shard is None:
+                continue
+            fraction = shard_fraction_of_model(shard)
+            if fraction is None or fraction <= 0.0:
+                continue
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+            )
+            credit[node_id] = credit.get(node_id, 0) + footprint.in_bytes
+        memory = {
+            node_id: (
+                usage.model_copy(
+                    update={
+                        "ram_available": Memory.from_bytes(
+                            min(
+                                usage.ram_total.in_bytes,
+                                usage.ram_available.in_bytes + credit[node_id],
+                            )
+                        )
+                    }
+                )
+                if node_id in credit
+                else usage
+            )
+            for node_id, usage in self._telemetry_view.node_memory.items()
+        }
+        unified_nodes = unified_memory_gpu_node_ids(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=memory,
+        )
+        remaining = {
+            identifier: instance
+            for identifier, instance in self.state.instances.items()
+            if identifier != current.instance_id
+        }
+        # The other placements' system RAM is spoken for in this snapshot
+        # too; reserve it before the GPU pool is derived from the memory.
+        memory = reserve_system_ram_usage(
+            memory,
+            remaining,
+            usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=memory,
+            ),
+            unified_memory_gpu_nodes=unified_nodes,
+            carve_first_nodes=carve_first_gpu_node_ids(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=memory,
+            ),
+            unreflected=self._unreflected_placements(remaining),
+        )
+        vram = dict(
+            usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=memory,
+            )
+        )
+        for node_id, reclaimed_bytes in credit.items():
+            if node_id in unified_nodes or node_id not in vram:
+                continue
+            accelerator = getattr(
+                self._telemetry_view.node_system.get(node_id), "accelerator", None
+            )
+            total_bytes = getattr(accelerator, "vram_total_bytes", None)
+            credited_bytes = vram[node_id].in_bytes + reclaimed_bytes
+            if isinstance(total_bytes, int) and total_bytes > 0:
+                credited_bytes = min(total_bytes, credited_bytes)
+            vram[node_id] = Memory.from_bytes(credited_bytes)
+        return memory, reserve_instance_vram(
+            vram,
+            self._telemetry_view.node_system,
+            remaining,
+            unified_memory_gpu_nodes=unified_nodes,
+        )
+
+    def _reset_steward_upgrade(self) -> None:
+        """Forget one in-progress best-brain convergence attempt."""
+        self._steward_upgrade_model = None
+        self._steward_upgrade_stable_since = None
+        self._steward_upgrade_prestaged_model = None
+        self._steward_upgrade_idle_since = None
+
+    def _steward_model_download_completed(
+        self, node_id: NodeId, shard_metadata: ShardMetadata
+    ) -> bool:
+        """Whether one node reports this exact completed steward shard."""
+        return any(
+            isinstance(progress, DownloadCompleted)
+            and progress.node_id == node_id
+            and progress.shard_metadata == shard_metadata
+            for progress in self._effective_downloads().get(node_id, ())
+        )
+
+    async def _maintain_steward_upgrade(
+        self,
+        steward_id: InstanceId,
+        preference: tuple[str, ...],
+    ) -> None:
+        """Converge an existing steward upward without creating a standby.
+
+        A better brain must remain placeable for five minutes. Its exact target
+        shards are then staged while the current steward keeps serving. Once
+        staging is complete and the current steward has been idle/Ready for
+        thirty seconds, the old placement is removed; the ordinary exactly-one
+        invariant places the already-staged successor on the following tick.
+        """
+        if self._steward_upgrade_replacing_instance == steward_id:
+            return
+        now = time.monotonic()
+        if now < self._steward_upgrade_retry_after:
+            return
+        current = self.state.instances.get(steward_id)
+        if current is None:
+            self._reset_steward_upgrade()
+            return
+        current_model = str(current.shard_assignments.model_id)
+        try:
+            current_index = preference.index(current_model)
+        except ValueError:
+            current_index = len(preference)
+
+        candidate_model: ModelId | None = None
+        candidate_instance: Instance | None = None
+        instances_without_steward = {
+            instance_id: instance
+            for instance_id, instance in self.state.instances.items()
+            if instance_id != steward_id
+        }
+        replacement_memory, replacement_vram = self._steward_replacement_memory_inputs(
+            current
+        )
+        for model_ref in preference[:current_index]:
+            try:
+                placed = await self._place_steward_model(
+                    model_ref,
+                    instances_without_steward,
+                    replacement_memory,
+                    replacement_vram,
+                )
+            except (PlacementError, PlacementInfoPendingError):
+                continue
+            if placed is None:
+                continue
+            new_instances = [
+                instance
+                for instance_id, instance in placed.items()
+                if instance_id not in instances_without_steward
+            ]
+            if len(new_instances) != 1:
+                continue
+            candidate_model = ModelId(model_ref)
+            candidate_instance = new_instances[0]
+            break
+
+        if candidate_model is None or candidate_instance is None:
+            self._reset_steward_upgrade()
+            return
+        if self._steward_upgrade_model != candidate_model:
+            self._reset_steward_upgrade()
+            self._steward_upgrade_model = candidate_model
+            self._steward_upgrade_stable_since = now
+            logger.info(
+                f"Better steward brain {candidate_model} is placeable; "
+                "waiting for topology stability before staging"
+            )
+            return
+        stable_since = self._steward_upgrade_stable_since
+        if (
+            stable_since is None
+            or now - stable_since < STEWARD_UPGRADE_STABILITY_SECONDS
+        ):
+            return
+
+        required_shards: list[tuple[NodeId, ShardMetadata]] = []
+        for (
+            node_id,
+            runner_id,
+        ) in candidate_instance.shard_assignments.node_to_runner.items():
+            shard = candidate_instance.shard_assignments.runner_to_shard[runner_id]
+            if isinstance(shard, RpcDonorShardMetadata):
+                continue
+            required_shards.append((node_id, shard))
+        if self._steward_upgrade_prestaged_model != candidate_model:
+            for node_id, shard in required_shards:
+                if self._steward_model_download_completed(node_id, shard):
+                    continue
+                await self.download_command_sender.send(
+                    ForwarderDownloadCommand(
+                        origin=self._system_id,
+                        command=StartDownload(
+                            target_node_id=node_id,
+                            shard_metadata=shard,
+                        ),
+                    )
+                )
+            self._steward_upgrade_prestaged_model = candidate_model
+            logger.info(f"Prestaging better steward brain {candidate_model}")
+            return
+        if any(
+            not self._steward_model_download_completed(node_id, shard)
+            for node_id, shard in required_shards
+        ):
+            return
+
+        runner_ids = current.shard_assignments.node_to_runner.values()
+        idle_ready = bool(current.shard_assignments.node_to_runner) and all(
+            isinstance(self.state.runners.get(runner_id), RunnerReady)
+            for runner_id in runner_ids
+        )
+        if idle_ready:
+            idle_ready = not any(
+                getattr(task, "instance_id", None) == steward_id
+                and getattr(task, "task_status", None)
+                in (TaskStatus.Pending, TaskStatus.Running)
+                for task in self.state.tasks.values()
+            )
+        if not idle_ready:
+            self._steward_upgrade_idle_since = None
+            return
+        if self._steward_upgrade_idle_since is None:
+            self._steward_upgrade_idle_since = now
+            return
+        if now - self._steward_upgrade_idle_since < STEWARD_UPGRADE_IDLE_SECONDS:
+            return
+
+        logger.info(
+            f"Replacing steward {current_model} with staged better brain "
+            f"{candidate_model}"
+        )
+        self._steward_upgrade_replacing_instance = steward_id
+        self._steward_upgrade_retry_after = now + STEWARD_UPGRADE_RETRY_COOLDOWN_SECONDS
+        await self._teardown_steward_instances([steward_id])
+        self._reset_steward_upgrade()
+
+    async def _teardown_steward_instances(
+        self, instance_ids: Sequence[InstanceId]
+    ) -> None:
+        """Tear down steward placements with full lifecycle hygiene.
+
+        Fails any in-flight tasks first (the TaskFailed-before-removal
+        invariant), emits the deletion transition events, and forwards
+        download cancellations so an in-flight steward-model download does
+        not keep occupying disk and bandwidth after its instance is gone —
+        the same steps the ordinary DeleteInstance path performs.
+        """
+        for task_failed in orphaned_task_failure_events(self.state, set(instance_ids)):
+            await self._queue_control_event(task_failed)
+        survivors = dict(self.state.instances)
+        for instance_id in instance_ids:
+            survivors = delete_instance(
+                DeleteInstance(instance_id=instance_id), survivors
+            )
+        for cmd in cancel_unnecessary_downloads(survivors, self._effective_downloads()):
+            await self.download_command_sender.send(
+                ForwarderDownloadCommand(origin=self._system_id, command=cmd)
+            )
+        for event in get_transition_events(
+            self.state.instances, survivors, self.state.tasks
+        ):
+            await self._queue_control_event(event)
 
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:
@@ -1921,9 +4255,7 @@ class Master:
                             f"{type(local_event.event).__name__}{payload_note} "
                             f"from {local_event.origin}"
                         )
-                    self._multi_buffer.skip(
-                        local_event.origin_idx, local_event.origin
-                    )
+                    self._multi_buffer.skip(local_event.origin_idx, local_event.origin)
                 else:
                     self._multi_buffer.ingest(
                         local_event.origin_idx,
@@ -1937,9 +4269,7 @@ class Master:
                         ):
                             if task_id == event.task_id:
                                 self.command_task_mapping.pop(command_id, None)
-                                self._realtime_instance_by_command.pop(
-                                    command_id, None
-                                )
+                                self._realtime_instance_by_command.pop(command_id, None)
 
                     if isinstance(event, TaskFailed) or (
                         isinstance(event, TaskStatusUpdated)
@@ -1951,9 +4281,7 @@ class Master:
                                 # Terminal task state is authoritative even if
                                 # the owning API disappears before TaskFinished.
                                 # Preserve command mapping for eventual deletion.
-                                self._realtime_instance_by_command.pop(
-                                    command_id, None
-                                )
+                                self._realtime_instance_by_command.pop(command_id, None)
 
                     # Refuse to index task-lifecycle events that are state
                     # no-ops (the task is already gone). Without this cap a
@@ -2055,10 +4383,7 @@ class Master:
             await self._send_event(IndexedEvent(idx=idx, event=event))
             replayed += 1
             self._active_replay_next_idx = idx + 1
-            if (
-                replayed % EVENT_LOG_REPLAY_CHUNK_SIZE == 0
-                and idx + 1 < replay_end
-            ):
+            if replayed % EVENT_LOG_REPLAY_CHUNK_SIZE == 0 and idx + 1 < replay_end:
                 await anyio.sleep(EVENT_LOG_REPLAY_CHUNK_INTERVAL_SECONDS)
         logger.info(
             "Served paced event-log replay "
@@ -2128,11 +4453,15 @@ class Master:
                 )
 
     def _load_state_sync_config_yaml(self) -> str | None:
-        """Return a sanitized config payload for bootstrap responses.
+        """Return a config payload for bootstrap responses.
 
-        State-sync responses travel over cluster pub/sub, so they must never
-        include secrets such as ``hf_token``. Read/parse failures are treated
-        as non-fatal so bootstrap requests cannot crash master coordination.
+        ``hf_token`` rides along: a node joining the fleet adopts the elected
+        master's token so downloads work everywhere without per-node token
+        entry (the fabric is PSK-encrypted and trusted by doctrine). A blank
+        token is dropped so it can never clobber a joining node's real one.
+        ``model_trust`` remains stripped as deprecated compatibility state.
+        Read/parse failures are treated as non-fatal so bootstrap requests
+        cannot crash master coordination.
         """
 
         config_path = resolve_config_path()
@@ -2160,11 +4489,14 @@ class Master:
         sanitized_config: JsonObject = {
             str(key): copy.deepcopy(value) for key, value in raw_config.items()
         }
-        sanitized_config.pop("hf_token", None)
+        from skulk.store.config import normalized_hf_token
+
+        if normalized_hf_token(sanitized_config.get("hf_token")) is None:
+            sanitized_config.pop("hf_token", None)
+        sanitized_config.pop("model_trust", None)
         model_store = sanitized_config.get("model_store")
-        if (
-            self._state_sync_store_http_host is not None
-            and isinstance(model_store, dict)
+        if self._state_sync_store_http_host is not None and isinstance(
+            model_store, dict
         ):
             model_store["store_http_host"] = self._state_sync_store_http_host
         return yaml.safe_dump(

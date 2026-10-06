@@ -11,6 +11,7 @@ def test_every_runtime_topic_has_one_explicit_plane() -> None:
         "local_events": MessagePlane.Control,
         "commands": MessagePlane.Control,
         "election_messages": MessagePlane.Control,
+        "authority_messages": MessagePlane.Authority,
         "connection_messages": MessagePlane.Control,
         "download_commands": MessagePlane.Control,
         "state_sync_messages": MessagePlane.Control,
@@ -21,4 +22,5 @@ def test_every_runtime_topic_has_one_explicit_plane() -> None:
         "speech_media": MessagePlane.Data,
         "trace_data": MessagePlane.Data,
         "vision_media": MessagePlane.Data,
+        "output_media": MessagePlane.Data,
     } == TOPIC_PLANE_CENSUS

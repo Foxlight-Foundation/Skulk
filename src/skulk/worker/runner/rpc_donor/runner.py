@@ -165,11 +165,9 @@ class Runner:
                         self._ensure_server_alive()
                         continue
                     except (EndOfStream, ClosedResourceError):
-                        # A sender-side close sets the channel's shared closed
-                        # flag BEFORE the end-of-stream sentinel is drained, and
-                        # receive_timeout checks that flag first, so a normal
-                        # close can surface as ClosedResourceError here. Both
-                        # mean the same thing: no more tasks, exit cleanly.
+                        # EndOfStream is a normal close; ClosedResourceError is
+                        # a stream that ended without its marker. Both mean the
+                        # same thing: no more tasks, exit cleanly.
                         break
                     self._handle_task(task)
                     if isinstance(self.current_status, RunnerShutdown):

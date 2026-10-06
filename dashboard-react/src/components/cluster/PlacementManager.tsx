@@ -1,6 +1,7 @@
+import { useModalFocus } from '../../hooks/useModalFocus';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled, { css } from 'styled-components';
-import { FiX, FiInfo } from 'react-icons/fi';
+import { FiX, FiInfo, FiArrowLeft } from 'react-icons/fi';
 import { MdPlayArrow } from 'react-icons/md';
 import type { TopologyData } from '../../types/topology';
 import { detectDeviceModel } from '../../types/topology';
@@ -11,7 +12,9 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
+/** Existing placement options, with optional return to the discovery dialog. */
 export interface PlacementManagerProps {
+  onBack?: () => void;
   modelId: string;
   modelSizeMb?: number;
   topology: TopologyData;
@@ -23,6 +26,8 @@ export interface PlacementManagerProps {
     instanceMeta: string;
     minNodes: number;
     excludedNodes: string[];
+    /** Chosen context window; omitted to take the fleet default. */
+    contextTokens?: number;
   }) => void;
   /** Embedding models: hide sharding/networking selectors and node slider */
   isEmbedding?: boolean;
@@ -93,10 +98,12 @@ const Overlay = styled.div`
 `;
 
 const Modal = styled.div`
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.surfaceElevated};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
   border-radius: ${({ theme }) => theme.radii.lg};
+  box-shadow: ${({ theme }) => theme.colors.shadowPop};
   width: 560px;
+  max-width: calc(100vw - 24px);
   max-height: 85vh;
   overflow-y: auto;
   display: flex;
@@ -107,31 +114,34 @@ const Header = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  gap: 8px;
+  padding: 14px 18px;
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
 `;
 
 const Title = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.md};
+  flex: 1; min-width: 0; overflow-wrap: anywhere;
+  font-size: 17px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
   color: ${({ theme }) => theme.colors.text};
 `;
 
 const ModelName = styled.span`
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   font-weight: 500;
 `;
 
 const CloseBtn = styled.button`
+  flex-shrink: 0;
   all: unset;
   cursor: pointer;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   &:hover { color: ${({ theme }) => theme.colors.text}; }
 `;
 
 const Body = styled.div`
-  padding: 20px;
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -204,18 +214,18 @@ const NodePill = styled.button<{ $excluded: boolean; $ineligible?: boolean }>`
 const NodePillHint = styled.div`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Slider = styled.input`
   flex: 1;
-  accent-color: ${({ theme }) => theme.colors.gold};
+  accent-color: ${({ theme }) => theme.colors.accentText};
 `;
 
 const SliderValue = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   min-width: 60px;
   text-align: right;
 `;
@@ -255,7 +265,7 @@ const OptionLabel = styled.div<{ $selected: boolean }>`
 const OptionSub = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin-top: 2px;
 `;
 
@@ -265,11 +275,61 @@ const Callout = styled.div`
   gap: 6px;
   padding: 8px 10px;
   border-radius: ${({ theme }) => theme.radii.sm};
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.2);
+  background: ${({ theme }) => theme.colors.warningBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderLive};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(245, 158, 11, 0.9);
+  color: ${({ theme }) => theme.colors.warningText};
+`;
+
+/** Smallest context window the server accepts for a placement. */
+const MIN_CONTEXT_TOKENS = 256;
+
+/** Group a token count for display, e.g. 32768 -> "32,768". */
+function formatTokens(tokens: number): string {
+  return tokens.toLocaleString();
+}
+
+/** Human-readable size for a reserved KV estimate. */
+function formatBytes(bytes: number): string {
+  const gib = bytes / 1024 ** 3;
+  if (gib >= 1) return `${gib.toFixed(1)} GiB`;
+  return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MiB`;
+}
+
+const ContextRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+`;
+
+const ContextInput = styled.input`
+  width: 120px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.surface};
+  color: ${({ theme }) => theme.colors.text};
+  font: inherit;
+  &[aria-invalid='true'] {
+    border-color: ${({ theme }) => theme.colors.error};
+  }
+`;
+
+const ContextMeta = styled.span`
+  color: ${({ theme }) => theme.colors.textSecondary};
+  font-size: 12px;
+`;
+
+const ContextReset = styled.button`
+  background: none;
+  border: none;
+  padding: 0;
+  color: ${({ theme }) => theme.colors.accentText};
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
 `;
 
 const ErrorCallout = styled.div`
@@ -279,16 +339,16 @@ const ErrorCallout = styled.div`
   padding: 10px 12px;
   border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.errorBg};
-  border: 1px solid rgba(239, 68, 68, 0.25);
+  border: 1px solid ${({ theme }) => theme.colors.borderDanger};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(248, 113, 113, 1);
+  color: ${({ theme }) => theme.colors.errorText};
 `;
 
 const Footer = styled.div`
   display: flex;
   justify-content: flex-end;
-  padding: 16px 20px;
+  padding: 12px 18px;
   border-top: 1px solid ${({ theme }) => theme.colors.border};
 `;
 
@@ -301,7 +361,7 @@ const Loading = styled.div`
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const CardWrapper = styled.div`
@@ -310,8 +370,11 @@ const CardWrapper = styled.div`
 
 /* ── Component ────────────────────────────────────────── */
 
-export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose, onLaunch, isEmbedding }: PlacementManagerProps) {
+/** Review placements in a keyboard-contained modal without launching on entry. */
+export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose, onLaunch, onBack, isEmbedding }: PlacementManagerProps) {
   const { t } = useSkulkTranslation();
+  const modalRef = useRef<HTMLDivElement>(null);
+  useModalFocus(open, modalRef, onClose);
   const [previews, setPreviews] = useState<PlacementPreview[]>([]);
   const [loading, setLoading] = useState(false);
   const [minNodes, setMinNodes] = useState(1);
@@ -322,6 +385,10 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   // with the PlaceInstance command so the master's planner treats those
   // nodes as if they were absent for *this* placement only.
   const [excludedNodes, setExcludedNodes] = useState<Set<string>>(new Set());
+  // Context window typed by the operator, as text so a cleared field stays
+  // cleared while they type; null keeps the fleet default. Engines that
+  // reserve their window at load commit this memory up front.
+  const [contextText, setContextText] = useState<string | null>(null);
 
   // The cluster preview, slider, and combo evaluation all run against the
   // *effective* topology — the original minus excluded nodes. The master
@@ -409,6 +476,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     setSharding('Pipeline');
     setInstanceMeta('MlxRing');
     setExcludedNodes(new Set());
+    setContextText(null);
   }, [open, modelId]);
 
   // Re-fetch previews whenever the modal opens for a model, the model
@@ -512,6 +580,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   const currentKey = comboKey(sharding, instanceMeta);
   const currentCombo = currentOptions?.[currentKey];
   const currentPreview = currentCombo?.available ? currentCombo.preview ?? null : null;
+  const trustRequirement = previews.find((preview) => preview.trust_requirement)?.trust_requirement ?? null;
 
   // Auto-select first available combo when node count changes
   useEffect(() => {
@@ -528,15 +597,33 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     }
   }, [minNodes, currentOptions, currentKey]);
 
+  const contextMax = currentPreview?.max_context_tokens ?? null;
+  const contextDefault = currentPreview?.default_context_tokens ?? contextMax;
+  const parsedContext = contextText === null ? null : Number.parseInt(contextText, 10);
+  const contextTokens = parsedContext !== null && Number.isFinite(parsedContext) ? parsedContext : null;
+  const contextChoice = contextText === null ? contextDefault : contextTokens;
+  const contextInvalid =
+    contextText !== null
+    && (contextTokens === null
+      || contextTokens < MIN_CONTEXT_TOKENS
+      || (contextMax !== null && contextTokens > contextMax));
+
   const handleLaunch = useCallback(() => {
     const excludedNodesArr = [...excludedNodes];
     if (isEmbedding) {
       onLaunch({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1, excludedNodes: excludedNodesArr });
     } else {
-      onLaunch({ modelId, sharding, instanceMeta, minNodes, excludedNodes: excludedNodesArr });
+      onLaunch({
+        modelId,
+        sharding,
+        instanceMeta,
+        minNodes,
+        excludedNodes: excludedNodesArr,
+        ...(contextTokens !== null ? { contextTokens } : {}),
+      });
     }
     onClose();
-  }, [modelId, sharding, instanceMeta, minNodes, excludedNodes, isEmbedding, onLaunch, onClose]);
+  }, [modelId, sharding, instanceMeta, minNodes, excludedNodes, contextTokens, isEmbedding, onLaunch, onClose]);
 
   const toggleNodeExclusion = useCallback((nodeId: string) => {
     setExcludedNodes((prev) => {
@@ -562,7 +649,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   const embeddingComboAvailable = isEmbedding
     ? (optionsByNodeCount[1]?.pipeline_ring?.available ?? false)
     : false;
-  const canLaunch = isEmbedding ? embeddingComboAvailable : (currentCombo?.available ?? false);
+  const canLaunch = isEmbedding ? embeddingComboAvailable : ((currentCombo?.available ?? false) && !contextInvalid);
   const pipelineRing = currentOptions?.pipeline_ring;
   const pipelineJaccl = currentOptions?.pipeline_jaccl;
   const tensorRing = currentOptions?.tensor_ring;
@@ -593,13 +680,20 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
 
   return (
     <Overlay onClick={onClose}>
-      <Modal onClick={(e) => e.stopPropagation()}>
+      <Modal ref={modalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={t('placement.dialog', 'Placement options')} onClick={(e) => e.stopPropagation()}>
         <Header>
+          {onBack && <Button variant="ghost" size="sm" icon onClick={onBack} aria-label={t('placement.backToDiscovery', 'Back to Find Models')}><FiArrowLeft aria-hidden /></Button>}
           <Title>{t('placement.title', 'Place')} <ModelName>{modelLabel(modelId)}</ModelName></Title>
           <CloseBtn onClick={onClose} aria-label={t('placement.close', 'Close placement manager')}><FiX size={18} /></CloseBtn>
         </Header>
 
         <Body>
+          {!loading && trustRequirement && (
+            <ErrorCallout>
+              <FiInfo size={16} style={{ flexShrink: 0, marginTop: 1 }} />
+              {trustRequirement}
+            </ErrorCallout>
+          )}
           {loading ? (
             <Loading>{t('placement.loading', 'Analyzing placement options...')}</Loading>
           ) : isEmbedding ? (
@@ -702,6 +796,61 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                       'Click a node to exclude it from this placement. Excluded nodes are skipped only for this launch - already-running instances on them are unaffected.',
                     )}
                   </NodePillHint>
+                </Section>
+              )}
+
+              {/* Context window: the window the engine serves. Engines that
+                  reserve it at load commit its memory whether or not requests
+                  use it, so the default is modest and the maximum is shown. */}
+              {!isEmbedding && currentPreview && contextMax !== null && (
+                <Section>
+                  <SectionLabel>{t('placement.contextWindow', 'Context window')}</SectionLabel>
+                  <ContextRow>
+                    <ContextInput
+                      type="number"
+                      min={MIN_CONTEXT_TOKENS}
+                      max={contextMax}
+                      step={1024}
+                      aria-label={t('placement.contextWindow', 'Context window')}
+                      aria-invalid={contextInvalid}
+                      value={contextText ?? String(contextDefault ?? '')}
+                      onChange={(e) => setContextText(e.target.value)}
+                    />
+                    <ContextMeta>
+                      {t('placement.contextTokensOf', 'tokens, up to {max}', { max: formatTokens(contextMax) })}
+                    </ContextMeta>
+                    {contextText !== null && (
+                      <ContextReset type="button" onClick={() => setContextText(null)}>
+                        {t('placement.contextUseDefault', 'Use default ({tokens})', { tokens: formatTokens(contextDefault ?? contextMax) })}
+                      </ContextReset>
+                    )}
+                  </ContextRow>
+                  <NodePillHint>
+                    {currentPreview.reserves_context_at_load
+                      ? currentPreview.kv_bytes_per_token && contextChoice
+                        ? t(
+                          'placement.contextReservedHint',
+                          'This engine reserves the whole window when the model loads: about {size} of memory for {tokens} tokens.',
+                          { size: formatBytes(currentPreview.kv_bytes_per_token * contextChoice), tokens: formatTokens(contextChoice) },
+                        )
+                        : t(
+                          'placement.contextReservedNoSizeHint',
+                          'This engine reserves the whole window when the model loads.',
+                        )
+                      : t(
+                        'placement.contextLazyHint',
+                        'This engine grows its cache per request; the window is a ceiling, not a reservation.',
+                      )}
+                  </NodePillHint>
+                  {contextInvalid && (
+                    <Callout>
+                      <FiInfo size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                      {t('placement.contextOutOfRange', 'Choose between {min} and {max} tokens for this placement.', {
+                        min: formatTokens(MIN_CONTEXT_TOKENS),
+                        max: formatTokens(contextMax),
+                      })}
+                    </Callout>
+                  )}
                 </Section>
               )}
 

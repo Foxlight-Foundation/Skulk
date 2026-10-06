@@ -1,0 +1,583 @@
+"""Guided local installation over the same durable operations as the dashboard."""
+
+import asyncio
+import json
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TypeGuard, final
+from uuid import uuid4
+
+from pydantic import JsonValue, SecretStr, TypeAdapter
+
+from skulk.extensions.runtime_artifacts import (
+    RuntimeTrust,
+    canonical_platform,
+    protocol_refusal_sentence,
+)
+from skulk.extensions.runtime_attachment import InstallationIdentifier
+from skulk.extensions.runtime_catalog import (
+    CatalogEntryReview,
+    CatalogReview,
+    catalog_refusal,
+    catalog_refusal_sentence,
+)
+from skulk.extensions.runtime_controller import LifecycleOperation, LifecycleRequest
+from skulk.extensions.runtime_download import (
+    InstallOperation,
+    InstallRequest,
+    ReleaseReview,
+    SourceStatus,
+    SourceUpdate,
+)
+from skulk.extensions.runtime_manager import (
+    PROTOCOL_UNSUPPORTED,
+    CatalogInstall,
+    CatalogInstallation,
+    CatalogInstallRequest,
+    CatalogRequest,
+    InstallationRequest,
+    InstallRecoveryRequest,
+    InstallSubmission,
+    ManagerRequest,
+    OperationRequest,
+    ReleaseRequest,
+    SourceRegistration,
+    SubmitRequest,
+)
+from skulk.extensions.runtime_selection import RuntimeSelection
+
+_OBJECT = TypeAdapter(dict[str, JsonValue])
+_IDENTIFIER = TypeAdapter[str](InstallationIdentifier)
+
+
+_WINDOW = TypeAdapter(list[int])
+
+
+def _is_integer(value: JsonValue) -> TypeGuard[int]:
+    """An integer of the fixed vocabulary; bool is an int to Python and not here."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def protocol_refusal(response: dict[str, JsonValue]) -> str | None:
+    """A named manager error: a release, runtime or catalog protocol outside the window.
+
+    Only the fixed vocabulary is read (a code, a kind, integers); anything else
+    in the response stays undisclosed.
+    """
+    if response.get("error") != PROTOCOL_UNSUPPORTED:
+        return None
+    kind = response.get("kind")
+    offered = response.get("offered")
+    try:
+        accepted = _WINDOW.validate_python(response.get("accepted"), strict=True)
+    except ValueError:
+        return None
+    if kind not in ("release", "runtime", "catalog") or not _is_integer(offered):
+        return None
+    return protocol_refusal_sentence(str(kind), offered, tuple(accepted))
+
+
+@final
+@dataclass(frozen=True)
+class TerminalInstaller:
+    """Inject terminal and manager effects; never execute a provider operation.
+
+    The manager retains every accepted effect after this client exits. Prompts
+    accept external source/trust settings and separate installation consent;
+    identifiers and revision fences come from generated or authoritative state.
+    """
+
+    request: Callable[[ManagerRequest], Awaitable[dict[str, JsonValue]]]
+    prompt: Callable[[str], str]
+    secret: Callable[[str], str]
+    output: Callable[[str], None]
+    wait: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+    async def _call(self, request: ManagerRequest) -> dict[str, JsonValue]:
+        response = await self.request(request)
+        if "error" in response or "result" not in response:
+            named = protocol_refusal(response)
+            catalog_refused = catalog_refusal(response)
+            if named is not None:
+                self.output(named)
+            elif catalog_refused is not None:
+                self.output(
+                    catalog_refusal_sentence(
+                        catalog_refused.code, catalog_refused.status
+                    )
+                )
+            # Neither manager errors nor rejected credential inputs belong in
+            # terminal diagnostics. The resume command was printed before effects.
+            raise ValueError("manager request incomplete; inspect retained status")
+        return _OBJECT.validate_python(response["result"], strict=True)
+
+    def _confirm(self, question: str) -> bool:
+        return self.prompt(question + " [y/N]: ").strip().lower() == "y"
+
+    def _review(self, review: ReleaseReview) -> None:
+        # JSON escapes control characters in publisher-supplied labels/permissions.
+        self.output(json.dumps(review.model_dump(mode="json"), indent=2))
+
+    def _source(self) -> SourceUpdate | None:
+        address = self.prompt("Trusted HTTPS release directory: ").strip()
+        metadata = self.prompt("Metadata filename [release.json]: ").strip()
+        publisher = self.prompt("Trusted publisher ID: ").strip()
+        public_key = self.prompt("Publisher Ed25519 public key (hex): ").strip()
+        expiry = datetime.fromisoformat(
+            self.prompt("Trust expiry (UTC, e.g. 2027-01-01T00:00:00Z): ").strip()
+        )
+        if expiry.tzinfo is None or expiry.timestamp() <= time.time():
+            raise ValueError("trust requires an explicit future timezone-aware expiry")
+        trust = RuntimeTrust(
+            revision=1,
+            expires_at=int(expiry.timestamp()),
+            publishers={publisher: public_key},
+        )
+        source = SourceUpdate(
+            expected_revision=0,
+            base_url=address,
+            metadata_filename=metadata or "release.json",
+            trust=trust,
+        )
+        self.output(source.model_dump_json(indent=2, exclude={"token"}))
+        if not self._confirm("Trust this publisher for this release source?"):
+            return None
+        token = self.secret("Feed bearer credential (hidden; blank for anonymous): ")
+        return SourceUpdate(
+            expected_revision=0,
+            base_url=source.base_url,
+            metadata_filename=source.metadata_filename,
+            trust=trust,
+            token=SecretStr(token) if token else None,
+            clear_token=not token,
+        )
+
+    async def _installation(
+        self, identifier: str
+    ) -> tuple[bool, RuntimeSelection | None]:
+        """Whether the manager still owns work for this installation, and its selection.
+
+        An activation whose reply was lost is resumed, never inspected past:
+        the manager refuses inspection while it owns work, and the retained
+        operation is the one to observe.
+        """
+        state = await self._call(
+            InstallationRequest(action="get", plugin_id=identifier)
+        )
+        summary = _OBJECT.validate_python(state["installation"], strict=True)
+        selection = (
+            RuntimeSelection.model_validate_json(json.dumps(state["selection"]))
+            if state["selection"] is not None
+            else None
+        )
+        return summary.get("operation_state") not in (None, "complete"), selection
+
+    async def _install_status(self, identifier: str) -> InstallOperation | None:
+        result = await self._call(
+            ReleaseRequest(action="install_status", plugin_id=identifier)
+        )
+        value = result["operation"]
+        return (
+            InstallOperation.model_validate_json(json.dumps(value))
+            if value is not None
+            else None
+        )
+
+    async def _stage(
+        self,
+        identifier: str,
+        source: SourceStatus,
+        expected_digest: str | None = None,
+    ) -> InstallOperation | None:
+        operation = await self._install_status(identifier)
+        review: ReleaseReview | None = None
+        in_flight, selection = await self._installation(identifier)
+        if in_flight and operation is None:
+            raise ValueError("another lifecycle operation needs inspection")
+        if (
+            expected_digest is not None
+            and operation is not None
+            and operation.request.runtime_digest != expected_digest
+            and (in_flight or operation.state != "staged")
+        ):
+            # A retained operation for another release that cannot be
+            # inspected past would be resumed as if it were the bound one.
+            raise ValueError(
+                "a retained installation operation for another release must "
+                "settle before the listed release is staged"
+            )
+        if operation is None or (operation.state == "staged" and not in_flight):
+            # With nothing in flight, the source is inspected again: an
+            # installation that already holds a staged release is upgraded
+            # when the source now publishes a newer one, instead of resuming
+            # the retained operation forever. Inspection reads and verifies;
+            # it downloads and activates nothing. An interrupted operation is
+            # never inspected past: recovery stays bound to its own digest.
+            review = ReleaseReview.model_validate_json(
+                json.dumps(
+                    await self._call(
+                        ReleaseRequest(action="inspect_release", plugin_id=identifier)
+                    )
+                )
+            )
+            if expected_digest is not None and review.runtime_digest != expected_digest:
+                # A catalog binding consented to one record; a feed that
+                # serves another since is refused before any transfer.
+                raise ValueError(
+                    "the release at the feed changed since the listing was bound; "
+                    "read the catalog again"
+                )
+        if (
+            review is not None
+            and operation is None
+            and selection is not None
+            and selection.enabled
+            and selection.runtime_digest == review.runtime_digest
+        ):
+            # An enabled selection with no retained download operation (an
+            # installation selected outside this wizard) at the reviewed
+            # release: nothing to stage or start. A disabled one falls
+            # through, so the release is staged again and activation offered.
+            self.output(f"Installation retained at sequence {selection.sequence}")
+            return None
+        if review is not None and (
+            operation is None
+            or operation.review.runtime_digest != review.runtime_digest
+        ):
+            # The high-water mark is the selection's when one exists, else
+            # the staged release's. Going below it is a rollback, which the
+            # terminal never requests: refused here, before any transfer,
+            # rather than after staging by the selector. A staged release
+            # that was never activated counts too, so a feed that goes back
+            # below it cannot replace the retained operation.
+            highest = max(
+                selection.highest_sequence if selection is not None else 0,
+                operation.review.sequence if operation is not None else 0,
+            )
+            if review.sequence < highest:
+                raise ValueError(
+                    "the release at the source is older than the installed one; "
+                    "rollback is an explicit lifecycle operation"
+                )
+            installed = (
+                selection.bundle_id
+                if selection is not None
+                else operation.review.bundle_id
+                if operation is not None
+                else None
+            )
+            if installed is not None and review.bundle_id != installed:
+                # The selector refuses a bundle change after staging; refusing
+                # it here leaves no unusable generation behind.
+                raise ValueError(
+                    "the release at the source belongs to another bundle; "
+                    "install it as a new installation"
+                )
+            self._review(review)
+            question = (
+                "Install this exact verified release?"
+                if operation is None and selection is None
+                else "Stage this newer verified release beside the installed one?"
+            )
+            if not self._confirm(question):
+                return None
+            request = InstallRequest(
+                operation_id=uuid4().hex,
+                runtime_digest=review.runtime_digest,
+                expected_source_revision=review.source_revision,
+            )
+            self.output("Installation operation: " + request.operation_id)
+            operation = InstallOperation.model_validate_json(
+                json.dumps(
+                    await self._call(
+                        InstallSubmission(plugin_id=identifier, request=request)
+                    )
+                )
+            )
+        elif operation is None:
+            raise ValueError("release inspection produced no installation")
+        elif operation.state == "recovery_required":
+            self._review(operation.review)
+            self.output("Interrupted installation: " + operation.request.operation_id)
+            if not self._confirm(
+                "Explicitly recover this retained local installation?"
+            ):
+                return None
+            operation = InstallOperation.model_validate_json(
+                json.dumps(
+                    await self._call(
+                        InstallRecoveryRequest(
+                            plugin_id=identifier,
+                            operation_id=operation.request.operation_id,
+                            expected_source_revision=source.revision,
+                        )
+                    )
+                )
+            )
+        expected = operation.request
+        for _ in range(240):
+            if operation.request != expected:
+                raise ValueError("installation changed; inspect the retained operation")
+            self.output(
+                f"{operation.state}: {operation.downloaded_bytes} / "
+                f"{operation.review.artifact_bytes} bytes"
+            )
+            if operation.state == "staged":
+                return operation
+            if operation.state == "recovery_required":
+                raise ValueError("installation needs explicit recovery")
+            await self.wait(1)
+            current = await self._install_status(identifier)
+            if current is None:
+                raise ValueError("installation history unavailable")
+            operation = current
+        raise TimeoutError("installation remains owned by the manager")
+
+    async def _activation_status(
+        self, identifier: str, operation_id: str
+    ) -> LifecycleOperation:
+        return LifecycleOperation.model_validate_json(
+            json.dumps(
+                await self._call(
+                    OperationRequest(
+                        action="operation",
+                        plugin_id=identifier,
+                        operation_id=operation_id,
+                    )
+                )
+            )
+        )
+
+    async def _activate(self, identifier: str, staged: InstallOperation) -> None:
+        state = await self._call(
+            InstallationRequest(action="get", plugin_id=identifier)
+        )
+        summary = _OBJECT.validate_python(state["installation"], strict=True)
+        selection = (
+            RuntimeSelection.model_validate_json(json.dumps(state["selection"]))
+            if state["selection"] is not None
+            else None
+        )
+        operation_id = summary.get("operation_id")
+        if operation_id is not None:
+            operation = await self._activation_status(
+                identifier, TypeAdapter(str).validate_python(operation_id, strict=True)
+            )
+            if operation.state != "complete":
+                # A lost activation response must not become another activation,
+                # nor may this wizard recover an unrelated disable or selection.
+                if (
+                    operation.request.action != "activate"
+                    or operation.request.runtime_digest != staged.request.runtime_digest
+                ):
+                    raise ValueError("another lifecycle operation needs inspection")
+                await self._observe_activation(identifier, operation)
+                return
+        replacing = (
+            selection is not None
+            and selection.runtime_digest != staged.request.runtime_digest
+        )
+        if selection is not None and replacing:
+            # A staged release older than the selected one would be a
+            # rollback, which the manager refuses at inspection and again at
+            # selection; only a newer release reaches this point.
+            self.output(f"Selected release sequence: {selection.sequence}")
+        elif selection is not None and selection.enabled:
+            return
+        self._review(staged.review)
+        question = (
+            "Accept these permissions, replace the selected release and restart "
+            "the plugin owner?"
+            if replacing
+            else "Accept these permissions and start the plugin owner?"
+        )
+        if not self._confirm(question):
+            return
+        request = LifecycleRequest(
+            operation_id=uuid4().hex,
+            action="activate",
+            expected_revision=selection.revision if selection is not None else 0,
+            runtime_digest=staged.request.runtime_digest,
+            accept_permissions=True,
+        )
+        self.output("Activation operation: " + request.operation_id)
+        operation = LifecycleOperation.model_validate_json(
+            json.dumps(
+                await self._call(SubmitRequest(plugin_id=identifier, request=request))
+            )
+        )
+        await self._observe_activation(identifier, operation)
+
+    async def _observe_activation(
+        self, identifier: str, operation: LifecycleOperation
+    ) -> None:
+        request = operation.request
+        for _ in range(90):
+            if operation.request != request:
+                raise ValueError("activation identity changed")
+            self.output("Activation: " + operation.state)
+            if operation.state == "complete":
+                return
+            if operation.state not in ("accepted", "applying"):
+                raise ValueError("activation requires explicit lifecycle recovery")
+            await self.wait(1)
+            operation = await self._activation_status(identifier, request.operation_id)
+        raise TimeoutError("activation remains owned by the manager")
+
+    async def run(self, plugin_id: str | None = None) -> str:
+        """Install a new plugin or observe a retained installation by its printed ID.
+
+        Print the generated identity before registration, ask for trust and
+        permissions separately, and retain accepted operations on cancellation.
+        This never changes capability-node settings or approves spending. Existing source
+        configuration and credentials are retained unchanged when resuming.
+        """
+        identifier = _IDENTIFIER.validate_python(
+            plugin_id if plugin_id is not None else "managed." + uuid4().hex,
+            strict=True,
+        )
+        self.output("Resume: skulk-plugin-service install-plugin " + identifier)
+        await self._call(InstallationRequest(action="register", plugin_id=identifier))
+        source = SourceStatus.model_validate_json(
+            json.dumps(
+                await self._call(
+                    ReleaseRequest(action="source_status", plugin_id=identifier)
+                )
+            )
+        )
+        if not source.configured:
+            configuration = self._source()
+            if configuration is None:
+                return identifier
+            source = SourceStatus.model_validate_json(
+                json.dumps(
+                    await self._call(
+                        SourceRegistration(plugin_id=identifier, request=configuration)
+                    )
+                )
+            )
+        if not source.credential_ready:
+            raise ValueError("replace the unavailable feed credential before resuming")
+        await self._stage_and_activate(identifier, source)
+        return identifier
+
+    async def _stage_and_activate(
+        self,
+        identifier: str,
+        source: SourceStatus,
+        expected_digest: str | None = None,
+    ) -> None:
+        staged = await self._stage(identifier, source, expected_digest)
+        if staged is None:
+            return
+        await self._activate(identifier, staged)
+        self.output(
+            "Installation retained: "
+            + identifier
+            + ". Continue through this plugin's documented terminal setup or the Plugins dashboard."
+        )
+        self.output(
+            "After owner activation, run plugin preflight before enabling capability work."
+        )
+
+    @staticmethod
+    def _listed(
+        review: CatalogReview,
+        bundle_id: str,
+        sequence: int | None,
+        platform: str | None,
+    ) -> CatalogEntryReview:
+        """The one listing to install: the newest of the bundle that fits this host.
+
+        Only runtime-bearing listings that fit this host are considered: this
+        host installs signed runtime records only, so a listing without an
+        artifact family is not installable here. Without ``--platform`` the
+        host's own match decides; with it, only listings of that artifact
+        family. Two artifacts at the same sequence are an ambiguity the
+        operator resolves by naming the family, never a guess.
+        """
+        wanted = canonical_platform(platform) if platform is not None else None
+        listed = [
+            entry
+            for entry in review.entries
+            if entry.bundle_id == bundle_id
+            and (sequence is None or entry.sequence == sequence)
+        ]
+        candidates = [
+            entry
+            for entry in listed
+            if entry.runtime_platform is not None
+            and entry.matches_host
+            and (wanted is None or canonical_platform(entry.runtime_platform) == wanted)
+        ]
+        if not candidates:
+            if listed and all(entry.runtime_platform is None for entry in listed):
+                raise ValueError(
+                    "this bundle is listed without an installable runtime record "
+                    "for this host; read the catalog"
+                )
+            raise ValueError(
+                "no listed release of this bundle fits this host; read the catalog"
+            )
+        highest = max(entry.sequence for entry in candidates)
+        newest = [entry for entry in candidates if entry.sequence == highest]
+        if len(newest) > 1:
+            raise ValueError(
+                "several listed artifacts fit this host at the same sequence; "
+                "name the family with --platform"
+            )
+        return newest[0]
+
+    async def run_from_catalog(
+        self,
+        bundle_id: str,
+        *,
+        sequence: int | None = None,
+        platform: str | None = None,
+        plugin_id: str | None = None,
+    ) -> str:
+        """Install a listed release: the catalog supplies the feed and publisher.
+
+        The listing is shown as consent facts before anything is registered;
+        binding the installation to it is one consent, staging the verified
+        release and activating it stay the existing separate consents. The
+        installation's later resume and upgrade go through the ordinary
+        install-plugin path, since its source is then configured.
+        """
+        identifier = _IDENTIFIER.validate_python(
+            plugin_id if plugin_id is not None else "managed." + uuid4().hex,
+            strict=True,
+        )
+        review = CatalogReview.model_validate_json(
+            json.dumps(await self._call(CatalogRequest(action="read_catalog")))
+        )
+        listing = self._listed(review, bundle_id, sequence, platform)
+        self.output(json.dumps(listing.model_dump(mode="json"), indent=2))
+        self.output("Resume: skulk-plugin-service install-plugin " + identifier)
+        if not self._confirm(
+            "Bind this installation to the listed release's feed and publisher?"
+        ):
+            return identifier
+        bound = CatalogInstallation.model_validate_json(
+            json.dumps(
+                await self._call(
+                    CatalogInstallRequest(
+                        request=CatalogInstall(
+                            catalog_sha256=review.catalog_sha256,
+                            bundle_id=listing.bundle_id,
+                            sequence=listing.sequence,
+                            runtime_platform=listing.runtime_platform,
+                            plugin_id=identifier,
+                        )
+                    )
+                )
+            )
+        )
+        if not bound.source.credential_ready:
+            raise ValueError("replace the unavailable feed credential before resuming")
+        await self._stage_and_activate(
+            identifier, bound.source, bound.review.runtime_digest
+        )
+        return identifier

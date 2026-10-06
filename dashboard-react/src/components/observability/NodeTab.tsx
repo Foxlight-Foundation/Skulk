@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { useEffect, useMemo, useState } from 'react';
 import { copyToClipboard } from '../../utils/clipboard';
 import styled from 'styled-components';
@@ -69,7 +70,7 @@ const SelectorLabel = styled.label`
   flex-shrink: 0;
 `;
 
-const NodeSelect = styled.select`
+const NodeSelect = styled(DesignedSelect)`
   flex: 1;
   min-width: 0;
   background: ${({ theme }) => theme.colors.bg};
@@ -83,6 +84,7 @@ const NodeSelect = styled.select`
   cursor: pointer;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 
@@ -96,7 +98,7 @@ const Subtitle = styled.div`
   margin: 0 0 14px;
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   word-break: break-all;
 `;
 
@@ -127,7 +129,7 @@ const SectionTitle = styled.h3`
   margin: 0 0 10px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.md};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
 `;
 
 const Row = styled.div`
@@ -140,7 +142,7 @@ const Row = styled.div`
 `;
 
 const Key = styled.div`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Value = styled.div<{ $warn?: boolean }>`
@@ -191,7 +193,7 @@ const ProcessLine = styled.div`
 
 const Monospace = styled.code`
   font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -434,7 +436,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
       <NodeSelect
         id="observability-node-select"
         value={effectiveNodeId ?? ''}
-        onChange={(event) => setSelectedNodeId(event.target.value || null)}
+        onValueChange={(selectedValue) => setSelectedNodeId(selectedValue || null)}
       >
         <option value="">{t('observability.node.selectNode', 'Select node...')}</option>
         {nodeOptions.map((option) => (

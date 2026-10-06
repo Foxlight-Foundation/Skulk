@@ -1,0 +1,22 @@
+--- a/src/community_models/minimax_music3/depth_decoder.cpp
++++ b/src/community_models/minimax_music3/depth_decoder.cpp
+@@ -559,5 +559,18 @@
+             out[static_cast<size_t>(song)].codes = {semantic_codes[static_cast<size_t>(song)]};
+             out[static_cast<size_t>(song)].hidden.reserve(
+                 static_cast<size_t>((config.codebooks - 1) * config.hidden_size));
+-            fallback_rngs.emplace_back(static_cast<uint32_t>(seeds[static_cast<size_t>(song)]));
++            // generate_batch runs once per AR frame. Seeding from the request
++            // seed alone replayed the same uniforms every frame, so on every
++            // non-CUDA backend the residual codes stopped being random and the
++            // AR locked into one held note. Mixing in the running sample index
++            // gives fresh draws per frame and stays deterministic per seed.
++            // (CUDA samples through the advancing Philox offset instead.)
++            const uint64_t seed = seeds[static_cast<size_t>(song)];
++            const uint64_t call_index = sample_call_indices[static_cast<size_t>(song)];
++            std::seed_seq frame_seed{
++                static_cast<uint32_t>(seed),
++                static_cast<uint32_t>(seed >> 32),
++                static_cast<uint32_t>(call_index),
++                static_cast<uint32_t>(call_index >> 32)};
++            fallback_rngs.emplace_back(frame_seed);
+         }

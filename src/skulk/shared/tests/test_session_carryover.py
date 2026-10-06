@@ -6,17 +6,23 @@ Pins what a promoted master inherits from the node's prior replicated state
 session's event index).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from skulk.shared.session_carryover import seed_state_for_new_session
 from skulk.shared.topology import Topology
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.profiling import NodeNetworkInfo
 from skulk.shared.types.state import State
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardCancelDownloadAction,
+)
 from skulk.shared.types.worker.downloads import (
+    DownloadAttemptId,
     DownloadCompleted,
     DownloadOngoing,
 )
+from skulk.shared.types.worker.instances import InstanceFailure, InstanceId
 
 
 def _prior_state() -> tuple[State, NodeId]:
@@ -35,6 +41,7 @@ def _prior_state() -> tuple[State, NodeId]:
         last_seen={node: datetime(2020, 1, 1, tzinfo=timezone.utc)},
         topology=topology,
         tracing_enabled=True,
+        model_trust_approved_remote_code_identities=(f"card_{'a' * 52}",),
         last_event_applied_idx=4242,
         # A connectivity field stays on the control plane and is carried; the
         # telemetry-plane readings (identities/disk/etc.) are not.
@@ -48,10 +55,57 @@ def test_carries_durable_facts():
     assert seed.instances == prior.instances
     assert seed.downloads == prior.downloads
     assert seed.tracing_enabled is True
+    assert (
+        seed.model_trust_approved_remote_code_identities
+        == prior.model_trust_approved_remote_code_identities
+    )
     assert node in seed.node_network
     # The telemetry-plane readings (node_memory/system since slice 2;
     # node_identities/disk/rdma-ctl since slice 3) are no longer carried — they
     # live in the Node-owned TelemetryView, which survives election separately.
+
+
+def test_carries_bounded_instance_failure_truth() -> None:
+    """Routine master promotion must not erase why a placement disappeared."""
+    failure = InstanceFailure(
+        instance_id=InstanceId("failed-instance"),
+        model_id=ModelId("org/model"),
+        error_code="runner_crashed",
+        error_message="Runner crashed repeatedly while loading the model.",
+        affected_node_ids=(NodeId("node-a"),),
+        recorded_at=datetime(2026, 8, 15, 16, 0, tzinfo=timezone.utc),
+    )
+    prior = State(instance_failures=(failure,))
+
+    seed = seed_state_for_new_session(prior)
+
+    assert seed.instance_failures == (failure,)
+
+
+def test_carries_steward_action_recovery_truth() -> None:
+    """Master promotion preserves actionable steward proposal state."""
+    now = datetime(2026, 9, 3, 8, 0, tzinfo=timezone.utc)
+    proposal = StewardActionProposal(
+        action=StewardCancelDownloadAction(
+            node_id=NodeId("worker"),
+            node_name="Worker",
+            model_id=ModelId("org/model"),
+            attempt_id=DownloadAttemptId("attempt"),
+        ),
+        rationale="The instance is no longer required.",
+        evidence=("No active workload requires the instance.",),
+        expected_effect="Stop the ordinary model instance.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+        status="dispatched",
+        decided_at=now + timedelta(seconds=1),
+        dispatched_at=now + timedelta(seconds=2),
+    )
+    prior = State(steward_action_proposals={proposal.proposal_id: proposal})
+
+    seed = seed_state_for_new_session(prior)
+
+    assert seed.steward_action_proposals == prior.steward_action_proposals
 
 
 def test_carries_only_completed_downloads():

@@ -5,7 +5,7 @@ const meta: Meta<typeof ClusterCard> = {
   title: 'Cluster/ClusterCard',
   component: ClusterCard,
   parameters: { layout: 'centered' },
-  decorators: [(Story) => <div style={{ padding: 32, background: '#000' }}><Story /></div>],
+  decorators: [(Story) => <div style={{ padding: 32, }}><Story /></div>],
 };
 
 export default meta;
@@ -34,7 +34,6 @@ export const Running3Nodes: Story = {
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
     nodes: threeNodes,
-    isRunning: true,
   },
 };
 
@@ -46,7 +45,6 @@ export const Running2Nodes: Story = {
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
     nodes: twoNodes,
-    isRunning: true,
   },
 };
 
@@ -58,7 +56,6 @@ export const Running1Node: Story = {
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
     nodes: oneNode,
-    isRunning: true,
   },
 };
 
@@ -70,7 +67,6 @@ export const Downloading: Story = {
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
     nodes: threeNodes,
-    isRunning: false,
     downloads: [
       { nodeId: 'node-1', nodeName: 'kite1', percent: 45 },
       { nodeId: 'node-2', nodeName: 'kite2', percent: 100 },
@@ -87,7 +83,6 @@ export const ReadyToLaunch: Story = {
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
     nodes: twoNodes,
-    isRunning: false,
     onLaunch: () => alert('Launch!'),
   },
 };
@@ -100,6 +95,5 @@ export const TensorJaccl: Story = {
     sharding: 'Tensor',
     instanceType: 'MlxJaccl',
     nodes: threeNodes,
-    isRunning: true,
   },
 };

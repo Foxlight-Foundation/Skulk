@@ -3,11 +3,9 @@
 vLLM is one of Skulk's **served** engines: instead of loading the model
 in-process, the worker launches an external `vllm serve` subprocess and proxies
 its OpenAI HTTP API, the same managed-server-plus-proxy shape as the
-`llama_server` engine. It exists for one reason: vLLM's continuous batching and
-paged attention hold latency flat and grow aggregate throughput under
-**concurrent load**, where a single-stream engine collapses. In a benchmark on
-an A100 at 64-way concurrency, llama.cpp's time-to-first-token reached ~31
-seconds while vLLM's stayed at ~0.5 seconds.
+`llama_server` engine. Its continuous batching and paged attention support concurrent GPU workloads.
+Latency and throughput depend on the model, GPU, context, request mix and memory
+budget; benchmark the intended workload before choosing an engine.
 
 It **coexists** with the other engines rather than replacing them: MLX owns
 Apple Silicon, and the llama.cpp engines remain the GGUF paths. vLLM is
@@ -15,7 +13,7 @@ GPU-only in Skulk's scope (`vllm-cuda` on NVIDIA, `vllm-rocm` on AMD CDNA).
 
 ## When a model runs on vLLM
 
-Two things have to line up, the same rule as every engine:
+Model support and live node support must agree:
 
 - **The model card** declares and ranks the engines that can serve it in
   `compatible_backends`. A card that lists a vLLM backend is a vLLM candidate.
@@ -25,17 +23,39 @@ Two things have to line up, the same rule as every engine:
   vendor). A node without the binary is never a placement candidate for vLLM
   cards.
 
+Signed engine-support claims can also establish compatibility for an exact
+artifact, engine build, capability and hardware class. Skulk applies its runner
+limits after that match. See [Model capabilities](model-capabilities.md).
+
 When several nodes qualify, placement prefers the card's higher-ranked
 backend, so the card is where the "this model is better on vLLM than on
 llama.cpp here" judgment lives.
 
 ## Current scope
 
-The engine serves **single-node, streamed text generation**. Its boundaries
-are enforced loudly rather than degraded silently:
+The engine serves **single-node text generation with tool calling**. Its
+boundaries are enforced loudly rather than degraded silently:
 
-- **Tool calling is rejected** with a clear error: retry without `tools` or
-  use a model carded for `llama_cpp` / `llama_server`.
+- **Tool calling works on parser-pinned cards.** A card that pins
+  `vllm_tool_call_parser` in its `[runtime]` section (the registry's Qwen2.5
+  vLLM cards pin `hermes`) launches the server with vLLM's native
+  tool-call parsing, and a tool-enabled request runs non-streamed so the
+  caller receives the assembled call, the same shape as the llama.cpp
+  engines. A tool attempt cut short by `max_tokens` reports `length`
+  instead of surfacing an incomplete call. Cards without a pinned parser
+  reject tool requests with a clear error rather than silently dropping
+  them; there is no family-default fallback, because one model family can
+  span generations with different tool wire formats.
+- **Reasoning is split on parser-pinned cards.** vLLM only separates
+  `reasoning_content` from `content` when the server is launched with a
+  reasoning parser, so a card pins `vllm_reasoning_parser` in its
+  `[runtime]` section (a Muse Glimmer card pins `muse_glimmer` for both
+  parsers) and the runner passes it as `--reasoning-parser`. Explicit only,
+  no family fallback, for the same reason as the tool-call parser. An
+  unpinned reasoning model streams its thinking inline. Muse Glimmer's
+  always-on reasoning is steered through the template's
+  `reasoning_strength` kwarg, which the runner derives from the request's
+  `reasoning_effort`.
 - **Per-token logprobs are rejected** with a clear error: the OpenAI SSE proxy
   does not surface them, and Skulk refuses to silently omit what you asked
   for.
@@ -70,13 +90,13 @@ vLLM must never be installed into Skulk's venv. Skulk drives its CLI purely as
 an external process.
 
 Already have vLLM installed some other way? Point `SKULK_VLLM_BIN` at its CLI
-before launching Skulk and the node advertises the engine; nothing else is
-required.
+before launching Skulk. Confirm the supported GPU backend, engine build, model
+parser pins and compiler/Python development prerequisites with `skulk doctor`;
+a CLI path alone does not prove that the server can load a given model.
 
 ## Concurrency behavior and knobs
 
-Unlike the in-process runners, which serialize one generation at a time, the
-vLLM runner **dispatches concurrently**: it keeps multiple requests in flight
+The vLLM runner **dispatches concurrently**: it keeps multiple requests in flight
 against the one `vllm serve` process at once, which is what lets the server's
 continuous batching actually engage and decode them together.
 
@@ -84,9 +104,24 @@ continuous batching actually engage and decode them together.
   generations the runner keeps in flight; requests beyond it queue in the
   runner's bounded pool. This is a client-side admission bound, not the
   server's batch width (vLLM batches up to its own `--max-num-seqs`).
-- `SKULK_VLLM_GPU_MEMORY_UTILIZATION` (default 0.90) sets the fraction of GPU
-  VRAM vLLM may use for weights plus KV cache, passed through as
-  `--gpu-memory-utilization`.
+- vLLM's share of GPU memory (`--gpu-memory-utilization`) is sized to the
+  instance's placement. The runner passes the fraction of the device that
+  holds the memory Skulk reserved for the model (weights with overhead, the KV
+  cache for the served window, and a small floor), rounded up to the next
+  ten-thousandth of the device total CUDA reports. vLLM spends whatever part of that share weights and runtime
+  memory leave on KV cache. A vLLM model can therefore share a GPU with other
+  models and stays within its reservation. The share never drops below the
+  weights, the served window's KV cache at the model's own geometry (read
+  from its `config.json`, counting every layer at its widest attention head)
+  and about a gigabyte of vLLM's own runtime memory, so wide-head models and
+  very small models still fit their window. It never exceeds the previous
+  fixed share of 0.90.
+- `SKULK_VLLM_GPU_MEMORY_UTILIZATION` pins a fixed share instead. Set it on a
+  GPU dedicated to vLLM to give the KV cache the rest of the device, for more
+  concurrent long requests; other models then find that GPU full. A model
+  whose `config.json` does not name its layer count, head width and KV-head
+  count, or a GPU whose memory total cannot be read, gets the fixed 0.90
+  share with a warning in the node log.
 
 Operationally: server startup on a large model can take a couple of minutes
 (weight load, compilation, CUDA-graph capture) and is allowed a generous health
@@ -98,14 +133,10 @@ orphans GPU memory.
 
 ## Honest performance framing
 
-vLLM's win is **concurrency, not single-stream speed**. Under concurrent load
-it holds time-to-first-token flat and grows aggregate throughput where the
-single-stream engines queue and collapse. For one request at a time, the
-in-process engines can be as fast or faster depending on the GPU generation
-(on GPUs without native FP4 support, in particular, a single stream can favor
-them). Skulk keeps the engines side by side precisely so the choice is made
-per model and per hardware rather than by ideology; the model card's backend
-ranking is where that choice is recorded.
+Continuous batching can improve aggregate throughput under concurrency, but
+it does not promise constant latency as load rises. Single-request performance
+also depends on quantization, hardware and speculative decoding. Use the card's
+backend ranking with measurements from the workload you expect to serve.
 
 vLLM runs card-driven speculative decoding for checkpoints that ship
 native multi-token-prediction heads (Qwen3.6 among them): the card's
@@ -118,11 +149,11 @@ same fields: `vllm_spec_method = "dflash"` plus `vllm_spec_draft_repo`
 pairs Poolside's Laguna models with their block-parallel DFlash drafter
 (vLLM 0.25.1 or later), with the drafter repo resolved through vLLM's own
 Hugging Face cache at engine start (measured 1.35x single-stream on an
-A100-80GB, which lacks native FP8; newer GPUs should land closer to the
-vendor's 1.7-2.6x). Deep speculative depths need more scheduler budget
+A100-80GB; gains on other GPUs require measurement). Deep speculative depths need more scheduler budget
 than vLLM's defaults provide, so for carded depths of 8 or more the runner
-raises `--max-num-batched-tokens` automatically; shallow MTP depths run
-with vLLM's defaults untouched. DFlash speculators also JIT their kernels
+pins both `--max-num-batched-tokens` and `--max-num-seqs` explicitly, since
+vLLM's own defaults for them vary by version and hardware; shallow MTP depths
+run with vLLM's defaults untouched. DFlash speculators also JIT their kernels
 through NVRTC at engine start and need a CUDA 12.8+ toolchain on the node.
 See [Speculative Decoding](speculative-decoding.md) for the other engines'
 mechanisms.

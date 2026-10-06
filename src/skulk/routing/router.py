@@ -33,6 +33,11 @@ from skulk_pyo3_bindings import (
     ZenohHandle,
 )
 
+from skulk.extensions.host_network import (
+    HostNetwork,
+    namespace_fingerprint,
+    tcp_endpoints,
+)
 from skulk.shared.constants import SKULK_NODE_ID_KEYPAIR
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import DataChunk, ErrorChunk
@@ -47,6 +52,7 @@ from skulk.utils.task_group import TaskGroup
 
 from .connection_message import ConnectionMessage
 from .data_plane import DataPlaneEgressObserver
+from .output_media import OutputMediaPacket
 from .provider_streams import (
     ProviderStreamPacket,
     provider_stream_rejection_packets,
@@ -55,9 +61,11 @@ from .realtime_audio import RealtimeAudioPacket
 from .speech_media import SpeechMediaPacket
 from .telemetry_plane import NO_PEER_WARNING_AFTER_SECONDS, TelemetryPlaneObserver
 from .topics import (
+    AUTHORITY_MESSAGES,
     CONNECTION_MESSAGES,
     DATA,
     ELECTION_MESSAGES,
+    OUTPUT_MEDIA,
     PROVIDER_DATA,
     REALTIME_AUDIO,
     SPEECH_MEDIA,
@@ -93,14 +101,27 @@ _ZENOH_DATA_STREAM_IDLE_LEASE_SECONDS = 30 * 60.0
 # consume generated-output queue capacity. Small per-stream queues make the
 # sender absorb sustained pressure while bounding serialized media in memory.
 _ZENOH_VISION_OUTBOUND_BUFFER = 0
-# A maximum upload is open + 64 chunks + completion. All 66 frames must fit
-# before a newly scheduled per-stream publisher has a chance to drain.
-_ZENOH_VISION_STREAM_BUFFER = 66
+# A maximum upload is open + chunks + completion. Image edits send at most 64
+# chunks; video reference media sends up to 512 (256 MiB). All frames must fit
+# before a newly scheduled per-stream publisher has a chance to drain, and the
+# API's 1 GiB staged-media admission cap bounds what can be queued in total.
+_ZENOH_VISION_STREAM_BUFFER = 514
 _ZENOH_VISION_MAX_STREAMS_PER_OWNER = 16
 _ZENOH_VISION_MAX_ACTIVE_STREAMS = 16
 _ZENOH_VISION_MAX_REJECTION_TASKS = 64
 _ZENOH_VISION_REJECTED_STREAM_TOMBSTONES = 512
 _ZENOH_VISION_STREAM_IDLE_LEASE_SECONDS = 5 * 60.0
+# Finished video containers are gigabyte-scale and read from disk as they are
+# sent, so their egress lane hands frames to the per-stream publisher with a
+# blocking send: a slow owner throttles the producing worker's file reads
+# instead of filling memory or dropping the stream.
+_ZENOH_OUTPUT_OUTBOUND_BUFFER = 0
+_ZENOH_OUTPUT_STREAM_BUFFER = 64
+_ZENOH_OUTPUT_MAX_STREAMS_PER_OWNER = 8
+_ZENOH_OUTPUT_MAX_ACTIVE_STREAMS = 32
+_ZENOH_OUTPUT_MAX_REJECTION_TASKS = 64
+_ZENOH_OUTPUT_REJECTED_STREAM_TOMBSTONES = 512
+_ZENOH_OUTPUT_STREAM_IDLE_LEASE_SECONDS = 5 * 60.0
 # Network receive loops hand vision input to dedicated bounded consumers. The
 # payload lane can retain one complete maximum-size stream (open, 64 chunks, and
 # completion) while a prior frame is being delivered; the larger terminal lane
@@ -111,6 +132,10 @@ _VISION_NETWORK_TERMINAL_BUFFER = 1024
 # Election egress owns a small bounded queue and publish loop so a burst on the
 # ordinary gossipsub topics cannot leave liveness traffic waiting in their FIFO.
 _ELECTION_OUTBOUND_BUFFER = 128
+# Consensus rounds are low-volume correctness traffic. A dedicated bounded
+# Python egress queue prevents ordinary control bursts from queuing ahead of
+# ballots and certificates while making overload backpressure explicit.
+_AUTHORITY_OUTBOUND_BUFFER = 128
 # Telemetry holds at most one serialized packet beyond the in-flight publish.
 # Newer values remain in the keyed admission map and replace stale values there.
 _TELEMETRY_OUTBOUND_BUFFER = 1
@@ -196,7 +221,8 @@ class TopicRouter[T: CamelCaseModel]:
         self.origin_senders: set[Sender[tuple[str | None, T]]] = set()
         receiver_buffer_size = (
             0
-            if topic.topic == VISION_MEDIA.topic and max_buffer_size == inf
+            if topic.topic in (VISION_MEDIA.topic, OUTPUT_MEDIA.topic)
+            and max_buffer_size == inf
             else max_buffer_size
         )
         send, recv = channel[T](receiver_buffer_size)
@@ -285,10 +311,12 @@ class TopicRouter[T: CamelCaseModel]:
                 f"{self.topic.topic} from {origin}"
             )
             return
-        if (
-            self.topic.topic == VISION_MEDIA.topic
-            and not self._routes_to_local_node(item)
-        ):
+        if self.topic.topic in (
+            VISION_MEDIA.topic,
+            OUTPUT_MEDIA.topic,
+        ) and not self._routes_to_local_node(item):
+            # On the gossipsub fallback every node receives the broadcast;
+            # node-addressed media is delivered only to its target.
             return
         await self.publish(item, origin=origin)
 
@@ -310,15 +338,11 @@ class TopicRouter[T: CamelCaseModel]:
         # The routing key (Zenoh data plane only) addresses this message to a
         # single subscriber; None broadcasts on the bare topic (#279 Phase 2).
         routing_key = (
-            self.topic.routing_key(item)
-            if self.topic.routing_key is not None
-            else None
+            self.topic.routing_key(item) if self.topic.routing_key is not None else None
         )
         started_at = time.monotonic()
         stream_key = (
-            self.topic.stream_key(item)
-            if self.topic.stream_key is not None
-            else None
+            self.topic.stream_key(item) if self.topic.stream_key is not None else None
         )
         is_terminal = (
             self.topic.is_terminal(item)
@@ -334,10 +358,7 @@ class TopicRouter[T: CamelCaseModel]:
             logger.opt(exception=exception).warning(
                 f"Dropping unserializable message on topic {self.topic.topic}"
             )
-            if (
-                routing_key is not None
-                and self._data_plane_egress_observer is not None
-            ):
+            if routing_key is not None and self._data_plane_egress_observer is not None:
                 self._data_plane_egress_observer.record_dropped(routing_key)
             return
         await self.networking_sender.send(
@@ -349,7 +370,10 @@ class TopicRouter[T: CamelCaseModel]:
                 data=serialized,
             )
         )
-        if self.topic.routing_key is not None and self._data_plane_egress_observer is not None:
+        if (
+            self.topic.routing_key is not None
+            and self._data_plane_egress_observer is not None
+        ):
             self._data_plane_egress_observer.record_enqueue_latency(
                 time.monotonic() - started_at
             )
@@ -393,9 +417,7 @@ class TelemetryTopicRouter(TopicRouter[NodeTelemetry]):
         self._pending[key] = _PendingTelemetry(item=item, enqueued_at=time.monotonic())
         self._observer.record_depth(
             pending=len(self._pending),
-            network_queue=(
-                self.networking_sender.statistics().current_buffer_used
-            ),
+            network_queue=(self.networking_sender.statistics().current_buffer_used),
         )
         with suppress(WouldBlock):
             self._wake_send.send_nowait(None)
@@ -479,6 +501,25 @@ class TelemetryTopicRouter(TopicRouter[NodeTelemetry]):
 
 
 class Router:
+    async def host_network(
+        self, network_version: str, namespace_token: str
+    ) -> HostNetwork:
+        """Describe live listeners without dialing peers or exposing namespace secrets."""
+        control = tcp_endpoints(await self._net.listen_addresses(), multiaddr=True)
+        data = (
+            tcp_endpoints(await self._zenoh.listen_addresses(), multiaddr=False)
+            if self._zenoh is not None
+            else ()
+        )
+        return HostNetwork(
+            node_id=self._node_id,
+            network_version=network_version,
+            namespace_fingerprint=namespace_fingerprint(namespace_token),
+            control=control,
+            data_transport="zenoh" if self._zenoh is not None else "gossipsub",
+            data=data,
+        )
+
     @classmethod
     def create(
         cls,
@@ -544,6 +585,11 @@ class Router:
         )
         self._election_out_send = election_send
         self._election_out_recv = election_recv
+        authority_send, authority_recv = channel[OutboundPacket](
+            _AUTHORITY_OUTBOUND_BUFFER
+        )
+        self._authority_out_send = authority_send
+        self._authority_out_recv = authority_recv
         telemetry_send, telemetry_recv = channel[OutboundPacket](
             _TELEMETRY_OUTBOUND_BUFFER
         )
@@ -576,6 +622,11 @@ class Router:
         )
         self._zenoh_vision_out_send = vision_send
         self._zenoh_vision_out_recv = vision_recv
+        output_send, output_recv = channel[OutboundPacket](
+            _ZENOH_OUTPUT_OUTBOUND_BUFFER
+        )
+        self._zenoh_output_out_send = output_send
+        self._zenoh_output_out_recv = output_recv
         vision_ingress_send, vision_ingress_recv = channel[_InboundVisionPacket](
             _VISION_NETWORK_PAYLOAD_BUFFER
         )
@@ -610,6 +661,7 @@ class Router:
             SPEECH_MEDIA.topic,
             TRACE_DATA.topic,
             VISION_MEDIA.topic,
+            OUTPUT_MEDIA.topic,
         )
 
     async def zenoh_connected_peer_count(self) -> int | None:
@@ -628,6 +680,8 @@ class Router:
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
         if topic.topic == VISION_MEDIA.topic:
             send = self._zenoh_vision_out_send.clone()
+        elif topic.topic == OUTPUT_MEDIA.topic:
+            send = self._zenoh_output_out_send.clone()
         elif self.uses_zenoh(topic.topic):
             # DATA on Zenoh egresses via its own loop so Block backpressure
             # can't stall the shared control-plane publish loop (#309).
@@ -635,6 +689,8 @@ class Router:
             send = self._zenoh_out_send.clone()
         elif topic.topic == ELECTION_MESSAGES.topic:
             send = self._election_out_send.clone()
+        elif topic.topic == AUTHORITY_MESSAGES.topic:
+            send = self._authority_out_send.clone()
         elif topic.topic == TELEMETRY.topic:
             send = self._telemetry_out_send.clone()
         else:
@@ -654,12 +710,24 @@ class Router:
                 ),
             )
         else:
+            if topic.topic in (VISION_MEDIA.topic, OUTPUT_MEDIA.topic):
+                # Bulk media admission is a rendezvous: retention lives only
+                # in the bounded, observable egress and stream queues.
+                producer_buffer_size = 0
+            elif topic.topic == AUTHORITY_MESSAGES.topic:
+                # Authority admission must be bounded before serialization as
+                # well as after it. Otherwise callers can fill TopicRouter's
+                # producer queue without limit while the dedicated egress
+                # queue is correctly applying backpressure downstream.
+                producer_buffer_size = _AUTHORITY_OUTBOUND_BUFFER
+            else:
+                producer_buffer_size = inf
             router = TopicRouter[T](
                 topic,
                 send,
                 # Vision producer admission is a rendezvous: packet retention
                 # lives only in the bounded, observable egress/stream queues.
-                max_buffer_size=0 if topic.topic == VISION_MEDIA.topic else inf,
+                max_buffer_size=producer_buffer_size,
                 local_routing_key=local_routing_key,
                 data_plane_egress_observer=(
                     self._vision_media_egress_observer
@@ -705,7 +773,8 @@ class Router:
 
         receiver_buffer_size = (
             0
-            if topic.topic == VISION_MEDIA.topic and max_buffer_size == inf
+            if topic.topic in (VISION_MEDIA.topic, OUTPUT_MEDIA.topic)
+            and max_buffer_size == inf
             else max_buffer_size
         )
         send, recv = channel[T](receiver_buffer_size)
@@ -722,9 +791,7 @@ class Router:
         assert router.topic.model_type == topic.model_type
 
         send, recv = channel[tuple[str | None, T]]()
-        router.origin_senders.add(
-            cast(Sender[tuple[str | None, CamelCaseModel]], send)
-        )
+        router.origin_senders.add(cast(Sender[tuple[str | None, CamelCaseModel]], send))
         return recv
 
     async def run(self):
@@ -737,8 +804,10 @@ class Router:
                 tg.start_soon(self._networking_recv)
                 tg.start_soon(self._networking_publish)
                 tg.start_soon(self._election_networking_publish)
+                tg.start_soon(self._authority_networking_publish)
                 tg.start_soon(self._telemetry_networking_publish)
                 tg.start_soon(self._vision_networking_publish)
+                tg.start_soon(self._output_networking_publish)
                 tg.start_soon(self._vision_networking_ingress)
                 if self._zenoh is not None:
                     tg.start_soon(self._zenoh_recv)
@@ -946,8 +1015,8 @@ class Router:
     async def _networking_publish(self):
         # Gossipsub control traffic plus DATA when Zenoh is off. DATA on Zenoh is
         # diverted to _zenoh_networking_publish at register time, while election
-        # and telemetry each have a dedicated loop. routing_key is irrelevant to
-        # bare-topic gossipsub broadcast.
+        # authority, election, and telemetry each have a dedicated Python
+        # egress loop. routing_key is irrelevant to bare-topic gossipsub broadcast.
         with self.networking_receiver as networked_items:
             async for packet in networked_items:
                 await self._publish_gossipsub_packet(packet)
@@ -957,6 +1026,13 @@ class Router:
 
         with self._election_out_recv as election_items:
             async for packet in election_items:
+                await self._publish_gossipsub_packet(packet)
+
+    async def _authority_networking_publish(self) -> None:
+        """Publish authority traffic independently from ordinary Python egress."""
+
+        with self._authority_out_recv as authority_items:
+            async for packet in authority_items:
                 await self._publish_gossipsub_packet(packet)
 
     async def _telemetry_networking_publish(self) -> None:
@@ -1037,45 +1113,43 @@ class Router:
                 f"({len(packet.data)} bytes), dropping"
             )
 
-    async def _zenoh_networking_publish(self, *, vision_ingress: bool = False):
+    async def _zenoh_networking_publish(
+        self, *, vision_ingress: bool = False, output_media: bool = False
+    ):
         """Drain the DATA-plane outbound channel onto Zenoh (#309).
 
         Separate from `_networking_publish` so the DATA path's
         `CongestionControl::Block` can only ever stall DATA egress, never the
         shared control-plane publish loop. DATA is best-effort, so a publish
         failure is logged and dropped rather than allowed to tear the loop down.
+        The vision and output lanes run the same loop on their own channels
+        and bounds; the output lane additionally blocks on a full per-stream
+        queue so bulk producers pace to network drain.
         """
-        if not vision_ingress:
+        if not vision_ingress and not output_media:
             assert self._zenoh is not None
-        receiver = (
-            self._zenoh_vision_out_recv if vision_ingress else self._zenoh_out_recv
-        )
+        if vision_ingress:
+            receiver = self._zenoh_vision_out_recv
+            stream_buffer = _ZENOH_VISION_STREAM_BUFFER
+            max_streams_per_owner = _ZENOH_VISION_MAX_STREAMS_PER_OWNER
+            max_active_streams = _ZENOH_VISION_MAX_ACTIVE_STREAMS
+            max_rejection_tasks = _ZENOH_VISION_MAX_REJECTION_TASKS
+            rejected_tombstones = _ZENOH_VISION_REJECTED_STREAM_TOMBSTONES
+        elif output_media:
+            receiver = self._zenoh_output_out_recv
+            stream_buffer = _ZENOH_OUTPUT_STREAM_BUFFER
+            max_streams_per_owner = _ZENOH_OUTPUT_MAX_STREAMS_PER_OWNER
+            max_active_streams = _ZENOH_OUTPUT_MAX_ACTIVE_STREAMS
+            max_rejection_tasks = _ZENOH_OUTPUT_MAX_REJECTION_TASKS
+            rejected_tombstones = _ZENOH_OUTPUT_REJECTED_STREAM_TOMBSTONES
+        else:
+            receiver = self._zenoh_out_recv
+            stream_buffer = _ZENOH_DATA_STREAM_BUFFER
+            max_streams_per_owner = _ZENOH_DATA_MAX_STREAMS_PER_OWNER
+            max_active_streams = _ZENOH_DATA_MAX_ACTIVE_STREAMS
+            max_rejection_tasks = _ZENOH_DATA_MAX_REJECTION_TASKS
+            rejected_tombstones = _ZENOH_DATA_REJECTED_STREAM_TOMBSTONES
         assert receiver is not None
-        stream_buffer = (
-            _ZENOH_VISION_STREAM_BUFFER
-            if vision_ingress
-            else _ZENOH_DATA_STREAM_BUFFER
-        )
-        max_streams_per_owner = (
-            _ZENOH_VISION_MAX_STREAMS_PER_OWNER
-            if vision_ingress
-            else _ZENOH_DATA_MAX_STREAMS_PER_OWNER
-        )
-        max_active_streams = (
-            _ZENOH_VISION_MAX_ACTIVE_STREAMS
-            if vision_ingress
-            else _ZENOH_DATA_MAX_ACTIVE_STREAMS
-        )
-        max_rejection_tasks = (
-            _ZENOH_VISION_MAX_REJECTION_TASKS
-            if vision_ingress
-            else _ZENOH_DATA_MAX_REJECTION_TASKS
-        )
-        rejected_tombstones = (
-            _ZENOH_VISION_REJECTED_STREAM_TOMBSTONES
-            if vision_ingress
-            else _ZENOH_DATA_REJECTED_STREAM_TOMBSTONES
-        )
         stream_senders: dict[tuple[str, str, str], Sender[OutboundPacket]] = {}
         owner_stream_counts: dict[str, int] = {}
         rejected_streams: set[tuple[str, str, str]] = set()
@@ -1085,20 +1159,17 @@ class Router:
         def reject_stream(stream: tuple[str, str, str]) -> None:
             rejected_streams.add(stream)
             rejected_stream_order.append(stream)
-            while (
-                len(rejected_stream_order)
-                > rejected_tombstones
-            ):
+            while len(rejected_stream_order) > rejected_tombstones:
                 rejected_streams.discard(rejected_stream_order.popleft())
 
         async with TaskGroup() as task_group:
             with receiver as items:
                 async for packet in items:
                     observer = self._egress_observer_for_topic(packet.topic)
-                # Nodes subscribe only to data/<own_node_id>, never the bare
-                # topic, so a keyless message reaches no subscriber. Every serving
-                # task carries owner_node (#279 Phase 2), so this should not
-                # happen - warn loudly rather than drop silently (#310 review).
+                    # Nodes subscribe only to data/<own_node_id>, never the bare
+                    # topic, so a keyless message reaches no subscriber. Every serving
+                    # task carries owner_node (#279 Phase 2), so this should not
+                    # happen - warn loudly rather than drop silently (#310 review).
                     if not packet.routing_key:
                         logger.warning(
                             f"Zenoh DATA publish on {packet.topic} has no routing key "
@@ -1153,9 +1224,7 @@ class Router:
                                 True,
                             )
                             continue
-                        sender, receiver = channel[OutboundPacket](
-                            stream_buffer
-                        )
+                        sender, receiver = channel[OutboundPacket](stream_buffer)
                         stream_senders[stream] = sender
                         owner_stream_counts[owner] = (
                             owner_stream_counts.get(owner, 0) + 1
@@ -1169,9 +1238,16 @@ class Router:
                             owner_stream_counts,
                             reject_stream,
                             vision_ingress,
+                            output_media,
                         )
                     try:
-                        sender.send_nowait(packet)
+                        if output_media:
+                            # Blocking hand-off: the producer's rendezvous send
+                            # waits here until the stream drains, so a slow
+                            # owner throttles the worker's file reads.
+                            await sender.send(packet)
+                        else:
+                            sender.send_nowait(packet)
                     except WouldBlock:
                         observer.record_dropped(owner)
                         logger.warning(
@@ -1182,6 +1258,7 @@ class Router:
                             REALTIME_AUDIO.topic,
                             SPEECH_MEDIA.topic,
                             VISION_MEDIA.topic,
+                            OUTPUT_MEDIA.topic,
                         ):
                             sender.close()
                             reject_stream(stream)
@@ -1211,9 +1288,12 @@ class Router:
 
         await self._zenoh_networking_publish(vision_ingress=True)
 
-    def _offer_vision_network_packet(
-        self, data: bytes, origin: str | None
-    ) -> None:
+    async def _output_networking_publish(self) -> None:
+        """Drain finished-media egress on its own paced lane."""
+
+        await self._zenoh_networking_publish(output_media=True)
+
+    def _offer_vision_network_packet(self, data: bytes, origin: str | None) -> None:
         """Admit one network frame without awaiting a vision component consumer."""
 
         try:
@@ -1300,7 +1380,9 @@ class Router:
             assert self._zenoh is not None
             await self._zenoh.zenoh_publish(f"{topic}/{owner}", data)
             return
-        if topic == VISION_MEDIA.topic:
+        if topic in (VISION_MEDIA.topic, OUTPUT_MEDIA.topic):
+            # Bulk media keeps a target-filtered gossipsub fallback on the
+            # trusted fabric; receivers drop frames not addressed to them.
             await self._net.gossipsub_publish(topic, data)
             return
         raise RuntimeError(f"No routed data transport is active for {topic}")
@@ -1331,6 +1413,8 @@ class Router:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], SPEECH_MEDIA)
             elif packet.topic == VISION_MEDIA.topic:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], VISION_MEDIA)
+            elif packet.topic == OUTPUT_MEDIA.topic:
+                rejection_topic = cast(TypedTopic[CamelCaseModel], OUTPUT_MEDIA)
             else:
                 return
             original = rejection_topic.deserialize(packet.data)
@@ -1373,11 +1457,14 @@ class Router:
                 )
             elif isinstance(
                 original,
-                (RealtimeAudioPacket, SpeechMediaPacket, VisionMediaPacket),
+                (
+                    RealtimeAudioPacket,
+                    SpeechMediaPacket,
+                    VisionMediaPacket,
+                    OutputMediaPacket,
+                ),
             ):
-                rejection_frames = [
-                    original.transport_failure(failure_message)
-                ]
+                rejection_frames = [original.transport_failure(failure_message)]
             else:
                 return
             for frame in rejection_frames:
@@ -1405,7 +1492,9 @@ class Router:
                 except get_cancelled_exc_class():
                     raise
                 except Exception as exception:
-                    self._egress_observer_for_topic(packet.topic).record_publish_failure(
+                    self._egress_observer_for_topic(
+                        packet.topic
+                    ).record_publish_failure(
                         rejection_owner, time.monotonic() - started_at
                     )
                     logger.opt(exception=exception).warning(
@@ -1435,6 +1524,7 @@ class Router:
         owner_stream_counts: dict[str, int],
         reject_stream: Callable[[tuple[str, str, str]], None],
         vision_ingress: bool = False,
+        output_media: bool = False,
     ) -> None:
         """Publish one command independently so blocked owners cannot stall peers."""
 
@@ -1442,15 +1532,17 @@ class Router:
         observer = self._egress_observer_for_topic(topic)
         last_packet: OutboundPacket | None = None
         last_published_packet: OutboundPacket | None = None
+        if vision_ingress:
+            idle_lease = _ZENOH_VISION_STREAM_IDLE_LEASE_SECONDS
+        elif output_media:
+            idle_lease = _ZENOH_OUTPUT_STREAM_IDLE_LEASE_SECONDS
+        else:
+            idle_lease = _ZENOH_DATA_STREAM_IDLE_LEASE_SECONDS
         try:
             with receiver as packets:
                 while True:
                     packet: OutboundPacket | None = None
-                    with move_on_after(
-                        _ZENOH_VISION_STREAM_IDLE_LEASE_SECONDS
-                        if vision_ingress
-                        else _ZENOH_DATA_STREAM_IDLE_LEASE_SECONDS
-                    ) as idle_scope:
+                    with move_on_after(idle_lease) as idle_scope:
                         try:
                             packet = await anext(packets)
                         except StopAsyncIteration:
@@ -1502,6 +1594,7 @@ class Router:
                             REALTIME_AUDIO.topic,
                             SPEECH_MEDIA.topic,
                             VISION_MEDIA.topic,
+                            OUTPUT_MEDIA.topic,
                         ):
                             reject_stream(stream)
                             rejection_slot = Semaphore(1)
@@ -1526,9 +1619,7 @@ class Router:
             sender = stream_senders.pop(stream, None)
             if sender is not None:
                 sender.close()
-            owner_stream_counts[owner] = max(
-                0, owner_stream_counts.get(owner, 1) - 1
-            )
+            owner_stream_counts[owner] = max(0, owner_stream_counts.get(owner, 1) - 1)
             if owner_stream_counts[owner] == 0:
                 owner_stream_counts.pop(owner, None)
             observer.record_stream_closed(owner)

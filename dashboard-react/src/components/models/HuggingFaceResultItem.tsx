@@ -62,6 +62,9 @@ const PIPELINE_CAPABILITY: Readonly<Record<string, string>> = {
   'sentence-similarity': 'embedding',
   'text-to-image': 'image_gen',
   'image-to-image': 'image_edit',
+  // Video pipelines stay unfamiliar here on purpose: the Hub import path
+  // cannot build a video card yet, so a video repository must not read as
+  // importable. Catalog video cards carry video_gen themselves.
 };
 
 const Row = styled.div`
@@ -104,7 +107,7 @@ const MetaLine = styled.div`
   gap: 10px;
   min-width: 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   white-space: nowrap;
 `;
 
@@ -186,7 +189,7 @@ const Chevron = styled.button<{ $open: boolean }>`
   width: 26px;
   height: 26px;
   border-radius: ${({ theme }) => theme.radii.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   flex-shrink: 0;
   transition: color 0.15s, background 0.15s;
 

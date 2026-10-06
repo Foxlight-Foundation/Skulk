@@ -16,10 +16,15 @@ from anyio import (
 )
 from anyio.streams.buffered import BufferedByteReceiveStream
 from loguru import logger
-from pydantic import ValidationError, field_serializer, field_validator
+from pydantic import UUID4, Field, ValidationError, field_serializer, field_validator
 
+from skulk.operator.identity import OperatorIdentityRepository
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.constants import SKULK_CONFIG_FILE, SKULK_MODELS_DIR
+from skulk.shared.types.capability_nodes import (
+    MAX_CAPABILITY_NODES_PER_HOST,
+    CapabilityNodeSummary,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
     DiskUsage,
@@ -281,6 +286,13 @@ async def _is_service_enabled(service_name: str) -> bool | None:
 class StaticNodeInformation(TaggedModel):
     """Node information that should NEVER change, to be gathered once at startup"""
 
+    node_install_id: UUID4 | None = Field(
+        default=None,
+        description=(
+            "Stable per-installation operator identity, independent of the current "
+            "runtime libp2p node ID."
+        ),
+    )
     model: str
     chip: str
     os_version: str
@@ -291,7 +303,9 @@ class StaticNodeInformation(TaggedModel):
     @classmethod
     async def gather(cls) -> Self:
         model, chip = await get_model_and_chip()
+        node_identity = OperatorIdentityRepository().load_or_create_node_identity()
         return cls(
+            node_install_id=node_identity.node_install_id,
             model=model,
             chip=chip,
             os_version=get_os_version(),
@@ -499,6 +513,104 @@ class NodeCapabilities(TaggedModel):
         return sorted(value)
 
 
+class NodePairingGateway(TaggedModel):
+    """Whether a node holds the cluster's phone-pairing relay route.
+
+    Phone pairing is managed on the node where an operator turned it on: that
+    node registered the relay route, holds the pairing journal, and serves
+    paired phones. Other nodes' dashboards read this reading to say where
+    pairing is managed instead of offering a second, separate pairing gateway.
+    Like :class:`NodeCapabilities`, the value comes from the API through the
+    gatherer's provider (the API sets it on the shared ``TelemetryView``).
+    """
+
+    active: bool
+    """True while this node holds a relay route for phone pairing."""
+
+
+PAIRING_GATEWAY_WITHDRAWAL_REPUBLISH_SECONDS = 60.0
+"""Seconds between repeats of a withdrawn pairing-gateway role."""
+
+
+class PairingGatewayAdvertisement:
+    """Decides when a node publishes its phone-pairing gateway role.
+
+    While the node holds the role, every poll publishes it, so a node that
+    joins later learns it. When the role ends, the withdrawal is published at
+    once and then about once a minute: telemetry has no replay, so a peer that
+    missed a single withdrawal would otherwise keep reporting pairing as
+    managed elsewhere until it restarts. A node that never held the role stays
+    silent, because almost every node is never the pairing gateway.
+    """
+
+    def __init__(
+        self,
+        republish_seconds: float = PAIRING_GATEWAY_WITHDRAWAL_REPUBLISH_SECONDS,
+    ) -> None:
+        """Create the policy for one publisher.
+
+        Args:
+            republish_seconds: Interval between repeats of a withdrawal.
+        """
+
+        self._republish_seconds = republish_seconds
+        self._held = False
+        self._last_withdrawal: float | None = None
+
+    def reading(self, active: bool, now: float) -> "NodePairingGateway | None":
+        """Return the reading to publish at ``now``, or ``None`` to stay silent.
+
+        Args:
+            active: Whether this node currently holds the relay route.
+            now: Monotonic time in seconds.
+
+        Returns:
+            The reading to send, or ``None`` when nothing is due.
+        """
+
+        if active:
+            self._held = True
+            self._last_withdrawal = None
+            return NodePairingGateway(active=True)
+        if not self._held:
+            return None
+        if (
+            self._last_withdrawal is not None
+            and now - self._last_withdrawal < self._republish_seconds
+        ):
+            return None
+        self._last_withdrawal = now
+        return NodePairingGateway(active=False)
+
+
+class NodeCapabilityNodes(TaggedModel):
+    """Summaries of the capability nodes a host runs, on the telemetry plane.
+
+    The topology-facing sibling of :class:`NodeCapabilities`: where that reading
+    says which capability tags a host offers, this one describes the managed
+    capability nodes behind them (status, surfaces, actions) so the dashboard
+    can draw each as a satellite of its host and open its surfaces. Like the
+    tag reading it is supplied by the extension surface rather than probed:
+    the API publishes summaries onto the shared ``TelemetryView`` and the
+    gatherer's ``capability_nodes_provider`` snapshots them. Last-write-wins,
+    never indexed, gone with its host.
+    """
+
+    nodes: tuple[CapabilityNodeSummary, ...] = Field(
+        default=(), max_length=MAX_CAPABILITY_NODES_PER_HOST
+    )
+    """Summaries in publication order, at most sixteen per host."""
+
+    @field_validator("nodes", mode="before")
+    @classmethod
+    def _coerce_nodes(cls, v: object) -> object:
+        # JSON arrays decode to lists, which strict mode rejects for a tuple
+        # field; coerce first so the reading populates over gossip.
+        if isinstance(v, list):
+            return tuple(cast("Iterable[object]", v))
+        return v
+
+
 class NodeHeartbeat(TaggedModel):
     """Small, explicit liveness reading published on the telemetry plane.
 
@@ -561,6 +673,8 @@ GatheredInfo = (
     | NodeResources
     | NodeDiskUsage
     | NodeCapabilities
+    | NodeCapabilityNodes
+    | NodePairingGateway
     | NodeHeartbeat
 )
 
@@ -568,6 +682,7 @@ GatheredInfo = (
 @dataclass
 class InfoGatherer:
     info_sender: Sender[GatheredInfo]
+    api_available: bool = True
     data_transport: NodeDataTransport = "gossipsub"
     heartbeat_poll_interval: float | None = 2
     interface_watcher_interval: float | None = 10
@@ -586,6 +701,18 @@ class InfoGatherer:
     # the monitor is inert and never publishes.
     capabilities_provider: Callable[[], frozenset[str]] | None = None
     capabilities_poll_interval: float | None = 30
+    # Capability-node summaries (topology satellites). Polled faster than the
+    # tag set because a node's status moves while it starts; published only on
+    # change plus a periodic republish for late joiners.
+    capability_nodes_provider: (
+        Callable[[], tuple[CapabilityNodeSummary, ...]] | None
+    ) = None
+    capability_nodes_poll_interval: float | None = 5
+    capability_nodes_republish_interval: float = 30
+    # Phone-pairing gateway role, supplied by the API. Without a provider (a
+    # node with no API) the monitor is inert.
+    pairing_gateway_provider: Callable[[], bool] | None = None
+    pairing_gateway_poll_interval: float | None = 15
     # Data-plane Zenoh connectivity, sampled from the router that owns the
     # session at each NodeResources advertisement. Optional so callers without
     # a router (tests, tools) stay unchanged; absent means "unknown", never 0.
@@ -619,6 +746,8 @@ class InfoGatherer:
                 tg.start_soon(self._monitor_node_resources)
                 tg.start_soon(self._monitor_disk_usage)
                 tg.start_soon(self._monitor_capabilities)
+                tg.start_soon(self._monitor_capability_nodes)
+                tg.start_soon(self._monitor_pairing_gateway)
                 tg.start_soon(self._monitor_heartbeat)
                 # NodeConfig is deliberately NOT sent: it is neither a
                 # telemetry-plane reading nor a durable control event, so the
@@ -702,6 +831,7 @@ class InfoGatherer:
                     )
                     await self.info_sender.send(
                         await NodeResources.gather(
+                            api_available=self.api_available,
                             data_transport=self.data_transport,
                             zenoh_connected_peers=zenoh_connected_peers,
                         )
@@ -729,7 +859,10 @@ class InfoGatherer:
         instead of keeping the stale value until the node leaves the cluster
         (provider liveness, fabric-citizenship Phase 2a).
         """
-        if self.capabilities_poll_interval is None or self.capabilities_provider is None:
+        if (
+            self.capabilities_poll_interval is None
+            or self.capabilities_provider is None
+        ):
             return
         published_nonempty = False
         while True:
@@ -750,6 +883,73 @@ class InfoGatherer:
             except Exception as e:
                 logger.warning(f"Error gathering node capabilities: {e}")
             await anyio.sleep(self.capabilities_poll_interval)
+
+    async def _monitor_pairing_gateway(self):
+        """Publish whether this node holds the phone-pairing relay route.
+
+        See :class:`PairingGatewayAdvertisement` for when a reading is sent.
+        """
+        if (
+            self.pairing_gateway_poll_interval is None
+            or self.pairing_gateway_provider is None
+        ):
+            return
+        advertisement = PairingGatewayAdvertisement()
+        while True:
+            try:
+                reading = advertisement.reading(
+                    self.pairing_gateway_provider(), anyio.current_time()
+                )
+                if reading is not None:
+                    with fail_after(30):
+                        await self.info_sender.send(reading)
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone: a stop signal, not a fault (see
+                # _monitor_capabilities).
+                raise
+            except Exception as e:
+                logger.warning(f"Error gathering pairing gateway role: {e}")
+            await anyio.sleep(self.pairing_gateway_poll_interval)
+
+    async def _monitor_capability_nodes(self):
+        """Publish capability-node summaries onto the telemetry plane.
+
+        Same publication discipline as :meth:`_monitor_capabilities`: nothing
+        while the host runs no capability node, one empty reading when the
+        last node goes so peers clear their entry, and otherwise a reading
+        whenever the snapshot changes. A non-empty snapshot is also republished
+        every ``capability_nodes_republish_interval`` seconds so a node that
+        joins later still learns it on a plane that has no replay.
+        """
+        if (
+            self.capability_nodes_poll_interval is None
+            or self.capability_nodes_provider is None
+        ):
+            return
+        last_published: tuple[CapabilityNodeSummary, ...] | None = None
+        last_published_at = anyio.current_time()
+        while True:
+            try:
+                nodes = self.capability_nodes_provider()
+                changed = nodes != last_published
+                stale = (
+                    anyio.current_time() - last_published_at
+                    >= self.capability_nodes_republish_interval
+                )
+                should_publish = (
+                    changed if last_published is not None else bool(nodes)
+                ) or (bool(nodes) and stale)
+                if should_publish:
+                    with fail_after(30):
+                        await self.info_sender.send(NodeCapabilityNodes(nodes=nodes))
+                    last_published = nodes
+                    last_published_at = anyio.current_time()
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone: a stop signal, not a fault (#266).
+                raise
+            except Exception as e:
+                logger.warning(f"Error gathering capability nodes: {e}")
+            await anyio.sleep(self.capability_nodes_poll_interval)
 
     async def _monitor_misc(self):
         if self.misc_poll_interval is None:

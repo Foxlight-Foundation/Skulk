@@ -30,8 +30,11 @@ curl -fsSL \
 
 Both the installer script and the checkout therefore come from the same exact
 candidate. Fetching the script from `main` would leave candidate installer
-changes untested; the literal `main/install.sh | bash` command belongs only to
-the post-promotion shipping qualification.
+changes untested; the literal `main/install.sh | bash` command belongs to the
+harness shipping profile (`skulk-harness fresh-install qualify --profile
+shipping`), an optional post-promotion sanity check that the public installer
+resolves the promoted commit. It is not a release gate: every release gate
+runs before promotion.
 
 Do not add `SKULK_*` overrides, edit the generated `skulk.yaml`, substitute an
 engine, reuse an existing Skulk home, or use a private setup wrapper. Those
@@ -87,6 +90,69 @@ interface tells the truth while it is working.
 8. **Restart and recovery.** Stop Skulk normally, start it with the same printed
    command, and confirm the dashboard, topology, model state, and a new text
    request recover without configuration edits.
+9. **Skulk fabric.** Turn on **Intelligent Fabric** in Settings, wait until
+   **Ask Skulk** reports ready, and ask about the cluster's nodes, models, and
+   downloads. Answers must match what the topology and Model Store show. Ask
+   for an action such as stopping an instance: the proposal must change
+   nothing until you approve it, and the approved action must then take
+   effect.
+10. **Plugins.** Set up the plugin service as the install guide describes,
+    connect a publisher's catalog under **Plugins → Browse**, review a
+    release, and install it with its consent screen. Finish its setup, then
+    open its screen from its satellite in the Cluster view. Every refusal must
+    say what to do next.
+11. **Operator app and relay onboarding.** Begin with a fresh cluster that has
+    no relay enrollment, provisioning material, or paired devices, and the
+    intended distributed app build. Follow only user-facing instructions to
+    authorize the owner, enroll the cluster, configure remote access, obtain a
+    pairing invitation, and pair the app. Exercise remote cluster refresh and
+    chat, restart/reconnect, then revoke the device and confirm access is lost.
+    Do not begin with a staff-provisioned gateway. An unavailable enrollment
+    path or app artifact is a blocked journey, not a reason to skip or pass it.
+    This gate applies whenever the release claims operator-app remote access;
+    otherwise explicitly record that capability as unavailable.
+
+## User-outcome evidence checklist
+
+Use this short record for each claimed user-facing capability, starting when
+the work is scoped and completing it before claiming user readiness. It
+supplements the automated matrix and human acceptance above, not replaces them.
+
+- [ ] **Outcome:** name the intended user, fresh starting state, public entry
+  point/instructions, and observable successful result.
+- [ ] **Dependencies:** identify every required repository, service, app,
+  credential acquisition path, and distribution channel. Each has an owner,
+  exact commit/build, verified merge status, deployment/distribution status,
+  acceptance evidence, and any blocker.
+- [ ] **Fresh-user walkthrough:** record tester, date, exact artifact versions,
+  platforms, steps, expected/actual results, and evidence. Use isolated fresh
+  state and the access an ordinary user has, not internal preconfiguration.
+  Every prerequisite must be obtainable through a documented, available path.
+- [ ] **Lifecycle:** exercise the first useful operation, restart/reconnect,
+  an actionable failure/recovery path, and revocation/removal where applicable.
+- [ ] **Decision:** record pass, blocked, failed, or not applicable with a reason,
+  remaining blockers and owners, and the release owner's sign-off. A required
+  but missing prerequisite is blocked, never not applicable.
+
+Keep cross-project delivery records and raw internal evidence in private
+`foxlight-docs`; public PRs contain sanitized results, not credentials or private
+environment details. A single delivery owner reconciles the record across
+repositories before sign-off. No new framework or capacity campaign is required
+merely to fill out this checklist; use proportionate evidence for the claim.
+
+Report these milestones separately: **implemented**, **merged into the intended
+branch**, **deployed/distributed**, and **fresh-user accepted**. Include exact
+artifacts and unmet gates; do not collapse them into “done.” A component PR can
+complete its own reviewed acceptance gate while the product journey stays
+blocked. A documentation-only change may explain why runtime acceptance does
+not apply to that change, but cannot mark the underlying product accepted.
+
+For example, a relay that carries traffic for a manually provisioned cluster
+has demonstrated that transport path, not self-service enrollment. Customer
+readiness requires a new operator to obtain enrollment and pairing through the
+supported public path without staff intervention. If a capability is excluded
+from a release, remove its availability claims from user-facing release material
+and record the exclusion explicitly; do not silently waive the failed journey.
 
 ## Platform focus
 
@@ -116,15 +182,21 @@ Remove secrets, tokens, private hostnames, addresses, node identifiers, and
 unrelated local paths before posting evidence publicly.
 
 If the fix changes Skulk code, the installer, shipped defaults, dashboard, or a
-model card, it creates a new candidate. Merge the fix to `dev`, record the new
-full commit, repeat automated fresh-install qualification, and only then repeat
-the affected human journey. A documentation-only clarification that does not
-change the commands or runtime contract does not invalidate the candidate.
+model card, the release owner judges whether the change is material to the
+first-install experience. A material change creates a new candidate: merge the
+fix to `dev`, record the new full commit, repeat automated fresh-install
+qualification, and only then repeat the affected human journey. A change judged
+immaterial (or a documentation-only clarification that does not change the
+commands or runtime contract) does not invalidate the candidate; record the
+judgment and the commits it covers in the sign-off.
 
 ## Sign-off
 
 Record the candidate commit, automated qualification report, tester, date,
-platforms exercised, journeys completed, and links to any issues. Human
-acceptance permits the `dev` to `main` promotion; it does not publish the
-release. After promotion, the automated shipping profile must still pass using
-the literal public `main` installer before the release or tag is published.
+platforms exercised, journeys completed, any post-qualification materiality
+judgments, and links to any issues. Qualification is complete before
+promotion: human acceptance on top of the passed automated matrix is the final
+release gate, and the `dev` to `main` promotion publishes the already-qualified
+release. The harness shipping profile may be run after promotion as a
+non-gating sanity check that the literal public `main` installer resolves the
+promoted commit.

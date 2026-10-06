@@ -1,5 +1,6 @@
+import type { StoreDownloadProgress } from '../layout/StoreRegistryTable';
 import styled, { css, keyframes, useTheme } from 'styled-components';
-import { FiCheck, FiChevronDown, FiDownload, FiStar } from 'react-icons/fi';
+import { FiCheck, FiChevronDown, FiDownload, FiStar, FiShield } from 'react-icons/fi';
 import type { Theme } from '../../theme';
 import type {
   ModelGroup,
@@ -20,6 +21,7 @@ import { BurstChip } from './BurstChip';
 import type { BurstInfo } from './burst';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
+/** Grouped model metadata, observed availability, and existing variant actions. */
 export interface ModelPickerGroupProps {
   group: ModelGroup;
   isExpanded: boolean;
@@ -32,6 +34,12 @@ export interface ModelPickerGroupProps {
   onSelectModel: (modelId: string) => void;
   onToggleFavorite: (groupId: string) => void;
   onShowInfo?: (group: ModelGroup) => void;
+  /** Observed transfers from the existing store poll, never synthetic progress. */
+  activeDownloads?: StoreDownloadProgress[];
+  /** Enter the existing placement workflow for a downloaded variant. */
+  onLaunch?: (modelId: string) => void;
+  /** Cancel a store transfer through the existing download controller. */
+  onCancelDownload?: (modelId: string) => void;
   downloadStatusMap?: Map<string, DownloadAvailability>;
   launchedAt?: number;
   instanceStatuses?: Record<string, InstanceStatus>;
@@ -67,7 +75,7 @@ function timeAgo(ts: number, t: SkulkTranslate): string {
 
 /** Capabilities surfaced as chips on the row. `text` is implied and omitted. */
 const CHIP_CAPABILITIES = new Set([
-  'thinking', 'vision', 'code', 'image_gen', 'image_edit', 'embedding', 'tts', 'stt',
+  'thinking', 'vision', 'code', 'image_gen', 'image_edit', 'video_gen', 'embedding', 'tts', 'stt',
 ]);
 
 function bestInstanceStatus(
@@ -97,19 +105,20 @@ const glowAnim = keyframes`
   50%      { box-shadow: 0 0 12px rgba(34,197,94,0.7); }
 `;
 
-const GroupContainer = styled.div`
-  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
-
-  &:first-child {
-    border-top: none;
-  }
+const GroupContainer = styled.div<{ $downloading: boolean }>`
+  flex-shrink: 0;
+  margin: 6px 18px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 12px;
+  background: ${({ theme }) => theme.colors.surface}; overflow: hidden;
+  ${({ $downloading, theme }) => $downloading && css`background: ${theme.colors.liveBg}; border-color: ${theme.colors.borderLive};`}
+  @media (max-width: 480px) { margin: 8px; }
 `;
 
-const Row = styled.div<{ $disabled: boolean; $highlighted: boolean; $expandable: boolean }>`
+const Row = styled.div<{ $highlighted: boolean; $expandable: boolean }>`
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
+  gap: 14px;
+  padding: 12px 14px;
+  @media (max-width: 600px) { padding: 12px; gap: 8px; flex-wrap: wrap; }
   cursor: ${({ $expandable }) => ($expandable ? 'pointer' : 'default')};
   transition: background 0.15s;
   user-select: none;
@@ -117,13 +126,6 @@ const Row = styled.div<{ $disabled: boolean; $highlighted: boolean; $expandable:
   &:hover {
     background: ${({ theme }) => theme.colors.surfaceHover};
   }
-
-  ${({ $disabled }) =>
-    $disabled &&
-    css`
-      opacity: 0.5;
-      pointer-events: none;
-    `}
 
   ${({ $highlighted }) =>
     $highlighted &&
@@ -134,19 +136,22 @@ const Row = styled.div<{ $disabled: boolean; $highlighted: boolean; $expandable:
 
 const Identity = styled.div`
   flex: 1;
+  @media (max-width: 600px) { flex: 1 1 calc(100% - 64px); }
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 5px;
 `;
 
 const Name = styled.span`
-  font-size: ${({ theme }) => theme.fontSizes.tableBody};
+  button { all: unset; cursor: pointer; font: inherit; color: inherit; }
+  font-size: 15px;
   font-weight: 600;
   color: ${({ theme }) => theme.colors.text};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  @media (max-width: 600px) { white-space: normal; overflow-wrap: anywhere; }
 `;
 
 const MetaLine = styled.div`
@@ -156,16 +161,18 @@ const MetaLine = styled.div`
   min-width: 0;
   overflow: hidden;
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
-  white-space: nowrap;
+  color: ${({ theme }) => theme.colors.textSecondary};
+  flex-wrap: wrap;
 `;
 
 const MetaText = styled.span`
+  font: 12px ${({ theme }) => theme.fonts.mono};
   overflow: hidden;
   text-overflow: ellipsis;
 `;
 
 const InStoreChip = styled.span`
+  min-height: 30px; box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -177,6 +184,21 @@ const InStoreChip = styled.span`
   border: 1px solid ${({ theme }) => theme.colors.accentBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 2px 8px;
+`;
+
+const RegistryChip = styled.span`
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.healthy};
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 1px 6px;
+`;
+
+const ProvenanceChip = styled(RegistryChip)`
+  color: ${({ theme }) => theme.colors.textSecondary};
 `;
 
 const StatusDot = styled.span<{ $class: string }>`
@@ -201,12 +223,12 @@ const FavStar = styled.button<{ $active: boolean }>`
   width: 26px;
   height: 26px;
   border-radius: ${({ theme }) => theme.radii.sm};
-  color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.textMuted)};
+  color: ${({ $active, theme }) => ($active ? theme.colors.live : theme.colors.textMuted)};
   transition: color 0.15s, background 0.15s;
 
   &:hover {
-    color: ${({ theme }) => theme.colors.gold};
-    background: ${({ theme }) => theme.colors.goldBg};
+    color: ${({ theme }) => theme.colors.live};
+    background: ${({ theme }) => theme.colors.liveBg};
   }
 
   svg {
@@ -223,7 +245,7 @@ const Chevron = styled.button<{ $open: boolean }>`
   width: 26px;
   height: 26px;
   border-radius: ${({ theme }) => theme.radii.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.textSecondary};
   flex-shrink: 0;
   transition: color 0.15s, background 0.15s;
 
@@ -239,23 +261,25 @@ const Chevron = styled.button<{ $open: boolean }>`
 `;
 
 const VariantPanel = styled.div`
-  margin: 0 14px 10px 62px;
+  margin: 0 14px 10px 72px;
 
   @media (max-width: 640px) {
     margin-left: 14px;
   }
-  border: 1px solid ${({ theme }) => theme.colors.borderLight};
-  border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.surfaceSunken};
-  overflow: hidden;
+  min-width: 0;
 `;
 
 const VariantRow = styled.div`
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 68px minmax(0, 1fr) 160px;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 7px 12px;
+  gap: 12px;
+  padding: 8px 0;
+  > div { min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 900px) {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    > div:first-child, > div:last-child { grid-column: 1 / -1; }
+  }
   font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ theme }) => theme.colors.textSecondary};
 
@@ -263,8 +287,15 @@ const VariantRow = styled.div`
     border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
   }
 `;
+const VariantHeader = styled(VariantRow)`
+  font: 600 10px ${({ theme }) => theme.fonts.mono}; text-transform: uppercase; letter-spacing: .08em;
+  @media (max-width: 900px) { display: none; }
+`;
+const VariantTags = styled.div`display: flex; flex-wrap: wrap; gap: 5px; align-items: center;`;
+const VariantActions = styled(VariantTags)`justify-content: flex-end;`;
 
 const ActionArea = styled.div`
+  > button:not([aria-expanded]) { min-width: 96px; }
   display: flex;
   align-items: center;
   gap: 6px;
@@ -289,6 +320,20 @@ function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) 
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.family', 'Family')}</span>
             <span>{v.family}</span>
+          </>
+        )}
+        <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.catalogSource', 'Catalog source')}</span>
+        <span>{v.catalog_source === 'registry' ? t('modelInfo.signedRegistry', 'Signed registry') : v.catalog_source === 'custom' ? t('modelInfo.customCard', 'Custom card') : t('modelInfo.installedCard', 'Installed card')}</span>
+        {v.registry_card_id && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.registryCard', 'Registry card')}</span>
+            <code title={v.registry_card_id}>{`${v.registry_card_id.slice(0, 15)}…`}</code>
+          </>
+        )}
+        {v.registry_provenance && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.provenance', 'Provenance')}</span>
+            <span>{v.registry_provenance}</span>
           </>
         )}
         <span style={{ color: theme.colors.textMuted }}>{t('modelPickerGroup.variants', 'Variants')}</span>
@@ -340,16 +385,19 @@ function ModelGroupInfo({ group, title }: { group: ModelGroup; title: string }) 
   );
 }
 
+/** Render a model group and its expandable, responsive variant details. */
 export function ModelPickerGroup({
   group,
   isExpanded,
   isFavorite,
   isHighlighted = false,
-  canModelFit,
   getModelFitStatus,
   onToggleExpand,
   onSelectModel,
   onToggleFavorite,
+  activeDownloads,
+  onLaunch,
+  onCancelDownload,
   downloadStatusMap,
   launchedAt,
   instanceStatuses,
@@ -369,15 +417,22 @@ export function ModelPickerGroup({
   // nullish check would render blank titles for user-added models.
   const title = group.smallestVariant.base_model || group.name;
 
-  const anyFits = variants.some((v) => canModelFit(v.id));
-  const anyHasInstance = variants.some((v) => instanceStatuses?.[v.id]);
-  const disabled = !anyFits && !anyHasInstance;
-
   const groupDownload = variants.find((v) => downloadStatusMap?.get(v.id)?.available);
   const instanceStatus = bestInstanceStatus(variants, instanceStatuses);
 
   const chips = group.capabilities.filter((c) => CHIP_CAPABILITIES.has(c));
   const contextLength = group.smallestVariant.context_length;
+  const provenanceValues = new Set(
+    variants.map((variant) => variant.registry_provenance),
+  );
+  const uniformProvenance = provenanceValues.size === 1
+    ? variants[0]?.registry_provenance ?? null
+    : null;
+  const provenanceLabel = (value: NonNullable<ModelInfo['registry_provenance']>) => ({
+    foxlight: t('modelInfo.provenanceFoxlight', 'Foxlight'),
+    agent: t('modelInfo.provenanceAgent', 'Agent'),
+    community: t('modelInfo.provenanceCommunity', 'Community'),
+  })[value];
 
   // Artifact format (GGUF, MLX) is placement-relevant truth. Show it on the
   // group row when every variant shares one format; otherwise it appears per
@@ -409,31 +464,29 @@ export function ModelPickerGroup({
     </InStoreChip>
   );
 
+  const variantAction = (model: ModelInfo) => {
+    const transfer = activeDownloads?.find(item => item.modelId === model.id);
+    if (transfer && !['complete', 'completed', 'failed', 'cancelled'].includes(transfer.status)) {
+      const progress = Math.max(0, Math.min(100, transfer.progress * 100));
+      return <div style={{ minWidth: 100, maxWidth: '100%' }}><progress aria-label={t('modelPickerGroup.downloading', 'Downloading {modelId}', { modelId: model.id })} max={100} value={progress} style={{ width: '100%', accentColor: theme.colors.live }} /><span style={{ fontSize: 11 }}>{Math.round(progress)}%</span>{onCancelDownload && <Button size="sm" onClick={() => onCancelDownload(model.id)}>{t('common.cancel', 'Cancel')}</Button>}</div>;
+    }
+    if (downloadStatusMap?.get(model.id)?.available) return <>{inStoreChip}{onLaunch && <Button variant="solid" size="sm" onClick={() => onLaunch(model.id)}>{t('common.launch', 'Launch')}</Button>}</>;
+    // Downloading into the store does not require present placement capacity.
+    return <><Button variant="primary" size="sm" onClick={() => onSelectModel(model.id)} aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', { modelId: model.id })}><FiDownload size={13} />{t('modelPickerGroup.download', 'Download')}</Button>{transfer?.status === 'failed' && <span role="status" style={{ color: theme.colors.error }}>{transfer.error || t('modelPickerGroup.downloadFailed', 'Download failed')}</span>}</>;
+  };
+
   return (
-    <GroupContainer>
+    <GroupContainer $downloading={variants.some(variant => activeDownloads?.some(item => item.modelId === variant.id && !['completed', 'complete', 'failed', 'cancelled'].includes(item.status)))}>
       <Row
-        $disabled={disabled}
         $highlighted={isHighlighted}
         $expandable={hasMultipleVariants}
         onClick={hasMultipleVariants ? onToggleExpand : undefined}
-        role={hasMultipleVariants ? 'button' : undefined}
-        tabIndex={hasMultipleVariants && !disabled ? 0 : undefined}
-        aria-expanded={hasMultipleVariants ? isExpanded : undefined}
-        aria-label={hasMultipleVariants
-          ? t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })
-          : undefined}
-        onKeyDown={(event) => {
-          if (hasMultipleVariants && !disabled && (event.key === 'Enter' || event.key === ' ')) {
-            event.preventDefault();
-            onToggleExpand();
-          }
-        }}
       >
         <FamilyAvatar name={group.family || title} />
 
         {/* Identity: title + meta line */}
         <Identity>
-          <Name title={singleVariant?.id ?? group.name}>{title}</Name>
+          <Name title={singleVariant?.id ?? group.name}>{hasMultipleVariants ? <button type="button" onClick={event => { event.stopPropagation(); onToggleExpand(); }} aria-expanded={isExpanded} aria-label={t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })}>{title}</button> : title}{variants.every(variant => variant.catalog_source === 'registry') && <FiShield size={13} color={theme.colors.healthy} aria-label={t('modelInfo.signedRegistry', 'Signed registry')} />}</Name>
           <MetaLine>
             {chips.map((c) => {
               const colors = TAG_COLORS[c];
@@ -447,6 +500,11 @@ export function ModelPickerGroup({
             {uniformFormat && <QuantBadge>{uniformFormat}</QuantBadge>}
             {singleVariant?.quantization && (
               <QuantBadge>{singleVariant.quantization}</QuantBadge>
+            )}
+            {uniformProvenance && (
+              <ProvenanceChip title={t('modelInfo.provenance', 'Provenance')}>
+                {provenanceLabel(uniformProvenance)}
+              </ProvenanceChip>
             )}
             <MetaText>
               {[
@@ -487,9 +545,7 @@ export function ModelPickerGroup({
           <FiStar size={15} />
         </FavStar>
 
-        {singleVariant && (
-          <HuggingFaceLink repoId={singleVariant.hugging_face_id ?? singleVariant.id} />
-        )}
+        <HuggingFaceLink repoId={group.smallestVariant.hugging_face_id ?? group.smallestVariant.id} />
 
         {/* Info */}
         <span onClick={(e) => e.stopPropagation()} style={{ display: 'flex' }}>
@@ -507,74 +563,53 @@ export function ModelPickerGroup({
           {groupBurst && <BurstChip info={groupBurst} fleetMemoryBytes={fleetMemoryBytes} />}
           {hasMultipleVariants ? (
             <>
+              {!groupDownload && <Button variant="primary" size="sm" onClick={onToggleExpand}><FiDownload size={13} />{t('modelPickerGroup.download', 'Download')}</Button>}
               {groupDownload && inStoreChip}
+              {groupDownload && onLaunch && <Button variant="solid" size="sm" onClick={() => onLaunch(groupDownload.id)}>{t('common.launch', 'Launch')}</Button>}
               <Chevron
                 type="button"
                 $open={isExpanded}
                 onClick={onToggleExpand}
                 aria-expanded={isExpanded}
                 aria-label={t('modelPickerGroup.expandGroup', 'Expand {groupName}', { groupName: title })}
-                tabIndex={-1}
               >
                 <FiChevronDown size={16} />
               </Chevron>
             </>
-          ) : groupDownload ? (
-            inStoreChip
-          ) : (
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => singleVariant && onSelectModel(singleVariant.id)}
-              aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', {
-                modelId: singleVariant?.id ?? title,
-              })}
-            >
-              <FiDownload size={13} />
-              {t('modelPickerGroup.download', 'Download')}
-            </Button>
-          )}
+          ) : singleVariant ? variantAction(singleVariant) : null          }
         </ActionArea>
       </Row>
 
       {/* Expanded variants */}
       {isExpanded && hasMultipleVariants && (
         <VariantPanel>
+          <VariantHeader aria-hidden="true"><div>{t('modelPickerGroup.variant', 'Variant')}</div><div>{t('modelPickerGroup.formatQuant', 'Format · quant')}</div><div>{t('common.size', 'Size')}</div><div>{t('modelPickerGroup.cachedOn', 'Cached on')}</div><div /></VariantHeader>
           {variants.map((v) => {
             const vFit = getModelFitStatus(v.id);
-            const vDownload = downloadStatusMap?.get(v.id);
             const vInstance = instanceStatuses?.[v.id];
 
             return (
               <VariantRow key={v.id}>
-                {uniformFormat === null && deriveFormatLabel(v.id) && (
+                <div style={{ fontFamily: theme.fonts.mono, fontSize: 12.5 }}>{v.id.split('/').pop()} <HuggingFaceLink repoId={v.hugging_face_id ?? v.id} /></div>
+                <VariantTags>{deriveFormatLabel(v.id) && (
                   <QuantBadge>{deriveFormatLabel(v.id)}</QuantBadge>
                 )}
                 <QuantBadge>{v.quantization ?? '—'}</QuantBadge>
+                {!uniformProvenance && v.registry_provenance && (
+                  <ProvenanceChip title={t('modelInfo.provenance', 'Provenance')}>
+                    {provenanceLabel(v.registry_provenance)}
+                  </ProvenanceChip>
+                )}
                 {groupBurst === null && (() => {
                   const b = getBurstInfo?.(v.id) ?? null;
                   return b ? <BurstChip info={b} fleetMemoryBytes={fleetMemoryBytes} /> : null;
                 })()}
-                <HuggingFaceLink repoId={v.hugging_face_id ?? v.id} />
-                <span style={{ color: fitColor(vFit, theme), fontWeight: 500, flex: 1 }}>
+                </VariantTags>
+                <div style={{ color: fitColor(vFit, theme), fontFamily: theme.fonts.mono, fontSize: 12.5 }}>
                   {sizeText(v.storage_size_megabytes)}
-                </span>
-                {vInstance && <StatusDot $class={vInstance.statusClass} title={vInstance.statusClass} />}
-                {vDownload?.available ? (
-                  inStoreChip
-                ) : (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={() => onSelectModel(v.id)}
-                    aria-label={t('modelPickerGroup.selectModel', 'Download {modelId}', {
-                      modelId: v.id,
-                    })}
-                  >
-                    <FiDownload size={13} />
-                    {t('modelPickerGroup.download', 'Download')}
-                  </Button>
-                )}
+                </div>
+                <VariantTags style={{ fontSize: 11.5, fontFamily: theme.fonts.mono, color: theme.colors.textMuted }}>{vInstance && <StatusDot $class={vInstance.statusClass} title={vInstance.statusClass} />}{downloadStatusMap?.get(v.id)?.nodeNames.join(' · ') || '—'}</VariantTags>
+                <VariantActions>{variantAction(v)}</VariantActions>
               </VariantRow>
             );
           })}

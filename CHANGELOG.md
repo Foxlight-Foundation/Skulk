@@ -7,6 +7,1374 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-06
+
+### Changed
+
+- A fresh node's **Devices & pairing** no longer shows errors about a
+  configured operator gateway: its invitation and device lists are simply
+  empty until a phone is paired.
+
+- A cluster now allows at most five paired phones and tablets at once. When
+  five are paired, **Devices & pairing** says so and stops generating codes,
+  `skulk operator pair` refuses with the commands that free a slot, and a
+  phone scanning an older code is told the invitation is unavailable. Revoke a
+  device to pair another; a device whose 30-day refresh credential expired no
+  longer counts. Invitations now allow every free slot by default and never
+  more than the free slots, the dashboard offers only as many devices as there
+  are free slots and marks expired devices, and new
+  `skulk operator devices list` and `skulk operator devices revoke` commands
+  manage pairings on a headless host. The limit is checked in the same
+  transaction that issues a phone's credentials, so simultaneous scans cannot
+  exceed it.
+
+- The dashboard header marks Skulk as a trademark, with a ™ beside the
+  wordmark, and leaves a little more space before the version number.
+
+- The Cluster topology draws its routes and arrowheads at half their previous
+  opacity in both themes. Routes join every pair of nodes, so a six-node fleet
+  draws fifteen of them, and at the old weight they competed with the nodes.
+
+- Adding a model (`POST /models/add`, the dashboard's **Add & Download**) and
+  starting a node download (`POST /download/start`) now require direct
+  operator access; before, any caller that reached the API could use them.
+  They accept the node itself, a direct private or CGNAT IPv4 peer (Tailscale
+  included) that sends no proxy-forwarding headers and whose browser `Origin`,
+  if any, is such an address or one of the node's own names, and a paired
+  device through the gateway with `operations:write`. Public addresses and
+  reverse proxies receive 403; a LAN dashboard opened by address or host name
+  keeps working.
+
+- The dashboard is redesigned around the Night (dark) and new Noon Ridge
+  (light) palettes, chosen under **Settings → Appearance → Color theme** or
+  with the header's theme button. The Settings drawer is resizable, with
+  collapsible sections, and keeps unsaved edits across **Devices & pairing**;
+  native dropdowns become keyboard-navigable menus; Chat's model chooser moves
+  into the composer; **Ask Skulk** opens in a drawer that expands to a page;
+  and **Find Models** gains source, family, task, fit, store and readiness
+  filters, grouped variants, and a placement flow that keeps the search. The
+  background mesh holds still when reduced motion is requested.
+
+- The Cluster topology is rebuilt: nodes sit on a stable orbit as gauges of
+  memory, compute and health, with memory in use, GPU temperature, power and
+  a vendor mark on the outer side. Animated routes join every pair of nodes,
+  so a node's observed links move to **Node information**, beside its chip,
+  operating system, Skulk version, RDMA state and any health problem with its
+  fix. Restart, diagnostics and information appear on hover, focus or
+  selection. The Model Store's cluster card draws NVIDIA nodes as a compact
+  desktop instead of a datacenter cube.
+
+- Every engine on an NVIDIA GB10 now sees measured GPU memory. The GB10's
+  NVML driver reports memory as unsupported, so Skulk reads free and total
+  memory through CUDA, counts the host's available memory as free when it is
+  the larger figure (CUDA leaves reclaimable page cache out of its own), and
+  admits work against the smallest of that free memory, available host
+  memory less 16 GB, and 75% of total RAM. Before, a GB10 reported no GPU
+  memory at all, and the dashboard showed none for it.
+
+- A management-only (`--no-worker`) node now publishes its capability tags
+  without advertising inference backends; before, it recorded tags but never
+  gossiped them. Providers can also report readiness (`CapabilityReadiness`):
+  a capability that is not ready leaves discovery, and new calls get
+  `not_found`. An asynchronous `on_stop` (`SupportsExtensionShutdown`) runs at
+  shutdown under a shared 30-second budget.
+
+- The managed llama.cpp served engine advances from b10092 to b10753 across
+  the CUDA wheel (0.10753.1), the Vulkan wheel (0.10753.0), the verified Linux
+  archives and the prebaked CUDA pod image. The build adds the RPC tensor
+  operation DeepSeek V4 needs for multi-node execution, Qwen 3.8 and Kimi-K3
+  text, native long-context support, recurrent-state rollback, served
+  reasoning-effort plumbing, and fixes to the served MTP path. `ggml-rpc-server`
+  advances with `llama-server` because the RPC protocol changed, so a
+  multi-node RPC pool upgrades together. AMD nodes continue through the
+  fleet-qualified Vulkan lane; upstream's Linux ROCm archive is not used.
+  DeepSeek V4 may use served CUDA, while its independently versioned
+  in-process CUDA backend remains excluded. New engine wheels publish only to
+  Foxlight's package index (`https://wheels.foxlight.ai/simple/`).
+
+- `install.sh --with-vllm` installs vLLM 0.28.0 (`vllm==0.28.0+cu129`), up
+  from 0.25.1, which parses Muse Glimmer natively. Its startup deadline grows
+  from 10 to 30 minutes, and `skulk doctor` adds `vllm-prerequisites`, which
+  fails a node without a C++ compiler or Python headers. Skulk never upgrades
+  an installed vLLM by itself.
+
+- The Apple stack moves to MLX 0.32.2 with matching mlx-lm, mlx-vlm 0.6.17,
+  upstream mlx-audio 0.5.1, and transformers 5.16.
+
+- A model that fits reads "Fits this cluster" in the model picker instead of
+  "Recommended", keeping fit separate from recommendation.
+
+- Admission reserves GPU memory for accepted placements that have not loaded
+  yet, and charges hybrid GGUF models for their per-slot recurrent state;
+  changing a node's llama-server slot count (`SKULK_LLAMA_SERVER_PARALLEL`) or
+  speculation setting requires placing its instances again. A positive
+  `contextTokenLimit` on `POST /instance` is now an upper bound; before, a
+  smaller request was raised to the host's maximum.
+
+- Placement skips nodes whose Zenoh data plane reports no peers; before, such
+  a node could load a model that never returned output.
+
+- Text requests go to ready instances first, and to ordinary instances before
+  the Intelligent Fabric resident, and fail with `instance_unavailable` when
+  none is viable; before, they could wait indefinitely on a failed instance.
+
+- The next release is Skulk 2.0.0, and dev now reports that version. A
+  plugin is admitted only when its `skulk_requires` includes the running
+  Skulk version, so plugin releases built for 1.5.x are refused by a 2.0.0
+  node. Rebuild plugins against 2.0.0 and install them together with the
+  core update.
+
+- Skulk no longer ships model cards. A node's catalog is the signed
+  registry's cards, each installed model's own card record (kept with the
+  model and valid offline indefinitely), and custom cards. Curated card edits
+  go to the model registry's seed.
+  - Offline, a node lists its installed and custom models.
+  - A node that has never reached the registry and holds neither logs why
+    its catalog is empty.
+  - `/v1/models` reports each model's `catalog_source`: `registry`,
+    `installed` or `custom`.
+  - `scripts/fetch_kv_heads.py` takes `--cards-dir`.
+  - Tests carry fixture copies of the few registry cards they exercise.
+  - A test refuses any model card under `src/skulk/resources`.
+  - The frozen PyInstaller build collects the test video engine's card from
+    its new home.
+  - A generated custom card keeps its signed split limit on every catalog
+    reload, including from a repository the registry carries only as quant
+    aliases. While the registry cannot be read, the installed cards for the
+    repository supply that limit.
+  - The empty-catalog warning names a disabled registry
+    (`SKULK_MODEL_REGISTRY_ENABLED=false`) as its own cause.
+  - `skulk doctor`'s installed-card check says an unrecorded model cannot be
+    served offline, since no shipped card stands in for it any more.
+  - Association never re-derives a card record over an existing one. A
+    model directory whose record no longer matches its files has drifted,
+    and it stays unresolved until a download repairs it; before, the
+    association scan could write a fresh verified record from the changed
+    bytes.
+
+- A model added from the Hugging Face search keeps the pipeline-split limit
+  of the signed registry card for its repository, taking the strictest
+  among the repository's quant aliases. Before, only a card shipped inside
+  Skulk supplied that limit.
+- A node whose catalog is legitimately empty (nothing installed and no
+  registry) no longer refreshes the catalog, and waits on the network, on
+  every catalog read.
+- The synthetic test video engine's card ships beside the engine instead
+  of among the model cards, since the registry can never supply it.
+
+- `skulk --offline` keeps the model registry out of reach, as
+  `SKULK_OFFLINE=true` does. Before, the flag only logged the mode, and the
+  card catalog still tried the network.
+- On the model store host, the node's own association pass gives a legacy
+  model in the canonical store its card record, instead of waiting for
+  reconciliation to scan the store.
+
+- A node that cannot reach the model registry, however long it has been
+  offline, gives a model downloaded before card records existed its record
+  from the last verified registry catalog it cached. Before, only the
+  cards shipped inside Skulk could. The cached catalog is never listed or
+  placed from; a model it matches gains its own card record and is then
+  listed and served like any other installed model. Association now runs
+  on every node, with or without a model store, and a model it records is
+  listed at once rather than after the next restart.
+
+- A plugin update that only rewords a setting, changes a setting's default, or
+  adds an optional setting now installs in place and keeps the installation's
+  settings, for plugins built with plugin SDK protocol 3 or later. Before, any
+  change to a plugin's settings schema refused the update with "configuration
+  schema requires migration", even a new description.
+- A disabled plugin reads "Disabled" in the plugin list instead of "Status
+  unavailable".
+- The Plugins page names each installed plugin by its signed release, for
+  example "Skulk Video Studio" with its version, sequence and publisher,
+  instead of its local `managed.<id>`. A plugin whose process stopped says
+  why, such as a release built for a different Skulk build, and reads
+  "Needs attention" instead of "Status unavailable".
+  `GET /v1/plugins/managed` gains a `release` field for each installation.
+- Video renders on AMD (the ComfyUI engine's ROCm lane) keep their models
+  loaded between renders and memory-map weight files up to 64 GB. Before,
+  every render rebuilt the text encoder, transformer and VAEs. ComfyUI's
+  cache is told to keep 40% of host RAM free, because at its default the
+  text encoder and transformer evicted each other on every new prompt. On
+  Strix Halo a 480x480 four-step MiniMax H3 render with a new prompt drops
+  from about 210 s to about 105 s once the models are loaded. The output
+  matches the old path as closely as two runs of the old path match each
+  other. A card with a weight file above 64 GB still loads without memory
+  mapping.
+- A superseded plugin manager runtime that could not be fully removed is
+  retried after five minutes. Before, a partial removal was recorded as
+  done, and the rest waited for a restart.
+- The ComfyUI engine's build identity in `NodeResources.engine_builds` names
+  the torch build beside the checkout commit
+  (`comfy@<commit>/torch@<version>`): the same checkout on cu130 and on ROCm
+  serve differently, and a signed engine-support claim must name exactly
+  what serves. `skulk doctor` prints the identity so it can be copied into a
+  claim. The engine-build inventory now runs in a worker thread when node
+  resources are gathered, so a slow or hung engine probe no longer stalls
+  the worker's event loop.
+
+### Added
+
+- Phone pairing works without configuration: the first **Pair a phone** (or
+  `skulk operator pair`) registers the node with Foxlight's relay at
+  `relay.foxlight.ai`. `connectivity.relay.registration_url` selects a
+  self-hosted relay, and `connectivity.relay.enabled: false` keeps pairing on
+  LAN and Tailscale.
+
+- A gateway can register its own relay route, so pairing a phone from the
+  command line needs no file from the relay operator. When the gateway has no
+  route, `skulk operator pair` generates the gateway's connector key and carrier
+  credentials, sends the relay only their fingerprints, stores the route, and
+  starts remote access without a restart. The relay comes from the new
+  `connectivity.relay` section of `skulk.yaml` (`registration_url`, `enabled`)
+  or the build's default; offline nodes never register. The new
+  `skulk operator forget-relay` turns remote access off again. Remote access
+  now also starts, stops, and follows a replaced route without restarting
+  Skulk, retries after an unexpected failure, and stops for good when the relay
+  revokes the route or refuses it for ten minutes.
+
+- The dashboard pairs a phone in one step. **Pair a phone** under
+  **Devices & pairing** registers the node with the relay the first time,
+  waits for the relay connection, and shows the code; before the first
+  registration the panel notes that traffic between the cluster and the
+  paired app is end to end encrypted. The
+  panel shows whether the relay connection is up, why this node cannot
+  register (registration off, offline, or no relay configured), and offers
+  **Turn off**, which also revokes codes made for the relay. In
+  a multi-node cluster the node where pairing was turned on advertises it, and
+  every other node's dashboard says where pairing is managed instead of
+  starting a second one.
+
+- The Skulk operator app for iOS and Android can operate a cluster remotely,
+  with no VPN on the phone. One API node acts as the operator gateway:
+  `skulk operator configure-relay --provisioning-file <file>` installs the
+  route a relay service supplies and generates the gateway's TLS identity,
+  and after a restart the gateway connects outward to the relay and serves the
+  ordinary Skulk API to paired devices on a loopback-only TLS listener
+  (`--operator-api-port`, default 52417). TLS ends at the gateway, so the
+  relay forwards bytes it cannot read. Every request is checked against the
+  device's scopes: `cluster:read` or `models:read` for reads, `chat:write` for
+  inference, `operations:write` for changes, and `devices:manage` for device
+  management. When the gateway or the relay is down, only remote access
+  stops; the local API keeps serving.
+
+- Devices pair with the gateway by QR code. `skulk operator pair` prints a
+  single-use QR valid for five minutes; `--valid-for` (up to `90d`) or
+  `--max-pairings` (1 to 20, default 10) creates a reusable invitation
+  instead, and each scan gets its own five-minute attempt. `--qr-output`
+  also writes an owner-only PNG, and `skulk operator invitations list` and
+  `skulk operator invitations revoke <id>` manage invitations without printing
+  their secret. With a relay configured the QR carries what the app needs to
+  reach the gateway; `--exchange-url` names a direct HTTPS address instead.
+  The QR never holds an access or refresh credential: the app proves its key
+  through `POST /v1/auth/pairing-sessions/challenge` and
+  `POST /v1/auth/pairing-sessions/exchange`, then receives a 15-minute access
+  token and a 30-day refresh token that `POST /v1/auth/token` rotates.
+  `GET /v1/auth/devices` and `DELETE /v1/auth/devices/{device_id}` list
+  devices and revoke them immediately; revoking an invitation leaves devices
+  that already paired connected.
+
+- Settings has a **Devices & pairing** view. It lists paired devices with a
+  confirmed **Revoke**, and **Generate pairing code** creates an invitation
+  valid for 5 minutes to 90 days for 1 to 20 devices, showing its QR for five
+  minutes with **Copy code**, **Save QR** and **Revoke now**, beside recent
+  invitations and their state. These actions apply at once, not at
+  **Save changes**. Invitations can be managed only on the gateway with its
+  relay configured, from a browser on that machine or over Tailscale (its
+  MagicDNS name or Tailscale address, confirmed by the gateway's own
+  Tailscale); ordinary LAN, proxied, cross-site and relay requests are refused
+  with directions. The routes are `POST` and `GET /v1/auth/pairing-invitations`
+  and `DELETE /v1/auth/pairing-invitations/{invitation_id}`.
+
+- `POST /admin/restart` accepts `node_install_id`, a stable identity each node
+  creates once and reports in `GET /state` under
+  `nodeIdentities[*].nodeInstallId`. Skulk resolves it to the node's current
+  runtime ID just before sending the restart, so a process restart cannot
+  leave a client targeting an ended session. An unknown identity returns 404,
+  an ambiguous one 409, and adding `node_id` returns 400; `node_id` alone works
+  as before.
+
+- A Hugging Face token entered once in any node's dashboard
+  (**Settings → HuggingFace → API Token**) now reaches every node, including
+  the model store host and nodes that join later. Before, it stayed on the
+  node where it was typed, so gated models failed on the store host while the
+  dashboard reported a token as set. It travels over the encrypted fabric in
+  the Settings broadcast, the store host's formation broadcast and the
+  join-time bootstrap, is stored owner-only, and takes effect without a
+  restart. A blank field never erases a token, `GET /config` still reports
+  only `has_hf_token`, and an `HF_TOKEN` exported at node start keeps
+  precedence on that node. A new `skulk doctor` check, `hf-token`, names the
+  token's source without printing it and warns only on a node that downloads.
+
+- **Settings → Devices & pairing** lists paired operator devices and revokes
+  one after confirmation, immediately rather than on **Save changes**.
+  `GET /v1/auth/devices` and `DELETE /v1/auth/devices/{device_id}` accept the
+  direct dashboard (a browser on the node or a verified Tailscale peer) as
+  well as a `devices:manage` bearer.
+
+- Text-to-music generation through asynchronous jobs. `POST /v1/music` takes
+  `model`, `prompt`, `seconds`, and optional `lyrics` and `seed`, and returns
+  a queued job. `GET /v1/music` lists jobs, and `GET /v1/music/{music_id}`
+  reports status and, on completion, the WAV's measured duration, sample
+  rate, channels, size, and SHA-256. `GET /v1/music/{music_id}/content`
+  downloads the WAV, `POST /v1/music/{music_id}/cancel` cancels, and
+  `DELETE /v1/music/{music_id}` deletes. The signed catalog carries MiniMax
+  Music 3 Q4 (lyrics required) and ACE-Step 1.5 Turbo BF16 (lyrics optional),
+  both for 10 to 60 second targets, and `GET /v1/models` gains a `music`
+  object with each card's lyric rule and duration bounds. Each API node keeps
+  finished WAVs for up to 24 hours, 2 GiB in total. A job for a model that is
+  not mounted fails.
+
+- A separately provisioned audio.cpp v0.8.2 music engine. Mounting a music
+  model makes one eligible worker download, verify, and cache a
+  SHA-256-pinned engine package from Foxlight's package index; the model's
+  weights download separately. Packages cover Apple Silicon macOS 15 or newer
+  (CPU and Metal), Linux amd64 (CPU, Vulkan, and CUDA for compute capability
+  8.9), and Linux arm64 (CPU, and CUDA for NVIDIA GB10). Skulk tries CUDA,
+  then Vulkan, then CPU or Metal, and falls back to a CPU lane with its own
+  support claim when GPU setup fails. Restarts reuse the verified cache, even
+  offline. `SKULK_AUDIO_CPP_BIN`, `SKULK_AUDIO_CPP_VULKAN_BIN`,
+  `SKULK_AUDIO_CPP_CUDA_BIN`, and `SKULK_AUDIO_CPP_SPECS_DIR` point at an
+  operator's own builds, and `SKULK_AUDIO_CPP_BACKENDS` limits the advertised
+  lanes. The CPU, Metal, and Vulkan packages carry a fix for an upstream
+  MiniMax sampling bug that could collapse a song into a held note or noise.
+
+- Exact admission for music. A model mounts only where a signed `supported`
+  claim matches the card, the node's running engine executable, and its
+  hardware class; managed CUDA packages also require exactly one NVIDIA GPU of
+  the compute class they were built for. Admission adds measured workspace to
+  the weights (10 GiB for ACE-Step; 2 GiB for MiniMax on CUDA and Vulkan, 5
+  GiB on Metal), so an undersized node is refused before loading. Node
+  resources now include AMD PCI chip classes such as `amd:pci-1002-1586`
+  (Strix Halo).
+
+- Plugins can run as separately supervised capability runtimes.
+  `skulk-plugin-service setup` registers a per-host plugin manager as a system
+  service (Apple Silicon macOS, or Linux with a running systemd). The
+  **Plugins** page, the `/v1/plugins` routes and `skulk-plugin-service
+  install-plugin` then install a signed release from an owner-configured
+  source, activate it with explicit permission consent, and configure, check,
+  disable, uninstall or recover it. Rerun on an installation,
+  `install-plugin` stages and, with consent, activates a newer release, and
+  refuses an older one as a rollback.
+  - Paired browsers get plugin access only through explicit `plugins:read`,
+    `plugins:manage` and `plugins:approve` grants
+    (`PUT /v1/auth/plugin-grants/{device_id}`, owner only). A plugin's own
+    proposals, such as paid work, run only through **Approve and execute
+    reviewed proposal**, which needs `plugins:approve` or direct owner access.
+  - The manager follows a Skulk update by staging a runtime for the new build
+    and restarting on it, without rerunning setup.
+  - A release outside the host's protocol window is refused by name, with
+    HTTP 409 and the same sentence in the terminal.
+  - Capability authors can declare `owner`, `manage` and `setup` launchers in
+    a signed wheel under the `skulk.capability_runtime` entry-point group
+    instead of shipping `__owner__.py`, `__manage__.py` and `__setup__.py`.
+
+- The signed catalog behind **Browse** is also available from a terminal and
+  the API: `skulk-plugin-service catalog`, `skulk-plugin-service
+  install-plugin --from-catalog BUNDLE_ID [--sequence N] [--platform FAMILY]`,
+  `GET /v1/plugins/managed/catalog`, and the owner-only
+  `POST /v1/plugins/managed/catalog/source` and
+  `POST /v1/plugins/managed/catalog/install`. Reading a catalog installs
+  nothing.
+
+- Managed plugin installations appear as topology satellites with no extra
+  plugin code; the host marks an owner unavailable when it stops answering and
+  withdraws its nodes when the owner stops.
+
+- Managed plugins can serve streaming capabilities. A plugin speaking plugin
+  protocol 4 is routed for `server_streaming`, `client_streaming` and
+  `bidirectional` capabilities through `POST /v1/capabilities/stream` and
+  `ExtensionContext.stream_capability`, like an in-process provider: raw media
+  up to 1 MiB per frame, one deadline per call, input half-close, and no
+  replay. Older plugins keep their unary behavior; deploy this release before
+  enabling streaming plugin releases.
+
+- Skulk can prepare actions for an operator to approve. A `skulk/steward`
+  conversation with operator authority can propose placing a model, stopping
+  or restarting an instance, or cancelling a download, with its evidence; a
+  proposal expires after ten minutes. Nothing happens until an operator
+  (loopback, a direct private-LAN or Tailscale peer, or the operator gateway)
+  approves that exact proposal with **Approve** or
+  `POST /v1/steward/proposals/{proposal_id}/decision`;
+  `GET /v1/steward/proposals` returns the audit. The elected master consumes
+  each approval once and revalidates it first, the resident instance is never
+  eligible, and `dispatched` means the command was accepted, not finished.
+  `SKULK_FABRIC_CAPABILITIES_DISABLE=1` on the elected master fails every
+  approval. Installed plugins can add bounded read tools and inert proposal
+  tools (`StewardToolProvider`); neither approves spending.
+
+- Skulk answers from fresh evidence. Every turn, follow-ups included, starts
+  from a validated cluster-state observation, and a turn without one ends in
+  an error instead of an answer. Standalone node-count, download, version and
+  capability-inventory questions are answered straight from observations,
+  with unknown or partial coverage said plainly.
+
+- `SKULK_PRESERVE_VENV_EXTRAS=1` keeps separately installed extension packages
+  across supervised service restarts, whose exact `uv sync` otherwise removes
+  them.
+
+- Model cards come from Foxlight's signed model registry. Nodes read a
+  TUF-signed catalog from `https://registry.foxlight.ai/`, verify it against
+  a root embedded in Skulk, and refresh it at most every 60 seconds, so cards
+  arrive and are corrected without a Skulk release. A card names one exact
+  artifact under an immutable content-derived ID, and its `model_id` may be
+  an alias of the repository that holds the bytes. During an outage a node
+  keeps the last verified catalog for up to 30 days. `/v1/models` and the
+  model picker show each card's `registry_provenance` (Foxlight, agent, or
+  community), and `SKULK_MODEL_REGISTRY_URL`, `SKULK_MODEL_REGISTRY_ENABLED`,
+  `SKULK_MODEL_REGISTRY_CACHE_DIR`, `SKULK_MODEL_REGISTRY_REFRESH_SECONDS`,
+  `SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS` and
+  `SKULK_MODEL_REGISTRY_MAX_STALE_DAYS` configure the client.
+
+- Signed engine-support claims can make an exact artifact placeable on one
+  engine build and hardware class without a new card. Nodes advertise their
+  `engine_builds` and `hardware_classes`; experimental, unsupported,
+  stale-build and hardware-mismatched claims never widen placement, and
+  empirical claims bind the exact card that was tested. Previews report
+  `compatibility_source`, and `SKULK_ENGINE_BUILDS` overrides a node's build
+  identity.
+
+- `GET /models/requirements?model_id=...&context_tokens=...` returns a
+  model's card digest, storage, memory estimate, required capabilities and
+  matching engine claims without reserving anything, for external
+  controllers. Launchable placement previews carry the same `card_digest`.
+
+- `GET /state` keeps the newest 64 terminal instance failures in
+  `instanceFailures`, each with a stable `errorCode`; ordinary stops are not
+  recorded. `POST /place_instance` returns `instance_id`, equal to its
+  `command_id`, so concurrent placements of one model can be told apart. A
+  failed artifact identity check ends the placement as `model_trust_rejected`
+  without retrying.
+
+- `DELETE /store/models/{model_id}/download`, also offered in the Add model
+  dialog, cancels a model store download and keeps its partial files for a
+  later resume.
+
+- `GET /store/registry` lists `cached_on_nodes` and a `cache_inventory` state
+  on any API node, including caches held by `--no-api` nodes.
+
+- `skulk doctor` reports installed models that lack their card record
+  (`installed-card-records`). A downloaded model's own card record is what
+  keeps it servable without the network; a model downloaded before those
+  records existed gets one when Skulk starts with network access and
+  recognizes it. Incomplete downloads are counted, not flagged. The audit
+  covers the model directories and the model store's canonical and staging
+  directories. `GET /v1/diagnostics/node` now runs the doctor checks off
+  the event loop, so a slow check no longer stalls the API.
+- A plugin can serve its own screens to every machine on the tailnet. When a
+  node runs Tailscale, Skulk hands the node's Tailscale address to the
+  plugins it runs. A plugin built for this serves there and on loopback,
+  never on the local network. Skulk picks the address up in the background,
+  and restarts the node's plugins once when it first sees it or when it
+  changes.
+
+- Plugins can be managed on any node from any machine on the tailnet:
+  - A capability's **Manage on** entry, followed by its host's name, in its
+    topology flyout and its details, links to that host's own dashboard at
+    its Tailscale address, opened on the plugin. It was only a hint before.
+  - **Plugins** lists the cluster's other nodes, each linking to its own
+    Plugins page.
+  - `/plugins?plugin=<id>` opens that plugin's details.
+
+- The Plugins page has a Browse tab for installing plugins from a signed
+  catalog:
+  - Connect a catalog with an invitation code, or its address and publisher
+    key.
+  - Review a release's signed facts, its permissions and whether it can spend
+    money, then install or update it with one consent.
+  - Follow the download, staging and activation in place. Leaving the page and
+    coming back picks the install up where it was, without repeating it.
+  - A setup step then shows what each of the plugin's nodes reports, offers
+    its setup checks and settings when one needs attention, and opens its
+    screens once they are ready.
+
+- `kill -USR1 <pid>` makes any Skulk node or runner process write every
+  thread's Python stack to its log and keep running. A runner stuck in
+  native code shows only C frames to an OS sampler, and a Python profiler
+  needs root on macOS.
+
+- `GET /v1/models` publishes every engine setting a video card's jobs
+  accept, with its default: the sampler and scheduler lists, the card's
+  trained video and audio shifts (and each adapter's own) with the accepted
+  range, reference sizing for `ref2va` cards, and the codecs. A client can
+  offer each setting without a copy of the engine's lists.
+
+- Video jobs can steer the engine. `POST /v1/videos` accepts `sampler`,
+  `scheduler`, `video_shift`, `audio_shift`, `reference_fidelity` (ref2va),
+  `styles` (the card's style embeddings) and `codec` (h264 or AV1), each
+  defaulting to what the ComfyUI template used before. Samplers that cannot
+  serve distilled H3 are refused with the reason. A finished job reports the
+  settings it actually ran with in `stats.engine`, the seed included when the
+  request gave none, and `GET /v1/models` lists each video card's styles.
+
+- Video jobs can steer the render with the card's ControlNet. A multipart
+  `POST /v1/videos` accepts a `control` clip, a `mask` whose white marks
+  what to regenerate, and a `source_video` behind that mask, with
+  `control_strength`, `control_start` and `control_end`. The control clip is
+  ordinary footage: the render derives the guide from it, as ComfyUI's H3
+  ControlNet template does, by `control_kind` (`pose` by default, `depth`,
+  or `edges`). `GET /v1/models` lists the guides each video card derives and
+  the weights they load. A card without a ControlNet for the mode, or
+  without the weights for a guide, refuses them, and `stats.engine` records
+  what the ControlNet ran with. On CUDA the ComfyUI engine runs on PyTorch's
+  own allocator (`--disable-cuda-malloc`): on the async allocator ComfyUI
+  would otherwise choose, a ControlNet render aborted the engine on the
+  GB10.
+
+- Video cards can pin companions hosted in other repositories. A new
+  `preprocessor` companion kind carries the weights that derive a guide video
+  from an ordinary clip (`role`: `pose_estimator`, `person_detector`, or
+  `depth_estimator`) and the `license` its repository declares. They download
+  with the card at their pinned revisions, count toward the card's
+  completeness, are protected from eviction while the card is in use, and the
+  ComfyUI engine searches each staged repository. The registry's MiniMax H3
+  cards pin SDPose, its RT-DETR person detector, and Depth Anything 3.
+
+- Placements choose their context window. llama-server, in-process llama.cpp
+  and vLLM reserve the whole window's memory when a model loads, and since the
+  unified-memory fix they were sized to the card's full context (262144 for
+  the steward), reserving memory most workloads never use. They now get a fleet
+  default, `inference.served_context_tokens` (32768, editable in Settings),
+  unless the placement asks for a window: `context_tokens` on
+  `POST /place_instance`, or the new context field in the dashboard's
+  placement dialog, which shows the maximum the chosen nodes hold and roughly
+  how much memory the window reserves. A request above the maximum is refused
+  with the maximum named; repair re-placements keep the request. MLX, which
+  grows its cache per request, keeps the full memory fit. Placement previews
+  add `max_context_tokens`, `default_context_tokens`,
+  `reserves_context_at_load`, and `kv_bytes_per_token`.
+
+- An installed model can take the signed card the registry publishes for it
+  from the Downloads page: an Update action beside "Update available" asks
+  the store for the current signed card, and when the bytes already
+  installed are that card's bundle the store swaps the sidecar without a
+  download. When a custom card overrode the alias, an operator-authorized
+  update retires that exact custom card once the store has adopted the
+  signed one, after the download when bytes had to move. The store's
+  "update available" now also covers a generation installed under a custom
+  or legacy card, which it previously read as current.
+- Video generation is a capability the dashboard knows: `video_gen` joins the
+  model browser's capability filter and chips with its own tint, so a
+  catalog video card can be filtered and badged.
+
+- Uninstalled managed plugins can be removed. `DELETE
+  /v1/plugins/managed/installations/{plugin_id}`, `skulk-plugin-service
+  purge-plugin <plugin_id>` and the plugin card's "Remove uninstalled plugin"
+  purge an installation that is uninstalled, or that never selected a
+  release, with everything it retained; a live installation is refused. The
+  Plugins page now lists an uninstalled installation under Uninstalled
+  instead of "Status unavailable".
+- Capability nodes in the dashboard topology. A plugin that runs a managed
+  child with its own user interface publishes a bounded, credential-free
+  `CapabilityNodeSummary` (status, link surfaces, manifest actions) through
+  `ExtensionContext.publish_capability_node`; hosts gossip it on the
+  telemetry plane as `NodeCapabilityNodes`, `GET /state` projects it as
+  `capabilityNodes`, and the dashboard draws each node as a satellite of its
+  host with a flyout that opens surfaces in a new tab, runs descriptor
+  actions on the local host, and opens a capability panel built on the
+  shared `RightDrawer` chrome now also used by the observability panel.
+  `SKULK_TEST_CAPABILITY_NODE=<url>` publishes a stand-in node for trying
+  the layer without a plugin; `VITE_CAPABILITY_SATELLITES=0` builds the
+  dashboard without it.
+- Video jobs accept timed keyframes: repeatable `keyframe` parts, each paired
+  with a `keyframe_at` time in seconds, anchor frames anywhere in the clip
+  (one H3 guide per frame), alongside or instead of the first and last frame.
+- Video jobs take their canvas from an attached keyframe: with no `size` and
+  no `aspect_ratio`, the `first_frame` (else `last_frame`) image sets the
+  shape, read from its header alone, so a keyframe keeps its framing.
+- Audio-video generation substrate and the `/v1/videos` job API. Model
+  cards gain a `[video]` section (modes `t2va` / `fl2va` / `ref2va`,
+  duration and frame grid, canvas rules, audio output, reference limits,
+  pinned LoRA / model-patch / embedding / graph-template companions) and a
+  `[license]` section, gated behind `SKULK_ENABLE_VIDEO_MODELS`; the
+  MiniMax H3 cards are published in the signed model registry. A `VideoGeneration` command and task
+  place on a single-host instance whose card serves the requested mode,
+  reference attachments ride the vision media plane as raw slot-keyed bytes
+  with per-slot digest verification, render progress rides `DATA` as
+  `VideoChunk`, and the finished container returns on the new
+  `OUTPUT_MEDIA` plane into the API node's expiring, byte-bounded
+  `VideoStore`. The OpenAI-shaped job routes create (JSON or multipart with
+  `input_reference`, `first_frame`, `last_frame`, and repeated `reference`
+  parts), list, retrieve, download (`content` with a `variant`), cancel,
+  and delete jobs; a job completes only when the render's terminal report
+  and the verified container both arrive. A deterministic test video engine
+  (`SKULK_TEST_VIDEO_ENGINE`, whose card `foxlight/test-video` ships beside
+  the engine) renders
+  seeded synthetic clips through every stage of the pipeline so the
+  substrate works end to end on nodes without a GPU. The `comfy` engine's
+  provisioning lands first: a pinned ComfyUI checkout (v0.35.0) in a
+  managed environment with a hash-pinned torch wheel set (cu130 from the
+  PyTorch index on NVIDIA; on AMD Strix Halo, AMD's stable ROCm 10.0.0
+  channel with torch's gfx1151 device packages, whose BLAS libraries carry
+  every kernel H3 reaches, where the rocm7.2 wheel's did not; installs are
+  keyed by pin and wheel-set digest so a wheel change reprovisions),
+  provisioned on Linux NVIDIA and AMD nodes that enable video models or by
+  `skulk doctor --fix`, advertised as `comfy-cuda` or `comfy-rocm` (the
+  ROCm lane launches ComfyUI with `--bf16-vae --disable-mmap
+  --cache-none`), with `SKULK_COMFY_BIN` and
+  `SKULK_COMFY_ROOT` for hand-built installs. The ComfyUI runner drives that install headless:
+  it exposes the staged H3 artifact through an `extra_model_paths.yaml`,
+  binds each request onto ComfyUI's own MiniMax H3 node graph (text, first
+  and last frame, and numbered image, video, and audio references; named
+  turbo adapters with their trained step counts and sigma shifts), follows
+  step progress on the WebSocket, cancels mid-render, and delivers the
+  H.264/AAC container with a first-frame thumbnail. H3 cards place on
+  `comfy-cuda` and `comfy-rocm` nodes.
+- `GET /v1/models` entries carry two additive sections from the card: `video`
+  (the declared video contract: modes, clip length range, frame grid and
+  canvas rules, audio output, default steps, reference limits, and the named
+  adapters selectable through a video job's `lora` field) and `license`
+  (name, URL, SPDX id, notice, and the product display name a license may
+  require), so a client such as the Video Studio capability can plan a valid
+  render and show the required attribution from the running node's catalog
+  instead of a copy of the card. Both are null where the card declares none.
+- Muse Glimmer (Meta, August 2026) is a first-class model family on the MLX,
+  llama-server and vLLM lanes. The capability resolver now derives the family's wire
+  contract from the card family or model id, the same way it does for
+  Gemma 4 and gpt-oss, so a registry or auto-imported card with no explicit
+  tooling or runtime sections resolves to always-on channel-delimited
+  reasoning (no toggle, default strength high), ATEM tool calling, and the
+  new `muse_glimmer` output parser. The MLX engine gains a streaming parser
+  for the `to=self` / `to=user` / `to=<tool>` channels and Meta's ATEM
+  markup, the shared text dialect reader and the no-tools scaffolding scrub
+  learn ATEM, and every engine's request path translates `reasoning_effort`
+  onto the template's `reasoning_strength` kwarg (`minimal` becomes `low`,
+  `xhigh` is honored; a disable request is ignored as on every no-toggle
+  model, because the template opens the reasoning channel unconditionally,
+  so callers steer with an explicit effort). Model cards gain
+  `runtime.vllm_reasoning_parser`
+  (explicit only, like the tool-call parser), mapped to vLLM's
+  `--reasoning-parser` so a card can pin `muse_glimmer` for both. The
+  in-process llama.cpp engine is not enabled for this family: the pinned
+  llama-cpp-python binding vendors a llama.cpp build that predates the
+  architecture, so placement and the worker's engine resolution subtract
+  that engine in code (platform truth, keyed on the resolved family) and a
+  registry card listing every llama.cpp lane lands on `llama_server` only.
+
+- Authenticated operator workflows can now install one complete pinned model
+  card through `POST /models/add-card` for pre-publication qualification. Skulk
+  preserves the exact artifact bundle while stripping registry identity and
+  provenance, so testing cannot impersonate signed registry truth; the explicit
+  exact-card add authorizes its pinned repository code. Headless registry automation
+  may use the narrowly scoped `SKULK_EXACT_CARD_QUALIFICATION_TOKEN` for only
+  this immutable temporary install and server-owned custom-card cleanup
+  lifecycle; only service-authenticated installs receive the ownership marker,
+  and the credential cannot replace or delete any other card. The elected
+  master rechecks that precondition at the serialized ordering boundary, and
+  success waits for local persistence of the indexed event carrying the exact
+  originating command ID. Cleanup preserves downloaded artifact bytes without
+  allowing their temporary installed sidecar to re-enter the catalog, and later
+  signed-registry refreshes update the master's ownership guard. Qualification
+  downloads additionally pin the immutable v2 bundle identity through both the
+  API node and canonical store, preventing a later alias replacement from
+  redirecting the bytes under test.
+
+- The dashboard has a new Integrations page that generates ready-to-paste
+  configuration for connecting external tools to the cluster: Claude Code,
+  OpenCode, Codex, Hermes, OpenClaw, Pi, AnythingLLM, Open WebUI, n8n and
+  Firefox. Snippets are built from live cluster state rather than being static
+  examples, so they carry the ids of models that currently have a ready
+  instance, those models' real context windows, and their capability flags
+  (image input is declared for vision models, and models that mark their
+  reasoning are configured to send it back on later turns). The address in a
+  snippet is the node's routable address rather than `localhost`, with a
+  chooser between the local network and Tailscale when both are available, and
+  Docker recipes rewrite a loopback address to `host.docker.internal`.
+
+- Signed registry-v2 cards can now describe one exact immutable artifact bundle
+  inside a shared upstream repository. Skulk downloads only the required file
+  allow-list, verifies sizes and available upstream object identities, preserves
+  directory layout, loads engines from the declared artifact root, and retains
+  bundle identity in installed sidecars and store generations. Existing v1
+  cards retain their previous behavior.
+
+- Served GGUF vision now uses one truthful model card for the base quant,
+  immutable projector, vision capability, and native MTP behavior. New cards
+  pin one exact projector path and size; downloads retain only that projector,
+  the runner verifies it against the installed manifest before launching
+  `llama-server --mmproj`, and CPU placement disables projector offload. Vision
+  plus MTP degrades to serial serving until concurrent multimodal qualification.
+  Homogeneous CUDA, ROCm, and Vulkan RPC placements reserve the projector on
+  their selected driver and route image media only there; legacy cards continue
+  through the in-process llama.cpp path.
+
+- Placement now keeps heterogeneous engine choice planner-owned: model cards may
+  declare an open set of compatible backends and an ordered fallback preference,
+  and the planner automatically falls through when an earlier engine or host is
+  unavailable. Previews expose stable failure categories and placement
+  responses add `X-Skulk-Placement-Failure` without replacing their readable
+  error message. Synchronized settings atomically retain owner-only config
+  permissions.
+
+- The managed CUDA llama-server wheel now ships for Linux aarch64 as well as
+  x86_64. The aarch64 lane is built natively with CUDA 12.9 for compute
+  capability 12.1, allowing Grace Blackwell and GB10 nodes to use the CUDA
+  served engine instead of falling back to Vulkan.
+
+- Supervised startup now preserves an installed managed CUDA or Vulkan
+  llama-server wheel across its routine `uv sync`; previously the exact sync
+  could prune the installer-managed wheel on the first service restart and
+  silently return the node to tarball provisioning.
+
+- Intelligent Fabric now speaks and identifies as Skulk rather than presenting
+  a separate Steward character. The dashboard streams answer prose through a
+  ready TTS model only when its voice catalog contains the signature `skulk`
+  voice, pins that voice on every sentence, and keeps speech failure isolated
+  from authoritative text generation. Internal steward route, role, and model
+  identifiers remain compatible for existing clients.
+
+- Skulk now ships its signature voice: a new bundled reference profile named
+  Skulk, constructed synthetically like the existing ten and paired with the
+  same shared conditioning transcript. It appears in the voice catalog of
+  every validated cloning card and replaces Kite as the default voice, so any
+  synthesis request that does not choose a voice, including speech spoken on
+  behalf of the steward, speaks as Skulk. The reference-voices README now
+  also records how bundled profiles are authored.
+
+- Model artifacts are now self-describing and air-gap durable: canonical and
+  staged copies retain their complete model card, immutable selection,
+  verification state, companion ownership, and SHA-256 manifest in an atomic
+  installed-card sidecar. The authoritative store automatically inventories
+  existing node caches and can import missing artifacts through resumable,
+  capability-bound peer transfers without returning to Hugging Face. The Model
+  Store dashboard exposes cache placement, verified versus local-legacy truth,
+  reconciliation progress, available updates, and signed warn-only advisories.
+  Durable deletion tombstones prevent missed node-cache evictions from
+  resurrecting removed models or their companion artifacts. Partial legacy
+  directories are never promoted from a name match, resumable peer imports
+  account only for missing bytes, capability exports enforce their transfer
+  ceiling, artifact eviction immediately clears stale installed state, startup
+  polling survives the delayed first scan, and companion recovery selects the
+  generation belonging to the current signed owner card. Internal peer imports
+  reject proxy-forwarded loopback requests, while omitted immutable card IDs
+  retain their documented current-generation compatibility behavior.
+
+- The dashboard voice loop now narrates code blocks: when a fenced code block
+  streams during live generation, the assistant voice speaks a short opener,
+  occasional fillers while the block streams, and a closer when it ends,
+  instead of leaving dead air where the unspoken code would be. Fillers fire
+  only when the voice has actually run out of queued speech, so narration can
+  never stack behind prose or chatter on a fast stream; adjacent blocks
+  continue without a false finish, replayed messages stay silent about code
+  by construction, and the Narrate code toggle beside Auto speech turns the
+  behavior off.
+
+- Intelligent Fabric mode gives the cluster a resident steward: an assistant
+  the fabric itself keeps placed as a hidden system instance, ready to answer
+  operator questions about cluster health, models, downloads, and diagnostics.
+  The steward investigates through read-only tools before answering and
+  holds no tool that changes the cluster; it can only propose actions for an
+  operator to approve. It is off by default; enabling it in Settings
+  makes the master establish the placement as a planner invariant: placed on
+  the best available nodes from a benched preference list (with a GGUF
+  universal floor so every fleet can serve one), re-placed after node loss or
+  master failover, and protected from ordinary deletion. Clients talk to it
+  through the standard OpenAI-compatible chat surface as the virtual model
+  `skulk/steward` (streaming included, no steward-specific client code), poll
+  readiness at `GET /v1/steward`, and see it flagged with
+  `system_role: "steward"` in `GET /v1/models` so pickers can badge or
+  separate it. The dashboard gains a Skulk fabric-chat page, chat-middleware extensions
+  run on steward turns exactly as on ordinary completions, and a steward that
+  is still being placed answers with a clean 503 status payload instead of
+  failing mid-answer.
+  The resident now converges upward when better capacity appears: an improved
+  brain must remain placeable for five minutes, stages before replacement, and
+  waits for a 30-second idle window. The parser-pinned 35B FP8 vLLM card joins
+  the default tier; explicit `NodeResources.api_available` telemetry elects one
+  canary owner while still covering `--no-api` worker hosts;
+  and node-scoped diagnostics include each node's doctor findings.
+
+### Fixed
+
+- A cluster keeps one phone-pairing gateway, so its five-device limit holds.
+  `skulk operator pair` now asks the node on its machine (`--api-port`,
+  default 52415) and refuses when another node already manages phone pairing,
+  as the dashboard does. A node that turns pairing off now repeats that
+  withdrawal about once a minute, so another node that missed it stops saying
+  pairing is managed there instead of waiting for a restart.
+
+- A new install from the Mac app or the Linux packages can download models.
+  Without a `skulk.yaml` a node had no model store, so **Download** failed
+  with `Store not configured`, and turning the store on in Settings left its
+  host and path blank and refused the save until both were filled in. Only
+  `install.sh` wrote the single-node store default, so source installs never
+  saw it. Now:
+  - a node that starts without `skulk.yaml` writes the same default: a store
+    on that machine in Skulk's data folder (`~/.skulk/model-store` on macOS,
+    `~/.local/share/skulk/model-store` for the Linux packages). An offline
+    node writes none, because the store's downloader would reach Hugging
+    Face;
+  - turning the store on in Settings fills in this machine's hostname and
+    the default path, and a save with blank fields takes the same values;
+  - with the store off, **Download** saves the model onto the node you are
+    using, the same download a launch starts. Requests only a store can
+    serve, such as companion artifacts, answer `409` with how to turn it on.
+
+  A fresh install also no longer logs a disk-usage warning every 30 seconds
+  before its first download creates the models folder.
+
+- An NVIDIA node installed from the Ubuntu or Debian packages now serves GGUF
+  models with the CUDA engine. The packaged runtime is read-only and has no
+  `uv`, so it could not install the CUDA llama-server wheel. Instead it fell
+  back to the Vulkan engine archive, which on a GPU container's compute-only
+  driver stack finds no device, so the node served on the CPU. When the
+  runtime's own environment cannot take the wheel, Skulk now installs it for
+  the user that runs the node. It downloads the pinned wheel from the
+  Foxlight index by exact URL, checks the SHA-256 the index publishes, and
+  installs it with the runtime's `pip` into that user's engines directory,
+  with NVIDIA's runtime libraries from PyPI. The engine then runs through
+  launchers that put those libraries on the loader path. The first online
+  start downloads several gigabytes once; an offline node downloads nothing.
+
+- Rerunning the installer upgrades a source install again. The dashboard
+  build's `npm install` rewrites `dashboard-react/package-lock.json` inside the
+  checkout, and git refuses to switch to a release whose lock file differs:
+  with a pinned commit the installer aborted at checkout, and with a branch
+  such as `main` the failed fast-forward was swallowed, so the installer
+  reported success while the install stayed on its old version. The
+  supervised startup script's boot-time `git pull` stalled the same way with
+  only a warning. Both now restore that build-rewritten file, with a log line,
+  before they switch versions.
+
+- A model store download no longer fails at the moment it completes because
+  the artifact inventory recorded the same directory at the same time. Both
+  wrote the model's installed-card record through one temporary file named
+  after the process, so whichever renamed second found the file already
+  consumed and the download failed with `FileNotFoundError`. Every record
+  write now stages through a temporary file of its own, and the inventory
+  leaves alone a record that the store wrote while the inventory was still
+  hashing the files.
+
+- A node holding two copies of one model, such as a store host with an
+  older staged copy beside its store copy, no longer refuses to load it
+  after the registry replaces the model's card. The download step vouched
+  for the copy that matched the new card, but the runner opens the copy it
+  resolves itself, whose sidecar still named the previous card, and the
+  load failed for good with `model_trust_denied`. The load check now adopts
+  the current card for that copy under the same proof the download step
+  uses (same repository, revision and files, covered by its verified
+  manifest), so the copy verified is the copy loaded. A card that needs
+  bytes the copy lacks is still refused.
+
+- Gemma vision works again on the MLX engine. Since the MLX stack moved to
+  mlx-vlm 0.6.17, every image sent to a Gemma 4 model crashed its runner and
+  came back as an empty answer: Skulk still replaced the model's vision tower
+  with a pooling fix that mlx-vlm now makes itself, and the replacement could
+  not accept mlx-vlm's new arguments. The replacement is gone. Gemma 3n read
+  small text in images poorly because Skulk framed each image without the
+  blank lines the model's own processor puts around it; images are now framed
+  the same way, and Gemma 3n reads the qualification card's code, color and
+  shape correctly.
+
+- A fresh install no longer downloads the whole git history of Skulk's
+  mflux fork (about 177 MB) to build one commit. The Foxlight forks of
+  mflux and mlx-lm now install as small wheels built from their pinned
+  commits and published to the Foxlight package index
+  (`mflux 0.19.1.post1`, `mlx-lm 0.32.0.post1`), so a slow or throttled
+  connection to GitHub no longer stretches an install by an hour.
+
+- `skulk operator configure-relay` no longer reports "None relay lanes"
+  for a version 2 provisioning file. Version 2 routes open relay
+  connections on demand, and the command now says so; version 1 routes
+  still report their lane count, with "1 relay lane" in the singular.
+
+- A gated or private model that fails to download now says why.
+  `GET /store/downloads` used to drop failed entries, leaving the Model Store
+  with a frozen bar or nothing; it now keeps them, with their `error`, until a
+  retry replaces them, and the row shows **Download failed** with the reason,
+  raises one toast and keeps Launch available for a retry. Messages
+  distinguish no token, a rejected token, unaccepted terms and terms accepted
+  on another account, and a missing-token message names the node that needs
+  one. **Find Models** toasts show the server's reason, and `POST /models/add`
+  gives the same guidance instead of the Hub's "log in".
+
+- A Grace Blackwell (GB10) node reports its chip instead of "Unknown Chip":
+  ARM Linux omits `model name` from `/proc/cpuinfo`, so Skulk falls back to
+  the NVIDIA device name.
+
+- Linux runners no longer load the MLX library while stopping or recording
+  memory diagnostics. Linux installs include a CPU build of MLX that these
+  runners never use, and loading it during shutdown could crash the runner as
+  it exited.
+
+- Long-running llama.cpp, llama-server, and vLLM runners no longer keep every
+  request ID they have ever handled; they keep the latest 4,096 to detect
+  duplicates.
+
+- Background work an extension starts from `on_start` keeps running. Skulk
+  built the node on one event loop and served it on another, so tasks created
+  at startup could be lost; `on_start` now runs on the serving loop.
+
+- A better election proposal that arrives after the timeout now corrects the
+  result; before, two nodes could both stay master until membership changed.
+
+- A download reports complete only once the model can load: completion waits
+  for its card record, a GGUF file in a subfolder is recorded at the
+  repository root, and a cached status no longer vouches for removed files.
+
+- Removing the model store configuration during reconciliation no longer
+  stops the node.
+
+- vLLM retries a lost server port race instead of failing the placement, and
+  a forced named `tool_choice` returns its call instead of an empty response.
+
+- The CUDA engine loads on fresh hosts: its wheel installs NVIDIA's NCCL
+  runtime and is built without the build machine's CPU features. Before, such
+  hosts could fail to start it.
+
+- mlx-lm runs a model configuration's `model_file` code only when the card
+  sets `trust_remote_code` (CVE-2026-5843); before, a card that did not allow
+  repository code could still run it.
+
+- The dashboard's English string catalog, the file seeded into Tolgee for
+  translation, is current again. Its exporter had failed since mid-September
+  (one key carried two different English texts, and the Integrations page
+  built tool-description keys at runtime, which the exporter cannot read),
+  so about 300 strings added since then never reached translators. Both are
+  fixed, the exporter also reads calls made through an object such as
+  `context.t(...)`, and the catalog is regenerated; nothing changes in
+  English.
+
+- A plugin request refused from an ordinary LAN address now says how
+  plugins are managed: from a browser on the node itself, the node's
+  dashboard over Tailscale, or, where a route accepts one, a paired device
+  granted plugin access. Every plugin route, reads included, used to
+  refuse a LAN browser with the text about managing pairing invitations
+  from the operator gateway. An owner-only change sent with a paired
+  credential now says to choose "Use direct host access". The
+  dashboard's release source form also suggests `release.json`, the record
+  name releases use and the terminal installer defaults to; it suggested
+  `runtime.json`.
+
+- A runner's last events are no longer lost when it exits. The channel from
+  a runner process to its worker discarded whatever the runner had sent but
+  the worker had not yet read as soon as the runner closed it. Stopping a
+  model therefore sometimes stalled for 15 seconds and recorded the shutdown
+  as timed out instead of complete. Everything a runner sends before closing
+  is now delivered.
+
+- A refused plugin catalog read, source change or install now says why.
+  The catalog routes answered every refusal with "local plugin operation
+  refused", and `skulk-plugin-service catalog` told the operator to
+  configure a catalog that was already configured, including when the
+  host simply could not reach the catalog address. Each refusal now has
+  one sentence, shared by the API and the terminal, that names the cause
+  (unreachable, not configured, the server's HTTP status, an untrusted
+  publisher, an expired catalog, a superseded listing, and others) and
+  what to do next, without the catalog address or credential. The guided
+  installer also names a catalog outside the host's protocol window.
+
+- A node no longer copies the models it was serving from the store again
+  after a restart, an update or a master election it wins. The startup
+  cleanup ran before any runner existed, so every staged model competed for
+  the 40 GiB recent-use budget, and a model larger than the budget (a 45 GiB
+  video model, for one) was always deleted. In-use models now refresh their
+  last-use time every minute and the startup cleanup keeps any copy used in
+  the last 30 minutes, whatever its size. A model placed on a node is also
+  kept while its runner is retried; an RPC donor placement, which never
+  reads the model, keeps nothing.
+
+- The dashboard no longer opens to a blank page after a Skulk update. Its
+  HTML shell was served without a cache policy, so browsers kept an old
+  shell that asked for script bundles the new build no longer had. The
+  shell and other unhashed files are now revalidated on every load, and
+  the content-hashed bundles under `assets/` are cached as immutable, also
+  when a browser revalidates one.
+
+- Active instance cards name the engine that serves each instance, with
+  its accelerator ("ComfyUI · ROCm", "vLLM · CUDA", "llama.cpp ·
+  Vulkan"). The dashboard guessed the engine from the model card's first
+  compatible backend and labelled every engine other than llama.cpp
+  "Pipeline · MLX Ring", including video models on AMD nodes; it now
+  reads the backend the master resolved for the placement.
+
+- Cancelling a steward answer by its command ID now works.
+  `POST /v1/cancel/{command_id}` with the ID a steward response advertises
+  used to return 404, because each investigation step runs under an internal
+  ID. It now stops the step that is generating and ends the turn, so the
+  steward starts no further steps or tool calls.
+
+- The steward's liveness canary now fails a probe that starts answering and
+  then stalls. A probe that produced some text before its two-minute
+  deadline used to count as healthy, so a steward that wedged mid-answer
+  never reached the three-failure replacement.
+
+- The steward is placed only on models that can serve it. A card in
+  `steward_models` that is not a tool-calling text model (an embedding,
+  image, or speech model, or a text model that cannot call tools) is now
+  skipped with a warning and the next candidate is tried. It used to be
+  placed as a steward that failed every turn.
+
+- The error for a tool request to a vLLM model without a pinned tool-call
+  parser no longer points at a family default that does not exist. It names
+  `runtime.vllm_tool_call_parser`, the only way to enable tools on vLLM.
+
+- A node no longer crashes when a peer restart changes the master. The
+  node closes its worker's event channel before replacing the worker, and
+  a topology update sent in that window raised out of the worker and
+  stopped the whole node, taking every model instance it hosted with it.
+  Both topology tasks now end quietly when their channel closes, as the
+  worker's other senders already did.
+
+- The Plugins page works when the dashboard is opened over plain HTTP from
+  another machine on the network. Add plugin, Configure, credential
+  changes, setup actions, proposal approvals, and runtime install or
+  activation all minted their operation IDs with `crypto.randomUUID`,
+  which browsers only provide on HTTPS or localhost pages, so each of
+  those buttons failed silently on a LAN dashboard.
+
+- On an AMD Strix Halo node, a Vulkan model (such as the resident steward)
+  is no longer counted against host RAM as well as the VRAM carve it
+  occupies. Admission subtracted a loaded one from both, so a node with room
+  refused a MiniMax H3 video engine beside the steward (about 48 GB offered
+  of a 128 GB node). The worker's pre-load check did the same to a Vulkan
+  model being loaded, and refused the steward beside a video engine holding
+  host RAM while the carve sat empty. A Vulkan model still loading is
+  charged as before, and a ROCm (HIP) model, which does allocate host RAM,
+  is unchanged.
+- A single-node placement whose runner dies is relaunched, and given up
+  with a recorded failure if it keeps dying, instead of staying dead behind
+  a live instance. Only a peer's failure used to shut a runner down, so a
+  one-node runner killed or crashed outside a GPU wedge left the placement
+  serving nothing, never retried and never failed, until someone deleted it.
+  The shutdown of a runner that already died no longer waits out its
+  15-second acknowledgement deadline.
+
+- The plugin service no longer keeps a full copy of Skulk for every update.
+  Each Skulk update stages a new manager runtime of about 1.7 GB, and none
+  was ever removed; one capability host held eleven. Once the manager runs
+  the runtime staged for the current build, the host removes the others. It
+  keeps that runtime, any a running manager still uses, and the one before
+  it, for going back to the previous build.
+
+- A managed plugin's owner that exits unexpectedly is started again. The
+  plugin manager restarts it after growing waits (5 s to 300 s, then every
+  five minutes while it keeps failing), so an owner stopped by a condition
+  that clears later comes back by itself; before, an owner that died, for
+  example when its host's disk filled, stayed down until the manager itself
+  restarted.
+
+- Browsing the plugin service root in Finder no longer stops the plugin
+  manager. The `.DS_Store` and AppleDouble files Finder leaves behind are
+  ignored by the manager's installation scan, the build fingerprint, the core
+  runtime copy, the pre-start runtime check and the installed seal; before,
+  one such file refused every manager request, and one rewritten inside the
+  core runtime made the manager fail to start.
+
+- A repair re-placement of an exact `POST /instance` placement keeps the
+  window the instance was stamped with instead of falling back to the fleet's
+  served context default.
+
+- A vLLM model now starts on a GPU that another model already uses. Skulk
+  used to launch vLLM with a fixed share of the GPU (90% unless configured),
+  and vLLM refuses to start unless that much memory is free, so any other
+  resident model stopped it even when placement had found room. The share is
+  now sized to the memory placement reserved for the instance, and vLLM uses
+  the part of it that weights and runtime memory leave as KV cache.
+  `SKULK_VLLM_GPU_MEMORY_UTILIZATION` still pins a fixed share: set it on a
+  GPU dedicated to vLLM to keep giving the KV cache the rest of the device.
+  The share always covers the model's KV cache at its own geometry, read from
+  its `config.json`, so wide-head models such as Gemma 4 still fit their
+  window, and it never exceeds the previous 0.90.
+
+- Served GGUF models on unified-memory nodes (every Mac, a Strix Halo, a
+  GB10 running llama-server) no longer serve a fixed 8192-token window. The
+  master sizes the window from the live available memory it admitted the
+  placement against, capped at the node's GPU working-set ceiling and the
+  static memory fit, never below the 8192 floor; the worker's pre-spawn guard
+  still refuses a window its current free memory cannot hold. Placement on
+  system RAM now also charges placements the master has committed but
+  telemetry does not show yet, the way discrete VRAM already did, so two
+  back-to-back placements cannot each claim the whole node. The lift was
+  previously reserved for discrete-VRAM GPUs, which made a served chat model
+  on a Mac unusable for anything longer than a short exchange.
+
+- Deleting a custom model card evicts it on every node. A node that held the
+  custom entry only in memory (no file backed it, or the file was named
+  otherwise) kept serving the deleted card until restart, because a custom
+  entry survives every catalog rebuild; the replicated delete now evicts the
+  entry whether or not a file exists and lets the rebuild restore the signed
+  or installed card.
+- A signed registry card this Skulk build cannot read is skipped with a
+  warning instead of failing the whole catalog. The registry publishes new
+  card classes (video cards first) ahead of the Skulk builds that read them;
+  one such card made an older node discard every signed card and fall back
+  to its bundled copies. Integrity checks on the snapshot stay atomic.
+
+- Cancelling a video render works while another render is queued behind it.
+  The ComfyUI runner acknowledged a render only when its server got to it,
+  so a second render queued behind a running one held the worker's control
+  loop until the first finished, and no cancel could reach either: the API
+  reported both cancelled while the GPU rendered them to the end. The runner
+  now dispatches through the shared served-runner loop at width one: renders
+  stay serial, every render is acknowledged on admission, a render cancelled
+  while it waits is never sent to the server, and one cancelled while it runs
+  is interrupted at the next step. The node diagnostics route no longer fails
+  on a runner whose process has already been reaped.
+- A request llama-server refuses reaches the caller with the server's own
+  reason. The served engine raised httpx's status error, which names only
+  the status and the URL, so a prompt past the context window came back as
+  "Client error '400 Bad Request'" with the reason left in the body. The
+  runner now reads the body's message into the error, and a context-size
+  refusal is answered by the API as a 400 `context_length_exceeded`, as its
+  own admission check is, rather than as an internal error.
+
+- `enable_thinking` is honored on the in-process llama.cpp engine for text
+  models whose GGUF chat template reads it (the Qwen3-family shape). The
+  binding's `create_chat_completion` offers no template-kwarg channel, so
+  the control was silently ignored and a thinking-default model reasoned on
+  every request regardless; the runner now wraps the default Jinja
+  formatter with a per-request slot. Guessed family formats, vision
+  handlers, and templates without the control are untouched, and an
+  unexpected library shape degrades loudly to the previous behavior. The
+  engine's reasoning parser follows the toggle: a thinking-off prompt
+  pre-closes the think block, so the generation starts outside it, and the
+  parser no longer assumes the mid-reasoning start (which misrouted the
+  whole plain answer into `reasoning_content` and starved tool recovery of
+  its visible text).
+
+- A `tool_choice` that forces a function name matching none of the offered
+  tools (or arrives with no tools at all) is now rejected with a 400 at the
+  API boundary, on every engine. The in-process engines never see
+  `tool_choice`, so such a request previously answered from the full tool
+  list with no report of the mismatch, and only the served engines surfaced
+  the caller's error.
+
+- A plain JSON answer from an unmarked-dialect model (Llama on MLX) streams
+  incrementally again. The message-opening brace provisionally opens a
+  tool-call block whose closing token is a generation stop that never arrives
+  as text, so the whole answer was held until the terminal chunk and
+  time-to-first-token grew to the full generation time. The open is now
+  provisional: the buffered prefix is released the moment it can no longer be
+  a call, bounded by the first decisive key, and a real call still parses
+  exactly as before.
+
+- A quoted argument containing the dialect's own closing marker (an
+  HTML-writing tool passing `"</tool_call>"`) no longer truncates the block
+  and errors the generation, on the streaming paths whose block interior is
+  known: Gemma 4's quoting and templates that render arguments as JSON.
+  Interiors with other quoting rules (Qwen3 XML) keep the previous scan.
+
+- Chained Llama `<|python_tag|>` calls are no longer split inside a quoted
+  argument: a semicolon in a shell command, SQL, or prose is data, and the
+  chained objects are now read as successive balanced JSON spans.
+
+- Visible text a model writes around its call is delivered as content
+  alongside the tool calls, instead of being swallowed with the markup, for
+  the dialects that know where their markup ends: the unmarked call object
+  and the Mistral `[TOOL_CALLS]` array, on both the MLX streaming path and
+  the llama.cpp text-recovery path. Mistral's displaced upstream
+  `NAME[ARGS]` form keeps parsing through the inner parser, with no
+  remainder.
+
+- Gemma 4 models can now call tools on the in-process llama.cpp engine. The
+  engine's bundled chat handler does not parse Gemma 4's call format, and the
+  text-recovery path had no dialect for it, so well-formed calls streamed to
+  the caller as raw markup (observed live on the GGUF card with tools
+  offered). The shared text parser gains the dialect, backed by the same
+  implementation the MLX engine already used, so both engines read it
+  identically.
+
+- An enabled model store with a blank `store_host` or `store_path` is now
+  refused loudly at config validation instead of running crippled. The blank
+  shape matches no node, so no store server ever started while every client
+  built unusable `http://:12415` URLs, and the resulting failure was
+  misclassified as "model not in store", starving downloads against a host
+  that can never answer instead of taking the direct Hugging Face fallback.
+  The refusal covers a hand-edited `skulk.yaml` at node startup; the Settings
+  save fills blank fields with the node's own defaults instead (see Fixed
+  above), and a URL that cannot even be
+  requested now classifies as store-unreachable immediately, with no retry
+  delay, so the fallback engages even if a bad address reaches the client
+  through another path.
+
+- The Mistral tool-call dialect now works on the MLX engine. The shared text
+  parser has read `[TOOL_CALLS]` arrays since they were added, but no MLX
+  tokenizer wiring selected it: Mistral templates carry no `<tool_call>`
+  marker, so requests fell through every wiring branch and the model's calls
+  leaked as content. Templates speaking `[TOOL_CALLS]` now wire the Mistral
+  whole-block parser, closed at end of generation the way the unmarked
+  dialect closes. A model registry card for a small Mistral
+  (`mlx-community/Ministral-8B-Instruct-2410-4bit`) makes the dialect
+  testable on a 24GB node.
+
+- The Qwen3.6 FP8 cards now enable tool calling on the vLLM engine. Qwen3.6
+  emits the XML function format, which vLLM's `qwen3_xml` parser reads; the
+  parser name was validated live on an A100-class GPU with the full served
+  tool suite on both cards, which is what the cards' own deferral note asked
+  for before pinning.
+
+- The no-tools marker protection now covers every engine. The scan below was
+  in-process MLX only: the served engines' servers never parse without tools
+  in the request, and the llama.cpp recovery branch is likewise skipped, so a
+  model that wrote a call anyway leaked its dialect markers to the caller as
+  content (observed live with a gemma card and `tool_choice: "none"`). The
+  `llama_server`, `vllm`, and `llama_cpp` runners now stream no-tools content
+  through a shared scaffolding scrub that removes the cross-dialect marker
+  vocabulary, holding partial markers across chunk boundaries.
+
+- A request offering no tools still has its markers stripped. Skipping the scan
+  entirely when none were offered, which is what keeps `tool_choice: "none"`
+  from producing a call, also meant nothing recognized a block the model wrote
+  anyway, so its markers went straight to the caller. The block is now always
+  recognized; whether it may become a call is what depends on the request.
+
+- A tool call handed back as content no longer carries the model's control
+  tokens. When a call names no offered tool it is delivered as text so the
+  caller can see what the model did, but the block was handed back verbatim, so
+  `<|python_tag|>` and `<tool_call>` markers ended up in the answer. The
+  markers are stripped from an answer; a response already flagged as an error
+  still carries the raw block, since there it is the evidence of what was
+  malformed.
+
+- gpt-oss and DeepSeek V3.2 no longer return a tool the caller never offered.
+  Those two families parse their calls out of the token stream themselves and
+  are selected before the marker path, so the offered-tools rule never saw
+  them: a gpt-oss request sending `tool_choice: "none"`, which removes the
+  tools, still came back with a call, and its name carried the model's own
+  namespace prefix. Their output now passes through the same rule, and a
+  rejected call is delivered as content so the caller sees what the model did
+  rather than a blank answer.
+
+- A model's parallel tool calls all reach the caller. Several families write
+  each call in its own block, and the stream consumer stops at the first chunk
+  carrying a finish reason, so one response per block delivered the first call
+  and dropped the rest. The calls of every block in a message are now coalesced
+  into a single response carrying a `tool_calls` array, which is the shape
+  OpenAI clients expect, and any text after the calls is released without a
+  finish reason so the tool response stays the terminal chunk.
+
+- Reasoning no longer hides a tool call on the MLX engine. Tool parsing runs
+  downstream of the thinking parser, so a model that reasons before calling a
+  tool sent its reasoning through the tool parser first; that text decided the
+  message was not a call, and the marker that followed was never examined, so
+  the caller received the raw markup as content. Reasoning chunks now pass
+  straight through without taking part in that decision. This also means a call
+  a model only contemplated inside its reasoning is no longer executed, matching
+  the behavior the llama.cpp engine already had.
+
+- `tool_choice` is now honored on the in-process engines. Only the served
+  engines forwarded it to a server that acts on it, so an MLX or llama.cpp
+  model ignored it entirely: a request sending `"none"` and asking for the tool
+  by name returned the tool call on every attempt. The option is now applied
+  before dispatch, so it means the same thing on every engine. `"none"` removes
+  the tools from the request, and naming a single function narrows the offered
+  tools to that one so the model cannot call a different tool than the caller
+  asked for. `"required"` remains a best-effort instruction on the in-process
+  engines, since forcing a call there would need constrained decoding.
+
+- Tool calls whose markers arrive split across chunks are now recognized. A
+  generation chunk is whatever the streaming detokenizer could resolve that
+  step, not a token, so an opening marker that is a single token id still
+  reaches the parser in pieces: `<tool`, `_`, `c`, `all>`. The parser tested
+  each chunk on its own, so for most models the block never opened and the
+  caller received the raw markup as message content with a `stop` finish
+  reason. Observed on a Qwen model served by the MLX engine, where the model
+  emitted a perfectly well formed call. Text is now scanned across chunk
+  boundaries by carrying forward only the trailing run that could still become
+  a marker, and the closing marker is matched against the accumulated block.
+  That run is shorter than the longest marker, so ordinary answers stream with
+  at most a few characters of latency, and the scan keeps looking after
+  ordinary text has been released, so a model that writes a sentence before
+  calling ("I'll check that.") still has its call recognized. The unmarked
+  dialect opens on a brace, which also appears in prose, so there a call is
+  recognized only at the start of the message; its distinctive marker still
+  opens one anywhere. Text the model writes after closing a call is delivered
+  rather than swallowed into the block, and a second call in the same message
+  is recognized.
+
+- Tool calling now works for Llama models on the MLX engine, and the shared
+  text parser recognizes the dialects the other families write. Llama declares
+  only its end-of-turn token as a stop token, not `<|eom_id|>`, which is how it
+  ends a message that hands off to a tool, so generation ran past the end of
+  the call and wrote the next turn's header into the answer text. Llama also
+  writes the call as a bare JSON object with no opening marker, so nothing
+  recognized it as a call at all: a caller offering a tool received JSON in
+  `content`, `finish_reason` of `stop`, and no `tool_calls`. Skulk now stops at
+  the message boundary for any model whose vocabulary has that token, and reads
+  the whole block with a set of cross-family dialects covering Llama
+  `<|python_tag|>` calls, Mistral `[TOOL_CALLS]` arrays, GLM
+  `<arg_key>`/`<arg_value>` pairs, and an unmarked call object that is the
+  entire message, alongside the harmony channels and `<tool_call>` blocks
+  already supported.
+
+- A model reaching for one of its own built-ins no longer surfaces as a tool
+  call. Llama answers some plain questions with a call to `print`, and gpt-oss
+  has `python` and `browser`; a caller has no implementation for those names,
+  so a response naming no offered tool is now returned as ordinary content. A
+  request that declares no tools may never receive `tool_calls`: the response
+  is still scanned so a recognized block's dialect markers are stripped rather
+  than delivered, but nothing comes back as a call, so a model writing
+  something call-shaped, which is what a request asking for JSON output
+  invites, cannot return `tool_calls` to a caller who offered none. Relatedly, text that opens
+  like a call but does not parse as one, which is what a model answering in
+  JSON looks like when tools are also offered, is returned as content instead
+  of being reported as a generation error.
+
+- Chat completions never return an empty body, and streaming responses always
+  terminate. A task that ended without producing any output, for example after
+  being cancelled, previously tripped an assertion inside the response
+  generator; because the status is committed before the body streams, callers
+  received HTTP 200 with zero bytes and every OpenAI-compatible client failed
+  while parsing rather than reporting the real problem. The non-streaming path
+  now returns the standard error object as its body, and the streaming path
+  emits an error frame followed by `data: [DONE]` instead of closing without
+  a terminator, which a client cannot distinguish from a dropped connection. A
+  turn that produced text but never reported a finish reason is also treated
+  as a failure rather than returned as a silently truncated completion.
+
+- Streaming chat completions now carry `"object": "chat.completion.chunk"`.
+  Every SSE frame previously carried `"chat.completion"`, the non-streaming
+  discriminator, because one response model served both paths. Clients that
+  read `choices[0].delta` directly were unaffected, which is why this went
+  unnoticed, but clients that validate the discriminator reject such a stream
+  outright, including the Vercel AI SDK's openai-compatible provider. The
+  streaming and non-streaming responses are now separate models so the two
+  cannot drift again. This changes bytes on the wire for streaming responses,
+  toward the documented OpenAI format rather than away from it.
+
+- Model execution authorization now follows the action that introduced the
+  exact card. Signed registry publication authorizes repository code for every
+  provenance class, explicit external-model addition authorizes its pinned
+  card, and an installed card recorded from a card an earlier Skulk release
+  shipped stays authorized by that release. Hugging Face
+  additions that omit a revision resolve `main` once to a full immutable
+  commit. Read and launch paths no longer fetch or persist unknown Hub cards as
+  a side effect, and caller-specified exact placements must match current
+  catalog truth rather than merely reuse its alias. The historical Model
+  trust config, state, wire fields, and endpoints remain deprecated and inert
+  for rolling compatibility. Historical executable custom cards with
+  no immutable revision fail closed until re-added, and ordinary model-add
+  responses now wait for their exact ordered catalog mutation before returning.
+  Image, embedding, and speech inference endpoints translate an unknown catalog
+  alias to HTTP 404 instead of leaking the strict lookup failure as HTTP 500.
+  The elected master also revalidates quick and exact placement cards against
+  command-ordered catalog truth, closing replacement/deletion races after an
+  API node has prepared a placement.
+  Executable installed cards without a registry identity must pin an
+  immutable source revision, and
+  installed custom-card sidecars no longer recreate catalog authorization after
+  the operator deletes the custom card.
+  Separate processor, vision-weight, assistant, and speculative-draft
+  repositories must also carry their matching immutable revisions.
+  The low-level explicit-download endpoint now requires operator authority and
+  rejects shard cards that do not exactly match authorized catalog truth.
+  Authorization comparison ignores only the signed snapshot publication stamp.
+  Signed-card, revision, installed-sidecar, and artifact-manifest verification
+  still fail closed.
+
+- Pre-publication qualification cleanup now names the complete temporary card
+  it owns, and the elected master compares that exact card before deleting the
+  alias. An older or retried job can no longer remove a newer qualification
+  replacement that reused the same model ID.
+
+- Same-artifact signed card replacements now run the card-only installed-sidecar
+  refresh before a staged-cache fast path can report the model ready. This
+  prevents a newly approved replacement card from passing placement and then
+  failing runner startup against the prior installed identity, without
+  retransferring unchanged model bytes.
+
 ## [1.5.1] - 2026-08-30
 
 ### Changed

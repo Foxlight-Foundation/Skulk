@@ -43,7 +43,7 @@ const meta: Meta<typeof ModelPickerGroup> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 480, background: '#111', padding: 8, borderRadius: 8 }}>
+      <div style={{ width: 'min(760px, calc(100vw - 32px))', padding: 8, borderRadius: 8 }}>
         <Story />
       </div>
     ),
@@ -128,7 +128,7 @@ export const WithInstanceRunning: Story = {
 
 export const WithDownload: Story = {
   render: () => {
-    const dlMap = new Map([['qwen3-30b-4bit', { available: true, nodeNames: ['kite3'], nodeIds: ['abc'] }]]);
+    const dlMap = new Map([['qwen3-30b-4bit', { available: true, nodeNames: ['Example workstation'], nodeIds: ['abc'] }]]);
     return (
       <ModelPickerGroup
         group={makeGroup()}
@@ -159,4 +159,15 @@ export const Highlighted: Story = {
     onSelectModel: () => {},
     onToggleFavorite: () => {},
   },
+};
+
+export const DownloadInProgress: Story = {
+  args: { ...TooLarge.args, group: makeSingleGroup(), canModelFit: fitAll, getModelFitStatus: fitStatus,
+    activeDownloads: [{ modelId: 'llama-8b-4bit', progress: .62, status: 'downloading' }], onCancelDownload: () => {} },
+};
+export const DownloadFailed: Story = {
+  args: { ...DownloadInProgress.args, activeDownloads: [{ modelId: 'llama-8b-4bit', progress: .62, status: 'failed', error: 'The fixture transfer was interrupted. Retry the download.' }] },
+};
+export const LaunchAvailable: Story = {
+  args: { ...DownloadInProgress.args, activeDownloads: [], downloadStatusMap: new Map([['llama-8b-4bit', { available: true, nodeNames: ['Example workstation'], nodeIds: ['fictional-node'] }]]), onLaunch: () => {} },
 };

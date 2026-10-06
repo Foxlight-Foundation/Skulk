@@ -5,14 +5,12 @@ model_type auto-detection priority, and VisionCardConfig BOI/EOI fields."""
 
 import base64
 import io
-from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
 from PIL import Image
 
-from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
@@ -23,6 +21,7 @@ from skulk.shared.models.model_cards import (
     ToolCallFormat,
     VisionCardConfig,
 )
+from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -130,13 +129,11 @@ class TestVisionCardConfigBoiEoi:
 
 
 class TestGemma4ExtendedModelCard:
-    """Gemma 4 built-in cards should expose advanced runtime declarations."""
+    """Curated cards should expose advanced runtime declarations."""
 
     async def test_builtin_card_includes_reasoning_and_runtime_sections(self):
         card = await ModelCard.load_from_path(
-            Path(RESOURCES_DIR)
-            / "inference_model_cards"
-            / "mlx-community--gemma-4-26b-a4b-it-4bit.toml"
+            FIXTURE_CARDS_DIR / "mlx-community--gemma-4-26b-a4b-it-4bit.toml"
         )
 
         assert card.reasoning is not None
@@ -148,9 +145,7 @@ class TestGemma4ExtendedModelCard:
 
     async def test_gpt_oss_builtin_card_includes_tooling_and_runtime_sections(self):
         card = await ModelCard.load_from_path(
-            Path(RESOURCES_DIR)
-            / "inference_model_cards"
-            / "mlx-community--gpt-oss-20b-MXFP4-Q8.toml"
+            FIXTURE_CARDS_DIR / "mlx-community--gpt-oss-20b-MXFP4-Q8.toml"
         )
 
         assert card.tooling is not None
@@ -161,9 +156,7 @@ class TestGemma4ExtendedModelCard:
 
     async def test_deepseek_v32_builtin_card_includes_dsml_sections(self):
         card = await ModelCard.load_from_path(
-            Path(RESOURCES_DIR)
-            / "inference_model_cards"
-            / "mlx-community--DeepSeek-V3.2-4bit.toml"
+            FIXTURE_CARDS_DIR / "mlx-community--DeepSeek-V3.2-4bit.toml"
         )
 
         assert card.reasoning is not None
@@ -646,143 +639,6 @@ class TestGemma4NativeProcessorBudget:
         result = _gemma4_native_processor_kwargs(messages, processor)
 
         assert result == {}
-
-
-class TestGemma4DynamicVisionPooling:
-    """Gemma 4 native vision should pool using the actual processed image size."""
-
-    def test_patch_positions_expand_past_default_max_patches(self):
-        from skulk.worker.engines.mlx.utils_mlx import (
-            _gemma4_patch_positions_and_padding,
-        )
-
-        pixel_values = mx.zeros((1, 3, 576, 1152))
-
-        patch_positions, padding_positions = _gemma4_patch_positions_and_padding(
-            pixel_values,
-            patch_size=16,
-            max_patches=280 * 9,
-        )
-
-        assert patch_positions.shape == (1, 2592, 2)
-        assert padding_positions.shape == (1, 2592)
-        assert bool(mx.any(padding_positions).item()) is False
-
-    def test_output_length_matches_processed_wide_image(self):
-        from skulk.worker.engines.mlx.utils_mlx import (
-            _gemma4_output_length_for_pixel_values,
-        )
-
-        pixel_values = mx.zeros((1, 3, 576, 1104))
-
-        result = _gemma4_output_length_for_pixel_values(
-            pixel_values,
-            patch_size=16,
-            pooling_kernel_size=3,
-        )
-
-        assert result == 276
-
-    def test_dynamic_wrapper_passes_output_length_to_pooler(self):
-        from skulk.worker.engines.mlx.utils_mlx import _Gemma4DynamicVisionTower
-
-        class _FakePatchEmbedder(nn.Module):
-            def __call__(
-                self,
-                pixel_values: mx.array,
-                patch_positions: mx.array,
-                padding_positions: mx.array,
-            ) -> mx.array:
-                batch_size = pixel_values.shape[0]
-                seq_len = patch_positions.shape[1]
-                _ = padding_positions
-                return mx.zeros((batch_size, seq_len, 8))
-
-        class _FakeEncoder(nn.Module):
-            def __call__(
-                self,
-                hidden_states: mx.array,
-                patch_positions: mx.array,
-                attn_mask: mx.array,
-            ) -> mx.array:
-                assert patch_positions.shape[1] == hidden_states.shape[1]
-                assert attn_mask.shape[-1] == hidden_states.shape[1]
-                return hidden_states
-
-        class _FakePooler(nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.output_length: int | None = None
-
-            def __call__(
-                self,
-                hidden_states: mx.array,
-                patch_positions: mx.array,
-                padding_positions: mx.array,
-                output_length: int | None = None,
-            ) -> tuple[mx.array, mx.array]:
-                _ = hidden_states
-                _ = patch_positions
-                _ = padding_positions
-                assert output_length is not None
-                self.output_length = output_length
-                pooled = mx.zeros((1, output_length, 8))
-                mask = mx.ones((1, output_length), dtype=mx.bool_)
-                return pooled, mask
-
-        class _FakeInner(nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.patch_size = 16
-                self.pooling_kernel_size = 3
-                self.max_patches = 280 * 9
-                self.patch_embedder = _FakePatchEmbedder()
-                self.encoder = _FakeEncoder()
-                self.pooler = _FakePooler()
-                self.config = SimpleNamespace(standardize=False)
-
-            def _patch_positions(
-                self, pixel_values: mx.array
-            ) -> tuple[mx.array, mx.array]:
-                import numpy as _np
-
-                batch_size, _, height, width = pixel_values.shape
-                patch_height = height // self.patch_size
-                patch_width = width // self.patch_size
-                num_real = patch_height * patch_width
-                num_padding = self.max_patches - num_real
-
-                positions = []
-                for y in range(patch_height):
-                    for x in range(patch_width):
-                        positions.append([x, y])
-
-                real_positions = _np.array(positions, dtype=_np.int32)
-                real_positions = _np.tile(real_positions[None], (batch_size, 1, 1))
-                if num_padding > 0:
-                    pad_positions = _np.full(
-                        (batch_size, num_padding, 2), -1, dtype=_np.int32
-                    )
-                    patch_positions = _np.concatenate(
-                        [real_positions, pad_positions], axis=1
-                    )
-                else:
-                    patch_positions = real_positions
-
-                padding_positions = _np.zeros(
-                    (batch_size, self.max_patches), dtype=bool
-                )
-                if num_padding > 0:
-                    padding_positions[:, num_real:] = True
-
-                return mx.array(patch_positions), mx.array(padding_positions)
-
-        inner = _FakeInner()
-        wrapped = _Gemma4DynamicVisionTower(inner)
-
-        _ = wrapped(mx.zeros((1, 3, 576, 1104)))
-
-        assert inner.pooler.output_length == 276
 
 
 class TestFormatVlmMessages:

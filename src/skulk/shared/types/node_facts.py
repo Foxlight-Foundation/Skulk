@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Final, Literal, final
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -76,6 +76,9 @@ class GpuDeviceFact(CamelCaseModel):
 
     compute_capability: str | None = None
     """NVIDIA SM level as ``"<major>.<minor>"``; ``None`` for other vendors."""
+
+    pci_device_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{4}:[0-9a-f]{4}$")
+    """Observed PCI vendor and device IDs, when sysfs exposes both values."""
 
 
 EngineBinaryState = Literal["not_configured", "ok", "missing", "not_executable"]
@@ -136,6 +139,17 @@ class LlamaServerDeviceProbe(CamelCaseModel):
 
     detail: str = ""
     """Short diagnostic detail for ``failed`` outcomes (bounded, single line)."""
+
+
+@final
+class AudioCppProbe(CamelCaseModel):
+    """Verified source revision and usable compute lanes of one audio.cpp binary."""
+
+    model_config = ConfigDict(frozen=True)
+
+    outcome: Literal["not_run", "ready", "failed"] = "not_run"
+    computes: tuple[str, ...] = ()
+    detail: str = ""
 
 
 CapabilityConflictCode = Literal[
@@ -241,6 +255,52 @@ class NodeFacts(CamelCaseModel):
 
     declared_vllm_backends: str | None = None
     """Raw ``SKULK_VLLM_BACKENDS`` value, verbatim, or ``None`` when unset."""
+
+    test_video_engine: bool = False
+    """Whether ``SKULK_TEST_VIDEO_ENGINE`` asks this node to advertise the
+    deterministic test video engine."""
+
+    comfy_binary: EngineBinaryFact = Field(
+        default_factory=lambda: EngineBinaryFact(env_var="SKULK_COMFY_BIN")
+    )
+    """State of the ``SKULK_COMFY_BIN`` declaration (the ComfyUI environment's
+    interpreter)."""
+
+    comfy_root: str | None = None
+    """Raw ``SKULK_COMFY_ROOT`` value (the ComfyUI checkout), or ``None``."""
+
+    comfy_root_state: Literal["not_configured", "missing", "ok"] = "not_configured"
+    """Whether ``comfy_root`` names a directory holding ComfyUI's ``main.py``."""
+
+    declared_comfy_backends: str | None = None
+    """Raw ``SKULK_COMFY_BACKENDS`` value, verbatim, or ``None`` when unset."""
+
+    audio_cpp_binary: EngineBinaryFact = Field(
+        default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_BIN")
+    )
+    """Only the prepared or explicit audio.cpp executable, never an installable wheel."""
+
+    audio_cpp_probe: AudioCppProbe = AudioCppProbe()
+    """The binary's own version and device report, required for readiness."""
+
+    audio_cpp_vulkan_binary: EngineBinaryFact = Field(
+        default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_VULKAN_BIN")
+    )
+    """Independently prepared Vulkan executable; CPU mounts retain their binary."""
+
+    audio_cpp_vulkan_probe: AudioCppProbe = AudioCppProbe()
+    """Version and device report for the independently prepared Vulkan wheel."""
+
+    audio_cpp_cuda_binary: EngineBinaryFact = Field(
+        default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_CUDA_BIN")
+    )
+    """Independently prepared CUDA executable for an NVIDIA compute lane."""
+
+    audio_cpp_cuda_probe: AudioCppProbe = AudioCppProbe()
+    """Version and device report for the independently prepared CUDA wheel."""
+
+    declared_audio_cpp_backends: str | None = None
+    """Optional operator restriction, checked against the binary's usable lanes."""
 
     def gpus_of(self, vendor: GpuVendor) -> tuple[GpuDeviceFact, ...]:
         """Return the observed GPUs of one vendor, preserving device order."""

@@ -1,0 +1,1449 @@
+"""Durable, self-describing records for installed model artifacts.
+
+The model bytes remain the source of local availability.  This module binds
+those bytes to the complete card Skulk used to acquire and launch them so an
+installed artifact remains understandable after a registry outage or an
+explicit air-gapped restart.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import uuid
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import Enum
+from pathlib import Path, PurePosixPath
+from typing import Final, Literal, final
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from skulk.shared.constants import SKULK_INSTALLED_CARD_RECORDS_DIR, SKULK_MODELS_DIR
+from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
+
+INSTALLED_CARD_RELATIVE_PATH = Path(".skulk") / "installed-card.json"
+"""Reserved sidecar path copied with canonical and staged artifacts."""
+
+
+def installed_artifact_directory(model_id: ModelId, downloaded_path: Path) -> Path:
+    """Return the identity root for a completed direct or staged download.
+
+    Direct GGUF downloads return the selected file, possibly nested below the
+    canonical repository directory. Its revision marker and runner load path
+    use that directory. Store-staged artifacts already return their own root.
+    """
+
+    canonical_directory = SKULK_MODELS_DIR / model_id.normalize()
+    if (
+        downloaded_path == canonical_directory
+        or canonical_directory in downloaded_path.parents
+    ):
+        return canonical_directory
+    return downloaded_path.parent if downloaded_path.is_file() else downloaded_path
+
+_SOURCE_REVISION_MARKER = ".skulk-source-revision"
+_IGNORED_MANIFEST_NAMES = {
+    ".last_used",
+    ".skulk-source-revision",
+    ".skulk-source-revision-staging",
+}
+
+InstalledCardVerification = Literal[
+    "registry_verified",
+    "local_legacy",
+    "custom",
+    "unresolved",
+]
+InstalledArtifactRole = Literal[
+    "base",
+    "vision_weights",
+    "mtp_sidecar",
+    "assistant",
+    "served_draft",
+    "vllm_draft",
+    "video_companion",
+]
+
+
+class _ArtifactRevisionDefault(Enum):
+    OMITTED = "omitted"
+
+
+@final
+class InstalledFileManifestEntry(BaseModel):
+    """One immutable file observation inside an installed artifact."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    path: str = Field(min_length=1, max_length=4096)
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("path")
+    @classmethod
+    def validate_relative_path(cls, value: str) -> str:
+        """Reject absolute, ambiguous, and cross-platform escaping paths."""
+
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or value != path.as_posix()
+            or "\\" in value
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("manifest path must be a canonical relative POSIX path")
+        return value
+
+
+@final
+class InstalledCardRecord(BaseModel):
+    """Complete local card and byte identity for one installed artifact.
+
+    ``model_card`` is deliberately retained in full.  ``verification`` states
+    whether the local bytes are proven to be the signed card's pinned artifact;
+    retaining a signed card as operational metadata never upgrades unmarked
+    legacy bytes to ``registry_verified``.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1, 2] = Field(
+        default=1,
+        description="Installed-card sidecar schema version.",
+    )
+    installed_identity: str = Field(
+        pattern=r"^(?:card_[a-z2-7]{52}|local_[a-z2-7]{52})$",
+        description=(
+            "Immutable signed card ID when verified, otherwise a content-derived "
+            "local generation ID."
+        ),
+    )
+    artifact_model_id: str = Field(
+        min_length=3,
+        max_length=512,
+        description="Canonical store and staging alias for this artifact.",
+    )
+    model_card: ModelCard = Field(
+        description="Complete effective model card retained for offline operation."
+    )
+    verification: InstalledCardVerification = Field(
+        description=(
+            "Evidence class binding the retained card to these bytes: signed "
+            "registry proof, legacy local bytes, custom operator truth, or unresolved."
+        )
+    )
+    artifact_role: InstalledArtifactRole = Field(
+        default="base",
+        description="Base-model or companion role served by this artifact.",
+    )
+    owner_model_id: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=512,
+        description="Owning base-model alias for a companion artifact.",
+    )
+    owner_card_id: str | None = Field(
+        default=None,
+        max_length=80,
+        description="Immutable owning base-card ID when one is available.",
+    )
+    artifact_repository: str = Field(
+        min_length=3,
+        max_length=512,
+        description="Upstream repository containing this artifact's bytes.",
+    )
+    artifact_revision: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{40}$",
+        description="Immutable upstream commit, or null for a mutable source.",
+    )
+    artifact_file: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="Selected repo-relative artifact file when file-addressed.",
+    )
+    artifact_bundle_id: str | None = Field(
+        default=None,
+        pattern=r"^bundle_[a-z2-7]{52}$",
+        description=(
+            "Exact signed bundle identity for v2 artifacts; absent for legacy cards."
+        ),
+    )
+    artifact_format: str = Field(
+        default="unknown",
+        min_length=1,
+        max_length=80,
+        description="Normalized runtime artifact format such as MLX or GGUF.",
+    )
+    quantization: str = Field(
+        default="",
+        max_length=120,
+        description="Artifact quantization label when known.",
+    )
+    manifest_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="SHA-256 of the canonical file-manifest representation.",
+    )
+    files: tuple[InstalledFileManifestEntry, ...] = Field(
+        description="Canonical relative paths, sizes, and digests for every file."
+    )
+    captured_at: datetime = Field(
+        description="UTC timestamp when this installed generation was recorded."
+    )
+
+    @model_validator(mode="after")
+    def validate_evidence_and_ownership(self) -> "InstalledCardRecord":
+        """Keep verification and companion ownership internally consistent."""
+
+        ModelId(self.artifact_model_id)
+        ModelId(self.artifact_repository)
+        if self.owner_model_id is not None:
+            ModelId(self.owner_model_id)
+        if self.artifact_role == "base" and (
+            self.owner_model_id is not None or self.owner_card_id is not None
+        ):
+            raise ValueError("base artifacts cannot declare companion ownership")
+        if self.artifact_role != "base" and self.owner_model_id is None:
+            raise ValueError("companion artifacts require owner_model_id")
+        if self.verification == "registry_verified" and (
+            self.model_card.registry_card_id is None or self.artifact_revision is None
+        ):
+            raise ValueError(
+                "registry verification requires card and revision identity"
+            )
+        if self.verification == "custom" and not self.model_card.is_custom:
+            raise ValueError("custom verification requires a custom card")
+        return self
+
+    @property
+    def is_registry_current_candidate(self) -> bool:
+        """Return whether this record carries an immutable registry identity."""
+
+        return self.model_card.registry_card_id is not None
+
+
+@final
+class ExternalInstalledCardRecord(BaseModel):
+    """Path-bound fallback for an artifact whose root cannot hold a sidecar."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    artifact_path: str = Field(min_length=1, max_length=4096)
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    record: InstalledCardRecord
+
+
+@dataclass(frozen=True)
+class _VerifiedDetachedInstalledCard:
+    """One detached record verified against an unchanged file-stat signature."""
+
+    external_record: ExternalInstalledCardRecord
+    file_signature: tuple[tuple[str, int, int, int, int, int], ...]
+
+
+@final
+class VerifiedDetachedInstalledCardCache:
+    """Process-local cache for expensive detached installed-card verification.
+
+    Detached records receive full hash verification before admission. Later
+    operator-inventory scans and local launch/cache checks may reuse that result
+    only while every manifest file retains the same path, device, inode, size,
+    modification time, and change time. Transfer and reconciliation callers do
+    not use this cache.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty verified-record cache."""
+
+        self._entries: dict[Path, _VerifiedDetachedInstalledCard] = {}
+
+    def get(
+        self,
+        model_directory: Path,
+        external_record: ExternalInstalledCardRecord,
+        file_signature: tuple[tuple[str, int, int, int, int, int], ...],
+    ) -> InstalledCardRecord | None:
+        """Return a previously verified record when metadata is unchanged."""
+
+        cached = self._entries.get(model_directory.resolve())
+        if (
+            cached is None
+            or cached.external_record != external_record
+            or cached.file_signature != file_signature
+        ):
+            return None
+        return cached.external_record.record
+
+    def remember(
+        self,
+        model_directory: Path,
+        external_record: ExternalInstalledCardRecord,
+        file_signature: tuple[tuple[str, int, int, int, int, int], ...],
+    ) -> None:
+        """Remember one detached record after full hash verification."""
+
+        self._entries[model_directory.resolve()] = _VerifiedDetachedInstalledCard(
+            external_record=external_record,
+            file_signature=file_signature,
+        )
+
+    def discard(self, model_directory: Path) -> None:
+        """Forget cached trust for one artifact directory."""
+
+        self._entries.pop(model_directory.resolve(), None)
+
+    def retain(self, model_directories: Iterable[Path]) -> None:
+        """Prune entries for directories absent from the latest inventory scan."""
+
+        retained = {directory.resolve() for directory in model_directories}
+        self._entries = {
+            directory: cached
+            for directory, cached in self._entries.items()
+            if directory in retained
+        }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def unlink_relative_artifact_path_without_following(
+    model_directory: Path,
+    relative_path: str,
+) -> bool:
+    """Unlink one invalid artifact entry without following staged symlinks.
+
+    The path must use the installed-manifest canonical relative POSIX form. If
+    an intermediate component is a symlink, that in-root symlink is removed so
+    the normal staging path can recreate the directory tree. A final symlink is
+    likewise unlinked as an entry rather than resolving and deleting its target.
+
+    Args:
+        model_directory: Root of the canonical or staged artifact generation.
+        relative_path: Canonical repository-relative path selected by the card.
+
+    Returns:
+        ``True`` when an invalid file or symlink entry was removed.
+    """
+
+    path = PurePosixPath(relative_path)
+    if (
+        path.is_absolute()
+        or relative_path != path.as_posix()
+        or "\\" in relative_path
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        return False
+    current = model_directory.resolve()
+    for part in path.parts[:-1]:
+        component = current / part
+        if component.is_symlink():
+            component.unlink()
+            return True
+        if not component.is_dir():
+            return False
+        current = component
+    candidate = current / path.name
+    if candidate.is_symlink() or candidate.is_file():
+        candidate.unlink()
+        return True
+    return False
+
+
+def build_file_manifest(
+    model_directory: Path,
+) -> tuple[InstalledFileManifestEntry, ...]:
+    """Hash every stable artifact file below ``model_directory``.
+
+    Runtime-owned markers and partial files are excluded.  The installed-card
+    sidecar is metadata about the manifest and therefore cannot hash itself.
+    Symlinks are rejected so a malicious or accidental cache entry cannot make
+    reconciliation read outside the artifact directory.
+    """
+
+    resolved_root = model_directory.resolve()
+    entries: list[InstalledFileManifestEntry] = []
+    for candidate in sorted(model_directory.rglob("*")):
+        if candidate.is_symlink():
+            raise ValueError(f"installed artifact contains symlink: {candidate}")
+        if not candidate.is_file():
+            continue
+        relative = candidate.relative_to(model_directory)
+        # A prior downloader wrote this sidecar next to nested GGUF files.
+        # It is still runtime metadata, not a model artifact to pin forever.
+        if relative.parts[-2:] == INSTALLED_CARD_RELATIVE_PATH.parts:
+            continue
+        if candidate.name in _IGNORED_MANIFEST_NAMES or candidate.name.endswith(
+            ".partial"
+        ):
+            continue
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(resolved_root):
+            raise ValueError(f"installed artifact path escapes root: {candidate}")
+        entries.append(
+            InstalledFileManifestEntry(
+                path=relative.as_posix(),
+                size_bytes=candidate.stat().st_size,
+                sha256=_sha256_file(candidate),
+            )
+        )
+    if not entries:
+        raise ValueError(f"installed artifact has no stable files: {model_directory}")
+    return tuple(entries)
+
+
+def manifest_sha256(files: tuple[InstalledFileManifestEntry, ...]) -> str:
+    """Return a deterministic digest for one complete file manifest."""
+
+    payload = [entry.model_dump(mode="json") for entry in files]
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _local_identity(model_card: ModelCard, digest: str, role: str) -> str:
+    payload = {
+        "card": model_card.model_dump(
+            mode="json",
+            exclude=(
+                {"is_custom"}
+                if model_card.qualification_only
+                else {"is_custom", "qualification_only"}
+            ),
+        ),
+        "manifest_sha256": digest,
+        "artifact_role": role,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    encoded = base64.b32encode(hashlib.sha256(canonical).digest()).decode().lower()
+    return f"local_{encoded.rstrip('=')}"
+
+
+def _revision_marker(model_directory: Path) -> str | None:
+    marker = model_directory / _SOURCE_REVISION_MARKER
+    try:
+        value = marker.read_text().strip()
+    except OSError:
+        return None
+    return value if len(value) == 40 else None
+
+
+def model_card_artifact_format(model_card: ModelCard) -> str:
+    """Derive the human artifact format from immutable card selection truth."""
+
+    if model_card.registry_artifact_format is not None:
+        return model_card.registry_artifact_format
+    if model_card.gguf_file is not None:
+        return "gguf"
+    backends = model_card.placement.compatible_backends
+    if any(backend.startswith("mlx_audio") for backend in backends):
+        return "mlx-audio"
+    if any(backend.startswith("mlx") for backend in backends):
+        return "mlx"
+    return "safetensors"
+
+
+def companion_artifact_role(
+    owner_card: ModelCard,
+    repository: str,
+) -> InstalledArtifactRole:
+    """Resolve a declared companion repository to its durable artifact role."""
+
+    if owner_card.vision is not None and owner_card.vision.weights_repo == repository:
+        return "vision_weights"
+    runtime = owner_card.runtime
+    if runtime is not None:
+        if runtime.mtp_sidecar_repo == repository:
+            return "mtp_sidecar"
+        if runtime.assistant_model_repo == repository:
+            return "assistant"
+        if runtime.served_spec_draft_repo == repository:
+            return "served_draft"
+        if runtime.vllm_spec_draft_repo == repository:
+            return "vllm_draft"
+    if any(
+        companion == repository
+        for companion, _ in owner_card.external_video_companions()
+    ):
+        return "video_companion"
+    raise ValueError(
+        f"{repository} is not a declared companion of {owner_card.model_id}"
+    )
+
+
+def build_installed_card_record(
+    model_directory: Path,
+    model_card: ModelCard,
+    *,
+    artifact_role: InstalledArtifactRole = "base",
+    artifact_model_id: str | None = None,
+    owner_model_id: str | None = None,
+    owner_card_id: str | None = None,
+    artifact_repository: str | None = None,
+    artifact_revision: str | None | _ArtifactRevisionDefault = (
+        _ArtifactRevisionDefault.OMITTED
+    ),
+    artifact_file: str | None = None,
+    artifact_format: str | None = None,
+    file_manifest: tuple[InstalledFileManifestEntry, ...] | None = None,
+) -> InstalledCardRecord:
+    """Create an honest installed-card record from local bytes and card truth.
+
+    ``file_manifest`` may reuse a previously verified size-complete manifest
+    during a metadata-only card refresh. New downloads and imports omit it and
+    hash the artifact bytes before first publication.
+    """
+
+    files = file_manifest or build_file_manifest(model_directory)
+    digest = manifest_sha256(files)
+    effective_repository = artifact_repository or str(model_card.artifact_repository)
+    effective_revision = (
+        model_card.source_revision
+        if artifact_revision is _ArtifactRevisionDefault.OMITTED
+        else artifact_revision
+    )
+    revision_verified = (
+        model_card.registry_card_id is not None
+        and effective_revision is not None
+        and _revision_marker(model_directory) == effective_revision
+    )
+    if model_card.is_custom:
+        verification: InstalledCardVerification = "custom"
+    elif revision_verified:
+        verification = "registry_verified"
+    else:
+        verification = "local_legacy"
+    registry_card_id = model_card.registry_card_id
+    installed_identity = (
+        registry_card_id
+        if revision_verified
+        and artifact_role == "base"
+        and registry_card_id is not None
+        else _local_identity(model_card, digest, artifact_role)
+    )
+    effective_artifact_file = artifact_file
+    if effective_artifact_file is None:
+        if artifact_role == "base":
+            effective_artifact_file = model_card.gguf_file
+        elif artifact_role == "served_draft" and model_card.runtime is not None:
+            effective_artifact_file = model_card.runtime.served_spec_draft_file
+    return InstalledCardRecord(
+        schema_version=2 if model_card.artifact_bundle is not None else 1,
+        installed_identity=installed_identity,
+        artifact_model_id=artifact_model_id or str(model_card.model_id),
+        model_card=model_card,
+        verification=verification,
+        artifact_role=artifact_role,
+        owner_model_id=owner_model_id,
+        owner_card_id=owner_card_id,
+        artifact_repository=effective_repository,
+        artifact_revision=effective_revision,
+        artifact_file=effective_artifact_file,
+        artifact_bundle_id=(
+            model_card.artifact_bundle.bundle_id
+            if artifact_role == "base" and model_card.artifact_bundle is not None
+            else None
+        ),
+        artifact_format=artifact_format or model_card_artifact_format(model_card),
+        quantization=model_card.quantization,
+        manifest_sha256=digest,
+        files=files,
+        captured_at=datetime.now(UTC),
+    )
+
+
+def installed_card_path(model_directory: Path) -> Path:
+    """Return the reserved installed-card sidecar path for an artifact."""
+
+    return model_directory / INSTALLED_CARD_RELATIVE_PATH
+
+
+def _replace_text_atomically(destination: Path, text: str) -> None:
+    """Replace ``destination`` with ``text`` through a temporary file of its own.
+
+    Two writers in one process, such as a model store finishing a download
+    while the artifact inventory associates the same directory, once shared a
+    PID-named temporary file, so the second rename found it already consumed
+    and failed the download. A per-write name keeps concurrent writers
+    independent; the last rename wins with a complete record either way.
+    """
+
+    temporary = destination.with_name(
+        f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temporary.write_text(text)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_installed_card(model_directory: Path, record: InstalledCardRecord) -> Path:
+    """Atomically persist ``record`` beside its artifact files."""
+
+    destination = installed_card_path(model_directory)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _replace_text_atomically(destination, record.model_dump_json(indent=2))
+    return destination
+
+
+def _external_record_path(
+    model_directory: Path,
+    manifest_digest: str,
+    *,
+    fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
+) -> Path:
+    """Return a stable fallback path keyed by artifact path and manifest digest."""
+
+    identity = f"{model_directory.resolve()}\0{manifest_digest}".encode()
+    return fallback_root / f"{hashlib.sha256(identity).hexdigest()}.json"
+
+
+def write_installed_card_with_fallback(
+    model_directory: Path,
+    record: InstalledCardRecord,
+    *,
+    fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
+) -> Path:
+    """Write beside the artifact, falling back to Skulk data for read-only roots."""
+
+    try:
+        return write_installed_card(model_directory, record)
+    except OSError:
+        fallback_root.mkdir(parents=True, exist_ok=True)
+        destination = _external_record_path(
+            model_directory,
+            record.manifest_sha256,
+            fallback_root=fallback_root,
+        )
+        external = ExternalInstalledCardRecord(
+            artifact_path=str(model_directory.resolve()),
+            manifest_sha256=record.manifest_sha256,
+            record=record,
+        )
+        _replace_text_atomically(destination, external.model_dump_json(indent=2))
+        return destination
+
+
+def read_installed_card(model_directory: Path) -> InstalledCardRecord | None:
+    """Load a local installed-card record, returning ``None`` when absent."""
+
+    path = installed_card_path(model_directory)
+    if not path.is_file():
+        return None
+    return InstalledCardRecord.model_validate_json(path.read_bytes(), strict=False)
+
+
+def _installed_file_stat_signature(
+    model_directory: Path,
+    record: InstalledCardRecord,
+) -> tuple[tuple[str, int, int, int, int, int], ...] | None:
+    """Return cheap change evidence for every file bound by one record."""
+
+    resolved_root = model_directory.resolve()
+    signature: list[tuple[str, int, int, int, int, int]] = []
+    for entry in record.files:
+        candidate = (resolved_root / entry.path).resolve()
+        if not candidate.is_relative_to(resolved_root) or not candidate.is_file():
+            return None
+        try:
+            metadata = candidate.stat()
+        except OSError:
+            return None
+        if metadata.st_size != entry.size_bytes:
+            return None
+        signature.append(
+            (
+                entry.path,
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+        )
+    return tuple(signature) if signature else None
+
+
+def read_installed_card_with_fallback(
+    model_directory: Path,
+    *,
+    fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+) -> InstalledCardRecord | None:
+    """Load an adjacent sidecar or its path-and-manifest-bound fallback.
+
+    Args:
+        model_directory: Artifact directory whose installed identity is needed.
+        fallback_root: Process-level directory containing detached records.
+        verified_detached_cache: Optional process-local cache used only by
+            inventory or launch/cache checks. A detached record is admitted
+            only after a full hash pass and is invalidated by file-stat changes.
+
+    Returns:
+        The trusted installed-card record, or ``None`` when no complete record
+        can be verified.
+    """
+
+    adjacent = read_installed_card(model_directory)
+    if adjacent is not None:
+        if verified_detached_cache is not None:
+            verified_detached_cache.discard(model_directory)
+        return adjacent
+    if not fallback_root.is_dir():
+        if verified_detached_cache is not None:
+            verified_detached_cache.discard(model_directory)
+        return None
+    resolved_directory = str(model_directory.resolve())
+    for path in fallback_root.glob("*.json"):
+        try:
+            external = ExternalInstalledCardRecord.model_validate_json(
+                path.read_bytes(), strict=False
+            )
+        except (OSError, ValueError):
+            continue
+        if (
+            external.artifact_path == resolved_directory
+            and external.manifest_sha256 == external.record.manifest_sha256
+        ):
+            file_signature = _installed_file_stat_signature(
+                model_directory,
+                external.record,
+            )
+            if file_signature is None:
+                continue
+            if verified_detached_cache is not None:
+                cached = verified_detached_cache.get(
+                    model_directory,
+                    external,
+                    file_signature,
+                )
+                if cached is not None:
+                    return cached
+            # A detached record cannot rely on the artifact directory and
+            # sidecar being moved together. Re-hash the bytes before trusting
+            # a new or metadata-changed path-bound fallback as installed truth.
+            if verify_installed_card(
+                model_directory,
+                external.record,
+                verify_hashes=True,
+            ):
+                if verified_detached_cache is not None:
+                    verified_detached_cache.remember(
+                        model_directory,
+                        external,
+                        file_signature,
+                    )
+                return external.record
+    if verified_detached_cache is not None:
+        verified_detached_cache.discard(model_directory)
+    return None
+
+
+def installed_card_matches(
+    model_directory: Path,
+    model_card: ModelCard,
+    *,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+) -> bool:
+    """Return whether a complete sidecar identifies the requested card generation.
+
+    Args:
+        model_directory: Artifact root containing or owning installed metadata.
+        model_card: Exact effective card requested for the generation.
+        verified_detached_cache: Optional cache for an already authenticated
+            detached record on a read-only artifact root.
+    """
+
+    try:
+        record = read_installed_card_with_fallback(
+            model_directory,
+            verified_detached_cache=verified_detached_cache,
+        )
+    except (OSError, ValueError):
+        return False
+    if record is None:
+        return False
+    if not verify_installed_card(model_directory, record):
+        return False
+    requested_id = model_card.registry_card_id
+    if requested_id is not None and record.model_card.registry_card_id == requested_id:
+        return True
+    # Custom cards have no content-derived registry identity, so their complete
+    # declarative contents are the generation identity. Reusing a sidecar after
+    # an operator changes runtime or capability policy would otherwise restore
+    # stale launch truth on the next air-gapped restart.
+    return requested_id is None and record.model_card == model_card
+
+
+def require_registry_installed_artifact(
+    model_directory: Path,
+    model_card: ModelCard,
+    *,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+) -> None:
+    """Require a staged artifact to match an immutable signed card exactly.
+
+    This is the runner-load boundary, after staging has completed but before a
+    model loader can execute repository Python. It rechecks the durable sidecar,
+    immutable revision marker and selected artifact identity. Full file hashes
+    were verified before atomic publication; the load boundary repeats bounded
+    path and size verification rather than re-hashing multi-gigabyte weights on
+    every launch.
+
+    Args:
+        model_directory: Complete staged or canonical artifact directory.
+        model_card: Signed card selected for this runner generation.
+        verified_detached_cache: Optional cache for an already authenticated
+            detached record on a read-only artifact root.
+
+    Raises:
+        PermissionError: If signed identity cannot be proven from local state.
+    """
+    card_id = model_card.registry_card_id
+    if card_id is None:
+        return
+    try:
+        record = read_installed_card_with_fallback(
+            model_directory,
+            verified_detached_cache=verified_detached_cache,
+        )
+    except (OSError, ValueError) as error:
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: installed artifact identity is "
+            f"unreadable for signed card {card_id}"
+        ) from error
+    if record is None or not verify_installed_card(model_directory, record):
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: installed artifact identity is "
+            f"missing or incomplete for signed card {card_id}"
+        )
+    marker_revision = _revision_marker(model_directory)
+    if (
+        record.verification != "registry_verified"
+        or record.installed_identity != card_id
+        or record.model_card.registry_card_id != card_id
+        or record.artifact_repository != str(model_card.artifact_repository)
+        or record.artifact_revision != model_card.source_revision
+        or marker_revision != model_card.source_revision
+        or record.artifact_file != model_card.gguf_file
+        or record.artifact_bundle_id
+        != (
+            model_card.artifact_bundle.bundle_id
+            if model_card.artifact_bundle is not None
+            else None
+        )
+    ):
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: installed artifact does not match "
+            f"signed card and pinned revision {card_id}"
+        )
+
+
+def companion_owner_matches(record: InstalledCardRecord, owner_card: ModelCard) -> bool:
+    """Whether an installed companion record serves ``owner_card``.
+
+    Most companions belong to the one card they were fetched for. A video
+    companion is the same bytes at one pinned repository revision, which
+    several cards can name (both MiniMax H3 cards pin the same guide
+    preprocessors), so any card that pins the record's repository at its
+    revision accepts it. Keying it to its first owner would make each card
+    replace the other's copy on every ensure.
+    """
+    if record.artifact_role == "video_companion":
+        return (
+            record.artifact_repository,
+            record.artifact_revision,
+        ) in owner_card.external_video_companions()
+    if owner_card.registry_card_id is not None:
+        return record.owner_card_id == owner_card.registry_card_id
+    return record.model_card == owner_card
+
+
+def installed_companion_matches(
+    model_directory: Path,
+    *,
+    artifact_model_id: str,
+    owner_card: ModelCard,
+    artifact_role: InstalledArtifactRole,
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+) -> bool:
+    """Return whether a complete local artifact belongs to an owning card.
+
+    Args:
+        model_directory: Complete companion artifact directory.
+        artifact_model_id: Store identity of the companion repository.
+        owner_card: Complete effective card that owns the companion.
+        artifact_role: Declared role of the companion artifact.
+        verified_detached_cache: Optional cache for an already authenticated
+            detached record on a read-only artifact root.
+    """
+
+    try:
+        record = read_installed_card_with_fallback(
+            model_directory,
+            verified_detached_cache=verified_detached_cache,
+        )
+    except (OSError, ValueError):
+        return False
+    if record is None:
+        return False
+    return (
+        record.artifact_model_id == artifact_model_id
+        and record.artifact_role == artifact_role
+        and companion_owner_matches(record, owner_card)
+        and verify_installed_card(model_directory, record)
+    )
+
+
+def verify_installed_card(
+    model_directory: Path,
+    record: InstalledCardRecord,
+    *,
+    verify_hashes: bool = False,
+) -> bool:
+    """Verify path boundaries, sizes and optionally hashes for one sidecar."""
+
+    resolved_root = model_directory.resolve()
+    for entry in record.files:
+        candidate = (resolved_root / entry.path).resolve()
+        if not candidate.is_relative_to(resolved_root) or not candidate.is_file():
+            return False
+        try:
+            if candidate.stat().st_size != entry.size_bytes:
+                return False
+            if verify_hashes and _sha256_file(candidate) != entry.sha256:
+                return False
+        except OSError:
+            return False
+    return bool(record.files)
+
+
+def refresh_registry_installed_card_if_same_artifact(
+    model_directory: Path,
+    model_card: ModelCard,
+) -> InstalledCardRecord | None:
+    """Atomically adopt a replacement signed card for unchanged local bytes.
+
+    The refresh is deliberately narrower than repository/revision equality. It
+    also requires the same selected base artifact and proves that every newly
+    selected same-repository file is already covered by the verified installed
+    manifest. A card that changes bytes, adds an absent projector, or selects a
+    different draft therefore stays on the normal download/staging path.
+
+    Args:
+        model_directory: Complete canonical or staged base-artifact directory.
+        model_card: Replacement signed registry card requested for launch.
+
+    Returns:
+        The newly written installed record, or ``None`` when local evidence is
+        insufficient for a metadata-only refresh.
+
+    Side effects:
+        Atomically replaces the adjacent installed-card sidecar, falling back
+        to Skulk's data directory for a read-only artifact root.
+    """
+
+    if model_card.registry_card_id is None or model_card.source_revision is None:
+        return None
+    try:
+        retained = read_installed_card_with_fallback(model_directory)
+    except (OSError, ValueError):
+        return None
+    if (
+        retained is None
+        or retained.artifact_role != "base"
+        or retained.artifact_model_id != str(model_card.model_id)
+        or retained.artifact_repository != str(model_card.artifact_repository)
+        or retained.artifact_revision != model_card.source_revision
+        or retained.artifact_file != model_card.gguf_file
+        or retained.artifact_bundle_id
+        != (
+            model_card.artifact_bundle.bundle_id
+            if model_card.artifact_bundle is not None
+            else None
+        )
+        or _revision_marker(model_directory) != model_card.source_revision
+        or not verify_installed_card(model_directory, retained)
+    ):
+        return None
+    if (
+        retained.verification == "registry_verified"
+        and retained.installed_identity == model_card.registry_card_id
+        and retained.model_card.registry_card_id == model_card.registry_card_id
+    ):
+        return retained
+
+    manifest_by_path = {entry.path: entry for entry in retained.files}
+    required_files: list[tuple[str, int | None]] = []
+    if model_card.artifact_bundle is not None:
+        required_files.extend(
+            (item.path, item.size_bytes) for item in model_card.artifact_bundle.files
+        )
+    if model_card.gguf_file is not None:
+        required_files.append((model_card.gguf_file, None))
+    if model_card.vision is not None and model_card.vision.projector_file is not None:
+        required_files.append(
+            (model_card.vision.projector_file, model_card.vision.projector_size)
+        )
+    runtime = model_card.runtime
+    if (
+        runtime is not None
+        and runtime.served_spec_draft_repo
+        == str(model_card.artifact_repository)
+        and runtime.served_spec_draft_file is not None
+    ):
+        required_files.append((runtime.served_spec_draft_file, None))
+    for relative_path, expected_size in required_files:
+        entry = manifest_by_path.get(relative_path)
+        if entry is None or (
+            expected_size is not None and entry.size_bytes != expected_size
+        ):
+            return None
+
+    refreshed = build_installed_card_record(
+        model_directory,
+        model_card,
+        artifact_repository=str(model_card.artifact_repository),
+        artifact_revision=model_card.source_revision,
+        artifact_file=model_card.gguf_file,
+        file_manifest=retained.files,
+    )
+    write_installed_card_with_fallback(model_directory, refreshed)
+    return refreshed
+
+
+def verify_installed_file(
+    model_directory: Path,
+    record: InstalledCardRecord,
+    relative_path: str,
+    *,
+    expected_size: int,
+) -> bool:
+    """Verify one card-pinned file against its installed manifest and digest.
+
+    This is intended for comparatively small executable companion artifacts,
+    such as a GGUF multimodal projector, that must be re-authenticated at the
+    runner boundary without re-hashing the base model's multi-gigabyte weights.
+
+    Args:
+        model_directory: Root containing the installed artifact generation.
+        record: Durable installed-card record for that root.
+        relative_path: Canonical repository-relative file selected by the card.
+        expected_size: Exact immutable byte size declared by the card.
+
+    Returns:
+        ``True`` only when the path is bounded, the manifest agrees with the
+        card, and the current bytes match the manifest digest.
+    """
+
+    entry = next((item for item in record.files if item.path == relative_path), None)
+    if entry is None or entry.size_bytes != expected_size:
+        return False
+    resolved_root = model_directory.resolve()
+    candidate = (resolved_root / relative_path).resolve()
+    if not candidate.is_relative_to(resolved_root) or not candidate.is_file():
+        return False
+    try:
+        return (
+            candidate.stat().st_size == expected_size
+            and _sha256_file(candidate) == entry.sha256
+        )
+    except OSError:
+        return False
+
+
+def discover_installed_cards(roots: Iterable[Path]) -> list[InstalledCardRecord]:
+    """Discover complete installed records below model-search roots.
+
+    Only direct artifact directories are inspected.  Invalid, partial or stale
+    records are ignored without making registry startup depend on any one disk.
+    """
+
+    records_by_identity: dict[str, InstalledCardRecord] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for model_directory in root.iterdir():
+            if not model_directory.is_dir() or model_directory.name.startswith("."):
+                continue
+            try:
+                record = read_installed_card_with_fallback(model_directory)
+            except (OSError, ValueError):
+                continue
+            if record is None or not verify_installed_card(model_directory, record):
+                continue
+            records_by_identity.setdefault(record.installed_identity, record)
+    return list(records_by_identity.values())
+
+
+def associate_installed_card(
+    model_directory: Path,
+    cards: Iterable[ModelCard],
+) -> InstalledCardRecord | None:
+    """Associate a trusted catalog card with one pre-existing artifact directory.
+
+    The directory name alone is never enough to assert registry verification;
+    it is only used to select a candidate card.  Verification still requires
+    the immutable revision marker and the selected artifact file, when one is
+    declared.  Companion repositories retain their owning full base card.
+    """
+
+    directory_name = model_directory.name
+    matches: list[tuple[ModelCard, InstalledArtifactRole, str, str | None]] = []
+    for card in cards:
+        base_matches = any(
+            _artifact_directory_matches(directory_name, repository, card.source_revision)
+            for repository in (card.model_id, card.artifact_repository)
+        )
+        if (
+            base_matches
+            and _legacy_base_artifact_is_complete(model_directory)
+            and _legacy_revision_marker_matches(
+                model_directory,
+                card.source_revision,
+            )
+            and (
+                card.gguf_file is None
+                or (model_directory / card.gguf_file).is_file()
+            )
+        ):
+            matches.append(
+                (card, "base", str(card.artifact_repository), card.source_revision)
+            )
+        companion_candidates: list[tuple[str | None, str | None]] = []
+        if card.vision is not None:
+            companion_candidates.append(
+                (card.vision.weights_repo or None, card.vision.weights_revision)
+            )
+        if card.runtime is not None:
+            companion_candidates.extend(
+                [
+                    (card.runtime.mtp_sidecar_repo, card.runtime.mtp_sidecar_revision),
+                    (
+                        card.runtime.assistant_model_repo,
+                        card.runtime.assistant_model_revision,
+                    ),
+                    (
+                        card.runtime.served_spec_draft_repo,
+                        card.runtime.served_spec_draft_revision,
+                    ),
+                    (
+                        card.runtime.vllm_spec_draft_repo,
+                        card.runtime.vllm_spec_draft_revision,
+                    ),
+                ]
+            )
+        companion_candidates.extend(card.external_video_companions())
+        for repository, revision in companion_candidates:
+            if repository is None or not _artifact_directory_matches(
+                directory_name, ModelId(repository), revision
+            ):
+                continue
+            role = companion_artifact_role(card, repository)
+            if not _legacy_revision_marker_matches(model_directory, revision) or not (
+                _legacy_companion_artifact_is_complete(
+                    model_directory,
+                    card=card,
+                    artifact_role=role,
+                )
+            ):
+                continue
+            matches.append(
+                (card, role, repository, revision)
+            )
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda match: (
+            match[0].registry_card_id is not None,
+            match[0].registry_card_id or "",
+        ),
+        reverse=True,
+    )
+    card, role, repository, revision = matches[0]
+    return build_installed_card_record(
+        model_directory,
+        card,
+        artifact_role=role,
+        artifact_model_id=(str(card.model_id) if role == "base" else repository),
+        owner_model_id=(None if role == "base" else str(card.model_id)),
+        owner_card_id=(None if role == "base" else card.registry_card_id),
+        artifact_repository=repository,
+        artifact_revision=revision,
+    )
+
+
+def _artifact_directory_matches(
+    directory_name: str,
+    repository: ModelId,
+    source_revision: str | None,
+) -> bool:
+    """Match mutable and canonical revision-qualified artifact directories."""
+
+    normalized = repository.normalize()
+    return directory_name == normalized or (
+        source_revision is not None
+        and directory_name == f"{normalized}--revision-{source_revision}"
+    )
+
+
+def _legacy_base_artifact_is_complete(model_directory: Path) -> bool:
+    """Conservatively recognize a complete pre-sidecar base artifact."""
+
+    from skulk.download.download_utils import is_model_directory_complete
+
+    if any(model_directory.rglob("*.partial")):
+        return False
+    if is_model_directory_complete(model_directory):
+        return True
+    # Small single-file safetensors repositories do not carry an index. This is
+    # the same conservative exception used by the existing staging fast path.
+    return (model_directory / "config.json").is_file() and (
+        model_directory / "model.safetensors"
+    ).is_file()
+
+
+def _legacy_revision_marker_matches(
+    model_directory: Path,
+    expected_revision: str | None,
+) -> bool:
+    """Reject explicit revision evidence that conflicts with a trusted card."""
+
+    marker = model_directory / _SOURCE_REVISION_MARKER
+    if not marker.exists():
+        return True
+    try:
+        observed_revision = marker.read_text().strip()
+    except (OSError, UnicodeError):
+        return False
+    return expected_revision is None or observed_revision == expected_revision
+
+
+def _legacy_companion_artifact_is_complete(
+    model_directory: Path,
+    *,
+    card: ModelCard,
+    artifact_role: InstalledArtifactRole,
+) -> bool:
+    """Conservatively recognize complete pre-sidecar companion bytes."""
+
+    if any(model_directory.rglob("*.partial")):
+        return False
+    if artifact_role == "mtp_sidecar":
+        # MTP repositories are intentionally not full model directories: they
+        # commonly contain one standalone tensor file and no config or index.
+        return any(
+            candidate.is_file() and candidate.stat().st_size > 0
+            for candidate in model_directory.rglob("*.safetensors")
+        )
+    if artifact_role == "video_companion":
+        # A video companion repository is staged as exactly the files the
+        # card names from it, not as a model directory.
+        expected = [
+            item.path
+            for item in (card.video.companions if card.video is not None else ())
+            if item.repo is not None
+            and _artifact_directory_matches(
+                model_directory.name, ModelId(item.repo), item.revision
+            )
+        ]
+        return bool(expected) and all(
+            (model_directory / path).is_file()
+            and (model_directory / path).stat().st_size > 0
+            for path in expected
+        )
+    if artifact_role == "served_draft":
+        selected_file = (
+            card.runtime.served_spec_draft_file
+            if card.runtime is not None
+            else None
+        )
+        return (
+            selected_file is not None
+            and (model_directory / selected_file).is_file()
+            and _legacy_base_artifact_is_complete(model_directory)
+        )
+    return _legacy_base_artifact_is_complete(model_directory)
+
+
+@final
+@dataclass(frozen=True)
+class UnrecordedArtifacts:
+    """Model directories under the search roots, by whether their card is recorded."""
+
+    complete: tuple[Path, ...]
+    """Complete artifacts with no card record, or a record their files no
+    longer match. Offline, Skulk can serve these only from a shipped card."""
+
+    incomplete: tuple[Path, ...]
+    """Directories without a record that are not a complete artifact, such
+    as an interrupted download."""
+
+    recorded: int
+    """Directories whose card record matches their files."""
+
+
+# The downloader keeps per-model file-list metadata under
+# ``<models dir>/caches``. It is not an artifact, and a model directory is
+# always ``org--name``, so the name cannot belong to one.
+_DOWNLOAD_METADATA_CACHE_NAME: Final = "caches"
+
+
+def _detached_records_by_path(
+    fallback_root: Path,
+) -> dict[str, tuple[InstalledCardRecord, ...]]:
+    """Index the detached records under ``fallback_root`` by artifact path.
+
+    Only records whose outer manifest digest matches the inner record are
+    kept, the same binding :func:`read_installed_card_with_fallback` applies.
+    """
+
+    if not fallback_root.is_dir():
+        return {}
+    by_path: dict[str, list[InstalledCardRecord]] = {}
+    for path in fallback_root.glob("*.json"):
+        try:
+            external = ExternalInstalledCardRecord.model_validate_json(
+                path.read_bytes(), strict=False
+            )
+        except (OSError, ValueError):
+            continue
+        if external.manifest_sha256 == external.record.manifest_sha256:
+            by_path.setdefault(external.artifact_path, []).append(external.record)
+    return {artifact: tuple(records) for artifact, records in by_path.items()}
+
+
+def find_unrecorded_artifacts(
+    roots: Iterable[Path],
+    *,
+    fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
+) -> UnrecordedArtifacts:
+    """Sort every model directory under ``roots`` by whether its card is recorded.
+
+    A record, adjacent or detached, is checked against the file sizes it
+    lists and never against their hashes, so this stays cheap on a node that
+    holds hundreds of gigabytes. That is enough for a report: the question is
+    whether a record exists, and launch still hashes a detached record before
+    trusting it. Hidden directories are skipped, as discovery skips them, and
+    so is the downloader's metadata cache.
+
+    Args:
+        roots: Model-search roots to inspect.
+        fallback_root: Directory holding detached records for read-only roots.
+
+    Returns:
+        The complete and incomplete directories without a usable record, and
+        the number with one.
+    """
+
+    detached = _detached_records_by_path(fallback_root)
+    complete: list[Path] = []
+    incomplete: list[Path] = []
+    recorded = 0
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for model_directory in sorted(root.iterdir()):
+            if (
+                not model_directory.is_dir()
+                or model_directory.name.startswith(".")
+                or model_directory.name == _DOWNLOAD_METADATA_CACHE_NAME
+            ):
+                continue
+            try:
+                adjacent = read_installed_card(model_directory)
+                candidates = (
+                    (adjacent,)
+                    if adjacent is not None
+                    else detached.get(str(model_directory.resolve()), ())
+                )
+                has_record = any(
+                    verify_installed_card(model_directory, record)
+                    for record in candidates
+                )
+            except (OSError, ValueError):
+                has_record = False
+            if has_record:
+                recorded += 1
+            elif _legacy_base_artifact_is_complete(model_directory):
+                complete.append(model_directory)
+            else:
+                incomplete.append(model_directory)
+    return UnrecordedArtifacts(
+        complete=tuple(complete), incomplete=tuple(incomplete), recorded=recorded
+    )
+
+
+def ensure_installed_cards(
+    root: Path,
+    cards: Iterable[ModelCard],
+    verified_detached_cache: VerifiedDetachedInstalledCardCache | None = None,
+    *,
+    fallback_root: Path = SKULK_INSTALLED_CARD_RECORDS_DIR,
+) -> tuple[InstalledCardRecord, ...]:
+    """Materialize missing sidecars for trusted, complete legacy directories.
+
+    Only a directory with no record at all is associated. One whose record no
+    longer matches its files has drifted: re-deriving a record from the
+    changed bytes would bless corruption or tampering, so it stays unresolved
+    until a download repairs it.
+
+    Args:
+        root: Launchable model-search root to inspect.
+        cards: Trusted cards used to associate complete legacy artifacts.
+        verified_detached_cache: Optional operator-inventory cache for detached
+            records on read-only roots.
+        fallback_root: Directory holding detached records for read-only roots.
+
+    Returns:
+        The records written by this call, so an async caller can converge the
+        process's live catalog on its event loop.
+    """
+
+    if not root.is_dir():
+        return ()
+    written: list[InstalledCardRecord] = []
+    card_list = tuple(cards)
+    detached = _detached_records_by_path(fallback_root)
+    for model_directory in root.iterdir():
+        if not model_directory.is_dir() or model_directory.name.startswith("."):
+            continue
+        try:
+            if installed_card_path(model_directory).exists() or detached.get(
+                str(model_directory.resolve())
+            ):
+                # Recorded, whether it still verifies or has drifted: never
+                # re-derive a record over an existing one.
+                continue
+            if read_installed_card_with_fallback(
+                model_directory,
+                verified_detached_cache=verified_detached_cache,
+                fallback_root=fallback_root,
+            ):
+                continue
+            record = associate_installed_card(model_directory, card_list)
+            if record is None:
+                continue
+            # Association hashes every file, long enough for a model store
+            # finishing this same download to write its own record first.
+            # Keep that record rather than replace it with one derived from
+            # the same bytes.
+            if installed_card_path(model_directory).exists():
+                continue
+            write_installed_card_with_fallback(
+                model_directory, record, fallback_root=fallback_root
+            )
+            written.append(record)
+        except (OSError, ValueError):
+            continue
+    return tuple(written)

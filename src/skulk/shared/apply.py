@@ -6,6 +6,8 @@ from loguru import logger
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import (
+    AudioCppPreparationCompleted,
+    AudioCppPreparationRequested,
     ChunkGenerated,
     CustomModelCardAdded,
     CustomModelCardDeleted,
@@ -14,12 +16,15 @@ from skulk.shared.types.events import (
     InputChunkReceived,
     InstanceCreated,
     InstanceDeleted,
+    InstanceFailureRecorded,
+    ModelTrustApprovalChanged,
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
     RunnerStatusUpdated,
     StagedModelEvicted,
     StateSnapshotHydrated,
+    StewardActionProposalChanged,
     TaskAcknowledged,
     TaskCreated,
     TaskDeleted,
@@ -39,6 +44,7 @@ from skulk.shared.types.profiling import (
     ThunderboltBridgeStatus,
 )
 from skulk.shared.types.state import State
+from skulk.shared.types.steward_actions import steward_action_proposal_is_prunable
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
 from skulk.shared.types.topology import Connection, RDMAConnection
 from skulk.shared.types.worker.downloads import (
@@ -48,7 +54,11 @@ from skulk.shared.types.worker.downloads import (
     DownloadPending,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import Instance, InstanceId
+from skulk.shared.types.worker.instances import (
+    INSTANCE_FAILURE_HISTORY_LIMIT,
+    Instance,
+    InstanceId,
+)
 from skulk.shared.types.worker.runners import RunnerId, RunnerShutdown, RunnerStatus
 from skulk.utils.info_gatherer.info_gatherer import (
     LinuxGpuMetrics,
@@ -59,10 +69,12 @@ from skulk.utils.info_gatherer.info_gatherer import (
     MemoryUsage,
     MiscData,
     NodeCapabilities,
+    NodeCapabilityNodes,
     NodeConfig,
     NodeDiskUsage,
     NodeHeartbeat,
     NodeNetworkInterfaces,
+    NodePairingGateway,
     RdmaCtlStatus,
     StaticNodeInformation,
     ThunderboltBridgeInfo,
@@ -74,6 +86,8 @@ def event_apply(event: Event, state: State) -> State:
     match event:
         case (
             TestEvent()
+            | AudioCppPreparationRequested()
+            | AudioCppPreparationCompleted()
             | ChunkGenerated()
             | TaskAcknowledged()
             | InputChunkReceived()
@@ -85,6 +99,8 @@ def event_apply(event: Event, state: State) -> State:
             return state
         case InstanceCreated():
             return apply_instance_created(event, state)
+        case InstanceFailureRecorded():
+            return apply_instance_failure_recorded(event, state)
         case InstanceDeleted():
             return apply_instance_deleted(event, state)
         case NodeTimedOut():
@@ -111,6 +127,41 @@ def event_apply(event: Event, state: State) -> State:
             return apply_topology_edge_deleted(event, state)
         case TracingStateChanged():
             return state.model_copy(update={"tracing_enabled": event.enabled})
+        case ModelTrustApprovalChanged():
+            approvals = set(state.model_trust_approved_remote_code_identities)
+            if event.approved:
+                approvals.add(event.trust_identity)
+            else:
+                approvals.discard(event.trust_identity)
+            return state.model_copy(
+                update={
+                    "model_trust_approved_remote_code_identities": tuple(
+                        sorted(approvals)
+                    )
+                }
+            )
+        case StewardActionProposalChanged():
+            proposals = dict(state.steward_action_proposals)
+            proposals[event.proposal.proposal_id] = event.proposal
+            # Retain the newest bounded audit window without discarding work
+            # that a promoted master can still recover.
+            if len(proposals) > 128:
+                as_of = (
+                    event.proposal.dispatched_at
+                    or event.proposal.decided_at
+                    or event.proposal.created_at
+                )
+                terminal = sorted(
+                    (
+                        proposal
+                        for proposal in proposals.values()
+                        if steward_action_proposal_is_prunable(proposal, as_of)
+                    ),
+                    key=lambda proposal: proposal.created_at,
+                )
+                for proposal in terminal[: len(proposals) - 128]:
+                    proposals.pop(proposal.proposal_id, None)
+            return state.model_copy(update={"steward_action_proposals": proposals})
         case StateSnapshotHydrated():
             return _sanitize_snapshot_downloads(event.state)
 
@@ -130,6 +181,33 @@ def _sanitize_snapshot_downloads(snapshot: State) -> State:
         node_id: progresses for node_id, progresses in downloads.items() if progresses
     }
     return snapshot.model_copy(update={"downloads": downloads})
+
+
+def apply_instance_failure_recorded(
+    event: InstanceFailureRecorded, state: State
+) -> State:
+    """Apply one retained instance failure without mutating existing state.
+
+    Args:
+        event: Persisted terminal failure to add to recent operator history.
+        state: Immutable cluster state to copy.
+
+    Returns:
+        A copied state with the failure first, any older record for the same
+        instance removed, and the history constrained to its fixed bound.
+    """
+    retained = (
+        failure
+        for failure in state.instance_failures
+        if failure.instance_id != event.failure.instance_id
+    )
+    return state.model_copy(
+        update={
+            "instance_failures": (event.failure, *retained)[
+                :INSTANCE_FAILURE_HISTORY_LIMIT
+            ],
+        }
+    )
 
 
 def apply(state: State, event: IndexedEvent) -> State:
@@ -464,6 +542,14 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
             # capability tags ride the TELEMETRY topic into the TelemetryView,
             # never the event log. No-op here so the GatheredInfo match stays
             # exhaustive; a stray log-path delivery is harmless.
+            pass
+        case NodeCapabilityNodes():
+            # Same plane, same reasoning: capability-node summaries feed the
+            # topology from the TelemetryView and never enter State.
+            pass
+        case NodePairingGateway():
+            # Same plane: which node holds the phone-pairing relay route lives
+            # in the TelemetryView and never enters State.
             pass
         case NodeHeartbeat():
             # Dedicated liveness belongs only in TelemetryView. This legacy

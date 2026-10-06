@@ -1,3 +1,5 @@
+import { ReadyModelSelect } from '../chat/ReadyModelSelect';
+import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import styled from 'styled-components';
@@ -15,7 +17,8 @@ import type { InstanceCardData } from '../layout/InstancePanel';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { chatActions } from '../../store/slices/chatSlice';
-import { store } from '../../store';
+import { useStore } from 'react-redux';
+import type { RootState } from '../../store';
 import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
 import {
   canUseStreamingSpeechPlayback,
@@ -23,9 +26,11 @@ import {
   SPEECH_PAUSE_MARKER,
   SPEECH_PAUSE_SECONDS,
   SpeechSentenceQueue,
+  speechTextFromMarkdown,
   splitCompleteSpeechSentences,
   StreamingSpeechPlayback,
 } from '../../audio/streamingSpeechPlayback';
+import { CodeNarrator, FenceProbe } from '../../audio/codeNarration';
 import {
   createPinnedSpeechVoiceSelector,
   fetchSpeechVoiceCatalog,
@@ -36,6 +41,7 @@ import {
   DASHBOARD_SPEECH_SEED,
   speechLanguageForDashboardLocale,
 } from '../../audio/speechSynthesisRequest';
+import { speechModelOption } from '../../audio/speechModelOption';
 import { buildApiMessages, type ApiMessagePayload } from './chatApiPayload';
 
 /* ── Types ────────────────────────────────────────────── */
@@ -79,25 +85,8 @@ const NoModels = styled.div`
   height: 100%;
   gap: 12px;
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: ${({ theme }) => theme.fontSizes.sm};
-`;
-
-const ModelSelect = styled.select`
-  appearance: none;
-  background: transparent;
-  border: none;
-  color: ${({ theme }) => theme.colors.gold};
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  cursor: pointer;
-  outline: none;
-  padding-right: 4px;
-
-  option {
-    background: ${({ theme }) => theme.colors.surface};
-    color: ${({ theme }) => theme.colors.text};
-  }
 `;
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -119,15 +108,6 @@ const HARMONY_CONTROL_TOKENS = [
   '<|constrain|>',
 ];
 const MAX_TOOL_ROUNDS = 4;
-const AUDIO_RESPONSE_FORMATS: readonly AudioResponseFormat[] = [
-  'mp3',
-  'wav',
-  'flac',
-  'ogg',
-  'opus',
-  'pcm',
-];
-
 type StreamingSpeechResponseSession = {
   playback: StreamingSpeechPlayback;
   useEncodedFallback: boolean;
@@ -202,47 +182,6 @@ const GPT_OSS_BROWSER_TOOLS = {
 } as const;
 
 type BuiltinBrowserToolName = keyof typeof GPT_OSS_BROWSER_TOOLS;
-
-function isAudioResponseFormat(value: string | null | undefined): value is AudioResponseFormat {
-  return AUDIO_RESPONSE_FORMATS.includes(value as AudioResponseFormat);
-}
-
-function shortModelLabel(modelId: string): string {
-  const parts = modelId.split('/');
-  return parts[parts.length - 1] || modelId;
-}
-
-function speechModelOption(modelId: string, model: ModelInfo | undefined): ChatSpeechModelOption {
-  const resolved = model?.resolved_capabilities;
-  const responseFormats = (
-    resolved?.audio_response_formats
-      ?? model?.audio?.response_formats
-      ?? []
-  ).filter(isAudioResponseFormat);
-  const resolvedDefault = resolved?.default_audio_response_format ?? null;
-  const cardDefault = model?.audio?.default_response_format ?? null;
-  const defaultResponseFormat: AudioResponseFormat = isAudioResponseFormat(resolvedDefault)
-    ? resolvedDefault
-    : isAudioResponseFormat(cardDefault)
-      ? cardDefault
-      : responseFormats[0] ?? 'mp3';
-  const formats = responseFormats.length > 0 ? responseFormats : [defaultResponseFormat];
-  return {
-    modelId,
-    label: shortModelLabel(modelId),
-    defaultResponseFormat,
-    responseFormats: formats,
-    supportsVoiceListing: model?.audio?.supports_voice_listing ?? false,
-    defaultVoice: model?.audio?.default_voice ?? null,
-    supportsStreaming: model?.audio?.supports_streaming ?? false,
-    supportsReferenceAudio: model?.audio?.supports_reference_audio ?? false,
-    supportsRealtime: Boolean(
-      resolved?.supports_realtime_audio
-        && model?.audio?.supports_streaming
-        && model.audio.supports_realtime,
-    ),
-  };
-}
 
 async function responseErrorMessage(response: Response): Promise<string> {
   const body = await response.text().catch(() => '');
@@ -567,9 +506,11 @@ export function ChatView({
   realtimeTranscriptionAvailable = false,
   className,
 }: ChatViewProps) {
+  const store = useStore<RootState>();
   const { t } = useSkulkTranslation();
   const speechLanguage = speechLanguageForDashboardLocale(tolgee.getLanguage());
   // Store state
+  const { data: stewardStatus } = useGetStewardStatusQuery(undefined, { pollingInterval: 15000 });
   const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
   const selectedTranscriptionModelId = useAppSelector((s) => s.chat.selectedTranscriptionModelId);
   const selectedSpeechModelId = useAppSelector((s) => s.chat.selectedSpeechModelId);
@@ -592,11 +533,13 @@ export function ChatView({
     dispatch(chatActions.setSelectedVoice(voice));
   const setAutoSpeakAssistant = (enabled: boolean) =>
     dispatch(chatActions.setAutoSpeakAssistant(enabled));
+  const narrateCodeBlocks = useAppSelector((s) => s.chat.narrateCodeBlocks);
+  const setNarrateCodeBlocks = (enabled: boolean) =>
+    dispatch(chatActions.setNarrateCodeBlocks(enabled));
   const setRealtimeVoiceEnabled = (enabled: boolean) =>
     dispatch(chatActions.setRealtimeVoiceEnabled(enabled));
   const setAutoSubmitVoice = (enabled: boolean) =>
     dispatch(chatActions.setAutoSubmitVoice(enabled));
-  const addMessage = (msg: ChatMessage) => dispatch(chatActions.addMessage(msg));
   const deleteMessageAction = (id: string) => dispatch(chatActions.deleteMessage(id));
   const editMessageAction = (messageId: string, content: string) =>
     dispatch(chatActions.editMessage({ messageId, content }));
@@ -1142,6 +1085,10 @@ export function ChatView({
   const handleSend = useCallback(async (text: string, files: ChatUploadedFile[]) => {
     if (!selectedModelId || !canSendMessages || isLoading) return;
     stopSpeechPlayback();
+    // Async conversion and streaming may outlive the selected model or this view.
+    // Pin both messages to their origin; deleted conversations stay deleted.
+    const conversationId = store.getState().chat.activeConversationId;
+    if (!conversationId) return;
 
     // Convert image files to base64 data URLs for the API and message history
     const imageAttachments: { dataUrl: string; file: ChatUploadedFile }[] = [];
@@ -1168,7 +1115,7 @@ export function ChatView({
         : undefined,
     };
 
-    addMessage(userMsg);
+    dispatch(chatActions.appendConversationMessage({ conversationId, message: userMsg }));
     setIsLoading(true);
     setStreamingContent('');
     setStreamingThinking(null);
@@ -1177,9 +1124,7 @@ export function ChatView({
 
     // Read messages from store (includes the user message we just added)
     const chatState = store.getState().chat;
-    const activeConvo = chatState.activeConversationId
-      ? chatState.conversations[chatState.activeConversationId]
-      : undefined;
+    const activeConvo = chatState.conversations[conversationId];
     if (!activeConvo) {
       setIsLoading(false);
       setStreamingContent(null);
@@ -1234,6 +1179,56 @@ export function ChatView({
         })()
       : null;
     speechSentenceQueueRef.current = sentenceQueue;
+    // Code narration (#769): short spoken interjections while a fenced code
+    // block streams. Live generation only (replays never build a narrator),
+    // and fillers fire only when the voice has run out of things to say.
+    const codeNarrator = sentenceQueue && narrateCodeBlocks
+      ? new CodeNarrator({
+          openers: [
+            t('chat.narration.opener1', "Let's write this out."),
+            t('chat.narration.opener2', 'Time for some code.'),
+            t('chat.narration.opener3', 'Writing it up now.'),
+          ],
+          fillers: [
+            t('chat.narration.filler1', 'Okay, next part.'),
+            t('chat.narration.filler2', 'Very good, now this.'),
+            t('chat.narration.filler3', 'Still writing.'),
+            t('chat.narration.filler4', 'Almost there.'),
+            t('chat.narration.filler5', 'And a little more.'),
+          ],
+          closers: [
+            t('chat.narration.closer1', 'Done!'),
+            t('chat.narration.closer2', 'And that does it.'),
+          ],
+        })
+      : null;
+    const fenceProbe = codeNarrator ? new FenceProbe() : null;
+    // Two-phase narration around each delta's enqueue: a finished block's
+    // closer settles BEFORE the prose that follows it, while an opener for
+    // a fence the delta introduces plays AFTER the introductory sentence.
+    // Only sentences that will actually be spoken count as prose (completed
+    // fences and rules produce no speech and must not defeat the debounce).
+    const narrateAround = (sentences: readonly string[]) => {
+      if (!codeNarrator || !sentenceQueue || !fenceProbe) {
+        sentenceQueue?.enqueue(sentences);
+        return;
+      }
+      const proseFollowing = sentences.some(
+        (sentence) => speechTextFromMarkdown(sentence).length > 0,
+      );
+      const closer = codeNarrator.settlePendingClose({
+        fenceNowOpen: fenceProbe.isOpen(),
+        proseFollowing,
+      });
+      if (closer) sentenceQueue.enqueue([closer]);
+      sentenceQueue.enqueue(sentences);
+      const utterance = codeNarrator.observe({
+        fenceOpen: fenceProbe.isOpen(),
+        queueStarved: sentenceQueue.isStarved(),
+        bufferedSeconds: streamingPlaybackRef.current?.bufferedSeconds() ?? 0,
+      });
+      if (utterance) sentenceQueue.enqueue([utterance]);
+    };
 
     try {
       const apiMessages: ApiMessagePayload[] = buildApiMessages(allMessages);
@@ -1342,7 +1337,8 @@ export function ChatView({
                   if (requestTools) {
                     roundSpeechSentences.push(...split.sentences);
                   } else {
-                    sentenceQueue.enqueue(split.sentences);
+                    fenceProbe?.feed(visibleDelta);
+                    narrateAround(split.sentences);
                   }
                 } else if (sentenceQueue) {
                   const split = resyncVisibleSpeech(
@@ -1355,7 +1351,9 @@ export function ChatView({
                   if (requestTools) {
                     roundSpeechSentences.push(...split.sentences);
                   } else {
-                    sentenceQueue.enqueue(split.sentences);
+                    fenceProbe?.reset();
+                    fenceProbe?.feed(separated.content);
+                    narrateAround(split.sentences);
                   }
                 }
               }
@@ -1487,13 +1485,26 @@ export function ChatView({
         thinkingContent: fullThinking || undefined,
       };
 
-      addMessage(assistantMsg);
+      dispatch(chatActions.appendConversationMessage({ conversationId, message: assistantMsg }));
       if (sentenceQueue) {
+        // Settle any pending code closer ahead of the trailing prose so the
+        // acknowledgement precedes the final explanation.
+        if (codeNarrator && speechTail.trim()) {
+          const closer = codeNarrator.settlePendingClose({
+            fenceNowOpen: fenceProbe?.isOpen() ?? false,
+            proseFollowing: speechTextFromMarkdown(speechTail).length > 0,
+          });
+          if (closer) sentenceQueue.enqueue([closer]);
+        }
         if (speechTail.trim()) sentenceQueue.enqueue([speechTail.trim()]);
         speechTail = '';
       } else if (autoSpeakAssistant && selectedSpeechModelId && finalAssistantContent) {
         void speakText(finalAssistantContent, assistantMsg.id);
       }
+    }
+    if (codeNarrator && sentenceQueue) {
+      const closer = codeNarrator.finish();
+      if (closer) sentenceQueue.enqueue([closer]);
     }
     sentenceQueue?.finish();
     setStreamingContent(null);
@@ -1503,7 +1514,7 @@ export function ChatView({
     activeCommandIdRef.current = null;
 
   }, [
-    addMessage,
+    dispatch,
     autoSpeakAssistant,
     canSendMessages,
     createSpeechSentenceQueue,
@@ -1586,7 +1597,7 @@ export function ChatView({
     void handleSend(text.trim(), []);
   }, [autoSubmitVoice, canSendMessages, handleSend]);
 
-  if (readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
+  if (!stewardStatus?.enabled && readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
       <NoModels>
         {t(
@@ -1597,18 +1608,8 @@ export function ChatView({
     );
   }
 
-  const modelSelector = readyModels.length > 1 ? (
-    <ModelSelect
-      value={selectedModelId ?? ''}
-      onChange={(e) => selectModel(e.target.value)}
-      aria-label={t('chat.view.selectModel', 'Select chat model')}
-    >
-      {readyModels.map((m) => (
-        <option key={m.instanceId} value={m.modelId}>
-          {m.modelId.split('/').pop()}
-        </option>
-      ))}
-    </ModelSelect>
+  const modelSelector = (readyModels.length > 1 || stewardStatus?.enabled) ? (
+    <ReadyModelSelect value={selectedModelId} onChange={selectModel} fabricEnabled={stewardStatus?.enabled === true} models={readyModels} />
   ) : undefined;
 
   return (
@@ -1666,6 +1667,8 @@ export function ChatView({
           onReferenceAudioChange={setReferenceAudioFile}
           onReferenceAudioTextChange={setReferenceAudioText}
           onAutoSpeakAssistantChange={setAutoSpeakAssistant}
+          narrateCodeBlocks={narrateCodeBlocks}
+          onNarrateCodeBlocksChange={setNarrateCodeBlocks}
           onRealtimeVoiceEnabledChange={setRealtimeVoiceEnabled}
           onAutoSubmitVoiceChange={setAutoSubmitVoice}
           onRealtimeTranscript={handleRealtimeTranscript}

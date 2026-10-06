@@ -15,6 +15,8 @@ export type {
   TelemetryConfig,
   TelemetryConsent,
   ExperimentsConfig,
+  IntelligentFabricConfig,
+  ModelTrustConfig,
   FullConfig,
   EffectiveConfig,
   ConfigResponse,

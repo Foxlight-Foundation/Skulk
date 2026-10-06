@@ -1,3 +1,6 @@
+import { FiMaximize2 } from 'react-icons/fi';
+import { MdAutoAwesome } from 'react-icons/md';
+import { ReadyModelSelect } from './components/chat/ReadyModelSelect';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 
@@ -13,10 +16,10 @@ const HeaderAnchor = styled.div`
 `;
 import { ThemeProvider } from 'styled-components';
 import { darkTheme, lightTheme, GlobalStyle } from './theme';
-import { useClusterState } from './hooks/useClusterState';
+import { useClusterState, type RawInstances } from './hooks/useClusterState';
 import { HeaderNav } from './components/layout/HeaderNav';
 import { MobileMenuSheet } from './components/layout/MobileMenuSheet';
-import { useIsMobile, MOBILE_BREAKPOINT_PX } from './hooks/useMediaQuery';
+import { useIsMobile, useCompactHeader, MOBILE_BREAKPOINT_PX } from './hooks/useMediaQuery';
 import { TopologyGraph } from './components/topology/TopologyGraph';
 // ClusterWarnings replaced by inline header warning indicator
 import { ConnectionBanner } from './components/status/ConnectionBanner';
@@ -25,20 +28,30 @@ import { NetworkMesh } from './components/common/NetworkMesh';
 import { SceneBackdrop } from './components/common/SceneBackdrop';
 import { ShootingStars } from './components/common/ShootingStars';
 import { ObservabilityPanel } from './components/observability/ObservabilityPanel';
+import { CapabilityPanel } from './components/capabilities/CapabilityPanel';
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { TelemetryConsentModal } from './components/layout/TelemetryConsentModal';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
 import { OperatorPage } from './components/pages/OperatorPage';
+import { RightDrawer } from './components/common/RightDrawer';
+import { Button } from './components/common/Button';
+import { useGetStewardStatusQuery } from './store/endpoints/steward';
+import { StewardClusterPrompt, StewardControllerProvider, STEWARD_MODEL_ID, StewardChatView } from './components/pages/StewardChatView';
+import { IntegrationsPage } from './components/pages/IntegrationsPage';
+import { PluginsPage } from './components/pages/PluginsPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
 import type { InstanceStatus, NodeRunnerState } from './components/cluster/RunningInstanceCard';
 import { chatActions } from './store/slices/chatSlice';
+import { operatorSession } from './auth/operatorSession';
+import { apiSlice } from './store/api';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
 import { useSkulkTranslation, type SkulkTranslate } from './i18n/tolgee';
 import { modelSupportsTextChat } from './types/models';
+import { parseBackendTag } from './utils/servingEngine';
 
 const Shell = styled.div`
   position: relative;
@@ -115,6 +128,7 @@ const PanelBackdrop = styled.div`
 `;
 
 const Main = styled.main`
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -217,21 +231,26 @@ export function App() {
     nodeThunderboltBridge,
     nodeRdmaCtl,
     nodeCapabilities,
+    capabilityNodes,
     nodeResources,
     thunderboltBridgeCycles,
   } = useClusterState();
   const realtimeTranscriptionAvailable = Boolean(
     localNodeId && nodeCapabilities[localNodeId]?.includes('stt.realtime'),
   );
+  const [stewardOpen, setStewardOpen] = useState(false);
+  const [stewardWidth, setStewardWidth] = useState(440);
+  const { data: stewardStatus } = useGetStewardStatusQuery(undefined, { pollingInterval: 15000 });
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Phone-width header: nav and icon actions collapse into the hamburger
   // sheet. The open flag resets when the viewport grows past the breakpoint
   // so a rotation or window resize never strands an invisible open menu.
   const isMobile = useIsMobile();
+  const compactHeader = useCompactHeader();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   useEffect(() => {
-    if (!isMobile) setMobileMenuOpen(false);
-  }, [isMobile]);
+    if (!compactHeader) setMobileMenuOpen(false);
+  }, [compactHeader]);
   // Drawer exclusivity must also hold for PERSISTED state, not just the
   // toggle handlers: both flags can arrive true from a desktop session, and
   // independent render predicates would stack both drawers over a phone
@@ -244,6 +263,14 @@ export function App() {
   // Observability panel state lives on the global UI store so any component (toolbar
   // nav, per-node bug icons, future cross-links) can open the panel to a specific tab.
   const dispatch = useAppDispatch();
+  useEffect(() => {
+    let identity = operatorSession.snapshot();
+    return operatorSession.subscribe(() => {
+      const next = operatorSession.snapshot();
+      if (next.mode !== identity.mode || next.deviceId !== identity.deviceId) dispatch(apiSlice.util.resetApiState());
+      identity = next;
+    });
+  }, [dispatch]);
   const openObservability = (tab?: ObservabilityTab, nodeId?: string) =>
     dispatch(uiActions.openObservability({ tab, nodeId }));
   const activeRoute = useAppSelector((s) => s.ui.activeRoute);
@@ -251,6 +278,26 @@ export function App() {
   const historyPanelOpen = useAppSelector((s) => s.ui.historyPanelOpen);
   const themeName = useAppSelector((s) => s.ui.theme);
   const activeTheme = themeName === 'light' ? lightTheme : darkTheme;
+  const openSteward = () => {
+    setSettingsOpen(false);
+    dispatch(uiActions.closeObservability());
+    dispatch(uiActions.closeCapabilityPanel());
+    setStewardOpen(true);
+  };
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setSettingsOpen(false);
+        dispatch(uiActions.closeObservability());
+        dispatch(uiActions.closeCapabilityPanel());
+        setStewardOpen(true);
+      }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  }, [dispatch]);
+
 
   // Reflect theme on the html root so non-styled-components surfaces (highlight.js,
   // scrollbars, etc.) can react via `html[data-theme='light'] …` selectors.
@@ -267,7 +314,7 @@ export function App() {
   // On load, honour the URL path so /operator (and future deep-links) work.
   useEffect(() => {
     const path = window.location.pathname.replace(/^\//, '') || 'cluster';
-    const valid: typeof activeRoute[] = ['cluster', 'model-store', 'chat', 'operator'];
+    const valid: typeof activeRoute[] = ['cluster', 'model-store', 'chat', 'steward', 'integrations', 'plugins', 'operator'];
     if (valid.includes(path as typeof activeRoute)) {
       dispatch(uiActions.setActiveRoute(path as typeof activeRoute));
     }
@@ -448,9 +495,26 @@ export function App() {
   }, [storeDownloads]);
 
   // Derive instance card data for the right panel
+  // Fabric-maintained system placements (the intelligent-fabric steward)
+  // are not user instances: filtering at the source hides them from every
+  // consumer at once (instance cards, chat picker, model-store page,
+  // placement views). The steward is reachable through its own chat surface.
+  const visibleInstances = useMemo<RawInstances>(() => {
+    const filtered: RawInstances = {};
+    for (const [iid, inst] of Object.entries(instances)) {
+      const inner =
+        inst.MlxRingInstance ?? inst.MlxJacclInstance ?? inst.LlamaRpcInstance;
+      if (inner?.systemRole) {
+        continue;
+      }
+      filtered[iid] = inst;
+    }
+    return filtered;
+  }, [instances]);
+
   const instanceCards = useMemo<InstanceCardData[]>(() => {
     const cards: InstanceCardData[] = [];
-    for (const [iid, inst] of Object.entries(instances)) {
+    for (const [iid, inst] of Object.entries(visibleInstances)) {
       // Instance is a tagged union: MlxRing / MlxJaccl (in-process) and
       // LlamaRpc (pooled multi-node GGUF, #328). Handling only the first two
       // silently dropped every pooled instance from the Active Instances panel.
@@ -478,6 +542,7 @@ export function App() {
       // so default its engine to 'served' regardless of shard-card ordering;
       // the backend read below only refines the in-process MLX/llama_cpp split.
       let engine: InstanceCardData['engine'] = instanceType === 'LlamaRpc' ? 'served' : 'mlx';
+      let accelerator: string | null = null;
       let isEmbedding = false;
       let supportsTextChat = true;
       let speculation: InstanceCardData['speculation'];
@@ -497,17 +562,23 @@ export function App() {
         });
 
         // Engine: every instance is wrapped as an MlxRing/Jaccl instance on the
-        // wire, so the card's placement backends (not the wrapper) tell us which
-        // engine actually serves it: in-process MLX, in-process llama.cpp, or the
-        // served llama-server. Used for the type label instead of assuming MLX.
+        // wire, so the wrapper cannot say what serves it. The master stamps the
+        // backend it resolved for the placement on each shard; older state
+        // without that stamp falls back to the card's first compatible backend.
         const placement = mc?.placement as Record<string, unknown> | undefined;
         const backends = (placement?.compatibleBackends ?? placement?.compatible_backends) as
           | string[]
           | undefined;
-        const firstBackend = backends?.[0] ?? '';
-        if (firstBackend.startsWith('llama_server')) engine = 'served';
-        else if (firstBackend.startsWith('llama_cpp')) engine = 'llama_cpp';
-        else engine = 'mlx';
+        const resolvedBackend = (shardInner?.resolvedBackend ?? shardInner?.resolved_backend) as
+          | string
+          | undefined;
+        const serving = parseBackendTag(resolvedBackend ?? backends?.[0]);
+        // A pooled instance is always served by llama-server across the RPC pair.
+        engine = instanceType === 'LlamaRpc' ? 'served' : serving.engine;
+        // Only a stamped backend names the accelerator: the card's list is
+        // serialized alphabetically, not in resolution order, so its first
+        // entry can name a device the runtime never chose.
+        accelerator = resolvedBackend ? serving.accelerator : null;
 
         // Speculative-decoding status comes from the card's runtime section —
         // the card is the rank-invariant source of truth for whether drafting
@@ -566,6 +637,7 @@ export function App() {
         sharding,
         instanceType,
         engine,
+        accelerator,
         nodeStatuses,
         status: derived.status,
         statusMessage: derived.message,
@@ -576,7 +648,7 @@ export function App() {
       });
     }
     return cards;
-  }, [instances, runners, topology, t]);
+  }, [visibleInstances, runners, topology, t]);
 
   const hasInstances = instanceCards.length > 0;
 
@@ -596,19 +668,12 @@ export function App() {
   return (
     <ThemeProvider theme={activeTheme}>
       <GlobalStyle />
-      {/* Phone width: a third of the mesh particles; the busy full-density
-          field reads as visual noise over content on a small screen. The key
-          remounts the canvas when the breakpoint flips so the particle field
-          re-seeds at the new density. */}
-      {/* The night palette replaces the abstract mesh with the star field
-          crowning the viewport and fading out on the way down, so every
-          screen opens under the brand sky without a painting competing
-          with content. Palettes without a scene keep the mesh. */}
       <SceneBackdrop />
       <ShootingStars />
       {activeTheme.colors.scene === 'none' && (
         <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
       )}
+      <StewardControllerProvider readyInstances={instanceCards}>
       <Shell>
         <ConnectionBanner connected={connected} />
         <HeaderAnchor>
@@ -616,11 +681,13 @@ export function App() {
           showHome
           activeRoute={activeRoute}
           onNavigate={(route) => setActiveRoute(route)}
-          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenSteward={openSteward}
+          stewardOpen={stewardOpen}
+          onOpenSettings={() => { setStewardOpen(false); dispatch(uiActions.closeObservability()); dispatch(uiActions.closeCapabilityPanel()); setSettingsOpen(true); }}
           downloadProgress={downloadProgress}
           warnings={clusterWarnings}
-          compact={isMobile}
-          showMobileMenuToggle={isMobile}
+          compact={compactHeader}
+          showMobileMenuToggle={compactHeader}
           mobileMenuOpen={mobileMenuOpen}
           onToggleMobileMenu={() => setMobileMenuOpen((v) => !v)}
           showSidebarToggle={activeRoute === 'chat' && allConversations.length > 0}
@@ -638,7 +705,7 @@ export function App() {
             togglePanel();
           }}
         />
-        {isMobile && (
+        {compactHeader && (
           <MobileMenuSheet
             open={mobileMenuOpen}
             activeRoute={activeRoute}
@@ -671,6 +738,7 @@ export function App() {
               activeConversationId={activeConversationId}
               onSelect={selectConversation}
               onDelete={deleteConversation}
+              onRename={(conversationId, name) => dispatch(chatActions.renameConversation({ conversationId, name }))}
               onNewChat={() => { if (selectedModelId) newConversation(selectedModelId); }}
             />
             </PanelOverlay>
@@ -681,21 +749,34 @@ export function App() {
                 topology={topology}
                 nodeResources={nodeResources}
                 downloads={downloads}
-                instances={instances}
+                instances={visibleInstances}
                 runners={runners}
                 onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
+            ) : activeRoute === 'chat' && selectedModelId === STEWARD_MODEL_ID ? (
+              stewardOpen ? <ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={instanceCards.filter(instance => (instance.status === 'ready' || instance.status === 'running') && instance.supportsTextChat && !instance.isEmbedding)} /> : <StewardChatView modelSelector={<ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={instanceCards.filter(instance => (instance.status === 'ready' || instance.status === 'running') && instance.supportsTextChat && !instance.isEmbedding)} />} />
             ) : activeRoute === 'chat' ? (
               <ChatView
                 readyInstances={instanceCards}
                 realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
               />
+            ) : activeRoute === 'steward' ? (
+              <>{!stewardOpen && <StewardChatView />}</>
+            ) : activeRoute === 'integrations' ? (
+              <IntegrationsPage readyInstances={instanceCards} />
             ) : activeRoute === 'operator' ? (
               <OperatorPage />
+            ) : activeRoute === 'plugins' ? (
+              <PluginsPage />
             ) : topology ? (
               <TopologyGraph
+                capabilityNodes={capabilityNodes}
                 data={topology}
+                localNodeId={localNodeId}
                 onInspectNode={(nodeId) => openObservability('node', nodeId)}
+                onOpenCapabilityPanel={(hostNodeId, key) =>
+                  dispatch(uiActions.openCapabilityPanel({ target: { hostNodeId, key } }))
+                }
               />
             ) : (
               <EmptyState>
@@ -704,6 +785,7 @@ export function App() {
                   : t('app.empty.connectingBackend', 'Connecting to backend...')}
               </EmptyState>
             )}
+            {activeRoute === 'cluster' && stewardStatus?.enabled && <div style={{ position: 'absolute', bottom: 24, left: 0, right: 0, display: 'flex', justifyContent: 'center' }}><StewardClusterPrompt onOpen={openSteward} /></div>}
           </Main>
           {hasInstances && panelOpen && (
             <PanelOverlay $side="right">
@@ -715,11 +797,20 @@ export function App() {
             </PanelOverlay>
           )}
         </ContentRow>
+        <RightDrawer open={stewardOpen} onClose={() => setStewardOpen(false)} tone="live"
+          title={<StewardHeading><MdAutoAwesome aria-hidden /><span>Skulk</span>{stewardStatus?.steward_model && <StewardModel title={stewardStatus.steward_model}>{stewardStatus.steward_model.split('/').pop()}</StewardModel>}</StewardHeading>}
+          headerActions={<Button variant="ghost" size="sm" aria-label={t('steward.openPage', 'Open as page')} onClick={() => { setStewardOpen(false); setActiveRoute('steward'); }}><FiMaximize2 aria-hidden /></Button>} ariaLabel={t('steward.drawer', 'Skulk Steward')}
+          width={stewardWidth} minWidth={360} maxWidth={800} onWidthChange={setStewardWidth}
+          closeLabel={t('common.close', 'Close')} resizeLabel={t('steward.resize', 'Resize Steward')}>
+          <StewardChatView presentation="drawer" />
+        </RightDrawer>
         <ToastContainer />
         <ObservabilityPanel />
+        <CapabilityPanel />
         <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         <TelemetryConsentModal />
       </Shell>
+      </StewardControllerProvider>
     </ThemeProvider>
   );
 }
@@ -734,4 +825,14 @@ const EmptyState = styled.div`
   color: ${({ theme }) => theme.colors.textMuted};
   text-transform: uppercase;
   letter-spacing: 2px;
+`;
+
+const StewardHeading = styled.span`
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  > svg { flex-shrink: 0; color: ${({ theme }) => theme.colors.live}; }
+`;
+const StewardModel = styled.span`
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font: 10.5px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.textMuted};
+  padding: 2px 7px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 5px;
 `;

@@ -8,15 +8,16 @@ it.
 
 An AMD node can run GGUF models through **two engines**:
 
-- **`llama_cpp`** (in-process): the default GGUF path. Skulk loads the model with
+- **`llama_cpp`** (in-process): an optional GGUF path. Skulk loads the model with
   `llama-cpp-python` and decodes on the Radeon GPU via Vulkan. Single-node.
 - **`llama_server`** (served): Skulk launches an external `llama-server` process
   and proxies its OpenAI API. This is the only path to llama.cpp's **native
   multi-token prediction** (`--spec-type draft-mtp`), so it is how you get
   speculative-decoding speedups on an AMD node; see
   [Speculative Decoding](speculative-decoding.md) for how served native MTP
-  works and its measured gains. Single-node; enabled per node by
-  pointing `SKULK_LLAMA_SERVER_BIN` at a `llama-server` binary.
+  works and its measured gains. The source installer provisions this served
+  engine; `SKULK_LLAMA_SERVER_BIN` can select an operator build. Compatible
+  multi-node GGUF placements use its driver/donor RPC path described below.
 
 This page covers what such a node needs, how to bring one up, both engines, and
 how the cluster decides what to run where.
@@ -44,8 +45,8 @@ lands on the Macs, automatically.
 
 On `gfx1151` the reliable, well-supported way to run llama.cpp on the GPU today
 is the **Vulkan backend** (Mesa's RADV driver), not the ROCm/HIP backend. ROCm is
-not required for inference. It is optional and used only for the `rocminfo`
-diagnostic. Skulk's llama.cpp runner offloads through Vulkan (Mesa RADV). On a
+not required for this Vulkan GGUF path; `rocminfo` is optional for diagnosis.
+The ComfyUI video lane described below uses a separate managed ROCm runtime. Skulk's llama.cpp runner offloads through Vulkan (Mesa RADV). On a
 Ryzen AI Max+ 395 (Radeon 8060S) this fully
 offloads a 7B Q4_K_M model to the iGPU and decodes at interactive speed, which is
 what makes the box useful as a cluster node rather than a CPU-only fallback.
@@ -335,6 +336,45 @@ What to expect, from measurements on a Strix Halo pair:
 - If a donor dies mid-generation, the in-flight request fails cleanly, the
   whole pooled instance tears down within seconds, and no orphan processes
   are left behind.
+
+## Video (MiniMax H3) on the AMD node
+
+The served `comfy` video engine has a ROCm lane for this hardware. With
+`SKULK_ENABLE_VIDEO_MODELS=true` set, a Linux AMD node provisions the pinned
+ComfyUI checkout into its own managed environment with the hash-pinned torch
+set from AMD's stable ROCm 10.0.0 channel (the `rocm` runtime with the
+gfx1151 device libraries, torch with its gfx1151 device packages,
+torchvision, torchaudio, triton), at node startup or through `skulk doctor --fix`
+(the doctor honors the same gate: without video models enabled it reports
+that no engine is expected and provisions nothing). Those wheels bundle their own HIP
+runtime, so unlike the Vulkan path above nothing from a system ROCm install is
+used; the amdgpu kernel driver and membership in the `render` and `video`
+groups are enough. The node then advertises `comfy-rocm` and H3 cards place
+on it. The runner launches ComfyUI with `--bf16-vae`, because the fp32 VAE
+decode does not fit beside the transformer, and adds `--disable-mmap` only
+for a card with a weight file above 64 GB, since memory-mapping one that
+large through unified memory is pathologically slow (the pruned H3 files
+map). One server stays warm across renders and keeps its models resident
+under ComfyUI's RAM-pressure cache, told to keep 40% of host RAM free
+(`--cache-ram`, 24 GiB on a node with 61 GiB of host RAM), so only the first
+render after placement pays the model load. That headroom matters: a HIP
+allocation on this APU comes out of host RAM, and at ComfyUI's default 10%
+the text encoder and the transformer evicted each other on every new prompt.
+On gfx1151 a warm 480x480 four-step render with a new prompt takes about
+105 s, against about 210 s when every model is rebuilt per prompt. The
+wheel set matters here: the rocm7.2 torch wheel from the PyTorch index, the
+lane's first set, shipped gfx1151 BLAS libraries missing GEMM kernels that
+keyframe and reference prompts reach (a single-precision batched GEMM in
+rocBLAS, a bf16 bias-fused GEMM in hipBLASLt), and the HIP runtime
+segfaults launching a missing kernel; text-only prompts never hit them,
+which is how the gaps hid. AMD's ROCm 10.0.0 wheels carry every kernel H3
+needs, and a hand-built stack pointed at by `SKULK_COMFY_BIN` should be
+built the same way. Per-step sampling time on gfx1151 is the same on both
+sets (the hardware's GEMM throughput is the ceiling), so the gain from the
+advance is correctness and the retired reload, not faster steps. Expect
+several gigabytes of wheels on first provisioning and set the
+unified-memory kernel parameters above so the GPU can address the whole
+pool.
 
 ## What is not on the AMD path today
 

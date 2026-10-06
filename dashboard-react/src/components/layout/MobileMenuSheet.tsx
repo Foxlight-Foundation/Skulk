@@ -1,5 +1,5 @@
 import styled from 'styled-components';
-import { FiSettings, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
+import { FiSettings, FiDatabase, FiMessageSquare, FiSun, FiMoon, FiLink, FiPackage } from 'react-icons/fi';
 import { MdHub } from 'react-icons/md';
 import { VscBug } from 'react-icons/vsc';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -78,7 +78,7 @@ const MenuRow = styled.button<{ $active?: boolean }>`
   border-radius: ${({ theme }) => theme.radii.md};
   font-size: ${({ theme }) => theme.fontSizes.nav};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.text)};
+  color: ${({ $active, theme }) => ($active ? theme.colors.accentText : theme.colors.text)};
   background: ${({ $active, theme }) => ($active ? theme.colors.goldBg : 'transparent')};
   border: 1px solid ${({ $active, theme }) => ($active ? theme.colors.goldDim : 'transparent')};
 
@@ -128,6 +128,13 @@ export function MobileMenuSheet({ open, activeRoute, onNavigate, onOpenSettings,
         </MenuRow>
         <MenuRow $active={activeRoute === 'chat'} onClick={() => go('chat')} tabIndex={open ? 0 : -1}>
           <FiMessageSquare size={18} /> {t('header.nav.chat', 'Chat')}
+        </MenuRow>
+
+        <MenuRow $active={activeRoute === 'integrations'} onClick={() => go('integrations')} tabIndex={open ? 0 : -1}>
+          <FiLink size={18} /> {t('header.nav.integrations', 'Integrations')}
+        </MenuRow>
+        <MenuRow $active={activeRoute === 'plugins'} onClick={() => go('plugins')} tabIndex={open ? 0 : -1}>
+          <FiPackage size={18} /> {t('header.nav.plugins', 'Plugins')}
         </MenuRow>
         <Divider />
         <MenuRow

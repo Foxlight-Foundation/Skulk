@@ -161,7 +161,7 @@ async def ring_instance(test: Tests, hn: str) -> Instance | None:
     else:
         raise ValueError(f"{hn} not in {test.devs}")
 
-    card = await ModelCard.load(test.model_id)
+    card = await ModelCard.load_or_fetch_from_hf(test.model_id)
     instance = MlxRingInstance(
         instance_id=iid,
         ephemeral_port=52417,
@@ -243,7 +243,7 @@ async def execute_test(test: Tests, instance: Instance, hn: str) -> list[Event]:
 
 
 async def jaccl_instance(test: Tests) -> MlxJacclInstance | None:
-    card = await ModelCard.load(test.model_id)
+    card = await ModelCard.load_or_fetch_from_hf(test.model_id)
     world_size = len(test.devs)
     assert test.ibv_devs
 

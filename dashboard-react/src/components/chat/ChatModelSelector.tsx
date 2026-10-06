@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useRef } from 'react';
+import { useMemo, useState, useCallback } from 'react';
 import styled, { css } from 'styled-components';
 import type { ChatModelInfo } from '../../types/chat';
 import { Button } from '../common/Button';
@@ -123,7 +123,7 @@ const Header = styled.div`
 const ClusterName = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.lg};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   margin-top: 4px;
 `;
 
@@ -169,14 +169,14 @@ const CardHeader = styled.div`
 const CategoryLabel = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   flex: 1;
 `;
 
 const InfoBtn = styled.span`
   cursor: help;
   font-size: ${({ theme }) => theme.fontSizes.label};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   &:hover { color: ${({ theme }) => theme.colors.text}; }
 `;
 
@@ -189,13 +189,13 @@ const ModelName = styled.div`
 const ModelMeta = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 
 const Hint = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   max-width: 300px;
 `;
 

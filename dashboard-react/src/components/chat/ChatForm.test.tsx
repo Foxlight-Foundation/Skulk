@@ -8,7 +8,7 @@ import { darkTheme } from '../../theme/theme';
 import type { ChatSpeechModelOption } from '../../types/chat';
 import { ChatForm } from './ChatForm';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
@@ -144,7 +144,7 @@ describe('ChatForm speech controls', () => {
     const transcriptionModel: ChatSpeechModelOption = {
       modelId: 'org/realtime-stt',
       label: 'Realtime STT',
-      supportsRealtime: true,
+      supportsRealtime: true, responseFormats: ['pcm'],
     };
     const speechModel: ChatSpeechModelOption = {
       modelId: 'org/streaming-tts',
@@ -210,7 +210,7 @@ describe('ChatForm speech controls', () => {
     const transcriptionModel: ChatSpeechModelOption = {
       modelId: 'org/realtime-stt',
       label: 'Realtime STT',
-      supportsRealtime: true,
+      supportsRealtime: true, responseFormats: ['pcm'],
     };
     await renderChatForm({
       onSend,
@@ -266,7 +266,7 @@ describe('ChatForm speech controls', () => {
     const transcriptionModel: ChatSpeechModelOption = {
       modelId: 'org/realtime-stt',
       label: 'Realtime STT',
-      supportsRealtime: true,
+      supportsRealtime: true, responseFormats: ['pcm'],
     };
     await renderChatForm({
       onSend: vi.fn(),
@@ -317,7 +317,7 @@ describe('ChatForm speech controls', () => {
     const transcriptionModel: ChatSpeechModelOption = {
       modelId: 'org/realtime-stt',
       label: 'Realtime STT',
-      supportsRealtime: true,
+      supportsRealtime: true, responseFormats: ['pcm'],
     };
     await renderChatForm({
       onSend: vi.fn(),
@@ -368,7 +368,7 @@ describe('ChatForm speech controls', () => {
     const transcriptionModel: ChatSpeechModelOption = {
       modelId: 'org/realtime-stt',
       label: 'Realtime STT',
-      supportsRealtime: true,
+      supportsRealtime: true, responseFormats: ['pcm'],
     };
     const props: React.ComponentProps<typeof ChatForm> = {
       onSend: vi.fn(),
@@ -434,17 +434,14 @@ describe('ChatForm speech controls', () => {
       onSelectedVoiceChange,
     });
 
-    const voiceSelect = container?.querySelector<HTMLSelectElement>('[aria-label="Voice"]');
-    expect(voiceSelect?.value).toBe('');
-    expect([...voiceSelect!.options].map((option) => option.textContent)).toEqual([
-      'Auto (match language)',
-      'Serena (zh)',
-      'Ryan (en)',
+    const voiceSelect = container!.querySelector<HTMLButtonElement>('[aria-label="Voice"]')!;
+    expect(voiceSelect.textContent).toContain('Auto (match language)');
+    await act(async () => { await userEvent.click(voiceSelect); });
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    expect(options.map(option => option.textContent)).toEqual([
+      'Auto (match language)', 'Serena (zh)', 'Ryan (en)',
     ]);
-
-    await act(async () => {
-      await userEvent.selectOptions(voiceSelect!, 'ryan');
-    });
+    await act(async () => { await userEvent.click(options[2]); });
     expect(onSelectedVoiceChange).toHaveBeenCalledWith('ryan');
   });
 

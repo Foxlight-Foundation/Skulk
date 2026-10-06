@@ -82,13 +82,17 @@
               buildInputs = (old.buildInputs or [ ]) ++ [
                 final.nvidia-cublas
                 final.nvidia-cuda-nvrtc
+                final.nvidia-cuda-runtime
                 final.nvidia-cudnn-cu13
+                final.nvidia-cufft
                 final.nvidia-nccl-cu13
               ];
               preFixup = ''
                 addAutoPatchelfSearchPath ${final.nvidia-cublas}
                 addAutoPatchelfSearchPath ${final.nvidia-cuda-nvrtc}
+                addAutoPatchelfSearchPath ${final.nvidia-cuda-runtime}
                 addAutoPatchelfSearchPath ${final.nvidia-cudnn-cu13}
+                addAutoPatchelfSearchPath ${final.nvidia-cufft}
                 addAutoPatchelfSearchPath ${final.nvidia-nccl-cu13}
               '';
               autoPatchelfIgnoreMissingDeps = [ "libcuda.so.1" ];

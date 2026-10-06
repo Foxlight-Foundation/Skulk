@@ -15,8 +15,9 @@ from skulk.worker.runner.llama_server.runner import (
     _SPEC_TYPE_FLAG,
     _draft_model_args,
     _gpu_layers_for_backend,
-    _model_declares_reasoning,
     _parse_sse_line,
+    _projector_server_args,
+    model_declares_reasoning,
 )
 
 
@@ -138,18 +139,18 @@ def _card(reasoning: object = None, capabilities: list[str] | None = None) -> Si
 
 
 def test_reasoning_card_section_declares_reasoning() -> None:
-    assert _model_declares_reasoning(_card(reasoning=SimpleNamespace())) is True
+    assert model_declares_reasoning(_card(reasoning=SimpleNamespace())) is True
 
 
 def test_thinking_capability_declares_reasoning() -> None:
-    assert _model_declares_reasoning(_card(capabilities=["text", "thinking"])) is True
+    assert model_declares_reasoning(_card(capabilities=["text", "thinking"])) is True
 
 
 def test_plain_text_card_declares_no_reasoning() -> None:
     # Gemma 4 served card: reasoning=None, capabilities=["text"] -> served with
     # --reasoning-format none so output stays in message.content.
-    assert _model_declares_reasoning(_card(capabilities=["text"])) is False
-    assert _model_declares_reasoning(_card()) is False
+    assert model_declares_reasoning(_card(capabilities=["text"])) is False
+    assert model_declares_reasoning(_card()) is False
 
 
 def test_parse_content_delta() -> None:
@@ -232,6 +233,22 @@ def test_gpu_layers_match_vram_admission(resolved: str | None, expected: str) ->
     # The runner's -ngl decision must mirror placement_utils._has_gpu_offload_backend
     # so a RAM-admitted placement never grabs an unbudgeted GPU.
     assert _gpu_layers_for_backend(resolved) == expected
+
+
+def test_projector_args_disable_offload_only_for_cpu() -> None:
+    """Accelerators keep default projector offload while CPU opts out explicitly."""
+
+    projector = Path("/models/mmproj-F16.gguf")
+    assert _projector_server_args(projector, "llama_server-cuda") == [
+        "--mmproj",
+        str(projector),
+    ]
+    assert _projector_server_args(projector, "llama_server-cpu") == [
+        "--mmproj",
+        str(projector),
+        "--no-mmproj-offload",
+    ]
+    assert _projector_server_args(None, "llama_server-cuda") == []
 
 
 def test_parse_sse_line_extracts_final_chunk_timings() -> None:

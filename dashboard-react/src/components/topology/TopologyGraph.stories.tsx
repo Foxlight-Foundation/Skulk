@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
+import styled from 'styled-components';
 import type { TopologyData, NodeInfo } from '../../types/topology';
 import { TopologyGraph } from './TopologyGraph';
 
@@ -26,11 +27,11 @@ function node(
   };
 }
 
-const Wrap = ({ children }: { children: React.ReactNode }) => (
-  <div style={{ width: '100%', height: '100vh', background: '#111' }}>
-    {children}
-  </div>
-);
+const Wrap = styled.div`
+  width: 100%;
+  height: 100vh;
+  background: ${({ theme }) => theme.colors.bgGradient};
+`;
 
 const meta: Meta<typeof TopologyGraph> = {
   title: 'Topology/TopologyGraph',
@@ -70,23 +71,42 @@ export const TwoNodes: Story = {
 
 const threeNodes: TopologyData = {
   nodes: {
-    'node-a': node('kite1', 'Mac Mini', 9 * GB, 16 * GB, 5, 37, 9),
-    'node-b': node('kite2', 'Mac Mini', 7.5 * GB, 16 * GB, 0, 30, 9),
-    'node-c': node('kite3', 'Mac Studio', 15.3 * GB, 24 * GB, 16, 40, 11),
+    'node-apple': node('kite3', 'Mac Studio', 8.9 * GB, 24 * GB, 15, 30, 9),
+    'node-amd': {
+      ...node('kite5', 'Nimo Direct Inc. MME3L', 2.6 * GB, 62.5 * GB, 4, 34, 16),
+      system_info: {
+        chip: 'AMD Ryzen AI Max+ 395 w/ Radeon 8060S',
+        model_id: 'Nimo Direct Inc. MME3L',
+      },
+    },
+    'node-nvidia': {
+      ...node('kite6', 'Cloud GPU host', 61 * GB, 121.6 * GB, 50, 43, 12),
+      system_info: {
+        accelerator_name: 'NVIDIA GPU',
+        accelerator_vendor: 'nvidia',
+        model_id: 'Cloud GPU host',
+      },
+      mactop_info: {
+        gpu_usage: [0, 0.5],
+        memory: { is_vram: true, ram_total: 121.6 * GB, ram_usage: 61 * GB },
+        sys_power: 12,
+        temp: { gpu_temp_avg: 43 },
+      },
+    },
   },
   edges: [
-    { source: 'node-a', target: 'node-b' },
-    { source: 'node-b', target: 'node-a' },
-    { source: 'node-b', target: 'node-c' },
-    { source: 'node-c', target: 'node-b' },
-    { source: 'node-a', target: 'node-c' },
-    { source: 'node-c', target: 'node-a' },
+    { source: 'node-apple', target: 'node-amd' },
+    { source: 'node-amd', target: 'node-apple' },
+    { source: 'node-amd', target: 'node-nvidia' },
+    { source: 'node-nvidia', target: 'node-amd' },
+    { source: 'node-apple', target: 'node-nvidia' },
+    { source: 'node-nvidia', target: 'node-apple' },
   ],
 };
 
 export const ThreeNodes: Story = {
   args: { data: threeNodes },
-  name: 'Three nodes (triangle)',
+  name: 'Three nodes (mixed hardware triangle)',
 };
 
 const fourNodes: TopologyData = {
@@ -111,6 +131,45 @@ const fourNodes: TopologyData = {
 export const FourNodes: Story = {
   args: { data: fourNodes },
   name: 'Four nodes (square)',
+};
+
+const mixedHardware: TopologyData = {
+  nodes: {
+    'node-apple-studio': node('kite1', 'Mac Studio', 42 * GB, 64 * GB, 28, 48, 31),
+    'node-apple-mini': node('kite2', 'Mac Mini', 20 * GB, 32 * GB, 12, 41, 18),
+    'node-amd': {
+      ...node('kite4', 'Nimo Direct Inc. MME3L', 96 * GB, 128 * GB, 62, 55, 68),
+      system_info: {
+        chip: 'AMD Ryzen AI Max+ 395 w/ Radeon 8060S',
+        model_id: 'Nimo Direct Inc. MME3L',
+      },
+    },
+    'node-nvidia': {
+      ...node('cuda-1', 'Cloud GPU host', 48 * GB, 80 * GB, 74, 61, 220),
+      system_info: {
+        accelerator_name: 'NVIDIA A100 80GB PCIe',
+        accelerator_vendor: 'nvidia',
+        model_id: 'Cloud GPU host',
+      },
+      mactop_info: {
+        gpu_usage: [0, 0.74],
+        memory: { is_vram: true, ram_total: 80 * GB, ram_usage: 48 * GB },
+        sys_power: 220,
+        temp: { gpu_temp_avg: 61 },
+      },
+    },
+  },
+  edges: [
+    { source: 'node-apple-studio', target: 'node-apple-mini' },
+    { source: 'node-apple-mini', target: 'node-amd' },
+    { source: 'node-amd', target: 'node-nvidia' },
+    { source: 'node-nvidia', target: 'node-apple-studio' },
+  ],
+};
+
+export const MixedHardware: Story = {
+  args: { data: mixedHardware },
+  name: 'Mixed hardware fabric',
 };
 
 const sixNodes: TopologyData = {

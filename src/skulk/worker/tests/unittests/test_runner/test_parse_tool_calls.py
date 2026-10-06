@@ -147,7 +147,40 @@ class TestParseToolCalls:
             "temperature": 0.75,
         }
 
-    def test_schema_coercion_skips_unknown_tools(self):
+    def test_a_call_naming_no_offered_tool_becomes_content(self):
+        """A call to a tool the caller never offered is delivered as content.
+
+        Llama answers some plain questions with `<|python_tag|>print("hi")`,
+        which parses as a call to `print`. Handing the caller a tool name they
+        have no implementation for is worse than showing them the text.
+        """
+
+        def _parser_calling_print(_text: str) -> dict[str, Any]:
+            return {"name": "print", "arguments": {"value": "hi"}}
+
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        results = list(
+            parse_tool_calls(
+                _make_responses(["<tool_call>", "print", "</tool_call>"]),
+                make_mlx_parser("<tool_call>", "</tool_call>", _parser_calling_print),
+                tools,
+            )
+        )
+
+        assert not any(isinstance(item, ToolCallResponse) for item in results)
+        text = "".join(getattr(item, "text", "") or "" for item in results if item)
+        assert "print" in text
+
+    def test_schema_coercion_skips_tools_without_a_schema(self):
         """If no matching tool schema exists, arguments should remain unchanged."""
 
         def _parser_with_string_id(_text: str) -> dict[str, Any]:
@@ -156,18 +189,11 @@ class TestParseToolCalls:
                 "arguments": {"action": "output", "id": "0"},
             }
 
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "different_tool",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"id": {"type": "integer"}},
-                    },
-                },
-            }
-        ]
+        # The tool is offered but declares no parameter schema, which is the
+        # case this covers. A call naming a tool that was never offered at all
+        # is a different matter and is dropped, see
+        # test_a_call_naming_no_offered_tool_becomes_content above.
+        tools = [{"type": "function", "function": {"name": "process"}}]
 
         results = list(
             parse_tool_calls(

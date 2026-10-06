@@ -1,4 +1,4 @@
-import type { Meta, StoryObj } from '@storybook/react';
+import type { Meta, StoryObj } from '@storybook/react-vite';
 import { InstancePanel } from './InstancePanel';
 import type { InstanceCardData } from './InstancePanel';
 
@@ -6,7 +6,7 @@ const meta: Meta<typeof InstancePanel> = {
   title: 'Layout/InstancePanel',
   component: InstancePanel,
   decorators: [(Story) => (
-    <div style={{ height: '100vh', display: 'flex', justifyContent: 'flex-end', background: '#000' }}>
+    <div style={{ height: '100vh', display: 'flex', justifyContent: 'flex-end', }}>
       <Story />
     </div>
   )],
@@ -20,7 +20,8 @@ const readyInstance: InstanceCardData = {
   modelId: 'mlx-community/Qwen3.5-9B-4bit',
   sharding: 'Pipeline',
   instanceType: 'MlxRing',
-  nodeName: 'kite2',
+  nodeStatuses: [],
+  engine: 'mlx',
   status: 'ready',
 };
 
@@ -29,7 +30,8 @@ const loadingInstance: InstanceCardData = {
   modelId: 'mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits',
   sharding: 'Pipeline',
   instanceType: 'MlxRing',
-  nodeName: 'kite3',
+  nodeStatuses: [],
+  engine: 'mlx',
   status: 'loading',
   loadProgress: 45,
   statusMessage: 'Downloading layers 14/32...',
@@ -40,7 +42,8 @@ const failedInstance: InstanceCardData = {
   modelId: 'mlx-community/DeepSeek-V3-0324',
   sharding: 'Tensor',
   instanceType: 'MlxJaccl',
-  nodeName: 'kite1',
+  nodeStatuses: [],
+  engine: 'mlx',
   status: 'failed',
   statusMessage: 'Out of memory: requires 48GB, only 32GB available',
 };
@@ -50,7 +53,8 @@ const runningInstance: InstanceCardData = {
   modelId: 'mlx-community/Llama-3.1-8B-Instruct-4bit',
   sharding: 'Tensor',
   instanceType: 'MlxJaccl',
-  nodeName: 'kite1',
+  nodeStatuses: [],
+  engine: 'mlx',
   status: 'running',
 };
 

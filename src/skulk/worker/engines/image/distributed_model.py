@@ -78,7 +78,11 @@ class DistributedImageModel:
     ) -> "DistributedImageModel":
         card = bound_instance.bound_shard.model_card
         model_id = card.model_id
-        model_path = build_model_path(model_id, card.source_revision)
+        model_path = build_model_path(
+            model_id,
+            card.source_revision,
+            card.artifact_bundle.root if card.artifact_bundle is not None else None,
+        )
 
         shard_metadata = bound_instance.bound_shard
         if not isinstance(shard_metadata, (PipelineShardMetadata, CfgShardMetadata)):

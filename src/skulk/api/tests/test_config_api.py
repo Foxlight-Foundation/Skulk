@@ -1,18 +1,30 @@
 """Tests for the /config API endpoint."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+import anyio
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from httpx2 import Response
 
+from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
-from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
+from skulk.shared.types.commands import (
+    ForwarderCommand,
+    ForwarderDownloadCommand,
+    SetModelTrustApproval,
+)
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
-from skulk.store.config import load_skulk_config
+from skulk.store.config import (
+    load_skulk_config,
+    persist_model_trust_config,
+    update_skulk_config_atomic,
+)
 from skulk.utils.channels import channel
 
 
@@ -71,6 +83,86 @@ def test_get_config_reports_effective_kv_backend_when_file_exists(
     assert config.get("hf_token") is None
     assert effective["kv_cache_backend"] == "optiq"
     assert effective["has_hf_token"] is True
+
+
+def test_get_config_reports_the_default_model_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settings pre-fills a switched-on store from these values."""
+    from skulk.store import config as store_config
+
+    monkeypatch.setattr(store_config.socket, "gethostname", lambda: "kite-dev.local")
+    monkeypatch.setattr(store_config, "SKULK_DATA_HOME", tmp_path / "data")
+    api = _build_api()
+    object.__setattr__(api, "_config_path", tmp_path / "skulk.yaml")
+    client = TestClient(api.app)
+
+    effective = _json_mapping(_json_object(client.get("/config"))["effective"])
+
+    assert effective["model_store_defaults"] == {
+        "store_host": "kite-dev",
+        "store_port": 12415,
+        "store_http_host": "127.0.0.1",
+        "store_path": str(tmp_path / "data" / "model-store"),
+    }
+
+
+def test_update_config_fills_a_blank_enabled_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turning the store on with blank fields saves this node's defaults (#888)."""
+    from skulk.store import config as store_config
+
+    monkeypatch.setattr(store_config.socket, "gethostname", lambda: "kite-dev.local")
+    monkeypatch.setattr(store_config, "SKULK_DATA_HOME", tmp_path / "data")
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config",
+        json={
+            "config": {
+                "model_store": {
+                    "enabled": True,
+                    "store_host": "",
+                    "store_http_host": "",
+                    "store_path": "",
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    config = load_skulk_config(config_path)
+    assert config is not None and config.model_store is not None
+    assert config.model_store.store_host == "kite-dev"
+    assert config.model_store.store_http_host == "127.0.0.1"
+    assert config.model_store.store_path == str(tmp_path / "data" / "model-store")
+
+
+def test_update_config_keeps_a_named_store(tmp_path: Path) -> None:
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config",
+        json={
+            "config": {
+                "model_store": {"store_host": "mac-studio", "store_path": "/Volumes/Models"}
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    config = load_skulk_config(config_path)
+    assert config is not None and config.model_store is not None
+    assert config.model_store.store_host == "mac-studio"
+    assert config.model_store.store_http_host is None
+    assert config.model_store.store_path == "/Volumes/Models"
 
 
 def test_get_config_treats_blank_skulk_kv_backend_as_default(
@@ -158,3 +250,348 @@ def test_update_config_preserves_existing_experiments_when_omitted(
     assert config.experiments is not None
     assert config.experiments.tts_streaming is True
     assert config.experiments.stt_realtime is True
+
+
+def test_update_config_preserves_existing_model_trust_when_omitted(
+    tmp_path: Path,
+) -> None:
+    """An older Settings client cannot silently revoke model approvals."""
+    card_id = f"card_{'a' * 52}"
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text(
+        "model_trust:\n"
+        "  approved_remote_code_identities:\n"
+        f"    - {card_id}\n",
+        encoding="utf-8",
+    )
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config",
+        json={"config": {"inference": {"kv_cache_backend": "default"}}},
+    )
+
+    assert response.status_code == 200
+    config = load_skulk_config(config_path)
+    assert config is not None
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [card_id]
+
+
+def _capture_broadcast(api: API) -> list[str]:
+    """Intercept the SyncConfig broadcast a PUT /config emits."""
+    captured: list[str] = []
+
+    async def send(command: object) -> None:
+        from skulk.shared.types.commands import SyncConfig
+
+        if isinstance(command, SyncConfig):
+            captured.append(command.config_yaml)
+
+    object.__setattr__(api, "_send_download", send)
+    return captured
+
+
+def test_update_config_broadcasts_the_token_to_the_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A token entered in one node's Settings must reach the store host.
+
+    The token rides the PSK-encrypted config broadcast so every node,
+    including the one that actually fetches from Hugging Face, converges on
+    it. GET /config still never returns it.
+    """
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config", json={"config": {"hf_token": "fleet-token"}}
+    )
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "hf_token: fleet-token" in broadcasts[0]
+    # The HTTP surface stays secret-free even though the fabric carries it.
+    get_response = client.get("/config")
+    assert "fleet-token" not in get_response.text
+
+
+def test_update_config_broadcasts_the_preserved_local_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saving unrelated settings re-broadcasts this node's existing token.
+
+    That is what lets any node's Settings page act as the fleet's token
+    source: the merged config, local token included, is what the fleet sees.
+    """
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text("hf_token: existing-token\n", encoding="utf-8")
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config", json={"config": {"inference": {"kv_cache_backend": "default"}}}
+    )
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "hf_token: existing-token" in broadcasts[0]
+
+
+def test_update_config_never_broadcasts_a_blank_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blank token is dropped so it cannot clobber a real one on peers."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put("/config", json={"config": {"hf_token": ""}})
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "hf_token" not in broadcasts[0]
+
+
+def test_update_config_never_broadcasts_a_whitespace_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whitespace is truthy but not a credential; it stays off the wire."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put("/config", json={"config": {"hf_token": "   "}})
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "hf_token" not in broadcasts[0]
+
+
+def test_update_config_never_broadcasts_model_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deprecated node-local compatibility state stays off the wire."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    card_id = f"card_{'a' * 52}"
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text(
+        "model_trust:\n"
+        "  approved_remote_code_identities:\n"
+        f"    - {card_id}\n",
+        encoding="utf-8",
+    )
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    broadcasts = _capture_broadcast(api)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config", json={"config": {"inference": {"kv_cache_backend": "default"}}}
+    )
+
+    assert response.status_code == 200
+    assert len(broadcasts) == 1
+    assert "model_trust" not in broadcasts[0]
+
+
+def test_update_config_merges_latest_trust_inside_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated Settings save cannot overwrite a concurrent decision."""
+
+    initial_identity = f"card_{'a' * 52}"
+    latest_identity = f"card_{'b' * 52}"
+    config_path = tmp_path / "skulk.yaml"
+    persist_model_trust_config(config_path, [initial_identity])
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+
+    def inject_latest_trust(
+        path: Path,
+        update: Callable[[dict[str, object]], dict[str, object]],
+    ) -> dict[str, object]:
+        persist_model_trust_config(path, [latest_identity])
+        return update_skulk_config_atomic(path, update)
+
+    monkeypatch.setattr(
+        api_main,
+        "update_skulk_config_atomic",
+        inject_latest_trust,
+    )
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config",
+        json={"config": {"inference": {"kv_cache_backend": "default"}}},
+    )
+
+    assert response.status_code == 200
+    config = load_skulk_config(config_path)
+    assert config is not None
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [latest_identity]
+
+
+def test_update_config_rejects_model_trust_snapshot_on_loopback(
+    tmp_path: Path,
+) -> None:
+    """The retired model-trust snapshot cannot be mutated by current clients."""
+
+    api = _build_api()
+    object.__setattr__(api, "_config_path", tmp_path / "skulk.yaml")
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
+
+    response = client.put(
+        "/config",
+        json={"config": {"model_trust": {"approved_remote_code_identities": []}}},
+    )
+
+    assert response.status_code == 409
+    assert "deprecated compatibility field" in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        (
+            "PUT",
+            "/config",
+            {"config": {"model_trust": {"approved_remote_code_identities": []}}},
+        ),
+        (
+            "POST",
+            f"/models/remote-code-approvals/card_{'a' * 52}",
+            None,
+        ),
+        (
+            "DELETE",
+            f"/models/remote-code-approvals/card_{'a' * 52}",
+            None,
+        ),
+        ("POST", "/models/add", {"model_id": "org/model"}),
+        (
+            "POST",
+            "/models/add-card",
+            {
+                "model_card": {
+                    "modelId": "org/model",
+                    "storageSize": {"inBytes": 1},
+                    "nLayers": 1,
+                    "hiddenSize": 1,
+                    "supportsTensor": False,
+                    "tasks": ["TextGeneration"],
+                }
+            },
+        ),
+    ],
+)
+def test_sensitive_model_mutations_reject_unauthenticated_network_client(
+    tmp_path: Path,
+    method: str,
+    path: str,
+    payload: dict[str, object] | None,
+) -> None:
+    """The unauthenticated fabric listener cannot grant model-code authority."""
+
+    api = _build_api()
+    object.__setattr__(api, "_config_path", tmp_path / "skulk.yaml")
+    client = TestClient(api.app)
+
+    response = client.request(method, path, json=payload)
+
+    assert response.status_code == 403
+    assert "loopback" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_model_trust_decision_is_submitted_to_master(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One model approval waits for its master-indexed decision."""
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text(
+        "hf_token: keep-secret\n",
+        encoding="utf-8",
+    )
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    card_id = f"card_{'a' * 52}"
+    sent = anyio.Event()
+    submitted: list[SetModelTrustApproval] = []
+    completed = False
+
+    async def send(command: object) -> None:
+        submitted.append(cast(SetModelTrustApproval, command))
+        sent.set()
+
+    async def approve() -> None:
+        nonlocal completed
+        await api.set_cluster_remote_code_approval(card_id, approved=True)
+        completed = True
+
+    monkeypatch.setattr(api, "_send", send)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(approve)
+        await sent.wait()
+        await anyio.sleep(0)
+        assert completed is False
+        api.state = api.state.model_copy(
+            update={
+                "last_event_applied_idx": 0,
+                "model_trust_approved_remote_code_identities": (card_id,),
+            }
+        )
+        api._release_model_trust_decision_waiters(  # pyright: ignore[reportPrivateUsage]
+            card_id,
+            True,
+        )
+
+    assert completed is True
+    assert len(submitted) == 1
+    command = submitted[0]
+    assert command.trust_identity == card_id
+    assert command.approved is True
+    assert config_path.read_text() == "hf_token: keep-secret\n"
+
+
+@pytest.mark.asyncio
+async def test_model_trust_decision_timeout_is_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost indexed event returns 503 and does not leak its waiter."""
+
+    api = _build_api()
+
+    async def send(_command: object) -> None:
+        return None
+
+    monkeypatch.setattr(api, "_send", send)
+    monkeypatch.setattr(api_main, "_MODEL_TRUST_DECISION_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(HTTPException) as failure:
+        await api.set_cluster_remote_code_approval(
+            f"card_{'a' * 52}",
+            approved=True,
+        )
+
+    assert failure.value.status_code == 503
+    assert "retry" in str(failure.value.detail).lower()
+    assert not api._model_trust_decision_waiters  # pyright: ignore[reportPrivateUsage]

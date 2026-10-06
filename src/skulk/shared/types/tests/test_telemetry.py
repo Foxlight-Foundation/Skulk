@@ -7,9 +7,18 @@ an in-process-only test missed a strict round-trip failure.
 """
 
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError
 
 from skulk.routing.topics import TELEMETRY
 from skulk.shared.tests.conftest import get_pipeline_shard_metadata
+from skulk.shared.types.artifact_inventory import (
+    ARTIFACT_INVENTORY_ENTRY_LIMIT,
+    NodeArtifactAvailability,
+    NodeArtifactInventory,
+)
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import NodeDownloadProgress, StateSnapshotHydrated
 from skulk.shared.types.memory import Memory
@@ -67,6 +76,77 @@ def test_node_heartbeat_survives_topic_codec_round_trip() -> None:
 
     assert restored == message
     assert isinstance(restored.info, NodeHeartbeat)
+
+
+def test_artifact_inventory_round_trips_and_coalesces_by_node() -> None:
+    """A newer inventory replaces the same node's prior availability reading."""
+
+    node = NodeId("node-a")
+    inventory = NodeArtifactInventory(
+        artifacts=[
+            NodeArtifactAvailability(
+                model_id="org/model",
+                installed_identity="installed-generation",
+                size_bytes=1024,
+                last_used_epoch_seconds=42,
+                in_use=True,
+                manifest_complete=True,
+            ),
+        ],
+        store_host=False,
+        truncated=False,
+    )
+    message = NodeTelemetry(node_id=node, info=inventory)
+
+    restored = TELEMETRY.deserialize(TELEMETRY.serialize(message))
+
+    assert restored == message
+    assert isinstance(restored.info, NodeArtifactInventory)
+    assert restored.coalescing_key() == f"{node}:NodeArtifactInventory"
+
+
+def test_artifact_inventory_uses_local_receipt_time_and_prunes_with_membership() -> None:
+    """Availability freshness never depends on the publishing node's clock."""
+
+    node = NodeId("node-a")
+    received_at = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
+    inventory = NodeArtifactInventory(
+        artifacts=[],
+        store_host=True,
+        truncated=False,
+    )
+    view = TelemetryView()
+
+    view.apply(
+        NodeTelemetry(node_id=node, info=inventory),
+        received_at=received_at,
+    )
+
+    assert view.node_artifact_inventories[node] == inventory
+    assert view.node_artifact_inventory_received_at[node] == received_at
+    view.prune(node)
+    assert node not in view.node_artifact_inventories
+    assert node not in view.node_artifact_inventory_received_at
+
+
+def test_artifact_inventory_rejects_payloads_beyond_the_fixed_entry_bound() -> None:
+    """One producer cannot turn compact telemetry into an unbounded catalog."""
+
+    artifact = NodeArtifactAvailability(
+        model_id="org/model",
+        installed_identity="installed-generation",
+        size_bytes=1024,
+        last_used_epoch_seconds=42,
+        in_use=False,
+        manifest_complete=True,
+    )
+
+    with pytest.raises(ValidationError):
+        NodeArtifactInventory(
+            artifacts=[artifact] * (ARTIFACT_INVENTORY_ENTRY_LIMIT + 1),
+            store_host=False,
+            truncated=True,
+        )
 
 
 def test_live_download_progress_round_trips_and_terminal_wins() -> None:
@@ -504,22 +584,27 @@ def test_view_merges_identity_from_two_readings() -> None:
     # accumulation), regardless of arrival order.
     view = TelemetryView()
     node = NodeId("node-a")
+    node_install_id = uuid4()
     view.apply(NodeTelemetry(node_id=node, info=MiscData(friendly_name="Kite 2")))
-    view.apply(
-        NodeTelemetry(
-            node_id=node,
-            info=StaticNodeInformation(
-                model="Mac mini",
-                chip="M4",
-                os_version="26.4",
-                os_build_version="X",
-                skulk_version="1.2.0",
-                skulk_commit="abc123",
-            ),
-        )
+    static_reading = NodeTelemetry(
+        node_id=node,
+        info=StaticNodeInformation(
+            node_install_id=node_install_id,
+            model="Mac mini",
+            chip="M4",
+            os_version="26.4",
+            os_build_version="X",
+            skulk_version="1.2.0",
+            skulk_commit="abc123",
+        ),
     )
+    restored = TELEMETRY.deserialize(TELEMETRY.serialize(static_reading))
+    assert isinstance(restored.info, StaticNodeInformation)
+    assert restored.info.node_install_id == node_install_id
+    view.apply(restored)
     identity = view.node_identities[node]
     assert identity.friendly_name == "Kite 2"  # preserved across the static merge
+    assert identity.node_install_id == node_install_id
     assert identity.chip_id == "M4"
     assert identity.skulk_version == "1.2.0"
     # a later friendly-name update keeps the static fields
@@ -682,3 +767,75 @@ def test_linux_gpu_metrics_round_trip_and_apply() -> None:
     assert acc.vendor == "amd"
     assert acc.vram_total_bytes == 68719476736
     assert acc.utilization_ratio == 0.42
+
+
+def test_unattributed_terminal_outcome_cannot_clear_a_live_attempt() -> None:
+    """An unattributed completion is ignored while a live attempt is identified.
+
+    This is the guard that made an already-staged model unloadable: the worker's
+    fast path emitted a terminal ``DownloadCompleted`` with no attempt id, this
+    branch treated it as an unorderable legacy replay, and the live ``Pending``
+    kept overlaying the durable completion. The planner then re-issued
+    ``DownloadModel`` every tick while the instance sat idle forever.
+
+    The guard itself is correct and stays; the fix is that live producers must
+    attribute their terminal outcomes. This pins the behaviour so the reason the
+    fast path carries an attempt id does not get lost.
+    """
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-live")
+    pending = DownloadPending(node_id=node, shard_metadata=shard, attempt_id=attempt)
+
+    view = TelemetryView()
+    view.record_download_event(NodeDownloadProgress(download_progress=pending))
+    view.apply(NodeTelemetry(node_id=node, info=pending))
+    assert view.effective_downloads({})[node] == [pending]
+
+    unattributed = DownloadCompleted(
+        node_id=node,
+        shard_metadata=shard,
+        model_directory="/models/a",
+        total=Memory.from_mb(10),
+        read_only=True,
+    )
+    view.record_download_event(NodeDownloadProgress(download_progress=unattributed))
+
+    # The live pending survives, so a planner reading effective_downloads still
+    # believes the model is not present.
+    assert view.effective_downloads({})[node] == [pending]
+
+
+def test_attributed_terminal_outcome_clears_its_live_attempt() -> None:
+    """A completion carrying the live attempt id retires the pending overlay.
+
+    This is the shape the already-staged fast path now emits: it opens an
+    attempt and closes it, so the durable completion becomes visible to the
+    planner and the instance can progress to loading.
+    """
+
+    node = NodeId("node-a")
+    shard = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=1)
+    attempt = DownloadAttemptId("attempt-live")
+    pending = DownloadPending(node_id=node, shard_metadata=shard, attempt_id=attempt)
+
+    view = TelemetryView()
+    view.record_download_event(NodeDownloadProgress(download_progress=pending))
+    view.apply(NodeTelemetry(node_id=node, info=pending))
+    assert view.effective_downloads({})[node] == [pending]
+
+    completed = DownloadCompleted(
+        node_id=node,
+        shard_metadata=shard,
+        model_directory="/models/a",
+        total=Memory.from_mb(10),
+        read_only=True,
+        attempt_id=attempt,
+    )
+    view.record_download_event(NodeDownloadProgress(download_progress=completed))
+
+    # No live overlay remains, so the durable terminal outcome is what the
+    # planner sees.
+    assert view.effective_downloads({}).get(node, []) == []
+    assert view.effective_downloads({node: [completed]})[node] == [completed]

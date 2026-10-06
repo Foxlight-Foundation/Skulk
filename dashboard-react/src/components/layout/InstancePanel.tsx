@@ -1,6 +1,7 @@
 import styled from 'styled-components';
 import { RunningInstanceCard, type InstanceStatus, type InstanceNodeStatus } from '../cluster/RunningInstanceCard';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import type { ServingEngine } from '../../utils/servingEngine';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -9,10 +10,12 @@ export interface InstanceCardData {
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl' | 'LlamaRpc';
-  /** Serving engine, derived from the card's placement backends. Drives the
-   *  type label (MLX vs served llama.cpp) since the wire wraps every instance
-   *  as an MLX instance. */
-  engine: 'mlx' | 'llama_cpp' | 'served';
+  /** Serving engine, from the backend the master resolved for the placement
+   *  (the card's first compatible backend for older state). Drives the type
+   *  label, since the wire wraps every instance as an MLX instance. */
+  engine: ServingEngine;
+  /** Accelerator named by the resolved backend, such as `ROCm`; null if none. */
+  accelerator?: string | null;
   nodeStatuses: InstanceNodeStatus[];
   status: InstanceStatus;
   statusMessage?: string;
@@ -50,7 +53,7 @@ const PanelHeader = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.body};
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   display: flex;
   align-items: center;
@@ -59,7 +62,7 @@ const PanelHeader = styled.div`
 
 const Count = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-weight: 400;
 `;
 

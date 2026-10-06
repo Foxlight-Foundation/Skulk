@@ -5,7 +5,7 @@ import { ClusterNode } from './ClusterNode';
 const GB = 1024 * 1024 * 1024;
 
 const SvgCanvas = ({ children }: { children: React.ReactNode }) => (
-  <svg width={400} height={300} style={{ background: '#111' }}>
+  <svg viewBox="0 0 400 300" width={400} height={300} style={{ maxWidth: '100%', height: 'auto' }}>
     {children}
   </svg>
 );

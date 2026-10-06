@@ -78,11 +78,43 @@ def _mem_fetch(blob: bytes) -> "Callable[[int, int], Awaitable[bytes]]":
 def _fake_model_info(filenames: list[str]):
     """A stand-in for huggingface_hub.model_info with files_metadata=True."""
 
-    def _factory(_model_id: object, files_metadata: bool = False) -> object:
+    def _factory(
+        _model_id: object,
+        *,
+        revision: str | None = None,
+        files_metadata: bool = False,
+    ) -> object:
+        del revision, files_metadata
         siblings = [SimpleNamespace(rfilename=name, size=100) for name in filenames]
-        return SimpleNamespace(siblings=siblings, safetensors=None)
+        return SimpleNamespace(
+            siblings=siblings,
+            safetensors=None,
+            sha="d" * 40,
+        )
 
     return _factory
+
+
+def _mock_dense_header(monkeypatch: pytest.MonkeyPatch, layers: int = 32) -> None:
+    """Serve an exact GGUF header independently of the repository config."""
+    from skulk.download import download_utils
+
+    blob = _build_gguf(
+        [
+            _kv_string("general.architecture", "llama"),
+            _kv_u32("llama.block_count", layers),
+            _kv_u32("llama.embedding_length", 4096),
+            _kv_u32("llama.attention.head_count_kv", 8),
+            _kv_u32("llama.context_length", 8192),
+        ]
+    )
+
+    async def read_range(
+        _model_id: object, _revision: str, _path: str, start: int, length: int
+    ) -> bytes:
+        return blob[start : start + length]
+
+    monkeypatch.setattr(download_utils, "range_read", read_range)
 
 
 def test_gguf_weight_siblings_filters_gguf_and_mmproj(
@@ -134,9 +166,13 @@ def test_shard_base_detection() -> None:
 async def test_fetch_gguf_card_stamps_both_llama_engines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_dense_header(monkeypatch)
     monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
 
-    async def _fake_config(_model_id: object) -> object:
+    async def _fake_config(
+        _model_id: object,
+        _revision: str | None = None,
+    ) -> object:
         return SimpleNamespace(
             layer_count=32,
             hidden_size=4096,
@@ -147,6 +183,7 @@ async def test_fetch_gguf_card_stamps_both_llama_engines(
     monkeypatch.setattr(model_cards, "fetch_config_data", _fake_config)
 
     card = await ModelCard.fetch_from_hf(ModelId("some/gguf-repo"))
+    assert card.source_revision == "d" * 40
     # Both llama.cpp engines, served first (mirrors the bundled GGUF cards,
     # #607): only llama_server pools multiple nodes via RPC, and a
     # llama_cpp-only card would be silently ineligible for every multi-node
@@ -172,6 +209,7 @@ async def test_fetch_gguf_card_stamps_both_llama_engines(
 async def test_fetch_gguf_card_honors_requested_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_dense_header(monkeypatch)
     requested = "model-IQ3_XXS.gguf"
     monkeypatch.setattr(
         model_cards,
@@ -179,7 +217,10 @@ async def test_fetch_gguf_card_honors_requested_file(
         _fake_model_info(["model-Q4_K_M.gguf", requested]),
     )
 
-    async def _fake_config(_model_id: object) -> object:
+    async def _fake_config(
+        _model_id: object,
+        _revision: str | None = None,
+    ) -> object:
         return SimpleNamespace(
             layer_count=32,
             hidden_size=4096,
@@ -229,7 +270,10 @@ async def test_fetch_gguf_card_reads_header_when_no_config(
     # GGUF binary header instead (#327), rather than failing or fabricating them.
     monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
 
-    async def _raises(_model_id: object) -> object:
+    async def _raises(
+        _model_id: object,
+        _revision: str | None = None,
+    ) -> object:
         raise FileNotFoundError("no config.json in this bare GGUF repo")
 
     monkeypatch.setattr(model_cards, "fetch_config_data", _raises)
@@ -267,7 +311,10 @@ async def test_fetch_gguf_card_reads_header_when_config_unusable(
     # must still kick in rather than letting the ValidationError abort the build.
     monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
 
-    async def _bad_config(_model_id: object) -> object:
+    async def _bad_config(
+        _model_id: object,
+        _revision: str | None = None,
+    ) -> object:
         # Raises a genuine pydantic ValidationError (layer_count is required).
         model_cards.ConfigData.model_validate({"hidden_size": 1})
         raise AssertionError("unreachable")
@@ -459,13 +506,17 @@ def test_select_preferred_gguf_sharded_group() -> None:
 
 
 async def test_gguf_card_pins_selected_quant(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_dense_header(monkeypatch, layers=16)
     monkeypatch.setattr(
         model_cards,
         "model_info",
         _fake_model_info(["model-BF16.gguf", "model-Q4_K_M.gguf"]),
     )
 
-    async def _cfg(_m: object) -> object:
+    async def _cfg(
+        _m: object,
+        _revision: str | None = None,
+    ) -> object:
         return SimpleNamespace(
             layer_count=16,
             hidden_size=2048,
@@ -505,3 +556,18 @@ def test_default_gguf_selection_never_picks_companion_artifacts() -> None:
     assert "dspark" not in select_preferred_gguf(files)
     # A drafter-only repo (a published draft companion) still resolves.
     assert select_preferred_gguf([("gemma-mtp-draft-Q8_0.gguf", 1)])
+
+
+async def test_header_keeps_hybrid_fields_after_basic_structural_dimensions() -> None:
+    """The real header ordering must not trigger the old four-field early exit."""
+    from skulk.shared.models.tests.test_gguf_memory import metadata
+
+    blob = _build_gguf(
+        [_kv_string("general.architecture", "qwen35")]
+        + [_kv_u32("qwen35." + key, value) for key, value in metadata().items()]
+        + [_kv_string("tokenizer.ggml.model", "unused")]
+    )
+    fields = await model_cards.read_gguf_structural_fields(_mem_fetch(blob))
+    assert fields.cache_geometry == model_cards.qwen35_cache_geometry(
+        "qwen35", metadata()
+    )

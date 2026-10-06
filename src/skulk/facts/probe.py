@@ -15,11 +15,12 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast, final
+from typing import Literal, cast, final
 
 from loguru import logger
 
 from skulk.shared.types.node_facts import (
+    AudioCppProbe,
     EngineBinaryFact,
     EngineBinaryState,
     GpuDeviceFact,
@@ -67,6 +68,87 @@ _DEVICE_PREFIX_TO_COMPUTE = {
     "hip": "rocm",
 }
 
+_AUDIO_CPP_DEVICE_COMPUTES = {
+    "MTL": "metal",
+    "VK": "vulkan",
+    "VULKAN": "vulkan",
+    "CUDA": "cuda",
+    "HIP": "rocm",
+    "CPU": "cpu",
+}
+_AUDIO_CPP_DEVICE_LINE = re.compile(r"^\s*([A-Za-z]+):\d+\s+", re.MULTILINE)
+
+
+def probe_audio_cpp(binary: str) -> AudioCppProbe:
+    """Verify the pinned audio.cpp server answers version and device probes.
+
+    A compiled backend is advertised only when its device actually enumerates.
+    A loader error, bad source revision, or timeout leaves the engine absent.
+    """
+    try:
+        version = subprocess.run(  # noqa: S603 - configured executable
+            [binary, "--version"], capture_output=True, text=True, timeout=20
+        )
+        devices = subprocess.run(  # noqa: S603 - configured executable
+            [binary, "--list-devices"], capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return AudioCppProbe(outcome="failed", detail=str(error)[:400])
+    if version.returncode or devices.returncode:
+        detail = (version.stderr + devices.stderr).strip() or "probe exited nonzero"
+        if "error while loading shared libraries" in detail and any(
+            library in detail
+            for library in (
+                "libcudart.so",
+                "libcublas.so",
+                "libcublasLt.so",
+                "libnccl.so",
+                "libcuda.so",
+            )
+        ):
+            detail = (
+                "audio.cpp CUDA loader failed; install the host CUDA 12 runtime, "
+                "cuBLAS, and NCCL libraries: " + detail
+            )
+        return AudioCppProbe(outcome="failed", detail=detail[:400])
+    from skulk.provisioning.audio_cpp import (
+        AUDIO_CPP_SOURCE_REVISION,
+        verified_cached_audio_cpp_binary,
+    )
+
+    revision = re.search(r"(?m)^git: ([0-9a-f]+)(?:\s|$)", version.stdout)
+    # Upstream's v0.8.2 CLI prints a short git revision. Trust that abbreviated
+    # output only for a binary reverified against our immutable wheel pin.
+    if revision is None or (
+        revision.group(1) != AUDIO_CPP_SOURCE_REVISION
+        and not (
+            AUDIO_CPP_SOURCE_REVISION.startswith(revision.group(1))
+            and verified_cached_audio_cpp_binary(Path(binary))
+        )
+    ):
+        return AudioCppProbe(outcome="failed", detail="audio.cpp source revision differs from the pinned v0.8.2 build")
+    compiled = {
+        token.strip().lower()
+        for line in version.stdout.splitlines()
+        if line.startswith("backends:")
+        for token in line.removeprefix("backends:").split(",")
+    }
+    observed = {
+        compute
+        for prefix in cast(
+            "list[str]", _AUDIO_CPP_DEVICE_LINE.findall(devices.stdout + devices.stderr)
+        )
+        if (compute := _AUDIO_CPP_DEVICE_COMPUTES.get(prefix.upper())) is not None
+    }
+    computes = tuple(
+        compute
+        for compute in ("cpu", "metal", "vulkan", "cuda", "rocm")
+        if compute in observed and (compute if compute != "rocm" else "hip") in compiled
+    )
+    if not computes:
+        return AudioCppProbe(outcome="failed", detail="audio.cpp reported no usable compute device")
+    return AudioCppProbe(outcome="ready", computes=computes)
+
 
 def _nvidia_gpu_facts(nvml: NvmlLike | None) -> tuple[GpuDeviceFact, ...]:
     """Observe every NVIDIA device NVML can enumerate (full-detection path)."""
@@ -84,6 +166,11 @@ def _nvidia_gpu_facts(nvml: NvmlLike | None) -> tuple[GpuDeviceFact, ...]:
         try:
             handle = nvml.nvmlDeviceGetHandleByIndex(index)
         except Exception:  # noqa: BLE001 - device-level degradation
+            # Enumeration still proves a device exists. Keep its unknown class
+            # so a different qualified GPU cannot hide this unavailable device.
+            facts.append(
+                GpuDeviceFact(vendor="nvidia", index=index, detection_source="nvml")
+            )
             continue
         try:
             raw = nvml.nvmlDeviceGetName(handle)
@@ -144,6 +231,18 @@ def _read_sysfs_int(path: Path) -> int | None:
         return None
 
 
+def _amd_pci_device_id(device: Path) -> str | None:
+    """Read the stable AMD PCI chip identity without relying on marketing names."""
+    try:
+        vendor = int((device / "vendor").read_text().strip(), 16)
+        chip = int((device / "device").read_text().strip(), 16)
+    except (OSError, ValueError):
+        return None
+    if vendor != 0x1002 or not 0 <= chip <= 0xFFFF:
+        return None
+    return f"{vendor:04x}:{chip:04x}"
+
+
 def _amd_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
     """Observe every amdgpu render device under ``drm_root`` (passive sysfs)."""
     try:
@@ -164,6 +263,7 @@ def _amd_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
                 detection_source="amdgpu_sysfs",
                 vram_total_bytes=_read_sysfs_int(device / "mem_info_vram_total"),
                 gtt_total_bytes=_read_sysfs_int(device / "mem_info_gtt_total"),
+                pci_device_id=_amd_pci_device_id(device),
             )
         )
     return tuple(facts)
@@ -278,10 +378,18 @@ def gather_node_facts(
     # back into this package (function-level import on both sides keeps the
     # module graph acyclic).
     from skulk.shared.backends import (
+        AUDIO_CPP_BACKENDS_ENV,
+        AUDIO_CPP_BIN_ENV,
+        AUDIO_CPP_CUDA_BIN_ENV,
+        AUDIO_CPP_VULKAN_BIN_ENV,
+        COMFY_BACKENDS_ENV,
+        COMFY_BIN_ENV,
+        COMFY_ROOT_ENV,
         LLAMA_CPP_BACKENDS_ENV,
         LLAMA_SERVER_BACKENDS_ENV,
         LLAMA_SERVER_BIN_ENV,
         RPC_SERVER_BIN_ENV,
+        TEST_VIDEO_ENGINE_ENV,
         VLLM_BACKENDS_ENV,
         VLLM_BIN_ENV,
     )
@@ -353,6 +461,59 @@ def gather_node_facts(
     declared_llama_cpp = env.get(LLAMA_CPP_BACKENDS_ENV)
     declared_llama_server = env.get(LLAMA_SERVER_BACKENDS_ENV)
     declared_vllm = env.get(VLLM_BACKENDS_ENV)
+    comfy_binary = _binary_fact(COMFY_BIN_ENV, env)
+    comfy_root = env.get(COMFY_ROOT_ENV, "").strip() or None
+    comfy_root_state: Literal["not_configured", "missing", "ok"] = "not_configured"
+    if comfy_root is not None:
+        comfy_root_state = (
+            "ok" if os.path.isfile(os.path.join(comfy_root, "main.py")) else "missing"
+        )
+    declared_comfy = env.get(COMFY_BACKENDS_ENV)
+    audio_cpp_binary = _binary_fact(AUDIO_CPP_BIN_ENV, env)
+    audio_cpp_probe = AudioCppProbe()
+    if audio_cpp_binary.state == "ok":
+        assert audio_cpp_binary.configured_path is not None
+        audio_cpp_probe = probe_audio_cpp(audio_cpp_binary.configured_path)
+        if audio_cpp_probe.outcome == "ready":
+            from skulk.provisioning.audio_cpp import audio_cpp_model_specs
+
+            try:
+                audio_cpp_model_specs(Path(audio_cpp_binary.configured_path), environ=env)
+            except (OSError, RuntimeError) as error:
+                audio_cpp_probe = AudioCppProbe(outcome="failed", detail=str(error)[:400])
+    audio_cpp_vulkan_binary = _binary_fact(AUDIO_CPP_VULKAN_BIN_ENV, env)
+    audio_cpp_vulkan_probe = AudioCppProbe()
+    if audio_cpp_vulkan_binary.state == "ok":
+        assert audio_cpp_vulkan_binary.configured_path is not None
+        audio_cpp_vulkan_probe = probe_audio_cpp(audio_cpp_vulkan_binary.configured_path)
+        if audio_cpp_vulkan_probe.outcome == "ready":
+            from skulk.provisioning.audio_cpp import audio_cpp_model_specs
+
+            try:
+                audio_cpp_model_specs(
+                    Path(audio_cpp_vulkan_binary.configured_path), environ=env
+                )
+            except (OSError, RuntimeError) as error:
+                audio_cpp_vulkan_probe = AudioCppProbe(
+                    outcome="failed", detail=str(error)[:400]
+                )
+    audio_cpp_cuda_binary = _binary_fact(AUDIO_CPP_CUDA_BIN_ENV, env)
+    audio_cpp_cuda_probe = AudioCppProbe()
+    if audio_cpp_cuda_binary.state == "ok":
+        assert audio_cpp_cuda_binary.configured_path is not None
+        audio_cpp_cuda_probe = probe_audio_cpp(audio_cpp_cuda_binary.configured_path)
+        if audio_cpp_cuda_probe.outcome == "ready":
+            from skulk.provisioning.audio_cpp import audio_cpp_model_specs
+
+            try:
+                audio_cpp_model_specs(
+                    Path(audio_cpp_cuda_binary.configured_path), environ=env
+                )
+            except (OSError, RuntimeError) as error:
+                audio_cpp_cuda_probe = AudioCppProbe(
+                    outcome="failed", detail=str(error)[:400]
+                )
+    test_video_engine = (env.get(TEST_VIDEO_ENGINE_ENV, "").strip().lower() in ("1", "true", "yes", "on"))
 
     # Probe the binary's own device list only when there is a usable binary
     # and no SERVER-specific declaration answers the question. A llama.cpp
@@ -380,4 +541,16 @@ def gather_node_facts(
         declared_llama_cpp_backends=declared_llama_cpp,
         declared_llama_server_backends=declared_llama_server,
         declared_vllm_backends=declared_vllm,
+        test_video_engine=test_video_engine,
+        comfy_binary=comfy_binary,
+        comfy_root=comfy_root,
+        comfy_root_state=comfy_root_state,
+        declared_comfy_backends=declared_comfy,
+        audio_cpp_binary=audio_cpp_binary,
+        audio_cpp_probe=audio_cpp_probe,
+        audio_cpp_vulkan_binary=audio_cpp_vulkan_binary,
+        audio_cpp_vulkan_probe=audio_cpp_vulkan_probe,
+        audio_cpp_cuda_binary=audio_cpp_cuda_binary,
+        audio_cpp_cuda_probe=audio_cpp_cuda_probe,
+        declared_audio_cpp_backends=env.get(AUDIO_CPP_BACKENDS_ENV),
     )

@@ -3,6 +3,7 @@ import multiprocessing as mp
 import signal
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Self
@@ -24,6 +25,8 @@ from skulk.shared.types.chunks import (
     EmbeddingChunk,
     ErrorChunk,
     GenerationChunk,
+    MusicChunk,
+    VideoChunk,
 )
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
@@ -52,6 +55,7 @@ from skulk.shared.types.tasks import (
     AudioTranscription,
     ImageEdits,
     ImageGeneration,
+    MusicGeneration,
     RealtimeAudioTranscription,
     SpeechSynthesis,
     Task,
@@ -59,6 +63,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextEmbedding,
     TextGeneration,
+    VideoGeneration,
 )
 from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import (
@@ -146,6 +151,8 @@ class RunnerSupervisor:
     # event log. Production wiring always supplies both senders; the master
     # independently rejects payload events if a malformed participant sends one.
     _data_sender: "Sender[DataChunk] | None" = None
+    _on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None
+    _on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None
     _trace_sender: "Sender[TraceDataPacket] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
@@ -244,6 +251,8 @@ class RunnerSupervisor:
         context_token_limit: int | None = None,
         data_sender: "Sender[DataChunk] | None" = None,
         trace_sender: "Sender[TraceDataPacket] | None" = None,
+        on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None,
+        on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -293,6 +302,8 @@ class RunnerSupervisor:
             _event_sender=event_sender,
             _data_sender=data_sender,
             _trace_sender=trace_sender,
+            _on_video_output=on_video_output,
+            _on_music_output=on_music_output,
         )
 
         return self
@@ -333,6 +344,30 @@ class RunnerSupervisor:
                 return
             if event.command_id not in self._stream_started:
                 await self._send_data_frame(event.command_id, "started")
+            if (
+                isinstance(event.chunk, VideoChunk)
+                and event.chunk.output is not None
+                and self._on_video_output is not None
+            ):
+                # The finished container never rides DATA. Hand the manifest to
+                # the worker, which streams the file to the owning API on the
+                # OUTPUT_MEDIA plane while the terminal frame below tells the
+                # API to expect it.
+                self._on_video_output(
+                    event.command_id,
+                    self._command_owner.get(event.command_id),
+                    event.chunk,
+                )
+            if (
+                isinstance(event.chunk, MusicChunk)
+                and event.chunk.output is not None
+                and self._on_music_output is not None
+            ):
+                self._on_music_output(
+                    event.command_id,
+                    self._command_owner.get(event.command_id),
+                    event.chunk,
+                )
             await self._send_data_frame(
                 event.command_id,
                 _stream_frame_kind(event.chunk),
@@ -378,6 +413,8 @@ class RunnerSupervisor:
                     TextGeneration,
                     ImageGeneration,
                     ImageEdits,
+                    VideoGeneration,
+                    MusicGeneration,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -555,6 +592,8 @@ class RunnerSupervisor:
                     TextGeneration,
                     ImageGeneration,
                     ImageEdits,
+                    VideoGeneration,
+                    MusicGeneration,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -571,6 +610,8 @@ class RunnerSupervisor:
                 TextGeneration,
                 ImageGeneration,
                 ImageEdits,
+                VideoGeneration,
+                MusicGeneration,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
@@ -715,6 +756,8 @@ class RunnerSupervisor:
                                 TextGeneration,
                                 ImageGeneration,
                                 ImageEdits,
+                                VideoGeneration,
+                                MusicGeneration,
                                 TextEmbedding,
                                 SpeechSynthesis,
                                 AudioTranscription,
@@ -754,6 +797,10 @@ class RunnerSupervisor:
                     # ChunkGenerated output, which _emit diverts to the data
                     # plane (#279 Phase 2).
                     await self._emit(event)
+            # The runner ended its event stream, so it is exiting. Check it now,
+            # as a broken stream is checked, instead of leaving the exit to the
+            # five-second liveness watch.
+            await self._check_runner(RuntimeError("Runner closed its event stream"))
         except (ClosedResourceError, BrokenResourceError) as e:
             await self._check_runner(e)
         finally:
@@ -817,6 +864,8 @@ class RunnerSupervisor:
                     TextGeneration,
                     ImageGeneration,
                     ImageEdits,
+                    VideoGeneration,
+                    MusicGeneration,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -965,6 +1014,8 @@ class RunnerSupervisor:
                 TextGeneration,
                 ImageGeneration,
                 ImageEdits,
+                VideoGeneration,
+                MusicGeneration,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
@@ -982,9 +1033,29 @@ class RunnerSupervisor:
             model_id=model_id,
         )
 
+    def process_alive(self) -> bool:
+        """Return whether the runner subprocess is still running.
+
+        Teardown closes the process object once a finished runner is reaped,
+        after which ``is_alive()`` raises; a closed process is dead.
+        """
+
+        try:
+            return self.runner_process.is_alive()
+        except ValueError:
+            return False
+
     def diagnostics(self) -> RunnerSupervisorDiagnostics:
         """Return live read-only diagnostics for this runner supervisor."""
 
+        try:
+            pid = self.runner_process.pid
+            process_alive = self.runner_process.is_alive()
+            exit_code = self.runner_process.exitcode
+        except ValueError:
+            # The process object is closed once a finished runner has been
+            # reaped; the supervisor's own record is still worth reading.
+            pid, process_alive, exit_code = None, False, None
         return RunnerSupervisorDiagnostics(
             runner_id=str(self.bound_instance.bound_runner_id),
             instance_id=str(self.bound_instance.instance.instance_id),
@@ -995,9 +1066,9 @@ class RunnerSupervisor:
             start_layer=self.shard_metadata.start_layer,
             end_layer=self.shard_metadata.end_layer,
             n_layers=self.shard_metadata.n_layers,
-            pid=self.runner_process.pid,
-            process_alive=self.runner_process.is_alive(),
-            exit_code=self.runner_process.exitcode,
+            pid=pid,
+            process_alive=process_alive,
+            exit_code=exit_code,
             status_kind=self.status.__class__.__name__,
             status_since=self._status_since,
             seconds_in_status=time.monotonic() - self._status_since_monotonic,

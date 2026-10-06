@@ -198,7 +198,7 @@ const ModelName = styled.div<{ $canFit: boolean }>`
 const ModelId = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -216,7 +216,7 @@ const HfLink = styled.a`
   color: ${({ theme }) => theme.colors.textSecondary};
   flex-shrink: 0;
   transition: color 0.15s;
-  &:hover { color: ${({ theme }) => theme.colors.gold}; }
+  &:hover { color: ${({ theme }) => theme.colors.accentText}; }
 `;
 
 const BadgeRow = styled.div`
@@ -305,7 +305,7 @@ const LaunchBtn = styled(Button)<{ $canFit: boolean; $launching: boolean }>`
   ${({ $launching }) =>
     $launching &&
     css`
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       border-color: ${({ theme }) => theme.colors.goldDim};
       cursor: wait;
     `}
@@ -417,6 +417,14 @@ export function ModelCard({
       {/* Engine badges: MLX shows its sharding + transport; a GGUF model runs on
           the single-node llama.cpp engine, so it shows one llama.cpp badge. */}
       <BadgeRow>
+        {apiPreview?.compatibility_source === 'signed_engine_support' && (
+          <Badge title={t(
+            'modelCard.runtime.signedEngineSupportTooltip',
+            'This backend was admitted by an exact signed engine-build support claim.',
+          )}>
+            {t('modelCard.runtime.signedEngineSupport', 'Signed engine support')}
+          </Badge>
+        )}
         {isGguf ? (
           <Badge title={t('modelCard.runtime.llamaCppTooltip', 'Runs on the llama.cpp engine (GPU-offload GGUF), single node.')}>
             {t('placement.llamaCpp', 'llama.cpp')}
@@ -436,6 +444,12 @@ export function ModelCard({
           </>
         )}
       </BadgeRow>
+
+      {apiPreview?.compatibility_detail && (
+        <div style={{ color: theme.colors.textMuted, fontSize: 11, lineHeight: 1.4, marginBottom: 8 }}>
+          {apiPreview.compatibility_detail}
+        </div>
+      )}
 
       {/* Per-node download progress */}
       {perNode.length > 0 && (

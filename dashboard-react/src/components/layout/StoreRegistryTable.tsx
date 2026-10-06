@@ -22,12 +22,58 @@ export interface StoreRegistryEntry {
   total_bytes: number;
   files: string[];
   downloaded_at: string;
+  installed_card?: {
+    installed_identity: string;
+    verification: 'registry_verified' | 'local_legacy' | 'custom' | 'unresolved';
+    artifact_role: 'base' | 'vision_weights' | 'mtp_sidecar' | 'assistant' | 'served_draft' | 'vllm_draft';
+    owner_model_id?: string | null;
+    owner_card_id?: string | null;
+  } | null;
+  cached_on_nodes?: Array<{
+    node_id: string;
+    complete: boolean;
+    installed_identity: string;
+    bytes: number;
+    last_use_epoch_seconds: number;
+    in_use: boolean;
+  }>;
+  update_available?: boolean;
+  installed_not_current?: boolean;
+  /** The signed card the registry currently publishes for this alias, when one exists. */
+  current_registry_identity?: string | null;
+  reconciliation_state?: string;
+  advisories?: Array<{
+    advisory_id: string;
+    severity: 'low' | 'moderate' | 'high' | 'critical';
+    title: string;
+    description: string;
+    enforcement: 'warn';
+  }>;
+}
+
+/**
+ * Fleet cache-to-store reconciliation progress returned by `/store/reconciliation`.
+ * Transitional states (`scanning` and `importing`) describe an active pass;
+ * `complete` and `failed` are terminal for that pass, while `idle` means no pass
+ * has been scheduled yet.
+ */
+export interface StoreReconciliationStatus {
+  state: 'idle' | 'scanning' | 'importing' | 'complete' | 'failed';
+  inventory_only: boolean;
+  scanned_nodes: number;
+  discovered_artifacts: number;
+  imported_artifacts: number;
+  pending_imports: string[];
+  failures: string[];
+  last_verified_at?: string | null;
 }
 
 export interface StoreDownloadProgress {
   modelId: string;
   progress: number;
   status: string;
+  /** Actionable failure explanation from the store, set when status is 'failed'. */
+  error?: string | null;
 }
 
 export interface ModelCardInfo {
@@ -88,10 +134,15 @@ export interface StoreRegistryTableProps {
   /** Total available cluster RAM in bytes — used to disable launch for models that won't fit */
   totalClusterMemoryBytes?: number;
   onOptimize?: (modelId: string) => void;
+  /** Adopt the signed card the registry currently publishes for an installed
+   *  generation that is behind it (a custom, legacy, or older signed card). The
+   *  store swaps the sidecar without moving bytes when the bundle is the same. */
+  onUpdate?: (entry: StoreRegistryEntry) => void;
   /** Companion (drafter / MTP-head sidecar) entries keyed by model_id. These are
    *  not independently placeable, so their launch/placement/optiq actions are
    *  suppressed and a role badge is shown instead. */
   companions?: Record<string, CompanionInfo>;
+  reconciliation?: StoreReconciliationStatus | null;
 }
 
 /* ---- helpers ---- */
@@ -167,7 +218,7 @@ const MobileLabel = styled.span`
     display: inline;
     margin-right: 4px;
     font-size: ${({ theme }) => theme.fontSizes.xs};
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.subtleText};
   }
 `;
 
@@ -201,7 +252,7 @@ const EmptyBox = styled.div`
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const Table = styled.div`
@@ -232,7 +283,7 @@ const THead = styled.div`
   background: ${({ theme }) => theme.colors.surfaceSunken};
   font-size: ${({ theme }) => theme.fontSizes.tableHead};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   flex-shrink: 0;
 `;
 
@@ -345,13 +396,25 @@ const CompanionBadge = styled.span`
   font-size: 10px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 500;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 0 6px;
   text-transform: uppercase;
   letter-spacing: 0.3px;
+`;
+
+const StateBadge = styled.span<{ $tone?: 'ok' | 'warn' | 'danger' }>`
+  flex-shrink: 0;
+  font-size: 10px;
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme, $tone }) =>
+    $tone === 'danger' ? theme.colors.error : $tone === 'warn' ? theme.colors.gold : theme.colors.healthy};
+  background: ${({ theme, $tone }) =>
+    $tone === 'danger' ? theme.colors.errorBg : $tone === 'warn' ? theme.colors.goldBg : theme.colors.accentBg};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 1px 6px;
 `;
 
 const ChatBubble = styled.button`
@@ -422,7 +485,7 @@ const RefreshBtn = styled.button<{ $spinning: boolean }>`
   transition: color 0.15s, background 0.15s;
 
   &:hover {
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
     background: ${({ theme }) => theme.colors.goldBg};
   }
 
@@ -447,7 +510,7 @@ const PlayBtn = styled.button`
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   background: ${({ theme }) => theme.colors.goldBg};
   transition: background 0.15s, transform 0.1s;
 
@@ -464,7 +527,7 @@ const DisabledBtn = styled.span`
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   opacity: 0.4;
   cursor: not-allowed;
 `;
@@ -478,11 +541,27 @@ const PlacementBtn = styled.button`
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   transition: all 0.15s;
 
   &:hover {
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
+    background: ${({ theme }) => theme.colors.goldBg};
+  }
+`;
+
+const UpdateBtn = styled.button`
+  all: unset;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: ${({ theme }) => theme.colors.accentText};
+  border: 1px solid ${({ theme }) => theme.colors.accentText};
+  transition: all 0.15s;
+
+  &:hover {
     background: ${({ theme }) => theme.colors.goldBg};
   }
 `;
@@ -528,6 +607,36 @@ const ActionsCell = styled.div<{ $area?: MobileGridArea }>`
 
 const LinkIcon = () => <FiExternalLink size={14} style={{ flexShrink: 0 }} />;
 
+const ModelInfo = styled.div`
+  min-width: min(240px, calc(100vw - 44px));
+  max-width: 100%;
+`;
+
+const ModelInfoTitle = styled.div`
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 6px;
+
+  > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+`;
+
+const ModelInfoGrid = styled.div`
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  min-width: 0;
+
+  > * {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+`;
+
 function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: ModelCardInfo }) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -537,8 +646,8 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
   const resolved = card?.resolvedCapabilities;
 
   return (
-    <div style={{ minWidth: 240 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+    <ModelInfo>
+      <ModelInfoTitle>
         <span style={{ color: theme.colors.gold, fontWeight: 600 }}>
           {entry.model_id}
         </span>
@@ -555,10 +664,24 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
             <LinkIcon />
           </a>
         )}
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
+      </ModelInfoTitle>
+      <ModelInfoGrid>
         <span style={{ color: theme.colors.textMuted }}>{t('common.size', 'Size')}</span>
         <span>{formatBytes(entry.total_bytes)}</span>
+        {entry.installed_card && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.installedIdentity', 'Installed identity')}</span>
+            <span>{entry.installed_card.installed_identity}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.verification', 'Verification')}</span>
+            <span>{entry.installed_card.verification}</span>
+          </>
+        )}
+        {(entry.cached_on_nodes?.length ?? 0) > 0 && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.cachedOn', 'Cached on')}</span>
+            <span>{entry.cached_on_nodes?.map((node) => node.node_id).join(', ')}</span>
+          </>
+        )}
         {card?.baseModel && (
           <>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.baseModel', 'Base model')}</span>
@@ -615,7 +738,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
         <span>{entry.files.length}</span>
         <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.downloaded', 'Downloaded')}</span>
         <span>{new Date(entry.downloaded_at).toLocaleString()}</span>
-      </div>
+      </ModelInfoGrid>
       {entry.files.length > 0 && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
           <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
@@ -628,7 +751,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
           </div>
         </div>
       )}
-    </div>
+    </ModelInfo>
   );
 }
 
@@ -648,12 +771,23 @@ export function StoreRegistryTable({
   clusterCards = {},
   totalClusterMemoryBytes = 0,
   onOptimize,
+  onUpdate,
   companions = {},
+  reconciliation = null,
 }: StoreRegistryTableProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const TAG_COLORS = useMemo(() => buildTagColors(theme), [theme]);
-  const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
+  const orderedEntries = useMemo(() => [...entries].sort((left, right) => {
+    const leftOwner = left.installed_card?.owner_model_id ?? left.model_id;
+    const rightOwner = right.installed_card?.owner_model_id ?? right.model_id;
+    const ownerOrder = leftOwner.localeCompare(rightOwner);
+    if (ownerOrder !== 0) return ownerOrder;
+    const leftCompanion = left.installed_card?.artifact_role !== undefined && left.installed_card.artifact_role !== 'base';
+    const rightCompanion = right.installed_card?.artifact_role !== undefined && right.installed_card.artifact_role !== 'base';
+    return Number(leftCompanion) - Number(rightCompanion) || left.model_id.localeCompare(right.model_id);
+  }), [entries]);
+  const registeredIds = useMemo(() => new Set(orderedEntries.map((e) => e.model_id)), [orderedEntries]);
   const pendingDownloads = useMemo(
     () => activeDownloads.filter((d) => !registeredIds.has(d.modelId)),
     [activeDownloads, registeredIds],
@@ -665,7 +799,9 @@ export function StoreRegistryTable({
   }, [activeDownloads]);
 
   const isActive = (id: string) => activeModelIds.includes(id);
-  const downloadingCount = activeDownloads.length;
+  // Failed entries stay in the listing so their reason can be shown; only
+  // live transfers count toward the "downloading" header.
+  const downloadingCount = activeDownloads.filter((d) => d.status !== 'failed').length;
 
   return (
     <Container>
@@ -676,6 +812,11 @@ export function StoreRegistryTable({
             plural: entries.length !== 1 ? 's' : '',
           })}
           {downloadingCount > 0 && t('storeRegistry.downloadingCount', ', {count} downloading', { count: downloadingCount })}
+          {reconciliation && reconciliation.state !== 'idle' && (
+            <> · {reconciliation.state === 'importing'
+              ? t('storeRegistry.reconciling', 'reconciling {count} artifact(s)', { count: reconciliation.pending_imports.length })
+              : t('storeRegistry.reconciliationState', 'reconciliation {state}', { state: reconciliation.state })}</>
+          )}
         </HeaderText>
         <HeaderActions>
           {actions}
@@ -716,26 +857,45 @@ export function StoreRegistryTable({
               <Cell $area="files" />
               <Cell $align="right" $area="status">
                 <MobileLabel>{t('common.status', 'Status')}</MobileLabel>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                  <ProgressTrack>
-                    <ProgressFill $pct={dl.progress * 100} />
-                  </ProgressTrack>
-                  <ProgressText>{(dl.progress * 100).toFixed(0)}%</ProgressText>
-                </div>
+                {dl.status === 'failed' ? (
+                  <InfoTooltip
+                    content={dl.error ?? t('storeRegistry.downloadFailedNoReason', 'Download failed. Check the store host logs for details.')}
+                    placement="left"
+                    delay={0}
+                  >
+                    <StateBadge $tone="danger">{t('storeRegistry.downloadFailed', 'Download failed')}</StateBadge>
+                  </InfoTooltip>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                    <ProgressTrack>
+                      <ProgressFill $pct={dl.progress * 100} />
+                    </ProgressTrack>
+                    <ProgressText>{(dl.progress * 100).toFixed(0)}%</ProgressText>
+                  </div>
+                )}
               </Cell>
               <Cell $area="actions" />
             </TRow>
           ))}
 
           {/* Registered entries */}
-          {entries.map((entry) => {
+          {orderedEntries.map((entry) => {
             const dl = downloadMap.get(entry.model_id);
+            // A failed download must not lock the row's actions: the operator
+            // fixes the cause (token, gated terms) and retries via Download.
+            const downloading = dl !== undefined && dl.status !== 'failed';
             const active = isActive(entry.model_id);
             const tooLarge = totalClusterMemoryBytes > 0 && entry.total_bytes > totalClusterMemoryBytes;
             // Speculative-decoding companion (drafter / MTP-head sidecar): loaded
             // automatically with its parent, never placed on its own, so it gets
             // no launch/placement/optiq actions, only a role badge.
-            const companion = companions[entry.model_id];
+            const installedRole = entry.installed_card?.artifact_role;
+            const companion = installedRole && installedRole !== 'base'
+              ? {
+                  role: installedRole === 'mtp_sidecar' ? 'sidecar' as const : 'drafter' as const,
+                  parent: entry.installed_card?.owner_model_id ?? t('common.unknown', 'Unknown'),
+                }
+              : companions[entry.model_id];
             // OptiQ is mlx-optiq mixed-precision quantization, which operates on
             // MLX (safetensors) weights. GGUF models carry llama.cpp's own quant
             // format, so OptiQ doesn't apply — hide the optimize action for them.
@@ -748,7 +908,7 @@ export function StoreRegistryTable({
                     <StopBtn onClick={() => onStop(entry.model_id)} title={t('storeRegistry.stopModel', 'Stop model')}>
                       <MdClose size={20} />
                     </StopBtn>
-                  ) : !active && !dl && !companion && onLaunch ? (
+                  ) : !active && !downloading && !companion && onLaunch ? (
                     tooLarge ? (
                       <InfoTooltip content={t('storeRegistry.insufficientClusterMemory', 'Insufficient cluster memory')} placement="right" delay={0}>
                         <DisabledBtn aria-label={t('storeRegistry.insufficientMemory', 'Insufficient memory')}>
@@ -771,7 +931,7 @@ export function StoreRegistryTable({
                   ) : null}
                 </PlayCell>
                 <PlayCell $area="place">
-                  {!active && !dl && !companion && onPlacement ? (
+                  {!active && !downloading && !companion && onPlacement ? (
                     <PlacementBtn
                       onClick={() => onPlacement(entry.model_id)}
                       title={t('storeRegistry.configurePlacement', 'Configure placement')}
@@ -797,6 +957,36 @@ export function StoreRegistryTable({
                           ? t('storeRegistry.companionSidecar', 'Sidecar')
                           : t('storeRegistry.companionDrafter', 'Drafter')}
                       </CompanionBadge>
+                    </InfoTooltip>
+                  )}
+                  <StateBadge>{t('storeRegistry.central', 'Central')}</StateBadge>
+                  {entry.installed_card?.verification === 'registry_verified' ? (
+                    <StateBadge>{t('storeRegistry.verified', 'Verified')}</StateBadge>
+                  ) : entry.installed_card?.verification === 'local_legacy' ? (
+                    <StateBadge $tone="warn">{t('storeRegistry.localLegacy', 'Local legacy')}</StateBadge>
+                  ) : null}
+                  {(entry.cached_on_nodes?.length ?? 0) > 0 && (
+                    <StateBadge>{t('storeRegistry.cachedNodes', '{count} node(s)', { count: entry.cached_on_nodes?.length ?? 0 })}</StateBadge>
+                  )}
+                  {entry.update_available && (
+                    <StateBadge $tone="warn">{t('storeRegistry.updateAvailable', 'Update available')}</StateBadge>
+                  )}
+                  {entry.update_available && entry.current_registry_identity && onUpdate && !active && !downloading && !companion && (
+                    <UpdateBtn
+                      type="button"
+                      onClick={() => onUpdate(entry)}
+                      aria-label={t('storeRegistry.updateNamedModel', 'Update {modelId} to the signed card', { modelId: entry.model_id })}
+                    >
+                      {t('storeRegistry.update', 'Update')}
+                    </UpdateBtn>
+                  )}
+                  {(entry.advisories?.length ?? 0) > 0 && (
+                    <InfoTooltip
+                      content={entry.advisories?.map((advisory) => `${advisory.advisory_id}: ${advisory.title}`).join('\n')}
+                      placement="right"
+                      delay={0}
+                    >
+                      <StateBadge $tone="danger">{t('storeRegistry.securityAdvisory', 'Security advisory')}</StateBadge>
                     </InfoTooltip>
                   )}
                   {(() => {
@@ -853,7 +1043,15 @@ export function StoreRegistryTable({
                 </Cell>
                 <Cell $align="right" $area="status">
                   <MobileLabel>{t('common.status', 'Status')}</MobileLabel>
-                  {dl ? (
+                  {dl && dl.status === 'failed' ? (
+                    <InfoTooltip
+                      content={dl.error ?? t('storeRegistry.downloadFailedNoReason', 'Download failed. Check the store host logs for details.')}
+                      placement="left"
+                      delay={0}
+                    >
+                      <StateBadge $tone="danger">{t('storeRegistry.downloadFailed', 'Download failed')}</StateBadge>
+                    </InfoTooltip>
+                  ) : dl ? (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                       <ProgressTrack>
                         <ProgressFill $pct={dl.progress * 100} />

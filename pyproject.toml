@@ -1,6 +1,6 @@
 [project]
 name = "skulk"
-version = "1.5.1"
+version = "2.0.0"
 description = "Skulk: distributed AI inference across heterogeneous clusters (Apple Silicon MLX, AMD Vulkan, and NVIDIA CUDA nodes)"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -18,9 +18,12 @@ dependencies = [
   "packaging>=24.0",                                # extension version gating
   "skulk_pyo3_bindings",                            # rust bindings
   "anyio==4.11.0",
-  "mlx==0.31.2; sys_platform == 'darwin'",
-  "mlx[cpu]==0.30.6; sys_platform == 'linux'",
-  "mlx-lm",
+  "mlx==0.32.2; sys_platform == 'darwin'",
+  "mlx[cpu]==0.32.2; sys_platform == 'linux'",
+  # mlx-lm and mflux are Foxlight forks installed as wheels from the Foxlight
+  # index (see [tool.uv.sources]); a .postN version is a Foxlight build of
+  # one pinned fork commit.
+  "mlx-lm==0.32.0.post1",
   "mlx-optiq[convert]; sys_platform == 'darwin'",
   "tiktoken>=0.12.0",                             # required for kimi k2 tokenizer
   "hypercorn>=0.18.0",
@@ -28,7 +31,12 @@ dependencies = [
   "httpx>=0.28.1",
   "ddgs>=9.6.1",
   "tomlkit>=0.14.0",
-  "mflux>=0.16.9",
+  "tuf>=6,<7",
+  # mflux: Foxlight fork (see [tool.uv.sources]). Released mflux caps
+  # mlx<0.32.0; the fork pins upstream main at the commit that moved to
+  # mlx 0.32, unblocking the coordinated MLX stack bump (Tom, 2026-09-05:
+  # fork rather than drop or wait). Same ownership doctrine as mlx-lm.
+  "mflux==0.19.1.post1",
   "python-multipart>=0.0.21",
   "msgspec>=0.19.0",
   "zstandard>=0.23.0",
@@ -37,17 +45,18 @@ dependencies = [
   # 0.6.4 carries server-side audio model loading, MTP/APC fixes, and
   # request-local M-RoPE batching fixes. Skulk narrowly backports its
   # converted-Qwen norm guard; 0.6.5+ requires a separate MLX 0.32 upgrade.
-  "mlx-vlm==0.6.4; sys_platform == 'darwin'",
+  "mlx-vlm==0.6.17; sys_platform == 'darwin'",
   # Upstream 0.4.3 fails to advance Fish S2's hidden state while generating
   # codebooks, producing fluent but unrelated speech. The Foxlight post-release
-  # carries only upstream mlx-audio #693 on top of the 0.4.3 tag.
-  "mlx-audio @ https://github.com/Foxlight-Foundation/mlx-audio/archive/7f87787fe8a48faffe2a6fb16c87d457b5fac289.tar.gz ; sys_platform == 'darwin'",
+  # Upstream mlx-audio: the Foxlight fork (0.4.3 + upstream #693) is retired
+  # as of the Lane C stack bump; 0.5.1 carries #693 and everything since.
+  "mlx-audio==0.5.1; sys_platform == 'darwin'",
   # HARD dependency of encoded MLX speech output. mlx-audio delegates MP3,
   # FLAC, OGG, and Opus encoding to an ffmpeg executable; the packaged binary
   # keeps those advertised formats working on a fresh install without requiring
   # a separate Homebrew or system package.
   "imageio-ffmpeg>=0.6.0; sys_platform == 'darwin'",
-  "transformers>=5.5.0,<6.0.0",
+  "transformers>=5.14.0,<6.0.0",
   # HARD dependency of the MLX vision path, not an extra (#614's rule: nothing
   # optional may be load-bearing). transformers 5.x routes every
   # AutoImageProcessor through a torchvision backend, so without this wheel
@@ -57,8 +66,14 @@ dependencies = [
   # fluent description of a picture it had never seen. Pinned to the release
   # paired with the torch mlx-vlm already resolves, so adding image support
   # does not quietly move the torch under the rest of the stack.
-  "torchvision==0.26.0; sys_platform == 'darwin'",
+  "torchvision==0.28.0; sys_platform == 'darwin'",
   "jsonschema>=4.26.0",
+  # Operator cluster identity and authority records use Ed25519 and AES-GCM.
+  # This is a direct production dependency: secret storage must not rely on a
+  # transitive dependency accidentally keeping cryptography installed.
+  "cryptography>=46.0.3",
+  # Local operator pairing renders a terminal QR without requiring a browser.
+  "qrcode>=8.2",
   "webrtcvad-wheels>=2.0.14,<3",
   # Platform-conditional HARD dependency (#614): nothing optional may be
   # load-bearing. Without this binding an NVIDIA node silently loses VRAM
@@ -74,6 +89,7 @@ dependencies = [
 
 [project.scripts]
 skulk = "skulk.main:main"
+skulk-plugin-service = "skulk.extensions.service_setup:main"
 skulk-build-macos-local-network-probe-app = "skulk.connectivity.local_network_probe_app:main"
 skulk-macos-local-network-probe = "skulk.connectivity.local_network_probe:main"
 
@@ -118,18 +134,31 @@ skulk_pyo3_bindings = { workspace = true }
 # build on macOS 26 Metal SDK. The fork's only change is a DSB memory barrier for
 # Thunderbolt RDMA GPU coherence, which we don't need (Skulk uses libp2p, not RDMA).
 # mlx = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git", branch = "address-rdma-gpu-locks", marker = "sys_platform == 'darwin'" }
-# Foxlight-owned mlx-lm, reconciled onto upstream v0.31.3 (version 0.31.3.post1).
-# Pinned to the merge of Foxlight-Foundation/mlx-lm PR #1 (branch
-# foxlight/v0.31.3-base). Carries two Foxlight fixes not in upstream:
-# ArraysCache leak (mx.depends on BatchKVCache.extend) and the DeepSeek-V3.2
-# lightning-indexer batch>1 fix. The other historic carries (float32 logprobs,
-# GDN precision via upstream #997, left_padding eval via upstream #960) are
-# absorbed in upstream v0.31.3. See foxlight-docs initiatives/gemma4-mtp/
-# reconcile-notes.md for the sign-off evidence.
-mlx-lm = { git = "https://github.com/Foxlight-Foundation/mlx-lm", rev = "e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35" }
+# Foxlight-owned mlx-lm, reconciled onto upstream main @ 32bb4e68 (2026-09-04,
+# Lane C re-fork; branch foxlight/reconcile-main-20260904, fork PR #3).
+# Carries exactly two Foxlight deltas upstream never absorbed: the ArraysCache
+# leak fix (mx.depends on BatchKVCache.extend) and the DeepSeek-V3.2
+# lightning-indexer batch>1 fix. The CVE-2026-5843 gate is upstream code on
+# this base. Plan + evidence: foxlight-docs
+# initiatives/skulk-engine-refresh/lane-c-reconciliation-plan.md.
+# Both forks install as wheels built from their pinned commits (mflux
+# 051ba9ff, mlx-lm 587b88aa) by .github/workflows/fork-wheel.yml and
+# published to the Foxlight index. A git source made every fresh install
+# fetch the fork's whole history (mflux's is about 177 MB) to build one
+# commit. The index is append-only: moving a fork to another commit means
+# a new .postN in that workflow and in the pins above.
+mflux = { index = "foxlight" }
+mlx-lm = { index = "foxlight" }
 # Uncomment to use local mlx/mlx-lm development versions:
 # mlx = { path = "/Users/Shared/mlx", editable=true }
 # mlx-lm = { path = "/Users/Shared/mlx-lm", editable=true }
+
+# Foxlight-built wheels. Explicit: only packages whose source names this
+# index resolve from it, so nothing else can be substituted through it.
+[[tool.uv.index]]
+name = "foxlight"
+url = "https://wheels.foxlight.ai/simple/"
+explicit = true
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]

@@ -20,6 +20,7 @@ async def test_management_node_advertises_transport_without_placement() -> None:
             task_group.start_soon(
                 _publish_management_node_resources,
                 NodeId("api-only-node"),
+                True,
                 "zenoh",
                 telemetry_send,
                 None,
@@ -29,6 +30,183 @@ async def test_management_node_advertises_transport_without_placement() -> None:
             assert telemetry.node_id == NodeId("api-only-node")
             assert isinstance(telemetry.info, NodeResources)
             assert telemetry.info.data_transport == "zenoh"
+            assert telemetry.info.api_available is True
             assert telemetry.info.participation == "management"
             assert telemetry.info.backends == frozenset()
             task_group.cancel_scope.cancel()
+
+
+async def test_management_node_publishes_capability_changes_and_empty_withdrawal() -> (
+    None
+):
+    """Management-only peers advertise plugins without ever advertising compute."""
+    from skulk.utils.info_gatherer.info_gatherer import NodeCapabilities
+
+    tags = {"managed.echo"}
+    sender, receiver = channel[NodeTelemetry]()
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                _publish_management_node_resources,
+                NodeId("management"),
+                True,
+                "zenoh",
+                sender,
+                None,
+                0.01,
+                lambda: frozenset(tags),
+            )
+            first = await receiver.receive()
+            assert isinstance(first.info, NodeResources)
+            assert first.info.backends == frozenset()
+            reading = await receiver.receive()
+            assert isinstance(reading.info, NodeCapabilities)
+            assert reading.info.capabilities == frozenset(tags)
+            tags.clear()
+            while True:
+                reading = await receiver.receive()
+                if isinstance(reading.info, NodeCapabilities):
+                    assert reading.info.capabilities == frozenset()
+                    break
+            tasks.cancel_scope.cancel()
+
+
+async def test_management_node_publishes_capability_nodes_and_empty_withdrawal() -> (
+    None
+):
+    """Capability-node summaries follow the same publish-and-clear discipline as tags."""
+    from skulk.shared.types.capability_nodes import CapabilityNodeSummary
+    from skulk.utils.info_gatherer.info_gatherer import NodeCapabilityNodes
+
+    summary = CapabilityNodeSummary.model_validate(
+        {
+            "plugin_id": "foxlight.video-studio",
+            "node_id": "studio",
+            "bundle_id": "foxlight.video-studio",
+            "version": "1.0.0",
+            "status": "ready",
+            "owner_available": True,
+        }
+    )
+    published: list[CapabilityNodeSummary] = [summary]
+    sender, receiver = channel[NodeTelemetry]()
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                _publish_management_node_resources,
+                NodeId("management"),
+                True,
+                "zenoh",
+                sender,
+                None,
+                0.01,
+                None,
+                lambda: tuple(published),
+            )
+            while True:
+                reading = await receiver.receive()
+                if isinstance(reading.info, NodeCapabilityNodes):
+                    assert reading.info.nodes == (summary,)
+                    break
+            # Unchanged snapshots are not resent every tick: with the
+            # republish interval far above the poll, the next ticks carry
+            # resources only.
+            repeats = 0
+            with anyio.move_on_after(0.1):
+                while True:
+                    reading = await receiver.receive()
+                    if isinstance(reading.info, NodeCapabilityNodes):
+                        repeats += 1
+            assert repeats == 0
+            published.clear()
+            while True:
+                reading = await receiver.receive()
+                if isinstance(reading.info, NodeCapabilityNodes):
+                    assert reading.info.nodes == ()
+                    break
+            # After the clearing reading, no further empty readings follow.
+            seen_empty_again = False
+            with anyio.move_on_after(0.1):
+                while True:
+                    reading = await receiver.receive()
+                    if isinstance(reading.info, NodeCapabilityNodes):
+                        seen_empty_again = True
+            assert not seen_empty_again
+            tasks.cancel_scope.cancel()
+
+
+async def test_management_node_republishes_unchanged_snapshot_for_late_joiners() -> None:
+    """A non-empty snapshot is resent on the republish cadence even when unchanged."""
+    from skulk.shared.types.capability_nodes import CapabilityNodeSummary
+    from skulk.utils.info_gatherer.info_gatherer import NodeCapabilityNodes
+
+    summary = CapabilityNodeSummary.model_validate(
+        {
+            "plugin_id": "foxlight.video-studio",
+            "node_id": "studio",
+            "bundle_id": "foxlight.video-studio",
+            "version": "1.0.0",
+            "status": "ready",
+            "owner_available": True,
+        }
+    )
+    sender, receiver = channel[NodeTelemetry]()
+    readings = 0
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                _publish_management_node_resources,
+                NodeId("management"),
+                True,
+                "zenoh",
+                sender,
+                None,
+                0.01,
+                None,
+                lambda: (summary,),
+                0.05,
+            )
+            with anyio.move_on_after(0.3):
+                while True:
+                    reading = await receiver.receive()
+                    if isinstance(reading.info, NodeCapabilityNodes):
+                        readings += 1
+            tasks.cancel_scope.cancel()
+    assert readings >= 3
+
+
+async def test_management_node_advertises_the_pairing_gateway_role() -> None:
+    """A no-worker gateway advertises the role while it holds a route, then clears it."""
+    from skulk.utils.info_gatherer.info_gatherer import NodePairingGateway
+
+    holds_route = [True]
+    sender, receiver = channel[NodeTelemetry]()
+    readings: list[bool] = []
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                _publish_management_node_resources,
+                NodeId("management"),
+                True,
+                "zenoh",
+                sender,
+                None,
+                0.01,
+                None,
+                None,
+                30.0,
+                lambda: holds_route[0],
+            )
+            while len(readings) < 3:
+                message = await receiver.receive()
+                if isinstance(message.info, NodePairingGateway):
+                    readings.append(message.info.active)
+                    if len(readings) == 2:
+                        holds_route[0] = False
+            # One inactive reading clears peers; nothing follows while inactive.
+            with anyio.move_on_after(0.1):
+                while True:
+                    message = await receiver.receive()
+                    assert not isinstance(message.info, NodePairingGateway)
+            tasks.cancel_scope.cancel()
+    assert readings == [True, True, False]

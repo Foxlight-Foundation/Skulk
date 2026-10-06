@@ -12,6 +12,7 @@ async def test_monitor_publishes_resolved_data_transport() -> None:
     info_send, info_recv = channel[GatheredInfo]()
     gatherer = InfoGatherer(
         info_sender=info_send,
+        api_available=False,
         data_transport="zenoh",
         node_resources_poll_interval=0.01,
     )
@@ -23,5 +24,6 @@ async def test_monitor_publishes_resolved_data_transport() -> None:
             )
             resources = await info_recv.receive()
             assert isinstance(resources, NodeResources)
+            assert resources.api_available is False
             assert resources.data_transport == "zenoh"
             task_group.cancel_scope.cancel()

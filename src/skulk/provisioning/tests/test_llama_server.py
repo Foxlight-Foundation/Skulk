@@ -2,6 +2,7 @@
 """Provisioning tests: variant selection, verification, wiring, overrides."""
 
 import hashlib
+import importlib.metadata
 import io
 import os
 import tarfile
@@ -34,6 +35,20 @@ def test_select_variant_chain_by_gpu_vendor() -> None:
     assert select_variant_chain(make_facts(gpus=(AMD_STRIX,))) == ("vulkan",)
     assert select_variant(make_facts(gpus=(NVIDIA_A40,))) == "cuda"
     assert select_variant(make_facts(gpus=(AMD_STRIX,))) == "vulkan"
+
+
+def test_manifest_matches_pinned_linux_release_shape() -> None:
+    """Only Linux assets that exist for the pinned upstream tag are exposed."""
+    assert set(LLAMA_SERVER_ARTIFACTS) == {
+        ("x86_64", "cpu"),
+        ("x86_64", "vulkan"),
+        ("aarch64", "cpu"),
+        ("aarch64", "vulkan"),
+    }
+    for artifact in LLAMA_SERVER_ARTIFACTS.values():
+        assert LLAMA_SERVER_PIN in artifact.asset_name
+        assert len(artifact.sha256) == 64
+        assert artifact.url().endswith(artifact.asset_name)
 
 
 def test_select_variant_cpu_without_gpu() -> None:
@@ -92,7 +107,7 @@ _REAL_TRY_INSTALL_CUDA_WHEEL = provisioning.try_install_cuda_wheel
 
 @pytest.fixture(autouse=True)
 def _never_install_wheels(  # pyright: ignore[reportUnusedFunction] - autouse
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """No test here may attempt a real wheel install (#661 review, P1).
 
@@ -107,7 +122,14 @@ def _never_install_wheels(  # pyright: ignore[reportUnusedFunction] - autouse
     def _no_install(installed_facts: object) -> bool:
         return False
 
+    # Existing synthetic NVIDIA facts model the established x86_64 wheel lane.
+    # Tests for the narrower arm64 kernel contract override this explicitly.
+    monkeypatch.setattr(provisioning.platform_module, "machine", lambda: "x86_64")
     monkeypatch.setattr(provisioning, "try_install_cuda_wheel", _no_install)
+    # Hermetic against the host: a real user-installed CUDA engine or a
+    # read-only test environment must not change which path a test takes.
+    monkeypatch.setattr(provisioning, "SKULK_ENGINES_DIR", tmp_path / "engines")
+    monkeypatch.setattr(provisioning, "_environment_writable", lambda: True)
 
 
 def test_provision_downloads_verifies_and_installs(
@@ -457,6 +479,30 @@ def test_cuda_capability_gate() -> None:
     )
 
 
+def test_cuda_capability_gate_on_arm64(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The arm64 package tag must not admit a GPU without a compiled kernel."""
+    from skulk.shared.types.node_facts import GpuDeviceFact
+
+    monkeypatch.setattr(provisioning.platform_module, "machine", lambda: "aarch64")
+    gb10 = GpuDeviceFact(
+        vendor="nvidia",
+        name="NVIDIA GB10",
+        detection_source="nvml",
+        vram_total_bytes=128 * 2**30,
+        compute_capability="12.1",
+    )
+    gh200 = GpuDeviceFact(
+        vendor="nvidia",
+        name="NVIDIA GH200",
+        detection_source="nvml",
+        vram_total_bytes=96 * 2**30,
+        compute_capability="9.0",
+    )
+
+    assert provisioning._cuda_capability_ok(make_facts(gpus=(gb10,))) is True
+    assert provisioning._cuda_capability_ok(make_facts(gpus=(gh200,))) is False
+
+
 def test_cuda_wheel_install_gates_on_capability_and_uv(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -473,12 +519,46 @@ def test_cuda_wheel_install_gates_on_capability_and_uv(
     old_gpu = NVIDIA_A40.model_copy(update={"compute_capability": "7.5"})
     assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(old_gpu,)))
 
-    # Capability fine, but no uv on PATH: degrade, do not crash.
+    # Capability fine, but neither uv nor pip: degrade, do not crash.
     def _no_uv(_name: str) -> None:
         return None
 
     monkeypatch.setattr(provisioning.shutil, "which", _no_uv)
+    monkeypatch.setattr(provisioning, "_pip_available", lambda: False)
     assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
+
+
+@pytest.mark.parametrize(
+    ("uv_on_path", "writable"), [(False, True), (False, False), (True, False)]
+)
+def test_cuda_wheel_install_routes_packaged_runtimes_to_the_user_engine(
+    monkeypatch: pytest.MonkeyPatch, uv_on_path: bool, writable: bool
+) -> None:
+    """A runtime without uv, or a read-only one, installs for the user.
+
+    The operating-system packages ship pip but no uv and install Skulk
+    read-only, so the wheel cannot join their environment.
+    """
+    routed: list[object] = []
+
+    def _user_install(installed_facts: object) -> bool:
+        routed.append(installed_facts)
+        return True
+
+    def _unexpected_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("uv must not run against a packaged runtime")
+
+    def _which(_name: str) -> str | None:
+        return "/usr/bin/uv" if uv_on_path else None
+
+    monkeypatch.setattr(provisioning.shutil, "which", _which)
+    monkeypatch.setattr(provisioning, "_environment_writable", lambda: writable)
+    monkeypatch.setattr(provisioning, "_pip_available", lambda: True)
+    monkeypatch.setattr(provisioning, "_install_cuda_wheel_for_user", _user_install)
+    monkeypatch.setattr(provisioning.subprocess, "run", _unexpected_run)
+    facts = make_facts(gpus=(NVIDIA_A40,))
+    assert _REAL_TRY_INSTALL_CUDA_WHEEL(facts)
+    assert routed == [facts]
 
 
 def test_cuda_wheel_install_sanitizes_index_environment(
@@ -531,6 +611,9 @@ def test_cuda_wheel_install_sanitizes_index_environment(
     # Config-file discovery (project pyproject.toml/uv.toml) is the other
     # index side channel; the install must opt out of it entirely.
     assert "--no-config" in seen_argv
+    pin = provisioning.LLAMA_SERVER_PIN.removeprefix("b")
+    minimum = provisioning.LLAMA_SERVER_CUDA_MIN_REVISION
+    assert f"skulk-llama-server-cuda==0.{pin}.*,>=0.{pin}.{minimum}" in seen_argv
 
 
 def test_cuda_wheel_install_degrades_when_uv_cannot_execute(
@@ -685,3 +768,28 @@ def test_install_success_requires_usable_wheel(
     monkeypatch.setattr(provisioning.shutil, "which", _fake_which)
     monkeypatch.setattr(provisioning, "_cuda_wheel_usable", _still_unusable)
     assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
+
+
+@pytest.mark.parametrize(
+    ("distribution", "installed", "accepted"),
+    [
+        ("skulk-llama-server-cuda", "0.10753.0", False),
+        ("skulk-llama-server-cuda", "0.10753.1", True),
+        ("skulk-llama-server-cuda", "0.10753.2", True),
+        ("skulk-llama-server-cuda", "0.10753.1rc1", False),
+        # Above the floor but a pre-release: never a qualified engine.
+        ("skulk-llama-server-cuda", "0.10753.2rc1", False),
+        ("skulk-llama-server-cuda", "0.10754.1", False),
+        ("skulk-llama-server-cuda", "malformed", False),
+        ("skulk-llama-server-vulkan", "0.10753.0", True),
+    ],
+)
+def test_engine_selection_rejects_broken_cuda_revision(
+    monkeypatch: pytest.MonkeyPatch, distribution: str, installed: str, accepted: bool
+) -> None:
+    """An already installed old wheel must not bypass the corrected package floor."""
+    def version(name: str) -> str:
+        return installed
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    assert provisioning._wheel_version_matches_pin(distribution) is accepted

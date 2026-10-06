@@ -9,7 +9,7 @@ const meta: Meta<typeof ModelFilterPopover> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ position: 'relative', width: 300, height: 400, background: '#000', padding: 20 }}>
+      <div style={{ position: 'relative', width: 'min(300px, calc(100vw - 48px))', height: 400, padding: 20 }}>
         <Story />
       </div>
     ),

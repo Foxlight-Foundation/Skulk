@@ -9,7 +9,7 @@ import styled from 'styled-components';
 export const QuantBadge = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: 11px;
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.body};
   background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.sm};

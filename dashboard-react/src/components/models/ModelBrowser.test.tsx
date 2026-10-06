@@ -4,11 +4,11 @@ import { ThemeProvider } from 'styled-components';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { darkTheme } from '../../theme/theme';
-import type { HuggingFaceModel, ModelInfo } from '../../types/models';
+import type { HuggingFaceModel, ModelInfo, PickerMode, InstanceStatus } from '../../types/models';
 import { ModelBrowser } from './ModelBrowser';
 import type { BurstInfo } from './burst';
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 
 vi.mock('../../i18n/tolgee', () => ({
   useSkulkTranslation: () => ({
@@ -27,6 +27,8 @@ const MODELS: ModelInfo[] = [
     family: 'qwen',
     quantization: '4bit',
     storage_size_megabytes: 2100,
+    catalog_source: 'registry',
+    registry_provenance: 'foxlight',
   },
   {
     id: 'mlx-community/LongCat-AudioDiT-1B-4bit',
@@ -41,6 +43,17 @@ const MODELS: ModelInfo[] = [
     base_model: 'Canary 1B',
     family: 'canary',
     storage_size_megabytes: 3100,
+  },
+  {
+    id: 'Comfy-Org/MiniMax-H3-FL2VA-comfy-int8',
+    name: 'MiniMax H3 FL2VA',
+    base_model: 'MiniMax H3',
+    family: 'minimax-h3',
+    quantization: 'int8_convrot',
+    storage_size_megabytes: 40500,
+    capabilities: ['video_gen'],
+    catalog_source: 'registry',
+    registry_provenance: 'foxlight',
   },
 ];
 
@@ -59,6 +72,12 @@ let container: HTMLDivElement | null = null;
 async function renderBrowser(
   onSelect = vi.fn(),
   getBurstInfo?: (variantId: string) => BurstInfo | null,
+  mode: PickerMode = 'store-download',
+  models: ModelInfo[] = MODELS,
+  getModelFitStatus: () => 'fits_now' | 'fits_cluster_capacity' = () => 'fits_now',
+  instanceStatuses?: Record<string, InstanceStatus>,
+  canModelFit = () => true,
+  recentModelIds?: string[],
 ): Promise<ReturnType<typeof vi.fn>> {
   container = document.createElement('div');
   document.body.append(container);
@@ -67,15 +86,17 @@ async function renderBrowser(
     root?.render(
       <ThemeProvider theme={darkTheme}>
         <ModelBrowser
-          models={MODELS}
+          models={models}
           selectedModelId={null}
           favorites={new Set()}
-          canModelFit={() => true}
-          getModelFitStatus={() => 'fits_now'}
+          canModelFit={canModelFit}
+          instanceStatuses={instanceStatuses}
+          recentModelIds={recentModelIds}
+          getModelFitStatus={getModelFitStatus}
           onSelect={onSelect}
           onToggleFavorite={vi.fn()}
           hfTrendingModels={HUB_MODELS}
-          mode="store-download"
+          mode={mode}
           getBurstInfo={getBurstInfo}
           fleetMemoryBytes={64 * 2 ** 30}
         />
@@ -105,18 +126,19 @@ describe('ModelBrowser store discovery taxonomy', () => {
     await renderBrowser();
 
     expect(container?.querySelector('nav')).toBeNull();
-    expect(container?.textContent).toContain('Supported models');
+    expect(container?.textContent).toContain('Supported');
     expect(container?.textContent).not.toContain('Recommended');
 
     const sourceButtons = container?.querySelectorAll('[role="group"][aria-label="Model source"] button');
     expect(sourceButtons?.length).toBe(2);
-    expect(sourceButtons?.[0]?.textContent).toBe('Supported models');
-    expect(sourceButtons?.[1]?.textContent).toBe('Search Hugging Face');
+    expect(sourceButtons?.[0]?.textContent).toBe('Supported');
+    expect(sourceButtons?.[1]?.textContent).toBe('Hugging Face');
 
     expect(familyChips().map((chip) => chip.textContent)).toEqual([
       'All',
       'Canary',
       'LongCat AudioDiT',
+      'Minimax H3',
       'Qwen',
     ]);
   });
@@ -132,7 +154,7 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(container?.textContent).not.toContain('Qwen3 4B');
 
     const hubButton = Array.from(container?.querySelectorAll('button') ?? [])
-      .find((button) => button.textContent === 'Search Hugging Face');
+      .find((button) => button.textContent === 'Hugging Face');
     expect(hubButton).not.toBeUndefined();
     await act(async () => hubButton?.click());
 
@@ -147,6 +169,25 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(container?.textContent).not.toContain('Canary 1B');
   });
 
+  it('filters and badges video generation as a capability', async () => {
+    await renderBrowser();
+
+    // The video card carries its capability as a chip on its row.
+    expect(container?.textContent).toContain('MiniMax H3');
+    const chips = Array.from(container?.querySelectorAll('span') ?? [])
+      .filter((el) => el.textContent?.toLowerCase() === 'video gen');
+    expect(chips.length).toBeGreaterThan(0);
+
+    // The capability filter offers Video Gen and keeps only the video card.
+    const videoToggle = Array.from(container?.querySelectorAll('button') ?? [])
+      .find((button) => button.textContent === 'Video Gen' && button.hasAttribute('aria-pressed'));
+    expect(videoToggle).not.toBeUndefined();
+    await act(async () => videoToggle?.click());
+    expect(container?.textContent).toContain('MiniMax H3');
+    expect(container?.textContent).not.toContain('Qwen3 4B');
+    expect(container?.textContent).not.toContain('Canary 1B');
+  });
+
   it('shows readable card titles and starts downloads only from the explicit button', async () => {
     const onSelect = await renderBrowser();
 
@@ -156,6 +197,7 @@ describe('ModelBrowser store discovery taxonomy', () => {
     // and artifact format (the fixture id is an mlx-community repo).
     expect(container?.textContent).toContain('4bit');
     expect(container?.textContent).toContain('MLX');
+    expect(container?.textContent).toContain('Foxlight');
 
     // Clicking the row body of a single-variant group must NOT start a download.
     const rowTitle = Array.from(container?.querySelectorAll('span') ?? [])
@@ -171,6 +213,62 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(downloadButton).not.toBeNull();
     await act(async () => downloadButton?.click());
     expect(onSelect).toHaveBeenCalledWith('mlx-community/Qwen3-4B-4bit');
+  });
+
+  it('describes current fit without claiming a recommendation', async () => {
+    await renderBrowser(vi.fn(), undefined, 'launch');
+
+    expect(container?.textContent).toContain('Fits this cluster');
+    expect(container?.textContent).not.toContain('Recommended');
+  });
+
+  it('includes models that fit total cluster capacity under the fit heading', async () => {
+    await renderBrowser(
+      vi.fn(),
+      undefined,
+      'launch',
+      MODELS,
+      () => 'fits_cluster_capacity',
+    );
+
+    expect(container?.textContent).toContain('Fits this cluster');
+    expect(container?.textContent).not.toContain('Other');
+  });
+
+  it('offers grouped downloads without silently choosing a variant', async () => {
+    const onSelect = vi.fn();
+    await renderBrowser(onSelect, undefined, 'store-download', [
+      MODELS[0],
+      { ...MODELS[0], id: 'local/Qwen3-4B-8bit', quantization: '8bit' },
+    ]);
+    const download = Array.from(container?.querySelectorAll('button') ?? [])
+      .find(button => button.textContent === 'Download');
+    expect(download).toBeDefined();
+    await act(async () => download?.click());
+    expect(container?.textContent).toContain('local/Qwen3-4B-8bit'.split('/').pop());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(container?.querySelector('[aria-label="Download local/Qwen3-4B-8bit"]')).not.toBeNull();
+  });
+
+  it('does not apply registry provenance to an unprovenanced grouped variant', async () => {
+    const mixedModels = [
+      MODELS[0],
+      {
+        ...MODELS[0],
+        id: 'local/Qwen3-4B-8bit',
+        name: 'Qwen3-4B-8bit',
+        quantization: '8bit',
+        catalog_source: 'installed' as const,
+        registry_provenance: null,
+      },
+    ];
+    await renderBrowser(vi.fn(), undefined, 'launch', mixedModels);
+
+    expect(container?.textContent).not.toContain('Foxlight');
+    const rowTitle = Array.from(container?.querySelectorAll('span') ?? [])
+      .find((element) => element.textContent === 'Qwen3 4B');
+    await act(async () => rowTitle?.click());
+    expect(container?.textContent).toContain('Foxlight');
   });
 
   it('partitions burst models after placeable ones and keeps them interactive', async () => {
@@ -194,5 +292,63 @@ describe('ModelBrowser store discovery taxonomy', () => {
     expect(downloadButton).not.toBeNull();
     await act(async () => downloadButton?.click());
     expect(onSelect).toHaveBeenCalledWith('mlx-community/Qwen3-4B-4bit');
+  });
+});
+
+
+describe('discovery evidence and download independence', () => {
+  it('applies readiness and search filters to recent models', async () => {
+    await renderBrowser(undefined, undefined, 'store-download', MODELS, undefined, {
+      [MODELS[0].id]: { status: 'Ready', statusClass: 'ready' },
+      [MODELS[1].id]: { status: 'Loading', statusClass: 'loading' },
+    }, undefined, MODELS.map(model => model.id));
+    const recent = familyChips().find(chip => chip.textContent === 'Recent')!;
+    await act(async () => recent.click());
+    expect(container!.textContent).toContain('4 model groups');
+
+    const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('1 model group');
+    expect(container!.textContent).toContain('Qwen3 4B');
+    expect(container!.textContent).not.toContain('LongCat AudioDiT 1B');
+
+    const search = container!.querySelector<HTMLInputElement>('input[aria-label="Search models"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, 'Canary');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container!.textContent).toContain('0 model groups');
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('Canary 1B');
+    expect(container!.textContent).not.toContain('Qwen3 4B');
+  });
+
+  it('shows no ready models when readiness evidence is unavailable', async () => {
+    await renderBrowser();
+    const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('0 model groups');
+    expect(container!.textContent).not.toContain('Qwen3 4B');
+  });
+
+  it('filters readiness independently of catalog and storage status', async () => {
+    await renderBrowser(undefined, undefined, 'store-download', MODELS, undefined, {
+      [MODELS[0].id]: { status: 'Ready', statusClass: 'ready' },
+      [MODELS[1].id]: { status: 'Loading', statusClass: 'loading' },
+    });
+    const ready = [...container!.querySelectorAll('label')].find(label => label.textContent === 'Ready now')!.querySelector('input')!;
+    await act(async () => ready.click());
+    expect(container!.textContent).toContain('Qwen3 4B');
+    expect(container!.textContent).not.toContain('LongCat AudioDiT 1B');
+    expect(container!.textContent).not.toContain('Canary 1B');
+  });
+
+  it('allows a store download when no current placement capacity exists', async () => {
+    const select = vi.fn();
+    await renderBrowser(select, undefined, 'store-download', MODELS, undefined, undefined, () => false);
+    const download = container!.querySelector<HTMLButtonElement>(`button[aria-label="Download ${MODELS[0].id}"]`)!;
+    expect(download.disabled).toBe(false);
+    await act(async () => download.click());
+    expect(select).toHaveBeenCalledWith(MODELS[0].id);
   });
 });

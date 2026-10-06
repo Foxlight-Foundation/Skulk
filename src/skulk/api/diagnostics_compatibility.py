@@ -1,5 +1,6 @@
 """Compatibility helpers for cross-node operational diagnostics."""
 
+import json
 from collections.abc import Sequence
 
 from skulk.api.build_identity import (
@@ -29,7 +30,14 @@ def parse_peer_node_diagnostics(payload: object) -> NodeDiagnostics:
         The known portion of the peer's diagnostics bundle.
     """
 
-    return NodeDiagnostics.model_validate(payload, extra="ignore")
+    # Peer responses have already crossed a JSON boundary. Re-validating the
+    # decoded Python mapping in strict mode rejects valid JSON representations
+    # such as UUID and datetime strings. JSON-mode validation preserves strict
+    # field typing while applying only the coercions defined by the wire format.
+    return NodeDiagnostics.model_validate_json(
+        json.dumps(payload),
+        extra="ignore",
+    )
 
 
 def compare_diagnostics_builds(

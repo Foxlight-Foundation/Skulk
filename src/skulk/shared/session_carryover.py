@@ -52,11 +52,20 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
       avoids re-downloading). Failed outcomes are session-scoped, while
       pending/ongoing entries can appear only in legacy snapshots; all three
       are dropped so the restarted coordinator can re-plan them.
+    - ``instance_failures`` — bounded terminal operator truth recorded before
+      teardown. A master election must not make a failed placement appear to
+      have never happened.
     - ``node_*`` info maps — memory/identity/network facts; carrying them
       avoids an artificial ``PlacementInfoPendingError`` window after
       failover. Gossip refreshes them within seconds either way.
     - ``thunderbolt_bridge_cycles`` and ``tracing_enabled`` — cluster
       configuration facts that have no session affinity.
+    - ``model_trust_approved_remote_code_identities`` — security decisions are
+      master-ordered durable facts and must survive election without falling
+      back to independently written node snapshots.
+    - ``steward_action_proposals`` — bounded pending, approved, dispatched, and
+      terminal audit truth. Actionable records drive the promoted master's
+      exact-command recovery paths.
 
     - ``last_seen`` — carried, but re-stamped to ``now`` for every node the
       seed still knows about (the union of the carried ``node_*`` maps) rather
@@ -110,8 +119,13 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
     last_seen = {node_id: stamp for node_id in carried_node_ids}
     return State(
         instances=prior.instances,
+        instance_failures=prior.instance_failures,
         downloads=_completed_downloads_only(prior.downloads),
         tracing_enabled=prior.tracing_enabled,
+        model_trust_approved_remote_code_identities=(
+            prior.model_trust_approved_remote_code_identities
+        ),
+        steward_action_proposals=prior.steward_action_proposals,
         last_seen=last_seen,
         node_network=prior.node_network,
         node_thunderbolt=prior.node_thunderbolt,

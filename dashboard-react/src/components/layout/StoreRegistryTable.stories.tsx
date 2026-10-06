@@ -18,7 +18,7 @@ const meta: Meta<typeof StoreRegistryTable> = {
   title: 'Layout/StoreRegistryTable',
   component: StoreRegistryTable,
   parameters: { layout: 'centered' },
-  decorators: [(Story) => <div style={{ width: 700, padding: 24, background: '#111' }}><Story /></div>],
+  decorators: [(Story) => <div style={{ width: 'min(700px, calc(100vw - 48px))', padding: 24, }}><Story /></div>],
 };
 
 export default meta;
@@ -55,6 +55,52 @@ export const Loading: Story = {
 export const Empty: Story = {
   args: {
     entries: [],
+    onRefresh: () => {},
+    onDelete: () => {},
+  },
+};
+
+export const LongMetadata: Story = {
+  args: {
+    entries: [{
+      model_id: 'mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit',
+      total_bytes: 2.9 * GB,
+      files: [
+        '.gitattributes',
+        'README.md',
+        'config.json',
+        'model.safetensors',
+        'model.safetensors.index.json',
+        'tekken.json',
+      ],
+      downloaded_at: new Date(Date.now() - 86400000).toISOString(),
+      installed_card: {
+        installed_identity: 'local_t4s6oy3ch5u2r6kxst7e5igon2z2yvep35e4x5avqwb6j2dtuxwa',
+        verification: 'local_legacy',
+        artifact_role: 'base',
+      },
+      cached_on_nodes: [{
+        node_id: '12D3KooWFEguSgoQNiqpVKK418huqbmpom24Rf2wFe6Eff2crhWH',
+        complete: true,
+        installed_identity: 'local_t4s6oy3ch5u2r6kxst7e5igon2z2yvep35e4x5avqwb6j2dtuxwa',
+        bytes: 2.9 * GB,
+        last_use_epoch_seconds: Date.now() / 1000,
+        in_use: false,
+      }],
+    }],
+    modelCards: {
+      'mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit': {
+        family: 'voxtral_realtime',
+        quantization: '4bit',
+        baseModel: 'mistralai/Voxtral-Mini-4B-Realtime-2602',
+        capabilities: ['stt'],
+        resolvedCapabilities: {
+          supportsAudioInput: true,
+          supportsTranscription: true,
+          supportsRealtimeAudio: true,
+        },
+      },
+    },
     onRefresh: () => {},
     onDelete: () => {},
   },

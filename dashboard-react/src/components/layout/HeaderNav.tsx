@@ -1,6 +1,15 @@
 import styled, { css, useTheme } from 'styled-components';
-import { FiSettings, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
-import { MdHub } from 'react-icons/md';
+import {
+  FiSettings,
+  FiSidebar,
+  FiDatabase,
+  FiMessageSquare,
+  FiSun,
+  FiMoon,
+  FiLink,
+  FiPackage,
+} from 'react-icons/fi';
+import { MdHub, MdAutoAwesome } from 'react-icons/md';
 import { VscBug } from 'react-icons/vsc';
 import { Button } from '../common/Button';
 import SkulkIcon from '../icons/SkulkIcon';
@@ -8,9 +17,17 @@ import type { Theme } from '../../theme';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { useSkulkTranslation } from '../../i18n/tolgee';
-import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
+import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
+import { MOBILE_BREAKPOINT_PX, useCompactHeader } from '../../hooks/useMediaQuery';
 
-export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'operator';
+export type NavRoute =
+  | 'cluster'
+  | 'model-store'
+  | 'chat'
+  | 'steward'
+  | 'integrations'
+  | 'plugins'
+  | 'operator';
 
 export interface HeaderNavProps {
   showHome?: boolean;
@@ -35,6 +52,9 @@ export interface HeaderNavProps {
   instancesHealthy?: boolean;
   downloadProgress?: { count: number; percentage: number } | null;
   warnings?: { level: 'error' | 'warning'; items: { level: 'error' | 'warning'; message: string }[] } | null;
+  /** Open the shared Steward drawer without submitting a prompt. */
+  onOpenSteward?: () => void;
+  stewardOpen?: boolean;
   onOpenSettings?: () => void;
   className?: string;
 }
@@ -58,6 +78,11 @@ const Nav = styled.header`
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+
+  @media (max-width: 360px) {
+    padding: 12px 8px;
+    gap: 6px;
+  }
 `;
 
 const LeftGroup = styled.div`
@@ -76,7 +101,7 @@ const ToggleBtn = styled(Button)<{ $active: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       border-color: ${({ theme }) => theme.colors.goldDim};
     `}
 `;
@@ -95,11 +120,28 @@ const LogoBtn = styled.button<{ $disabled: boolean }>`
 `;
 
 const LogoText = styled.span`
-  font-size: ${({ theme }) => theme.fontSizes.xxl};
+  font-size: 30px;
+  line-height: 1;
+  letter-spacing: -.02em;
   font-weight: 700;
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.text};
-  filter: drop-shadow(0 0 4px ${({ theme }) => theme.colors.border});
+  @media (max-width: 360px) { font-size: 24px; }
+`;
+
+/** The trademark notice beside the wordmark: the ™ glyph already sits high in
+ *  its em box, so top alignment (not a superscript, which would raise it twice)
+ *  places it at the wordmark's cap height at any header size. It is muted like
+ *  the version number so the wordmark stays the focus. */
+const TrademarkSign = styled.span`
+  font-size: 0.4em;
+  font-weight: 400;
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  letter-spacing: 0;
+  line-height: 1;
+  vertical-align: top;
+  margin-left: 1px;
 `;
 
 const VersionTag = styled.sup`
@@ -107,7 +149,7 @@ const VersionTag = styled.sup`
   font-weight: 400;
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textSecondary};
-  margin-left: 2px;
+  margin-left: 6px;
   position: relative;
   top: -4px;
 `;
@@ -129,7 +171,7 @@ const NavLink = styled.button<{ $active?: boolean }>`
 
   &:hover {
     border-color: ${({ theme }) => theme.colors.goldDim};
-    color: ${({ theme }) => theme.colors.gold};
+    color: ${({ theme }) => theme.colors.accentText};
   }
 `;
 
@@ -304,6 +346,8 @@ const SidebarIcon = () => <FiSidebar size={18} />;
 const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
 const ChatIcon = () => <FiMessageSquare size={16} />;
+const StewardIcon = () => <MdAutoAwesome size={16} />;
+const IntegrationsIcon = () => <FiLink size={16} />;
 
 const ObservabilityIcon = () => <VscBug size={16} />;
 const SettingsIcon = () => <FiSettings size={16} />;
@@ -349,14 +393,24 @@ export function HeaderNav({
   onToggleMobileMenu,
   mobileRightOpen = false,
   onToggleMobileRight,
-  compact = false,
+  compact: compactOverride,
   instanceCount = 0,
   instancesHealthy = true,
   downloadProgress = null,
   warnings = null,
+  onOpenSteward,
+  stewardOpen = false,
   onOpenSettings,
   className,
 }: HeaderNavProps) {
+  // The steward link appears only while intelligent-fabric mode is on;
+  // polling keeps it in step with Settings changes made on any node.
+  const { data: stewardStatus } = useGetStewardStatusQuery(undefined, {
+    pollingInterval: 30000,
+  });
+  const stewardEnabled = stewardStatus?.enabled ?? false;
+  const compactViewport = useCompactHeader();
+  const compact = compactOverride ?? compactViewport;
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const dispatch = useAppDispatch();
@@ -407,7 +461,11 @@ export function HeaderNav({
         )}
         <LogoBtn $disabled={!showHome} onClick={showHome ? () => navigate('cluster') : undefined}>
           <SkulkIcon size={32} color={theme.colors.text} />
-          <LogoText>{t('header.brand', 'Skulk')}<VersionTag>{__APP_VERSION__}</VersionTag></LogoText>
+          <LogoText>
+            {t('header.brand', 'Skulk')}
+            <TrademarkSign>{t('header.brandTrademark', '™')}</TrademarkSign>
+            <VersionTag>{__APP_VERSION__}</VersionTag>
+          </LogoText>
         </LogoBtn>
         {warnings && warnings.items.length > 0 && (
           <WarningDot $level={warnings.level}>
@@ -438,6 +496,15 @@ export function HeaderNav({
         <NavLink $active={activeRoute === 'chat'} onClick={() => navigate('chat')}>
           <ChatIcon /> {t('header.nav.chat', 'Chat')}
         </NavLink>
+
+
+
+        <NavLink $active={activeRoute === 'integrations'} onClick={() => navigate('integrations')}>
+          <IntegrationsIcon /> {t('header.nav.integrations', 'Integrations')}
+        </NavLink>
+        <NavLink $active={activeRoute === 'plugins'} onClick={() => navigate('plugins')}>
+          <FiPackage /> {t('header.nav.plugins', 'Plugins')}
+        </NavLink>
         </>)}
 
         {instanceCount > 0 && (
@@ -462,7 +529,7 @@ export function HeaderNav({
                 dominantBaseline="central"
                 fill={instancesHealthy ? theme.colors.healthy : theme.colors.error}
                 fontSize="13"
-                fontFamily="'Outfit', sans-serif"
+                fontFamily="'Instrument Sans', sans-serif"
                 fontWeight="700"
               >
                 {instanceCount}
@@ -471,6 +538,8 @@ export function HeaderNav({
           </InstanceToggle>
         )}
 
+        {compact && stewardEnabled && <Button variant="ghost" size="lg" icon onClick={onOpenSteward ?? (() => navigate('steward'))} aria-label={t('steward.open', 'Ask Skulk')} aria-pressed={stewardOpen}
+          style={stewardOpen ? { color: theme.colors.live, borderColor: theme.colors.borderLive, background: theme.colors.liveBg } : undefined}><StewardIcon /></Button>}
         {!compact && (<>
         <Button
           variant="ghost"
@@ -487,6 +556,8 @@ export function HeaderNav({
           {themeName === 'dark' ? <FiSun size={16} /> : <FiMoon size={16} />}
         </Button>
 
+        {stewardEnabled && <Button variant="ghost" size="lg" icon onClick={onOpenSteward ?? (() => navigate('steward'))} aria-label={t('steward.open', 'Ask Skulk')} aria-pressed={stewardOpen}
+          style={stewardOpen ? { color: theme.colors.live, borderColor: theme.colors.borderLive, background: theme.colors.liveBg } : undefined}><StewardIcon /></Button>}
         <Button
           variant={observabilityPanelOpen ? 'outline' : 'ghost'}
           size="lg"

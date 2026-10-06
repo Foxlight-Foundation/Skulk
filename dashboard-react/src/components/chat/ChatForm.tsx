@@ -1,3 +1,4 @@
+import { Select as DesignedSelect } from '../common/Select';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
 import styled, { css } from 'styled-components';
@@ -16,6 +17,15 @@ import {
 import { MAX_REFERENCE_AUDIO_BYTES } from '../../audio/speechSynthesisRequest';
 
 export interface ChatFormProps {
+  /** Fabric conversation uses the reference amber composer treatment. */
+  steward?: boolean;
+  /** Compact drawer composer omits decorative chrome and unavailable attachments. */
+  compact?: boolean;
+  /** Optional owner-controlled draft, preserved across presentation changes. */
+  draft?: string;
+  /** Updates the owner-controlled draft. */
+  onDraftChange?: (value: string) => void;
+
   onSend: (message: string, files: ChatUploadedFile[]) => void;
   onCancel?: () => void;
   isLoading?: boolean;
@@ -54,6 +64,8 @@ export interface ChatFormProps {
   selectedVoice?: string | null;
   /** Discovered model-native or bundled-reference voices for the TTS model. */
   voiceOptions?: ChatVoiceOption[];
+  /** Fixed product voice label when this conversation must not expose a voice picker. */
+  fixedSpeechVoiceLabel?: string;
   /** Whether the selected model's voice catalog is still loading. */
   isVoiceCatalogLoading?: boolean;
   /** Request-scoped reference clip used to condition dashboard TTS playback. */
@@ -62,6 +74,8 @@ export interface ChatFormProps {
   referenceAudioText?: string;
   /** Whether final assistant messages should be spoken automatically. */
   autoSpeakAssistant?: boolean;
+  /** Speak short interjections while a code block streams. */
+  narrateCodeBlocks?: boolean;
   /** Enable a persistent server-VAD conversation instead of push-to-transcribe. */
   realtimeVoiceEnabled?: boolean;
   /** Submit final realtime transcripts through the dashboard chat flow. */
@@ -82,6 +96,8 @@ export interface ChatFormProps {
   onReferenceAudioTextChange?: (text: string) => void;
   /** Toggle automatic TTS playback for final assistant messages. */
   onAutoSpeakAssistantChange?: (enabled: boolean) => void;
+  /** Toggle spoken interjections while a code block streams. */
+  onNarrateCodeBlocksChange?: (enabled: boolean) => void;
   onRealtimeVoiceEnabledChange?: (enabled: boolean) => void;
   onAutoSubmitVoiceChange?: (enabled: boolean) => void;
   onRealtimeTranscript?: (text: string, final: boolean) => void;
@@ -96,10 +112,11 @@ export interface ChatFormProps {
 
 /* ---- styles ---- */
 
-const Form = styled.form<{ $dragOver: boolean }>`
+const Form = styled.form<{ $dragOver: boolean; $steward: boolean }>`
+  ${({ $steward, theme }) => $steward && css`border-color: ${theme.colors.borderLive} !important; box-shadow: 0 0 0 3px ${theme.colors.liveBg};`}
   position: relative;
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.surfaceElevated};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
   border-radius: ${({ theme }) => theme.radii.lg};
   overflow: hidden;
   transition: border-color 0.15s;
@@ -111,24 +128,19 @@ const Form = styled.form<{ $dragOver: boolean }>`
   ${({ $dragOver }) =>
     $dragOver &&
     css`
-      border-color: ${({ theme }) => theme.colors.gold};
+      border-color: ${({ theme }) => theme.colors.accentText};
       box-shadow: 0 0 12px ${({ theme }) => theme.colors.goldDim};
     `}
-`;
-
-const AccentLine = styled.div`
-  height: 1px;
-  background: linear-gradient(90deg, transparent, ${({ theme }) => theme.colors.goldDim}, transparent);
 `;
 
 const HeaderRow = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  font-size: ${({ theme }) => theme.fontSizes.xs};
+  padding: 12px 14px 0;
+  font-size: 13px;
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
     flex-wrap: wrap;
@@ -141,10 +153,10 @@ const VoiceRow = styled.div`
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 0 12px 8px;
+  padding: 10px 14px 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
 `;
 
 const VoiceGroup = styled.div`
@@ -159,11 +171,11 @@ const ReferenceAudioGroup = styled(VoiceGroup)`
 `;
 
 const VoiceLabel = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-size: ${({ theme }) => theme.fontSizes.xs};
 `;
 
-const VoiceSelect = styled.select`
+const VoiceSelect = styled(DesignedSelect)`
   appearance: none;
   min-width: 96px;
   max-width: 180px;
@@ -178,11 +190,12 @@ const VoiceSelect = styled.select`
   padding: 0 8px;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 
   &:disabled {
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.subtleText};
   }
 
   option {
@@ -204,11 +217,12 @@ const VoiceInput = styled.input`
   padding: 0 8px;
 
   &:focus {
+    outline: none;
     border-color: ${({ theme }) => theme.colors.goldDim};
   }
 
   &::placeholder {
-    color: ${({ theme }) => theme.colors.textMuted};
+    color: ${({ theme }) => theme.colors.subtleText};
   }
 `;
 
@@ -236,8 +250,8 @@ const VoiceToggle = styled.button<{ $active: boolean }>`
 
   ${({ $active }) =>
     $active
-      ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      ? css`border-color: ${({ theme }) => theme.colors.accentText}; color: ${({ theme }) => theme.colors.accentText}; background: ${({ theme }) => theme.colors.goldBg};`
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.subtleText}; &:hover { border-color: ${({ theme }) => theme.colors.accentText}; color: ${({ theme }) => theme.colors.accentText}; }`}
 
   &:disabled {
     opacity: 0.88;
@@ -254,14 +268,14 @@ const VoiceIconBtn = styled(Button)<{ $active?: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.accentText};
       border-color: ${({ theme }) => theme.colors.goldDim};
       background: ${({ theme }) => theme.colors.goldBg};
     `}
 `;
 
 const VoiceStatus = styled.span<{ $error?: boolean }>`
-  color: ${({ $error, theme }) => ($error ? theme.colors.error : theme.colors.goldTextDim)};
+  color: ${({ $error, theme }) => ($error ? theme.colors.error : theme.colors.accentText)};
   font-variant-numeric: tabular-nums;
 `;
 
@@ -286,7 +300,7 @@ const ModelLine = styled.div`
 const ModelBtn = styled.button`
   all: unset;
   cursor: pointer;
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
   font: inherit;
   transition: opacity 0.15s;
   &:hover { opacity: 0.8; }
@@ -303,17 +317,17 @@ const ThinkingBtn = styled.button<{ $active: boolean }>`
 
   ${({ $active }) =>
     $active
-      ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldTextDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      ? css`border-color: ${({ theme }) => theme.colors.accentText}; color: ${({ theme }) => theme.colors.accentText}; background: ${({ theme }) => theme.colors.goldBg};`
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.subtleText}; &:hover { border-color: ${({ theme }) => theme.colors.accentText}; color: ${({ theme }) => theme.colors.accentText}; }`}
 `;
 
 const Stat = styled.span`
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   font-variant-numeric: tabular-nums;
 `;
 
 const StatValue = styled.span`
-  color: ${({ theme }) => theme.colors.goldTextDim};
+  color: ${({ theme }) => theme.colors.accentText};
 `;
 
 const Spacer = styled.span`
@@ -323,8 +337,8 @@ const Spacer = styled.span`
 const InputRow = styled.div`
   display: flex;
   align-items: flex-end;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 12px;
+  padding: 10px 14px;
 
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
     gap: 6px;
@@ -335,27 +349,22 @@ const AttachBtn = styled(Button)`
   flex-shrink: 0;
 `;
 
-const Prompt = styled.span`
-  color: ${({ theme }) => theme.colors.gold};
-  font-size: ${({ theme }) => theme.fontSizes.lg};
-  font-family: ${({ theme }) => theme.fonts.body};
-  flex-shrink: 0;
-  line-height: 28px;
-`;
-
-const TextArea = styled.textarea`
+const TextArea = styled.textarea<{ $steward: boolean }>`
   all: unset;
   flex: 1;
   min-width: 0;
-  font-size: ${({ theme }) => theme.fontSizes.md};
+  font-size: ${({ $steward }) => $steward ? '18px' : '16px'};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.text};
-  min-height: 28px;
+  min-height: 30px;
   max-height: 150px;
   resize: none;
   line-height: 1.5;
 
-  &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
+  /* The composer frame supplies the focus indication around the whole control. */
+  &:focus-visible { outline: none; }
+
+  &::placeholder { color: ${({ theme }) => theme.colors.subtleText}; }
 `;
 
 const SendBtn = styled(Button)`
@@ -374,24 +383,20 @@ const DragOverlay = styled.div`
   border-radius: ${({ theme }) => theme.radii.lg};
   font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.gold};
+  color: ${({ theme }) => theme.colors.accentText};
 `;
 
 const HelperText = styled.div`
-  padding: 4px 12px 8px;
+  margin: 0 14px;
+  padding: 8px 0 10px;
+  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.metadataText};
   text-align: center;
 
   /* Keyboard hints (Enter / Shift+Enter / drag & drop) mean nothing on a
    * phone; they and their rule hide below the breakpoint. */
-  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
-    display: none;
-  }
-`;
-
-const BottomAccentLine = styled(AccentLine)`
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
     display: none;
   }
@@ -404,6 +409,10 @@ function isLocalBrowserHostname(hostname: string): boolean {
 /* ---- component ---- */
 
 export function ChatForm({
+  steward = false,
+  compact = false,
+  draft,
+  onDraftChange,
   onSend,
   onCancel,
   isLoading = false,
@@ -427,10 +436,12 @@ export function ChatForm({
   selectedSpeechModelId = null,
   selectedVoice = null,
   voiceOptions = [],
+  fixedSpeechVoiceLabel,
   isVoiceCatalogLoading = false,
   referenceAudioFile = null,
   referenceAudioText = '',
   autoSpeakAssistant = false,
+  narrateCodeBlocks = true,
   realtimeVoiceEnabled = true,
   autoSubmitVoice = false,
   isSpeaking = false,
@@ -441,6 +452,7 @@ export function ChatForm({
   onReferenceAudioChange,
   onReferenceAudioTextChange,
   onAutoSpeakAssistantChange,
+  onNarrateCodeBlocksChange,
   onRealtimeVoiceEnabledChange,
   onAutoSubmitVoiceChange,
   onRealtimeTranscript,
@@ -450,7 +462,16 @@ export function ChatForm({
   className,
 }: ChatFormProps) {
   const { t } = useSkulkTranslation();
-  const [message, setMessage] = useState('');
+  const [localMessage, setLocalMessage] = useState('');
+  const message = draft ?? localMessage;
+  const messageRef = useRef(message);
+  messageRef.current = message;
+  const setMessage = useCallback((next: string | ((previous: string) => string)) => {
+    const value = typeof next === 'function' ? next(messageRef.current) : next;
+    messageRef.current = value;
+    if (onDraftChange) onDraftChange(value);
+    else setLocalMessage(value);
+  }, [onDraftChange]);
   const [files, setFiles] = useState<ChatUploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isStartingRecording, setIsStartingRecording] = useState(false);
@@ -596,7 +617,7 @@ export function ChatForm({
       if (!current) return trimmed;
       return `${current}\n${trimmed}`;
     });
-  }, []);
+  }, [setMessage]);
 
   const startRecording = useCallback(async () => {
     if (
@@ -850,6 +871,7 @@ export function ChatForm({
       if (componentMountedRef.current) setIsStartingRecording(false);
     }
   }, [
+    setMessage,
     appendTranscript,
     cleanupRecordingResources,
     isLoading,
@@ -1019,7 +1041,7 @@ export function ChatForm({
         textareaRef.current.style.height = 'auto';
       }
     },
-    [isLoading, canSend, message, files, onSend, clearFiles],
+    [isLoading, canSend, message, files, onSend, clearFiles, setMessage],
   );
 
   useEffect(() => {
@@ -1091,12 +1113,12 @@ export function ChatForm({
     <Form
       className={className}
       $dragOver={isDragOver}
+      $steward={steward}
       onSubmit={handleSubmit}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <AccentLine />
 
       {isDragOver && <DragOverlay>{t('chat.form.dropFilesHere', 'Drop files here')}</DragOverlay>}
 
@@ -1141,7 +1163,7 @@ export function ChatForm({
             <VoiceSelect
               value={selectedTranscriptionId ?? ''}
               disabled={transcriptionModels.length === 0 || isStartingRecording || isRecording || isTranscribing}
-              onChange={(event) => onSelectTranscriptionModel?.(event.target.value || null)}
+              onValueChange={(selectedValue) => onSelectTranscriptionModel?.(selectedValue || null)}
               aria-label={t('chat.form.selectTranscriptionModel', 'Select transcription model')}
             >
               {transcriptionModels.length === 0 ? (
@@ -1222,27 +1244,33 @@ export function ChatForm({
 
           <VoiceGroup>
             <VoiceLabel>{t('chat.form.ttsLabel', 'TTS')}</VoiceLabel>
-            <VoiceSelect
-              value={selectedSpeechId ?? ''}
-              disabled={speechModels.length === 0}
-              onChange={(event) => onSelectSpeechModel?.(event.target.value || null)}
-              aria-label={t('chat.form.selectSpeechModel', 'Select speech model')}
-            >
-              {speechModels.length === 0 ? (
-                <option value="">{t('chat.form.noSpeechModels', 'No TTS')}</option>
-              ) : (
-                speechModels.map((model) => (
-                  <option key={model.modelId} value={model.modelId}>
-                    {model.label}
-                  </option>
-                ))
-              )}
-            </VoiceSelect>
-            {speechModels.length > 0 && selectedSpeechModel?.supportsVoiceListing && (
+            {fixedSpeechVoiceLabel ? (
+              <VoiceStatus>{fixedSpeechVoiceLabel}</VoiceStatus>
+            ) : (
+              <VoiceSelect
+                value={selectedSpeechId ?? ''}
+                disabled={speechModels.length === 0}
+                onValueChange={(selectedValue) => onSelectSpeechModel?.(selectedValue || null)}
+                aria-label={t('chat.form.selectSpeechModel', 'Select speech model')}
+              >
+                {speechModels.length === 0 ? (
+                  <option value="">{t('chat.form.noSpeechModels', 'No TTS')}</option>
+                ) : (
+                  speechModels.map((model) => (
+                    <option key={model.modelId} value={model.modelId}>
+                      {model.label}
+                    </option>
+                  ))
+                )}
+              </VoiceSelect>
+            )}
+            {!fixedSpeechVoiceLabel
+              && speechModels.length > 0
+              && selectedSpeechModel?.supportsVoiceListing && (
                 <VoiceSelect
                   value={voiceOptions.some((voice) => voice.id === selectedVoice) ? selectedVoice ?? '' : ''}
                   disabled={isVoiceCatalogLoading}
-                  onChange={(event) => onSelectedVoiceChange?.(event.target.value || null)}
+                  onValueChange={(selectedValue) => onSelectedVoiceChange?.(selectedValue || null)}
                   aria-label={t('chat.form.voiceName', 'Voice')}
                 >
                   <option value="">
@@ -1258,7 +1286,7 @@ export function ChatForm({
                     </option>
                   ))}
                 </VoiceSelect>
-            )}
+              )}
             <VoiceToggle
               type="button"
               disabled={!speechReady}
@@ -1268,6 +1296,21 @@ export function ChatForm({
             >
               {t('chat.form.autoSpeak', 'Auto')}
             </VoiceToggle>
+            {autoSpeakAssistant && (
+              <VoiceToggle
+                type="button"
+                disabled={!speechReady}
+                $active={narrateCodeBlocks}
+                aria-pressed={narrateCodeBlocks}
+                onClick={() => onNarrateCodeBlocksChange?.(!narrateCodeBlocks)}
+                title={t(
+                  'chat.form.narrateCodeTitle',
+                  'Speak short interjections while a code block streams instead of staying silent',
+                )}
+              >
+                {t('chat.form.narrateCode', 'Narrate code')}
+              </VoiceToggle>
+            )}
             {isSpeaking ? (
               <VoiceIconBtn
                 variant="ghost"
@@ -1366,7 +1409,7 @@ export function ChatForm({
 
       {/* Input row */}
       <InputRow>
-        <AttachBtn
+        {(!compact || supportsImageAttachments) && <AttachBtn
           variant="ghost"
           size="sm"
           icon
@@ -1376,9 +1419,9 @@ export function ChatForm({
           aria-label={t('chat.form.attachFile', 'Attach file')}
         >
           <FiPaperclip size={17} />
-        </AttachBtn>
-        <Prompt>▶</Prompt>
+        </AttachBtn>}
         <TextArea
+          $steward={steward}
           ref={textareaRef}
           value={message}
           onChange={(e) => {
@@ -1404,7 +1447,7 @@ export function ChatForm({
           </SendBtn>
         ) : (
           <SendBtn
-            variant="primary"
+            variant={steward ? "approve" : "solid"}
             size="sm"
             icon
             type="submit"
@@ -1416,15 +1459,14 @@ export function ChatForm({
         )}
       </InputRow>
 
-      <BottomAccentLine />
-      <HelperText>
+      {!compact && <HelperText>
         {supportsImageAttachments
           ? t(
               'chat.form.helperWithImages',
               'Enter to send - Shift+Enter for new line - Drag & drop images',
             )
           : t('chat.form.helper', 'Enter to send - Shift+Enter for new line')}
-      </HelperText>
+      </HelperText>}
 
       {/* Hidden file input */}
       <input

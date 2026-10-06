@@ -86,3 +86,15 @@ logging:
 # Optional Hugging Face token.
 # The dashboard Settings UI can manage this too.
 # hf_token: hf_xxxxxxxxxxxxxxxxxxxx
+
+# Intelligent fabric: the resident steward (small always-on operator
+# assistant the fabric places and repairs automatically). Off by default.
+# When enabled, the master keeps exactly one hidden steward placement using
+# the first servable model from steward_models, and the dashboard/API expose
+# the steward chat surface. The steward is read-only in this release: it
+# observes and advises, it cannot change the cluster.
+#intelligent_fabric:
+#  enabled: false
+#  steward_models:
+#    - mlx-community/Qwen3.5-4B-MLX-4bit
+#    - unsloth/Qwen3.5-4B-GGUF

@@ -1,0 +1,741 @@
+# Copyright 2026 Foxlight Foundation
+"""Opt-in joined qualification against the real paired-WebSocket relay binary."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import json
+import os
+import socket
+import ssl
+import subprocess
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, cast
+from uuid import UUID
+
+import aiohttp
+import anyio
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+import skulk.operator.relay as relay_module
+from skulk.api.main import API
+from skulk.operator.authority import EncryptedAuthorityStore
+from skulk.operator.key_provider import LocalFileAuthorityKeyProvider
+from skulk.operator.pairing import OperatorPairingService, pairing_signature_message
+from skulk.operator.relay import (
+    OperatorRelayConfigurationRepository,
+    OperatorRelayProvisioning,
+    OperatorRemoteAccessMaterial,
+)
+from skulk.shared.election import ElectionMessage
+from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
+from skulk.shared.types.common import NodeId
+from skulk.shared.types.events import IndexedEvent
+from skulk.utils.channels import channel
+
+_RELAY_BINARY_ENVIRONMENT_VARIABLE = "SKULK_PAIRED_RELAY_BINARY"
+_RELAY_LOOPBACK_HOST = "127.0.0.1"
+
+
+@dataclass(frozen=True, slots=True)
+class _HttpResponse:
+    """Parsed status and JSON object returned by the inner operator API."""
+
+    status: int
+    body: dict[str, object]
+
+
+def _base64url(value: bytes) -> str:
+    """Encode exact device-key and proof bytes without padding."""
+
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _available_loopback_port() -> int:
+    """Reserve and release one currently available loopback TCP port."""
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind((_RELAY_LOOPBACK_HOST, 0))
+        return cast(tuple[str, int], listener.getsockname())[1]
+
+
+def _require_relay_binary() -> Path:
+    """Return the explicitly selected external relay binary or skip the test."""
+
+    configured = os.environ.get(_RELAY_BINARY_ENVIRONMENT_VARIABLE)
+    if configured is None:
+        pytest.skip(
+            f"set {_RELAY_BINARY_ENVIRONMENT_VARIABLE} to run joined relay qualification"
+        )
+    relay_binary = Path(configured).expanduser().resolve()
+    if not relay_binary.is_file() or not os.access(relay_binary, os.X_OK):
+        pytest.fail(
+            f"{_RELAY_BINARY_ENVIRONMENT_VARIABLE} must name an executable file"
+        )
+    return relay_binary
+
+
+def _build_api(service: OperatorPairingService) -> API:
+    """Build the smallest real Skulk API needed for relay qualification."""
+
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    _, event_receiver = channel[IndexedEvent]()
+    _, election_receiver = channel[ElectionMessage]()
+    return API(
+        NodeId("joined-relay-qualification"),
+        port=52415,
+        event_receiver=event_receiver,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        election_receiver=election_receiver,
+        enable_event_log=False,
+        mount_dashboard=False,
+        operator_pairing_service=service,
+    )
+
+
+async def _wait_for_relay_health(port: int, *, ready: bool = False) -> None:
+    """Wait for process health or gateway readiness at the selected listener."""
+
+    endpoint = "readyz" if ready else "healthz"
+    url = f"http://{_RELAY_LOOPBACK_HOST}:{port}/{endpoint}"
+    async with aiohttp.ClientSession() as session:
+        for _ in range(200):
+            try:
+                async with session.get(url) as response:
+                    if response.status == 204:
+                        return
+            except aiohttp.ClientError:
+                pass
+            await asyncio.sleep(0.05)
+    raise AssertionError("paired-WebSocket relay did not become healthy")
+
+
+async def _wait_for_operator_listener(port: int) -> None:
+    """Wait until Skulk exposes its relay-only inner-TLS listener."""
+
+    for _ in range(100):
+        try:
+            _, writer = await asyncio.open_connection(_RELAY_LOOPBACK_HOST, port)
+            writer.close()
+            await writer.wait_closed()
+            return
+        except OSError:
+            await asyncio.sleep(0.05)
+    raise AssertionError("Skulk operator listener did not become available")
+
+
+async def _copy_tcp_to_websocket(
+    reader: asyncio.StreamReader,
+    websocket: aiohttp.ClientWebSocketResponse,
+) -> None:
+    """Copy opaque inner-TLS bytes into app-role relay frames."""
+
+    while payload := await reader.read(1024 * 1024):
+        await websocket.send_bytes(payload)
+
+
+async def _copy_websocket_to_tcp(
+    websocket: aiohttp.ClientWebSocketResponse,
+    writer: asyncio.StreamWriter,
+) -> None:
+    """Copy opaque app-role relay frames into the inner-TLS socket."""
+
+    async for message in websocket:
+        if message.type is aiohttp.WSMsgType.BINARY:
+            writer.write(cast(bytes, message.data))
+            await writer.drain()
+            continue
+        if message.type in {
+            aiohttp.WSMsgType.CLOSE,
+            aiohttp.WSMsgType.CLOSED,
+            aiohttp.WSMsgType.ERROR,
+        }:
+            return
+        raise AssertionError("relay emitted a non-binary carrier frame")
+
+
+async def _bridge_app_lane(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    remote_access: OperatorRemoteAccessMaterial,
+) -> None:
+    """Adapt one local inner-TLS socket to one real app-role WebSocket."""
+
+    headers = {
+        "Authorization": f"Bearer {remote_access.app_carrier_credential}",
+        "x-skulk-relay-route": remote_access.routing_locator,
+    }
+    async with aiohttp.ClientSession() as session:
+        websocket: aiohttp.ClientWebSocketResponse | None = None
+        for _ in range(100):
+            try:
+                websocket = await session.ws_connect(
+                    remote_access.app_websocket_url,
+                    headers=headers,
+                    max_msg_size=1024 * 1024,
+                )
+                break
+            except aiohttp.ClientResponseError as error:
+                if error.status != 503:
+                    raise
+                await asyncio.sleep(0.05)
+        if websocket is None:
+            raise AssertionError("gateway lane did not become available")
+
+        tasks = (
+            asyncio.create_task(_copy_tcp_to_websocket(reader, websocket)),
+            asyncio.create_task(_copy_websocket_to_tcp(websocket, writer)),
+        )
+        _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await websocket.close()
+    writer.close()
+    await writer.wait_closed()
+
+
+async def _request(
+    remote_access: OperatorRemoteAccessMaterial,
+    method: str,
+    path: str,
+    *,
+    body: dict[str, object] | None = None,
+    bearer: str | None = None,
+) -> _HttpResponse:
+    """Send one canonical HTTP request through the real paired carrier."""
+
+    server = await asyncio.start_server(
+        lambda reader, writer: _bridge_app_lane(
+            reader,
+            writer,
+            remote_access,
+        ),
+        _RELAY_LOOPBACK_HOST,
+        0,
+    )
+    sockets = server.sockets
+    assert sockets is not None
+    adapter_port = cast(tuple[str, int], sockets[0].getsockname())[1]
+    context = ssl.create_default_context(
+        cadata=remote_access.gateway_ca_certificate_pem
+    )
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    try:
+        reader, writer = await asyncio.open_connection(
+            _RELAY_LOOPBACK_HOST,
+            adapter_port,
+            ssl=context,
+            server_hostname=remote_access.gateway_server_name,
+        )
+        encoded_body = (
+            b""
+            if body is None
+            else json.dumps(body, separators=(",", ":")).encode("utf-8")
+        )
+        headers = [
+            f"{method} {path} HTTP/1.1",
+            f"Host: {remote_access.gateway_server_name}",
+            "Accept: application/json",
+            "Connection: close",
+        ]
+        if encoded_body:
+            headers.extend(
+                (
+                    "Content-Type: application/json",
+                    f"Content-Length: {len(encoded_body)}",
+                )
+            )
+        if bearer is not None:
+            headers.append(f"Authorization: Bearer {bearer}")
+        writer.write("\r\n".join(headers).encode("ascii") + b"\r\n\r\n" + encoded_body)
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=10.0)
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    response_headers, separator, response_body = response.partition(b"\r\n\r\n")
+    assert separator
+    status = int(response_headers.split(b" ", maxsplit=2)[1])
+    decoded_value: object = (
+        cast(object, json.loads(response_body))
+        if response_body
+        else dict[str, object]()
+    )
+    assert isinstance(decoded_value, dict)
+    return _HttpResponse(
+        status=status,
+        body=cast(dict[str, object], decoded_value),
+    )
+
+
+async def _stop_gateway_task(
+    task: asyncio.Task[None] | None,
+    shutdown: anyio.Event | None,
+) -> None:
+    """Stop the optional Skulk gateway task without masking test failures."""
+
+    if task is None:
+        return
+    if shutdown is not None:
+        shutdown.set()
+    try:
+        await asyncio.wait_for(task, timeout=10.0)
+    except TimeoutError:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def _stop_relay_process(process: subprocess.Popen[bytes]) -> None:
+    """Terminate the external relay and escalate only after a bounded wait."""
+
+    process.terminate()
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=5.0)
+    if process.poll() is None:
+        process.kill()
+        process.wait(timeout=5.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [1, 2])
+async def test_joined_relay_pairing_refresh_and_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: Literal[1, 2],
+) -> None:
+    """Prove both real relay transports, renewal, recovery, and authorization."""
+
+    relay_binary = _require_relay_binary()
+    relay_port = _available_loopback_port()
+    relay_configuration_path = tmp_path / "relay.json"
+    skulk_provisioning_path = tmp_path / "skulk-provisioning.json"
+    relay_origin = f"ws://{_RELAY_LOOPBACK_HOST}:{relay_port}"
+    renewal_sent = asyncio.Event()
+    hello_count = 0
+    original_send_bytes = aiohttp.ClientWebSocketResponse.send_bytes
+
+    async def observe_control_send(
+        websocket: aiohttp.ClientWebSocketResponse,
+        data: bytes,
+        compress: int | None = None,
+    ) -> None:
+        """Observe message kinds only after the real network send completes."""
+
+        nonlocal hello_count
+        await original_send_bytes(websocket, data, compress=compress)
+        if data[:6] == b"SKRL\x01\x01":
+            hello_count += 1
+        elif data[:6] == b"SKRL\x01\x04":
+            renewal_sent.set()
+
+    monkeypatch.setattr(
+        aiohttp.ClientWebSocketResponse, "send_bytes", observe_control_send
+    )
+    # Keep the actual signed wall clock and relay heartbeat; only shorten the
+    # renewal schedule so the real Rust/Python contract is exercised in seconds.
+    monkeypatch.setattr(relay_module, "_CONNECTOR_RENEWAL_SECONDS", 0.0)
+    subprocess.run(
+        (
+            relay_binary,
+            "provision" if version == 1 else "provision-on-demand",
+            relay_origin,
+            relay_configuration_path,
+            skulk_provisioning_path,
+        ),
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    # Only select the ephemeral listener in this newly generated, owner-only
+    # fixture; retain the generated credentials and all service limits.
+    relay_document = cast(
+        dict[str, object], json.loads(relay_configuration_path.read_text())
+    )
+    relay_document["bind"] = f"{_RELAY_LOOPBACK_HOST}:{relay_port}"
+    relay_configuration_path.write_text(json.dumps(relay_document))
+    relay_process = subprocess.Popen(
+        (relay_binary, "serve", relay_configuration_path),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    gateway_task: asyncio.Task[None] | None = None
+    shutdown: anyio.Event | None = None
+    try:
+        await _wait_for_relay_health(relay_port)
+        key_provider = LocalFileAuthorityKeyProvider(tmp_path / "authority-key.bin")
+        authority_store = EncryptedAuthorityStore(
+            key_provider,
+            tmp_path / "authority.sqlite3",
+        )
+        relay_repository = OperatorRelayConfigurationRepository(
+            authority_store,
+            certificate_path=tmp_path / "operator-tls.pem",
+            private_key_path=tmp_path / "operator-tls-key.pem",
+        )
+        pairing_service = OperatorPairingService(
+            authority_store,
+            key_provider,
+            relay_repository=relay_repository,
+        )
+        provisioning = OperatorRelayProvisioning.model_validate_json(
+            skulk_provisioning_path.read_text(encoding="utf-8")
+        )
+        configuration = pairing_service.configure_relay(
+            provisioning,
+            operator_api_port=_available_loopback_port(),
+            cluster_name="Joined Relay Qualification",
+        )
+        api = _build_api(pairing_service)
+        shutdown = anyio.Event()
+        gateway_task = asyncio.create_task(api.run_operator_remote_access(shutdown))
+        await _wait_for_operator_listener(configuration.operator_api_port)
+        await _wait_for_relay_health(relay_port, ready=True)
+
+        pairing_package = pairing_service.create_session()
+        assert pairing_package.as_url().startswith("skulk://pair?z=")
+        remote_access = pairing_package.remote_access
+        assert remote_access is not None
+
+        device_private_key = Ed25519PrivateKey.generate()
+        device_public_key = device_private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        challenge = await _request(
+            remote_access,
+            "POST",
+            "/v1/auth/pairing-sessions/challenge",
+            body={
+                "nonce": pairing_package.nonce,
+                "deviceName": "Joined qualification device",
+                "devicePublicKey": _base64url(device_public_key),
+            },
+        )
+        assert challenge.status == 200
+        signature = device_private_key.sign(
+            pairing_signature_message(
+                cluster_id=UUID(str(pairing_package.cluster_id)),
+                nonce=pairing_package.nonce,
+                challenge=str(challenge.body["challenge"]),
+            )
+        )
+        exchange = await _request(
+            remote_access,
+            "POST",
+            "/v1/auth/pairing-sessions/exchange",
+            body={
+                "nonce": pairing_package.nonce,
+                "signature": _base64url(signature),
+            },
+        )
+        assert exchange.status == 200
+        access_token = str(exchange.body["accessToken"])
+        refresh_token = str(exchange.body["refreshToken"])
+        device_id = str(exchange.body["deviceId"])
+
+        state = await _request(remote_access, "GET", "/state", bearer=access_token)
+        assert state.status == 200
+        assert "topology" in state.body
+
+        if version == 2:
+            await asyncio.wait_for(renewal_sent.wait(), timeout=10.0)
+            renewed_state = await _request(
+                remote_access, "GET", "/state", bearer=access_token
+            )
+            assert renewed_state.status == 200
+            assert hello_count == 1, "renewal must not require control reconnection"
+
+        refreshed = await _request(
+            remote_access,
+            "POST",
+            "/v1/auth/token",
+            body={"deviceId": device_id, "refreshToken": refresh_token},
+        )
+        assert refreshed.status == 200
+        next_access_token = str(refreshed.body["accessToken"])
+        stale_access = await _request(
+            remote_access,
+            "GET",
+            "/state",
+            bearer=access_token,
+        )
+        assert stale_access.status == 401
+
+        devices = await _request(
+            remote_access,
+            "GET",
+            "/v1/auth/devices",
+            bearer=next_access_token,
+        )
+        assert devices.status == 200
+        paired_devices = devices.body["devices"]
+        assert isinstance(paired_devices, list)
+        assert len(cast(list[object], paired_devices)) == 1
+
+        # Recreate gateway objects from durable storage. The existing app
+        # package and refreshed token must survive without another pairing.
+        await _stop_gateway_task(gateway_task, shutdown)
+        gateway_task = None
+        restored_store = EncryptedAuthorityStore(
+            key_provider, tmp_path / "authority.sqlite3"
+        )
+        restored_repository = OperatorRelayConfigurationRepository(
+            restored_store,
+            certificate_path=tmp_path / "operator-tls.pem",
+            private_key_path=tmp_path / "operator-tls-key.pem",
+        )
+        restored_service = OperatorPairingService(
+            restored_store, key_provider, relay_repository=restored_repository
+        )
+        api = _build_api(restored_service)
+        shutdown = anyio.Event()
+        gateway_task = asyncio.create_task(api.run_operator_remote_access(shutdown))
+        await _wait_for_operator_listener(configuration.operator_api_port)
+        await _wait_for_relay_health(relay_port, ready=True)
+        recovered_state = await _request(
+            remote_access, "GET", "/state", bearer=next_access_token
+        )
+        assert recovered_state.status == 200
+        restored_configuration = restored_repository.load()
+        assert restored_configuration is not None
+        if version == 2:
+            assert restored_configuration.connector_generation >= 2
+
+        _stop_relay_process(relay_process)
+        relay_process = subprocess.Popen(
+            (relay_binary, "serve", relay_configuration_path),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        await _wait_for_relay_health(relay_port, ready=True)
+        recovered_state = await _request(
+            remote_access, "GET", "/state", bearer=next_access_token
+        )
+        assert recovered_state.status == 200
+
+        revoked = await _request(
+            remote_access,
+            "DELETE",
+            f"/v1/auth/devices/{device_id}",
+            bearer=next_access_token,
+        )
+        assert revoked.status == 204
+        revoked_access = await _request(
+            remote_access,
+            "GET",
+            "/state",
+            bearer=next_access_token,
+        )
+        assert revoked_access.status == 401
+    finally:
+        await _stop_gateway_task(gateway_task, shutdown)
+        _stop_relay_process(relay_process)
+
+
+async def _wait_for_carrier(remote_access: OperatorRemoteAccessMaterial) -> None:
+    """Wait until an app request crosses the relay and reaches the gateway.
+
+    A registration relay reports process readiness only, so readiness cannot
+    show that this gateway's connector has been admitted. An unauthenticated
+    request answered by Skulk proves the whole carrier path instead.
+    """
+
+    for _ in range(200):
+        try:
+            response = await _request(remote_access, "GET", "/state")
+        except (OSError, AssertionError, ValueError, asyncio.TimeoutError):
+            await asyncio.sleep(0.1)
+            continue
+        if response.status == 401:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError("registered gateway never became reachable through the relay")
+
+
+@pytest.mark.asyncio
+async def test_joined_registration_relay_pairs_a_self_registered_gateway(
+    tmp_path: Path,
+) -> None:
+    """Prove self-service registration end to end against the real relay binary.
+
+    No route file is provisioned or transferred: the gateway registers itself,
+    the relay keeps only credential digests, pairing and refresh cross the
+    carrier, the route survives a relay restart, and turning pairing off then
+    on registers a new route under a new key.
+    """
+
+    relay_binary = _require_relay_binary()
+    relay_port = _available_loopback_port()
+    configuration_path = tmp_path / "registration.json"
+    subprocess.run(
+        (
+            relay_binary,
+            "provision-registration",
+            "wss://relay.example.invalid",
+            configuration_path,
+        ),
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    relay_document = cast(dict[str, object], json.loads(configuration_path.read_text()))
+    assert relay_document["version"] == 3
+    # Serve the generated relay on an ephemeral loopback port and advertise
+    # that port, so the carrier URLs the relay returns are reachable here.
+    relay_document["bind"] = f"{_RELAY_LOOPBACK_HOST}:{relay_port}"
+    relay_document["public_origin"] = f"ws://{_RELAY_LOOPBACK_HOST}:{relay_port}"
+    configuration_path.write_text(json.dumps(relay_document))
+    relay_process = subprocess.Popen(
+        (relay_binary, "serve", configuration_path),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    gateway_task: asyncio.Task[None] | None = None
+    shutdown: anyio.Event | None = None
+    try:
+        await _wait_for_relay_health(relay_port)
+        key_provider = LocalFileAuthorityKeyProvider(tmp_path / "authority-key.bin")
+        authority_store = EncryptedAuthorityStore(
+            key_provider,
+            tmp_path / "authority.sqlite3",
+        )
+        relay_repository = OperatorRelayConfigurationRepository(
+            authority_store,
+            certificate_path=tmp_path / "operator-tls.pem",
+            private_key_path=tmp_path / "operator-tls-key.pem",
+        )
+        pairing_service = OperatorPairingService(
+            authority_store,
+            key_provider,
+            relay_repository=relay_repository,
+        )
+        registration_origin = f"http://{_RELAY_LOOPBACK_HOST}:{relay_port}"
+        configuration = pairing_service.register_relay(
+            registration_origin=registration_origin,
+            operator_api_port=_available_loopback_port(),
+            cluster_name="Joined Registration Qualification",
+        )
+        assert configuration.version == 2
+        assert configuration.app_websocket_url == (
+            f"ws://{_RELAY_LOOPBACK_HOST}:{relay_port}/v1/carrier/app"
+        )
+
+        # The relay retains digests only: neither carrier credential appears
+        # in its durable state, while the gateway credential's digest does.
+        state_text = (
+            tmp_path / "registration.json.authority-state" / "fences.json"
+        ).read_text()
+        for credential in (
+            configuration.app_carrier_credential,
+            configuration.gateway_carrier_credential,
+        ):
+            assert credential not in state_text
+        gateway_digest = hashlib.sha256(
+            base64.urlsafe_b64decode(configuration.gateway_carrier_credential + "=")
+        ).digest()
+        assert _base64url(gateway_digest) in state_text
+
+        api = _build_api(pairing_service)
+        shutdown = anyio.Event()
+        gateway_task = asyncio.create_task(api.run_operator_remote_access(shutdown))
+        await _wait_for_operator_listener(configuration.operator_api_port)
+
+        pairing_package = pairing_service.create_session()
+        remote_access = pairing_package.remote_access
+        assert remote_access is not None
+        await _wait_for_carrier(remote_access)
+
+        device_private_key = Ed25519PrivateKey.generate()
+        device_public_key = device_private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        challenge = await _request(
+            remote_access,
+            "POST",
+            "/v1/auth/pairing-sessions/challenge",
+            body={
+                "nonce": pairing_package.nonce,
+                "deviceName": "Joined registration device",
+                "devicePublicKey": _base64url(device_public_key),
+            },
+        )
+        assert challenge.status == 200
+        signature = device_private_key.sign(
+            pairing_signature_message(
+                cluster_id=UUID(str(pairing_package.cluster_id)),
+                nonce=pairing_package.nonce,
+                challenge=str(challenge.body["challenge"]),
+            )
+        )
+        exchange = await _request(
+            remote_access,
+            "POST",
+            "/v1/auth/pairing-sessions/exchange",
+            body={"nonce": pairing_package.nonce, "signature": _base64url(signature)},
+        )
+        assert exchange.status == 200
+        device_id = str(exchange.body["deviceId"])
+        refreshed = await _request(
+            remote_access,
+            "POST",
+            "/v1/auth/token",
+            body={
+                "deviceId": device_id,
+                "refreshToken": str(exchange.body["refreshToken"]),
+            },
+        )
+        assert refreshed.status == 200
+        access_token = str(refreshed.body["accessToken"])
+        state = await _request(remote_access, "GET", "/state", bearer=access_token)
+        assert state.status == 200
+
+        # The registered route is durable: a relay restart keeps it, and the
+        # gateway's connector is admitted again without registering anew.
+        _stop_relay_process(relay_process)
+        relay_process = subprocess.Popen(
+            (relay_binary, "serve", configuration_path),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        await _wait_for_relay_health(relay_port)
+        await _wait_for_carrier(remote_access)
+        recovered = await _request(remote_access, "GET", "/state", bearer=access_token)
+        assert recovered.status == 200
+
+        revoked = await _request(
+            remote_access,
+            "DELETE",
+            f"/v1/auth/devices/{device_id}",
+            bearer=access_token,
+        )
+        assert revoked.status == 204
+
+        # Turning pairing off forgets the route locally; turning it back on
+        # registers a new route under a new signing key.
+        await _stop_gateway_task(gateway_task, shutdown)
+        gateway_task = None
+        assert pairing_service.forget_relay()
+        renewed = pairing_service.register_relay(
+            registration_origin=registration_origin,
+            operator_api_port=_available_loopback_port(),
+        )
+        assert renewed.routing_locator != configuration.routing_locator
+        assert (
+            renewed.connector_authority_key_id
+            != configuration.connector_authority_key_id
+        )
+    finally:
+        await _stop_gateway_task(gateway_task, shutdown)
+        _stop_relay_process(relay_process)

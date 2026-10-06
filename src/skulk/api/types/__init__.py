@@ -1,5 +1,8 @@
 from .api import AddCustomModelParams as AddCustomModelParams
+from .api import AddExactCustomModelCardParams as AddExactCustomModelCardParams
 from .api import AdvancedImageParams as AdvancedImageParams
+from .api import ArtifactExportRequest as ArtifactExportRequest
+from .api import ArtifactExportResponse as ArtifactExportResponse
 from .api import AudioCapabilitySection as AudioCapabilitySection
 from .api import AudioSpeechRequest as AudioSpeechRequest
 from .api import AudioTranscriptionCompletedEvent as AudioTranscriptionCompletedEvent
@@ -16,8 +19,11 @@ from .api import BenchChatCompletionRequest as BenchChatCompletionRequest
 from .api import BenchChatCompletionResponse as BenchChatCompletionResponse
 from .api import BenchImageGenerationResponse as BenchImageGenerationResponse
 from .api import BenchImageGenerationTaskParams as BenchImageGenerationTaskParams
+from .api import CachedArtifactLocation as CachedArtifactLocation
+from .api import CacheInventoryStatus as CacheInventoryStatus
 from .api import CancelCommandResponse as CancelCommandResponse
 from .api import ChatCompletionChoice as ChatCompletionChoice
+from .api import ChatCompletionChunkResponse as ChatCompletionChunkResponse
 from .api import ChatCompletionContentPart as ChatCompletionContentPart
 from .api import ChatCompletionMessage as ChatCompletionMessage
 from .api import ChatCompletionMessageImageUrl as ChatCompletionMessageImageUrl
@@ -28,6 +34,9 @@ from .api import CompletionTokensDetails as CompletionTokensDetails
 from .api import CreateInstanceParams as CreateInstanceParams
 from .api import CreateInstanceResponse as CreateInstanceResponse
 from .api import DeleteDownloadResponse as DeleteDownloadResponse
+from .api import (
+    DeleteExactCustomModelCardParams as DeleteExactCustomModelCardParams,
+)
 from .api import DeleteInstanceResponse as DeleteInstanceResponse
 from .api import DeleteTracesRequest as DeleteTracesRequest
 from .api import DeleteTracesResponse as DeleteTracesResponse
@@ -53,11 +62,18 @@ from .api import ImageGenerationTaskParams as ImageGenerationTaskParams
 from .api import ImageListItem as ImageListItem
 from .api import ImageListResponse as ImageListResponse
 from .api import ImageSize as ImageSize
+from .api import LicenseSection as LicenseSection
 from .api import Logprobs as Logprobs
 from .api import LogprobsContentItem as LogprobsContentItem
 from .api import ModalitiesCapabilitySection as ModalitiesCapabilitySection
 from .api import ModelList as ModelList
 from .api import ModelListModel as ModelListModel
+from .api import ModelRequirements as ModelRequirements
+from .api import MusicCapabilitySection as MusicCapabilitySection
+from .api import MusicCreateRequest as MusicCreateRequest
+from .api import MusicDeletedResponse as MusicDeletedResponse
+from .api import MusicListResponse as MusicListResponse
+from .api import MusicResource as MusicResource
 from .api import NodePowerStats as NodePowerStats
 from .api import NodeStorageSummary as NodeStorageSummary
 from .api import OpenUrlToolRequest as OpenUrlToolRequest
@@ -70,11 +86,16 @@ from .api import PromptTokensDetails as PromptTokensDetails
 from .api import PurgeStagingRequest as PurgeStagingRequest
 from .api import PurgeStagingResponse as PurgeStagingResponse
 from .api import ReasoningCapabilitySection as ReasoningCapabilitySection
+from .api import ReconciliationStatus as ReconciliationStatus
+from .api import RemoteCodeApprovalView as RemoteCodeApprovalView
 from .api import ResolvedModelCapabilities as ResolvedModelCapabilities
 from .api import RuntimeCapabilitySection as RuntimeCapabilitySection
 from .api import StartDownloadParams as StartDownloadParams
 from .api import StartDownloadResponse as StartDownloadResponse
 from .api import StoreDownloadRequest as StoreDownloadRequest
+from .api import StoreDownloadResponse as StoreDownloadResponse
+from .api import StoreRegistryEntry as StoreRegistryEntry
+from .api import StoreRegistryResponse as StoreRegistryResponse
 from .api import StreamingChoiceResponse as StreamingChoiceResponse
 from .api import ToolCall as ToolCall
 from .api import ToolCallItem as ToolCallItem
@@ -92,6 +113,18 @@ from .api import TraceTaskKind as TraceTaskKind
 from .api import TracingStateResponse as TracingStateResponse
 from .api import UpdateTracingStateRequest as UpdateTracingStateRequest
 from .api import Usage as Usage
+from .api import VideoAdapterSection as VideoAdapterSection
+from .api import VideoCapabilitySection as VideoCapabilitySection
+from .api import VideoCreateRequest as VideoCreateRequest
+from .api import VideoDeletedResponse as VideoDeletedResponse
+from .api import VideoEngineInfo as VideoEngineInfo
+from .api import VideoError as VideoError
+from .api import VideoListResponse as VideoListResponse
+from .api import VideoModeName as VideoModeName
+from .api import VideoOutputInfo as VideoOutputInfo
+from .api import VideoReferenceLimitsSection as VideoReferenceLimitsSection
+from .api import VideoResource as VideoResource
+from .api import VideoStatsInfo as VideoStatsInfo
 from .api import WebSearchResult as WebSearchResult
 from .api import WebSearchToolRequest as WebSearchToolRequest
 from .api import WebSearchToolResponse as WebSearchToolResponse

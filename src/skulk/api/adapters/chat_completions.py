@@ -4,12 +4,14 @@ import base64
 import re
 import time
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, cast
 
+from fastapi import HTTPException
 from loguru import logger
 
 from skulk.api.types import (
     ChatCompletionChoice,
+    ChatCompletionChunkResponse,
     ChatCompletionMessage,
     ChatCompletionMessageImageUrl,
     ChatCompletionMessageText,
@@ -103,11 +105,112 @@ async def fetch_image_url(url: str) -> str:
         return base64.b64encode(data).decode("ascii")
 
 
+def _forced_function_name(
+    tool_choice: str | dict[str, Any] | None,
+) -> str | None:
+    """The function name a ``tool_choice`` object forces, or ``None``.
+
+    Only the well-formed OpenAI shape ``{"type": "function", "function":
+    {"name": ...}}`` forces a name; a malformed object forces nothing and is
+    passed through for the engine to interpret.
+    """
+
+    if not isinstance(tool_choice, dict):
+        return None
+    if tool_choice.get("type") != "function":
+        return None
+    function = tool_choice.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = cast("object", function.get("name"))  # pyright: ignore[reportUnknownMemberType]
+    return name if isinstance(name, str) else None
+
+
+def resolve_tool_choice(
+    tools: list[dict[str, Any]] | None,
+    tool_choice: str | dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]] | None, str | dict[str, Any] | None]:
+    """Apply ``tool_choice`` to the offered tools before dispatch.
+
+    Only the served engines forward ``tool_choice`` to a server that acts on
+    it. The in-process engines render whatever tools they are given and parse
+    whatever the model writes, so applying the caller's choice here is what
+    makes the option mean the same thing on every engine.
+
+    ``"none"`` removes the tools entirely, which is the only way to guarantee
+    the documented behavior that the model does not call one; a model handed a
+    tool and asked for it will call it whatever the request said. Naming a
+    single function narrows the offered tools to that one, so the model cannot
+    call a different tool than the caller asked for; a name matching none of
+    the offered tools rejects the request with a 400, on every engine, because
+    the caller's forced choice cannot be honored and any answer would be a
+    guess at what they meant. ``"auto"``, ``"required"`` and an unrecognized
+    value pass through untouched: ``required`` is a best-effort instruction to
+    the model in-process, since forcing a call would need constrained decoding.
+
+    Returns the tools and the tool_choice to dispatch with.
+
+    Raises:
+        HTTPException: 400 when the choice forces a function name that is not
+            among the offered tools (or when no tools were offered at all).
+    """
+
+    forced_name = _forced_function_name(tool_choice)
+    if tool_choice is None or not tools:
+        if forced_name is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"tool_choice forces function {forced_name!r}, "
+                    "but the request offers no tools"
+                ),
+            )
+        return tools, tool_choice
+
+    if isinstance(tool_choice, str):
+        if tool_choice == "none":
+            # Dropping the choice with the tools keeps a served engine from
+            # being handed a tool_choice with nothing to choose from.
+            return None, None
+        return tools, tool_choice
+
+    if forced_name is None:
+        return tools, tool_choice
+
+    named = [
+        tool
+        for tool in tools
+        if isinstance(tool.get("function"), dict)
+        and cast("dict[str, Any]", tool["function"]).get("name") == forced_name
+    ]
+    if not named:
+        # The caller's forced choice cannot be honored. The in-process engines
+        # never see tool_choice, so passing the request through answered from
+        # the full list with no report of the mismatch; rejecting here is what
+        # makes the outcome the same on every engine.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"tool_choice forces function {forced_name!r}, "
+                "which is not among the offered tools"
+            ),
+        )
+    return named, tool_choice
+
+
 async def chat_request_to_text_generation(
     request: ChatCompletionRequest,
     *,
     model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
+    # Resolved before message normalization on purpose: normalization may
+    # fetch HTTP images, and a request whose forced tool choice is invalid
+    # must get its documented 400 without first paying (or failing on) that
+    # outbound I/O.
+    resolved_tools, resolved_tool_choice = resolve_tool_choice(
+        request.tools, request.tool_choice
+    )
+
     instructions: str | None = None
     input_messages: list[InputMessage] = []
     chat_template_messages: list[dict[str, Any]] = []
@@ -213,6 +316,11 @@ async def chat_request_to_text_generation(
         else request.top_logprobs is not None
     )
 
+    # tool_choice is resolved at the boundary for the same reason as logprobs:
+    # only the served engines forward it to a server that understands it, so
+    # an in-process engine would otherwise ignore it entirely and answer a
+    # "none" request with a tool call. The resolution itself runs at the top
+    # of this function, before any image I/O.
     return TextGenerationTaskParams(
         model=request.model,
         input=input_messages
@@ -226,7 +334,8 @@ async def chat_request_to_text_generation(
         stop=request.stop,
         seed=request.seed,
         stream=request.stream,
-        tools=request.tools,
+        tools=resolved_tools,
+        tool_choice=resolved_tool_choice,
         reasoning_effort=resolved_effort,
         enable_thinking=resolved_thinking,
         chat_template_messages=chat_template_messages
@@ -278,8 +387,8 @@ def usage_from_stats(stats: GenerationStats | None) -> Usage | None:
 
 def chunk_to_response(
     chunk: TokenChunk, command_id: CommandId
-) -> ChatCompletionResponse:
-    """Convert a TokenChunk to a streaming ChatCompletionResponse."""
+) -> ChatCompletionChunkResponse:
+    """Convert a TokenChunk to one streaming chat-completion chunk."""
     # Build logprobs if available
     logprobs: Logprobs | None = None
     if chunk.logprob is not None:
@@ -306,7 +415,7 @@ def chunk_to_response(
             f"finish_reason={chunk.finish_reason!r}"
         )
 
-    return ChatCompletionResponse(
+    return ChatCompletionChunkResponse(
         id=command_id,
         created=int(time.time()),
         model=chunk.model,
@@ -357,7 +466,7 @@ async def generate_chat_stream(
                     )
                     for i, tool in enumerate(chunk.tool_calls)
                 ]
-                tool_response = ChatCompletionResponse(
+                tool_response = ChatCompletionChunkResponse(
                     id=command_id,
                     created=int(time.time()),
                     model=chunk.model,
@@ -405,6 +514,20 @@ async def generate_chat_stream(
                         )
                     yield "data: [DONE]\n\n"
                     return
+
+    # Falling out of the loop means the producer stopped without a finish
+    # reason and without an error: a cancelled or timed-out task that never
+    # reached a terminal chunk. Returning here would close the connection with
+    # no `data: [DONE]`, which a client reads as a truncated stream rather than
+    # as a failure, so say what happened and terminate properly (#872).
+    yield (
+        "data: "
+        + error_chunk_response(
+            "Generation ended without completing before the task finished"
+        ).model_dump_json()
+        + "\n\n"
+    )
+    yield "data: [DONE]\n\n"
 
 
 async def collect_chat_response(
@@ -481,7 +604,33 @@ async def collect_chat_response(
 
     combined_text = "".join(text_parts)
     combined_thinking = "".join(thinking_parts) if thinking_parts else None
-    assert model is not None
+
+    if model is None or finish_reason is None:
+        # The producer stopped without reaching a terminal chunk. Two shapes
+        # land here and both must be failures rather than successes:
+        #
+        # - Nothing at all was produced (`model is None`). This used to assert,
+        #   and because the status is committed before the body streams the
+        #   assertion reached callers as HTTP 200 with zero bytes, which every
+        #   client treats as success and then fails to parse (#872).
+        # - Some text arrived but no finish reason did, which is what
+        #   cancellation mid-generation looks like. Returning that as a normal
+        #   completion would hand the caller a silently truncated answer, which
+        #   is worse than an empty body because nothing marks it as incomplete.
+        #
+        # A finish reason is the producer's only signal that a turn ended; the
+        # streaming path already refuses to send `[DONE]` without one.
+        produced = len(combined_text)
+        detail = (
+            "Generation produced no output before the task ended"
+            if model is None
+            else (
+                "Generation ended without a finish reason after "
+                f"{produced} characters, so the response is incomplete"
+            )
+        )
+        yield error_chunk_response(detail).model_dump_json()
+        return
 
     yield ChatCompletionResponse(
         id=command_id,

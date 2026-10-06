@@ -32,6 +32,13 @@ export interface PersistedStoreConfig
 
 export interface InferenceConfig {
   kv_cache_backend: string;
+  /**
+   * Context window, in tokens, that llama-server, in-process llama.cpp and
+   * vLLM placements get when the placement names none. Those engines reserve
+   * the whole window's memory when the model loads. Absent means the server
+   * default (32768).
+   */
+  served_context_tokens?: number;
 }
 
 export interface LoggingConfig {
@@ -64,18 +71,50 @@ export interface TelemetryConfig {
   ingest_url: string;
 }
 
+/** Intelligent-fabric (resident steward) settings. */
+export interface IntelligentFabricConfig {
+  /** Master switch: the fabric keeps a hidden steward placement while on. */
+  enabled: boolean;
+  /** Ordered model-card preference list for the steward brain. */
+  steward_models?: string[];
+}
+
+/** Cluster-wide operator decisions for exact model-card identities. */
+export interface ModelTrustConfig {
+  /** Cards approved to execute repository-supplied code on every node. */
+  approved_remote_code_identities: string[];
+}
+
 export interface FullConfig {
   model_store?: PersistedStoreConfig;
   inference?: InferenceConfig;
   logging?: LoggingConfig;
   experiments?: ExperimentsConfig;
   telemetry?: TelemetryConfig;
+  intelligent_fabric?: IntelligentFabricConfig;
+  model_trust?: ModelTrustConfig;
   hf_token?: string;
+}
+
+/** The single-node store a fresh node starts with, as the node reports it. */
+export interface ModelStoreDefaults {
+  /** This node's short hostname: it hosts the store. */
+  store_host: string;
+  store_port: number;
+  /** Loopback, replaced by a routable address if the node joins a cluster. */
+  store_http_host: string;
+  /** Absolute default store folder in Skulk's data directory. */
+  store_path: string;
 }
 
 export interface EffectiveConfig {
   kv_cache_backend: string;
   has_hf_token?: boolean;
+  /**
+   * Defaults Settings fills into a store when it is switched on with blank
+   * fields; the server applies the same values to a blank save.
+   */
+  model_store_defaults?: ModelStoreDefaults;
   /**
    * True when the node runs with SKULK_ENABLE_EXPERIMENTAL_MODE. Gates the
    * dashboard's Experiments settings section; memory-agnostic.
@@ -109,7 +148,9 @@ export const configApi = apiSlice.injectEndpoints({
         method: 'PUT',
         body: { config },
       }),
-      invalidatesTags: ['Config'],
+      // Saving may flip intelligent_fabric: refresh steward status so the
+      // nav link and steward page react immediately, not on the next poll.
+      invalidatesTags: ['Config', 'StewardStatus'],
     }),
   }),
 });

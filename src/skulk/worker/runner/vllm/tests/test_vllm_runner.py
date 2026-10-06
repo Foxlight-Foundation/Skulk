@@ -15,7 +15,10 @@ from typing import Any
 
 import pytest
 
-from skulk.shared.types.common import CommandId
+from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.types.common import CommandId, ModelId
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import AcceleratorMetrics
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     TaskId,
@@ -29,10 +32,15 @@ from skulk.worker.runner.vllm.runner import (
     _DEFAULT_MAX_CONCURRENT_REQUESTS,
     _GPU_MEMORY_UTILIZATION_ENV,
     _MAX_CONCURRENT_REQUESTS_ENV,
-    _gpu_memory_utilization,
+    GpuMemoryShare,
+    _configured_gpu_memory_utilization,
+    _device_memory_total,
     _max_concurrent_requests,
+    _read_artifact_kv_bytes_per_token,
+    artifact_kv_bytes_per_token,
     build_vllm_serve_args,
     parse_openai_sse_line,
+    resolve_gpu_memory_utilization,
     vllm_generation_kwargs,
     vllm_reasoning_overrides,
 )
@@ -124,12 +132,20 @@ def test_build_vllm_serve_args_shape() -> None:
     assert args[args.index("--host") + 1] == "127.0.0.1"
     assert args[args.index("--port") + 1] == "51234"
     assert args[args.index("--max-model-len") + 1] == "8192"
-    assert args[args.index("--gpu-memory-utilization") + 1] == "0.90"
+    assert args[args.index("--gpu-memory-utilization") + 1] == "0.9000"
     # single-node in this slice.
     assert args[args.index("--tensor-parallel-size") + 1] == "1"
     # Required for prompt_tokens_details in the include_usage final chunk;
     # without it the cache-honest prompt rate (#631) never sees cached counts.
     assert "--enable-prompt-tokens-details" in args
+
+
+def test_build_vllm_serve_args_reasoning_parser() -> None:
+    # A card-pinned reasoning parser reaches the server; without one vLLM
+    # streams a reasoning model's thinking inline as answer text.
+    args = _serve_args(reasoning_parser="muse_glimmer")
+    assert args[args.index("--reasoning-parser") + 1] == "muse_glimmer"
+    assert "--reasoning-parser" not in _serve_args()
 
 
 def test_build_vllm_serve_args_trust_remote_code() -> None:
@@ -235,24 +251,378 @@ def test_usage_count_bool_and_shape_guards() -> None:
     assert _usage_count(None, "prompt_tokens") is None
 
 
-def test_gpu_memory_utilization_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gpu_memory_utilization_unset_is_not_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv(_GPU_MEMORY_UTILIZATION_ENV, raising=False)
-    assert _gpu_memory_utilization() == _DEFAULT_GPU_MEMORY_UTILIZATION
+    assert _configured_gpu_memory_utilization() is None
 
 
-def test_gpu_memory_utilization_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gpu_memory_utilization_env_pins_the_share(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv(_GPU_MEMORY_UTILIZATION_ENV, "0.75")
-    assert _gpu_memory_utilization() == 0.75
+    assert _configured_gpu_memory_utilization() == 0.75
 
 
 @pytest.mark.parametrize("bad", ["nonsense", "0", "1.5", "-0.2"])
-def test_gpu_memory_utilization_rejects_bad_values(
+def test_gpu_memory_utilization_ignores_bad_values(
     monkeypatch: pytest.MonkeyPatch, bad: str
 ) -> None:
-    # Unparseable or out-of-(0,1] values fall back to the default rather than
-    # passing vLLM a fraction that would fail the server at spawn.
+    # Unparseable or out-of-(0,1] values are ignored, so the runner sizes vLLM
+    # from its placement rather than passing a fraction that fails at spawn.
     monkeypatch.setenv(_GPU_MEMORY_UTILIZATION_ENV, bad)
-    assert _gpu_memory_utilization() == _DEFAULT_GPU_MEMORY_UTILIZATION
+    assert _configured_gpu_memory_utilization() is None
+
+
+_GIB = 1024**3
+_GB10_TOTAL = 130_595_991_552
+_QWEN_7B_KV = 2 * 28 * 4 * 128 * 2
+"""The artifact bound for the 7B shape below: 28 layers, 4 KV heads, 128 wide."""
+
+
+def _sized_card(*, kv_heads: int | None = 4) -> ModelCard:
+    """A 14 GiB, 28-layer text card shaped like the served Qwen2.5-7B."""
+    return ModelCard(
+        model_id=ModelId("org/sized"),
+        storage_size=Memory.from_bytes(14 * _GIB),
+        n_layers=28,
+        hidden_size=3584,
+        supports_tensor=False,
+        num_key_value_heads=kv_heads,
+        tasks=[ModelTask.TextGeneration],
+    )
+
+
+def test_artifact_bound_derives_head_width_from_hidden_size() -> None:
+    config: dict[str, object] = {
+        "num_hidden_layers": 28,
+        "num_attention_heads": 28,
+        "num_key_value_heads": 4,
+        "hidden_size": 3584,
+    }
+    assert artifact_kv_bytes_per_token(config) == _QWEN_7B_KV
+
+
+def test_artifact_bound_reads_nested_wide_head_geometry() -> None:
+    """Gemma 4 nests its decoder and names wider heads for global layers.
+
+    Its 8 KV heads at 256 wide outweigh the single 512-wide global head, so
+    every layer counts at 2048 elements for keys and again for values.
+    """
+    config: dict[str, object] = {
+        "model_type": "gemma4_unified",
+        "text_config": {
+            "num_hidden_layers": 48,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 8,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "num_global_key_value_heads": 1,
+            "hidden_size": 3840,
+        },
+    }
+    assert artifact_kv_bytes_per_token(config) == 2 * 48 * 8 * 256 * 2
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {},
+        {"num_hidden_layers": 28, "hidden_size": 3584},
+        {"num_hidden_layers": "28", "num_attention_heads": 28, "hidden_size": 3584},
+        {"text_config": {"num_hidden_layers": 0, "num_attention_heads": 8, "head_dim": 64}},
+    ],
+)
+def test_artifact_bound_needs_the_full_geometry(config: dict[str, object]) -> None:
+    assert artifact_kv_bytes_per_token(config) is None
+
+
+def test_artifact_bound_reads_the_served_directory(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        '{"num_hidden_layers": 28, "num_attention_heads": 28, '
+        '"num_key_value_heads": 4, "hidden_size": 3584}'
+    )
+    assert _read_artifact_kv_bytes_per_token(tmp_path) == _QWEN_7B_KV
+
+
+@pytest.mark.parametrize("content", [None, "not json", "[1, 2]"])
+def test_artifact_bound_is_unknown_without_a_readable_config(
+    tmp_path: Path, content: str | None
+) -> None:
+    if content is not None:
+        (tmp_path / "config.json").write_text(content)
+    assert _read_artifact_kv_bytes_per_token(tmp_path) is None
+
+
+def test_share_holds_the_placement_footprint() -> None:
+    """The share covers the reserved footprint, rounded up to a ten-thousandth.
+
+    14 GiB of weights at the 1.30 overhead factor, 1.75 GiB of KV cache for a
+    32768-token window and the 256 MB floor come to about 20.2 GiB, which is
+    about 0.1661 of a GB10's shared pool, not the fixed 0.90. The rounding
+    leaves at most a ten-thousandth of the device outside the reservation.
+    """
+    from skulk.shared.models.memory_estimate import estimate_shard_footprint
+
+    footprint = estimate_shard_footprint(
+        _sized_card(), 1.0, context_budget=32768, resolved_backend="vllm-cuda"
+    ).in_bytes
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, None, _QWEN_7B_KV
+    )
+    assert share.basis == "placement"
+    assert 0.16 < share.fraction < 0.17
+    assert share.fraction * _GB10_TOTAL >= footprint - 1
+    assert share.fraction * _GB10_TOTAL - footprint < _GB10_TOTAL / 10_000
+
+
+def test_share_grows_with_the_served_window() -> None:
+    short = resolve_gpu_memory_utilization(
+        _sized_card(), 4096, "vllm-cuda", _GB10_TOTAL, None, _QWEN_7B_KV
+    )
+    long = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, None, _QWEN_7B_KV
+    )
+    assert short.fraction < long.fraction
+
+
+def test_operator_pin_wins_over_sizing() -> None:
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, 0.6, _QWEN_7B_KV
+    )
+    assert share == GpuMemoryShare(0.6, "pinned")
+
+
+def test_wide_head_model_share_covers_the_artifact_cache() -> None:
+    """A card's 128-wide estimate cannot shrink a wide-head model's share.
+
+    A Gemma 4 12B shape on a 48 GiB GPU: the card estimates 6 GiB of window KV
+    cache, but at the artifact's 256-wide heads the bound is 12 GiB. The share
+    covers 8 GiB of weights, those 12 GiB and vLLM's own gigabyte.
+    """
+    card = ModelCard(
+        model_id=ModelId("org/wide"),
+        storage_size=Memory.from_bytes(8 * _GIB),
+        n_layers=48,
+        hidden_size=3840,
+        supports_tensor=False,
+        num_key_value_heads=8,
+        tasks=[ModelTask.TextGeneration],
+    )
+    device_total = 48 * _GIB
+    share = resolve_gpu_memory_utilization(
+        card, 32768, "vllm-cuda", device_total, None, 2 * 48 * 8 * 256 * 2
+    )
+    assert share.basis == "placement"
+    assert share.fraction * device_total >= (8 + 12 + 1) * _GIB
+
+
+def test_card_without_kv_geometry_is_sized_from_its_artifact() -> None:
+    """The artifact's config sizes a card that omits num_key_value_heads.
+
+    Its footprint holds no KV cache, and sizing from it alone left vLLM 0.16
+    GiB for a Qwen3-0.6B window that needs 3.5 GiB; the artifact bound covers
+    the window.
+    """
+    card = ModelCard(
+        model_id=ModelId("org/unsized"),
+        storage_size=Memory.from_bytes(1_519_209_243),
+        n_layers=28,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    artifact = 2 * 28 * 8 * 128 * 2
+    share = resolve_gpu_memory_utilization(
+        card, 32768, "vllm-cuda", _GB10_TOTAL, None, artifact
+    )
+    assert share.basis == "placement"
+    assert share.fraction * _GB10_TOTAL >= 1_519_209_243 + artifact * 32768 + _GIB
+
+
+def test_unreadable_artifact_geometry_keeps_the_default_share() -> None:
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, None, None
+    )
+    assert share == GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "no_kv_geometry")
+
+
+@pytest.mark.parametrize("total", [None, 0])
+def test_unknown_device_total_keeps_the_default_share(total: int | None) -> None:
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", total, None, _QWEN_7B_KV
+    )
+    assert share == GpuMemoryShare(
+        _DEFAULT_GPU_MEMORY_UTILIZATION, "unknown_device_total"
+    )
+
+
+def test_small_model_share_covers_vllm_runtime_memory() -> None:
+    """A tiny model still gets its window's KV cache after vLLM's own memory.
+
+    Half a GiB of weights at the 1.30 factor leaves only 0.15 GiB of overhead
+    allowance, less than the gigabyte vLLM holds for its CUDA context and
+    activations whatever the model's size. The share is raised to weights,
+    3.5 GiB of window KV cache and that gigabyte: 5.0 GiB, not the 4.4 GiB
+    footprint.
+    """
+    card = ModelCard(
+        model_id=ModelId("org/tiny"),
+        storage_size=Memory.from_bytes(_GIB // 2),
+        n_layers=28,
+        hidden_size=1024,
+        supports_tensor=False,
+        num_key_value_heads=8,
+        tasks=[ModelTask.TextGeneration],
+    )
+    device_total = 24 * _GIB
+    share = resolve_gpu_memory_utilization(
+        card, 32768, "vllm-cuda", device_total, None, 2 * 28 * 8 * 128 * 2
+    )
+    assert share.basis == "placement"
+    assert share.fraction * device_total >= 5.0 * _GIB
+
+
+def test_share_never_exceeds_the_fixed_default() -> None:
+    """Sizing never asks for more than the historical fixed share."""
+    share = resolve_gpu_memory_utilization(
+        _sized_card(), 32768, "vllm-cuda", 8 * _GIB, None, _QWEN_7B_KV
+    )
+    assert share == GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "placement")
+
+
+def _patch_nvidia(
+    monkeypatch: pytest.MonkeyPatch, accelerator: AcceleratorMetrics
+) -> None:
+    import skulk.utils.info_gatherer.nvidia_gpu as nvidia_gpu
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    monkeypatch.setattr(vllm_runner.sys, "platform", "linux")
+    monkeypatch.setattr(vllm_runner, "_cuda_device_total", lambda: None)
+    monkeypatch.setattr(nvidia_gpu, "load_nvml", lambda: object())
+
+    def has_nvidia_gpu(_nvml: object) -> bool:
+        return True
+
+    def read(_nvml: object, **_: object) -> AcceleratorMetrics:
+        return accelerator
+
+    monkeypatch.setattr(nvidia_gpu, "has_nvidia_gpu", has_nvidia_gpu)
+    monkeypatch.setattr(nvidia_gpu, "read_accelerator_metrics", read)
+
+
+def test_device_total_prefers_the_cuda_visible_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUDA's own total is the denominator vLLM applies its share to."""
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    monkeypatch.setattr(vllm_runner.sys, "platform", "linux")
+    monkeypatch.setattr(vllm_runner, "_cuda_device_total", lambda: 79 * _GIB)
+    assert _device_memory_total("vllm-cuda") == 79 * _GIB
+
+
+class _FakeCudaDriver:
+    """Scriptable CUDA driver entry points for ``_cuda_device_total``."""
+
+    def __init__(self, total: int, failing: str | None = None) -> None:
+        self.total = total
+        self.failing = failing
+
+    def cuInit(self, _flags: int) -> int:  # noqa: N802 - CUDA's own naming
+        return 100 if self.failing == "init" else 0
+
+    def cuDeviceGet(self, _device: object, _ordinal: int) -> int:  # noqa: N802
+        return 101 if self.failing == "device" else 0
+
+    def cuDeviceTotalMem_v2(self, total: Any, _device: object) -> int:  # noqa: N802
+        if self.failing == "total":
+            return 1
+        total._obj.value = self.total
+        return 0
+
+
+def test_cuda_device_total_reads_the_driver(monkeypatch: pytest.MonkeyPatch) -> None:
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    def load(_name: str) -> _FakeCudaDriver:
+        return _FakeCudaDriver(_GB10_TOTAL)
+
+    monkeypatch.setattr(vllm_runner.ctypes, "CDLL", load)
+    assert vllm_runner._cuda_device_total() == _GB10_TOTAL
+
+
+@pytest.mark.parametrize("failing", ["init", "device", "total"])
+def test_cuda_device_total_is_unknown_when_the_driver_fails(
+    monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    def load(_name: str) -> _FakeCudaDriver:
+        return _FakeCudaDriver(_GB10_TOTAL, failing)
+
+    monkeypatch.setattr(vllm_runner.ctypes, "CDLL", load)
+    assert vllm_runner._cuda_device_total() is None
+
+
+def test_cuda_device_total_is_unknown_without_the_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    def missing(_name: str) -> object:
+        raise OSError("libcuda.so.1: cannot open shared object file")
+
+    monkeypatch.setattr(vllm_runner.ctypes, "CDLL", missing)
+    assert vllm_runner._cuda_device_total() is None
+
+
+def test_device_total_reads_nvml_on_a_discrete_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_nvidia(
+        monkeypatch,
+        AcceleratorMetrics(
+            vendor="nvidia",
+            name="NVIDIA A100-SXM4-80GB",
+            vram_total_bytes=80 * _GIB,
+            compute_capability="8.0",
+        ),
+    )
+    assert _device_memory_total("vllm-cuda") == 80 * _GIB
+
+
+def test_device_total_uses_host_memory_on_a_gb10(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NVML has no memory figure on a GB10; CUDA's total is the host's memory."""
+    _patch_nvidia(
+        monkeypatch,
+        AcceleratorMetrics(
+            vendor="nvidia", name="NVIDIA GB10", compute_capability="12.1"
+        ),
+    )
+    import skulk.worker.runner.vllm.runner as vllm_runner
+
+    monkeypatch.setattr(
+        vllm_runner.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(total=_GB10_TOTAL),
+    )
+    assert _device_memory_total("vllm-cuda") == _GB10_TOTAL
+
+
+def test_device_total_is_unknown_without_a_memory_figure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_nvidia(
+        monkeypatch,
+        AcceleratorMetrics(
+            vendor="nvidia", name="NVIDIA H100", compute_capability="9.0"
+        ),
+    )
+    assert _device_memory_total("vllm-cuda") is None
 
 
 def test_max_concurrent_requests_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -615,22 +985,30 @@ def test_build_vllm_serve_args_speculative_config() -> None:
         spec_method="dflash",
         spec_num_tokens=15,
         spec_draft_repo="poolside/Laguna-XS-2.1-DFlash-FP8",
+        spec_draft_revision="a" * 40,
     )
     payload = args[args.index("--speculative-config") + 1]
     assert _json.loads(payload) == {
         "method": "dflash",
         "num_speculative_tokens": 15,
         "model": "poolside/Laguna-XS-2.1-DFlash-FP8",
+        "revision": "a" * 40,
     }
-    # Deep depths must raise the scheduler's batched-token budget: vLLM's
-    # defaults (2048 batched, 256 seqs) go negative at depth 15 and engine
-    # init fails ("max_num_scheduled_tokens is set to -1536" observed live).
-    # 8192 is the fresh-box-validated floor for the Laguna depth-15 card.
+    # Deep depths must raise the scheduler's batched-token budget AND pin
+    # the sequence cap: the budget constraint is
+    # batched >= seqs * (depth - 1), and both sides are vLLM-version- and
+    # hardware-band-dependent defaults if left unpinned (0.25.1's effective
+    # 2048/256 failed engine init at depth 15 with
+    # "max_num_scheduled_tokens is set to -1536"; 0.28.0 defaults seqs as
+    # high as 1024, which would sink the raised budget again). 8192 is the
+    # fresh-box-validated floor for the Laguna depth-15 card.
     assert args[args.index("--max-num-batched-tokens") + 1] == "8192"
+    assert args[args.index("--max-num-seqs") + 1] == "256"
     # Shallow MTP depths keep vLLM's default scheduler sizing (the exact
-    # shape the #649 cards validated under): no flag emitted.
+    # shape the #649 cards validated under): neither flag emitted.
     shallow = _serve_args(spec_method="mtp", spec_num_tokens=2)
     assert "--max-num-batched-tokens" not in shallow
+    assert "--max-num-seqs" not in shallow
     # Depths past the validated floor scale linearly rather than re-hitting
     # the same wall (2048 + 256 * 30 = 9728 at depth 31).
     deep = _serve_args(
@@ -639,6 +1017,7 @@ def test_build_vllm_serve_args_speculative_config() -> None:
         spec_draft_repo="poolside/Laguna-XS-2.1-DFlash-FP8",
     )
     assert deep[deep.index("--max-num-batched-tokens") + 1] == "9728"
+    assert deep[deep.index("--max-num-seqs") + 1] == "256"
 
 
 def test_vllm_max_model_len_constant_shared_with_placement() -> None:
@@ -648,3 +1027,92 @@ def test_vllm_max_model_len_constant_shared_with_placement() -> None:
     from skulk.shared.models.memory_estimate import VLLM_MAX_MODEL_LEN
 
     assert VLLM_MAX_MODEL_LEN == 32768
+
+
+def test_tool_call_finish_surfaces_forced_choice_stop() -> None:
+    # With a named tool_choice, vLLM reports the forced call under
+    # finish_reason "stop" (OpenAI semantics); gating on "tool_calls" alone
+    # returned an empty stop chunk to the caller (observed live on 0.28.0).
+    from skulk.worker.runner.vllm.runner import tool_call_finish_surfaces
+
+    assert tool_call_finish_surfaces("stop")
+    assert tool_call_finish_surfaces("tool_calls")
+    assert tool_call_finish_surfaces(None)
+    # A call cut short has incomplete arguments and must not surface.
+    assert not tool_call_finish_surfaces("length")
+    assert not tool_call_finish_surfaces("content_filter")
+
+
+def _retry_runner(health_outcomes: list[Exception | None]) -> tuple[Any, list[int], list[int]]:
+    """Build a runner whose spawn/health pair is scripted, tracking both calls."""
+    runner: Any = VllmRunner.__new__(VllmRunner)
+    spawns: list[int] = []
+    teardowns: list[int] = []
+    remaining = list(health_outcomes)
+
+    def fake_spawn(_model_dir: Path, _served: str, _n_ctx: int) -> None:
+        spawns.append(len(spawns) + 1)
+
+    def fake_health() -> None:
+        outcome = remaining.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    def fake_teardown() -> None:
+        teardowns.append(len(teardowns) + 1)
+
+    runner._spawn_server = fake_spawn
+    runner._await_health = fake_health
+    runner._teardown_server = fake_teardown
+    return runner, spawns, teardowns
+
+
+def test_lost_port_race_retries_with_a_fresh_port() -> None:
+    """A bind-time EADDRINUSE is transient and must not fail the placement.
+
+    _pick_port proves a port free, then vllm serve binds it seconds later; in
+    that window the kernel can hand the same ephemeral port to an outbound
+    connection on a busy node. Retrying picks a new port.
+    """
+    collision = RuntimeError(
+        "vllm serve exited during startup (code 1); log tail:\n"
+        "OSError: [Errno 98] Address already in use"
+    )
+    runner, spawns, teardowns = _retry_runner([collision, None])
+
+    runner._spawn_server_with_port_retry(Path("/models/m"), "org/m", 8192)
+
+    assert len(spawns) == 2
+    # The failed attempt is reclaimed before rebinding so no handles leak.
+    assert len(teardowns) == 1
+
+
+def test_port_race_retries_are_bounded() -> None:
+    collision = RuntimeError(
+        "vllm serve exited during startup (code 1); log tail:\n"
+        "OSError: [Errno 98] Address already in use"
+    )
+    runner, spawns, _ = _retry_runner([collision, collision, collision])
+
+    with pytest.raises(RuntimeError, match="Address already in use"):
+        runner._spawn_server_with_port_retry(Path("/models/m"), "org/m", 8192)
+
+    assert len(spawns) == 3
+
+
+def test_other_startup_failures_are_not_retried() -> None:
+    """A real fault must fail fast rather than burn attempts.
+
+    A CUDA OOM, a missing weight shard, or a bad flag will fail identically on
+    a fresh port, so retrying only delays the operator's error by minutes.
+    """
+    fault = RuntimeError(
+        "vllm serve exited during startup (code 1); log tail:\n"
+        "torch.AcceleratorError: CUDA error: out of memory"
+    )
+    runner, spawns, _ = _retry_runner([fault])
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        runner._spawn_server_with_port_retry(Path("/models/m"), "org/m", 8192)
+
+    assert len(spawns) == 1

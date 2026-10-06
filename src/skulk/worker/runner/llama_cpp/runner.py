@@ -17,11 +17,12 @@ cleanly on nodes (e.g. Macs) where the binding is not installed.
 """
 
 import inspect
+import json
 import os
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast, final
 
 from skulk.api.types import GenerationStats, ToolCallItem, TopLogprobItem
 from skulk.shared.models.capabilities import resolve_model_capability_profile
@@ -62,10 +63,17 @@ from skulk.worker.runner.generation_stats import (
     blocking_call_stats,
     resolve_stream_token_counts,
 )
+from skulk.worker.runner.llama_server.channel_text_parser import (
+    GemmaChannelTextParser,
+)
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
+from skulk.worker.runner.llm_inference.scaffolding_scrub import (
+    StreamingScaffoldingScrub,
+)
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
+from skulk.worker.runner.llm_inference.tool_parsers import declared_tool_calls
 from skulk.worker.runner.llm_inference.tool_text_parser import (
-    parse_tool_calls_from_text,
+    parse_tool_calls_with_remainder,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 
@@ -398,6 +406,100 @@ def _sanitize_harmony_assistant_messages(
     return sanitized
 
 
+@final
+class TemplateKwargFormatter:
+    """Inject chat-template kwargs into llama-cpp-python's Jinja render.
+
+    ``create_chat_completion`` offers no channel for template kwargs (the
+    served engines forward ``chat_template_kwargs`` to their servers; the
+    in-process binding has no equivalent parameter), but the library's
+    ``Jinja2ChatFormatter.__call__`` forwards its own ``**kwargs`` into the
+    template render. Wrapping the formatter therefore gives the runner a
+    per-request slot for controls the template itself defines, such as
+    ``enable_thinking``. The runner's dispatch is strictly serial (width 1),
+    so mutating the slot between requests is race-free.
+
+    A kwarg the template never reads is inert in the render, so injecting
+    into a template that ignores it changes nothing; the installer still
+    gates on the template actually mentioning the control, to keep the
+    handler swap off every model that cannot use it.
+    """
+
+    def __init__(self, inner: Callable[..., Any]) -> None:
+        self._inner = inner
+        self.template_kwargs: dict[str, Any] = {}
+
+    def __call__(self, **kwargs: Any) -> Any:
+        # The handler's own arguments (messages, tools, ...) must win over
+        # the injected slot on any collision.
+        return self._inner(**{**self.template_kwargs, **kwargs})
+
+
+def install_template_kwarg_formatter(model: Any) -> TemplateKwargFormatter | None:
+    """Install a kwarg-injecting default chat handler on a loaded ``Llama``.
+
+    Rebuilds the model's default GGUF-template formatter exactly the way
+    llama-cpp-python's own ``__init__`` does (same template, eos/bos token
+    text, and stop token id), wrapped with the injection slot, and installs
+    it as the ``chat_template.default`` handler. Only the default Jinja path
+    is touched: a guessed family chat format or an explicit chat handler
+    (vision) is never overridden, and a template that does not mention
+    ``enable_thinking`` is left alone. Returns the wrapper whose
+    ``template_kwargs`` the runner sets per request, or ``None`` when the
+    model takes none of this (or the library's internals do not match, in
+    which case the runner degrades loudly to the previous behavior).
+    """
+
+    try:
+        import llama_cpp.llama_chat_format as llama_chat_format
+
+        if getattr(model, "chat_format", None) != "chat_template.default":
+            return None
+        metadata = getattr(model, "metadata", None)
+        if not isinstance(metadata, dict):
+            # An internals mismatch, not a not-applicable model: the default
+            # Jinja path was chosen, so metadata must exist. Raising routes
+            # it through the loud degradation below.
+            raise RuntimeError("Llama.metadata is not a dict")
+        template = cast("dict[str, Any]", metadata).get("tokenizer.chat_template")
+        if not isinstance(template, str):
+            raise RuntimeError("tokenizer.chat_template missing from metadata")
+        if "enable_thinking" not in template:
+            return None
+        eos_token_id = int(model.token_eos())
+        bos_token_id = int(model.token_bos())
+        eos_token = (
+            model._model.token_get_text(eos_token_id)  # noqa: SLF001 - mirrors upstream __init__
+            if eos_token_id != -1
+            else ""
+        )
+        bos_token = (
+            model._model.token_get_text(bos_token_id)  # noqa: SLF001 - mirrors upstream __init__
+            if bos_token_id != -1
+            else ""
+        )
+        formatter = llama_chat_format.Jinja2ChatFormatter(
+            template=template,
+            eos_token=eos_token,
+            bos_token=bos_token,
+            stop_token_ids=[eos_token_id],
+        )
+        wrapper = TemplateKwargFormatter(formatter)
+        handlers = getattr(model, "_chat_handlers", None)
+        if not isinstance(handlers, dict):
+            raise RuntimeError("Llama._chat_handlers is not a dict")
+        cast("dict[str, Any]", handlers)["chat_template.default"] = (
+            llama_chat_format.chat_formatter_to_chat_completion_handler(wrapper)
+        )
+        return wrapper
+    except Exception as error:  # noqa: BLE001 - degrade to the previous behavior
+        logger.warning(
+            "Thinking control unavailable on this llama.cpp build; "
+            f"enable_thinking will be ignored in-process ({error})"
+        )
+        return None
+
+
 def generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
     """Translate Skulk task params into llama.cpp ``create_chat_completion`` kwargs."""
     kwargs: dict[str, Any] = {}
@@ -448,6 +550,41 @@ def tool_calls_from_message(message: dict[str, Any]) -> list[ToolCallItem]:
             item_kwargs["id"] = call["id"]
         items.append(ToolCallItem(**item_kwargs))
     return items
+
+
+def dropped_call_text(message: dict[str, Any]) -> str:
+    """Render native calls as text, for calls that named no offered tool.
+
+    When llama.cpp's own handler parses a call, the raw markup is gone from the
+    message and ``content`` is null. Dropping such a call without putting
+    anything in its place would answer the request with a successful blank
+    message, so the call is re-serialized and delivered as content, which is
+    what the text-recovered path does with a block naming no offered tool.
+    """
+
+    rendered = [
+        json.dumps({"name": call.name, "arguments": call.arguments})
+        for call in tool_calls_from_message(message)
+    ]
+    return "\n".join(rendered)
+
+
+def offered_tool_calls_from_message(
+    message: dict[str, Any], tools: list[dict[str, Any]] | None
+) -> list[ToolCallItem]:
+    """Native structured calls from llama.cpp, limited to the offered tools.
+
+    llama.cpp's bundled chat handlers fill ``tool_calls`` themselves for the
+    formats they recognize, and nothing there checks the name against the
+    request. A model reaching for one of its own built-ins would otherwise
+    reach the caller as a call they cannot run, which is the same rule the
+    text-recovered path applies, and a request that offered no tools cannot
+    produce one at all.
+    """
+
+    if not tools:
+        return []
+    return declared_tool_calls(tool_calls_from_message(message), tools)
 
 
 def _logprob_fields(
@@ -684,6 +821,10 @@ class Runner(ServedConcurrentDispatch):
         self.cancelled_tasks: set[TaskId] = set()
         self.seen: set[TaskId] = set()
         self.model: Any = None
+        # Set at load for text models whose GGUF template reads
+        # enable_thinking; carries per-request thinking control into the
+        # template render (see TemplateKwargFormatter).
+        self._thinking_formatter: TemplateKwargFormatter | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         # Width 1: the in-process Llama object cannot generate concurrently.
         # The mixin still bounds admitted work and stamps admission concurrency.
@@ -757,25 +898,35 @@ class Runner(ServedConcurrentDispatch):
 
         from llama_cpp import Llama  # pyright: ignore[reportAttributeAccessIssue]
 
-        from skulk.download.download_utils import build_model_path
+        from skulk.download.download_utils import (
+            build_model_path,
+            resolve_artifact_file,
+        )
 
         _require_bounded_swa_support(Llama)
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
-        model_dir = build_model_path(ModelId(model_id), card.source_revision)
+        model_dir = build_model_path(
+            ModelId(model_id),
+            card.source_revision,
+            card.artifact_bundle.root if card.artifact_bundle is not None else None,
+        )
         # Load the exact file the card pinned at creation (the selected quant);
         # fall back to scanning if it's absent (older card / manual staging), so
         # download, sizing, and loading stay in agreement.
         pinned = self.shard_metadata.model_card.gguf_file
         gguf_path: Path | None = None
         if pinned:
-            candidate = (model_dir / pinned).resolve()
-            # Reject a hand-edited card whose gguf_file is absolute or uses ".."
-            # to escape the model directory; fall back to the in-dir scan.
-            if candidate.is_file() and candidate.is_relative_to(model_dir.resolve()):
-                gguf_path = candidate
-            else:
+            try:
+                gguf_path = resolve_artifact_file(
+                    model_dir,
+                    card.artifact_bundle.root
+                    if card.artifact_bundle is not None
+                    else None,
+                    pinned,
+                )
+            except (FileNotFoundError, ValueError):
                 logger.warning(
                     f"card gguf_file {pinned!r} is missing or outside the model "
                     f"dir; scanning {model_dir} instead"
@@ -843,6 +994,10 @@ class Runner(ServedConcurrentDispatch):
                 verbose=False,
                 chat_handler=chat_handler,
             )
+        if chat_handler is None:
+            # Text path only: a vision chat handler owns its own rendering
+            # and must not be swapped out from under the projector.
+            self._thinking_formatter = install_template_kwarg_formatter(self.model)
         self.current_status = RunnerReady()
         record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
         logger.info(
@@ -877,6 +1032,16 @@ class Runner(ServedConcurrentDispatch):
         if self._is_harmony_model():
             messages = _sanitize_harmony_assistant_messages(messages)
         kwargs = generation_kwargs(task.task_params)
+        if self._thinking_formatter is not None:
+            # Set (or cleared) for every request, so one request's thinking
+            # control can never leak into the next. Covers the tools path
+            # too: _generate_with_tools renders through the same handler.
+            enable_thinking = task.task_params.enable_thinking
+            self._thinking_formatter.template_kwargs = (
+                {"enable_thinking": enable_thinking}
+                if enable_thinking is not None
+                else {}
+            )
 
         want_logprobs = wants_logprobs(
             task.task_params.logprobs, task.task_params.top_logprobs
@@ -936,7 +1101,9 @@ class Runner(ServedConcurrentDispatch):
             # Reparse the marker stream from strings (the MLX engine does the
             # token-level equivalent) so reasoning lands in reasoning_content and
             # content is clean.
-            reasoning_parser = self._reasoning_text_parser()
+            reasoning_parser = self._reasoning_text_parser(
+                thinking_disabled=self._thinking_disabled_for(task.task_params)
+            )
 
             # Reasoning parsing re-chunks the stream into pieces that no longer
             # align 1:1 with the source tokens, so per-token logprobs can't be
@@ -992,6 +1159,17 @@ class Runner(ServedConcurrentDispatch):
                 )
 
             emitted_finish = False
+            # With no tools offered neither llama.cpp's native handler nor the
+            # text-recovery branch runs, so a model writing a call anyway would
+            # leak its dialect markers as content (#889); scrub them, the same
+            # invariant the MLX path enforces with emit_calls=False. Logprobs
+            # requests are exempt: rewriting a token chunk's text would detach
+            # it from the per-token logprob it carries.
+            scrub = (
+                StreamingScaffoldingScrub()
+                if not task.task_params.tools and not want_logprobs
+                else None
+            )
             for chunk in stream:
                 if self._is_cancelled(task.task_id):
                     logger.info(f"llama.cpp generation cancelled: {task.task_id}")
@@ -1010,17 +1188,29 @@ class Runner(ServedConcurrentDispatch):
 
                 if reasoning_parser is not None:
                     for clean_text, is_thinking in reasoning_parser.feed(text):
+                        if not is_thinking and scrub is not None:
+                            clean_text = scrub.feed(clean_text)
+                            if not clean_text:
+                                continue
                         self._send_token_chunk(
                             command_id, model_id, clean_text, is_thinking=is_thinking
                         )
                     if finish is not None:
                         for clean_text, is_thinking in reasoning_parser.flush():
+                            if not is_thinking and scrub is not None:
+                                clean_text = scrub.feed(clean_text)
+                                if not clean_text:
+                                    continue
                             self._send_token_chunk(
                                 command_id,
                                 model_id,
                                 clean_text,
                                 is_thinking=is_thinking,
                             )
+                        if scrub is not None:
+                            tail = scrub.flush()
+                            if tail:
+                                self._send_token_chunk(command_id, model_id, tail)
                         emitted_finish = True
                         self._send_token_chunk(
                             command_id,
@@ -1031,6 +1221,10 @@ class Runner(ServedConcurrentDispatch):
                         )
                     continue
 
+                if scrub is not None:
+                    text = scrub.feed(text)
+                    if finish is not None:
+                        text += scrub.flush()
                 if not text and finish is None and logprob is None:
                     continue
                 emitted_finish = emitted_finish or finish is not None
@@ -1057,9 +1251,17 @@ class Runner(ServedConcurrentDispatch):
                 # so a stream that ends without a finish_reason doesn't truncate.
                 if reasoning_parser is not None:
                     for clean_text, is_thinking in reasoning_parser.flush():
+                        if not is_thinking and scrub is not None:
+                            clean_text = scrub.feed(clean_text)
+                            if not clean_text:
+                                continue
                         self._send_token_chunk(
                             command_id, model_id, clean_text, is_thinking=is_thinking
                         )
+                if scrub is not None:
+                    tail = scrub.flush()
+                    if tail:
+                        self._send_token_chunk(command_id, model_id, tail)
                 self.event_sender.send(
                     ChunkGenerated(
                         command_id=command_id,
@@ -1127,16 +1329,49 @@ class Runner(ServedConcurrentDispatch):
             return False
         return profile.output_parser == OutputParserType.GptOss
 
-    def _reasoning_text_parser(self) -> HarmonyTextParser | ThinkTextParser | None:
+    def _thinking_disabled_for(
+        self, task_params: TextGenerationTaskParams
+    ) -> bool:
+        """Whether this request's prompt rendered with thinking pre-closed.
+
+        True only when BOTH hold: the template-kwarg formatter is installed
+        (so the injection actually reaches the render) and the request asked
+        for thinking off. A control-less template or a failed install leaves
+        the prompt in its usual mid-reasoning shape, whatever the request
+        said.
+        """
+
+        return (
+            self._thinking_formatter is not None
+            and task_params.enable_thinking is False
+        )
+
+    def _reasoning_text_parser(
+        self,
+        *,
+        thinking_disabled: bool = False,
+    ) -> HarmonyTextParser | ThinkTextParser | GemmaChannelTextParser | None:
         """Pick the string reasoning parser for this model's output format.
 
         llama.cpp hands back already-detokenized strings, so the reasoning/content
         split the MLX engine does at the token level must be redone here from
         text. gpt-oss (harmony channel markers) uses :class:`HarmonyTextParser`; a
         token-delimited ``<think>``/``</think>`` reasoning model (e.g. Qwen3.5)
-        uses :class:`ThinkTextParser`; anything else returns ``None`` so the text
+        uses :class:`ThinkTextParser`; a channel-delimited reasoning model
+        (Gemma 4) uses :class:`GemmaChannelTextParser`, without which its
+        thought channel reaches ``visible_text`` and a call the model only
+        contemplated could be recovered as executable; anything else returns
+        ``None`` so the text
         passes through untouched. A card we cannot resolve is treated as
         unparsed (logged, never raised) so generation stays best-effort.
+
+        ``thinking_disabled`` says this request rendered with
+        ``enable_thinking=false`` through the installed template-kwarg
+        formatter, which makes the prompt PRE-CLOSE the think block instead of
+        opening it: the generation then starts OUTSIDE thinking, and a parser
+        assuming the usual mid-reasoning start would misroute the whole plain
+        answer into ``reasoning_content`` (and starve tool recovery of its
+        visible text).
         """
         card = self.shard_metadata.model_card
         try:
@@ -1149,12 +1384,16 @@ class Runner(ServedConcurrentDispatch):
             return None
         if profile.output_parser == OutputParserType.GptOss:
             return HarmonyTextParser()
+        if profile.thinking_format == ReasoningFormat.ChannelDelimited:
+            return GemmaChannelTextParser()
         if profile.thinking_format == ReasoningFormat.TokenDelimited:
             # The reasoning chat template pre-fills the opening <think> in the
-            # prompt (not the output), so the stream begins mid-reasoning and only
-            # </think> appears. The runner does not toggle thinking, so this is
-            # always the shape for these models on llama.cpp.
-            return ThinkTextParser(starts_in_thinking=True)
+            # prompt (not the output), so the stream begins mid-reasoning and
+            # only </think> appears -- unless this request disabled thinking
+            # through the template, which pre-closes the block instead. The
+            # parser stays installed either way: a model that opens a literal
+            # <think> in its output is still split correctly.
+            return ThinkTextParser(starts_in_thinking=not thinking_disabled)
         return None
 
     def _send_token_chunk(
@@ -1247,7 +1486,9 @@ class Runner(ServedConcurrentDispatch):
         # text; the MLX engine does this at the token level). A reasoning model
         # wraps its answer -- and may merely *contemplate* a tool call -- inside
         # <think>/harmony scaffolding.
-        reasoning_parser = self._reasoning_text_parser()
+        reasoning_parser = self._reasoning_text_parser(
+            thinking_disabled=self._thinking_disabled_for(task.task_params)
+        )
         emissions = (
             reasoning_parser.feed(content) + reasoning_parser.flush()
             if reasoning_parser is not None
@@ -1255,8 +1496,20 @@ class Runner(ServedConcurrentDispatch):
         )
         visible_text = "".join(text for text, is_thinking in emissions if not is_thinking)
 
-        tool_calls = tool_calls_from_message(message)
-        if not tool_calls:
+        tool_calls = offered_tool_calls_from_message(message, task.task_params.tools)
+        if not tool_calls and not visible_text.strip():
+            # The handler consumed the raw markup while parsing, so a call that
+            # named no offered tool leaves nothing to say. Put the call back as
+            # text rather than answering with a successful blank message.
+            restored = dropped_call_text(message)
+            if restored:
+                visible_text = restored
+                emissions = emissions + [(restored, False)]
+                # The plain-model branch below emits `content`, which the
+                # handler emptied when it parsed the call, so it needs the
+                # restored text too or the answer is still blank.
+                content = restored
+        if not tool_calls and task.task_params.tools:
             # llama.cpp only fills structured tool_calls for formats its bundled
             # chat handlers recognize. A reasoning model emits the call as text,
             # so recover it from the string (#416). Source selection matters:
@@ -1272,9 +1525,28 @@ class Runner(ServedConcurrentDispatch):
                 if isinstance(reasoning_parser, HarmonyTextParser)
                 else visible_text
             )
-            tool_calls = parse_tool_calls_from_text(
-                tool_source, task.task_params.tools
+            resolved_format = None
+            try:
+                card = self.shard_metadata.model_card
+                resolved_format = resolve_model_capability_profile(
+                    card.model_id, model_card=card
+                ).tool_call_format
+            except Exception:  # noqa: BLE001 - no profile means text inference
+                pass
+            # Card truth scopes the recovery dialect (#897 review): a model's
+            # resolved format decides how its output is read, so a foreign
+            # dialect echoed in prose can never be minted as a call.
+            tool_calls, trailing_text = parse_tool_calls_with_remainder(
+                tool_source,
+                task.task_params.tools,
+                tool_call_format=resolved_format,
             )
+            if tool_calls and trailing_text:
+                # The model kept writing after its call ("{...} Done."). That
+                # is the assistant's content, delivered alongside the calls
+                # rather than swallowed with the markup; the tool response
+                # stays the terminal chunk.
+                self._send_token_chunk(command_id, model_id, trailing_text)
         if tool_calls:
             self.event_sender.send(
                 ChunkGenerated(

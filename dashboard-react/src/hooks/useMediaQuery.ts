@@ -48,3 +48,8 @@ export const MOBILE_BREAKPOINT_PX = 480;
 export function useIsMobile(): boolean {
   return useMediaQuery(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
 }
+
+/** The full navigation needs more room than the topology's phone layout. */
+export function useCompactHeader(): boolean {
+  return useMediaQuery('(max-width: 1000px)');
+}

@@ -60,6 +60,7 @@ else:
 
 from skulk.download.download_utils import build_model_path
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
+from skulk.shared.models.capabilities import muse_glimmer_reasoning_strength
 from skulk.shared.models.model_cards import VisionCardConfig
 from skulk.shared.tracing import TraceAttrValue
 from skulk.shared.types.common import ModelId
@@ -160,7 +161,7 @@ def _filter_config(cls: type, d: JsonDict) -> JsonDict:
 
 
 def _load_mlx_vlm_image_processor_from_pretrained(
-    proc_mod: object, repo: str
+    proc_mod: object, repo: str, revision: str | None = None
 ) -> _ImageProcessorProtocol | None:
     """Load an MLX-VLM processor via ``from_pretrained`` and extract its image processor.
 
@@ -191,14 +192,12 @@ def _load_mlx_vlm_image_processor_from_pretrained(
                     or parameter.kind is inspect.Parameter.VAR_KEYWORD
                     for parameter in parameters
                 )
-                processor = from_pretrained(
-                    repo,
-                    **(
-                        {"trust_remote_code": True}
-                        if supports_trust_remote_code
-                        else {}
-                    ),
-                )
+                loader_options: dict[str, object] = {}
+                if supports_trust_remote_code:
+                    loader_options["trust_remote_code"] = True
+                if revision is not None:
+                    loader_options["revision"] = revision
+                processor = from_pretrained(repo, **loader_options)
             except Exception as exc:
                 logger.info(
                     f"mlx_vlm {attr_name}.from_pretrained failed for {repo}: {exc}"
@@ -256,7 +255,9 @@ def _instantiate_mlx_vlm_image_processor(
     return None
 
 
-def _load_gemma3n_pil_image_processor(repo: str) -> _ImageProcessorProtocol:
+def _load_gemma3n_pil_image_processor(
+    repo: str, revision: str | None = None
+) -> _ImageProcessorProtocol:
     """Load Gemma 3n's configured SigLIP processor without torchvision.
 
     Transformers 5 exposes ``AutoImageProcessor`` as a torchvision-gated dummy
@@ -273,7 +274,10 @@ def _load_gemma3n_pil_image_processor(repo: str) -> _ImageProcessorProtocol:
     factory = cast(_ImageProcessorFactory, cast(object, SiglipImageProcessorPil))
     return cast(
         _ImageProcessorProtocol,
-        factory.from_pretrained(repo),
+        factory.from_pretrained(
+            repo,
+            **({"revision": revision} if revision is not None else {}),
+        ),
     )
 
 
@@ -611,6 +615,23 @@ def _diagnostic_attrs(attrs: dict[str, TraceAttrValue]) -> dict[str, object]:
     return cast(dict[str, object], attrs)
 
 
+
+#: ``vision.model_type`` spellings the registry and cards use for Muse Glimmer.
+MUSE_GLIMMER_VISION_MODEL_TYPES: frozenset[str] = frozenset(
+    {"muse_glimmer", "muse-glimmer"}
+)
+
+#: Model families whose own processor surrounds every expanded image block
+#: with a blank line on each side. Hugging Face's Gemma 3n processor builds
+#: ``"\n\n" + BOI + soft tokens + EOI + "\n\n"`` (its ``full_image_sequence``),
+#: while Gemma 4's processor adds no blank lines. The expansion has to match
+#: the family exactly: without the blank lines Gemma 3n E2B dropped letters of a
+#: six-character code it reads correctly with them. Gemma 3's processor frames
+#: images the same way, so a Gemma 3 vision card would belong here too once its
+#: placeholder handling is verified.
+_BLANK_LINE_FRAMED_IMAGE_MODEL_TYPES: frozenset[str] = frozenset({"gemma3n"})
+
+
 def _build_vision_prompt_with_debug(
     tokenizer: TokenizerWrapper,
     chat_template_messages: list[JsonDict],
@@ -625,8 +646,10 @@ def _build_vision_prompt_with_debug(
     """Build the expanded prompt and retain the raw placeholder layout.
 
     For models that use BOI/EOI framing (Gemma 3n/4), each expanded image
-    sequence is wrapped as ``BOI + (IMAGE × N) + EOI`` matching the format
-    the model was trained on."""
+    sequence is wrapped as ``BOI + (IMAGE × N) + EOI``. Families in
+    ``_BLANK_LINE_FRAMED_IMAGE_MODEL_TYPES`` also get the blank line their
+    own processor places on each side of that block, so the prompt matches
+    the format the model was trained on."""
     logger.info(
         "Building vision prompt "
         f"(messages={len(chat_template_messages)}, images={len(n_tokens_per_image)})"
@@ -647,6 +670,11 @@ def _build_vision_prompt_with_debug(
             extra_kwargs["thinking"] = enable_thinking
         if reasoning_effort is not None:
             extra_kwargs["reasoning_effort"] = reasoning_effort
+            if model_type in MUSE_GLIMMER_VISION_MODEL_TYPES:
+                # Muse Glimmer's template reads a strength level, not effort.
+                strength = muse_glimmer_reasoning_strength(reasoning_effort)
+                if strength is not None:
+                    extra_kwargs["reasoning_strength"] = strength
         prompt = tokenizer.apply_chat_template(
             chat_template_messages,
             tokenize=False,
@@ -664,6 +692,7 @@ def _build_vision_prompt_with_debug(
     # Walk the prompt and expand each single image_token placeholder into
     # N copies where N = the number of vision features for that image,
     # wrapped in BOI/EOI markers when configured.
+    frame = "\n\n" if model_type in _BLANK_LINE_FRAMED_IMAGE_MODEL_TYPES else ""
     image_idx = 0
     result: list[str] = []
     i = 0
@@ -675,7 +704,7 @@ def _build_vision_prompt_with_debug(
                 if image_idx < len(n_tokens_per_image)
                 else 1
             )
-            result.append(f"{boi_str}{image_token * n}{eoi_str}")
+            result.append(f"{frame}{boi_str}{image_token * n}{eoi_str}{frame}")
             image_idx += 1
             i += pad_len
         else:
@@ -910,15 +939,25 @@ class VisionEncoder:
         config: VisionCardConfig,
         model_id: ModelId,
         source_revision: str | None = None,
+        source_repository: ModelId | None = None,
+        artifact_root: str | None = None,
     ):
         self._config = config
-        self._main_model_path = build_model_path(model_id, source_revision)
-        weights_revision = (
-            source_revision if config.weights_repo == str(model_id) else None
+        self._source_revision = source_revision
+        self._source_repository = source_repository or model_id
+        self._main_model_path = (
+            build_model_path(model_id, source_revision)
+            if artifact_root is None
+            else build_model_path(
+                model_id, source_revision, artifact_root=artifact_root
+            )
         )
-        self._model_path = build_model_path(
-            ModelId(config.weights_repo), weights_revision
-        )
+        if config.weights_repo == str(self._source_repository):
+            self._model_path = self._main_model_path
+        else:
+            self._model_path = build_model_path(
+                ModelId(config.weights_repo), config.weights_revision
+            )
         self._vision_tower: nn.Module | None = None
         self._projector: nn.Module | None = None
         self._processor: _ImageProcessorProtocol | None = None
@@ -1069,12 +1108,22 @@ class VisionEncoder:
 
         processor_repo = self._config.processor_repo
         repo = processor_repo or str(self._model_path)
+        processor_revision = (
+            self._source_revision
+            if processor_repo == str(self._source_repository)
+            else self._config.processor_revision
+        )
+        loader_options: dict[str, object] = (
+            {"revision": processor_revision}
+            if processor_revision is not None
+            else {}
+        )
         image_proc: _ImageProcessorProtocol | None = None
         load_failures: list[str] = []
         try:
             image_proc = cast(
                 _ImageProcessorProtocol | None,
-                load_image_processor(repo),
+                load_image_processor(repo, **loader_options),
             )
         except (ImportError, OSError, ValueError) as exc:
             load_failures.append(f"mlx_vlm.utils.load_image_processor: {exc}")
@@ -1082,7 +1131,9 @@ class VisionEncoder:
 
         if image_proc is None and self._config.model_type == "gemma3n":
             try:
-                image_proc = _load_gemma3n_pil_image_processor(repo)
+                image_proc = _load_gemma3n_pil_image_processor(
+                    repo, processor_revision
+                )
                 logger.info("Using Transformers PIL SigLIP image processor")
             except (ImportError, OSError, TypeError, ValueError) as exc:
                 load_failures.append(f"Transformers PIL SigLIP processor: {exc}")
@@ -1096,6 +1147,7 @@ class VisionEncoder:
                 image_proc = _load_mlx_vlm_image_processor_from_pretrained(
                     proc_mod,
                     repo,
+                    processor_revision,
                 )
                 if image_proc is not None:
                     break
@@ -1108,7 +1160,11 @@ class VisionEncoder:
                 )
                 image_proc = cast(
                     _ImageProcessorProtocol,
-                    auto_from_pretrained(repo, trust_remote_code=True),
+                    auto_from_pretrained(
+                        repo,
+                        trust_remote_code=True,
+                        **loader_options,
+                    ),
                 )
             except (ImportError, OSError, ValueError) as exc:
                 load_failures.append(f"transformers.AutoImageProcessor: {exc}")
@@ -1613,9 +1669,17 @@ class VisionProcessor:
         config: VisionCardConfig,
         model_id: ModelId,
         source_revision: str | None = None,
+        source_repository: ModelId | None = None,
+        artifact_root: str | None = None,
     ):
         self.vision_config = config
-        self._encoder = VisionEncoder(config, model_id, source_revision)
+        self._encoder = VisionEncoder(
+            config,
+            model_id,
+            source_revision,
+            source_repository,
+            artifact_root,
+        )
         self._feature_cache: dict[str, tuple[mx.array, list[int]]] = {}
         self._feature_cache_max = 32
 

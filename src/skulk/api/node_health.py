@@ -24,6 +24,7 @@ from skulk.api.build_identity import (
     git_commit_identifiers_disagree,
     known_build_identifier,
 )
+from skulk.shared.data_plane_health import zenoh_isolated_nodes
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.node_facts import CONFLICT_ERROR_CODES
@@ -251,10 +252,11 @@ def _zenoh_isolated_reason(
     stream dies with transport errors, so without this reason the dashboard
     looks green while inference through the node is broken.
     """
-    resources = node_resources.get(node_id)
-    if resources is None or resources.data_transport != "zenoh":
-        return None
-    if resources.zenoh_connected_peers != 0:
+    isolated_nodes = zenoh_isolated_nodes(
+        live_nodes=live_nodes.keys(),
+        node_resources=node_resources,
+    )
+    if node_id not in isolated_nodes:
         return None
     other_zenoh_nodes = sum(
         1

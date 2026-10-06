@@ -46,6 +46,8 @@ export interface ChatState {
   selectedSpeechModelId: string | null;
   selectedVoice: string | null;
   autoSpeakAssistant: boolean;
+  /** Speak short interjections while a code block streams (voice loop). */
+  narrateCodeBlocks: boolean;
   realtimeVoiceEnabled: boolean;
   autoSubmitVoice: boolean;
   modelToConversationId: Record<string, string>;
@@ -56,6 +58,7 @@ interface PersistedDurable {
   modelToConversationId?: Record<string, string>;
   selectedVoice?: string | null;
   autoSpeakAssistant?: boolean;
+  narrateCodeBlocks?: boolean;
   realtimeVoiceEnabled?: boolean;
   autoSubmitVoice?: boolean;
 }
@@ -103,6 +106,7 @@ function initialState(): ChatState {
     selectedSpeechModelId: session.selectedSpeechModelId ?? null,
     selectedVoice: durable.selectedVoice ?? null,
     autoSpeakAssistant: durable.autoSpeakAssistant ?? false,
+    narrateCodeBlocks: durable.narrateCodeBlocks ?? true,
     realtimeVoiceEnabled: durable.realtimeVoiceEnabled ?? true,
     autoSubmitVoice: durable.autoSubmitVoice ?? false,
   };
@@ -126,7 +130,7 @@ const slice = createSlice({
 
       // Empty current conversation — re-assign it to the new model rather
       // than leaving an unused conversation behind.
-      if (currentConvo && currentConvo.messages.length === 0) {
+      if (currentConvo && currentConvo.messages.length === 0 && !state.conversations[state.modelToConversationId[modelId]]) {
         if (state.modelToConversationId[currentConvo.modelId] === currentConvo.id) {
           delete state.modelToConversationId[currentConvo.modelId];
         }
@@ -178,6 +182,10 @@ const slice = createSlice({
 
     setAutoSpeakAssistant(state, action: PayloadAction<boolean>) {
       state.autoSpeakAssistant = action.payload;
+    },
+
+    setNarrateCodeBlocks(state, action: PayloadAction<boolean>) {
+      state.narrateCodeBlocks = action.payload;
     },
 
     setRealtimeVoiceEnabled(state, action: PayloadAction<boolean>) {
@@ -262,6 +270,36 @@ const slice = createSlice({
       prepare(modelId: string) {
         return { payload: { id: nanoid(), modelId } };
       },
+    },
+
+    /** Create a model-owned conversation without moving another chat's selection. */
+    createBackgroundConversation: {
+      reducer(state, action: PayloadAction<{ id: string; modelId: string }>) {
+        const { id, modelId } = action.payload;
+        const now = Date.now();
+        state.conversations[id] = { id, modelId, name: DEFAULT_CONVERSATION_NAME, createdAt: now, updatedAt: now, messages: [] };
+        state.modelToConversationId[modelId] = id;
+        if (state.selectedModelId === modelId) state.activeConversationId = id;
+      },
+      prepare(modelId: string) { return { payload: { id: nanoid(), modelId } }; },
+    },
+
+    /** Pin async replies to their originating conversation; deletion never resurrects it. */
+    appendConversationMessage(state, action: PayloadAction<{ conversationId: string; message: ChatMessage }>) {
+      const conversation = state.conversations[action.payload.conversationId];
+      if (!conversation) return;
+      conversation.messages.push(action.payload.message);
+      if (conversation.name === DEFAULT_CONVERSATION_NAME && action.payload.message.role === 'user') {
+        conversation.name = autoName(action.payload.message.content);
+      }
+      conversation.updatedAt = Date.now();
+    },
+
+    /** Rename a saved conversation without replacing its messages or selection. */
+    renameConversation(state, action: PayloadAction<{ conversationId: string; name: string }>) {
+      const conversation = state.conversations[action.payload.conversationId];
+      const name = action.payload.name.trim();
+      if (conversation && name) { conversation.name = name; conversation.updatedAt = Date.now(); }
     },
 
     selectConversation(state, action: PayloadAction<string>) {
@@ -350,6 +388,7 @@ export function subscribeChatPersistence(
         modelToConversationId: chat.modelToConversationId,
         selectedVoice: chat.selectedVoice,
         autoSpeakAssistant: chat.autoSpeakAssistant,
+        narrateCodeBlocks: chat.narrateCodeBlocks,
         realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
         autoSubmitVoice: chat.autoSubmitVoice,
       },

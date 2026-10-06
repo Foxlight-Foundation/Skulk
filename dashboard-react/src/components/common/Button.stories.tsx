@@ -8,7 +8,7 @@ const meta: Meta<typeof Button> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: 24, background: '#111', minWidth: 400 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: 24, maxWidth: '100%', flexWrap: 'wrap' }}>
         <Story />
       </div>
     ),
@@ -39,8 +39,10 @@ const RefreshIcon = () => (
 export const Variants: Story = {
   render: () => (
     <>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <Button variant="primary">Primary</Button>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Button variant="primary">Primary outline</Button>
+        <Button variant="solid">Save changes</Button>
+        <Button variant="approve">Approve action</Button>
         <Button variant="outline">Outline</Button>
         <Button variant="ghost">Ghost</Button>
         <Button variant="danger">Danger</Button>
@@ -49,10 +51,22 @@ export const Variants: Story = {
   ),
 };
 
+/** Screen-specific commit actions retain their solid treatment. */
+export const SolidActions: Story = {
+  render: () => <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+    <Button variant="solid">Launch</Button>
+    <Button variant="solid">Save changes</Button>
+    <Button variant="approve">Approve action</Button>
+    <Button variant="solid" disabled>Launch unavailable</Button>
+    <Button variant="solid" loading>Launching</Button>
+    <Button variant="approve" loading>Approving</Button>
+  </div>,
+};
+
 export const Sizes: Story = {
   render: () => (
     <>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <Button variant="primary" size="sm">Small</Button>
         <Button variant="primary" size="md">Medium</Button>
         <Button variant="primary" size="lg">Large</Button>
@@ -64,7 +78,7 @@ export const Sizes: Story = {
 export const WithIcons: Story = {
   render: () => (
     <>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <Button variant="primary"><PlusIcon /> New Chat</Button>
         <Button variant="outline"><RefreshIcon /> Refresh</Button>
         <Button variant="danger"><TrashIcon /> Delete</Button>
@@ -76,11 +90,11 @@ export const WithIcons: Story = {
 export const IconOnly: Story = {
   render: () => (
     <>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <Button variant="primary" icon size="sm"><PlusIcon /></Button>
-        <Button variant="outline" icon><RefreshIcon /></Button>
-        <Button variant="ghost" icon><TrashIcon /></Button>
-        <Button variant="danger" icon><TrashIcon /></Button>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Button variant="primary" icon size="sm" aria-label="Add"><PlusIcon /></Button>
+        <Button variant="outline" icon aria-label="Refresh"><RefreshIcon /></Button>
+        <Button variant="ghost" icon aria-label="Delete"><TrashIcon /></Button>
+        <Button variant="danger" icon aria-label="Delete"><TrashIcon /></Button>
       </div>
     </>
   ),
@@ -89,7 +103,7 @@ export const IconOnly: Story = {
 export const States: Story = {
   render: () => (
     <>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <Button variant="primary">Normal</Button>
         <Button variant="primary" disabled>Disabled</Button>
         <Button variant="primary" loading>Loading</Button>
@@ -100,8 +114,8 @@ export const States: Story = {
 
 export const Block: Story = {
   render: () => (
-    <div style={{ width: 300 }}>
-      <Button variant="primary" block>▸ Launch Model</Button>
+    <div style={{ width: '100%', maxWidth: 300 }}>
+      <Button variant="solid" block>▸ Launch Model</Button>
     </div>
   ),
 };
@@ -111,7 +125,7 @@ export const InteractiveLoading: Story = {
     const [loading, setLoading] = useState(false);
     return (
       <Button
-        variant="primary"
+        variant="solid"
         loading={loading}
         onClick={() => {
           setLoading(true);

@@ -29,7 +29,14 @@ def fake_files(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(system_info, "_read_text", fake_read_text)
 
 
-def test_linux_model_and_chip(fake_files: None) -> None:
+def test_linux_model_and_chip(
+    fake_files: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_nvml_is_loaded() -> None:
+        raise AssertionError("x86 CPU identity must take precedence over NVML")
+
+    monkeypatch.setattr(system_info, "load_nvml", fail_if_nvml_is_loaded)
     model, chip = system_info._linux_model_and_chip()
     assert model == "Nimo Direct Inc. MME3L"  # vendor prefixed onto product
     assert chip == "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S"  # from /proc/cpuinfo
@@ -59,6 +66,42 @@ def test_linux_model_falls_back_to_board_then_unknown(
         return files.get(path, "")
 
     monkeypatch.setattr(system_info, "_read_text", fake_read_text)
+    monkeypatch.setattr(system_info, "load_nvml", lambda: None)
     model, chip = system_info._linux_model_and_chip()
     assert model == "NIMO Mini PC"  # vendor was junk, product junk -> board name
     assert chip == "Unknown Chip"
+
+
+def test_linux_arm_identity_falls_back_to_nvml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = {
+        "/sys/class/dmi/id/product_name": "GX10",
+        "/sys/class/dmi/id/board_name": "GX10",
+        "/sys/class/dmi/id/sys_vendor": "ASUSTeK COMPUTER INC.",
+        "/proc/cpuinfo": (
+            "processor\t: 0\n"
+            "CPU implementer\t: 0x41\n"
+            "CPU part\t: 0xd85\n"
+        ),
+    }
+    nvml = object()
+
+    def fake_read_text(path: str) -> str:
+        return files.get(path, "")
+
+    def fake_nvidia_device_name(loaded_nvml: object) -> str | None:
+        return "NVIDIA GB10" if loaded_nvml is nvml else None
+
+    monkeypatch.setattr(system_info, "_read_text", fake_read_text)
+    monkeypatch.setattr(system_info, "load_nvml", lambda: nvml)
+    monkeypatch.setattr(
+        system_info,
+        "read_nvidia_device_name",
+        fake_nvidia_device_name,
+    )
+
+    model, chip = system_info._linux_model_and_chip()
+
+    assert model == "ASUSTeK COMPUTER INC. GX10"
+    assert chip == "NVIDIA GB10"

@@ -26,40 +26,139 @@ They drive:
 - placement and memory calculations
 - model browsing in the API and dashboard
 - custom model registration
+- exact pre-publication qualification without claiming registry trust
 - modality hints such as vision
 - advanced capability declarations for model-specific runtime behavior
 
 ## Where They Live
 
-Built-in cards are shipped in:
+Skulk's current supported catalog comes from the TUF-verified external registry
+at `registry.foxlight.ai`. A registry card represents one exact selectable
+artifact—one quant or selected file—and carries an immutable card ID and signed
+snapshot provenance. Registry refreshes do not require a Skulk release.
 
-- [`resources/inference_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/inference_model_cards)
-- [`resources/image_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/image_model_cards)
-- [`resources/embedding_model_cards`](https://github.com/Foxlight-Foundation/Skulk/tree/main/resources/embedding_model_cards)
+An authenticated operator may also install a complete pinned card through
+`POST /models/add-card`. Skulk preserves its artifact bundle but strips every
+signed-registry trust claim and stores it as a custom card. This lets the model
+registry exercise an exact candidate on real hardware before publication while
+keeping unsigned qualification separate from signed publication. Explicit
+operator addition is the repository-code authorization boundary for executable
+custom cards; qualification credentials do not grant that wider authority.
+Headless qualification may use a dedicated
+`SKULK_EXACT_CARD_QUALIFICATION_TOKEN` bearer for only the temporary install and
+cleanup operations. The token does not approve repository code and does not
+grant any wider operator or inference scope. Skulk requires the immutable source
+revision and immutable pins for every external companion repository, assigns a
+durable `qualification_only` marker only to service-authenticated installs, and
+refuses to replace or remove any pre-existing non-qualification card through
+this service credential. The elected master rechecks that ownership at its
+serialized command-ordering boundary, closing races between different API
+nodes. Success additionally requires local persistence of the indexed event
+carrying that exact command ID and visibility of the exact card, so a cached
+identical card cannot acknowledge a new qualification request.
+Cleanup waits for its own indexed delete acknowledgement. Downloaded bytes and
+their installed record remain available for later signed adoption, while the
+`qualification_only` sidecar is deliberately excluded from catalog projection
+once its lifecycle-owned custom card has been removed.
+The qualification worker also sends the candidate's `artifact_bundle_id` to
+the store download endpoint. Both the API node and canonical store verify that
+identity, so a changed alias cannot redirect qualification to different bytes.
 
-Custom cards are stored under the user data directory and synced through the cluster event flow.
+The signed catalog also carries open `architecture` and `capability_claims`
+metadata beside the immutable card. Claims describe intrinsic model behavior
+and selected-artifact completeness without asserting that Skulk can serve the
+capability today. A separately signed engine-support matrix records exact
+engine-build compatibility; neither discovery agents nor mutable card fields
+can turn a claim into placement permission. Empirical load and feature
+qualification is bound to the exact immutable card it tested. An explicit
+artifact-scoped `incomplete` claim blocks matrix-derived placement for that
+capability even when the base model advertises it.
+
+Registry envelope v2 can additionally carry an `artifact_bundle`: a strict,
+content-derived description of one complete executable artifact. It pins an
+optional repository-relative loader root and the exact required files, sizes,
+and upstream object identities. This lets several independently loadable quants
+share one Hugging Face repository and revision without collapsing into one
+card. Existing v1 cards remain valid and retain their historical download
+behavior.
+
+Complete canonical and staged artifacts retain their full effective card and
+hashed manifest beside the bytes in `.skulk/installed-card.json`. These
+installed cards load before registry access, remain usable indefinitely while
+their artifact is complete, and keep an older installed generation active until
+a replacement has transferred and verified atomically.
+
+Skulk ships no model cards. When a model is downloaded, so is its card. A
+node's catalog has three sources: signed registry cards (from the registry, or
+from its verified cache for up to 30 days during an outage), the installed
+cards of its downloaded models (including detached records for models under a
+read-only model root), and custom cards. Installed cards stay local and have no
+expiry, so they keep working offline.
+
+When neither the registry nor an acceptable cache is available, Skulk reads the
+last verified registry catalog cached on the node without its age limit. It
+uses that cache only to associate legacy installed artifacts that predate card
+records with their signed card; an associated artifact gains its own card
+record and is then listed. The cached catalog is never listed or placed from by itself.
+`SKULK_OFFLINE=true` and `skulk --offline` both skip registry network
+refreshes, so the catalog is the installed and custom cards.
+
+A node that has never reached the registry and has no installed model and no
+custom card has an empty catalog. It logs a warning that names the cause and
+the remedies: connect once, copy a model directory together with its
+`.skulk/installed-card.json`, or add a custom card.
+
+Curated cards are maintained in the model registry's seed,
+[`foxlight-model-registry/seed/cards`](https://github.com/Foxlight-Foundation/foxlight-model-registry/tree/main/seed/cards).
+Card edits go there, never into Skulk.
+
+Custom cards are stored under the user data directory and synced through the
+cluster event flow. They are operator-owned and retain final precedence over
+registry and installed cards for the same `model_id`. Deleting a custom card
+restores the signed or installed card for that `model_id`, or removes the
+model from the catalog when neither exists.
 
 ## The card interface (source of truth)
 
 The authoritative definition of the model-card interface is the `ModelCard`
 type in
-[`src/skulk/shared/models/model_cards.py`](https://github.com/Foxlight-Foundation/Skulk/tree/main/src/skulk/shared/models/model_cards.py).
+[`src/skulk/shared/models/model_cards.py`](https://github.com/Foxlight-Foundation/Skulk/tree/dev/src/skulk/shared/models/model_cards.py).
 Every field is documented in that model, and the exhaustive, always-current field
 reference is the generated API schema (`ModelCard` and its nested
 `PlacementCardConfig` / `RuntimeCapabilityCardConfig` / `VisionCardConfig` /
 `ReasoningCardConfig` / `ModalitiesCardConfig` / `ToolingCardConfig` /
-`ComponentInfo`) in the [API reference](/api/skulk-api). This page is the curated
+`AudioCardConfig` / `MusicCardConfig` / `VideoCardConfig` /
+`LicenseCardConfig` / `ArtifactBundleConfig` / `ComponentInfo`) in the
+[API reference](/api/skulk-api). This page is the curated
 narrative; when in doubt about an exact field, the schema is canonical.
 
 Cards are camelCase on the wire and strict (unknown fields are rejected), so every
 node in a cluster must run the same Skulk version.
+
+The registry validates the persisted card body against its own strict schema
+before signing it. Its [model-card contract](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/docs/model-cards.md)
+maps field groups and publication evidence. When a card section changes, update
+both schema readers and both guides before publishing cards that use it.
+
+| Card surface | Source of truth | Runtime meaning |
+| --- | --- | --- |
+| Identity and bytes | `model_id`, `source_repository`, `source_revision`, `gguf_file`, `artifact_bundle` | One selected artifact and complete pinned download. |
+| Intrinsic behavior | `tasks` and typed sections such as `[audio]`, `[music]`, and `[video]` | What the selected model can do and which request fields it accepts. |
+| Compatibility | `[placement]` and separate signed engine-support claims | Candidate backends and exact qualified model/build/hardware combinations. |
+| Live admission | `NodeResources.engine_builds`, hardware facts, and Skulk runner limits | Whether a particular node is ready to serve the card now. |
+
+A valid artifact card is not by itself a live placement claim. The engine
+package, model weights, signed support decision, and current node resources
+remain separate truths.
 
 ## Core Fields
 
 ### Identity and size
 
 - `model_id`
-  - Hugging Face / MLX model identifier
+  - selectable artifact alias; legacy and custom cards normally use the Hugging Face repository id, while registry cards may give two exact files or quants from one repository different aliases
+- `source_repository`
+  - optional upstream Hugging Face repository containing the bytes; defaults to `model_id` and is set by the registry when the selectable alias differs from the byte origin
 - `storage_size`
   - total model size used for store/download/placement planning
 - `n_layers`
@@ -69,9 +168,18 @@ node in a cluster must run the same Skulk version.
 - `num_key_value_heads`
   - optional KV head count for tensor compatibility decisions
 - `gguf_file`
-  - for GGUF (llama.cpp) models only: the repo-relative weights file the runner loads (the selected quant's first shard), resolved once at card creation; `null` for safetensors/MLX cards
+  - for GGUF models, including music: the exact repository-relative weights file selected by the card (the selected quant's first shard for text GGUF); `null` for safetensors/MLX cards
 - `source_revision`
   - optional full Hugging Face commit hash for the qualified model artifacts; when set, metadata, store downloads, direct downloads, and worker staging all use that immutable revision instead of the repository's mutable `main` branch
+- `artifact_bundle`
+  - optional signed v2 manifest for one exact executable artifact: `root`,
+    `files` (repository-relative `path`, `size_bytes`, and optional immutable
+    `object_id`), content-derived `bundle_id`, and `download_size`
+  - signed v2 cards require this manifest to be internally consistent. Paths
+    are canonical POSIX-relative paths and cannot escape the repository or the
+    declared artifact root
+  - the loader runs from `root` when set, while file paths such as `gguf_file`
+    remain repository-relative for compatibility
 - `components`
   - for multi-component models (such as a diffusion stack): the per-component weight layout; `null` for a single-weights model
 
@@ -80,13 +188,29 @@ node in a cluster must run the same Skulk version.
 - `supports_tensor`
   - whether tensor-style placement is allowed (GGUF/llama.cpp cards set this `false`)
 - `tasks`
-  - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, or `SpeechTranslation`
+  - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, `SpeechTranslation`, or `TextToMusic`
 - `trust_remote_code`
-  - whether the loader may enable remote-code behavior for this model
+  - whether the artifact requires repository-supplied Python; signed publication authorizes the exact immutable registry card regardless of provenance
+  - explicitly adding an external model authorizes its pinned card, and an omitted Hugging Face revision is resolved to one immutable commit before the card is created; an installed card without a registry identity, recorded from a card an earlier Skulk release shipped, stays authorized by that release
+  - legacy executable custom cards that predate immutable revision pinning fail closed and must be re-added through the operator flow; an absent revision can never silently authorize mutable `main`
+  - ordinary catalog reads and placement requests never fetch or persist an unknown Hub card; callers must use an authenticated add flow first, and exact-placement payloads must match that effective catalog card completely
+  - this field controls the loader's repository-code behavior, not a second operator approval ceremony; artifact identity and immutable revision checks still fail closed
 - `uses_cfg`
   - whether the model uses classifier-free guidance (relevant to some image/diffusion models)
+- `generator_revision`
+  - optional version of the card generator used to produce a curated card; it is metadata about card production, not a mutable model revision
 
 ### Catalog metadata
+
+- `registry_card_id` / `registry_snapshot_id` / `registry_provenance`
+  - provenance is signed catalog metadata (`foxlight`, `agent`, or `community`)
+    and is deliberately excluded from the content-derived card identity
+  - runtime provenance attached by the verified external catalog; these are absent from custom cards and from installed cards without a registry identity
+- `registry_architecture` / `registry_capability_claims`
+  - signed intrinsic architecture and model/artifact capability evidence from
+    the registry envelope; persisted into installed sidecars for air-gapped use
+  - these fields do not declare present-day Skulk compatibility. Placement may
+    expand only from a separate exact signed engine/build support decision.
 
 - `family`
   - coarse family label such as `gemma`, `qwen`, `deepseek`
@@ -113,14 +237,31 @@ Fields include:
   - MLX-VLM model family identifier such as `gemma4`
 - `weights_repo`
   - optional alternate weights repository for the vision tower
+- `weights_revision`
+  - full immutable commit for a separate `weights_repo`; required for signed-registry cards
 - `image_token`
   - optional literal image token string
 - `processor_repo`
   - optional alternate processor repository
+- `processor_revision`
+  - full immutable commit for a separate `processor_repo`; required for
+    signed-registry cards because processor loaders may execute repository Python
 - `boi_token_id`
   - optional begin-of-image token id
 - `eoi_token_id`
   - optional end-of-image token id
+- `projector_file`
+  - exact repository-relative GGUF multimodal projector selected for served
+    vision; when present, `gguf_file` and a full immutable `source_revision`
+    are also required
+- `projector_size`
+  - exact positive byte size of `projector_file` at `source_revision`; it must
+    appear together with `projector_file`
+
+Legacy GGUF vision cards without an exact projector pin remain loadable through
+the in-process `llama_cpp` path. `llama_server` becomes eligible only when both
+projector fields are present, so the served runner never guesses among upstream
+projector variants.
 
 ## Placement Section
 
@@ -135,7 +276,7 @@ is also valid vocabulary: nodes advertise it alongside their compound tags, so a
 card written against the original `{"mlx"}` set keeps matching.
 
 - `compatible_backends`
-  - the hard filter: the set of backend tags this model may run on. The planner excludes any node whose advertised backends do not intersect this set. The default is `{"mlx"}` (so an unannotated card stays on MLX nodes); a GGUF card lists the llama.cpp tags. This is what keeps an MLX model off an AMD node and a GGUF model off a Mac.
+  - the declared backend set, combined with exact supported matches from the signed engine-support matrix and then filtered by live node and runner support. The planner excludes nodes that match no effective backend. The default is `{"mlx"}` (so an unannotated card stays on MLX nodes); a GGUF card lists the llama.cpp tags. This keeps MLX artifacts on nodes with MLX support and GGUF artifacts on a compatible GGUF engine; the artifact format does not by itself exclude a Mac.
 - `backend_preference`
   - the soft score: an ordered list of preferred tags. When several compatible nodes qualify, the planner prefers the node whose backend ranks earliest, with graceful fallback to the rest. This lets a card say "fastest on Vulkan, but ROCm is fine."
 - `min_vram_gib`
@@ -219,10 +360,73 @@ eligibility gate; the model must also be mounted and ready.
 For realtime STT, both `supports_streaming = true` and
 `supports_realtime = true` are necessary but not sufficient. The API must have
 reachable ready single-host capacity and use a model whose upstream runtime
-exposes a true incremental streaming session. The bundled
+exposes a true incremental streaming session. The registry's
 `mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit` card is the first validated
 contract candidate. Batch Parakeet and Whisper cards deliberately keep both
 flags false.
+
+### `[music]`
+
+Declares text-to-music model truth. A music card has `tasks = ["TextToMusic"]`
+as its sole task, a complete `artifact_bundle`, and no speech `[audio]`
+section. The registry derives `music.generate` from that task; it does not
+classify every upstream `text-to-audio` repository as music.
+
+- `family`
+  - `minimax_music3` or `ace_step_1_5`; the music adapter uses this typed value
+    to translate Skulk's request into family-specific engine options. The
+    top-level `family` is a separate coarse model label.
+- `lyrics`
+  - `required`, `optional`, or `unsupported`; MiniMax Music 3 requires lyrics.
+- `min_seconds` / `max_seconds`
+  - positive accepted generation targets with `min_seconds <= max_seconds <= 120`.
+    A target is a request budget, not a promise of exact WAV duration.
+- `language_model_gguf` / `rvq_depth_decoder_gguf` /
+  `flow_transformer_gguf`
+  - the three MiniMax GGUF components selected by this exact card. Their paths
+    are relative to the bundle's loader root, have matching component roles,
+    and must occur in the bundle. ACE-Step does not use these fields.
+
+MiniMax's selected language model is also the card's `gguf_file`. Its bundle
+contains that model, the selected RVQ decoder and flow transformer, plus the
+required conditioner, vocoder, tokenizer, and configuration files. ACE-Step
+selects one GGUF as `gguf_file`; its bundle contains only that file. See the
+registry's complete [MiniMax Q4](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/seed/cards/music_model_cards/audio-cpp--MiniMax-Music3-GGUF-Q4.toml)
+and [ACE-Step Turbo BF16](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/seed/cards/music_model_cards/audio-cpp--ACE-Step1.5-Turbo-BF16.toml)
+cards for exact component identities and sizes. Each other quant or selected
+variant requires its own card.
+
+Both initial music cards set `placement.compatible_backends = []`. That means
+they do not claim legacy backend compatibility. A signed `supported` claim
+must match the exact card, audio.cpp build, `music.generate` capability,
+architecture, and applicable hardware class after load and generation
+qualification. The node must also report that same ready build before Skulk
+will place it. Installing the audio.cpp package alone grants no model support.
+Music placement resolves a concrete `audio_cpp-cpu`, `audio_cpp-metal`,
+`audio_cpp-vulkan`, `audio_cpp-cuda`, or `audio_cpp-rocm` lane. The bare
+`audio_cpp` tag reports engine availability but cannot select a music runner.
+The [Strix Vulkan qualification record](audio-cpp-strix-qualification.md)
+documents the exact build, hardware class, and initial card results behind
+that lane's claims.
+
+### `[video]`
+
+Declares audio-video generation truth independently of an engine. `modes`
+contains `t2va`, `fl2va`, or `ref2va`, and the card's video tasks must match
+those modes. Duration bounds, `fps`, frame-grid and canvas multiples, aspect
+ratios, pixel limits, and sampling defaults constrain requests. `audio_output`
+requires `audio_sample_rate` and `audio_channels`. `ref2va` requires typed
+`reference_limits`. `companions` pin adapters, patches, embeddings, or graph
+templates to their source revision and declared modes. The generated
+`VideoCardConfig` schema in the [API reference](/api/skulk-api) lists every
+field and its type.
+
+### `[license]`
+
+Records operator-facing `name`, optional `url`, `spdx_id`, `notice`, and
+`display_name`. These facts help an operator review the selected artifact's
+terms and attribution. Skulk does not enforce license conditions at download
+or placement time.
 
 ### `[tooling]`
 
@@ -233,7 +437,7 @@ Declares tool-calling behavior:
 - `builtin_tools`
   - optional list of builtin platform tool contracts such as `web_search`, `open_url`, or `extract_page`
 - `tool_call_format`
-  - expected tool-call output format such as `generic`, `gemma4`, `gpt_oss`, or `dsml`
+  - expected tool-call output format such as `generic`, `gemma4`, `gpt_oss`, `dsml`, or `atem` (Muse Glimmer's `<atem:function_calls>` markup)
 
 ### `[runtime]`
 
@@ -242,7 +446,7 @@ Declares runtime integration preferences:
 - `prompt_renderer`
   - prompt renderer to use, such as `tokenizer`, `gemma4`, or `dsml`
 - `output_parser`
-  - output parser to use, such as `generic`, `gemma4`, `gpt_oss`, or `deepseek_v32`
+  - output parser to use, such as `generic`, `gemma4`, `gpt_oss`, `deepseek_v32`, or `muse_glimmer` (the `to=self` / `to=user` / `to=<tool>` channel grammar)
 - `metal_fast_synch`
   - per-model override for the MLX `MLX_METAL_FAST_SYNCH` flag; set to `false` for models that deadlock under FAST_SYNCH on the ring backend
 - `mtp_heads`
@@ -251,6 +455,8 @@ Declares runtime integration preferences:
   - maximum draft depth the MTP heads support; start at `1` for Apple Silicon (deeper values rarely amortize on Metal due to near-linear verify-pass scaling)
 - `mtp_sidecar_repo`
   - Hugging Face repo ID containing the published `mtp.safetensors` sidecar (e.g. `"FoxlightAI/qwen3-5-9b-base-mtp"`); produced by SWP (Skulk Weights Publisher) from the original BF16 checkpoint
+- `mtp_sidecar_revision`
+  - full immutable commit for a separately hosted MTP sidecar; required for signed-registry cards
 - `mtp_norm_convention`
   - how the MTP heads normalize hidden states (`zero_centered` or `actual_scale`); must match how the sidecar was produced
 - `mtp_concat_order`
@@ -259,6 +465,12 @@ Declares runtime integration preferences:
   - set to `false` to forbid speculative decoding when the model is sharded across multiple nodes (it stays single-node speculative); the runner and the generation loop read this to make the same rank-symmetric decision
 - `assistant_model_repo`
   - Hugging Face repo of a small companion model used as an external drafter for speculative decoding (the Gemma 4 path), as opposed to native MTP heads
+- `assistant_model_revision`
+  - full immutable commit for a separately hosted assistant; required for signed-registry cards
+
+Separate `served_spec_draft_repo` and `vllm_spec_draft_repo` companions likewise
+require `served_spec_draft_revision` and `vllm_spec_draft_revision`. A companion
+in the base artifact repository inherits the card's `source_revision`.
 
 ## MTP Speculative Decoding
 
@@ -282,7 +494,7 @@ If the sidecar is declared but the file is not found locally, Skulk logs a warni
 
 ### Models with native MTP heads
 
-The shipped cards that declare an MTP sidecar are the Qwen3.5 and Qwen3.6
+The registry cards that declare an MTP sidecar include the Qwen3.5 and Qwen3.6
 quantizations:
 
 - `mlx-community/Qwen3.5-2B-4bit`
@@ -299,6 +511,7 @@ Gemma 4 does **not** use native MTP heads; it uses an external drafter model (`a
 mtp_heads = true
 mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-5-9b-base-mtp"
+mtp_sidecar_revision = "06c840b3529f5695648807d993b1cb48b576a988"
 ```
 
 The sidecar repo must be published by SWP before adding these fields. See the [SWP documentation](https://foxlight-foundation.github.io/skulk-weights-publisher/) for how sidecars are produced and published.
@@ -331,7 +544,7 @@ When Skulk resolves a runtime capability profile, it uses this order:
 2. conservative family/model heuristics
 3. generic fallback behavior
 
-That means a custom or built-in card can refine behavior without breaking old
+That means a custom or registry card can refine behavior without breaking old
 cards that only declare coarse metadata.
 
 ## Extended Card Example
@@ -426,8 +639,8 @@ reference_profile = "angus"
 
 The central profile manifest pins the local MP3 digest and exact transcript.
 Model cards intentionally repeat the public voice order so API and dashboard
-behavior remain explicit model truth; CI verifies every bundled cloning card
-against the central manifest.
+behavior remain explicit model truth; CI verifies the cloning cards among
+Skulk's test fixtures against the central manifest.
 
 ## When to Extend a Card
 

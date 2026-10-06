@@ -1,15 +1,28 @@
 import ipaddress
 from collections.abc import Generator, Mapping
+from collections.abc import Set as AbstractSet
 from typing import Final, final
 
 from loguru import logger
 from pydantic import Field
 
+from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
     UMA_GPU_OS_HEADROOM,
+    backend_offloads_to_vram,
+    estimate_music_workspace,
+    estimate_recurrent_cache_bytes,
+    estimate_shard_footprint,
+    gb10_unified_memory_pool,
+    gpu_working_set_ceiling,
+    is_gb10_accelerator,
     memory_overhead_factor,
+    per_token_kv_bytes,
+    shard_fraction_of_model,
+    shard_preallocates_kv_upfront,
+    vulkan_fills_carve_first,
 )
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS as PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
@@ -31,6 +44,7 @@ from skulk.shared.types.profiling import (
     SystemPerformanceProfile,
 )
 from skulk.shared.types.topology import Cycle, RDMAConnection, SocketConnection
+from skulk.shared.types.worker.instances import Instance, InstanceId, LlamaRpcInstance
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import (
     CfgShardMetadata,
@@ -74,7 +88,12 @@ class CycleMemoryDiagnostics(CamelCaseModel):
 # against VRAM, not system RAM). Both the in-process llama.cpp runner and the
 # served llama-server engine launch with ``-ngl`` full-GPU offload; vLLM would
 # join here too. The bare CPU compute tag is excluded by the ``-cpu`` check.
-_GPU_OFFLOAD_ENGINE_PREFIXES: Final = ("llama_cpp-", "llama_server-", "vllm-")
+_GPU_OFFLOAD_ENGINE_PREFIXES: Final = (
+    "llama_cpp-", "llama_server-", "vllm-", "comfy-",
+)
+_AUDIO_CPP_DISCRETE_LANES: Final = frozenset(
+    {"audio_cpp-cuda", "audio_cpp-rocm", "audio_cpp-vulkan"}
+)
 
 
 def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
@@ -88,9 +107,13 @@ def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
     served ``llama_server`` engine is included because it launches
     ``llama-server -ngl 99``, and ``vllm`` because ``vllm serve`` allocates weights +
     KV from the GPU -- both use VRAM exactly like the in-process llama.cpp runner.
+    The ``comfy`` video and audio.cpp music engines hold their model weights
+    on the selected GPU in the same way. Metal stays on Apple unified memory;
+    this predicate gates only AMD/NVIDIA discrete-VRAM observations.
     """
     return any(
-        tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES) and not tag.endswith("-cpu")
+        tag in _AUDIO_CPP_DISCRETE_LANES
+        or (tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES) and not tag.endswith("-cpu"))
         for tag in backends
     )
 
@@ -99,6 +122,7 @@ def usable_vram_by_node(
     node_system: Mapping[NodeId, SystemPerformanceProfile],
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+    current_instances: Mapping[InstanceId, Instance] | None = None,
 ) -> dict[NodeId, Memory]:
     """Per-node usable GPU memory for placement, keyed by node.
 
@@ -116,6 +140,12 @@ def usable_vram_by_node(
       GPU_VRAM_WORKING_SET_FRACTION)``. VRAM is a dedicated pool reported
       separately from system RAM, so placement admits against VRAM, not
       ``0.75 * system_ram``, and never assumes the whole card is free.
+      When ``current_instances`` is supplied, committed concrete GPU shards
+      reduce the static working-set ceiling by their estimated weights,
+      overhead, and stamped context window. This covers allocations not yet
+      visible in telemetry without subtracting loaded memory twice. RPC
+      placements have no concrete per-device partition and retain observed
+      memory admission; their driver shard is not a whole-model reservation.
     * Unified-memory APU (e.g. AMD Strix Halo), detected when the GTT aperture
       spans the whole system (``gtt_total > vram_total`` AND ``gtt_total >=
       ram_total``): the GPU addresses the BIOS VRAM carve-out PLUS system RAM
@@ -157,6 +187,13 @@ def usable_vram_by_node(
         vram_usable = min(vram_avail, ceiling)
         gtt_total = accelerator.gtt_total_bytes
         memory = node_memory.get(node_id)
+        if is_gb10_accelerator(accelerator):
+            # GB10 is one shared pool, so an absent host-memory reading or a
+            # mismatched CUDA total must never fall through to discrete VRAM.
+            gb10_pool = gb10_unified_memory_pool(accelerator, memory)
+            if gb10_pool is not None:
+                usable[node_id] = gb10_pool
+            continue
         # UMA signature: the GTT aperture spans the WHOLE system, i.e. it both
         # exceeds the VRAM carve-out AND covers all of system RAM. A discrete AMD
         # GPU also exposes ``mem_info_gtt_total`` (its default can equal VRAM), so
@@ -181,7 +218,246 @@ def usable_vram_by_node(
             usable[node_id] = Memory.from_bytes(vram_usable + sys_for_gpu)
             continue
         usable[node_id] = Memory.from_bytes(vram_usable)
+    return reserve_instance_vram(
+        usable,
+        node_system,
+        current_instances or {},
+        unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+            node_system, node_resources, node_memory
+        ),
+    )
+
+
+def reserve_instance_vram(
+    node_vram: Mapping[NodeId, Memory],
+    node_system: Mapping[NodeId, SystemPerformanceProfile],
+    current_instances: Mapping[InstanceId, Instance],
+    *,
+    unified_memory_gpu_nodes: frozenset[NodeId] = frozenset(),
+) -> dict[NodeId, Memory]:
+    """Cap observed discrete VRAM by the capacity committed to concrete shards.
+
+    Args:
+        node_vram: Observed usable memory, or a hypothetical teardown-credit map.
+        node_system: Accelerator telemetry containing physical VRAM totals.
+        current_instances: Placements that still own their shard reservations.
+        unified_memory_gpu_nodes: APUs using host memory; retain their existing
+            combined-pool admission instead of treating the VRAM carve as a cap.
+
+    Returns:
+        A fresh memory map bounded by both observations and uncommitted physical
+        working-set capacity. RPC partitions remain observation-only because
+        their runtime-selected per-device shares are not represented by shards.
+    """
+    committed: dict[NodeId, int] = {}
+    for instance in current_instances.values():
+        if isinstance(instance, LlamaRpcInstance):
+            # The driver nominally spans every layer but llama.cpp chooses the
+            # actual pooled split at runtime. Charging that nominal shard would
+            # invent a full-model allocation on the driver and none on donors.
+            continue
+        assignments = instance.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard[runner_id]
+            # Older restored placements may predate master backend stamping.
+            # Unknown engine ownership on a GPU host cannot expose fresh VRAM;
+            # explicitly CPU-resolved shards still use only the system-RAM pool.
+            unresolved_gpu = shard.resolved_backend is None and node_id in node_vram
+            if not unresolved_gpu and not backend_offloads_to_vram(
+                shard.resolved_backend
+            ):
+                continue
+            fraction = shard_fraction_of_model(shard)
+            if fraction is None:
+                continue
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+                context_budget=(
+                    instance.context_token_limit
+                    if instance.context_token_limit is not None
+                    else PLACEMENT_KV_CONTEXT_BUDGET_TOKENS
+                ),
+            )
+            committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes
+    usable = dict(node_vram)
+    for node_id, observed in node_vram.items():
+        profile = node_system.get(node_id)
+        accelerator = profile.accelerator if profile is not None else None
+        total = accelerator.vram_total_bytes if accelerator is not None else None
+        if (
+            accelerator is None
+            or total is None
+            or total <= 0
+            or (node_id in unified_memory_gpu_nodes and accelerator.vendor == "amd")
+        ):
+            continue
+        ceiling = int(
+            total
+            * (
+                GPU_WORKING_SET_FRACTION
+                if node_id in unified_memory_gpu_nodes
+                else GPU_VRAM_WORKING_SET_FRACTION
+            )
+        )
+        # Observed usage includes loaded instances already. Bound against the
+        # remaining static budget instead of subtracting from observed free
+        # memory, which would count those allocations twice. After deletion,
+        # lagging telemetry still limits admission until memory is released.
+        usable[node_id] = Memory.from_bytes(
+            min(observed.in_bytes, max(0, ceiling - committed.get(node_id, 0)))
+        )
     return usable
+
+
+def reserve_instance_system_ram(
+    node_memory: Mapping[NodeId, MemoryUsage],
+    current_instances: Mapping[InstanceId, Instance],
+    node_vram: Mapping[NodeId, Memory] | None = None,
+    *,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
+    carve_first_nodes: AbstractSet[NodeId] = frozenset(),
+    unreflected: AbstractSet[InstanceId] = frozenset(),
+) -> dict[NodeId, Memory]:
+    """Live system RAM per node, net of placements telemetry may not show yet.
+
+    A placement made moments earlier may not show in ``ram_available`` yet,
+    so two back-to-back placements would each admit and size a served window
+    against the same untouched figure and overcommit the node. This is the
+    system-RAM twin of ``reserve_instance_vram``: every shard whose memory
+    lands in system RAM (MLX, a CPU-resolved shard, anything on a node
+    without discrete VRAM or on a unified-memory APU) charges its estimated
+    footprint against the node's GPU working-set ceiling, the same capacity
+    admission caps each candidate at, and the usable figure is the smaller
+    of the observed ``ram_available`` and the uncommitted ceiling. A
+    fixed-window engine is charged at its stamped window; an engine that
+    grows its cache lazily (MLX) is charged at the admission floor, the same
+    reservation admission and the worker's guard make for it. Observed usage
+    already includes loaded instances, so bounding against the remaining
+    static budget never counts an allocation twice; a placement whose load
+    is not reflected yet (``unreflected``: pending its indexed echo, or
+    still loading) is additionally taken off the observed figure, since an
+    observed figure already lowered by other work would otherwise hide it.
+    A node with nothing committed keeps its observed figure untouched. RPC
+    placements choose their split at runtime and stay observation-only, as
+    in the VRAM path.
+
+    Args:
+        node_memory: Observed node memory, ``ram_available`` and ``ram_total``.
+        current_instances: Placements that still own their reservations,
+            pending ones included.
+        node_vram: Nodes with discrete VRAM; a GPU-offload shard on one of
+            them (that is not a unified-memory APU) lives in VRAM, not here.
+        unified_memory_gpu_nodes: APUs whose GPU allocations also take host
+            pages; their shards charge system RAM.
+        carve_first_nodes: Unified-memory AMD APUs (see
+            ``carve_first_gpu_node_ids``). A loaded Vulkan shard on one of
+            them sits in the BIOS carve, which the observed ``vram_used``
+            already nets out of the GPU pool, so it is not charged here as
+            well; while it is still loading it is charged as before. Only a
+            caller that also supplies ``unreflected`` may pass this set:
+            without it every shard reads as loaded.
+        unreflected: Placements whose load telemetry has not shown yet; their
+            footprints also come off the observed figure.
+
+    Returns:
+        Usable live system RAM keyed by node, for every node in ``node_memory``.
+    """
+    node_vram = node_vram or {}
+    committed: dict[NodeId, int] = {}
+    pending: dict[NodeId, int] = {}
+    for instance_id, instance in current_instances.items():
+        if isinstance(instance, LlamaRpcInstance):
+            continue
+        assignments = instance.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard[runner_id]
+            # The same ownership rule as reserve_instance_vram: a shard that
+            # offloads, or an unstamped one on a discrete-VRAM host, lives in
+            # VRAM and is charged there, never here as well.
+            in_discrete_vram = (
+                node_id in node_vram
+                and node_id not in unified_memory_gpu_nodes
+                and (
+                    shard.resolved_backend is None
+                    or backend_offloads_to_vram(shard.resolved_backend)
+                )
+            )
+            if in_discrete_vram:
+                continue
+            if (
+                node_id in carve_first_nodes
+                and instance_id not in unreflected
+                and vulkan_fills_carve_first(shard.resolved_backend)
+            ):
+                # Charging this shard against host RAM too would count it
+                # twice: the pool already subtracts the carve it occupies.
+                # On Strix Halo that refused a ROCm video engine beside a
+                # loaded Vulkan steward the node demonstrably holds.
+                continue
+            fraction = shard_fraction_of_model(shard)
+            if fraction is None:
+                continue
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+                context_budget=(
+                    instance.context_token_limit
+                    if instance.context_token_limit is not None
+                    and shard_preallocates_kv_upfront(shard)
+                    else PLACEMENT_KV_CONTEXT_BUDGET_TOKENS
+                ),
+            )
+            committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes
+            if instance_id in unreflected:
+                pending[node_id] = pending.get(node_id, 0) + footprint.in_bytes
+    usable: dict[NodeId, Memory] = {}
+    for node_id, usage in node_memory.items():
+        charged = committed.get(node_id, 0)
+        if charged <= 0:
+            usable[node_id] = usage.ram_available
+            continue
+        ceiling = gpu_working_set_ceiling(usage.ram_total).in_bytes
+        observed = usage.ram_available.in_bytes - pending.get(node_id, 0)
+        usable[node_id] = Memory.from_bytes(max(0, min(observed, ceiling - charged)))
+    return usable
+
+
+def reserve_system_ram_usage(
+    node_memory: Mapping[NodeId, MemoryUsage],
+    current_instances: Mapping[InstanceId, Instance],
+    node_vram: Mapping[NodeId, Memory] | None = None,
+    *,
+    unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
+    carve_first_nodes: AbstractSet[NodeId] = frozenset(),
+    unreflected: AbstractSet[InstanceId] = frozenset(),
+) -> dict[NodeId, MemoryUsage]:
+    """``node_memory`` with each ``ram_available`` net of committed placements.
+
+    The map placement admits against and sizes served windows from; see
+    ``reserve_instance_system_ram`` for what is charged. ``ram_total`` is
+    never touched, so context-ceiling math stays anchored to capacity.
+    """
+    reserved = reserve_instance_system_ram(
+        node_memory,
+        current_instances,
+        node_vram,
+        unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+        carve_first_nodes=carve_first_nodes,
+        unreflected=unreflected,
+    )
+    return {
+        node_id: (
+            usage.model_copy(update={"ram_available": reserved[node_id]})
+            if reserved[node_id] != usage.ram_available
+            else usage
+        )
+        for node_id, usage in node_memory.items()
+    }
 
 
 def unified_memory_gpu_node_ids(
@@ -214,6 +490,13 @@ def unified_memory_gpu_node_ids(
     for node_id, profile in node_system.items():
         accelerator = profile.accelerator
         memory = node_memory.get(node_id)
+        if accelerator is not None and gb10_unified_memory_pool(accelerator, memory) is not None:
+            if node_resources is None or (
+                (resources := node_resources.get(node_id)) is not None
+                and _has_gpu_offload_backend(resources.backends)
+            ):
+                unified.add(node_id)
+            continue
         if (
             accelerator is None
             or accelerator.vendor != "amd"
@@ -235,6 +518,40 @@ def unified_memory_gpu_node_ids(
     return frozenset(unified)
 
 
+def carve_first_gpu_node_ids(
+    node_system: Mapping[NodeId, SystemPerformanceProfile],
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
+    node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+) -> frozenset[NodeId]:
+    """Unified-memory AMD APUs, whose Vulkan allocations fill the BIOS carve first.
+
+    On a Strix-class APU the Vulkan driver places device-local allocations in
+    the VRAM carve-out and spills to GTT only past it, and ``vram_used``
+    reports the carve's occupancy, while a HIP engine on the same node
+    allocates from GTT, which is host RAM. GB10 is unified too but has no
+    carve, so it is not in this set. A node must report ``vram_used``: the
+    pool reads a missing reading as an empty carve, so a loaded Vulkan shard
+    there keeps its host-RAM charge rather than going uncounted.
+
+    Args:
+        node_system: Per-node accelerator telemetry.
+        node_resources: Optional backend telemetry, as for
+            ``unified_memory_gpu_node_ids``.
+        node_memory: Per-node system-memory telemetry.
+
+    Returns:
+        Immutable IDs of unified-memory AMD GPU-offload nodes.
+    """
+    return frozenset(
+        node_id
+        for node_id in unified_memory_gpu_node_ids(node_system, node_resources, node_memory)
+        if (profile := node_system.get(node_id)) is not None
+        and profile.accelerator is not None
+        and profile.accelerator.vendor == "amd"
+        and profile.accelerator.vram_used_bytes is not None
+    )
+
+
 def _per_node_required_memory(
     cycle: Cycle,
     node_memory: Mapping[NodeId, MemoryUsage],
@@ -243,6 +560,7 @@ def _per_node_required_memory(
     node_vram: Mapping[NodeId, Memory] | None = None,
     *,
     exact_pipeline_layers: bool = True,
+    fixed_memory_by_node: Mapping[NodeId, Memory] | None = None,
 ) -> dict[NodeId, Memory]:
     """Estimate the weight bytes each node in the cycle must hold.
 
@@ -268,12 +586,17 @@ def _per_node_required_memory(
     the heterogeneous clusters this check is meant to support.
     """
     node_vram = node_vram or {}
+    fixed_memory_by_node = fixed_memory_by_node or {}
     required_memory = model_card.storage_size
     if sharding == Sharding.Tensor:
         even_share = required_memory / len(cycle.node_ids)
         return {node_id: even_share for node_id in cycle.node_ids}
     node_usable = {
-        node_id: _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+        node_id: max(
+            Memory(),
+            _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+            - fixed_memory_by_node.get(node_id, Memory()),
+        )
         for node_id in cycle.node_ids
     }
     total_usable = sum(node_usable.values(), start=Memory())
@@ -363,6 +686,9 @@ def filter_cycles_by_memory(
     node_vram: Mapping[NodeId, Memory] | None = None,
     *,
     exact_pipeline_layers: bool = True,
+    fixed_memory_by_node: Mapping[NodeId, Memory] | None = None,
+    resolved_backends: Mapping[NodeId, str | None] | None = None,
+    llama_server_settings: Mapping[NodeId, LlamaServerSettings | None] | None = None,
 ) -> tuple[list[Cycle], CycleMemoryDiagnostics]:
     """Keep cycles whose every node can hold its shard with runtime headroom.
 
@@ -372,7 +698,7 @@ def filter_cycles_by_memory(
     admit it. Each node must satisfy::
 
         weights_share * memory_overhead_factor(model_card)
-            + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+            + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR + music_workspace
             <= node usable memory
 
     where usable memory is the node's discrete VRAM pool when it has one
@@ -393,6 +719,7 @@ def filter_cycles_by_memory(
     Returns the surviving cycles plus diagnostics describing every rejection.
     """
     node_vram = node_vram or {}
+    fixed_memory_by_node = fixed_memory_by_node or {}
     diagnostics = CycleMemoryDiagnostics()
     filtered_cycles: list[Cycle] = []
     required_memory = model_card.storage_size
@@ -456,15 +783,47 @@ def filter_cycles_by_memory(
             sharding,
             node_vram,
             exact_pipeline_layers=exact_pipeline_layers,
+            fixed_memory_by_node=fixed_memory_by_node,
         )
         # GGUF runs on the lighter llama.cpp C++ runtime, so its weight overhead
         # is smaller than MLX's; use the engine-aware factor for the fit decision.
         overhead_factor = memory_overhead_factor(model_card)
         overloaded: list[str] = []
         for node_id, share in node_shares.items():
-            kv_share = share * kv_ratio
+            backend = (resolved_backends or {}).get(node_id)
+            settings = (llama_server_settings or {}).get(node_id)
+            node_kv_ratio = kv_ratio
+            recurrent_share = Memory()
+            if model_card.gguf_cache_geometry is not None:
+                if (
+                    backend is not None
+                    and backend.startswith("llama_server")
+                    and settings is None
+                ):
+                    overloaded.append(
+                        f"node {node_id} has no observed llama-server serving settings"
+                    )
+                    continue
+                node_kv_ratio = (
+                    per_token_kv_bytes(
+                        model_card,
+                        resolved_backend=backend,
+                        llama_server_settings=settings,
+                    )
+                    * context_budget
+                    / required_memory.in_bytes
+                )
+                recurrent_share = estimate_recurrent_cache_bytes(
+                    model_card, resolved_backend=backend, llama_server_settings=settings
+                ) * (share.in_bytes / required_memory.in_bytes)
+            kv_share = share * node_kv_ratio
             required_with_overhead = (
-                share * overhead_factor + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+                share * overhead_factor
+                + kv_share
+                + recurrent_share
+                + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+                + estimate_music_workspace(model_card, resolved_backend=backend)
+                + fixed_memory_by_node.get(node_id, Memory())
             )
             node_vram_usable = node_vram.get(node_id)
             available = _node_usable_memory(node_memory[node_id], node_vram_usable)
@@ -477,7 +836,7 @@ def filter_cycles_by_memory(
                 overloaded.append(
                     f"node {node_id} needs ~{required_with_overhead.in_gb:.1f}GB "
                     f"({share.in_gb:.1f}GB weights + {kv_share.in_gb:.1f}GB "
-                    f"KV@{context_budget}tok + runtime headroom) but can use "
+                    f"KV@{context_budget}tok + runtime/fixed headroom) but can use "
                     f"{available.in_gb:.1f}GB ({pool})"
                 )
         if overloaded:
@@ -640,7 +999,9 @@ def _allocate_and_validate_layers(
     for i, node_id in enumerate(node_ids):
         node_layers = layer_allocations[i]
         required_memory = (total_storage * node_layers) // total_layers
-        usable_memory = _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+        usable_memory = _node_usable_memory(
+            node_memory[node_id], node_vram.get(node_id)
+        )
         if required_memory > usable_memory:
             pool = (
                 "GPU VRAM"
@@ -862,9 +1223,7 @@ def get_shard_assignments_for_llama_rpc(
     """
     _validate_cycle(cycle)
     if driver_node not in cycle.node_ids:
-        raise ValueError(
-            f"Driver node {driver_node} is not part of the selected cycle"
-        )
+        raise ValueError(f"Driver node {driver_node} is not part of the selected cycle")
     world_size = len(cycle.node_ids)
     runner_to_shard: dict[RunnerId, ShardMetadata] = {}
     node_to_runner: dict[NodeId, RunnerId] = {}
@@ -1065,9 +1424,7 @@ def _is_routable_rpc_donor_address(ip: str) -> bool:
     except ValueError:
         return False
     return (
-        address.version == 4
-        and not address.is_link_local
-        and not address.is_loopback
+        address.version == 4 and not address.is_link_local and not address.is_loopback
     )
 
 

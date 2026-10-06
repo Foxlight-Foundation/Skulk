@@ -17,9 +17,13 @@ from skulk.shared.types.profiling import (
     NodeThunderboltInfo,
     ThunderboltBridgeStatus,
 )
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalId,
+)
 from skulk.shared.types.tasks import Task, TaskId
 from skulk.shared.types.worker.downloads import DownloadProgress
-from skulk.shared.types.worker.instances import Instance, InstanceId
+from skulk.shared.types.worker.instances import Instance, InstanceFailure, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -41,6 +45,28 @@ class State(CamelCaseModel):
         arbitrary_types_allowed=True,
     )
     instances: Mapping[InstanceId, Instance] = {}
+    instance_failures: tuple[InstanceFailure, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Bounded newest-first history of terminal placement failures retained "
+            "after their instances are removed. Clean operator stops are excluded."
+        ),
+    )
+    steward_action_proposals: Mapping[
+        StewardActionProposalId, StewardActionProposal
+    ] = Field(
+        default={},
+        description="Bounded authoritative steward proposals keyed by identity.",
+    )
+
+    @field_validator("instance_failures", mode="before")
+    @classmethod
+    def _coerce_instance_failures(cls, value: object) -> object:
+        """Restore immutable failure history from JSON array wire values."""
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
+
     runners: Mapping[RunnerId, RunnerStatus] = {}
     downloads: Mapping[NodeId, Sequence[DownloadProgress]] = Field(
         default={},
@@ -60,6 +86,25 @@ class State(CamelCaseModel):
     )
     topology: Topology = Field(default_factory=Topology)
     tracing_enabled: bool = False
+    model_trust_approved_remote_code_identities: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Master-ordered immutable model-card identities approved to execute "
+            "repository code across the cluster."
+        ),
+    )
+
+    @field_validator(
+        "model_trust_approved_remote_code_identities",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_model_trust_identities(cls, value: object) -> object:
+        """Restore the immutable trust set from JSON array wire values."""
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
+
     last_event_applied_idx: int = Field(default=-1, ge=-1)
 
     # Connectivity mappings stay on the control plane: apply() builds the

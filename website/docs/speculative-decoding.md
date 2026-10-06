@@ -12,7 +12,7 @@ when it turns itself off, and how to confirm it is working.
 
 The short version:
 
-- speculative decoding makes supported models generate faster, for free
+- speculative decoding can accelerate supported model and hardware combinations
 - it is **automatic** (there is nothing to configure)
 - it pays off the most for dense models sharded across multiple nodes
 - it deliberately turns itself off in a few honest cases (see below)
@@ -38,10 +38,10 @@ pipeline (sharded) placements through one shared decode loop. You do not
 enable it, size it, or tune it for normal use: if a model ships with a
 drafter and the placement supports it, it activates on its own.
 
-## Two Engines: MLX and Served (llama.cpp)
+## Engines: MLX, llama.cpp, and vLLM
 
-MTP runs on both of Skulk's speculative-capable engines, and placement routes
-each model to the right one from its card:
+Skulk selects speculative execution from the model card and the available
+engine. These paths have different placement and companion requirements:
 
 - **MLX** (Apple Silicon, in-process): the drafters and models in the table
   below. Skulk owns the generation loop, the multi-node ring, and the
@@ -143,16 +143,20 @@ cross-attends the target's cache.
 
 The drafter weights are companion repos. Skulk fetches and stages them
 alongside the target model, so you do not download or reference them directly.
+[Skulk Weights Publisher](ecosystem.md#model-metadata-and-published-weights)
+extracts some native heads into sidecars; model authors publish other assistant
+models directly. Signed cards pin external companions to immutable revisions.
+A sidecar or assistant is a dependency of its base model, not a separate model
+to place or chat with. The signed registry can update these bindings without a
+Skulk software release; consult the selected card for its exact contract.
 
 ## What Speedups To Expect
 
-The numbers below were measured on **M4-base nodes** (the kites), which are
-the *lowest-bandwidth Apple Silicon currently being manufactured* and so are
-a deliberately worst-case platform for absolute throughput. Read the
-**ratios** as the portable result: absolute tok/s scales almost linearly
-with memory bandwidth, so the same build on an M4 Pro/Max prints 2 to 4.5x the
-absolute numbers below with no code changes, while the speedup ratio stays
-roughly the same.
+The numbers below are measurements on base **Apple M4** hardware. They describe
+these model artifacts, placements, and request settings, rather than guaranteed
+throughput on another machine. Memory bandwidth, context, workload, engine
+version, and interconnect can change both absolute throughput and the benefit
+of speculation.
 
 Protocol: production API, greedy decoding, 200-token completions, median of
 3 runs per arm on the same live instance.
@@ -172,12 +176,6 @@ the 12B 2-node pipeline still measures +60% (8.3 → 13.3) and Qwen 9B single
 still +28% (21.4 → 27.4); at temperature 0.7 the 12B pipeline is +54% and
 Qwen 9B is +21%. The 200-token greedy table is not flattering the feature by
 much.
-
-For external context: production native-MTP serving on datacenter GPUs
-lands in the 1.3 to 1.8x band; Skulk measures 1.35x single-node and 1.81x
-on a 2-node pipeline, at the top of that band, on far slower hardware, and
-the pipeline figure beats published distributed-speculation results on
-comparable clusters.
 
 ## Where It Shines: Dense Models Sharded Across Nodes
 
@@ -227,8 +225,8 @@ the drafting rank periodically emits an acceptance line:
 MTP acceptance so far: 137/180 (76%)
 ```
 
-A non-zero, healthy acceptance rate (typically ~50–97% on the shipped
-models) means speculation is running and paying off. The other signal is
+A non-zero acceptance rate confirms that speculation is running. Acceptance
+alone does not prove a speedup: draft and verification work also cost time. The other signal is
 throughput: compare the runner's `generated N tokens @ X tok/s` figure for a
 supported model against the plain-decode numbers in the table above.
 

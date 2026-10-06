@@ -13,8 +13,8 @@ This is the first *served* engine. Its shape (managed inference server + OpenAI
 proxy) is deliberately generic so vLLM and other OpenAI-compatible servers can
 become additional served backends without new runner architecture.
 
-Single-node only (no ring / ConnectToGroup / warmup), mirroring the in-process
-llama.cpp and embeddings runners. Linux-oriented: the subprocess is reaped on
+Single-node or the driver of a homogeneous llama.cpp RPC placement (no Skulk
+ring / ConnectToGroup / warmup). Linux-oriented: the subprocess is reaped on
 parent death via ``PR_SET_PDEATHSIG`` so a runner crash never orphans a server
 holding GPU memory. Per-request cancellation aborts the proxied HTTP connection
 (which stops server-side generation); ``SIGTERM`` is for instance teardown of the
@@ -42,8 +42,17 @@ import httpx
 
 from skulk.api.types import GenerationStats
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
-from skulk.shared.constants import MAX_OUTPUT_TOKENS
-from skulk.shared.models.model_cards import OutputParserType
+from skulk.shared.constants import (
+    CONTEXT_LENGTH_EXCEEDED_PREFIX,
+    MAX_OUTPUT_TOKENS,
+)
+from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.llama_server_settings import (
+    LLAMA_SERVER_DEFAULT_DRAFT_DEPTH,
+    LLAMA_SERVER_DEFAULT_PARALLEL,
+    resolve_llama_server_settings,
+)
+from skulk.shared.models.model_cards import ModelCard, OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -92,7 +101,92 @@ from skulk.worker.runner.llama_cpp.runner import (
 from skulk.worker.runner.llama_server.channel_text_parser import (
     GemmaChannelTextParser,
 )
+from skulk.worker.runner.llm_inference.reasoning_controls import (
+    muse_glimmer_strength_kwargs,
+)
+from skulk.worker.runner.llm_inference.scaffolding_scrub import (
+    StreamingScaffoldingScrub,
+)
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
+
+# llama-server's error body, when it sends one: ``{"error": {"message", "type",
+# "code"}}``; a request past the context window carries this ``type``.
+_SERVER_CONTEXT_ERROR_TYPE: Final = "exceed_context_size_error"
+_SERVER_MESSAGE_CHARS: Final = 300
+
+
+class ServerRefusalError(RuntimeError):
+    """llama-server answered a request with an error status, in its own words."""
+
+
+def server_refusal_message(response: httpx.Response) -> str:
+    """The refusal as the caller should read it: status plus the server's reason.
+
+    httpx's own status error names only the status and the URL, so a prompt
+    past the context window reached callers as ``Client error '400 Bad
+    Request'`` with the reason left behind in the body. The body's message is
+    read (a streamed response is read to its end first), bounded, and a
+    context-size refusal is prefixed with the API's context sentinel so the
+    API answers it as a 400 ``context_length_exceeded``, the way it answers
+    its own admission check, rather than as an internal error.
+    """
+    with contextlib.suppress(Exception):
+        response.read()
+    message = ""
+    kind = ""
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 - a non-JSON body is still a message
+        with contextlib.suppress(Exception):
+            message = response.text
+    else:
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict):
+            message = str(error.get("message") or "")
+            kind = str(error.get("type") or "")
+        elif isinstance(error, str):
+            message = error
+    message = " ".join(message.split())[:_SERVER_MESSAGE_CHARS]
+    head = f"llama-server answered {response.status_code}"
+    text = (
+        f"{head}: {message}" if message else f"{head} {response.reason_phrase}".strip()
+    )
+    if kind == _SERVER_CONTEXT_ERROR_TYPE or "context size" in message.lower():
+        return f"{CONTEXT_LENGTH_EXCEEDED_PREFIX} {text}"
+    return text
+
+
+def raise_for_server_status(response: httpx.Response) -> None:
+    """``raise_for_status`` with the server's reason in the error.
+
+    Raises :class:`ServerRefusalError` (a ``RuntimeError``, so every caller that
+    surfaces a failed generation as an ``ErrorChunk`` carries the message)
+    from the underlying ``HTTPStatusError``.
+    """
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        raise ServerRefusalError(server_refusal_message(error.response)) from error
+
+
+def _effective_server_parallel(card: Any) -> int:
+    """Return the safe served slot count for this card generation.
+
+    llama.cpp can serve multimodal requests with native MTP, but concurrent
+    multimodal qualification is intentionally outside the current evidence
+    envelope. Keep that exact combination serial while preserving configured
+    batching for text-only and non-speculative vision models.
+    """
+
+    runtime = getattr(card, "runtime", None)
+    served_spec_type = getattr(runtime, "served_spec_type", None) if runtime else None
+    if (
+        getattr(card, "vision", None) is not None
+        and served_spec_type not in (None, "none")
+        and not _force_no_spec()
+    ):
+        return 1
+    return _llama_server_parallel()
 
 # Card ``served_spec_type`` value -> the ``llama-server --spec-type`` token.
 # ``draft_mtp`` usually uses the model's own built-in MTP heads; a separate
@@ -123,12 +217,7 @@ def _force_no_spec() -> bool:
     MTP on-vs-off throughput comparison and for debugging a misbehaving spec
     pairing; unset in normal operation.
     """
-    return os.environ.get("SKULK_LLAMA_SERVER_FORCE_NO_SPEC", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return not resolve_llama_server_settings(os.environ).speculation_enabled
 
 
 _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
@@ -137,7 +226,7 @@ _LLAMA_SERVER_PARALLEL_ENV: Final = "SKULK_LLAMA_SERVER_PARALLEL"
 # Sixteen is the exercised fleet setting. A unified KV buffer keeps every slot's
 # advertised context window truthful without allocating N private caches; users
 # dominated by near-window prompts can still opt back to serial explicitly.
-_DEFAULT_LLAMA_SERVER_PARALLEL: Final = 16
+_DEFAULT_LLAMA_SERVER_PARALLEL: Final = LLAMA_SERVER_DEFAULT_PARALLEL
 # An omitted OpenAI ``max_tokens`` value otherwise lets llama-server consume the
 # remainder of the shared KV pool. Bound it to the same normal-generation width
 # as Skulk's MLX path so aggregate admission has a finite reservation and one
@@ -191,7 +280,7 @@ def _llama_server_parallel() -> int:
             f"using {_DEFAULT_LLAMA_SERVER_PARALLEL}"
         )
         return _DEFAULT_LLAMA_SERVER_PARALLEL
-    return value
+    return resolve_llama_server_settings(os.environ).parallel_slots
 
 
 def _request_context_reservation(
@@ -298,7 +387,7 @@ def _draft_model_args(
     misconfiguration and still raise loudly. Pure except for the on-disk path
     resolution, so the validation branches are unit-testable. A draft sharing
     the base repository inherits the base card's immutable source revision;
-    separate-repository drafts retain their own unpinned lookup contract.
+    separate-repository drafts use their card-declared immutable revision.
 
     Args:
         runtime: Resolved runtime capability section from the base model card.
@@ -328,7 +417,7 @@ def _draft_model_args(
         draft_revision = (
             source_revision
             if base_model_id is not None and draft_repo == str(base_model_id)
-            else None
+            else getattr(runtime, "served_spec_draft_revision", None)
         )
         try:
             draft_dir = build_model_path(ModelId(draft_repo), draft_revision)
@@ -357,7 +446,7 @@ def _draft_model_args(
     return []
 
 
-def _model_declares_reasoning(card: Any) -> bool:
+def model_declares_reasoning(card: Any) -> bool:
     """Whether the card advertises a reasoning/thinking capability.
 
     Drives ``--reasoning-format``: a reasoning model keeps llama-server's default
@@ -367,14 +456,34 @@ def _model_declares_reasoning(card: Any) -> bool:
     Without that, llama-server's ``auto`` can extract a plain model's prose into
     ``reasoning_content`` (observed with Gemma 4 served via ``--jinja``), leaving
     ``message.content`` empty for the client. Detection mirrors the capability
-    spine: an explicit ``reasoning`` card section or a ``thinking`` capability.
+    spine: an explicit ``reasoning`` card section, a ``thinking`` capability,
+    or a resolved profile whose family reasons intrinsically.
     """
     if getattr(card, "reasoning", None) is not None:
         return True
-    return "thinking" in (getattr(card, "capabilities", None) or [])
+    if "thinking" in (getattr(card, "capabilities", None) or []):
+        return True
+    # Families whose reasoning is intrinsic resolve it through the capability
+    # profile even when the card carries no reasoning section (the signed
+    # registry's Muse Glimmer card, compiled with no tooling/runtime/reasoning
+    # facts). Reading only the raw card here launched such a model with
+    # --reasoning-format none, so its to=self channel streamed as content.
+    if not isinstance(card, ModelCard):
+        return False
+    try:
+        profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    except Exception as exc:  # noqa: BLE001 - an unreadable card just means no reasoning
+        logger.opt(exception=exc).warning(
+            f"capability resolution failed for {card.model_id}; "
+            "serving without a reasoning format"
+        )
+        return False
+    return profile.supports_thinking
 
 
-def reasoning_request_overrides(task_params: Any) -> dict[str, Any]:
+def reasoning_request_overrides(
+    task_params: Any, card: ModelCard | None = None
+) -> dict[str, Any]:
     """Map Skulk's thinking controls onto llama-server request fields.
 
     ``generation_kwargs`` carries sampling params but NOT thinking control, so
@@ -391,15 +500,23 @@ def reasoning_request_overrides(task_params: Any) -> dict[str, Any]:
     - ``reasoning_effort`` -> OpenAI-style effort for harmony models (gpt-oss).
       ``"none"`` is not a valid server value; disabling is expressed via
       ``enable_thinking=False`` instead, so it is dropped here.
+    - Muse Glimmer (resolved from ``card``) reads neither: its template steers
+      always-on reasoning with a ``reasoning_strength`` template kwarg, so the
+      effort is translated onto that and the other two levers are omitted.
     """
     overrides: dict[str, Any] = {}
+    effort = getattr(task_params, "reasoning_effort", None)
+    strength_kwargs = muse_glimmer_strength_kwargs(card, effort)
+    if strength_kwargs:
+        overrides["chat_template_kwargs"] = strength_kwargs
+        return overrides
     enable_thinking = getattr(task_params, "enable_thinking", None)
     if enable_thinking is not None:
         overrides["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
-    effort = getattr(task_params, "reasoning_effort", None)
     if effort is not None and effort != "none":
         overrides["reasoning_effort"] = effort
     return overrides
+
 
 
 # How long to wait for the server to finish loading the model and report healthy.
@@ -449,6 +566,24 @@ def _gpu_layers_for_backend(resolved_backend: str | None) -> str:
     ):
         return "99"
     return "0"
+
+
+def _projector_server_args(
+    projector_path: Path | None,
+    resolved_backend: str | None,
+) -> list[str]:
+    """Return served multimodal flags for one authenticated projector.
+
+    CPU-resolved service keeps the projector in host memory explicitly;
+    accelerator backends retain llama.cpp's default projector offload.
+    """
+
+    if projector_path is None:
+        return []
+    args = ["--mmproj", str(projector_path)]
+    if _gpu_layers_for_backend(resolved_backend) == "0":
+        args.append("--no-mmproj-offload")
+    return args
 
 
 def _parse_sse_line(line: str) -> _StreamDelta | None:
@@ -511,7 +646,7 @@ def _set_pdeathsig() -> None:
 
 
 class Runner(ServedConcurrentDispatch):
-    """Single-node served-backend runner that proxies an external ``llama-server``.
+    """Served-backend runner that proxies an external ``llama-server``.
 
     Lifecycle mirrors the in-process llama.cpp runner: it skips the ring
     (``ConnectToGroup`` / ``StartWarmup``), spawns the server on ``LoadModel``,
@@ -580,7 +715,26 @@ class Runner(ServedConcurrentDispatch):
         # _spawn_server) keeps every slot's context at the full stamped window,
         # while the weighted gate below prevents their aggregate reservations
         # from exhausting the one shared pool.
-        self._init_concurrent_dispatch(_llama_server_parallel(), "llama-gen")
+        settings = self.shard_metadata.llama_server_settings
+        if settings is not None and settings != resolve_llama_server_settings(
+            os.environ
+        ):
+            raise ValueError(
+                "llama-server settings changed since memory admission; re-place the instance"
+            )
+        effective_parallel = _effective_server_parallel(self.shard_metadata.model_card)
+        self._init_concurrent_dispatch(effective_parallel, "llama-gen")
+        if (
+            effective_parallel == 1
+            and self.shard_metadata.model_card.vision is not None
+            and self.shard_metadata.model_card.runtime is not None
+            and self.shard_metadata.model_card.runtime.served_spec_type
+            not in (None, "none")
+        ):
+            logger.warning(
+                "served vision plus speculative decoding is running serially "
+                "because concurrent multimodal serving is not yet qualified"
+            )
         if self._max_concurrency > 1:
             # The shipped default uses the shared buffer, so normal startup
             # records the trade without presenting the supported default as an
@@ -675,27 +829,40 @@ class Runner(ServedConcurrentDispatch):
         self.update_status(RunnerLoading())
         self.acknowledge_task(task)
 
-        from skulk.download.download_utils import build_model_path
+        from skulk.download.download_utils import (
+            build_model_path,
+            resolve_artifact_file,
+        )
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
-        model_dir = build_model_path(ModelId(model_id), card.source_revision)
+        model_dir = build_model_path(
+            ModelId(model_id),
+            card.source_revision,
+            card.artifact_bundle.root if card.artifact_bundle is not None else None,
+        )
         # Load the file the card pinned (the selected quant); fall back to scanning
         # so download / sizing / loading stay in agreement. Reject an absolute or
         # ``..`` path that escapes the model dir.
         pinned = card.gguf_file
         gguf_path: Path | None = None
         if pinned:
-            candidate = (model_dir / pinned).resolve()
-            if candidate.is_file() and candidate.is_relative_to(model_dir.resolve()):
-                gguf_path = candidate
-            else:
+            try:
+                gguf_path = resolve_artifact_file(
+                    model_dir,
+                    card.artifact_bundle.root
+                    if card.artifact_bundle is not None
+                    else None,
+                    pinned,
+                )
+            except (FileNotFoundError, ValueError):
                 logger.warning(
                     f"card gguf_file {pinned!r} is missing or outside the model "
                     f"dir; scanning {model_dir} instead"
                 )
         if gguf_path is None:
             gguf_path = select_gguf_file(model_dir)
+        projector_path = self._resolve_projector(model_dir)
 
         # When the card declares a channel output parser we strip reasoning
         # markers ourselves, so llama-server must hand back raw text
@@ -706,7 +873,7 @@ class Runner(ServedConcurrentDispatch):
             and card.runtime.output_parser == OutputParserType.Gemma4
         )
         reasoning_format_none = self._uses_channel_parser or not (
-            _model_declares_reasoning(card)
+            model_declares_reasoning(card)
         )
         n_ctx = self._serving_context_tokens
         try:
@@ -725,7 +892,11 @@ class Runner(ServedConcurrentDispatch):
                 },
             ):
                 self._spawn_server(
-                    gguf_path, n_ctx, card.runtime, reasoning_format_none
+                    gguf_path,
+                    n_ctx,
+                    card.runtime,
+                    reasoning_format_none,
+                    projector_path,
                 )
                 self._await_health()
         except Exception:
@@ -744,6 +915,7 @@ class Runner(ServedConcurrentDispatch):
         n_ctx: int,
         runtime: Any,
         reasoning_format_none: bool,
+        projector_path: Path | None = None,
     ) -> None:
         binary = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
         if not binary:
@@ -782,6 +954,10 @@ class Runner(ServedConcurrentDispatch):
         # deterministic command line.
         if self._rpc_donor_endpoints:
             cmd += ["--rpc", ",".join(sorted(self._rpc_donor_endpoints.values()))]
+        cmd += _projector_server_args(
+            projector_path,
+            self.shard_metadata.resolved_backend,
+        )
         # --reasoning-format none hands back raw text in message.content. We use
         # it for (a) plain non-reasoning models (otherwise llama-server's default
         # `auto` extracts their prose into reasoning_content, leaving content
@@ -828,9 +1004,14 @@ class Runner(ServedConcurrentDispatch):
                 )
                 if draft_args is not None:
                     cmd += ["--spec-type", flag]
-                    n_max = getattr(runtime, "served_spec_n_max", None)
-                    if n_max is not None:
-                        cmd += ["--spec-draft-n-max", str(n_max)]
+                    # Admission reserves rollback rows at this depth. Pass the
+                    # shared default explicitly so an engine upgrade cannot
+                    # silently change the allocation after placement.
+                    n_max = (
+                        getattr(runtime, "served_spec_n_max", None)
+                        or LLAMA_SERVER_DEFAULT_DRAFT_DEPTH
+                    )
+                    cmd += ["--spec-draft-n-max", str(n_max)]
                     cmd += draft_args
 
         self.server_log_path = (
@@ -853,6 +1034,57 @@ class Runner(ServedConcurrentDispatch):
             preexec_fn=_set_pdeathsig,  # noqa: PLW1509 - Linux reap-on-parent-death
         )
         self.base_url = f"http://127.0.0.1:{port}"
+
+    def _resolve_projector(self, model_dir: Path) -> Path | None:
+        """Resolve and authenticate the card-pinned served-vision projector.
+
+        Legacy vision cards intentionally return ``None`` and remain gated to
+        the in-process runner. A new served card must prove the exact projector
+        path, byte size, and installed-manifest digest before llama-server is
+        allowed to read it.
+        """
+
+        card = self.shard_metadata.model_card
+        vision = card.vision
+        if vision is None or not vision.has_pinned_projector:
+            return None
+        assert vision.projector_file is not None
+        assert vision.projector_size is not None
+        from skulk.download.download_utils import (
+            artifact_install_directory,
+            resolve_artifact_file,
+        )
+        from skulk.store.installed_cards import (
+            read_installed_card_with_fallback,
+            verify_installed_file,
+        )
+
+        artifact_root = (
+            card.artifact_bundle.root if card.artifact_bundle is not None else None
+        )
+        install_directory = artifact_install_directory(model_dir, artifact_root)
+
+        try:
+            record = read_installed_card_with_fallback(install_directory)
+        except (OSError, ValueError) as error:
+            raise RuntimeError(
+                f"served vision projector metadata is unreadable for "
+                f"{card.model_id}: {error}"
+            ) from error
+        if record is None or not verify_installed_file(
+            install_directory,
+            record,
+            vision.projector_file,
+            expected_size=vision.projector_size,
+        ):
+            raise RuntimeError(
+                f"served vision projector {vision.projector_file!r} is missing, "
+                "stale, incorrectly sized, or corrupt; re-stage the exact signed "
+                "model generation"
+            )
+        return resolve_artifact_file(
+            model_dir, artifact_root, vision.projector_file
+        )
 
     def _pick_port(self) -> int:
         """Pick a free ephemeral port for the server, avoiding the API port."""
@@ -945,7 +1177,7 @@ class Runner(ServedConcurrentDispatch):
                 json=body,
                 timeout=30.0,
             )
-            response.raise_for_status()
+            raise_for_server_status(response)
             raw_count = response.json().get("input_tokens")
             if isinstance(raw_count, int) and not isinstance(raw_count, bool):
                 return max(0, raw_count)
@@ -1033,7 +1265,11 @@ class Runner(ServedConcurrentDispatch):
         # Forward thinking-control (enable_thinking / reasoning_effort) to
         # llama-server. Without this a reasoning model thinks on every request and
         # can return empty content under a bounded budget (#428/#420).
-        body.update(reasoning_request_overrides(task.task_params))
+        body.update(
+            reasoning_request_overrides(
+                task.task_params, self.shard_metadata.model_card
+            )
+        )
         # Tool definitions change the rendered prompt, so include them before the
         # exact token-count request. _generate_with_tools sets the same fields
         # again before the real completion for local clarity.
@@ -1159,6 +1395,16 @@ class Runner(ServedConcurrentDispatch):
         # Gemma 4 emits its reasoning as literal <|channel> markers in content;
         # reparse them here (llama-server can't) into reasoning/content chunks.
         parser = GemmaChannelTextParser() if self._uses_channel_parser else None
+        # With no tools offered the server's own tool parser never runs, so a
+        # model that writes a call anyway would leak its dialect markers to the
+        # caller as content (#889). Scrub them here, the same invariant the
+        # MLX path enforces in parse_tool_calls with emit_calls=False.
+        scrub = (
+            StreamingScaffoldingScrub() if not task.task_params.tools else None
+        )
+
+        def _content_pieces(text: str) -> str:
+            return scrub.feed(text) if scrub is not None else text
         # No read timeout: generation can pause between tokens on a busy GPU. The
         # connection is closed (aborting server generation) when we break out.
         timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
@@ -1168,7 +1414,7 @@ class Runner(ServedConcurrentDispatch):
                 "POST", f"{self.base_url}/v1/chat/completions", json=body
             ) as resp,
         ):
-            resp.raise_for_status()
+            raise_for_server_status(resp)
             for line in resp.iter_lines():
                 if self._is_cancelled(task.task_id):
                     logger.info(f"llama-server generation cancelled: {task.task_id}")
@@ -1190,17 +1436,27 @@ class Runner(ServedConcurrentDispatch):
                 if delta.content:
                     if parser is not None:
                         for text, is_thinking in parser.feed(delta.content):
-                            self._send_token(
-                                command_id, model_id, text, is_thinking=is_thinking
-                            )
+                            emit = text if is_thinking else _content_pieces(text)
+                            if emit or is_thinking:
+                                self._send_token(
+                                    command_id, model_id, emit, is_thinking=is_thinking
+                                )
                     else:
-                        self._send_token(command_id, model_id, delta.content)
+                        emit = _content_pieces(delta.content)
+                        if emit:
+                            self._send_token(command_id, model_id, emit)
                 if delta.finish is not None:
                     if parser is not None:
                         for text, is_thinking in parser.flush():
-                            self._send_token(
-                                command_id, model_id, text, is_thinking=is_thinking
-                            )
+                            emit = text if is_thinking else _content_pieces(text)
+                            if emit or is_thinking:
+                                self._send_token(
+                                    command_id, model_id, emit, is_thinking=is_thinking
+                                )
+                    if scrub is not None:
+                        tail = scrub.flush()
+                        if tail:
+                            self._send_token(command_id, model_id, tail)
                     self._send_token(
                         command_id,
                         model_id,
@@ -1214,9 +1470,15 @@ class Runner(ServedConcurrentDispatch):
         if not emitted_finish and not self._is_cancelled(task.task_id):
             if parser is not None:
                 for text, is_thinking in parser.flush():
-                    self._send_token(
-                        command_id, model_id, text, is_thinking=is_thinking
-                    )
+                    emit = text if is_thinking else _content_pieces(text)
+                    if emit or is_thinking:
+                        self._send_token(
+                            command_id, model_id, emit, is_thinking=is_thinking
+                        )
+            if scrub is not None:
+                tail = scrub.flush()
+                if tail:
+                    self._send_token(command_id, model_id, tail)
             self._send_token(
                 command_id, model_id, "", finish_reason="stop", stats=final_stats()
             )
@@ -1243,7 +1505,7 @@ class Runner(ServedConcurrentDispatch):
         request_started = time.perf_counter()
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)
-            resp.raise_for_status()
+            raise_for_server_status(resp)
             result = resp.json()
         request_seconds = time.perf_counter() - request_started
         # A cancel that arrived while the (non-streamed) request was in flight:

@@ -1,0 +1,932 @@
+# pyright: reportUnusedFunction=false
+"""FastAPI routes for Skulk operator pairing and credential lifecycle."""
+
+import sqlite3
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
+from ipaddress import IPv4Network, IPv6Network, ip_address
+from typing import Annotated, Final, Never
+from urllib.parse import urlsplit
+from uuid import UUID
+
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
+from loguru import logger
+from starlette.concurrency import run_in_threadpool
+
+from skulk.api.remote_pairing import (
+    RemotePairingController,
+    RemotePairingErrorBody,
+    RemotePairingRefusedError,
+    RemotePairingStatus,
+)
+from skulk.connectivity.tailscale import is_tailscale_peer
+from skulk.operator.pairing import (
+    OperatorCredentialExpiredError,
+    OperatorCredentialInvalidError,
+    OperatorDeviceNotFoundError,
+    OperatorDevicesResponse,
+    OperatorPairingService,
+    OperatorScopeError,
+    OperatorTokenRequest,
+    OperatorTokenResponse,
+    PairingCapacity,
+    PairingChallengeRequest,
+    PairingChallengeResponse,
+    PairingDeviceLimitError,
+    PairingExchangeRequest,
+    PairingExchangeResponse,
+    PairingGatewayNotInitializedError,
+    PairingInvitationCapacityError,
+    PairingInvitationCreateRequest,
+    PairingInvitationCreateResponse,
+    PairingInvitationSummary,
+    PairingPackageTooLargeError,
+    PairingProofError,
+    PairingSessionExpiredError,
+    PairingSessionNotFoundError,
+    PairingSessionStateError,
+    PluginGrant,
+    PluginGrantUpdate,
+)
+from skulk.operator.plugin_scopes import PluginScope
+from skulk.operator.relay import OperatorRelayUnavailableError
+from skulk.operator.relay_registration import (
+    RelayRegistrationError,
+    RelayRegistrationFailure,
+)
+
+_BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
+_PAIRING_INVITATION_PATH = "/pairing-invitations"
+_PAIRING_CAPACITY_PATH = "/pairing-capacity"
+_REMOTE_PAIRING_PATH = "/remote-pairing"
+# Failures reading or writing local pairing state (a lost data key, an
+# integrity failure, unwritable files) surface as one safe 503.
+_PAIRING_STATE_ERRORS: Final = (OSError, RuntimeError, ValueError, sqlite3.Error)
+# HTTP status for each registration failure: a node-side reason it cannot
+# register (409), a relay that is limiting or momentarily unable (429, 503),
+# or a relay answer this node cannot use (502).
+_REGISTRATION_FAILURE_STATUS: Final[dict[RelayRegistrationFailure, int]] = {
+    "disabled": status.HTTP_409_CONFLICT,
+    "offline": status.HTTP_409_CONFLICT,
+    "not_configured": status.HTTP_409_CONFLICT,
+    "rate_limited": status.HTTP_429_TOO_MANY_REQUESTS,
+    "registration_paused": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "capacity_exhausted": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "relay_busy": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "unreachable": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "invalid_request": status.HTTP_502_BAD_GATEWAY,
+    "already_registered": status.HTTP_502_BAD_GATEWAY,
+    "registration_unsupported": status.HTTP_502_BAD_GATEWAY,
+    "invalid_response": status.HTTP_502_BAD_GATEWAY,
+}
+_DASHBOARD_REQUEST_HEADER = "pairing-v1"
+_TAILSCALE_IPV4_NETWORK: Final = IPv4Network("100.64.0.0/10")
+_TAILSCALE_IPV6_NETWORK: Final = IPv6Network("fd7a:115c:a1e0::/48")
+_PAIRING_AUTHORITY_DETAIL: Final = (
+    "Pairing invitations can be managed only from the configured operator gateway. "
+    "Open that gateway's dashboard through Tailscale using its MagicDNS name or "
+    "Tailscale IP, or open it through localhost. Public relay and ordinary LAN "
+    "access are blocked."
+)
+_PLUGIN_ACCESS_DETAIL: Final = (
+    "Plugins are managed from a browser on this node itself (localhost) or "
+    "through Tailscale using the node's MagicDNS name or Tailscale IP, or by a "
+    "paired device granted plugin access. Without a paired credential, ordinary "
+    "LAN addresses, the public relay and forwarded requests cannot manage them."
+)
+_PLUGIN_OWNER_AUTHORITY_DETAIL: Final = (
+    "This plugin change needs direct owner access: open this node's dashboard in "
+    "a browser on the node itself (localhost) or through Tailscale using its "
+    "MagicDNS name or Tailscale IP. Ordinary LAN addresses, the public relay, "
+    "forwarded requests and paired devices cannot make it."
+)
+_PAIRED_PLUGIN_OWNER_DETAIL: Final = (
+    "This plugin change needs direct owner access, which a paired credential "
+    "never grants. From a browser on this node itself (localhost) or through "
+    "Tailscale, choose \"Use direct host access\" on the Plugins page and try "
+    "again; API clients send the request without the paired credential."
+)
+_PAIRING_GATEWAY_DETAIL: Final = (
+    "Phone pairing is not set up on this node yet. Choose Pair a phone under "
+    "Settings, Devices & pairing to connect it to the relay, or pair through a "
+    "direct address with `skulk operator pair --exchange-url`."
+)
+_FORWARDED_REQUEST_HEADERS = frozenset(
+    {
+        b"forwarded",
+        b"x-forwarded-for",
+        b"x-forwarded-host",
+        b"x-forwarded-proto",
+        b"x-real-ip",
+        b"cf-connecting-ip",
+        b"true-client-ip",
+    }
+)
+TailnetPeerVerifier = Callable[[str], Awaitable[bool]]
+
+
+async def _direct_dashboard_authority_request(
+    request: Request,
+    tailnet_peer_verifier: TailnetPeerVerifier,
+) -> bool:
+    """Return whether a browser request came directly over localhost or Tailscale.
+
+    Minting a bearer invitation establishes persistent remote operator access,
+    so same-origin headers alone are insufficient. The socket peer must be
+    loopback or a Tailscale-assigned address, while the browser origin must
+    exactly match the direct dashboard URL and use a loopback, MagicDNS, or
+    literal Tailscale host. Forwarding headers are rejected because a proxy
+    would otherwise erase the real peer boundary.
+    """
+
+    if any(
+        name.lower() in _FORWARDED_REQUEST_HEADERS for name, _ in request.headers.raw
+    ):
+        return False
+    if request.headers.get("x-skulk-dashboard") != _DASHBOARD_REQUEST_HEADER:
+        return False
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    client_host = request.client.host if request.client is not None else None
+    if origin is None or client_host is None:
+        return False
+
+    try:
+        parsed_origin = urlsplit(origin)
+        origin_port = parsed_origin.port
+    except ValueError:
+        return False
+    origin_hostname = _normalized_hostname(parsed_origin.hostname)
+    request_hostname = _normalized_hostname(request.url.hostname)
+    if (
+        parsed_origin.scheme not in {"http", "https"}
+        or parsed_origin.scheme != request.url.scheme
+        or parsed_origin.username is not None
+        or parsed_origin.password is not None
+        or origin_hostname is None
+        or origin_hostname != request_hostname
+        or _effective_port(parsed_origin.scheme, origin_port)
+        != _effective_port(request.url.scheme, request.url.port)
+    ):
+        return False
+
+    if _is_loopback_address(client_host):
+        return _is_loopback_hostname(origin_hostname)
+    if not (_is_tailnet_address(client_host) and _is_tailnet_hostname(origin_hostname)):
+        return False
+    return await tailnet_peer_verifier(client_host)
+
+
+def _normalized_hostname(host: str | None) -> str | None:
+    """Normalize one URL hostname for exact same-origin comparison."""
+
+    if host is None:
+        return None
+    return host.rstrip(".").casefold()
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    """Return the explicit or default port for an HTTP origin."""
+
+    if port is not None:
+        return port
+    if scheme == "http":
+        return 80
+    if scheme == "https":
+        return 443
+    return None
+
+
+def _is_loopback_address(host: str) -> bool:
+    """Return whether a socket peer is an exact loopback IP address."""
+
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_loopback_hostname(host: str) -> bool:
+    """Return whether a same-origin dashboard host denotes loopback."""
+
+    if host == "localhost":
+        return True
+    return _is_loopback_address(host)
+
+
+def _is_tailnet_address(host: str) -> bool:
+    """Return whether a socket peer is in Tailscale's assigned address space."""
+
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    if address.version == 4:
+        return address in _TAILSCALE_IPV4_NETWORK
+    return address in _TAILSCALE_IPV6_NETWORK
+
+
+def _is_tailnet_hostname(host: str) -> bool:
+    """Return whether a same-origin host is a MagicDNS name or Tailscale IP."""
+
+    if _is_tailnet_address(host):
+        return True
+    return "." not in host or host.endswith(".ts.net")
+
+
+async def _require_direct_dashboard_authority(
+    request: Request,
+    tailnet_peer_verifier: TailnetPeerVerifier,
+    detail: str = _PAIRING_AUTHORITY_DETAIL,
+) -> None:
+    """Reject owner administration outside the direct trusted dashboard.
+
+    Args:
+        request: The incoming dashboard request.
+        tailnet_peer_verifier: Binds a Tailscale socket address to a real peer.
+        detail: The refusal, naming what the caller tried to administer and
+            how to reach this node so it can.
+
+    Raises:
+        HTTPException: 403 when the request is not a direct loopback or
+            verified Tailscale dashboard request.
+    """
+
+    if not await _direct_dashboard_authority_request(request, tailnet_peer_verifier):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=detail,
+        )
+
+
+def _raise_pairing_gateway_http_error(exc: Exception) -> Never:
+    """Map an uninitialized local authority to actionable dashboard guidance."""
+
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=_PAIRING_GATEWAY_DETAIL,
+    ) from exc
+
+
+def _require_bearer(authorization: str | None) -> str:
+    """Extract one opaque bearer token without accepting alternate schemes."""
+
+    if authorization is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="bearer credential is required",
+            headers=_BEARER_CHALLENGE,
+        )
+    scheme, separator, token = authorization.partition(" ")
+    if separator != " " or scheme.lower() != "bearer" or not token.strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="bearer credential is invalid",
+            headers=_BEARER_CHALLENGE,
+        )
+    return token.strip()
+
+
+def _raise_credential_http_error(exc: Exception) -> Never:
+    """Map safe credential-domain failures onto stable HTTP semantics."""
+
+    if isinstance(exc, PairingGatewayNotInitializedError):
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if isinstance(exc, OperatorScopeError):
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if isinstance(
+        exc,
+        (OperatorCredentialInvalidError, OperatorCredentialExpiredError),
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+            headers=_BEARER_CHALLENGE,
+        ) from exc
+    raise exc
+
+
+async def authorize_plugin_request(
+    request: Request,
+    service: OperatorPairingService | None,
+    required_scope: PluginScope,
+    tailnet_peer_verifier: TailnetPeerVerifier = is_tailscale_peer,
+) -> str:
+    """Require direct owner authority or an explicitly scoped paired operator.
+
+    A presented bearer is always checked, never silently replaced by ambient
+    dashboard authority. Direct HTTP outside the verified owner transport is
+    refused; relay ingress has already authenticated its encrypted listener.
+    """
+    from skulk.api.operator_gateway import OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
+
+    authorization = request.headers.getlist("authorization")
+    if not authorization:
+        await _require_direct_dashboard_authority(
+            request, tailnet_peer_verifier, _PLUGIN_ACCESS_DETAIL
+        )
+        return "local-owner"
+    if len(authorization) != 1 or service is None:
+        raise HTTPException(status_code=401, detail="operator credential invalid")
+    try:
+        operator = await run_in_threadpool(
+            service.validate_access_token,
+            _require_bearer(authorization[0]),
+            required_scopes=(required_scope,),
+        )
+    except (
+        OperatorCredentialInvalidError,
+        OperatorCredentialExpiredError,
+        OperatorScopeError,
+        PairingGatewayNotInitializedError,
+    ) as exc:
+        _raise_credential_http_error(exc)
+    if (
+        request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is not True
+        and request.url.scheme != "https"
+        and not await _direct_dashboard_authority_request(
+            request, tailnet_peer_verifier
+        )
+    ):
+        raise HTTPException(
+            status_code=403, detail="plugin management requires protected transport"
+        )
+    return str(operator.device_id)
+
+
+async def authorize_plugin_owner_request(
+    request: Request,
+    tailnet_peer_verifier: TailnetPeerVerifier = is_tailscale_peer,
+) -> None:
+    """Reserve publisher trust and credential destinations for direct owner administration."""
+    from skulk.api.operator_gateway import OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY
+
+    if (
+        request.headers.getlist("authorization")
+        or request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True
+    ):
+        raise HTTPException(status_code=403, detail=_PAIRED_PLUGIN_OWNER_DETAIL)
+    # The pairing refusal names invitations and the operator gateway; neither
+    # applies to plugins, which any node manages from a direct dashboard.
+    await _require_direct_dashboard_authority(
+        request, tailnet_peer_verifier, _PLUGIN_OWNER_AUTHORITY_DETAIL
+    )
+
+
+def _remote_pairing_error(
+    status_code: int,
+    code: str,
+    detail: str,
+    retry_after_seconds: int | None = None,
+) -> JSONResponse:
+    """Build the documented remote-pairing error body with a stable code."""
+
+    body = RemotePairingErrorBody(
+        detail=detail,
+        code=code,
+        retry_after_seconds=retry_after_seconds,
+    )
+    headers = (
+        {"Retry-After": str(retry_after_seconds), "Cache-Control": "no-store"}
+        if retry_after_seconds is not None
+        else {"Cache-Control": "no-store"}
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json", by_alias=True),
+        headers=headers,
+    )
+
+
+_REMOTE_PAIRING_ERROR_RESPONSES: Final[dict[int | str, dict[str, object]]] = {
+    status.HTTP_409_CONFLICT: {
+        "model": RemotePairingErrorBody,
+        "description": (
+            "Phone pairing cannot be turned on here: registration is turned off, "
+            "the node is offline, no relay is configured, another node manages "
+            "pairing, the cluster has its maximum of paired devices, or a "
+            "registration is in flight."
+        ),
+    },
+    status.HTTP_429_TOO_MANY_REQUESTS: {
+        "model": RemotePairingErrorBody,
+        "description": "The relay is limiting registrations; see Retry-After.",
+    },
+    status.HTTP_502_BAD_GATEWAY: {
+        "model": RemotePairingErrorBody,
+        "description": "The relay refused this registration or answered invalidly.",
+    },
+    status.HTTP_503_SERVICE_UNAVAILABLE: {
+        "model": RemotePairingErrorBody,
+        "description": (
+            "The relay is paused, full, busy, or unreachable, or this node's "
+            "pairing state is temporarily unavailable."
+        ),
+    },
+}
+
+
+def create_operator_auth_router(
+    service: OperatorPairingService,
+    *,
+    remote_pairing: RemotePairingController | None = None,
+    tailnet_peer_verifier: TailnetPeerVerifier = is_tailscale_peer,
+) -> APIRouter:
+    """Create narrowly scoped pairing routes for one designated gateway.
+
+    Args:
+        service: Encrypted local pairing service owned by the API node.
+        remote_pairing: Phone-pairing controller for the relay status and
+            turn-on/turn-off routes; ``None`` omits those routes.
+        tailnet_peer_verifier: Async local-authority check that binds a socket
+            address to an actual Tailscale node. Production uses tailscaled;
+            tests inject deterministic membership.
+
+    Returns:
+        Router exposing pairing, refresh rotation, and paired-device
+        management. General Skulk model and inference APIs remain canonical.
+    """
+
+    router = APIRouter(prefix="/v1/auth", tags=["Authentication"])
+
+    @router.get(
+        "/plugin-grants",
+        response_model=tuple[PluginGrant, ...],
+        summary="List owner-controlled plugin grants",
+        description=(
+            "List explicit paired-device plugin privileges from the direct localhost "
+            "or verified Tailscale dashboard. This route is unavailable through relay "
+            "access and refuses any paired bearer, including on the direct listener. It does not expose credentials. Existing pairings have no plugin grants."
+        ),
+    )
+    async def list_plugin_grants(
+        request: Request, response: Response
+    ) -> tuple[PluginGrant, ...]:
+        """Return safe grant metadata only after verifying direct owner authority."""
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await run_in_threadpool(service.plugin_grants)
+        except PairingGatewayNotInitializedError as exc:
+            _raise_pairing_gateway_http_error(exc)
+
+    @router.put(
+        "/plugin-grants/{device_id}",
+        response_model=PluginGrant,
+        summary="Replace one device's explicit plugin grants",
+        description=(
+            "Replace plugin read, management and approval grants after a direct owner "
+            "dashboard check and expected-revision comparison. An empty scope list "
+            "revokes every plugin grant immediately, including for existing access tokens. "
+            "A presented paired bearer is refused even with matching direct-owner origin headers. Remote operators cannot call this route or grant themselves privileges."
+        ),
+    )
+    async def replace_plugin_grant(
+        device_id: UUID,
+        payload: PluginGrantUpdate,
+        request: Request,
+        response: Response,
+    ) -> PluginGrant:
+        """Apply a revision-fenced grant without returning or rotating credentials."""
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await run_in_threadpool(service.set_plugin_grant, device_id, payload)
+        except OperatorDeviceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PairingSessionStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (
+            PairingGatewayNotInitializedError,
+            OperatorCredentialInvalidError,
+            OperatorCredentialExpiredError,
+        ) as exc:
+            _raise_credential_http_error(exc)
+
+    @router.post(
+        _PAIRING_INVITATION_PATH,
+        response_model=PairingInvitationCreateResponse,
+        response_model_by_alias=True,
+        summary="Create a dashboard pairing invitation",
+        description=(
+            "Create one bounded, revocable pairing invitation from the configured "
+            "gateway dashboard over localhost or Tailscale. The secret pairing code "
+            "is returned once with no-store response headers and is never "
+            "relay-accessible. A cluster allows at most five active paired "
+            "devices: the invitation's pairing limit is reduced to the free "
+            "device slots, and creation returns 409 when no slot is free."
+        ),
+    )
+    async def create_pairing_invitation(
+        payload: PairingInvitationCreateRequest,
+        request: Request,
+        response: Response,
+    ) -> PairingInvitationCreateResponse:
+        """Create one invitation and return its QR payload exactly once."""
+
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        try:
+            package = await run_in_threadpool(
+                service.create_invitation,
+                lifetime=timedelta(seconds=payload.valid_for_seconds),
+                max_pairings=payload.max_pairings,
+            )
+            invitation = next(
+                item
+                for item in await run_in_threadpool(service.invitations)
+                if item.invitation_id == package.invitation_id
+            )
+        except PairingPackageTooLargeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="pairing invitation is too large for a reliable QR code",
+            ) from exc
+        except PairingDeviceLimitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        except (PairingGatewayNotInitializedError, ValueError) as exc:
+            _raise_pairing_gateway_http_error(exc)
+        except OperatorRelayUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="the operator gateway identity is temporarily unavailable",
+            ) from exc
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return PairingInvitationCreateResponse(
+            invitation=invitation,
+            pairing_code=package.as_url(),
+        )
+
+    @router.get(
+        _PAIRING_INVITATION_PATH,
+        response_model=list[PairingInvitationSummary],
+        response_model_by_alias=True,
+        summary="List dashboard pairing invitations",
+        description=(
+            "Return safe invitation status without bearer nonces or pairing "
+            "codes. A node that has never paired returns an empty list. This "
+            "management route is available only to the gateway dashboard over "
+            "localhost or Tailscale and never through the relay gateway."
+        ),
+    )
+    async def list_pairing_invitations(
+        request: Request,
+    ) -> list[PairingInvitationSummary]:
+        """List safe status for invitations created on this gateway."""
+
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        try:
+            return list(await run_in_threadpool(service.invitations))
+        except PairingGatewayNotInitializedError:
+            # A node that never paired has no invitations yet; that is not an
+            # error the dashboard should show.
+            return []
+
+    @router.get(
+        _PAIRING_CAPACITY_PATH,
+        response_model=PairingCapacity,
+        response_model_by_alias=True,
+        summary="Report paired-device capacity",
+        description=(
+            "Return how many paired devices can still connect, the cluster's "
+            "maximum of five, and the free device slots. A device stops "
+            "occupying a slot when it is revoked or its refresh credential "
+            "expires. A node that has never paired a device reports every "
+            "slot free. This management route is available only to the "
+            "dashboard over localhost or Tailscale and never through the relay "
+            "gateway."
+        ),
+    )
+    async def get_pairing_capacity(request: Request) -> PairingCapacity:
+        """Return the paired-device capacity from the trusted direct dashboard."""
+
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        return await run_in_threadpool(service.pairing_capacity)
+
+    @router.delete(
+        f"{_PAIRING_INVITATION_PATH}/{{invitation_id}}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        summary="Revoke a dashboard pairing invitation",
+        description=(
+            "Immediately prevent new and unfinished pairing attempts for one "
+            "invitation without revoking devices that already paired. This "
+            "management route is available only to the configured gateway "
+            "dashboard over localhost or Tailscale and is never relay-accessible."
+        ),
+    )
+    async def revoke_pairing_invitation(
+        invitation_id: UUID, request: Request
+    ) -> Response:
+        """Revoke one invitation from the trusted direct gateway dashboard."""
+
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        try:
+            await run_in_threadpool(service.revoke_invitation, invitation_id)
+        except PairingGatewayNotInitializedError as exc:
+            _raise_pairing_gateway_http_error(exc)
+        except PairingSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PairingSessionStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @router.post(
+        "/pairing-sessions/challenge",
+        response_model=PairingChallengeResponse,
+        response_model_exclude_none=True,
+        summary="Bind a device key to a local pairing session",
+        description=(
+            "Accept a candidate Ed25519 public key only when the nonce names an "
+            "unexpired host-created pairing session or invitation, then return "
+            "one random challenge for proof of possession. Reusable invitations "
+            "return an independent five-minute attempt identity. Returns 409 "
+            "when the cluster already has its maximum of five active paired "
+            "devices."
+        ),
+    )
+    def create_pairing_challenge(
+        request: PairingChallengeRequest,
+    ) -> PairingChallengeResponse:
+        """Create one device proof challenge for a pending pairing session."""
+
+        try:
+            return service.create_challenge(request)
+        except PairingGatewayNotInitializedError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except PairingSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PairingSessionExpiredError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
+        except PairingSessionStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PairingInvitationCapacityError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
+        except PairingDeviceLimitError as exc:
+            # 409 maps to the released app's "ask the operator for a new code"
+            # guidance; retrying cannot help until a device is revoked.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PairingProofError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.post(
+        "/pairing-sessions/exchange",
+        response_model=PairingExchangeResponse,
+        summary="Exchange a device-key proof for operator credentials",
+        description=(
+            "Verify the candidate device's Ed25519 signature, consume its "
+            "single-use session or independent invitation attempt, and return "
+            "short-lived access plus rotating refresh credentials exactly once. "
+            "The device limit is enforced atomically with the credential "
+            "commit: when the cluster already has five active paired devices "
+            "the exchange returns 409 and issues no credential."
+        ),
+    )
+    def exchange_pairing_proof(
+        request: PairingExchangeRequest,
+    ) -> PairingExchangeResponse:
+        """Verify a candidate device and consume its pairing capability."""
+
+        try:
+            return service.exchange(request)
+        except PairingGatewayNotInitializedError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except PairingSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PairingSessionExpiredError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
+        except PairingSessionStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PairingDeviceLimitError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PairingProofError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    @router.post(
+        "/token",
+        response_model=OperatorTokenResponse,
+        summary="Rotate an operator refresh credential",
+        description=(
+            "Accept the current opaque refresh credential for one paired "
+            "device, invalidate its existing token pair, and return a fresh "
+            "short-lived access token plus rotating refresh token exactly once."
+        ),
+    )
+    def refresh_operator_token(request: OperatorTokenRequest) -> OperatorTokenResponse:
+        """Rotate the access and refresh credentials for one paired device."""
+
+        try:
+            return service.refresh(request)
+        except OperatorDeviceNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="refresh credential is invalid",
+                headers=_BEARER_CHALLENGE,
+            ) from exc
+        except (
+            OperatorCredentialInvalidError,
+            OperatorCredentialExpiredError,
+            PairingGatewayNotInitializedError,
+        ) as exc:
+            _raise_credential_http_error(exc)
+        except PairingSessionStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.get(
+        "/devices",
+        response_model=OperatorDevicesResponse,
+        summary="List paired operator devices",
+        description=(
+            "Return safe active and revoked device projections for a bearer "
+            "credential with device-management scope or a verified direct dashboard. Credential material is "
+            "never included. The direct dashboard receives an empty list on a "
+            "node that has never paired."
+        ),
+    )
+    async def list_operator_devices(
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> OperatorDevicesResponse:
+        """List devices visible to an authorized operator."""
+
+        try:
+            if authorization is None and request.headers.get("x-skulk-dashboard") == "pairing-v1":
+                await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+                try:
+                    return await run_in_threadpool(service.owner_devices)
+                except PairingGatewayNotInitializedError:
+                    # A node that never paired has no devices yet.
+                    return OperatorDevicesResponse(devices=())
+            return await run_in_threadpool(service.devices, _require_bearer(authorization))
+        except (
+            OperatorCredentialInvalidError,
+            OperatorCredentialExpiredError,
+            OperatorScopeError,
+            PairingGatewayNotInitializedError,
+        ) as exc:
+            _raise_credential_http_error(exc)
+
+    @router.delete(
+        "/devices/{device_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        summary="Revoke a paired operator device",
+        description=(
+            "Immediately invalidate the target device's access and refresh "
+            "credentials. Repeating revocation for an already revoked device "
+            "is idempotent. Requires device-management bearer scope or verified direct dashboard authority."
+        ),
+    )
+    async def revoke_operator_device(
+        request: Request,
+        device_id: UUID,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> Response:
+        """Revoke one stable paired-device identity."""
+
+        try:
+            if authorization is None and request.headers.get("x-skulk-dashboard") == "pairing-v1":
+                await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+                await run_in_threadpool(service.owner_revoke_device, device_id)
+            else:
+                await run_in_threadpool(service.revoke_device, _require_bearer(authorization), device_id)
+        except OperatorDeviceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (
+            OperatorCredentialInvalidError,
+            OperatorCredentialExpiredError,
+            OperatorScopeError,
+            PairingGatewayNotInitializedError,
+        ) as exc:
+            _raise_credential_http_error(exc)
+        except PairingSessionStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    if remote_pairing is not None:
+        _add_remote_pairing_routes(router, remote_pairing, tailnet_peer_verifier)
+
+    return router
+
+
+def _add_remote_pairing_routes(
+    router: APIRouter,
+    controller: RemotePairingController,
+    tailnet_peer_verifier: TailnetPeerVerifier,
+) -> None:
+    """Add the dashboard-only phone-pairing status and turn-on/turn-off routes."""
+
+    @router.get(
+        _REMOTE_PAIRING_PATH,
+        response_model=RemotePairingStatus,
+        response_model_by_alias=True,
+        summary="Read phone pairing status",
+        description=(
+            "Return whether phone pairing through the relay is set up on this "
+            "node and whether the relay holds a live session from it: "
+            "not_set_up, registering, connecting, connected, relay_unreachable, "
+            "revoked (the relay permanently refused the route), or "
+            "managed_elsewhere (another node holds the cluster's relay route). "
+            "Also reports whether this node can register a route, the last "
+            "registration failure, and the relay host. Available only to the "
+            "dashboard over localhost or Tailscale, never through the relay."
+        ),
+        responses={503: _REMOTE_PAIRING_ERROR_RESPONSES[503]},
+    )
+    async def get_remote_pairing(request: Request, response: Response) -> object:
+        """Return the current phone-pairing status."""
+
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await run_in_threadpool(controller.status)
+        except _PAIRING_STATE_ERRORS:
+            return _pairing_state_unavailable()
+
+    @router.post(
+        _REMOTE_PAIRING_PATH,
+        response_model=RemotePairingStatus,
+        response_model_by_alias=True,
+        summary="Turn phone pairing on",
+        description=(
+            "Register this node's relay route when it has none, so paired "
+            "phones can reach it through the content-blind relay; remote access "
+            "starts without a restart. The node generates its connector key and "
+            "carrier credentials and sends the relay only their fingerprints. "
+            "Idempotent: with a route stored or a registration in flight it "
+            "returns the current status. Refused while another node manages "
+            "phone pairing or the cluster has its maximum of paired devices. "
+            "Failures carry a stable code. Available only to the dashboard over "
+            "localhost or Tailscale, never through the relay."
+        ),
+        responses=_REMOTE_PAIRING_ERROR_RESPONSES,
+    )
+    async def enable_remote_pairing(request: Request, response: Response) -> object:
+        """Register a relay route for this node when it has none."""
+
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await run_in_threadpool(controller.enable)
+        except RemotePairingRefusedError as exc:
+            return _remote_pairing_error(
+                status.HTTP_409_CONFLICT, exc.refusal, str(exc)
+            )
+        except RelayRegistrationError as exc:
+            return _remote_pairing_error(
+                _REGISTRATION_FAILURE_STATUS[exc.failure],
+                exc.failure,
+                str(exc),
+                exc.retry_after_seconds,
+            )
+        except _PAIRING_STATE_ERRORS:
+            return _pairing_state_unavailable()
+
+    @router.delete(
+        _REMOTE_PAIRING_PATH,
+        response_model=RemotePairingStatus,
+        response_model_by_alias=True,
+        summary="Turn phone pairing off",
+        description=(
+            "Forget this node's relay route; remote access stops without a "
+            "restart. Phones paired through the route lose remote access and "
+            "keep their device records until revoked. Active invitations for "
+            "the route are revoked. The relay is not contacted. Idempotent. "
+            "Available only to the dashboard over localhost or Tailscale, never "
+            "through the relay."
+        ),
+        responses={
+            409: _REMOTE_PAIRING_ERROR_RESPONSES[409],
+            503: _REMOTE_PAIRING_ERROR_RESPONSES[503],
+        },
+    )
+    async def disable_remote_pairing(request: Request, response: Response) -> object:
+        """Forget this node's relay route."""
+
+        await _require_direct_dashboard_authority(request, tailnet_peer_verifier)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await run_in_threadpool(controller.disable)
+        except RemotePairingRefusedError as exc:
+            return _remote_pairing_error(
+                status.HTTP_409_CONFLICT, exc.refusal, str(exc)
+            )
+        except _PAIRING_STATE_ERRORS:
+            return _pairing_state_unavailable()
+
+
+def _pairing_state_unavailable() -> JSONResponse:
+    """Report unreadable local pairing state without echoing its cause."""
+
+    # The exception text can name protected files or key material locations.
+    logger.warning("Phone pairing state is unavailable on this node")
+    return _remote_pairing_error(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "pairing_state_unavailable",
+        "This node's pairing state is temporarily unavailable.",
+    )

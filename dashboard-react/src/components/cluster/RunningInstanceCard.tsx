@@ -4,6 +4,7 @@ import { BsChatDotsFill } from 'react-icons/bs';
 import { InfoTooltip } from '../common/InfoTooltip';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
+import type { ServingEngine } from '../../utils/servingEngine';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -31,10 +32,12 @@ export interface RunningInstanceCardProps {
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl' | 'LlamaRpc';
-  /** Serving engine: MLX (in-process), in-process llama.cpp, or the served
-   *  llama-server. Drives the type label so a GGUF/served instance is not
-   *  mislabelled as an MLX ring. */
-  engine: 'mlx' | 'llama_cpp' | 'served';
+  /** Serving engine, from the placement's resolved backend. Drives the type
+   *  label so a llama.cpp, vLLM, ComfyUI or audio instance is not mislabelled
+   *  as an MLX ring. */
+  engine: ServingEngine;
+  /** Accelerator named by the resolved backend, such as `ROCm`; null if none. */
+  accelerator?: string | null;
   /** Per-node placement status: one entry per node the instance is placed on
    *  (all pipeline / tensor ranks), each with its runner's current phase, so the
    *  card shows which node is the laggard rather than a single aggregate. */
@@ -67,12 +70,12 @@ function buildStatusConfig(
     // Loading and warming are work in flight, so they burn the living
     // colour (matching the store table's loading state), not the ordinary
     // interactive accent.
-    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.live,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
-    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.live,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
+    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.liveText,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
+    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.liveText,    glow: theme.colors.liveBg,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
     ready:         { label: t('instance.status.ready', 'Ready'),         color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.readyMessage', 'Ready to chat!') },
     running:       { label: t('instance.status.running', 'Running'),       color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.runningMessage', 'Processing inference...') },
     failed:        { label: t('instance.status.failed', 'Failed'),        color: theme.colors.error,   glow: theme.colors.errorBg,    defaultMessage: t('instance.status.failedMessage', 'Instance failed') },
-    shutting_down: { label: t('instance.status.shuttingDown', 'Shutting Down'), color: theme.colors.warning, glow: theme.colors.warningBg,  defaultMessage: t('instance.status.shuttingDownMessage', 'Shutting down...') },
+    shutting_down: { label: t('instance.status.shuttingDown', 'Shutting Down'), color: theme.colors.liveText, glow: theme.colors.warningBg,  defaultMessage: t('instance.status.shuttingDownMessage', 'Shutting down...') },
   };
 }
 
@@ -81,22 +84,29 @@ function formatInstanceId(id: string): string {
 }
 
 /** The engine/topology label under the model name. MLX shows its sharding +
- *  ring/jaccl transport; the llama.cpp engines are single-node, so they show the
- *  engine name instead of an MLX-specific ring label. */
+ *  ring/jaccl transport; every other engine shows its name and, when the
+ *  resolved backend names one, the accelerator it runs on. */
 function formatEngineLabel(
-  engine: 'mlx' | 'llama_cpp' | 'served',
+  engine: ServingEngine,
+  accelerator: string | null,
   sharding: 'Pipeline' | 'Tensor',
   instanceType: 'MlxRing' | 'MlxJaccl' | 'LlamaRpc',
   t: SkulkTranslate,
 ): string {
+  const on = (name: string) => (accelerator ? `${name} · ${accelerator}` : name);
   if (engine === 'served') {
     // A pooled instance is served across the RPC pair; distinguish it from a
     // single-node served instance so the multi-node nature is legible.
     return instanceType === 'LlamaRpc'
       ? t('placement.servedPooled', 'Served (pooled)')
-      : t('placement.served', 'Served (llama.cpp)');
+      : on(t('placement.served', 'Served (llama.cpp)'));
   }
-  if (engine === 'llama_cpp') return t('placement.llamaCpp', 'llama.cpp');
+  if (engine === 'llama_cpp') return on(t('placement.llamaCpp', 'llama.cpp'));
+  if (engine === 'vllm') return on(t('placement.vllm', 'vLLM'));
+  if (engine === 'comfy') return on(t('placement.comfy', 'ComfyUI'));
+  if (engine === 'audio_cpp') return on(t('placement.audioCpp', 'audio.cpp'));
+  if (engine === 'mlx_audio') return t('placement.mlxAudio', 'MLX Audio');
+  if (engine === 'test_video') return t('placement.testVideo', 'Test video engine');
   const shard = sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor');
   const transport = instanceType === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl');
   return `${shard} · ${transport}`;
@@ -117,7 +127,7 @@ function nodeStateVisual(
     case 'stopping': return { Icon: FiClock, color: theme.colors.warning, spin: false };
     case 'pending': return { Icon: FiClock, color: theme.colors.textMuted, spin: false };
     case 'loading':
-    default: return { Icon: FiLoader, color: theme.colors.live, spin: true };
+    default: return { Icon: FiLoader, color: theme.colors.liveText, spin: true };
   }
 }
 
@@ -159,7 +169,8 @@ const Card = styled.div<{ $color: string; $glow: string }>`
   display: flex;
   flex-direction: column;
   gap: 6px;
-  min-width: 280px;
+  min-width: 0;
+  width: 100%;
   max-width: 380px;
   font-family: ${({ theme }) => theme.fonts.body};
 `;
@@ -226,7 +237,7 @@ const MetaRow = styled.div`
 const StatusBadge = styled.span<{ $color: string }>`
   font-size: 10px;
   font-weight: 600;
-  color: ${({ $color }) => $color};
+  color: ${({ theme, $color }) => $color === theme.colors.liveText ? theme.colors.liveBadgeText : $color};
   background: ${({ $color }) => $color}1a;
   border: 1px solid ${({ $color }) => $color}40;
   border-radius: ${({ theme }) => theme.radii.sm};
@@ -268,14 +279,15 @@ const NodeChip = styled.span`
 `;
 
 const StatusLabel = styled.div<{ $color: string }>`
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-size: 15px;
+  letter-spacing: .02em;
   font-weight: 700;
   color: ${({ $color }) => $color};
 `;
 
 const StatusMessage = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.metadataText};
   font-style: italic;
 `;
 
@@ -294,9 +306,10 @@ const ChatBtn = styled.button`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.healthy};
-  border: 1px solid ${({ theme }) => theme.colors.accentBg};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  padding: 3px 10px;
+  border: 1px solid ${({ theme }) => theme.colors.borderHealthy};
+  border-radius: 8px;
+  box-sizing: border-box; height: 30px;
+  padding: 0 10px;
   transition: all 0.15s;
 
   &:hover {
@@ -344,6 +357,7 @@ export function RunningInstanceCard({
   sharding,
   instanceType,
   engine,
+  accelerator = null,
   nodeStatuses,
   status,
   statusMessage,
@@ -379,7 +393,7 @@ export function RunningInstanceCard({
 
       <MetaRow>
         <span>
-          {formatEngineLabel(engine, sharding, instanceType, t)}
+          {formatEngineLabel(engine, accelerator, sharding, instanceType, t)}
         </span>
         <StatusBadge $color={cfg.color}>{cfg.label}</StatusBadge>
         {speculation && (

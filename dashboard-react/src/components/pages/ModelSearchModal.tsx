@@ -1,16 +1,84 @@
+import { useModalFocus } from '../../hooks/useModalFocus';
+import type { StoreDownloadProgress } from '../layout/StoreRegistryTable';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
-import { FiX } from 'react-icons/fi';
 import { ModelBrowser } from '../models/ModelBrowser';
 import { burstVerdict, hfWeightBytes, type BurstInfo, type FleetServingSummary } from '../models/burst';
 import { deriveFormatLabel, deriveQuantLabel } from '../models/quantBadge';
-import type { ModelInfo, HuggingFaceModel, DownloadAvailability } from '../../types/models';
+import type { ModelInfo, HuggingFaceModel, DownloadAvailability, InstanceStatus } from '../../types/models';
 import { addToast } from '../../hooks/useToast';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
 const FAVORITES_KEY = 'skulk-favorite-models';
 const RECENTS_KEY = 'skulk-recent-models';
 const MAX_RECENT_MODELS = 20;
+
+/**
+ * Read a download-start response body and report whether the store host
+ * actually accepted the transfer.
+ *
+ * The API keeps HTTP 200 for these responses and encodes a store-host
+ * rejection as `status: "error"` with an operator-readable `error` field,
+ * so acceptance must be judged from the body, not the status code. A body
+ * that cannot be parsed is treated as accepted to preserve the previous
+ * behavior for older responses.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- The store and discovery workflows share this response contract parser.
+export async function readAcceptedDownload(
+  res: Response,
+): Promise<{ rejected: boolean; reason: string | null; destination: 'store' | 'node' }> {
+  try {
+    const body: unknown = await res.json();
+    if (body && typeof body === 'object') {
+      const record = body as Record<string, unknown>;
+      if (record.status === 'error') {
+        return {
+          rejected: true,
+          reason: typeof record.error === 'string' && record.error.trim() ? record.error : null,
+          destination: 'store',
+        };
+      }
+      // A node with no model store downloads the model onto itself.
+      if (record.destination === 'node') {
+        return { rejected: false, reason: null, destination: 'node' };
+      }
+    }
+  } catch {
+    // Unparseable body — assume the historical accepted shape.
+  }
+  return { rejected: false, reason: null, destination: 'store' };
+}
+
+/**
+ * Pull the human-readable failure reason out of an error response.
+ *
+ * The API's HTTPException handler serializes failures as
+ * `{"error": {"message": ...}}` (the OpenAI-style envelope), while plain
+ * FastAPI validation errors use a top-level `detail` field; both carry the
+ * reason a mutation failed (for example that a Hugging Face repository is
+ * gated and needs a token or accepted terms), and a generic toast that
+ * drops it leaves the operator with nothing to act on. Returns `null` when
+ * the body carries no usable text in either shape.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- The store and discovery workflows share this safe error parser.
+export async function extractErrorDetail(res: Response): Promise<string | null> {
+  try {
+    const body: unknown = await res.json();
+    if (body && typeof body === 'object') {
+      const record = body as Record<string, unknown>;
+      const nestedError = record.error;
+      if (nestedError && typeof nestedError === 'object') {
+        const message = (nestedError as Record<string, unknown>).message;
+        if (typeof message === 'string' && message.trim()) return message;
+      }
+      const detail = record.detail;
+      if (typeof detail === 'string' && detail.trim()) return detail;
+    }
+  } catch {
+    // Non-JSON error body — fall through to the generic message.
+  }
+  return null;
+}
 
 /**
  * One-time migration of pre-rename (exo-*) localStorage keys so existing
@@ -76,22 +144,36 @@ function loadRecentIds(): string[] {
 }
 
 interface ModelSearchModalProps {
+  /** Retain discovery filters while its nested placement view owns the modal. */
+  preserveViewWhileClosed?: boolean;
+  /** Live runner-derived readiness; storage availability is a separate fact. */
+  instanceStatuses?: Record<string, InstanceStatus>;
+  activeDownloads?: StoreDownloadProgress[];
+  onLaunch?: (modelId: string) => void;
   open: boolean;
   onClose: () => void;
   existingModelIds: Set<string>;
-  onDownloadStarted: () => void;
+  /** Called with the model id when the store host accepts a download start. */
+  onDownloadStarted: (modelId: string) => void;
   /** What the local fleet can serve; enables burst partitioning when set. */
   fleet?: FleetServingSummary | null;
 }
 
+/** Own discovery requests, favourites and download actions inside the Find Models dialog. */
 export function ModelSearchModal({
   open,
+  preserveViewWhileClosed = false,
   onClose,
   existingModelIds,
+  activeDownloads,
+  instanceStatuses,
+  onLaunch,
   onDownloadStarted,
   fleet = null,
 }: ModelSearchModalProps) {
   const { t } = useSkulkTranslation();
+  const modalRef = useRef<HTMLDivElement>(null);
+  useModalFocus(open, modalRef, onClose);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [favorites, setFavorites] = useState<Set<string>>(() => loadFavorites());
   const [recentIds, setRecentIds] = useState<string[]>(() => loadRecentIds());
@@ -232,17 +314,33 @@ export function ModelSearchModal({
           body: JSON.stringify({ gguf_file: ggufFile }),
         } : {}),
       });
-      if (res.ok) {
+      // The API answers HTTP 200 even when the store host rejected the
+      // request (the rejection rides in the body as status "error"), so a
+      // status check alone would show a false success toast.
+      const accepted = res.ok ? await readAcceptedDownload(res) : null;
+      if (accepted && !accepted.rejected) {
         addToast({
           type: 'success',
-          message: t('modelSearch.toasts.downloadingToStore', 'Downloading {modelId} to store', { modelId }),
+          message: accepted.destination === 'node'
+            ? t('modelSearch.toasts.downloadingToNode', 'Downloading {modelId} to this node', { modelId })
+            : t('modelSearch.toasts.downloadingToStore', 'Downloading {modelId} to store', { modelId }),
         });
         setRecentIds((prev) => [modelId, ...prev.filter((id) => id !== modelId)].slice(0, MAX_RECENT_MODELS));
-        onDownloadStarted();
-      } else {
+        onDownloadStarted(modelId);
+      } else if (accepted?.rejected) {
         addToast({
           type: 'error',
-          message: t('modelSearch.toasts.downloadStartFailedForModel', 'Failed to start download for {modelId}', { modelId }),
+          message: accepted.reason
+            ? t('modelSearch.toasts.downloadStartFailedWithReason', 'Failed to start download for {modelId}: {reason}', { modelId, reason: accepted.reason })
+            : t('modelSearch.toasts.downloadStartFailedForModel', 'Failed to start download for {modelId}', { modelId }),
+        });
+      } else {
+        const reason = await extractErrorDetail(res);
+        addToast({
+          type: 'error',
+          message: reason
+            ? t('modelSearch.toasts.downloadStartFailedWithReason', 'Failed to start download for {modelId}: {reason}', { modelId, reason })
+            : t('modelSearch.toasts.downloadStartFailedForModel', 'Failed to start download for {modelId}', { modelId }),
         });
       }
     } catch {
@@ -267,7 +365,13 @@ export function ModelSearchModal({
         }
         return true;
       }
-      addToast({ type: 'error', message: t('modelSearch.toasts.addModelFailed', 'Failed to add {modelId}', { modelId }) });
+      const reason = await extractErrorDetail(res);
+      addToast({
+        type: 'error',
+        message: reason
+          ? t('modelSearch.toasts.addModelFailedWithReason', 'Failed to add {modelId}: {reason}', { modelId, reason })
+          : t('modelSearch.toasts.addModelFailed', 'Failed to add {modelId}', { modelId }),
+      });
     } catch {
       addToast({ type: 'error', message: t('modelSearch.toasts.addModelFailed', 'Failed to add {modelId}', { modelId }) });
     }
@@ -313,6 +417,15 @@ export function ModelSearchModal({
     return burstVerdict(fleet, weight?.bytes ?? null, weight?.estimated ?? true, format);
   }, [fleet]);
 
+  const cancelDownload = async (modelId: string) => {
+    try {
+      const response = await fetch(`/store/models/${encodeURIComponent(modelId)}/download`, { method: 'DELETE' });
+      if (!response.ok) throw new Error(await extractErrorDetail(response) ?? t('modelSearch.cancelFailed', 'Could not cancel the download. Refresh its status before retrying.'));
+    } catch (error) {
+      addToast({ type: 'error', message: error instanceof Error ? error.message : t('modelSearch.cancelFailed', 'Could not cancel the download. Refresh its status before retrying.') });
+    }
+  };
+
   // Build a download status map so models already in store show a checkmark
   const storeDownloadMap = useMemo(() => {
     const map = new Map<string, DownloadAvailability>();
@@ -322,25 +435,26 @@ export function ModelSearchModal({
     return map;
   }, [existingModelIds]);
 
-  if (!open) return null;
+  if (!open && !preserveViewWhileClosed) return null;
 
   return (
     <>
-      <Backdrop onClick={onClose} />
-      <ModalContainer role="dialog" aria-modal="true" aria-labelledby="model-search-title">
-        <ModalHeader>
-          <ModalTitle id="model-search-title">{t('modelSearch.title', 'Find Models')}</ModalTitle>
-          <CloseButton onClick={onClose} aria-label={t('common.close', 'Close')}>
-            <FiX size={20} />
-          </CloseButton>
-        </ModalHeader>
+      {open && <Backdrop onClick={onClose} />}
+      <ModalContainer ref={modalRef} style={{ display: open ? undefined : 'none' }} aria-hidden={!open} tabIndex={-1} role={open ? 'dialog' : undefined} aria-modal={open ? true : undefined} aria-label={t('modelSearch.title', 'Find Models')}>
         <ModalBody>
           <ModelBrowser
+            heading={t('modelSearch.title', 'Find Models')}
+            defaultFitsOnly={fleet !== null}
+            onClose={onClose}
             models={models}
             selectedModelId={null}
             favorites={favorites}
             recentModelIds={recentIds}
             existingModelIds={existingModelIds}
+            activeDownloads={activeDownloads}
+            instanceStatuses={instanceStatuses}
+            onCancelDownload={modelId => void cancelDownload(modelId)}
+            onLaunch={onLaunch}
             downloadStatusMap={storeDownloadMap}
             canModelFit={() => true}
             getModelFitStatus={() => 'fits_now'}
@@ -382,43 +496,20 @@ const ModalContainer = styled.div`
   z-index: 51;
   display: flex;
   flex-direction: column;
-  width: min(94vw, 900px);
+  width: min(94vw, 1120px);
   height: min(86vh, 760px);
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.lg};
+  /* Composite the elevated tint over the base so background content cannot bleed through. */
+  background: linear-gradient(${({ theme }) => theme.colors.surfaceElevated}, ${({ theme }) => theme.colors.surfaceElevated}), ${({ theme }) => theme.colors.bg};
+  &:focus-visible { outline: none; }
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border-radius: 14px;
   overflow: hidden;
-  box-shadow: 0 0 43px ${({ theme }) => theme.colors.shadowStrong}, 0 0 88px ${({ theme }) => theme.colors.shadow};
+  box-shadow: ${({ theme }) => theme.colors.shadowPop};
 
   @media (max-width: 640px) {
     width: calc(100vw - 16px);
-    height: calc(100vh - 16px);
+    height: calc(100dvh - 16px);
   }
-`;
-
-const ModalHeader = styled.div`
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
-`;
-
-const ModalTitle = styled.h2`
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.lg};
-  font-weight: 600;
-  color: ${({ theme }) => theme.colors.gold};
-  margin: 0;
-`;
-
-const CloseButton = styled.button`
-  all: unset;
-  cursor: pointer;
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: color 0.15s;
-  display: flex;
-  &:hover { color: ${({ theme }) => theme.colors.text}; }
 `;
 
 const ModalBody = styled.div`

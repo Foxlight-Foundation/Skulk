@@ -39,7 +39,7 @@ const meta: Meta<typeof ChatForm> = {
   component: ChatForm,
   parameters: { layout: 'centered' },
   decorators: [(Story) => (
-    <div style={{ width: 'min(600px, calc(100vw - 48px))', padding: 24, background: '#000' }}>
+    <div style={{ width: 'min(600px, calc(100vw - 48px))', padding: 24, }}>
       <Story />
     </div>
   )],

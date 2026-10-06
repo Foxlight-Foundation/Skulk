@@ -29,8 +29,9 @@ any machine where `nvidia-smi` works is ready. In particular:
 
 - **No CUDA toolkit install is required.** The managed CUDA engine wheel does
   not rehost the CUDA runtime; it resolves it from NVIDIA's official PyPI
-  wheels (`nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`), which install as
-  ordinary Python dependencies.
+  wheels (`nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`,
+  `nvidia-nccl-cu12`), which install as ordinary Python dependencies. NCCL is
+  required to load the pinned binary even for single-GPU inference.
 - **No NVML setup is required.** GPU detection and VRAM telemetry use
   `nvidia-ml-py`, which is an ordinary Linux dependency of Skulk itself and
   installs automatically with the environment.
@@ -39,7 +40,10 @@ any machine where `nvidia-smi` works is ready. In particular:
 
 On Ubuntu or Debian, start with the packaged app or headless runtime in the
 [installation guide](install). It keeps the node's runtime aligned with the
-other release artifacts. The source installer below remains useful for other
+other release artifacts. A packaged NVIDIA node installs the CUDA engine
+wheel described below for the user that runs Skulk at its first online
+start, a one-time download of several gigabytes into
+`~/.local/share/skulk/engines`, and then serves GGUF models with it. The source installer below remains useful for other
 distributions, development builds, custom CUDA environments, and the optional
 `--with-vllm` source path.
 
@@ -51,8 +55,9 @@ On a Linux machine where `nvidia-smi` reports a GPU, the installer provisions,
 beyond the usual toolchain (uv, Rust, the repo checkout, the Python
 environment, and the dashboard built by Skulk's bundled Node.js runtime):
 
-- **The `skulk-llama-server-cuda` engine wheel**, fetched from the Foxlight
-  wheel index at `wheels.foxlight.ai` (the CUDA wheel exceeds PyPI's per-file
+- **The `skulk-llama-server-cuda` engine wheel** for x86_64 or aarch64 (the
+  aarch64 build targets compute capability 12.1, Grace Blackwell and GB10),
+  fetched from the Foxlight wheel index at `wheels.foxlight.ai` (the CUDA wheel exceeds PyPI's per-file
   size limit; PyPI stays the source for the NVIDIA runtime dependencies). The
   wheel carries Foxlight-built `llama-server` and `ggml-rpc-server` binaries
   compiled from the pinned upstream llama.cpp release, behind a shim that
@@ -144,9 +149,8 @@ records in `~/.skulk/skulk.env`. The download is several GB. See
 One extra requirement applies to models carded with a DFlash speculator
 (the Laguna cards): the speculator JIT-compiles its kernels through NVRTC at
 engine start, which needs a **CUDA 12.8 or newer toolchain** on the node
-(older headers predate the FP8 types it uses). Nodes running a CUDA 12.8+
-driver stack normally have this already; container images pinned to an older
-CUDA toolkit need the newer `cuda-nvcc`/`cudart-dev` packages installed even
+(older headers predate the FP8 types it uses). A compatible GPU driver alone does not supply those development headers;
+container images pinned to an older CUDA toolkit need the newer `cuda-nvcc`/`cudart-dev` packages installed even
 though the GPU driver itself is fine. Models without a DFlash card section
 are unaffected.
 

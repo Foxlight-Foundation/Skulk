@@ -4,7 +4,47 @@
 
 Thank you for your interest in contributing to Skulk! Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
 
+## User-facing completion
+
+Define the user, starting state, public entry point, and successful outcome
+before implementation. Use the [user-outcome evidence checklist](website/docs/human-release-qualification.md#user-outcome-evidence-checklist)
+to distinguish an accepted component from a product a new user can use.
+Missing enrollment or an unavailable prerequisite blocks the corresponding
+readiness claim, even when CI and an internally configured deployment pass.
+Record cross-repository owners, dependencies, artifact versions, merge and
+deployment status, and acceptance evidence in private `foxlight-docs`; keep
+public summaries sanitized. This does not authorize production changes or
+replace existing release qualification.
+
 ## Getting Started
+
+Managed plugin adapter work belongs in `src/skulk/extensions/managed.py`; keep
+provider implementations and their dependency environments outside Skulk.
+Use isolated test state for owner connection records, never production setup.
+The optional cached discovery contract and local registration format are documented
+in [Extensions](website/docs/extensions.md#separately-supervised-plugin-owners).
+Generic offline installer changes belong in `extensions/runtime_artifacts.py`,
+`runtime_files.py`, `runtime_integrity.py`, `runtime_install.py` and
+`runtime_selection.py`. Exercise them with synthetic signed
+artifacts and empty protected test roots; never install test dependencies into
+the Skulk environment or reuse production operation journals.
+The `skulk-plugin-service setup` command creates a separate nonroot system service;
+do not run it against production during development checks. Unit templates and
+setup recovery tests belong alongside `service_setup.py` and the standalone
+`service_registration.py` helper, with OS effects injected into isolated fixtures.
+Validate real LaunchDaemon/systemd behavior and reboot recovery on the explicitly
+assigned qualification host before claiming unattended installation support.
+Guided terminal installation lives in `extensions/terminal_install.py`. Its terminal
+effects are injectable; test the complete workflow against real manager IPC and
+synthetic signed artifacts, including disconnects, hidden credentials and distinct
+owner decisions. Keep plugin-specific setup and approval policy out of this module.
+
+Declarative model resources live in `src/skulk/resources/` so the normal uv build
+includes them in both wheels and source distributions. The root `resources`
+symlink preserves existing source tooling and desktop bundle paths; edit the
+package files rather than creating a second copy. Verify packaging changes with
+`uv build` and an installation outside the checkout, without resource environment
+overrides. A successful editable install does not establish wheel completeness.
 
 To run Skulk from source:
 
@@ -47,10 +87,9 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `src/skulk/` — Python backend (inference, API, store, worker, routing)
 - `dashboard-react/` — React dashboard (Skulk UI)
 - `rust/` — Rust components (networking, libp2p, PyO3 bindings)
-- `resources/inference_model_cards/` — Text generation model metadata TOML files
-- `resources/image_model_cards/` — Image model metadata TOML files
-- `resources/embedding_model_cards/` — Embedding model metadata TOML files
-- `resources/speech_model_cards/` — Speech model metadata TOML files
+- `Foxlight-Foundation/foxlight-model-registry/seed/cards/`: curated model cards, in the model registry repository; Skulk ships no model cards
+- `resources/model_registry/`: the embedded TUF root for the signed model-card registry
+- `src/skulk/worker/runner/test_video/foxlight--test-video.toml`: the synthetic test video engine's card, beside the engine; it names no artifact, so the registry can never supply it
 - `resources/speech_reference_voices/` — Checksummed bundled TTS conditioning audio and exact transcripts
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
@@ -64,8 +103,11 @@ The Skulk dashboard is a React + TypeScript + styled-components app in `dashboar
 - `src/components/cluster/` — ClusterCard, PlacementManager, RunningInstanceCard
 - `src/components/layout/` — HeaderNav, SettingsPanel, InstancePanel, ConversationPanel, StoreRegistryTable
 - `src/components/chat/` — ChatForm, ChatMessages, ChatModelSelector
+- `src/components/topology/` — TopologyGraph, ClusterNode, capability satellites and flyout (`CapabilitySatellite`, `CapabilityFlyout`, `capabilityActions.ts`)
+- `src/components/capabilities/` — CapabilityPanel, the drawer for one capability node (overview, surfaces, actions)
 - `src/stores/` — Zustand stores (chatStore, uiStore) with localStorage/sessionStorage persistence
 - `src/hooks/` — useClusterState, useConfig, useModelPicker
+- `src/auth/` — Browser operator pairing and in-memory credential transport; its public protocol fixtures are checked against Python pairing proofs. Credentials must bypass Redux and browser persistence.
 - `e2e/` — Explicit Playwright qualification against a running Skulk dashboard
 
 To run the dashboard in dev mode:
@@ -79,9 +121,40 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/api/main.py` — FastAPI server (OpenAI, Claude, Ollama API compatibility)
 - `src/skulk/master/` — Master node (placement, election, event sourcing)
 - `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
+- `src/skulk/worker/runner/`: one package per engine runner (MLX text, image, embeddings, speech, llama.cpp, llama-server, vLLM, RPC donor); `comfy/` drives a headless ComfyUI server for the audio-video engine, `test_video/` is the deterministic test video engine that renders synthetic clips so the video substrate runs without a GPU, and `video_plan.py` is the request-to-plan resolution both share
+- `packaging/skulk-audio-cpp-cpu/`: separately installed audio.cpp music server wheel; `.github/workflows/audio-cpp-engine-wheel.yml` builds CPU-capable packages for the three supported OS/CPU architectures from the pinned upstream source
+- `scripts/verify_audio_cpp_promotion.py`: verifies previously tested audio.cpp wheels before workflow publication; CPU/Metal promotion takes a JSON filename-to-SHA-256 map covering all three platforms at one version, while GPU promotion takes a one-entry map selecting the qualified platform filename. A plain digest is accepted only for a source run containing one GPU wheel. Supply it as `publish_sha256` together with `publish_run_id`; every selected wheel must also pass attestation verification, and only verified paths are published. Package publication does not establish a model support claim.
+- `packaging/skulk-audio-cpp-vulkan/`: separate Linux amd64 Vulkan music server wheel, built by the same pinned workflow; its cache and executable digest remain distinct from the CPU package
+- `packaging/skulk-audio-cpp-cuda/`: separate native Linux amd64 (SM 8.9) and arm64 (GB10 SM 12.1) CUDA music server wheels; each platform artifact and exact hardware/model claim requires its own qualification
+- `src/skulk/shared/tests/fixtures/model_cards/`: fixture copies of a few registry cards (and their architecture sidecars), for tests only; tests load them through `src/skulk/shared/tests/model_card_fixtures.py`
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
+- `src/skulk/operator/` — Stable operator identity, quorum certification,
+  crash-fault consensus, bounded dormant proposal lifecycle, and
+  encrypted/public authority persistence. It also owns the designated-gateway
+  local key provider, paired-WebSocket relay configuration/connector,
+  self-service relay registration (`relay_registration.py`), the
+  `skulk operator pair`, `configure-relay`, `forget-relay`, and `devices`
+  commands, and single-use device pairing plus credential lifecycle; the
+  matching FastAPI routes, relay-only canonical API guard, and runtime relay
+  ingress supervisor live in `src/skulk/api/operator_auth.py`,
+  `src/skulk/api/operator_gateway.py`, and
+  `src/skulk/api/operator_remote_access.py`. It is a
+  separate security plane from event-sourced inference state; do not place its
+  secrets or mutable authorization records in `State`, telemetry, diagnostics,
+  or ordinary events.
 - `src/skulk/shared/` — Shared types, constants, topology
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
+- `scripts/publish_docs_export.py` — Exact source and OpenAPI identities from a
+  successfully built documentation channel for independently branded mirrors
+
+Documentation publishing remains owned by the product repository. A successful
+stable/next push build exports `docs-export.json` and `openapi.json` alongside
+each channel's site. The manifest binds that matrix checkout, not the workflow
+trigger revision; its SHA-256 values cover the generated API, original sidebar,
+and tracked guides/images. Consumers must verify those identities before
+publication. Do not replace guides, flatten navigation or maintain a second
+copy of normative product documentation in a presentation repository. A failed
+build or obsolete workflow run does not replace the last working publication.
 
 ## Development Guidelines
 
@@ -126,14 +199,25 @@ For the React dashboard:
 
 ## Model Cards
 
-Skulk uses TOML-based model cards to define model metadata and capabilities. Model cards are stored in:
-- `resources/inference_model_cards/` for text generation models
-- `resources/image_model_cards/` for image generation models
-- `resources/embedding_model_cards/` for embedding models
-- `resources/speech_model_cards/` for TTS/STT speech models
+Skulk uses TOML-based model cards to define model metadata and capabilities.
+Skulk ships no model cards: when a model is downloaded, so is its card. The
+signed external registry is the curated source of truth, and local custom cards
+remain explicit operator overrides. Model-card locations are:
+- `Foxlight-Foundation/foxlight-model-registry/seed/cards/` for curated cards and the registry candidate workflow
+- `src/skulk/worker/runner/test_video/` for the synthetic test video engine's card
+- `src/skulk/shared/tests/fixtures/model_cards/` for fixture copies of registry cards, used by tests only
 - `~/.skulk/custom_model_cards/` for user-added custom models
 
 ### Adding a Model Card
+
+Do not add a model card to Skulk. Submit it to
+the private registry as one exact artifact (one card per quant/file), pin a full
+40-character source revision and exact GGUF file where applicable, then attach
+runtime qualification evidence. Structural validation alone must leave it a
+candidate. Card edits also go to the registry, never into Skulk:
+`test_skulk_ships_no_model_cards` fails on any TOML declaring a `model_id` under
+`src/skulk/resources`. A test that needs a real card uses a fixture copy under
+`src/skulk/shared/tests/fixtures/model_cards/`.
 
 To add a new model, create a TOML file with the following structure:
 
@@ -298,6 +382,44 @@ npm run test
 npm run build
 ```
 
+The joined operator-access qualification is opt-in because it executes a real
+`paired-websocket-service` binary from the sibling `skulk-relay` repository.
+It starts an isolated loopback relay and a minimal relay-only Skulk API with
+temporary authority state; it does not discover, join, or mutate a fleet:
+
+```bash
+SKULK_PAIRED_RELAY_BINARY=/absolute/path/to/paired-websocket-service \
+uv run pytest src/skulk/operator/tests/test_joined_relay_integration.py
+```
+
+The test runs both version-one warm lanes and version-two on-demand lanes with
+a binary built from reviewed relay source supporting `provision-on-demand`.
+It proves QR package generation, Ed25519 device proof, credential
+exchange, authenticated canonical `/state`, token rotation, paired-device
+listing, revocation, and rejection of revoked credentials through the actual
+opaque carrier and pinned inner TLS connection. It also opens new connections
+after a signed lease renewal and recreates both the gateway and relay while
+retaining the same app pairing material. Test listeners use generated loopback
+ports and protected temporary files. This does not prove relay-side durable
+fencing, physical-device compatibility, or hosted capacity.
+
+The separate `bench/operator_workload_fixture.py` serves deterministic canonical
+reads and synthetic chat/PCM streams behind the real on-demand gateway and
+pairing service without constructing a Node. Its local lifetime, protected QR,
+watchdog, tests and source-pinned schema validator are documented in
+[Isolated operator workload fixture](website/docs/operator-workload-fixture.md).
+It is not an observed workload profile or relay capacity result.
+The explicit programmatic public-rehearsal hook requires a separately reviewed
+bounded, independently expiring ingress controller with verified cleanup; no CLI
+enables it. Its run-bound hostname gate does not attest provider ownership.
+The public hook starts before the carrier, so its controller awaits public
+readiness after fixture startup and before showing pairing. Public route startup
+has a 120-second ceiling within the existing whole-session lease; local/private
+readiness retries are unchanged.
+`bench/observe_operator_workload.py` adds fixed-vocabulary flow controls and a
+bounded aggregate recorder pipe. The same contract documents artifact pins,
+opt-in recorder tests, measurement boundaries, and physical-device prerequisites.
+
 The live vision test is deliberately explicit because it places a real image
 through the built-in dashboard and a running model. Provide the dashboard URL,
 the exact mounted model ID, and a local PNG fixture:
@@ -402,3 +524,57 @@ If you find a bug or have a feature request, please open an issue on GitHub with
 ## Questions?
 
 Open an issue or discussion on the [Skulk repository](https://github.com/foxlight-foundation/Skulk).
+
+
+Managed plugin service development uses `skulk-plugin-service setup` for the
+explicit local system installation and `skulk-plugin-service manage` for subsequent
+typed operations through its generated connection. Source configuration, release
+inspection and durable download/staging are documented in the
+[API guide](website/docs/api-guide.md#private-release-inspection-and-installation).
+Use signed fixture feeds for tests; do not put private feed tokens in shell
+arguments, committed fixtures or ordinary diagnostic output.
+
+
+Optional installed-plugin local setup uses the fixed signed `__setup__.py`
+entrypoint, or the `setup` launcher a signed wheel declares under
+`skulk.capability_runtime`, and `skulk-plugin-service setup-plugin <managed-id> -- <setup-fields>`.
+Generic path discovery, runtime verification and inherited installation fencing
+live in `extensions/local_setup.py`; provider-specific prompts stay in the plugin.
+Tests cover actual offline runtime execution and terminal/fence inheritance without
+performing privileged OS registration.
+
+### Dashboard component gallery
+
+Shared presentation primitives live under `dashboard-react/src/components/common/`;
+Steward proposal/prompt surfaces and integration cards live under `components/steward/`
+and `components/integrations/`. Select Night or Noon Ridge in the existing Storybook
+toolbar. `Inventory` stories cover connected components with fictional responses.
+`.storybook/fixtures.tsx` isolates Redux and intercepts API traffic, rejecting mutations
+and unprovided observations. Do not replace these fixtures with a real cluster URL.
+Run `npm run lint`, `npx tsc -b`, `npm test`, `npm run build`, and
+`npx vitest run --project storybook` from `dashboard-react` when changing the gallery.
+
+### Documentation screenshots
+
+Capture a running dashboard using its actual cluster state. Set the target
+explicitly; the script opens fresh browser contexts and does not reuse login
+credentials or saved conversations:
+
+```bash
+SKULK_DOCS_URL=http://localhost:52415 node scripts/capture_docs_screenshots.mjs
+```
+
+The script refreshes desktop and phone captures under `website/docs/imgs/`. It
+blocks non-read HTTP requests and uses only navigation, theme, and panel controls;
+it does not submit chat, modify configuration, or manage models. It fails on page
+errors or attempted non-read requests. Use a target the operator has authorized
+for documentation capture and inspect every image for exposed credentials,
+clipping, overlays, and incomplete loading before committing. Captions should
+identify actual state at capture time; do not replace observed state with fixture
+data. Native operator-app screenshots must come from the app separately.
+
+The read-only script captures the pairing form but never generates an invitation.
+For an operator-authorized screenshot of the generated QR screen, create a
+short-lived invitation, capture it, and immediately revoke that same invitation.
+Verify its revoked state before publishing the image and caption it as unusable
+for pairing. Do not publish an active pairing code.

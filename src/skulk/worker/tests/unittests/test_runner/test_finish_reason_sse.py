@@ -3,6 +3,12 @@ from typing import Any, cast
 
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from skulk.api.types import (
+    CompletionTokensDetails,
+    PromptTokensDetails,
+    ToolCallItem,
+    Usage,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
@@ -30,6 +36,7 @@ from skulk.worker.runner.llm_inference.model_output_parsers import (
     parse_gemma4_thinking_channels,
     parse_thinking_models,
     parse_tool_calls,
+    reject_unoffered_tool_calls,
 )
 from skulk.worker.runner.llm_inference.tool_parsers import make_mlx_parser
 
@@ -447,7 +454,10 @@ class TestGemma4ThinkingChannels:
                 tokenizer=_no_thinking_tokenizer(),
                 model_type=Model,
                 model_id=ModelId("custom/deepseek-compatible"),
-                tools=None,
+                # The tool has to be offered: a request declaring none cannot
+                # produce a call on any path. What this covers is that the
+                # DeepSeek parser is selected from the family alone.
+                tools=[{"type": "function", "function": {"name": "get_weather"}}],
                 model_card=ModelCard(
                     model_id=ModelId("custom/deepseek-compatible"),
                     storage_size=Memory.from_bytes(1024),
@@ -602,3 +612,198 @@ class TestBatchGeneratorSingleNext:
         assert _got_finish(collected), (
             f"No finish_reason in collected: {[(type(r).__name__, getattr(r, 'finish_reason', None) if isinstance(r, GenerationResponse) else 'tool') for r in collected]}"
         )
+
+
+class TestToolParsingRequiresOfferedTools:
+    """A request that declared no tools must not come back with a tool call.
+
+    The tool parser is wired from the tokenizer, which does not know what this
+    request asked for, so without gating on the request a model that
+    spontaneously writes something call-shaped (exactly what a request asking
+    for JSON output invites) returns `tool_calls` to a caller who offered none.
+    It is also what makes `tool_choice: "none"` hold, since resolving that
+    choice removes the tools from the request.
+    """
+
+    @staticmethod
+    def _run(
+        tools: list[dict[str, Any]] | None,
+    ) -> list[GenerationResponse | ToolCallResponse]:
+        tokens = [
+            _make_response("<tool_call>", 200),
+            _make_response("anything", 201),
+            _make_response("</tool_call>", 202, finish_reason="stop"),
+        ]
+        return _step_until_finish(
+            apply_all_parsers(
+                _queue_source(tokens),
+                prompt="",
+                tool_parser=_dummy_parser,
+                tokenizer=_no_thinking_tokenizer(),
+                model_type=Model,
+                model_id=ModelId("mlx-community/does-not-matter"),
+                tools=tools,
+            )
+        )
+
+    def test_no_tools_offered_yields_no_tool_call(self) -> None:
+        results = self._run(None)
+        assert not any(isinstance(item, ToolCallResponse) for item in results)
+
+    def test_an_empty_tools_list_yields_no_tool_call(self) -> None:
+        results = self._run([])
+        assert not any(isinstance(item, ToolCallResponse) for item in results)
+
+    def test_no_tools_offered_still_strips_the_markers(self) -> None:
+        # Skipping the scan entirely left the dialect's markers in the answer,
+        # which a caller saw. The block is recognized either way; only whether
+        # it may become a call depends on the request.
+        results = self._run(None)
+        text = "".join(
+            item.text for item in results if isinstance(item, GenerationResponse)
+        )
+        assert "<tool_call>" not in text
+        assert "</tool_call>" not in text
+
+    def test_offering_a_tool_still_yields_the_call(self) -> None:
+        results = self._run(
+            [{"type": "function", "function": {"name": "test_fn"}}]
+        )
+        assert any(isinstance(item, ToolCallResponse) for item in results)
+
+
+class TestFamilyParsersHonourOfferedTools:
+    """gpt-oss and DeepSeek parse their own calls, so they need the same rule.
+
+    Observed live on gpt-oss served by MLX: a request sending
+    `tool_choice: "none"`, which removes the tools, still came back with a
+    call, and its name carried the harmony namespace prefix as well. Those
+    parsers are selected before the marker path, so the offered-tools filter
+    the marker path applies never saw them. The guard is tested directly
+    rather than through a synthetic token stream, because these parsers decode
+    real harmony/DSML tokens and a hand-built stream would pass vacuously.
+    """
+
+    @staticmethod
+    def _run(
+        calls: list[str], tools: list[dict[str, Any]] | None
+    ) -> list[GenerationResponse | ToolCallResponse]:
+        def source() -> Generator[GenerationResponse | ToolCallResponse | None]:
+            yield _make_response("thinking about it", 0)
+            yield ToolCallResponse(
+                tool_calls=[
+                    ToolCallItem(name=name, arguments="{}") for name in calls
+                ],
+                usage=None,
+                stats=None,
+            )
+
+        return [
+            item
+            for item in reject_unoffered_tool_calls(source(), tools)
+            if item is not None
+        ]
+
+    def test_no_tools_offered_yields_no_call(self) -> None:
+        results = self._run(["get_weather"], None)
+        assert not any(isinstance(item, ToolCallResponse) for item in results)
+
+    def test_a_call_to_an_unoffered_tool_is_dropped(self) -> None:
+        results = self._run(
+            ["get_weather"],
+            [{"type": "function", "function": {"name": "something_else"}}],
+        )
+        assert not any(isinstance(item, ToolCallResponse) for item in results)
+
+    def test_an_offered_tool_still_produces_the_call(self) -> None:
+        results = self._run(
+            ["get_weather"],
+            [{"type": "function", "function": {"name": "get_weather"}}],
+        )
+        calls = [item for item in results if isinstance(item, ToolCallResponse)]
+        assert [c.name for c in calls[0].tool_calls] == ["get_weather"]
+
+    def test_only_the_unoffered_call_is_dropped(self) -> None:
+        results = self._run(
+            ["something_else", "get_weather"],
+            [{"type": "function", "function": {"name": "get_weather"}}],
+        )
+        calls = [item for item in results if isinstance(item, ToolCallResponse)]
+        assert [c.name for c in calls[0].tool_calls] == ["get_weather"]
+
+    def test_a_dropped_call_is_delivered_as_content(self) -> None:
+        # Dropping the only output would answer the request with a blank
+        # message, so the caller is shown what the model actually did.
+        results = self._run(["get_weather"], None)
+        text = "".join(
+            item.text for item in results if isinstance(item, GenerationResponse)
+        )
+        assert "get_weather" in text
+
+    def test_the_stream_still_terminates_when_a_call_is_dropped(self) -> None:
+        assert _got_finish(self._run(["get_weather"], None))
+
+    def test_a_terminal_chunk_after_the_call_is_not_duplicated(self) -> None:
+        # These streams usually carry a terminal chunk after the call. Adding a
+        # second terminal would end the stream at the consumer before the real
+        # one arrives.
+        def source() -> Generator[GenerationResponse | ToolCallResponse | None]:
+            yield ToolCallResponse(
+                tool_calls=[ToolCallItem(name="get_weather", arguments="{}")],
+                usage=None,
+                stats=None,
+            )
+            yield _make_response("", 1, finish_reason="stop")
+
+        results = [
+            item
+            for item in reject_unoffered_tool_calls(source(), None)
+            if item is not None
+        ]
+        terminals = [
+            item
+            for item in results
+            if isinstance(item, ToolCallResponse) or item.finish_reason is not None
+        ]
+        assert len(terminals) == 1
+        assert terminals[0] is results[-1]
+        text = "".join(
+            item.text for item in results if isinstance(item, GenerationResponse)
+        )
+        assert "get_weather" in text
+
+    def test_several_rejected_calls_stay_readable_and_keep_accounting(self) -> None:
+        # Concatenating the rendered calls without a separator produced text a
+        # caller could not read back, and the fabricated fallback threw away
+        # the accounting the rejected response carried.
+        usage = Usage(
+            prompt_tokens=7,
+            completion_tokens=3,
+            total_tokens=10,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=0),
+        )
+
+        def source() -> Generator[GenerationResponse | ToolCallResponse | None]:
+            yield ToolCallResponse(
+                tool_calls=[ToolCallItem(name="first", arguments="{}")],
+                usage=None,
+                stats=None,
+            )
+            yield ToolCallResponse(
+                tool_calls=[ToolCallItem(name="second", arguments="{}")],
+                usage=usage,
+                stats=None,
+            )
+
+        results = [
+            item
+            for item in reject_unoffered_tool_calls(source(), None)
+            if item is not None
+        ]
+        assert len(results) == 1
+        final = results[0]
+        assert isinstance(final, GenerationResponse)
+        assert final.text.count("\n") == 1
+        assert "first" in final.text and "second" in final.text
+        assert final.usage == usage

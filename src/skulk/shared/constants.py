@@ -74,6 +74,8 @@ def _get_xdg_dir(env_var: str, fallback: str) -> Path:
 SKULK_CONFIG_HOME = _get_xdg_dir("XDG_CONFIG_HOME", ".config")
 SKULK_DATA_HOME = _get_xdg_dir("XDG_DATA_HOME", ".local/share")
 SKULK_CACHE_HOME = _get_xdg_dir("XDG_CACHE_HOME", ".cache")
+SKULK_INSTALLED_CARD_RECORDS_DIR = SKULK_DATA_HOME / "installed_card_records"
+"""Fallback records for artifacts mounted from read-only model roots."""
 
 # Models directory (data)
 _SKULK_MODELS_DIR_ENV = _env("SKULK_MODELS_DIR")
@@ -156,6 +158,38 @@ SKULK_MAX_CHUNK_SIZE = 512 * 1024
 
 SKULK_CUSTOM_MODEL_CARDS_DIR = SKULK_DATA_HOME / "custom_model_cards"
 
+# Signed external model-card registry. The transition release prefers this
+# catalog but retains bundled cards as a fallback until registry qualification
+# and offline behavior have been observed across the heterogeneous fleet.
+SKULK_MODEL_REGISTRY_ENABLED = (
+    _env("SKULK_MODEL_REGISTRY_ENABLED", "true") or "false"
+).lower() == "true"
+SKULK_MODEL_REGISTRY_URL = (
+    _env("SKULK_MODEL_REGISTRY_URL", "https://registry.foxlight.ai/")
+    or "https://registry.foxlight.ai/"
+)
+_MODEL_REGISTRY_CACHE_DIR_ENV = _env("SKULK_MODEL_REGISTRY_CACHE_DIR")
+SKULK_MODEL_REGISTRY_CACHE_DIR = (
+    SKULK_CACHE_HOME / "model_registry"
+    if _MODEL_REGISTRY_CACHE_DIR_ENV is None
+    else Path(_MODEL_REGISTRY_CACHE_DIR_ENV).expanduser()
+)
+SKULK_MODEL_REGISTRY_REFRESH_SECONDS = float(
+    _env("SKULK_MODEL_REGISTRY_REFRESH_SECONDS", "60") or "60"
+)
+SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS = int(
+    _env("SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS", "5") or "5"
+)
+SKULK_MODEL_REGISTRY_MAX_STALE_DAYS = int(
+    _env("SKULK_MODEL_REGISTRY_MAX_STALE_DAYS", "30") or "30"
+)
+if SKULK_MODEL_REGISTRY_REFRESH_SECONDS <= 0:
+    raise ValueError("SKULK_MODEL_REGISTRY_REFRESH_SECONDS must be greater than 0")
+if SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS <= 0:
+    raise ValueError("SKULK_MODEL_REGISTRY_TIMEOUT_SECONDS must be greater than 0")
+if SKULK_MODEL_REGISTRY_MAX_STALE_DAYS < 0:
+    raise ValueError("SKULK_MODEL_REGISTRY_MAX_STALE_DAYS cannot be negative")
+
 # Managed engine binaries (#614 Phase 3): pinned prebuilt inference-engine
 # builds provisioned by skulk.provisioning live here, keyed by engine and
 # build tag (e.g. engines/llama-server/b10068/vulkan/...). SKULK_LLAMA_SERVER_BIN
@@ -170,17 +204,64 @@ SKULK_ENABLE_IMAGE_MODELS = (
     _env("SKULK_ENABLE_IMAGE_MODELS", "false") or "false"
 ).lower() == "true"
 
-SKULK_OFFLINE = (
-    _env("SKULK_OFFLINE", "false") or "false"
+# Video cards stay out of the catalog until a node can serve them; the served
+# video engines flip this by default once they exist, the same way image
+# models are gated today.
+SKULK_ENABLE_VIDEO_MODELS = (
+    _env("SKULK_ENABLE_VIDEO_MODELS", "false") or "false"
 ).lower() == "true"
+
+# Video generation moves whole containers between processes by path rather
+# than inline: a worker writes verified reference media here for its runner,
+# the runner writes finished output here for the worker to stream, and the
+# owning API keeps completed jobs in its own store until they expire.
+SKULK_VIDEO_INPUT_DIR = SKULK_CACHE_HOME / "video_input"
+SKULK_VIDEO_OUTPUT_DIR = SKULK_CACHE_HOME / "video_output"
+SKULK_VIDEO_STORE_DIR = SKULK_CACHE_HOME / "videos"
+SKULK_MUSIC_OUTPUT_DIR = SKULK_CACHE_HOME / "music_output"
+SKULK_MUSIC_STORE_DIR = SKULK_CACHE_HOME / "music"
+# Ceiling on finished video artifacts one API node keeps on disk; the store
+# evicts the oldest completed jobs when a new artifact would exceed it.
+SKULK_VIDEO_STORE_MAX_BYTES = int(
+    _env("SKULK_VIDEO_STORE_MAX_BYTES", str(32 * 1024**3)) or 32 * 1024**3
+)
+
+SKULK_OFFLINE = (_env("SKULK_OFFLINE", "false") or "false").lower() == "true"
+
+# ``skulk --offline`` switches this on at startup. The environment variable is
+# read once at import, so modules that ask ``offline_mode()`` at call time see
+# either way of going offline.
+_offline_flag = False
+
+
+def offline_mode() -> bool:
+    """Whether this node runs air-gapped: ``SKULK_OFFLINE`` or ``--offline``.
+
+    Returns:
+        ``True`` when either the environment variable or the command-line
+        flag asked for offline operation.
+    """
+
+    return SKULK_OFFLINE or _offline_flag
+
+
+def set_offline_mode() -> None:
+    """Put this process in offline mode, as ``skulk --offline`` does.
+
+    Side effects:
+        Every later ``offline_mode()`` call returns ``True``; nothing reaches
+        for the model registry after this.
+    """
+
+    global _offline_flag  # noqa: PLW0603
+    _offline_flag = True
 
 SKULK_TRACING_ENABLED = (
     _env("SKULK_TRACING_ENABLED", "false") or "false"
 ).lower() == "true"
 
 SKULK_IMAGE_TRANSPORT_DEBUG = (
-    _env("SKULK_IMAGE_TRANSPORT_DEBUG", "false")
-    or "false"
+    _env("SKULK_IMAGE_TRANSPORT_DEBUG", "false") or "false"
 ).lower() == "true"
 
 # MLX batch-generator admission width: how many generations are ACTIVE at
@@ -192,9 +273,7 @@ SKULK_IMAGE_TRANSPORT_DEBUG = (
 # qualification fleet's 16 is an operator override on known hardware); do not
 # raise it until admission accounts for aggregate KV (#683 review, the
 # adaptive-concurrency arc).
-SKULK_MAX_CONCURRENT_REQUESTS = int(
-    _env("SKULK_MAX_CONCURRENT_REQUESTS", "8") or "8"
-)
+SKULK_MAX_CONCURRENT_REQUESTS = int(_env("SKULK_MAX_CONCURRENT_REQUESTS", "8") or "8")
 
 
 # Wire-safe marker for context-length admission rejections. The runner embeds

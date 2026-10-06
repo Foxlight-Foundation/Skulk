@@ -20,7 +20,7 @@ from skulk.shared.types.common import NodeId, SessionId
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
-from skulk.store.config import ModelStoreConfig, SkulkConfig
+from skulk.store.config import ModelStoreConfig, ModelTrustConfig, SkulkConfig
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.model_store_server import ModelStoreServer
 from skulk.utils.channels import channel
@@ -84,8 +84,9 @@ class _OldStoreServer:
 
 
 class _FakeApi:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], *, state: State | None = None) -> None:
         self._events = events
+        self.state = state if state is not None else State()
 
     def reset(
         self,
@@ -428,6 +429,95 @@ async def test_new_master_does_not_wait_on_unavailable_state_sync_config(
     await node._elect_loop()
 
     assert "new_master.created" in order_events
+
+
+@pytest.mark.asyncio
+async def test_api_only_promotion_seeds_master_from_replicated_trust_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An API-only winner must not resurrect stale startup trust decisions."""
+
+    order_events: list[str] = []
+    stale_identity = "card_" + ("a" * 52)
+    replicated_identity = "card_" + ("b" * 52)
+    captured_initial_states: list[State | None] = []
+
+    class NewEventRouter:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def sender(self) -> object:
+            return object()
+
+        def receiver(self) -> object:
+            return object()
+
+        async def run(self) -> None:
+            return
+
+    class NewMaster:
+        def __init__(self, *_args: Any, **kwargs: Any) -> None:
+            captured_initial_states.append(kwargs.get("initial_state"))
+
+        async def run(self) -> None:
+            return
+
+    monkeypatch.setattr("skulk.main.EventRouter", NewEventRouter)
+    monkeypatch.setattr("skulk.main.Master", NewMaster)
+
+    async def _unexpected_request_cluster_config(
+        *_args: Any, **_kwargs: Any
+    ) -> str | None:
+        raise AssertionError("new master should not request config before startup")
+
+    monkeypatch.setattr(
+        Node, "_request_cluster_config", _unexpected_request_cluster_config
+    )
+
+    election_sender, election_receiver = channel[ElectionResult]()
+    api_state = State(
+        model_trust_approved_remote_code_identities=(replicated_identity,)
+    )
+    node = Node(
+        router=cast(Router, cast(object, _FakeRouter())),
+        event_router=cast(EventRouter, cast(object, _OldEventRouter(order_events))),
+        download_coordinator=None,
+        worker=None,
+        election=cast(Election, object()),
+        election_result_receiver=election_receiver,
+        master=None,
+        api=cast(API, cast(object, _FakeApi(order_events, state=api_state))),
+        node_id=NodeId("self"),
+        offline=False,
+        skulk_config=SkulkConfig(
+            model_trust=ModelTrustConfig(
+                approved_remote_code_identities=[stale_identity]
+            )
+        ),
+        store_client=None,
+        store_server=None,
+        telemetry_view=TelemetryView(),
+        telemetry_receiver=channel[NodeTelemetry]()[1],
+    )
+    node._tg = _FakeTaskGroup(order_events)  # pyright: ignore[reportAttributeAccessIssue]
+
+    await election_sender.send(
+        ElectionResult(
+            session_id=SessionId(master_node_id=NodeId("self"), election_clock=9),
+            won_clock=9,
+            is_new_master=True,
+        )
+    )
+    election_sender.close()
+
+    await node._elect_loop()
+
+    assert len(captured_initial_states) == 1
+    promotion_seed = captured_initial_states[0]
+    assert promotion_seed is not None
+    assert promotion_seed.model_trust_approved_remote_code_identities == (
+        replicated_identity,
+    )
 
 
 class _StateSyncOnlyRouter:

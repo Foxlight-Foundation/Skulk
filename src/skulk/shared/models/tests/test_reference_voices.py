@@ -23,6 +23,7 @@ _EXPECTED_IDS = (
     "kite",
     "rufus",
     "samson",
+    "skulk",
     "sydney",
     "sylvie",
 )

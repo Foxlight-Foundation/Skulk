@@ -172,3 +172,31 @@ class TestRotatingKVCacheSnapshot:
         restored_keys = restored.state[0]
         assert restored_keys is not None
         assert mx.allclose(restored_keys[..., :4, :], mx.ones((1, 2, 4, 4)))
+
+
+class TestRotatingCacheReset:
+    def test_snapshotless_trim_resets_rotating_cache_empty(self) -> None:
+        """A reject without a snapshot must empty a rotating cache, not crash.
+
+        The reset branch used to read the ArraysCache slot list on every
+        non-KV entry; RotatingKVCache has no slot list, and going through
+        its state setter raises on mlx-lm 0.32 (the setter dereferences
+        keys.shape). The rotating reset writes the empty shape directly.
+        """
+        import mlx.core as mx
+        from mlx_lm.models.cache import RotatingKVCache
+
+        entry = RotatingKVCache(max_size=8, keep=0)
+        keys = mx.ones((1, 1, 4, 2))
+        entry.update_and_fetch(keys, keys)
+        assert entry.offset == 4
+
+        from skulk.worker.engines.mlx.cache import trim_cache
+
+        trim_cache([entry], num_tokens=0, snapshot=None)
+
+        assert entry.keys is None
+        assert entry.values is None
+        assert entry.offset == 0
+        # Configuration survives the reset.
+        assert entry.max_size == 8

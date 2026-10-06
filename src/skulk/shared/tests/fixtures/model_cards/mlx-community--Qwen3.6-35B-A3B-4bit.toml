@@ -1,0 +1,62 @@
+# Qwen3.6 35B A3B, 4-bit MLX. The Apple Silicon lane of the intelligent-fabric
+# steward's brain: same weights class the steward bench picked on the GPU lane,
+# so a Mac-only fleet with enough unified memory gets the same resident
+# intelligence instead of falling through to a smaller model. Also a general
+# large-MoE chat model for MLX nodes. Architecture from the repo's config.json
+# text_config (arch qwen3_5_moe: 40 layers, hidden 2048, 2 KV heads,
+# 262144 ctx), matching the Qwen3.5-35B-A3B sibling exactly.
+model_id = "mlx-community/Qwen3.6-35B-A3B-4bit"
+n_layers = 40
+hidden_size = 2048
+num_key_value_heads = 2
+supports_tensor = true
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "4bit"
+base_model = "Qwen3.6 35B A3B"
+capabilities = ["text", "thinking", "thinking_toggle", "vision"]
+context_length = 262144
+# Pinned to the repository state the steward bench ran against, so an
+# upstream requantization cannot silently change the brain.
+source_revision = "38740b847e4cb78f352aba30aa41c76e08e6eb46"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+# Qwen3.6 emits the Qwen3 XML function dialect
+#   <tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>
+# (verified against this repo's chat_template.jinja, which is the same
+# tool-call block the GGUF sibling embeds). Declaring the generic format is
+# load-bearing on this card: a natively multimodal repo loads through the
+# mlx-vlm vision path, which does not inherit mlx-lm's inferred tool parser,
+# and the generic declaration is what wires the shared XML/Hermes text parser
+# through the runner's marker mechanism (#728).
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+# Qwen3.6 is a natively multimodal (early-fusion) VLM: config.json ships a
+# vision_config and the repo is tagged image-text-to-text. The MLX vision path
+# splices image embeddings at image_token_id (248056, from config.json) and
+# the tower weights ship in this same repo. The steward never sends images;
+# this is the model's own capability, declared because the card states model
+# truth rather than the steward's usage.
+[modalities]
+supports_native_multimodal = true
+
+[vision]
+image_token_id = 248056
+model_type = "qwen3_5_moe"
+
+# NO MTP section, by measurement on the immediate predecessor rather than by
+# omission: the Qwen3.5-35B-A3B sidecar drafted at 85% acceptance yet measured
+# 0.63x end to end, because a fast MoE routes every verify token to its own
+# experts and a low per-step baseline magnifies fixed per-round overhead. Do
+# not add a sidecar here without re-measuring on this checkpoint.
+
+[storage_size]
+in_bytes = 20429169263

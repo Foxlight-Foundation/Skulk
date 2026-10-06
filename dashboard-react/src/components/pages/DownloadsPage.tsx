@@ -5,9 +5,10 @@ import { detectDeviceModel } from '../../types/topology';
 import type { RawDownloads, RawInstances, RawRunners } from '../../hooks/useClusterState';
 import type { RawNodeResources } from '../../store/endpoints/cluster';
 import type { FleetServingSummary } from '../models/burst';
-import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo, type CompanionInfo } from '../layout/StoreRegistryTable';
+import type { InstanceStatus } from '../../types/models';
+import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo, type CompanionInfo, type StoreReconciliationStatus } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
-import { ModelSearchModal } from './ModelSearchModal';
+import { extractErrorDetail, ModelSearchModal, readAcceptedDownload } from './ModelSearchModal';
 import { FiTrash2, FiSearch } from 'react-icons/fi';
 import { Button } from '../common/Button';
 import { addToast } from '../../hooks/useToast';
@@ -42,11 +43,14 @@ const SearchIcon = () => <FiSearch size={14} />;
 
 /* ── Component ────────────────────────────────────────── */
 
+/** Present store inventory and retain the existing download, placement and runtime controls. */
 export function ModelStorePage({ topology, nodeResources = {}, downloads, instances, runners, onChat }: ModelStorePageProps) {
   const { t } = useSkulkTranslation();
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownloadProgress[]>([]);
+  const [reconciliation, setReconciliation] = useState<StoreReconciliationStatus | null>(null);
   const [storeLoading, setStoreLoading] = useState(false);
+  const [placementFromSearch, setPlacementFromSearch] = useState(false);
   const [placementModelId, setPlacementModelId] = useState<string | null>(null);
   const [apiModelCards, setApiModelCards] = useState<Record<string, ModelCardInfo>>({});
   // Companion (drafter / MTP-head sidecar) repos, keyed by the companion's own
@@ -56,6 +60,43 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
   const pollRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const storePollingDisposedRef = useRef(false);
   const optimizePollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  // Download failures already listed on the first fetch are shown by the
+  // table badge only; `null` means no fetch has been applied yet. Failures
+  // that appear after that additionally raise a toast with the store's
+  // reason, once per failure.
+  const knownFailedDownloadsRef = useRef<Set<string> | null>(null);
+  // Read through a ref so applyDownloadEntries stays referentially stable:
+  // putting `t` in its dependency list would rebuild refreshStore (and
+  // re-trigger the polling effects behind it) on every render. The ref holds
+  // `{ t }` so each call reads as `.t(...)`, which the Tolgee exporter sees.
+  const translateRef = useRef({ t });
+  translateRef.current = { t };
+
+  const applyDownloadEntries = useCallback((entries: StoreDownloadProgress[]) => {
+    const failedNow = entries.filter((d) => d.status === 'failed');
+    if (knownFailedDownloadsRef.current === null) {
+      knownFailedDownloadsRef.current = new Set(failedNow.map((d) => d.modelId));
+    } else {
+      const known = knownFailedDownloadsRef.current;
+      for (const dl of failedNow) {
+        if (known.has(dl.modelId)) continue;
+        known.add(dl.modelId);
+        addToast({
+          type: 'error',
+          message: dl.error
+            ? translateRef.current.t('downloads.toasts.downloadFailedWithReason', 'Download of {modelId} failed: {reason}', { modelId: dl.modelId, reason: dl.error })
+            : translateRef.current.t('downloads.toasts.downloadFailed', 'Download of {modelId} failed', { modelId: dl.modelId }),
+        });
+      }
+      // A retry that goes live again clears the entry so a repeat failure
+      // re-raises the toast.
+      for (const id of Array.from(known)) {
+        const current = entries.find((d) => d.modelId === id);
+        if (current && current.status !== 'failed') known.delete(id);
+      }
+    }
+    setStoreDownloads(entries);
+  }, []);
 
   // Fetch authoritative model card info from /models API
   useEffect(() => {
@@ -67,8 +108,8 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
         const cards: Record<string, ModelCardInfo> = {};
         // A model's runtime section names the companion repos it pulls in: an
         // MTP sidecar (prediction heads) and/or a separate draft model (MLX
-        // assistant or served draft GGUF). Those repos land in the store but are
-        // not independently placeable, so map them to a role for the store UI.
+        // assistant, served draft GGUF, or vLLM drafter). Those repos land in
+        // the store but are not independently placeable, so map them to a role.
         // Skip self-references (same-repo co-fetch) so the parent isn't hidden.
         const companions: Record<string, CompanionInfo> = {};
         for (const m of data.data ?? []) {
@@ -77,10 +118,11 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           const sidecar = rt.mtp_sidecar_repo as string | undefined;
           const assistant = rt.assistant_model_repo as string | undefined;
           const draft = rt.served_spec_draft_repo as string | undefined;
+          const vllmDraft = rt.vllm_spec_draft_repo as string | undefined;
           if (sidecar && sidecar !== m.id) {
             companions[sidecar] = { role: 'sidecar', parent: m.id };
           }
-          for (const d of [assistant, draft]) {
+          for (const d of [assistant, draft, vllmDraft]) {
             if (d && d !== m.id && !companions[d]) {
               companions[d] = { role: 'drafter', parent: m.id };
             }
@@ -187,23 +229,38 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     } catch { return null; }
   }, []);
 
+  const fetchReconciliation = useCallback(async (): Promise<StoreReconciliationStatus | null> => {
+    try {
+      const response = await fetch('/store/reconciliation');
+      if (!response.ok) return null;
+      return await response.json() as StoreReconciliationStatus;
+    } catch { return null; }
+  }, []);
+
   const refreshStore = useCallback(async (): Promise<boolean> => {
-    const [registryEntries, downloadEntries] = await Promise.all([
+    const [registryEntries, downloadEntries, reconciliationStatus] = await Promise.all([
       fetchRegistry(),
       fetchDownloads(),
+      fetchReconciliation(),
     ]);
     if (storePollingDisposedRef.current) return true;
     if (registryEntries !== null) setStoreEntries(registryEntries);
-    if (downloadEntries !== null) setStoreDownloads(downloadEntries);
+    if (downloadEntries !== null) applyDownloadEntries(downloadEntries);
+    if (reconciliationStatus !== null) setReconciliation(reconciliationStatus);
 
     // A transient failure must keep the convergence loop alive. In particular,
     // the store can finish a download just as the dashboard reloads; stopping on
     // an empty downloads response while the registry request failed leaves a new
     // user permanently looking at "0 models in store" until a manual refresh.
+    // Failed downloads stay listed (so their reason stays visible) but are
+    // terminal: only live transfers should keep the 2s poll running.
     return registryEntries !== null
       && downloadEntries !== null
-      && downloadEntries.length === 0;
-  }, [fetchDownloads, fetchRegistry]);
+      && reconciliationStatus !== null
+      && downloadEntries.every((d) => d.status === 'failed')
+      && reconciliationStatus.state !== 'scanning'
+      && reconciliationStatus.state !== 'importing';
+  }, [applyDownloadEntries, fetchDownloads, fetchReconciliation, fetchRegistry]);
 
   const scheduleStoreRefresh = useCallback(() => {
     if (storePollingDisposedRef.current || pollRef.current) return;
@@ -228,6 +285,16 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
       if (!storePollingDisposedRef.current) setStoreLoading(false);
     }
   }, [refreshStore, scheduleStoreRefresh]);
+
+  // A retry can fail again before the next 2s poll ever shows it as live
+  // (gated-repository auth failures answer in well under a second), so the
+  // failed-to-failed transition would look unchanged and stay untoasted.
+  // Forgetting the model's previous failure when its download is accepted
+  // makes the retry's outcome toast again.
+  const handleDownloadStarted = useCallback((modelId: string) => {
+    knownFailedDownloadsRef.current?.delete(modelId);
+    void loadRegistry();
+  }, [loadRegistry]);
 
   // Load store registry on mount
   useEffect(() => {
@@ -388,7 +455,20 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
     return cards;
   }, [instances, runners, topology, storeEntries]);
 
-  const handleLaunchWithParams = useCallback(async (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number; excludedNodes?: string[] }) => {
+  const discoveryStatuses = useMemo(() => {
+    const statuses: Record<string, InstanceStatus> = {};
+    for (const instance of Object.values(instances)) {
+      const assignments = (instance.MlxRingInstance ?? instance.MlxJacclInstance ?? instance.LlamaRpcInstance)?.shardAssignments;
+      if (!assignments?.modelId) continue;
+      const runnerIds = Object.values(assignments.nodeToRunner ?? {});
+      const ready = runnerIds.length > 0 && runnerIds.every(id => runners[id] && ('RunnerReady' in runners[id] || 'RunnerRunning' in runners[id]));
+      // Any ready instance qualifies; another loading replica cannot erase it.
+      if (ready) statuses[assignments.modelId] = { status: 'Ready', statusClass: 'ready' };
+    }
+    return statuses;
+  }, [instances, runners]);
+
+  const handleLaunchWithParams = useCallback(async (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number; excludedNodes?: string[]; contextTokens?: number }) => {
     try {
       const res = await fetch('/place_instance', {
         method: 'POST',
@@ -399,6 +479,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           instance_meta: params.instanceMeta,
           min_nodes: params.minNodes,
           excluded_nodes: params.excludedNodes ?? [],
+          ...(params.contextTokens !== undefined ? { context_tokens: params.contextTokens } : {}),
         }),
       });
       if (res.ok) {
@@ -407,10 +488,24 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           message: t('downloads.toasts.launchingModel', 'Launching {modelId}', { modelId: params.modelId }),
         });
       } else {
-        const err = await res.json().catch(() => ({}));
+        const err: unknown = await res.json().catch(() => ({}));
+        const errorRecord =
+          typeof err === 'object' && err !== null
+            ? (err as Record<string, unknown>)
+            : {};
+        const nestedError =
+          typeof errorRecord.error === 'object' && errorRecord.error !== null
+            ? (errorRecord.error as Record<string, unknown>)
+            : {};
+        const serverMessage =
+          typeof errorRecord.detail === 'string'
+            ? errorRecord.detail
+            : typeof nestedError.message === 'string'
+              ? nestedError.message
+              : null;
         addToast({
           type: 'error',
-          message: (err as Record<string, string>).detail
+          message: serverMessage
             ?? t('downloads.toasts.launchFailedForModel', 'Failed to launch {modelId}', { modelId: params.modelId }),
         });
       }
@@ -467,6 +562,43 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
       addToast({ type: 'error', message: t('downloads.toasts.deleteFailed', 'Failed to delete model') });
     }
   }, [loadRegistry, t]);
+
+  const handleUpdate = useCallback(async (entry: { model_id: string; current_registry_identity?: string | null }) => {
+    if (!entry.current_registry_identity) return;
+    try {
+      // The store answers "complete" at once when the signed card names the
+      // bytes already installed (same bundle): the sidecar is swapped and no
+      // download starts. A different bundle starts a real download.
+      const res = await fetch(`/store/models/${encodeURIComponent(entry.model_id)}/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ registry_card_id: entry.current_registry_identity }),
+      });
+      // The API answers HTTP 200 even when the store host rejected the
+      // request (the rejection rides in the body as status "error"), so the
+      // body decides between the success and the failure toast.
+      const accepted = res.ok ? await readAcceptedDownload(res) : null;
+      if (accepted && !accepted.rejected) {
+        addToast({
+          type: 'success',
+          message: t('downloads.toasts.updateRequested', 'Updating {modelId} to the signed card', { modelId: entry.model_id }),
+        });
+        // Same as a fresh download: forget an earlier failure for this model
+        // so a retry that fails again is reported, then refresh.
+        handleDownloadStarted(entry.model_id);
+      } else {
+        const reason = accepted?.reason ?? (res.ok ? null : await extractErrorDetail(res));
+        addToast({
+          type: 'error',
+          message: reason
+            ? t('downloads.toasts.updateFailedWithReason', 'Failed to update {modelId}: {reason}', { modelId: entry.model_id, reason })
+            : t('downloads.toasts.updateFailedForModel', 'Failed to update {modelId}', { modelId: entry.model_id }),
+        });
+      }
+    } catch {
+      addToast({ type: 'error', message: t('downloads.toasts.updateFailed', 'Failed to update model') });
+    }
+  }, [handleDownloadStarted, t]);
 
   const handleOptimize = useCallback(async (modelId: string) => {
     try {
@@ -556,6 +688,7 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           activeModelIds={activeModelIds}
           modelCards={modelCards}
           companions={companionRoles}
+          reconciliation={reconciliation}
           actions={
             <>
               <Button variant="danger" size="sm" onClick={() => setPurgeConfirm(true)}>
@@ -576,16 +709,21 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
           onLaunch={handleLaunch}
           onStop={handleStop}
           onChat={onChat}
-          onPlacement={setPlacementModelId}
+          onPlacement={modelId => { setPlacementFromSearch(false); setPlacementModelId(modelId); }}
           clusterCards={clusterCards}
           totalClusterMemoryBytes={totalClusterMemoryBytes}
           onOptimize={handleOptimize}
+          onUpdate={handleUpdate}
         />
       <ModelSearchModal
         open={searchOpen}
+        preserveViewWhileClosed={placementFromSearch && placementModelId !== null}
         onClose={() => setSearchOpen(false)}
+        activeDownloads={storeDownloads}
+        instanceStatuses={discoveryStatuses}
+        onLaunch={topology ? (modelId) => { setSearchOpen(false); setPlacementFromSearch(true); setPlacementModelId(modelId); } : undefined}
         existingModelIds={storeModelIds}
-        onDownloadStarted={loadRegistry}
+        onDownloadStarted={handleDownloadStarted}
         fleet={fleet}
       />
       {placementModelId && topology && (
@@ -596,7 +734,8 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
             : undefined}
           topology={topology}
           open={!!placementModelId}
-          onClose={() => setPlacementModelId(null)}
+          onClose={() => { setPlacementFromSearch(false); setPlacementModelId(null); }}
+          onBack={placementFromSearch ? () => { setPlacementFromSearch(false); setPlacementModelId(null); setSearchOpen(true); } : undefined}
           onLaunch={handleLaunchWithParams}
           isEmbedding={modelCards[placementModelId]?.tags?.includes('embedding')}
         />
@@ -661,7 +800,7 @@ const ModalText = styled.p`
 const ModalNote = styled.p`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.subtleText};
   margin: 0 0 16px;
 `;
 

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from skulk.store.config import (
     hostname_aliases,
     load_skulk_config,
     node_matches_store_host,
+    persist_model_trust_config,
     resolve_node_staging,
 )
 
@@ -127,6 +129,41 @@ def test_load_skulk_config_fails_loud_on_legacy_exo_yaml(tmp_path: Path) -> None
         load_skulk_config(target)
 
 
+def test_persist_model_trust_updates_only_authoritative_section(
+    tmp_path: Path,
+) -> None:
+    """Indexed trust updates retain node-local secrets and unrelated settings."""
+    target = tmp_path / "skulk.yaml"
+    target.write_text(
+        "hf_token: keep-secret\nlogging:\n  enabled: true\n  ingest_url: https://logs.invalid\n"
+    )
+    card_id = f"card_{'a' * 52}"
+
+    config = persist_model_trust_config(target, [card_id])
+
+    assert config.hf_token == "keep-secret"
+    assert config.logging is not None and config.logging.enabled
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [card_id]
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_persist_model_trust_without_descriptor_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Platforms without os.fchmod still atomically persist cluster trust."""
+
+    target = tmp_path / "skulk.yaml"
+    target.write_text("{}\n")
+    monkeypatch.delattr(os, "fchmod")
+    card_id = f"card_{'b' * 52}"
+
+    config = persist_model_trust_config(target, [card_id])
+
+    assert config.model_trust is not None
+    assert config.model_trust.approved_remote_code_identities == [card_id]
+
+
 def test_experiments_config_defaults_speech_streaming_off() -> None:
     """Experimental feature toggles default off until explicitly opted in."""
 
@@ -156,3 +193,146 @@ def test_load_skulk_config_parses_speech_streaming_experiments(
     assert config.experiments.tts_streaming is True
     assert config.experiments.stt_realtime is True
     assert config.experiments.speech_translation is True
+
+
+def test_intelligent_fabric_config_defaults() -> None:
+    """The intelligent-fabric section parses, defaults off, and carries the
+    benched steward model preference order."""
+    from skulk.store.config import IntelligentFabricConfig, SkulkConfig
+
+    config = SkulkConfig.model_validate({})
+    assert config.intelligent_fabric is None
+
+    parsed = SkulkConfig.model_validate({"intelligent_fabric": {"enabled": True}})
+    assert parsed.intelligent_fabric is not None
+    assert parsed.intelligent_fabric.enabled
+    assert parsed.intelligent_fabric.steward_models == [
+        "unsloth/Qwen3.6-35B-A3B-GGUF",
+        "mlx-community/Qwen3.6-35B-A3B-4bit",
+        "Qwen/Qwen3.6-35B-A3B-FP8",
+        "mlx-community/Qwen3.5-4B-MLX-4bit",
+        "unsloth/Qwen3.5-4B-GGUF",
+        "unsloth/Qwen3.5-0.8B-GGUF",
+    ]
+
+    # The documented YAML-sequence override must load (list, not tuple:
+    # strict validation rejects coercion).
+    override = SkulkConfig.model_validate(
+        {"intelligent_fabric": {"enabled": True, "steward_models": ["a/b"]}}
+    )
+    assert override.intelligent_fabric is not None
+    assert override.intelligent_fabric.steward_models == ["a/b"]
+
+    default_section = IntelligentFabricConfig()
+    assert not default_section.enabled
+
+
+def test_enabled_store_refuses_blank_host() -> None:
+    """The installer-shaped brokenness fails loudly at validation (#888).
+
+    ``store_host: ''`` matches no node, so no store server ever starts and
+    every client builds ``http://:12415`` URLs; a fleet shipped in this shape
+    could not place any model that was not already staged.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from skulk.store.config import ModelStoreConfig
+
+    with pytest.raises(ValidationError, match="store_host"):
+        ModelStoreConfig(enabled=True, store_host="", store_path="/models")
+    with pytest.raises(ValidationError, match="store_path"):
+        ModelStoreConfig(enabled=True, store_host="kite", store_path="  ")
+
+
+def test_disabled_store_permits_blank_identity() -> None:
+    """Running without a store is spelled enabled: false, and stays valid."""
+    from skulk.store.config import ModelStoreConfig
+
+    config = ModelStoreConfig(enabled=False, store_host="", store_path="")
+    assert config.enabled is False
+
+
+def test_enabled_store_with_identity_is_valid() -> None:
+    from skulk.store.config import ModelStoreConfig
+
+    config = ModelStoreConfig(enabled=True, store_host="kite", store_path="/models")
+    assert config.store_host == "kite"
+
+
+def test_normalized_hf_token_treats_whitespace_as_absent() -> None:
+    """Whitespace is truthy but not a credential (#922 review)."""
+    from skulk.store.config import normalized_hf_token
+
+    assert normalized_hf_token(None) is None
+    assert normalized_hf_token("") is None
+    assert normalized_hf_token("   ") is None
+    assert normalized_hf_token("\t\n") is None
+    assert normalized_hf_token(123) is None
+    assert normalized_hf_token(" real-token ") == "real-token"
+
+
+class TestPromoteHfToken:
+    """Rotation converges; operator launch values are never replaced (#922)."""
+
+    def _clear(self, monkeypatch: "pytest.MonkeyPatch") -> None:
+        from skulk.store.config import HF_TOKEN_USER_SET_MARKER
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv(HF_TOKEN_USER_SET_MARKER, raising=False)
+
+    def test_promotes_into_an_empty_environment(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        import os
+
+        from skulk.store.config import promote_hf_token
+
+        self._clear(monkeypatch)
+        assert promote_hf_token("token-a", source="test") is True
+        assert os.environ["HF_TOKEN"] == "token-a"
+
+    def test_replaces_a_config_derived_value_so_rotation_converges(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        import os
+
+        from skulk.store.config import promote_hf_token
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "token-a")  # promoted from config earlier
+        assert promote_hf_token("token-b", source="test") is True
+        assert os.environ["HF_TOKEN"] == "token-b"
+
+    def test_never_replaces_an_operator_supplied_launch_value(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        import os
+
+        from skulk.store.config import HF_TOKEN_USER_SET_MARKER, promote_hf_token
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "operator-token")
+        monkeypatch.setenv(HF_TOKEN_USER_SET_MARKER, "1")
+        assert promote_hf_token("fleet-token", source="test") is False
+        assert os.environ["HF_TOKEN"] == "operator-token"
+
+    def test_whitespace_never_lands_in_the_environment(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        import os
+
+        from skulk.store.config import promote_hf_token
+
+        self._clear(monkeypatch)
+        assert promote_hf_token("   ", source="test") is False
+        assert "HF_TOKEN" not in os.environ
+
+    def test_noop_when_the_value_is_already_current(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        from skulk.store.config import promote_hf_token
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("HF_TOKEN", "token-a")
+        assert promote_hf_token("token-a", source="test") is False

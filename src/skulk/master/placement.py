@@ -2,10 +2,11 @@ import random
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from copy import deepcopy
-from typing import Final, Sequence
+from typing import ClassVar, Final, Literal, Sequence, TypeAlias
 
 from skulk.master.placement_utils import (
     Cycle,
+    CycleMemoryDiagnostics,
     filter_cycles_by_memory,
     get_llama_rpc_donor_endpoints,
     get_mlx_jaccl_coordinators,
@@ -22,8 +23,33 @@ from skulk.shared.backends import (
     platform_compatible_backends,
     resolve_node_backend,
 )
-from skulk.shared.models.memory_estimate import instance_context_token_limit
-from skulk.shared.models.model_cards import ModelCard, ModelId, card_serves_speech
+from skulk.shared.data_plane_health import zenoh_isolated_nodes
+from skulk.shared.models.capabilities import (
+    family_predates_in_process_llama_cpp,
+    resolve_model_capability_profile,
+)
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS,
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
+    backend_offloads_to_vram,
+    estimate_shard_footprint,
+    gpu_working_set_ceiling,
+    instance_context_token_limit,
+    shard_fraction_of_model,
+    shard_preallocates_kv_upfront,
+)
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    card_serves_speech,
+    registry_supported_backends_for_node,
+    same_authorized_model_card,
+)
+from skulk.shared.models.remote_code_approval import (
+    remote_code_approval_required,
+    remote_code_trust_identity,
+)
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
     CancelDownload,
@@ -63,7 +89,11 @@ from skulk.shared.types.worker.instances import (
     instance_meta_of,
 )
 from skulk.shared.types.worker.runners import ShardAssignments
-from skulk.shared.types.worker.shards import Sharding, TensorShardMetadata
+from skulk.shared.types.worker.shards import (
+    RpcDonorShardMetadata,
+    Sharding,
+    TensorShardMetadata,
+)
 
 # Ring/coordinator/donor listener ports are drawn from a band BELOW every
 # OS's default ephemeral range: macOS assigns outgoing-connection local ports
@@ -132,6 +162,43 @@ def _listener_ports_in_use(
     return ports
 
 
+def served_context_window(
+    assignments: ShardAssignments,
+    ceiling: int | None,
+    *,
+    requested: int | None,
+    served_default: int | None,
+) -> int | None:
+    """Context window to stamp on a placement, given its memory-fit ceiling.
+
+    ``ceiling`` is the largest window the placement can hold (memory fit,
+    card maximum, engine caps). A caller's ``requested`` window is honored
+    exactly when it fits and refused when it does not, so an operator never
+    gets a silently different window than the one asked for. Without a
+    request, an engine that reserves its whole window at load
+    (``shard_preallocates_kv_upfront``) takes ``served_default`` so it does
+    not commit memory for the card's full context; MLX, which grows its
+    cache per request, keeps the full ceiling.
+
+    Raises:
+        PlacementError: The requested window exceeds what the placement holds.
+    """
+    if requested is not None:
+        if ceiling is not None and requested > ceiling:
+            raise PlacementError(
+                f"The requested context of {requested} tokens exceeds the "
+                f"{ceiling} tokens this placement can hold; request at most "
+                f"{ceiling} or place on nodes with more free memory"
+            )
+        return requested
+    if served_default is not None and any(
+        shard_preallocates_kv_upfront(shard)
+        for shard in assignments.runner_to_shard.values()
+    ):
+        return served_default if ceiling is None else min(ceiling, served_default)
+    return ceiling
+
+
 def add_instance_to_placements(
     command: CreateInstance,
     topology: Topology,
@@ -139,7 +206,29 @@ def add_instance_to_placements(
     node_memory: Mapping[NodeId, MemoryUsage],
     node_vram: Mapping[NodeId, Memory] | None = None,
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
+    approved_remote_code_identities: AbstractSet[str] | None = None,
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
 ) -> Mapping[InstanceId, Instance]:
+    """Validate and add one caller-specified exact instance placement.
+
+    Args:
+        command: Exact instance creation request.
+        topology: Current cluster topology.
+        current_instances: Existing authoritative placements.
+        node_memory: Current node memory observations.
+        node_vram: Current discrete-GPU memory observations.
+        unified_memory_gpu_nodes: Nodes whose GPU allocations use system RAM.
+        approved_remote_code_identities: Deprecated legacy approval set retained
+            for compatibility with older call sites.
+        node_resources: Advertised engines used to resolve unstamped exact shards.
+
+    Returns:
+        Existing placements plus the validated, memory-stamped instance.
+
+    Raises:
+        PlacementModelCardIdentityError: If a shard card identifies a model
+            other than the assignment alias.
+    """
     # TODO: validate against topology
 
     # Stamp the memory-derived context-admission ceiling, same as the
@@ -153,6 +242,94 @@ def add_instance_to_placements(
     # still unknown, so a transient missing reading yields the card guard rather
     # than None (review catch on #292).
     assignments = command.instance.shard_assignments
+    require_instance_model_card_identity(command.instance)
+    music_instance = any(
+        shard.model_card.music is not None
+        for shard in assignments.runner_to_shard.values()
+    )
+    if (
+        len(assignments.node_to_runner) != 1
+        and music_instance
+    ):
+        raise PlacementError("Music instances require exactly one node")
+    if music_instance and isinstance(command.instance, LlamaRpcInstance):
+        raise PlacementError("Music instances cannot use llama.cpp RPC placement")
+    if music_instance and len(assignments.runner_to_shard) != 1:
+        raise PlacementError("Music instances require exactly one runner shard")
+    require_instance_model_code_approval(
+        command.instance,
+        approved_remote_code_identities,
+    )
+    if not isinstance(command.instance, LlamaRpcInstance):
+        resolved_shards = dict(assignments.runner_to_shard)
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = resolved_shards[runner_id]
+            resources = (node_resources or {}).get(node_id)
+            if shard.model_card.music is not None:
+                if resources is None:
+                    raise PlacementError("Ready audio.cpp backend telemetry is required for exact music placement")
+                supported = _card_platform_backends(shard.model_card, resources)
+                if not supported or (
+                    shard.resolved_backend is not None
+                    and shard.resolved_backend not in supported
+                ):
+                    raise PlacementError(
+                        "Exact music placement requires a ready audio.cpp build and matching signed support claim"
+                    )
+            if shard.resolved_backend is not None:
+                if shard.model_card.music is not None:
+                    assert resources is not None
+                    build = resources.engine_builds.get(shard.resolved_backend)
+                    if build is None:
+                        raise PlacementError("Exact music placement lacks a verified engine build")
+                    resolved_shards[runner_id] = shard.model_copy(
+                        update={"resolved_engine_build": build}
+                    )
+                continue
+            if resources is None:
+                # Production callers always supply resources. Retain the legacy
+                # standalone RAM-only helper contract, but never infer a safe
+                # CPU engine for a known GPU or a missing production observation.
+                if node_resources is not None or node_id in (node_vram or {}):
+                    raise PlacementError(
+                        "Backend telemetry is required for unresolved exact placement"
+                    )
+                continue
+            backend = resolve_node_backend(
+                _card_platform_backends(shard.model_card, resources),
+                shard.model_card.placement.backend_preference,
+                resources.backends,
+            )
+            if backend is None:
+                raise PlacementError("No compatible backend for exact placement")
+            # Stamp before deriving context and checking the footprint: otherwise
+            # the worker can pick a GPU after admission charged only system RAM.
+            updates: dict[str, str] = {"resolved_backend": backend}
+            if shard.model_card.music is not None:
+                build = resources.engine_builds.get(backend)
+                if build is None:
+                    raise PlacementError("Exact music placement lacks a verified engine build")
+                updates["resolved_engine_build"] = build
+            resolved_shards[runner_id] = shard.model_copy(update=updates)
+        assignments = assignments.model_copy(
+            update={"runner_to_shard": resolved_shards}
+        )
+    assignments = _stamp_llama_server_settings(assignments, node_resources or {})
+    fixed_memory_by_node: dict[NodeId, Memory] = {}
+    first_shard = next(iter(assignments.runner_to_shard.values()), None)
+    if first_shard is not None:
+        card = first_shard.model_card
+        projector_size = (
+            card.vision.projector_size if card.vision is not None else None
+        )
+        if projector_size is not None:
+            projector_memory = Memory.from_bytes(projector_size)
+            if isinstance(command.instance, LlamaRpcInstance):
+                fixed_memory_by_node[command.instance.driver_node] = projector_memory
+            elif len(assignments.node_to_runner) == 1:
+                fixed_memory_by_node[next(iter(assignments.node_to_runner))] = (
+                    projector_memory
+                )
     ceiling = instance_context_token_limit(
         assignments,
         {
@@ -162,9 +339,118 @@ def add_instance_to_placements(
         },
         node_vram=node_vram,
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+        fixed_memory_by_node=fixed_memory_by_node,
+        node_ram_available={
+            node_id: node_memory[node_id].ram_available
+            for node_id in assignments.node_to_runner
+            if node_id in node_memory
+        },
     )
-    instance = command.instance.model_copy(update={"context_token_limit": ceiling})
+    requested_limit = command.instance.context_token_limit
+    if requested_limit is not None:
+        if requested_limit <= 0:
+            raise PlacementError("The requested context token limit must be positive")
+        # Exact placement callers may intentionally budget a smaller window than
+        # the preview maximum. Raising it silently can multiply load-time KV
+        # allocation and defeat the caller's resource plan.
+        ceiling = requested_limit if ceiling is None else min(ceiling, requested_limit)
+    # An exact placement names its window in contextTokenLimit, not as a
+    # request; record the stamped window as the repair intent so a refusal
+    # or download-failure re-placement rebuilds the same window instead of
+    # falling back to the fleet default. A value outside the request bounds
+    # (a tiny memory-limited fit) is left unrecorded; repair then re-derives.
+    repair_intent = command.instance.requested_context_tokens
+    if (
+        repair_intent is None
+        and ceiling is not None
+        and MIN_REQUESTED_CONTEXT_TOKENS <= ceiling <= MAX_REQUESTED_CONTEXT_TOKENS
+    ):
+        repair_intent = ceiling
+    instance = command.instance.model_copy(
+        update={
+            "context_token_limit": ceiling,
+            "shard_assignments": assignments,
+            "requested_context_tokens": repair_intent,
+        }
+    )
+    if not isinstance(instance, LlamaRpcInstance):
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard[runner_id]
+            fraction = shard_fraction_of_model(shard)
+            uses_vram = backend_offloads_to_vram(shard.resolved_backend)
+            if not uses_vram and not music_instance:
+                continue
+            available = (
+                (node_vram or {}).get(node_id)
+                if uses_vram
+                else (
+                    min(memory.ram_available, gpu_working_set_ceiling(memory.ram_total))
+                    if (memory := node_memory.get(node_id)) is not None
+                    else None
+                )
+            )
+            if available is None or fraction is None:
+                pool = "GPU" if uses_vram else "System"
+                raise PlacementError(
+                    f"{pool} memory telemetry and a concrete shard are required for exact placement"
+                )
+            # A context ceiling alone is not a weights admission check: it can
+            # become zero, or fall back to the card when KV geometry is absent.
+            # Exact placements must not bypass the already-committed GPU budget.
+            footprint = estimate_shard_footprint(
+                shard.model_card,
+                fraction,
+                context_budget=ceiling
+                if ceiling is not None
+                else KV_CONTEXT_BUDGET_TOKENS,
+                resolved_backend=shard.resolved_backend,
+                llama_server_settings=shard.llama_server_settings,
+            )
+            if ceiling == 0 or footprint > available:
+                pool = "GPU memory" if uses_vram else "system memory"
+                raise PlacementError(f"Insufficient {pool} for the exact placement")
     return {**current_instances, instance.instance_id: instance}
+
+
+def _stamp_llama_server_settings(
+    assignments: ShardAssignments, resources_by_node: Mapping[NodeId, NodeResources]
+) -> ShardAssignments:
+    shards = dict(assignments.runner_to_shard)
+    has_rpc_donors = any(
+        isinstance(shard, RpcDonorShardMetadata) for shard in shards.values()
+    )
+    for node_id, runner_id in assignments.node_to_runner.items():
+        shard = shards[runner_id]
+        if isinstance(shard, RpcDonorShardMetadata):
+            # Donors provide memory to the driver's one context; they do not
+            # launch a served instance with their own parallel-slot controls.
+            continue
+        if (
+            shard.resolved_backend is None
+            and shard.model_card.gguf_cache_geometry is not None
+            and not has_rpc_donors
+        ):
+            # A worker may resolve this shard to a served engine after telemetry
+            # catches up. Default or caller-supplied slots cannot authorize that
+            # later process's recurrent allocation.
+            raise PlacementError(
+                "Backend telemetry is required for recurrent memory admission"
+            )
+        if not has_rpc_donors and (
+            shard.resolved_backend is None
+            or not shard.resolved_backend.startswith("llama_server")
+        ):
+            continue
+        resources = resources_by_node.get(node_id)
+        settings = resources.llama_server_settings if resources is not None else None
+        if settings is None and shard.model_card.gguf_cache_geometry is not None:
+            raise PlacementError(
+                "Serving settings are required for recurrent memory admission"
+            )
+        # Exact requests cannot substitute client-supplied slot settings for the
+        # node's observation. The worker verifies this stamp before spawning.
+        shards[runner_id] = shard.model_copy(update={"llama_server_settings": settings})
+    return assignments.model_copy(update={"runner_to_shard": shards})
 
 
 def _get_node_download_fraction(
@@ -236,7 +522,10 @@ def _cycle_backend_preference_score(
     return 0
 
 
-def _card_platform_backends(card: ModelCard) -> frozenset[str]:
+def _card_platform_backends(
+    card: ModelCard,
+    node_resources: NodeResources | None = None,
+) -> frozenset[str]:
     """The card's compatible backends minus current platform limitations.
 
     Cards declare MODEL truth (what the model and its artifacts can do); which
@@ -246,16 +535,42 @@ def _card_platform_backends(card: ModelCard) -> frozenset[str]:
     ``compatible_backends`` goes through this helper so eligibility, the
     common-engine cycle rule, and backend stamping all agree.
     """
+    # Music is admitted only by an exact signed build/hardware claim, even if
+    # an old embedded card carries a legacy compatible_backends declaration.
+    compatible: set[str] = (
+        set() if card.music is not None else set(card.placement.compatible_backends)
+    )
+    if node_resources is not None:
+        compatible.update(
+            registry_supported_backends_for_node(
+                card,
+                node_backends=node_resources.backends,
+                engine_builds=node_resources.engine_builds,
+                hardware_classes=node_resources.hardware_classes,
+            )
+        )
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
     return platform_compatible_backends(
-        card.placement.compatible_backends,
+        frozenset(compatible),
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
+        card_serves_music=card.music is not None,
+        card_has_pinned_projector=(
+            card.vision is not None and card.vision.has_pinned_projector
+        ),
+        card_supports_tool_calling=profile.supports_tool_calling,
+        card_vllm_tool_call_parser=(
+            card.runtime.vllm_tool_call_parser if card.runtime is not None else None
+        ),
+        card_family_predates_in_process_binding=(
+            family_predates_in_process_llama_cpp(card)
+        ),
     )
 
 
 def _cycle_common_multi_node_engines(
     cycle: Cycle,
-    card_backends: AbstractSet[str],
+    card: ModelCard,
     node_resources: Mapping[NodeId, NodeResources],
 ) -> set[EngineType]:
     """Multi-node-capable engines advertised by EVERY node in the cycle.
@@ -280,6 +595,7 @@ def _cycle_common_multi_node_engines(
         backends = (
             resources.backends if resources is not None else frozenset({"mlx"})
         )
+        card_backends = _card_platform_backends(card, resources)
         node_engines: set[EngineType] = {
             engine
             for tag in backends & card_backends
@@ -295,7 +611,7 @@ def _cycle_common_multi_node_engines(
 
 def _is_llama_rpc_cycle(
     cycle: Cycle,
-    card_backends: AbstractSet[str],
+    card: ModelCard,
     node_resources: Mapping[NodeId, NodeResources],
 ) -> bool:
     """Whether a multi-node cycle would serve this card via the RPC shape (#328).
@@ -307,8 +623,46 @@ def _is_llama_rpc_cycle(
     """
     if len(cycle) <= 1:
         return False
-    engines = _cycle_common_multi_node_engines(cycle, card_backends, node_resources)
+    engines = _cycle_common_multi_node_engines(cycle, card, node_resources)
     return "llama_server" in engines and "mlx" not in engines
+
+
+def _common_served_accelerator_tags(
+    cycle: Cycle,
+    card: ModelCard,
+    node_resources: Mapping[NodeId, NodeResources],
+) -> frozenset[str]:
+    """Return exact served accelerator tags shared by every node in a cycle.
+
+    Vision RPC is qualified only when all ranks execute one homogeneous
+    llama.cpp accelerator backend. Bare and CPU tags are intentionally absent:
+    donors do not execute the image path, but mixed accelerator builds have not
+    yet been qualified for multimodal RPC.
+    """
+
+    allowed_suffixes = ("-cuda", "-rocm", "-vulkan")
+    common: set[str] | None = None
+    for node_id in cycle.node_ids:
+        resources = node_resources.get(node_id)
+        if resources is None:
+            return frozenset()
+        tags = {
+            tag
+            for tag in resources.backends & _card_platform_backends(card, resources)
+            if tag.startswith("llama_server-") and tag.endswith(allowed_suffixes)
+        }
+        common = tags if common is None else common & tags
+        if not common:
+            return frozenset()
+    return frozenset(common or set())
+
+
+PlacementFailureCode: TypeAlias = Literal[
+    "no_valid_placement",
+    "placement_info_pending",
+    "model_code_approval_required",
+    "model_card_identity_mismatch",
+]
 
 
 class PlacementError(ValueError):
@@ -317,6 +671,8 @@ class PlacementError(ValueError):
     Subclasses ``ValueError`` so existing callers that catch ``ValueError``
     (the API preview endpoint, the master command processor) keep working.
     """
+
+    code: ClassVar[PlacementFailureCode] = "no_valid_placement"
 
 
 class PlacementInfoPendingError(PlacementError):
@@ -330,6 +686,108 @@ class PlacementInfoPendingError(PlacementError):
     topology gap or memory shortfall so callers can wait instead of
     reporting a false error.
     """
+
+    code: ClassVar[PlacementFailureCode] = "placement_info_pending"
+
+
+class PlacementModelCodeApprovalError(PlacementError):
+    """Legacy error retained for placement wire compatibility."""
+
+    code: ClassVar[PlacementFailureCode] = "model_code_approval_required"
+
+
+class PlacementModelCardIdentityError(PlacementError):
+    """A caller-specified shard embeds a card for a different model alias."""
+
+    code: ClassVar[PlacementFailureCode] = "model_card_identity_mismatch"
+
+
+def require_instance_model_card_identity(
+    instance: Instance,
+    authorized_card: ModelCard | None = None,
+) -> None:
+    """Require embedded shard cards to match the assignment and catalog truth.
+
+    Args:
+        instance: Caller-specified exact placement containing shard cards.
+        authorized_card: Effective card loaded from the authorized local catalog.
+            When supplied, every embedded card must match it exactly.
+
+    Raises:
+        PlacementModelCardIdentityError: If a shard identifies another model or
+            differs from the authorized catalog card.
+    """
+
+    expected_model_id = instance.shard_assignments.model_id
+    mismatched_model_ids = sorted(
+        {
+            str(shard.model_card.model_id)
+            for shard in instance.shard_assignments.runner_to_shard.values()
+            if shard.model_card.model_id != expected_model_id
+        }
+    )
+    if mismatched_model_ids:
+        mismatches = ", ".join(mismatched_model_ids)
+        raise PlacementModelCardIdentityError(
+            "Exact placement model-card identity mismatch: assignment model "
+            f"{expected_model_id} contains shard card(s) for {mismatches}."
+        )
+    if authorized_card is None:
+        return
+    if authorized_card.model_id != expected_model_id:
+        raise PlacementModelCardIdentityError(
+            "Exact placement catalog identity mismatch: assignment model "
+            f"{expected_model_id} resolved to {authorized_card.model_id}."
+        )
+    if any(
+        not same_authorized_model_card(shard.model_card, authorized_card)
+        for shard in instance.shard_assignments.runner_to_shard.values()
+    ):
+        raise PlacementModelCardIdentityError(
+            "Exact placement embeds model-card content that does not match the "
+            f"authorized catalog card for {expected_model_id}. Recompute the "
+            "placement from the current catalog before retrying."
+        )
+
+
+def _raise_model_code_approval_error(card: ModelCard) -> None:
+    """Raise the stable actionable placement error for one exact card."""
+
+    trust_identity = remote_code_trust_identity(card)
+    raise PlacementModelCodeApprovalError(
+        "The cluster operator has not approved repository code for immutable "
+        f"model-card identity {trust_identity}. Approve this model in Settings "
+        "before placing it."
+    )
+
+
+def require_instance_model_code_approval(
+    instance: Instance,
+    approved_remote_code_identities: AbstractSet[str] | None = None,
+) -> None:
+    """Apply the legacy model-approval hook to every embedded card.
+
+    Current publication/addition authorization makes this a no-op for valid
+    cards. The hook and error type remain during rolling compatibility with
+    older callers and response schemas.
+
+    Args:
+        instance: Caller-specified exact placement containing shard cards.
+        approved_remote_code_identities: Deprecated legacy approval set.
+
+    Raises:
+        PlacementModelCodeApprovalError: If any distinct shard card is blocked.
+    """
+
+    checked_identities: set[str] = set()
+    for shard in instance.shard_assignments.runner_to_shard.values():
+        card = shard.model_card
+        trust_identity = remote_code_trust_identity(card)
+        if trust_identity in checked_identities:
+            continue
+        checked_identities.add(trust_identity)
+        if remote_code_approval_required(card, approved_remote_code_identities):
+            _raise_model_code_approval_error(card)
 
 
 def place_instance(
@@ -345,10 +803,25 @@ def place_instance(
     node_vram: Mapping[NodeId, Memory] | None = None,
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     stamped_exclusions: set[NodeId] | None = None,
+    approved_remote_code_identities: AbstractSet[str] | None = None,
+    served_context_default: int | None = None,
 ) -> dict[InstanceId, Instance]:
+    if command.model_card.music is not None and command.min_nodes != 1:
+        raise PlacementError("Music instances require exactly one node")
+    if remote_code_approval_required(
+        command.model_card, approved_remote_code_identities
+    ):
+        _raise_model_code_approval_error(command.model_card)
+
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
+    if command.model_card.music is not None:
+        # audio.cpp runs one complete model on one host; a larger cycle could
+        # otherwise be selected when no single node passes memory admission.
+        candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
     if not candidate_cycles:
+        if command.model_card.music is not None:
+            raise PlacementError("No single-node placement is available for this music model")
         known_nodes = sum(1 for _ in topology.list_nodes())
         if known_nodes >= command.min_nodes:
             # Enough nodes exist for this placement — they just aren't
@@ -389,35 +862,77 @@ def place_instance(
                 "cluster session restarts."
             )
 
-    # Hard-filter on node participation and backend compatibility (#149).
+    # A healthy control-plane topology does not prove that generated tokens can
+    # return from every candidate node. When telemetry positively reports a
+    # live Zenoh node with zero peers, exclude every cycle touching it so the
+    # planner cannot create a runner that loads successfully but never delivers
+    # output. Unknown peer counts remain eligible during startup.
+    if node_resources:
+        isolated_nodes = zenoh_isolated_nodes(
+            live_nodes=set(topology.list_nodes()),
+            node_resources=node_resources,
+        )
+        if isolated_nodes:
+            candidate_cycles = [
+                cycle
+                for cycle in candidate_cycles
+                if not (set(cycle.node_ids) & isolated_nodes)
+            ]
+            if not candidate_cycles:
+                raise PlacementError(
+                    f"All cycles of at least {command.min_nodes} node(s) touch "
+                    "a node whose Zenoh inference data plane is isolated. "
+                    "Restore data-plane connectivity or exclude the affected "
+                    "node before placing the model."
+                )
+
+    # Hard-filter on node participation and backend compatibility (#149/#845).
+    # Repository-code trust is an operator decision for the exact model-card
+    # identity and was checked once above; it is deliberately not a node axis.
     # A node is ineligible for an inference shard of THIS model when it
     # declares a non-``full`` participation role (e.g. a ``management`` /
     # edge node that serves the API but never joins a ring), or when its
     # advertised backends do not intersect the card's compatible_backends.
-    # Nodes with no resources entry yet (gossip still warming up) are treated
-    # as eligible so behavior matches the pre-#149 default of full/mlx.
-    if node_resources:
-        compatible_backends = _card_platform_backends(command.model_card)
-        ineligible_nodes = {
-            node_id
-            for node_id, resources in node_resources.items()
-            if resources.participation != "full"
-            or not (resources.backends & compatible_backends)
-        }
-        if ineligible_nodes:
-            candidate_cycles = [
-                cycle
-                for cycle in candidate_cycles
-                if not (set(cycle.node_ids) & ineligible_nodes)
-            ]
-            if not candidate_cycles:
-                raise PlacementError(
-                    f"All cycles of at least {command.min_nodes} node(s) touch a "
-                    f"node ineligible for this model: either a non-participating "
-                    f"(management/edge) node or one whose backends do not match "
-                    f"the model's compatible_backends "
-                    f"({sorted(compatible_backends)})."
+    # Nodes with no resources entry yet (gossip still warming up) retain the
+    # legacy optimistic behavior only when the card has a static projection.
+    # A matrix-only card needs exact build/hardware evidence and therefore waits
+    # rather than falling through to an unproven default engine.
+    resolved_node_resources = node_resources or {}
+    matrix_only = not command.model_card.placement.compatible_backends
+    pending_matrix_nodes: set[NodeId] = set()
+    ineligible_nodes: set[NodeId] = set()
+    compatible_backend_summary: set[str] = set()
+    for node_id in topology.list_nodes():
+        resources = resolved_node_resources.get(node_id)
+        if resources is None:
+            if matrix_only:
+                pending_matrix_nodes.add(node_id)
+            continue
+        compatible_backends = _card_platform_backends(command.model_card, resources)
+        compatible_backend_summary.update(compatible_backends)
+        if resources.participation != "full" or not (
+            resources.backends & compatible_backends
+        ):
+            ineligible_nodes.add(node_id)
+    excluded_for_compatibility = ineligible_nodes | pending_matrix_nodes
+    if excluded_for_compatibility:
+        candidate_cycles = [
+            cycle
+            for cycle in candidate_cycles
+            if not (set(cycle.node_ids) & excluded_for_compatibility)
+        ]
+        if not candidate_cycles:
+            if pending_matrix_nodes:
+                raise PlacementInfoPendingError(
+                    "Exact engine-build and hardware info has not been gossiped "
+                    "for a matrix-only model. Retry shortly."
                 )
+            raise PlacementError(
+                f"All cycles of at least {command.min_nodes} node(s) touch a "
+                f"node ineligible for this model: either a non-participating "
+                f"(management/edge) node or one whose exact backend support does "
+                f"not match ({sorted(compatible_backend_summary)})."
+            )
 
     # Common-engine cycle rule. A multi-node placement runs ONE engine across
     # the whole cycle, so a multi-node cycle is admissible only when some
@@ -432,9 +947,10 @@ def place_instance(
     # node, which the per-node any() check used to allow). Single-node cycles
     # are untouched -- the per-node participation/backend filter above already
     # covers them. Cards with no declared backends (legacy) skip the rule.
-    resolved_node_resources = node_resources or {}
-    card_backends = _card_platform_backends(command.model_card)
-    if card_backends:
+    backend_constrained = bool(command.model_card.placement.compatible_backends) or (
+        command.model_card.registry_card_id is not None
+    )
+    if backend_constrained:
         multi_node_candidate_cycles = [
             cycle for cycle in candidate_cycles if len(cycle) > 1
         ]
@@ -443,7 +959,7 @@ def place_instance(
             for cycle in candidate_cycles
             if len(cycle) == 1
             or _cycle_common_multi_node_engines(
-                cycle, card_backends, resolved_node_resources
+                cycle, command.model_card, resolved_node_resources
             )
         ]
         if not candidate_cycles:
@@ -484,7 +1000,7 @@ def place_instance(
             cycle
             for cycle in candidate_cycles
             if not _is_llama_rpc_cycle(
-                cycle, card_backends, resolved_node_resources
+                cycle, command.model_card, resolved_node_resources
             )
         ]
         if not candidate_cycles:
@@ -492,6 +1008,39 @@ def place_instance(
                 "Requested Tensor sharding, but every candidate cycle would "
                 "serve this model via multi-node llama.cpp (RPC), which is "
                 "pipeline-only."
+            )
+
+    pinned_projector_size = (
+        command.model_card.vision.projector_size
+        if command.model_card.vision is not None
+        else None
+    )
+    projector_memory = (
+        Memory.from_bytes(pinned_projector_size)
+        if pinned_projector_size is not None
+        else Memory()
+    )
+    if projector_memory.in_bytes > 0:
+        vision_rpc_candidates = [
+            cycle
+            for cycle in candidate_cycles
+            if _is_llama_rpc_cycle(
+                cycle, command.model_card, resolved_node_resources
+            )
+        ]
+        candidate_cycles = [
+            cycle
+            for cycle in candidate_cycles
+            if cycle not in vision_rpc_candidates
+            or _common_served_accelerator_tags(
+                cycle, command.model_card, resolved_node_resources
+            )
+        ]
+        if not candidate_cycles:
+            raise PlacementError(
+                "Served vision RPC requires one exact llama_server accelerator "
+                "backend tag (CUDA, ROCm, or Vulkan) shared by every node in "
+                "the cycle. Mixed-backend multimodal RPC is not qualified."
             )
 
     # Filter to cycles containing all required nodes (subset matching)
@@ -518,20 +1067,56 @@ def place_instance(
     standard_candidates = [
         cycle
         for cycle in candidate_cycles
-        if not _is_llama_rpc_cycle(cycle, card_backends, resolved_node_resources)
+        if not _is_llama_rpc_cycle(
+            cycle, command.model_card, resolved_node_resources
+        )
     ]
     rpc_candidates = [
         cycle
         for cycle in candidate_cycles
-        if _is_llama_rpc_cycle(cycle, card_backends, resolved_node_resources)
+        if _is_llama_rpc_cycle(cycle, command.model_card, resolved_node_resources)
     ]
-    cycles_with_sufficient_memory, memory_diagnostics = filter_cycles_by_memory(
-        standard_candidates,
-        node_memory,
-        command.model_card,
-        command.sharding,
-        node_vram=node_vram,
-    )
+    cycles_with_sufficient_memory: list[Cycle] = []
+    memory_diagnostics = CycleMemoryDiagnostics()
+    for standard_cycle in standard_candidates:
+        standard_fixed = (
+            {standard_cycle.node_ids[0]: projector_memory}
+            if len(standard_cycle) == 1 and projector_memory.in_bytes > 0
+            else {}
+        )
+        standard_fit, standard_diagnostics = filter_cycles_by_memory(
+            [standard_cycle],
+            node_memory,
+            command.model_card,
+            command.sharding,
+            node_vram=node_vram,
+            fixed_memory_by_node=standard_fixed,
+            resolved_backends={
+                node_id: resolve_node_backend(
+                    _card_platform_backends(command.model_card, resources),
+                    command.model_card.placement.backend_preference,
+                    resources.backends,
+                )
+                for node_id in standard_cycle.node_ids
+                if (resources := resolved_node_resources.get(node_id)) is not None
+            },
+            llama_server_settings={
+                node_id: resources.llama_server_settings
+                for node_id in standard_cycle.node_ids
+                if (resources := resolved_node_resources.get(node_id)) is not None
+            },
+        )
+        cycles_with_sufficient_memory.extend(standard_fit)
+        memory_diagnostics.pending_info_node_ids.extend(
+            node_id
+            for node_id in standard_diagnostics.pending_info_node_ids
+            if node_id not in memory_diagnostics.pending_info_node_ids
+        )
+        memory_diagnostics.rejection_reasons.extend(
+            standard_diagnostics.rejection_reasons
+        )
+    rpc_driver_by_cycle: dict[tuple[NodeId, ...], NodeId] = {}
+    resolved_download_status = download_status or {}
     if rpc_candidates:
         rpc_vram_map: Mapping[NodeId, Memory] = node_vram or {}
         # A cycle node missing from the usable-GPU map (telemetry warm-up:
@@ -550,24 +1135,62 @@ def place_instance(
             for cycle in rpc_candidates
             if all(node_id in rpc_vram_map for node_id in cycle.node_ids)
         ]
-        rpc_fit, rpc_diagnostics = filter_cycles_by_memory(
-            vram_known_rpc_candidates,
-            node_memory,
-            command.model_card,
-            # llama.cpp splits the pooled model proportional to device memory,
-            # which is exactly the Pipeline-proportional fit estimate.
-            Sharding.Pipeline,
-            node_vram=rpc_vram_map,
-            exact_pipeline_layers=False,
-        )
-        cycles_with_sufficient_memory = cycles_with_sufficient_memory + rpc_fit
+        for rpc_cycle in vram_known_rpc_candidates:
+            driver = max(
+                rpc_cycle.node_ids,
+                key=lambda node_id: (
+                    max(
+                        0,
+                        rpc_vram_map[node_id].in_bytes - projector_memory.in_bytes,
+                    ),
+                    _get_node_download_fraction(
+                        node_id,
+                        command.model_card.model_id,
+                        resolved_download_status,
+                    ),
+                ),
+            )
+            rpc_fixed = (
+                {driver: projector_memory}
+                if projector_memory.in_bytes > 0
+                else {}
+            )
+            rpc_fit, rpc_diagnostics = filter_cycles_by_memory(
+                [rpc_cycle],
+                node_memory,
+                command.model_card,
+                Sharding.Pipeline,
+                node_vram=rpc_vram_map,
+                exact_pipeline_layers=False,
+                fixed_memory_by_node=rpc_fixed,
+                resolved_backends={
+                    node_id: "llama_server" for node_id in rpc_cycle.node_ids
+                },
+                llama_server_settings={
+                    node_id: (
+                        resources.llama_server_settings
+                        if (resources := resolved_node_resources.get(driver))
+                        is not None
+                        else None
+                    )
+                    for node_id in rpc_cycle.node_ids
+                },
+            )
+            cycles_with_sufficient_memory.extend(rpc_fit)
+            if rpc_fit:
+                rpc_driver_by_cycle[tuple(rpc_cycle.node_ids)] = driver
+            memory_diagnostics.pending_info_node_ids.extend(
+                node_id
+                for node_id in rpc_diagnostics.pending_info_node_ids
+                if node_id not in memory_diagnostics.pending_info_node_ids
+            )
+            memory_diagnostics.rejection_reasons.extend(
+                rpc_diagnostics.rejection_reasons
+            )
         memory_diagnostics.pending_info_node_ids.extend(
             node_id
-            for node_id in (*rpc_diagnostics.pending_info_node_ids, *sorted(vram_pending_nodes))
+            for node_id in sorted(vram_pending_nodes)
             if node_id not in memory_diagnostics.pending_info_node_ids
-        )
-        memory_diagnostics.rejection_reasons.extend(
-            rpc_diagnostics.rejection_reasons
         )
     if len(cycles_with_sufficient_memory) == 0:
         if memory_diagnostics.pending_info_node_ids:
@@ -632,7 +1255,6 @@ def place_instance(
         if any(topology.node_is_leaf(node_id) for node_id in cycle)
     ]
 
-    resolved_download_status = download_status or {}
     candidate_cycles = (
         cycles_with_leaf_nodes if cycles_with_leaf_nodes != [] else smallest_cycles
     )
@@ -670,7 +1292,7 @@ def place_instance(
     # mirroring the single-node coercion above: instance_meta is an MLX-shape
     # vocabulary and the served engine has exactly one multi-node form.
     selected_is_rpc = _is_llama_rpc_cycle(
-        selected_cycle, card_backends, resolved_node_resources
+        selected_cycle, command.model_card, resolved_node_resources
     )
     if command.instance_meta == InstanceMeta.LlamaRpc and not selected_is_rpc:
         raise PlacementError(
@@ -680,20 +1302,28 @@ def place_instance(
         )
 
     driver_node: NodeId | None = None
+    selected_rpc_backend: str | None = None
     if selected_is_rpc:
         # Driver = the node with the largest usable VRAM (most layers land
         # locally, minimizing cross-network boundaries), tie-broken by which
         # node already has the model on disk (only the driver reads the GGUF).
-        rpc_vram = node_vram or {}
-        driver_node = max(
-            selected_cycle.node_ids,
-            key=lambda node_id: (
-                rpc_vram.get(node_id, Memory()).in_bytes,
-                _get_node_download_fraction(
-                    node_id, command.model_card.model_id, resolved_download_status
-                ),
-            ),
+        driver_node = rpc_driver_by_cycle.get(tuple(selected_cycle.node_ids))
+        if driver_node is None:
+            raise PlacementError(
+                "The selected RPC cycle has no memory-qualified driver. Retry "
+                "after accelerator telemetry converges."
+            )
+        common_tags = _common_served_accelerator_tags(
+            selected_cycle,
+            command.model_card,
+            resolved_node_resources,
         )
+        if projector_memory.in_bytes > 0:
+            selected_rpc_backend = resolve_node_backend(
+                common_tags,
+                backend_preference,
+                common_tags,
+            )
         shard_assignments = get_shard_assignments_for_llama_rpc(
             command.model_card, selected_cycle, driver_node
         )
@@ -714,16 +1344,20 @@ def place_instance(
     # allows in-process llama_cpp (with it earlier in preference or alphabetical
     # order) must not stamp the driver with a tag that would dispatch the
     # single-node in-process runner.
-    compatible_backends = _card_platform_backends(command.model_card)
-    if selected_is_rpc:
-        compatible_backends = frozenset(
-            tag
-            for tag in compatible_backends
-            if engine_of(tag) == "llama_server"
-        )
     stamped_runner_to_shard = dict(shard_assignments.runner_to_shard)
     for node_id, runner_id in shard_assignments.node_to_runner.items():
         resources = resolved_node_resources.get(node_id)
+        compatible_backends = _card_platform_backends(command.model_card, resources)
+        if selected_is_rpc:
+            compatible_backends = (
+                frozenset({selected_rpc_backend})
+                if selected_rpc_backend is not None
+                else frozenset(
+                    tag
+                    for tag in compatible_backends
+                    if engine_of(tag) == "llama_server"
+                )
+            )
         resolved_backend = (
             resolve_node_backend(
                 compatible_backends, backend_preference, resources.backends
@@ -733,8 +1367,15 @@ def place_instance(
         )
         if resolved_backend is not None:
             shard = stamped_runner_to_shard[runner_id]
+            updates: dict[str, str] = {"resolved_backend": resolved_backend}
+            if command.model_card.music is not None:
+                assert resources is not None
+                build = resources.engine_builds.get(resolved_backend)
+                if build is None:
+                    raise PlacementError("Music placement lacks a verified engine build")
+                updates["resolved_engine_build"] = build
             stamped_runner_to_shard[runner_id] = shard.model_copy(
-                update={"resolved_backend": resolved_backend}
+                update=updates
             )
     shard_assignments = ShardAssignments(
         model_id=shard_assignments.model_id,
@@ -742,10 +1383,18 @@ def place_instance(
         node_to_runner=shard_assignments.node_to_runner,
     )
 
+    shard_assignments = _stamp_llama_server_settings(
+        shard_assignments, resolved_node_resources
+    )
+
     # Stamp the context-admission ceiling into the placement decision (#279
-    # slice 2). Computed once here from the hosting nodes' static ram_total, so
-    # every rank reads the identical value off replicated state rather than
-    # recomputing from the (now telemetry-plane, last-write-wins) node memory.
+    # slice 2). Computed once here, so every rank reads the identical value off
+    # replicated state rather than recomputing from the (telemetry-plane,
+    # last-write-wins) node memory. The live ram_available handed in is the
+    # figure this placement was just admitted against (the master hands in
+    # memory already net of placements telemetry may not show yet, see
+    # reserve_system_ram_usage); it sizes the served window of a fixed-window
+    # engine whose KV lands in system RAM.
     context_token_limit = instance_context_token_limit(
         shard_assignments,
         {
@@ -754,11 +1403,35 @@ def place_instance(
         },
         node_vram=node_vram,
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
+        node_ram_available={
+            node_id: node_memory[node_id].ram_available
+            for node_id in selected_cycle.node_ids
+        },
+        fixed_memory_by_node=(
+            {driver_node: projector_memory}
+            if driver_node is not None and projector_memory.in_bytes > 0
+            else (
+                {selected_cycle.node_ids[0]: projector_memory}
+                if len(selected_cycle) == 1 and projector_memory.in_bytes > 0
+                else {}
+            )
+        ),
+    )
+    context_token_limit = served_context_window(
+        shard_assignments,
+        context_token_limit,
+        requested=command.requested_context_tokens,
+        served_default=served_context_default,
     )
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
 
-    instance_id = InstanceId()
+    # The accepted command identity is also the resulting placement identity.
+    # This lets API clients correlate an acknowledgement with exactly one
+    # runtime without guessing from model name or observation order. Repair
+    # commands receive fresh command IDs, so replacement placements remain
+    # independently identifiable.
+    instance_id = InstanceId(str(command.command_id))
     # Persist the CALLER'S per-placement exclusions on the instance (#658):
     # repair re-placements reconstruct intent from the instance, and without
     # this record they widened eligibility back to the full topology. Repair
@@ -798,7 +1471,9 @@ def place_instance(
             instance_id=instance_id,
             shard_assignments=shard_assignments,
             context_token_limit=context_token_limit,
+            requested_context_tokens=command.requested_context_tokens,
             excluded_nodes=stamped_exclusions_list,
+            system_role=command.system_role,
             driver_node=driver_node,
             donor_endpoints=donor_endpoints,
         )
@@ -845,7 +1520,9 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
+                requested_context_tokens=command.requested_context_tokens,
                 excluded_nodes=stamped_exclusions_list,
+                system_role=command.system_role,
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
@@ -863,7 +1540,9 @@ def place_instance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
                 context_token_limit=context_token_limit,
+                requested_context_tokens=command.requested_context_tokens,
                 excluded_nodes=stamped_exclusions_list,
+                system_role=command.system_role,
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
             )
@@ -928,6 +1607,10 @@ def fallback_command_for_refused_instance(
         # exclusions (#658): the anywhere-fallback still may not land on
         # nodes the caller excluded.
         excluded_nodes=sorted({*instance.excluded_nodes, refusing_node}),
+        # System-role marker (intelligent-fabric steward): repair
+        # re-placements re-stamp it so the flag survives node loss.
+        system_role=instance.system_role,
+        requested_context_tokens=instance.requested_context_tokens,
     )
 
 
@@ -960,6 +1643,10 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         # The instance's original per-placement exclusions (#658); the wider
         # re-placement keeps honoring the caller's intent.
         excluded_nodes=sorted(instance.excluded_nodes),
+        # System-role marker (intelligent-fabric steward): repair
+        # re-placements re-stamp it so the flag survives node loss.
+        system_role=instance.system_role,
+        requested_context_tokens=instance.requested_context_tokens,
     )
 
 
@@ -993,6 +1680,10 @@ def replacement_command_for_download_failed_instance(
         # (#658) and the newly failed node(s): repair must not land on
         # nodes the caller excluded, nor on the nodes that just failed.
         excluded_nodes=sorted({*instance.excluded_nodes, *excluded_nodes}),
+        # System-role marker (intelligent-fabric steward): repair
+        # re-placements re-stamp it so the flag survives node loss.
+        system_role=instance.system_role,
+        requested_context_tokens=instance.requested_context_tokens,
     )
 
 

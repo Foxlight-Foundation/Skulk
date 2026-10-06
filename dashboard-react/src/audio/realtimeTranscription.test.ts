@@ -575,7 +575,9 @@ describe('RealtimePcmCapture', () => {
         onmessage: null,
       };
 
-      constructor(_context: AudioContext, readonly name: string) {
+      readonly name: string;
+      constructor(_context: AudioContext, name: string) {
+        this.name = name;
         worklets.push(this);
       }
 

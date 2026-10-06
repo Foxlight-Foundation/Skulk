@@ -41,6 +41,10 @@ degraded node is loud even if nobody runs the doctor.
 
 Verifies at least one inference engine is usable: in-process MLX on macOS, an importable llama-cpp-python build, a llama-server binary (SKULK_LLAMA_SERVER_BIN), or a vllm CLI (SKULK_VLLM_BIN). A node with none advertises no backends and can only participate as management. Supports `--fix`.
 
+### ComfyUI video engine (`comfy-engine`)
+
+When video models are enabled (SKULK_ENABLE_VIDEO_MODELS), verifies the served ComfyUI video engine is configured (SKULK_COMFY_BIN plus SKULK_COMFY_ROOT) or provisioned as the managed install under the engines directory. A Linux NVIDIA or AMD node without one is degraded: video cards never place there. Management nodes and nodes with video models disabled pass. Supports `--fix`.
+
 ### Capability conflicts (`capability-conflicts`)
 
 Runs backend derivation over the node facts snapshot and surfaces every observation-vs-declaration conflict: a GPU that no engine would use (silent CPU serving), degraded NVIDIA detection (missing nvidia-ml-py or a driver mismatch), an engine binary override pointing at an unusable path, or a declared backend the observed hardware cannot support. Supports `--fix`.
@@ -49,6 +53,18 @@ Runs backend derivation over the node facts snapshot and surfaces every observat
 
 Verifies the models directory exists, is writable, and has download headroom (warns under 10 GB free, fails at 2 GB or less). Supports `--fix`.
 
+### Installed model cards (`installed-card-records`)
+
+Verifies every complete model in the model directories and in the model store's canonical and staging directories carries its card record (`.skulk/installed-card.json`, or the detached record kept for a read-only model directory), the record that keeps a downloaded model servable without the network. Records are checked by file size, never hashed, so the check stays fast on large stores. A model downloaded before these records existed gets one when Skulk starts with network access and recognizes it. Incomplete downloads are counted, not flagged.
+
 ### Dashboard assets (`dashboard-assets`)
 
 Reports whether the built web dashboard is present. The API serves without it; headless workers are expected to run this way.
+
+### Hugging Face token (`hf-token`)
+
+Reports whether this node can authenticate to Hugging Face, and whether it is the node that needs to. A token entered in any node's dashboard Settings propagates over the encrypted cluster fabric to every node, and joining nodes adopt it at bootstrap, so one entry covers the fleet; this check verifies it actually arrived on the node that performs downloads (the model store host when a store is configured, otherwise this node itself). Without one, public models still download and only gated or private repositories fail.
+
+### vLLM build prerequisites (`vllm-prerequisites`)
+
+When a vLLM engine is configured, verifies the node can actually compile its kernels. vLLM JITs Triton and torch.compile kernels at runtime, shelling out to a C++ compiler (Inductor drives g++, so gcc alone is not enough) against the Python development headers; neither is a dependency of the vLLM wheel. Without them the node advertises vLLM capacity and accepts placements, then fails every engine start with an InductorError.

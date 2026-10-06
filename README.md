@@ -10,7 +10,7 @@
 
 [![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
 [![Install Skulk](https://img.shields.io/badge/docs-install_skulk-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/install/)
-[![Release Notes](https://img.shields.io/badge/release_notes-v1.5.1-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.1/)
+[![Release Notes](https://img.shields.io/badge/release_notes-v2.0.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.0/)
 [![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
 
   <br>
@@ -29,6 +29,7 @@ On top of that, Skulk adds:
 - A speech fabric: OpenAI-compatible `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`, and `/v1/audio/voices` endpoints, voice cloning with ten bundled reference voices, a realtime transcription WebSocket at `/v1/realtime` with server-side voice-activity detection, a composable speech-to-chat-to-speech WebSocket at `/v1/fabric/chains/speech`, and a hands-free voice loop in the dashboard chat. Guide: [Speech providers and realtime transcription](https://foxlight-foundation.github.io/Skulk/speech-fabric-realtime/).
 - An extension (plugin) API: separately installed Python packages hook the serving path (request transform, response observer, in-process embeddings) and can serve self-describing provider capabilities that stream media through the fabric and advertise themselves on the telemetry plane. A raising extension is contained and skipped, and extensions never own the response stream. Guide: [Extensions](https://foxlight-foundation.github.io/Skulk/extensions/).
 - Managed engine delivery: Linux GPU nodes get pinned `llama-server` builds as ordinary pip wheels (`skulk-llama-server-cuda`, `skulk-llama-server-vulkan`) from the Foxlight wheel index at `wheels.foxlight.ai`, built from pinned llama.cpp source with sigstore build-provenance attestations.
+- A signed external model-card registry: each selectable quant or file is an immutable card, refreshed independently of the Skulk distribution. Complete store and node-cache artifacts retain that full card beside their bytes, so installed models remain self-describing and launchable when the cluster is air-gapped.
 - A real-time React dashboard with easy access to:
   - A central model store
   - A placement manager with live cluster preview
@@ -54,7 +55,7 @@ desktop control for starting the node, opening the dashboard, and viewing logs.
 
 **Apple Silicon macOS 15 or newer:**
 
-[Download the signed and notarized Skulk 1.5.1 DMG](https://releases.foxlight.ai/desktop/macos/1.5.1/3/Skulk-1.5.1-3-macOS-arm64.dmg), or install with Homebrew:
+[Download the signed and notarized Skulk 2.0.0 DMG](https://releases.foxlight.ai/desktop/macos/2.0.0/1/Skulk-2.0.0-1-macOS-arm64.dmg), or install with Homebrew:
 
 ```bash
 brew install --cask Foxlight-Foundation/skulk/skulk
@@ -168,9 +169,9 @@ Why would you use Skulk over another solution? What does it get you?
 
 ### Storage
 
-- **Model store.** Optional cluster-shared host with rsync-style staging: download once, and every node stages locally instead of independently fetching from Hugging Face. **Why it matters:** large-model cluster cold start is bandwidth-bounded by one node, not N.
+- **Model store.** A cluster-shared canonical artifact host with resumable staging: download once, and only nodes that run a model cache its bytes and full installed-card sidecar. Existing node caches reconcile back into the store without another Hugging Face download. **Why it matters:** large-model cold start is bandwidth-bounded by one node, while an air-gapped cluster retains complete model identity and artifact truth locally.
 
-- **Custom model cards.** Operator-added `*.toml` files under `~/.local/share/skulk/custom_model_cards/` (XDG on Linux, `~/.skulk/...` on macOS). The capability resolver reads built-in + custom and prefers custom on `model_id` collision. **Why it matters:** ship your own quantized variant or override a built-in card without forking the repo.
+- **Signed and custom model cards.** The TUF-verified Foxlight registry is the current supported catalog. Skulk ships no model cards: when a model is downloaded, so is its card, and complete installed artifacts retain that card locally with no expiry. Operator-added `*.toml` files under the Skulk data directory keep final precedence. **Why it matters:** model support can evolve without shipping a new Skulk build, while local ownership and air-gapped operation remain intact.
 
 ### Operations
 
@@ -431,6 +432,12 @@ Without it, each node may download model data independently.
 With it, one node acts as the store host and the rest of the cluster stages from that machine over the LAN.
 Staged files are kept on worker nodes by default so repeated placements can
 reuse the local cache instead of re-copying large models every time.
+Every complete canonical or staged artifact retains its full effective model
+card and hashed file manifest in `.skulk/installed-card.json`. The store host
+automatically inventories complete node caches and imports missing artifacts
+without downloading them again from Hugging Face; clearing a staged cache
+removes its bytes and adjacent card together without touching the canonical
+store copy.
 
 Use the model store when:
 
@@ -462,9 +469,10 @@ Skulk exposes several API surfaces:
 - **Speech endpoints**: `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/voices`, the `/v1/realtime` WebSocket, and the `/v1/fabric/chains/speech` composition WebSocket
 - **Skulk control endpoints**: placement, model store, config, tracing, downloads, cluster state
 
-The most important API doc lives here:
+The most important API documentation lives here:
 
-- [docs/api.md](docs/api.md)
+- [API guide](https://foxlight-foundation.github.io/Skulk/api-guide/)
+- [Generated OpenAPI reference](https://foxlight-foundation.github.io/Skulk/api/skulk-api/)
 - [website/docs/tracing.md](website/docs/tracing.md)
 
 That guide is written to be both newcomer-friendly and integration-friendly. It includes:
@@ -703,7 +711,7 @@ Highlights:
 - [Thunderbolt clustering](https://foxlight-foundation.github.io/Skulk/thunderbolt-clustering) and [RDMA on macOS](https://foxlight-foundation.github.io/Skulk/build-and-runtime)
 - [Speculative decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding)
 - [API guide](https://foxlight-foundation.github.io/Skulk/api-guide) and [architecture](https://foxlight-foundation.github.io/Skulk/architecture)
-- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.5.1/)
+- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.0/)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing

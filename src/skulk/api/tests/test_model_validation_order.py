@@ -198,6 +198,41 @@ async def test_running_text_requests_use_in_memory_model_card(monkeypatch: pytes
 
 
 @pytest.mark.anyio
+async def test_inference_catalog_misses_are_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strict catalog lookup must not turn unknown inference models into 500s."""
+    model_id = ModelId("missing/model")
+
+    async def _unknown(_model_id: ModelId) -> ModelCard:
+        raise ValueError(f"Unknown model {_model_id}")
+
+    monkeypatch.setattr(ModelCard, "load", _unknown)
+    api = object.__new__(API)
+    api.state = State()
+
+    with pytest.raises(HTTPException) as running_error:
+        await _get_running_model_card_fn(api)(model_id)
+    assert running_error.value.status_code == 404
+
+    image_validator = cast(
+        Callable[[ModelId], Awaitable[ModelId]],
+        object.__getattribute__(api, "_validate_image_model"),
+    )
+    with pytest.raises(HTTPException) as image_error:
+        await image_validator(model_id)
+    assert image_error.value.status_code == 404
+
+    embedding_validator = cast(
+        Callable[[ModelId], Awaitable[ModelId]],
+        object.__getattribute__(api, "_validate_embedding_model"),
+    )
+    with pytest.raises(HTTPException) as embedding_error:
+        await embedding_validator(model_id)
+    assert embedding_error.value.status_code == 404
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("task", "kind"),
     [

@@ -6,16 +6,20 @@ import pathlib
 import pytest
 from anyio import Path
 
-from skulk.shared.constants import RESOURCES_DIR
 from skulk.shared.models import model_cards as model_cards_module
 from skulk.shared.models.model_cards import (
     ModelCard,
+    ModelTask,
     PlacementCardConfig,
     RuntimeCapabilityCardConfig,
-    get_bundled_card,
+    VisionCardConfig,
+    gguf_allow_patterns,
     preserve_generated_card_constraints,
+    same_authorized_model_card,
 )
+from skulk.shared.tests.model_card_fixtures import load_fixture_card
 from skulk.shared.types.common import ModelId
+from skulk.shared.types.memory import Memory
 
 _MINIMAL_CARD = """\
 model_id = "testorg/override-model"
@@ -28,6 +32,69 @@ quantization = "{quantization}"
 [storage_size]
 in_bytes = 1024
 """
+
+
+def test_vision_projector_pin_is_atomic_and_path_safe() -> None:
+    """A served projector cannot be partially pinned or escape its artifact."""
+
+    with pytest.raises(ValueError, match="must be set together"):
+        VisionCardConfig(projector_file="mmproj-f16.gguf")
+    with pytest.raises(ValueError, match="canonical relative POSIX path"):
+        VisionCardConfig(projector_file="../mmproj.gguf", projector_size=1024)
+
+    vision = VisionCardConfig(
+        projector_file="projectors/mmproj-f16.gguf",
+        projector_size=1024,
+    )
+    assert vision.has_pinned_projector is True
+    assert gguf_allow_patterns("model-Q4_K_M.gguf", vision.projector_file) == [
+        "model-Q4_K_M.gguf",
+        "projectors/mmproj-f16.gguf",
+    ]
+
+
+def test_authorized_card_comparison_ignores_only_snapshot_provenance() -> None:
+    """Republishing identical signed truth cannot change execution identity."""
+    card = ModelCard(
+        model_id=ModelId("org/signed-model"),
+        source_revision="a" * 40,
+        storage_size=Memory.from_bytes(1024),
+        n_layers=4,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        registry_card_id="card_" + "d" * 52,
+        registry_snapshot_id="snapshot-old",
+    )
+
+    republished = card.model_copy(
+        update={"registry_snapshot_id": "snapshot-new"}
+    )
+    changed_source = republished.model_copy(
+        update={"source_revision": "b" * 40}
+    )
+
+    assert same_authorized_model_card(card, republished)
+    assert not same_authorized_model_card(card, changed_source)
+
+
+def test_model_card_binds_projector_to_immutable_gguf_revision() -> None:
+    """A projector pin is meaningful only beside exact base bytes."""
+
+    with pytest.raises(ValueError, match="requires source_revision"):
+        ModelCard(
+            model_id=ModelId("org/vision"),
+            storage_size=Memory.from_bytes(1024),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            gguf_file="model-Q4_K_M.gguf",
+            vision=VisionCardConfig(
+                projector_file="mmproj-F16.gguf",
+                projector_size=512,
+            ),
+        )
 
 
 def test_pipeline_split_limit_must_be_inside_model() -> None:
@@ -50,14 +117,15 @@ def test_pipeline_split_limit_must_be_inside_model() -> None:
 
 
 @pytest.mark.anyio
-async def test_custom_card_overrides_bundled(
+async def test_custom_card_overrides_curated(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A custom card with a bundled card's model id must win (#652).
+    """A custom card with a curated card's model id must win (#652).
 
     The custom directory exists for operator override; before the fix the
-    first-wins cache silently kept the bundled card, so the operator's card
-    appeared installed while the bundled card actually served.
+    first-wins cache silently kept the curated card, so the operator's card
+    appeared installed while the curated card actually served. A curated
+    card is a signed or installed one; here a non-custom load stands in.
     """
     builtin_dir = tmp_path / "builtin"
     custom_dir = tmp_path / "custom"
@@ -83,7 +151,7 @@ async def test_custom_card_overrides_bundled(
     )
 
     card = model_cards_module._card_cache[ModelId("testorg/override-model")]
-    assert card.is_custom, "the custom card must replace the bundled card"
+    assert card.is_custom, "the custom card must replace the curated card"
     assert card.quantization == "int4"
 
     # Within the builtin pass, first-wins is preserved: reloading the builtin
@@ -95,22 +163,149 @@ async def test_custom_card_overrides_bundled(
         ModelId("testorg/override-model")
     ].is_custom
 
-    # Deleting the override restores the BUNDLED card immediately (PR #655
-    # review): the cache only self-refreshes when empty, so without the
-    # delete-path reload the bundled model would vanish from the catalog
-    # until process restart.
+    # Deleting the override rebuilds the catalog at once. Skulk ships no
+    # cards, so with no signed or installed card for the model nothing takes
+    # the override's place; the next test covers a signed card returning.
     monkeypatch.setattr(
         model_cards_module, "_custom_cards_dir", Path(str(custom_dir))
-    )
-    monkeypatch.setattr(
-        model_cards_module, "_BUILTIN_CARD_DIRS", [Path(str(builtin_dir))]
     )
     assert await model_cards_module.delete_custom_card(
         ModelId("testorg/override-model")
     )
-    restored = model_cards_module._card_cache[ModelId("testorg/override-model")]
-    assert not restored.is_custom, "bundled card must return after delete"
-    assert restored.quantization == "fp16"
+    assert ModelId("testorg/override-model") not in model_cards_module._card_cache
+
+
+@pytest.mark.anyio
+async def test_custom_card_deletion_restores_signed_registry_authority(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting an override cannot resurrect an unlisted bundled card."""
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    custom_path = custom_dir / "testorg--override-model.toml"
+    custom_path.write_text(_MINIMAL_CARD.format(quantization="int4"))
+    registry_card = ModelCard.model_validate(
+        {
+            "model_id": "testorg/override-model",
+            "storage_size": {"in_bytes": 1024},
+            "n_layers": 4,
+            "hidden_size": 64,
+            "supports_tensor": False,
+            "tasks": ["TextGeneration"],
+            "quantization": "registry-fp8",
+            "registry_card_id": f"card_{'a' * 52}",
+            "registry_snapshot_id": "snapshot_test",
+        }
+    )
+    revoked_bundled = registry_card.model_copy(
+        update={
+            "model_id": ModelId("testorg/revoked-bundled"),
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+        }
+    )
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_custom_cards_dir", Path(str(custom_dir)))
+    model_cards_module._card_cache[registry_card.model_id] = registry_card
+    model_cards_module._card_cache[revoked_bundled.model_id] = revoked_bundled
+    await model_cards_module._load_cards_from_dir(
+        Path(str(custom_dir)), is_custom=True
+    )
+
+    async def load_registry() -> bool:
+        for cached_model_id, card in tuple(model_cards_module._card_cache.items()):
+            if not card.is_custom:
+                del model_cards_module._card_cache[cached_model_id]
+        model_cards_module._card_cache[registry_card.model_id] = registry_card
+        return True
+
+    monkeypatch.setattr(model_cards_module, "_load_cards_from_registry", load_registry)
+
+    assert await model_cards_module.delete_custom_card(registry_card.model_id)
+    assert model_cards_module._card_cache[registry_card.model_id] == registry_card
+    assert revoked_bundled.model_id not in model_cards_module._card_cache
+
+
+@pytest.mark.anyio
+async def test_custom_card_deletion_evicts_a_cache_entry_without_a_file(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replicated delete evicts the custom entry even when no file backs it.
+
+    A custom entry survives every rebuild (the registry merge never replaces
+    one), so a node that held it only in memory would serve the deleted card
+    until restart; the delete must evict it and let the rebuild restore the
+    signed card.
+    """
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    registry_card = ModelCard.model_validate(
+        {
+            "model_id": "testorg/override-model",
+            "storage_size": {"in_bytes": 1024},
+            "n_layers": 4,
+            "hidden_size": 64,
+            "supports_tensor": False,
+            "tasks": ["TextGeneration"],
+            "quantization": "registry-fp8",
+            "registry_card_id": f"card_{'a' * 52}",
+            "registry_snapshot_id": "snapshot_test",
+        }
+    )
+    custom_card = registry_card.model_copy(
+        update={
+            "registry_card_id": None,
+            "registry_snapshot_id": None,
+            "quantization": "int4",
+            "is_custom": True,
+        }
+    )
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_custom_cards_dir", Path(str(custom_dir)))
+    model_cards_module._card_cache[custom_card.model_id] = custom_card
+
+    async def load_registry() -> bool:
+        for cached_model_id, card in tuple(model_cards_module._card_cache.items()):
+            if not card.is_custom:
+                del model_cards_module._card_cache[cached_model_id]
+        existing = model_cards_module._card_cache.get(registry_card.model_id)
+        if existing is None or not existing.is_custom:
+            model_cards_module._card_cache[registry_card.model_id] = registry_card
+        return True
+
+    monkeypatch.setattr(model_cards_module, "_load_cards_from_registry", load_registry)
+
+    assert await model_cards_module.delete_custom_card(custom_card.model_id)
+    assert model_cards_module._card_cache[registry_card.model_id] == registry_card
+    # An alias that is not a custom entry is not a deletion.
+    assert not await model_cards_module.delete_custom_card(registry_card.model_id)
+    assert model_cards_module._card_cache[registry_card.model_id] == registry_card
+    # A custom file under another name declares the alias; the rebuild would
+    # read it straight back, so the delete removes it too.
+    await custom_card.save(Path(str(custom_dir / "edited.toml")))
+    model_cards_module._card_cache[custom_card.model_id] = custom_card
+    assert await model_cards_module.delete_custom_card(custom_card.model_id)
+    assert not (custom_dir / "edited.toml").exists()
+    assert model_cards_module._card_cache[registry_card.model_id] == registry_card
+
+
+@pytest.mark.anyio
+async def test_custom_card_deletion_rejects_normalized_alias_collision(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup cannot unlink a file whose embedded alias has another owner."""
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    custom_path = custom_dir / "testorg--override-model.toml"
+    custom_path.write_text(_MINIMAL_CARD.format(quantization="int4"))
+    monkeypatch.setattr(model_cards_module, "_custom_cards_dir", Path(str(custom_dir)))
+
+    with pytest.raises(ValueError, match="different alias"):
+        await model_cards_module.delete_custom_card(
+            ModelId("testorg--override-model")
+        )
+
+    assert custom_path.exists()
 
 
 _STAMPED_CARD = """\
@@ -142,7 +337,7 @@ async def _load_both(
 
 
 @pytest.mark.anyio
-async def test_stale_generated_card_is_superseded_by_bundled(
+async def test_stale_generated_card_is_superseded_by_curated(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A machine-generated card older than the generator loses its override.
@@ -166,7 +361,7 @@ async def test_stale_generated_card_is_superseded_by_bundled(
 
     card = await _load_both(builtin_dir, custom_dir, monkeypatch)
 
-    assert not card.is_custom, "the bundled card must supersede a stale one"
+    assert not card.is_custom, "the curated card must supersede a stale one"
     assert card.quantization == "fp16"
 
 
@@ -196,7 +391,7 @@ async def test_current_generated_card_keeps_override(
 
 
 @pytest.mark.anyio
-async def test_current_generated_card_preserves_bundled_split_constraint(
+async def test_current_generated_card_preserves_curated_split_constraint(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Generated overrides must retain curated architecture invariants."""
@@ -272,44 +467,6 @@ def test_hand_authored_card_keeps_explicit_placement_override() -> None:
 
 
 @pytest.mark.anyio
-async def test_bundled_lookup_ignores_cached_custom_winner(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A repeated add must still find curated constraints beneath the cache."""
-    builtin_dir = tmp_path / "builtin"
-    builtin_dir.mkdir()
-    bundled = ModelCard(
-        model_id=ModelId("testorg/override-model"),
-        storage_size=model_cards_module.Memory(in_bytes=1024),
-        n_layers=4,
-        hidden_size=64,
-        supports_tensor=False,
-        tasks=[model_cards_module.ModelTask.TextGeneration],
-        placement=PlacementCardConfig(max_pipeline_split_layer=2),
-    )
-    await bundled.save(Path(str(builtin_dir / "testorg--override-model.toml")))
-    cached_custom = bundled.model_copy(
-        update={
-            "placement": PlacementCardConfig(),
-            "is_custom": True,
-            "generator_revision": model_cards_module.CARD_GENERATOR_REVISION,
-        }
-    )
-    monkeypatch.setattr(model_cards_module, "_BUILTIN_CARD_DIRS", [Path(str(builtin_dir))])
-    monkeypatch.setattr(
-        model_cards_module,
-        "_card_cache",
-        {ModelId("testorg/override-model"): cached_custom},
-    )
-
-    resolved = await get_bundled_card(ModelId("testorg/override-model"))
-
-    assert resolved is not None
-    assert not resolved.is_custom
-    assert resolved.placement.max_pipeline_split_layer == 2
-
-
-@pytest.mark.anyio
 async def test_stale_generated_card_without_bundled_still_serves(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -378,14 +535,214 @@ def test_vllm_spec_pairing_validator() -> None:
 
 
 @pytest.mark.anyio
-async def test_gemma4_builtin_card_declares_context_length() -> None:
-    """Built-in Gemma 4 cards should publish their context length to the UI."""
-    card_path = (
-        Path(RESOURCES_DIR)
-        / "inference_model_cards"
-        / "mlx-community--gemma-4-26b-a4b-it-4bit.toml"
-    )
-
-    card = await ModelCard.load_from_path(card_path)
+async def test_gemma4_curated_card_declares_context_length() -> None:
+    """Curated Gemma 4 cards should publish their context length to the UI."""
+    card = await load_fixture_card("mlx-community/gemma-4-26b-a4b-it-4bit")
 
     assert card.context_length == 262144
+
+
+def _constrained(model_id: str, split: int | None, source: str | None = None) -> ModelCard:
+    return ModelCard(
+        model_id=ModelId(model_id),
+        source_repository=ModelId(source) if source is not None else None,
+        storage_size=model_cards_module.Memory(in_bytes=1024),
+        n_layers=8,
+        hidden_size=64,
+        supports_tensor=False,
+        tasks=[model_cards_module.ModelTask.TextGeneration],
+        placement=PlacementCardConfig(max_pipeline_split_layer=split),
+    )
+
+
+async def _no_refresh() -> None:
+    return None
+
+
+@pytest.mark.anyio
+async def test_curated_baseline_is_the_signed_card_for_the_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generated card keeps the signed constraint, not only a shipped one.
+
+    The exact signed card wins. Otherwise the signed aliases of the
+    repository (one per quant) share the architecture, and the strictest
+    split limit among them is kept.
+    """
+    repository = "testorg/quantized-GGUF"
+    aliases = {
+        ModelId(f"{repository}@q8"): _constrained(f"{repository}@q8", 3, repository),
+        ModelId(f"{repository}@q4"): _constrained(f"{repository}@q4", 2, repository),
+        ModelId("otherorg/model"): _constrained("otherorg/model", 1),
+    }
+    monkeypatch.setattr(model_cards_module, "_refresh_card_cache_if_due", _no_refresh)
+    monkeypatch.setattr(model_cards_module, "_registry_current_cards", aliases)
+
+    baseline = await model_cards_module.get_curated_baseline_card(ModelId(repository))
+    assert baseline is not None
+    assert baseline.placement.max_pipeline_split_layer == 2
+
+    exact = _constrained(repository, 5)
+    monkeypatch.setattr(
+        model_cards_module,
+        "_registry_current_cards",
+        {**aliases, ModelId(repository): exact},
+    )
+    assert await model_cards_module.get_curated_baseline_card(ModelId(repository)) is exact
+    assert (
+        await model_cards_module.get_curated_baseline_card(ModelId("nobody/unknown"))
+        is None
+    )
+
+
+@pytest.mark.anyio
+async def test_an_empty_catalog_does_not_refresh_on_every_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing installed and no registry, reads do not keep refreshing.
+
+    Emptiness is a legitimate result once a refresh has completed; only a
+    dirty cache, or the registry interval, starts another.
+    """
+    refreshes: list[int] = []
+
+    empty: dict[ModelId, ModelCard] = {}
+
+    async def counting_refresh() -> None:
+        refreshes.append(1)
+        model_cards_module._card_cache_loaded_for = empty
+
+    monkeypatch.setattr(model_cards_module, "_refresh_card_cache", counting_refresh)
+    monkeypatch.setattr(model_cards_module, "_card_cache", empty)
+    monkeypatch.setattr(model_cards_module, "_card_cache_dirty", False)
+    monkeypatch.setattr(model_cards_module, "_card_cache_loaded_for", None)
+    monkeypatch.setattr(model_cards_module, "_registry_enabled", lambda: False)
+
+    for _ in range(3):
+        assert await model_cards_module.get_all_model_cards() == []
+    assert len(refreshes) == 1
+
+    model_cards_module._card_cache_dirty = True
+    await model_cards_module.get_all_model_cards()
+    assert len(refreshes) == 2
+
+
+def test_offline_flag_keeps_the_registry_out_of_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``skulk --offline`` alone keeps the catalog off the network.
+
+    ``SKULK_OFFLINE`` is read once at import; the flag is set after that, so
+    the registry check asks ``offline_mode()`` each time.
+    """
+    from skulk.shared import constants
+
+    monkeypatch.setenv("SKULK_TESTS", "0")
+    monkeypatch.setattr(model_cards_module, "SKULK_MODEL_REGISTRY_ENABLED", True)
+    monkeypatch.setattr(constants, "SKULK_OFFLINE", False)
+    monkeypatch.setattr(constants, "_offline_flag", False)
+    assert model_cards_module._registry_enabled()
+
+    constants.set_offline_mode()
+
+    assert constants.offline_mode()
+    assert not model_cards_module._registry_enabled()
+
+
+@pytest.mark.anyio
+async def test_reloaded_generated_card_keeps_a_signed_alias_limit(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A generated plain-repository card meets its aliases' limit on reload.
+
+    The registry may carry a repository only through quant aliases, so the
+    reload cannot compare exact ids alone.
+    """
+    repository = "testorg/quantized-GGUF"
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    generated = _constrained(repository, None).model_copy(
+        update={
+            "is_custom": True,
+            "generator_revision": model_cards_module.CARD_GENERATOR_REVISION,
+        }
+    )
+    await generated.save(Path(str(custom_dir / "testorg--quantized-GGUF.toml")))
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(
+        model_cards_module,
+        "_registry_current_cards",
+        {
+            ModelId(f"{repository}@q8"): _constrained(f"{repository}@q8", 3, repository),
+            ModelId(f"{repository}@q4"): _constrained(f"{repository}@q4", 2, repository),
+        },
+    )
+
+    await model_cards_module._load_cards_from_dir(Path(str(custom_dir)), is_custom=True)
+
+    loaded = model_cards_module._card_cache[ModelId(repository)]
+    assert loaded.is_custom
+    assert loaded.placement.max_pipeline_split_layer == 2
+
+
+@pytest.mark.anyio
+async def test_curated_baseline_falls_back_to_installed_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the registry cannot be read, installed cards carry the limit.
+
+    They are the signed cards the models were downloaded with, so re-adding
+    an installed repository during an outage keeps its split limit.
+    """
+    from types import SimpleNamespace
+    from typing import cast
+
+    from skulk.store.installed_cards import InstalledCardRecord
+
+    repository = "testorg/quantized-GGUF"
+    installed = {
+        ModelId(f"{repository}@q8"): _constrained(f"{repository}@q8", 3, repository),
+        ModelId(f"{repository}@q4"): _constrained(f"{repository}@q4", 2, repository),
+    }
+    monkeypatch.setattr(model_cards_module, "_refresh_card_cache_if_due", _no_refresh)
+    monkeypatch.setattr(model_cards_module, "_registry_current_cards", {})
+    monkeypatch.setattr(
+        model_cards_module,
+        "_installed_card_cache",
+        {
+            model_id: cast("InstalledCardRecord", cast(object, SimpleNamespace(model_card=card)))
+            for model_id, card in installed.items()
+        },
+    )
+
+    baseline = await model_cards_module.get_curated_baseline_card(ModelId(repository))
+
+    assert baseline is not None
+    assert baseline.placement.max_pipeline_split_layer == 2
+
+
+def test_empty_catalog_names_a_disabled_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled registry is its own cause, with its own remedy."""
+    from skulk.shared import constants
+
+    warnings: list[str] = []
+
+    class _Recorder:
+        def warning(self, message: str) -> None:
+            warnings.append(message)
+
+    monkeypatch.setattr(model_cards_module, "logger", _Recorder())
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_empty_catalog_explained", False)
+    monkeypatch.setattr(model_cards_module, "SKULK_MODEL_REGISTRY_ENABLED", False)
+    monkeypatch.setattr(constants, "SKULK_OFFLINE", False)
+    monkeypatch.setattr(constants, "_offline_flag", False)
+
+    model_cards_module._explain_an_empty_catalog(registry_loaded=False)
+
+    assert len(warnings) == 1
+    assert "SKULK_MODEL_REGISTRY_ENABLED=false" in warnings[0]
+    assert "Enable the registry" in warnings[0]
+

@@ -7,7 +7,7 @@ const meta: Meta<typeof HuggingFaceResultItem> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 500, background: '#111', padding: 8, borderRadius: 8 }}>
+      <div style={{ width: 'min(500px, calc(100vw - 48px))', padding: 8, borderRadius: 8 }}>
         <Story />
       </div>
     ),

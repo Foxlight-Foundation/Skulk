@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Final, Literal
+from typing import AbstractSet, Final, Literal
 
 from loguru import logger
 
@@ -38,7 +38,10 @@ def _is_executable_file(path: str) -> bool:
     """Whether ``path`` names an existing executable file."""
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
-EngineType = Literal["mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm"]
+EngineType = Literal[
+    "mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm", "test_video", "comfy",
+    "audio_cpp",
+]
 """Inference runtime that loads and runs a model; selects the worker runner.
 
 ``llama_server`` is a *served-backend* engine: instead of loading the model
@@ -65,6 +68,19 @@ in-process engines can beat it for one request). GPU-only in scope: ``cuda``
 ``mlx-audio`` package. It is kept separate from ``mlx`` because TTS/STT model
 loading, generation, and future realtime session contracts are not the same as
 the text/vision MLX runner.
+
+``test_video`` is the deterministic test video engine: it renders synthetic
+audio-video clips in-process so the video substrate can be exercised end to
+end without a GPU. A node advertises it only when ``SKULK_TEST_VIDEO_ENGINE``
+is set, and it serves only the bundled ``foxlight/test-video`` card.
+
+``comfy`` is the served audio-video engine: the worker launches a pinned
+ComfyUI checkout headless from its own managed virtual environment and
+drives it over its HTTP API with the graph templates a video card declares.
+GPU-only (``cuda`` today, ``rocm`` once the Strix lane is qualified). The
+node provisions the pinned checkout and torch wheel set on demand when
+video models are enabled, or an operator points ``SKULK_COMFY_BIN`` and
+``SKULK_COMFY_ROOT`` at an existing install.
 """
 
 ComputeBackend = Literal["metal", "vulkan", "rocm", "cuda", "cpu"]
@@ -78,6 +94,9 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "llama_cpp",
     "llama_server",
     "vllm",
+    "test_video",
+    "comfy",
+    "audio_cpp",
 )
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
@@ -127,6 +146,82 @@ VLLM_BACKENDS_ENV: Final = "SKULK_VLLM_BACKENDS"
 # vLLM compute backends we support advertising. GPU-only: NVIDIA CUDA and AMD
 # CDNA ROCm. vLLM's Vulkan/Metal/CPU paths are out of scope for placement.
 _VLLM_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")
+
+# Advertise the deterministic test video engine (``test_video`` /
+# ``test_video-cpu``) when set to a truthy value. The engine needs no hardware
+# and no weights; it exists to drive the video substrate in tests and on nodes
+# that cannot run a real video engine. Never set on a production node.
+TEST_VIDEO_ENGINE_ENV: Final = "SKULK_TEST_VIDEO_ENGINE"
+
+# Interpreter of the ComfyUI environment the ``comfy`` video engine launches
+# (``<venv>/bin/python``), and the checkout that holds ``main.py``. Set both to
+# use a hand-built ComfyUI; absent, a node with video models enabled provisions
+# the pinned checkout and torch wheel set itself (Linux, NVIDIA today).
+COMFY_BIN_ENV: Final = "SKULK_COMFY_BIN"
+COMFY_ROOT_ENV: Final = "SKULK_COMFY_ROOT"
+
+# Compute backends the ComfyUI install targets (comma-separated). GPU-only, so
+# only ``cuda`` / ``rocm`` are honored; unset falls back to the same
+# declaration chain vLLM uses, then to the observed GPU vendor.
+COMFY_BACKENDS_ENV: Final = "SKULK_COMFY_BACKENDS"
+
+# audio.cpp is absent from the base environment. Only a verified installed
+# executable is eligible for placement; the on-demand package preparation path
+# sets this variable after it has checked the immutable wheel and binary.
+AUDIO_CPP_BIN_ENV: Final = "SKULK_AUDIO_CPP_BIN"
+AUDIO_CPP_VULKAN_BIN_ENV: Final = "SKULK_AUDIO_CPP_VULKAN_BIN"
+AUDIO_CPP_CUDA_BIN_ENV: Final = "SKULK_AUDIO_CPP_CUDA_BIN"
+AUDIO_CPP_SPECS_DIR_ENV: Final = "SKULK_AUDIO_CPP_SPECS_DIR"
+AUDIO_CPP_BACKENDS_ENV: Final = "SKULK_AUDIO_CPP_BACKENDS"
+GB10_AUDIO_CPP_CUDA_BUILD: Final = (
+    "audio.cpp@sha256:21db727c1f2ec030b93cabffbd09e3c522ceb77fa2ae1092cd96a0f4b0120c9c"
+)
+"""Exact SM 12.1 package build; broad CUDA claims cannot authorize this binary."""
+L40S_AUDIO_CPP_CUDA_BUILD: Final = (
+    "audio.cpp@sha256:05f719a638a5152944c00fc724db802ffcc9c99d90a9e772e850a6c92f82ba80"
+)
+"""Exact amd64 SM 8.9 package build; model support remains signed registry truth."""
+AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE: Final[dict[str, str]] = {
+    "x86_64": "nvidia:sm-8.9",
+    "amd64": "nvidia:sm-8.9",
+    "aarch64": "nvidia:sm-12.1",
+    "arm64": "nvidia:sm-12.1",
+}
+"""Compiled CUDA targets, requiring exact live and signed hardware evidence."""
+AUDIO_CPP_CUDA_TARGETS_BY_BUILD: Final[dict[str, str]] = {
+    GB10_AUDIO_CPP_CUDA_BUILD: "nvidia:sm-12.1",
+    L40S_AUDIO_CPP_CUDA_BUILD: "nvidia:sm-8.9",
+}
+"""Exact native builds whose compiled target cannot be widened by broad claims."""
+AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE: Final[dict[str, str]] = {
+    "x86_64": L40S_AUDIO_CPP_CUDA_BUILD,
+    "amd64": L40S_AUDIO_CPP_CUDA_BUILD,
+    "aarch64": GB10_AUDIO_CPP_CUDA_BUILD,
+    "arm64": GB10_AUDIO_CPP_CUDA_BUILD,
+}
+"""Managed executable selected by each architecture's immutable CUDA wheel."""
+
+
+def audio_cpp_cuda_hardware_matches(
+    required_class: str, hardware_classes: AbstractSet[str]
+) -> bool:
+    """Check one observed NVIDIA device against a managed wheel's compute class.
+
+    The sidecar does not select a particular accelerator. Multiple devices,
+    including other vendors, or unknown SM classes cannot bind its execution and
+    memory pool to a device. Linux telemetry may prefer an AMD pool on a mixed
+    host, so the presence of one matching NVIDIA device is insufficient.
+    ``required_class`` names the wheel's compiled target; ``hardware_classes``
+    contains live inventory evidence. Return whether that evidence is sufficient.
+    """
+    return not (hardware_classes & {"amd", "apple", "nvidia:multiple-devices"}) and {
+        hardware_class
+        for hardware_class in hardware_classes
+        if hardware_class.startswith("nvidia:sm-")
+    } == {required_class}
+
+# ComfyUI compute backends Skulk advertises: NVIDIA CUDA and AMD ROCm.
+_COMFY_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")
 
 # Path to the ``ggml-rpc-server`` binary an RPC memory-donor runner launches
 # (#328, multi-node GGUF pooling). Optional: when unset, the donor looks for
@@ -211,15 +306,31 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
 # [vision] section declares what the MODEL can do (its projector artifact
 # exists and is grounded); this table declares which of our runner
 # implementations can actually serve it. The served ``llama_server`` engine is
-# text-only until its runner stages and passes the mmproj projector (upstream
-# llama-server supports --mmproj; the gap is ours). Keeping the limitation
-# here rather than on cards means a platform capability landing lights up
-# every affected card at once, with no card edits, and cards stay a clean
-# description of the model.
+# admitted conditionally below only when a card pins one exact projector; legacy
+# cards stay on the in-process compatibility path. Keeping the limitation here
+# rather than deleting model capability from cards preserves model/platform
+# truth and makes newly compiled cards light up without a broad card sweep.
 _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
     {"mlx", "llama_cpp"}
 )
 _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
+_MUSIC_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"audio_cpp"})
+AUDIO_CPP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
+    {"audio_cpp-cpu", "audio_cpp-metal", "audio_cpp-vulkan", "audio_cpp-cuda", "audio_cpp-rocm"}
+)
+
+# Engines whose runner binding cannot LOAD a family the served sibling serves
+# fine. The in-process ``llama_cpp`` engine runs whatever llama.cpp build the
+# pinned llama-cpp-python binding vendors, and that build trails the served
+# engine's pin by months; a family that landed upstream in between (Muse
+# Glimmer, merged 2026-08-10, first shipped in b10353, while llama-cpp-python
+# 0.3.30 vendors a 2026-06-16 build) loads through ``llama_server`` only. The
+# call sites key the gate on the card's family identity (family or model
+# id, which a card cannot override the way it can override its parser), so
+# registry, bundled, and custom cards all hit the same gate; the table of
+# affected families is the resolver's, this is the platform consequence. Drop the gate
+# for a family once the binding advances past its first supporting build.
+_FAMILY_GATED_ENGINES: Final[frozenset[EngineType]] = frozenset({"llama_cpp"})
 
 
 def platform_compatible_backends(
@@ -227,6 +338,11 @@ def platform_compatible_backends(
     *,
     card_serves_vision: bool,
     card_serves_speech: bool = False,
+    card_serves_music: bool = False,
+    card_has_pinned_projector: bool = False,
+    card_supports_tool_calling: bool = False,
+    card_vllm_tool_call_parser: str | None = None,
+    card_family_predates_in_process_binding: bool = False,
 ) -> frozenset[str]:
     """Filter a card's declared backends down to what this platform can serve.
 
@@ -244,22 +360,50 @@ def platform_compatible_backends(
         compatible_backends: the card's declared backend tags.
         card_serves_vision: whether the card declares a vision capability.
         card_serves_speech: whether the card declares a speech capability.
+        card_has_pinned_projector: whether a vision card identifies one exact
+            immutable projector that the served runner can validate and load.
+        card_supports_tool_calling: whether the model exposes tool calling.
+        card_vllm_tool_call_parser: exact vLLM parser pinned by the card. vLLM
+            tool requests fail closed when this is absent, so those cards are
+            not platform-compatible with vLLM for resident tool use.
+        card_family_predates_in_process_binding: whether the card resolves to
+            a family the in-process llama.cpp binding cannot load yet (see
+            ``_FAMILY_GATED_ENGINES``); those cards keep only their served
+            llama.cpp backends.
 
     Returns:
         The subset of tags whose engine can serve everything the card declares.
     """
     filtered = compatible_backends
     if card_serves_vision:
+        vision_engines = (
+            _VISION_SERVING_ENGINES | frozenset({"llama_server"})
+            if card_has_pinned_projector
+            else _VISION_SERVING_ENGINES
+        )
         filtered = frozenset(
             tag
             for tag in filtered
-            if (engine := engine_of(tag)) is None or engine in _VISION_SERVING_ENGINES
+            if (engine := engine_of(tag)) is None or engine in vision_engines
         )
     if card_serves_speech:
         filtered = frozenset(
             tag
             for tag in filtered
             if (engine := engine_of(tag)) is None or engine in _SPEECH_SERVING_ENGINES
+        )
+    if card_serves_music:
+        filtered = frozenset(
+            tag
+            for tag in filtered
+            if (engine := engine_of(tag)) is None
+            or (engine in _MUSIC_SERVING_ENGINES and tag in AUDIO_CPP_COMPUTE_BACKENDS)
+        )
+    if card_supports_tool_calling and card_vllm_tool_call_parser is None:
+        filtered = frozenset(tag for tag in filtered if engine_of(tag) != "vllm")
+    if card_family_predates_in_process_binding:
+        filtered = frozenset(
+            tag for tag in filtered if engine_of(tag) not in _FAMILY_GATED_ENGINES
         )
     return filtered
 

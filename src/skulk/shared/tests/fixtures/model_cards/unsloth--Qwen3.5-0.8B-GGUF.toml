@@ -1,0 +1,44 @@
+# Qwen3.5-0.8B (dense) GGUF Q4_K_M, quantized from the instruct model. The
+# intelligent-fabric steward's universal-floor artifact: it serves on the
+# CPU-only llama.cpp lanes, so every fleet, including one with no GPU at
+# all, can place a steward (benched 0.75 strict on the hard tier at ~52 s
+# per episode on pure CPU; the 4B brain is preferred wherever it fits).
+# Architecture facts from the repo config's text_config (arch qwen3_5:
+# 24 layers, hidden 1024, 2 KV heads, 262144 ctx). Text-only through
+# Skulk for the same served-lane reasons as the 4B GGUF card.
+# supports_tensor = false: single-node on either GGUF engine.
+model_id = "unsloth/Qwen3.5-0.8B-GGUF"
+n_layers = 24
+hidden_size = 1024
+num_key_value_heads = 2
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "Q4_K_M"
+base_model = "Qwen3.5 0.8B"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+gguf_file = "Qwen3.5-0.8B-Q4_K_M.gguf"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[placement]
+# The floor card lists every GGUF lane, including the in-process CUDA and
+# ROCm tags the 4B card omits: a node with llama-cpp-python but no
+# llama-server binary advertises only llama_cpp-<compute>, and the whole
+# point of this card is that no node class is left without a steward
+# candidate.
+compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu", "llama_cpp-vulkan", "llama_cpp-cuda", "llama_cpp-rocm", "llama_cpp-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_cpp-vulkan", "llama_cpp-cuda", "llama_cpp-rocm", "llama_server-cpu", "llama_cpp-cpu"]
+
+[storage_size]
+in_bytes = 532517120

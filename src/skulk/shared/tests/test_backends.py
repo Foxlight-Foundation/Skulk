@@ -159,6 +159,11 @@ def test_platform_compatible_backends_gates_vision_off_served() -> None:
     assert (
         platform_compatible_backends(declared, card_serves_vision=False) == declared
     )
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=True,
+        card_has_pinned_projector=True,
+    ) == declared
 
 
 def test_vision_card_preferring_llama_server_still_resolves_to_llama_cpp() -> None:
@@ -220,6 +225,28 @@ def test_platform_compatible_backends_gates_speech_to_mlx_audio() -> None:
     )
 
 
+def test_platform_compatible_backends_requires_vllm_tool_parser() -> None:
+    """Tool-using cards cannot land on a vLLM server without its parser pair."""
+    declared = frozenset({"mlx", "vllm-cuda", "vllm-rocm"})
+
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_supports_tool_calling=True,
+    ) == frozenset({"mlx"})
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_supports_tool_calling=True,
+        card_vllm_tool_call_parser="qwen3_xml",
+    ) == declared
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_supports_tool_calling=False,
+    ) == declared
+
+
 def test_resolve_node_backend_none_when_no_intersection() -> None:
     assert (
         resolve_node_backend(
@@ -245,3 +272,25 @@ def test_engine_supports_multi_node() -> None:
     assert engine_supports_multi_node("mlx") is True
     assert engine_supports_multi_node("mlx_audio") is False
     assert engine_supports_multi_node("llama_cpp") is False
+
+
+def test_platform_compatible_backends_gates_new_families_off_in_process_llama_cpp() -> None:
+    """A family the pinned binding predates keeps only its served llama.cpp lanes."""
+    declared = frozenset(
+        {
+            "llama_cpp-vulkan",
+            "llama_cpp-cuda",
+            "llama_cpp-cpu",
+            "llama_server-vulkan",
+            "llama_server-cuda",
+            "mlx",
+        }
+    )
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_family_predates_in_process_binding=True,
+    ) == frozenset({"llama_server-vulkan", "llama_server-cuda", "mlx"})
+    assert (
+        platform_compatible_backends(declared, card_serves_vision=False) == declared
+    )

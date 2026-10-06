@@ -19,9 +19,14 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from typing import Final
 
-from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.models.llama_server_settings import (
+    LLAMA_SERVER_DEFAULT_DRAFT_DEPTH,
+    LlamaServerSettings,
+)
+from skulk.shared.models.model_cards import ModelCard, MusicModelFamily
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import AcceleratorMetrics, MemoryUsage
 from skulk.shared.types.worker.runners import ShardAssignments
 from skulk.shared.types.worker.shards import (
     CfgShardMetadata,
@@ -72,6 +77,38 @@ the OS + worker + download staging from being squeezed out of the shared pool.
 16 GB is generous for a headless inference node; the worker's local pre-spawn
 guard backstops it with current free memory."""
 
+
+def is_gb10_accelerator(accelerator: AcceleratorMetrics) -> bool:
+    """Identify the GB10 CUDA device whose NVML memory query is unsupported."""
+    return (
+        accelerator.vendor == "nvidia"
+        and accelerator.name.startswith("NVIDIA GB10")
+        and accelerator.compute_capability == "12.1"
+    )
+
+
+def gb10_unified_memory_pool(
+    accelerator: AcceleratorMetrics, memory: MemoryUsage | None
+) -> Memory | None:
+    """Return GB10 usable shared GPU memory when both live pools are measured."""
+    total = accelerator.vram_total_bytes
+    used = accelerator.vram_used_bytes
+    if (
+        not is_gb10_accelerator(accelerator)
+        or total is None
+        or used is None
+        or memory is None
+        or not 9 * memory.ram_total.in_bytes <= 10 * total <= 11 * memory.ram_total.in_bytes
+    ):
+        return None
+    return Memory.from_bytes(
+        min(
+            max(0, total - used),
+            max(0, memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
+            gpu_working_set_ceiling(memory.ram_total).in_bytes,
+        )
+    )
+
 LLAMA_CPP_MEMORY_OVERHEAD_FACTOR: float = 1.10
 """``MEMORY_OVERHEAD_FACTOR`` for the llama.cpp (GGUF) engine. The 1.30 default
 covers MLX's buffer cache + Python/MLX runtime, which the C++ llama.cpp runtime
@@ -84,6 +121,30 @@ KV_CONTEXT_BUDGET_TOKENS: int = 8192
 Reserving a model's advertised max (e.g. GLM-4.7-Flash: 131072) would over-
 refuse by tens of GB. Planning assumption only; exposing it as an operator/UI
 knob is tracked follow-up work."""
+
+LOAD_FIT_TOLERANCE: Final = 0.10
+"""Fraction by which a shard's estimated footprint may exceed live usable memory
+before the worker's pre-load guard refuses (#383): the footprint is padded and
+the master admits on a gossiped figure that can sit a little above the
+worker's live reading. The live-RAM served window leaves the same fraction of
+headroom, so a window sized to the moment's free memory cannot use the
+tolerance to start with a KV allocation larger than what is actually free."""
+
+SERVED_CONTEXT_DEFAULT_TOKENS: Final = 32768
+"""Context window an engine that reserves its KV cache at load gets when the
+caller names none (llama-server, in-process llama.cpp, vLLM). Those engines
+commit the whole window's memory up front whether or not a request uses it,
+so sizing them to the card's maximum (commonly 262144) reserves memory most
+workloads never touch. Operators change it fleet-wide in Settings
+(``inference.served_context_tokens``) or per placement; MLX grows its cache
+per request and keeps the full memory fit."""
+
+MIN_REQUESTED_CONTEXT_TOKENS: Final = 256
+"""Smallest context window a caller or the fleet setting may request."""
+
+MAX_REQUESTED_CONTEXT_TOKENS: Final = 1_048_576
+"""Largest context window a caller or the fleet setting may request; the
+placement's memory fit and the card's maximum still bound what is stamped."""
 
 KV_HEAD_DIM_FALLBACK: int = 128
 """Attention head dimension assumed when a model card omits it (cards do not
@@ -104,6 +165,21 @@ architectures whose sliding layers use wider K/V tensors than their global
 layers. Keep the runner tied to this constant so a dependency default cannot
 silently invalidate the context window Skulk admitted.
 """
+
+
+_ACE_STEP_CPU_WORKSPACE: Final = Memory.from_bytes(10 * 1024**3)
+"""Transient CPU workspace reserved in addition to ACE's weight estimate.
+
+The qualified BF16 artifact contains 10.1 GB of weights, but its eight-thread
+10–60-second generation soak reached 18.7 GB RSS. A text-GGUF multiplier alone
+cannot cover these buffers. Ten GiB leaves headroom above the measured peak.
+"""
+_ACE_STEP_GPU_WORKSPACE: Final = Memory.from_bytes(10 * 1024**3)
+"""Reserve above weights covering CUDA/Vulkan peaks of 17.93/15.33 GiB."""
+_MINIMAX_GPU_WORKSPACE: Final = Memory.from_bytes(2 * 1024**3)
+"""Reserve above weights covering CUDA/Vulkan peaks of 9.15/8.35 GiB."""
+_MINIMAX_METAL_WORKSPACE: Final = Memory.from_bytes(5 * 1024**3)
+"""Reserve above weights covering the qualified 11.83 GiB Metal process peak."""
 
 
 def memory_overhead_factor(model_card: ModelCard) -> float:
@@ -127,6 +203,10 @@ def estimate_kv_cache_bytes(
 ) -> Memory:
     """Estimate KV-cache bytes for ``n_layers`` layers at ``context_tokens``.
 
+    A GGUF cache geometry uses its actual attention layers and widths, scaled
+    by the requested layer fraction. It does not fold recurrent state into KV.
+    Without that geometry the legacy approximation below remains in use.
+
     The cache holds a key and a value vector per token, per layer, each sized
     ``num_key_value_heads * head_dim``::
 
@@ -137,24 +217,58 @@ def estimate_kv_cache_bytes(
     non-positive — the weight-overhead factor must absorb the slack then.
     ``head_dim`` falls back to ``KV_HEAD_DIM_FALLBACK`` (cards omit it).
     """
-    kv_heads = model_card.num_key_value_heads
-    if kv_heads is None or context_tokens <= 0 or n_layers <= 0:
+    if context_tokens <= 0 or n_layers <= 0:
         return Memory()
     kv_bytes = (
-        2 * n_layers * context_tokens * kv_heads * KV_HEAD_DIM_FALLBACK * KV_DTYPE_BYTES
+        per_token_kv_bytes(model_card)
+        * n_layers
+        * context_tokens
+        // model_card.n_layers
     )
     return Memory.from_bytes(kv_bytes)
+
+
+def estimate_music_workspace(
+    model_card: ModelCard, *, resolved_backend: str | None,
+) -> Memory:
+    """Return transient workspace charged for the selected music engine lane.
+
+    Qualified CPU, CUDA, Vulkan and Metal lanes reserve measured working buffers
+    separately from weight bytes for the initial ACE-Step and MiniMax artifacts.
+    Other lanes and unresolved advisory estimates receive no additional reserve.
+    This pure estimate is
+    shared by placement, API admission and the worker's local load guard.
+    """
+    if model_card.music is None:
+        return Memory()
+    family = model_card.music.family
+    if family == MusicModelFamily.AceStep15 and resolved_backend == "audio_cpp-cpu":
+        return _ACE_STEP_CPU_WORKSPACE
+    if resolved_backend in {"audio_cpp-cuda", "audio_cpp-vulkan"}:
+        # Native GPU qualification measures transient buffers as well as weights.
+        # Weight-only estimates admitted smaller GPUs that cannot serve them.
+        if family == MusicModelFamily.AceStep15:
+            return _ACE_STEP_GPU_WORKSPACE
+        if family == MusicModelFamily.MiniMaxMusic3:
+            return _MINIMAX_GPU_WORKSPACE
+    if family == MusicModelFamily.MiniMaxMusic3 and resolved_backend == "audio_cpp-metal":
+        return _MINIMAX_METAL_WORKSPACE
+    return Memory()
 
 
 def estimate_shard_footprint(
     model_card: ModelCard,
     shard_fraction: float,
     context_budget: int = KV_CONTEXT_BUDGET_TOKENS,
+    *,
+    resolved_backend: str | None = None,
+    llama_server_settings: LlamaServerSettings | None = None,
 ) -> Memory:
     """Estimate resident memory for a shard holding ``shard_fraction`` of a model.
 
-    ``weights_share * MEMORY_OVERHEAD_FACTOR + kv_share + MEMORY_OVERHEAD_FLOOR``
-    where weights and KV both scale by ``shard_fraction``. That single fraction
+    ``weights_share * overhead + kv_share + recurrent_share + overhead_floor + music_workspace``
+    where weights and KV both scale by ``shard_fraction``. Music is single-host
+    and reserves its complete transient workspace. That single fraction
     works for every sharding because both quantities are linear in it:
 
     * Pipeline: ``shard_fraction = layers_held / n_layers`` (a node holds a
@@ -163,17 +277,46 @@ def estimate_shard_footprint(
       ``1/world_size`` of each weight matrix and of the KV heads).
 
     ``shard_fraction == 1.0`` gives the whole-model footprint (single node).
+    ``resolved_backend`` and ``llama_server_settings`` select the actual engine's
+    slot and speculation costs; omitted settings use the shipped server defaults
+    for advisory planning. Persisted placements supply their stamped settings.
     """
     if shard_fraction <= 0.0:
         return Memory()
     weights_share = model_card.storage_size * shard_fraction
-    full_kv = estimate_kv_cache_bytes(model_card, model_card.n_layers, context_budget)
+    full_kv = Memory.from_bytes(
+        per_token_kv_bytes(
+            model_card,
+            resolved_backend=resolved_backend,
+            llama_server_settings=llama_server_settings,
+        )
+        * max(0, context_budget)
+    )
     kv_share = full_kv * shard_fraction
-    return (
+    footprint = (
         weights_share * memory_overhead_factor(model_card)
         + kv_share
+        + estimate_recurrent_cache_bytes(
+            model_card,
+            resolved_backend=resolved_backend,
+            llama_server_settings=llama_server_settings,
+        )
+        * shard_fraction
         + MEMORY_OVERHEAD_FLOOR
+        + estimate_music_workspace(model_card, resolved_backend=resolved_backend)
     )
+    # A single-node GGUF vision runner owns the complete projector in addition
+    # to the base weights. RPC donors bypass this shard guard; the RPC driver
+    # reservation is handled explicitly by placement because llama.cpp chooses
+    # the pooled weight split itself.
+    if (
+        shard_fraction >= 1.0
+        and model_card.gguf_file is not None
+        and model_card.vision is not None
+        and model_card.vision.projector_size is not None
+    ):
+        footprint += Memory.from_bytes(model_card.vision.projector_size)
+    return footprint
 
 
 def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
@@ -237,30 +380,122 @@ def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
     )
 
 
+def vulkan_fills_carve_first(resolved_backend: str | None) -> bool:
+    """Whether a shard's engine allocates through Vulkan.
+
+    On a unified-memory AMD APU the Vulkan driver places device-local memory,
+    weights and a fixed KV window alike, in the BIOS VRAM carve and spills to
+    GTT (host RAM) only past it; a HIP engine on the same APU allocates from
+    GTT. Measured on Strix Halo: a llama-server-vulkan steward with its fixed
+    window loaded entirely into the carve and left host RAM untouched.
+    """
+    return resolved_backend is not None and resolved_backend.endswith("-vulkan")
+
+
 def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
     """Whether a resolved backend allocates weights + KV from DISCRETE GPU VRAM.
 
     A GPU compute tag (``llama_cpp-cuda`` / ``-rocm``, ``llama_server-cuda`` /
-    ``-rocm``, ``vllm-cuda`` / ``-rocm``) offloads to VRAM. A ``-cpu`` tag OR a
-    bare engine tag (no compute suffix) does not offload to the GPU and allocates
-    from system RAM, so it does NOT. ``None`` (unresolved) is treated as not-VRAM:
-    we cannot confirm VRAM offload, so the caller stays conservative.
+    ``-rocm``, ``vllm-cuda`` / ``-rocm``, ``comfy-cuda`` / ``-rocm``, or
+    ``audio_cpp-cuda`` / ``-rocm`` / ``-vulkan``) offloads to dedicated VRAM.
+    Audio.cpp Metal uses Apple unified memory. A ``-cpu`` tag OR a bare engine tag (no compute suffix) does not offload
+    to the GPU and allocates from system RAM, so it does NOT. ``None``
+    (unresolved) is treated as not-VRAM: we cannot confirm VRAM offload, so the
+    caller stays conservative.
     """
     if resolved_backend is None:
         return False
+    if resolved_backend == "comfy":
+        # The video engine has no CPU mode: a card that names only the bare
+        # engine tag still lands its model on the GPU.
+        return True
+    if resolved_backend == "audio_cpp-metal":
+        return False
     return resolved_backend.startswith(
-        ("llama_cpp-", "llama_server-", "vllm-")
+        ("llama_cpp-", "llama_server-", "vllm-", "comfy-", "audio_cpp-")
     ) and not resolved_backend.endswith("-cpu")
 
 
-def per_token_kv_bytes(model_card: ModelCard) -> int:
+def _served_speculative_mode(
+    model_card: ModelCard,
+    resolved_backend: str | None,
+    settings: LlamaServerSettings,
+) -> str | None:
+    if (
+        not settings.speculation_enabled
+        or (
+            resolved_backend is not None
+            and not resolved_backend.startswith("llama_server")
+        )
+        or model_card.runtime is None
+    ):
+        return None
+    return model_card.runtime.served_spec_type
+
+
+def estimate_recurrent_cache_bytes(
+    model_card: ModelCard,
+    *,
+    resolved_backend: str | None = None,
+    llama_server_settings: LlamaServerSettings | None = None,
+) -> Memory:
+    """Return fixed FP32 recurrent state for the configured llama.cpp instance.
+
+    Unknown geometry retains the legacy approximation; it must not be described
+    as a proven zero-cost recurrent model. Non-llama engines use their own memory
+    contract. Unresolved planning uses shipped llama-server settings.
+    """
+    geometry = model_card.gguf_cache_geometry
+    if geometry is None or (
+        resolved_backend is not None
+        and not resolved_backend.startswith(("llama_cpp", "llama_server"))
+    ):
+        return Memory()
+    settings = llama_server_settings or LlamaServerSettings()
+    mode = _served_speculative_mode(model_card, resolved_backend, settings)
+    depth = (
+        (model_card.runtime.served_spec_n_max or LLAMA_SERVER_DEFAULT_DRAFT_DEPTH)
+        if mode in ("draft_mtp", "draft_eagle3", "draft_dflash")
+        and model_card.runtime is not None
+        else 0
+    )
+    slots = (
+        1
+        if resolved_backend is not None and resolved_backend.startswith("llama_cpp")
+        else settings.effective_slots(
+            speculative_vision=model_card.vision is not None
+            and mode not in (None, "none")
+        )
+    )
+    return Memory.from_bytes(
+        geometry.recurrent_bytes(parallel_slots=slots, rollback_depth=depth)
+    )
+
+
+def per_token_kv_bytes(
+    model_card: ModelCard,
+    *,
+    resolved_backend: str | None = None,
+    llama_server_settings: LlamaServerSettings | None = None,
+) -> int:
     """Whole-model KV-cache bytes consumed by ONE token of context.
 
-    Covers all layers at fp16 (``KV_DTYPE_BYTES``); a node holding
+    Uses artifact attention geometry when present, including embedded MTP only
+    for a speculative served instance. Otherwise covers all layers at fp16
+    (``KV_DTYPE_BYTES``); a node holding
     ``shard_fraction`` of the model pays ``per_token_kv_bytes * shard_fraction``
     per token. Returns 0 when the card lacks ``num_key_value_heads`` —
     callers must treat 0 as "KV cost unknown, cannot enforce a memory ceiling".
     """
+    geometry = model_card.gguf_cache_geometry
+    if geometry is not None and (
+        resolved_backend is None
+        or resolved_backend.startswith(("llama_cpp", "llama_server"))
+    ):
+        mode = _served_speculative_mode(
+            model_card, resolved_backend, llama_server_settings or LlamaServerSettings()
+        )
+        return geometry.attention_bytes_per_token(embedded_mtp=mode == "draft_mtp")
     kv_heads = model_card.num_key_value_heads
     if kv_heads is None or model_card.n_layers <= 0:
         return 0
@@ -293,13 +528,91 @@ def shard_fraction_of_model(shard: ShardMetadata) -> float | None:
             return None
 
 
+def _system_ram_window_tokens(
+    shard_assignments: ShardAssignments,
+    model_card: ModelCard,
+    node_ram_totals: Mapping[NodeId, Memory],
+    node_ram_available: Mapping[NodeId, Memory],
+    fixed_memory_by_node: Mapping[NodeId, Memory],
+) -> int:
+    """Served window for a fixed-window engine whose KV lands in system RAM.
+
+    The window is committed at load against what the node has free then, so
+    it is sized from the live ``ram_available`` the master admitted the
+    placement against, capped at the node's GPU working-set ceiling (the same
+    pool the worker's own pre-spawn guard checks on such a node), less the
+    guard's ``LOAD_FIT_TOLERANCE`` as headroom, after the shard's weights and
+    overhead. The smallest hosting node bounds the
+    instance. It is never below ``KV_CONTEXT_BUDGET_TOKENS``: admission
+    already guaranteed that much KV fits, so a live reading lower than the
+    floor cannot shrink the window the placement was admitted for. A missing
+    live figure or an unsizeable shard on any hosting node keeps the floor,
+    the safe window when nothing better is known.
+    """
+    window: int | None = None
+    for node_id, runner_id in shard_assignments.node_to_runner.items():
+        ram_total = node_ram_totals.get(node_id)
+        ram_available = node_ram_available.get(node_id)
+        if ram_total is None or ram_available is None:
+            return KV_CONTEXT_BUDGET_TOKENS
+        node_tokens = _node_window_tokens(
+            model_card,
+            shard_assignments.runner_to_shard[runner_id],
+            min(ram_available, gpu_working_set_ceiling(ram_total))
+            * (1.0 - LOAD_FIT_TOLERANCE),
+            fixed_memory_by_node.get(node_id, Memory()),
+        )
+        if node_tokens is None:
+            return KV_CONTEXT_BUDGET_TOKENS
+        window = node_tokens if window is None else min(window, node_tokens)
+    if window is None:
+        return KV_CONTEXT_BUDGET_TOKENS
+    return max(KV_CONTEXT_BUDGET_TOKENS, window)
+
+
+def _node_window_tokens(
+    model_card: ModelCard,
+    shard: ShardMetadata,
+    working_set: Memory,
+    fixed_memory: Memory,
+) -> int | None:
+    """Tokens of KV that fit ``working_set`` after the shard's weights and overhead.
+
+    ``None`` when the shard's share of the model or its per-token KV cost is
+    unknown, so the caller cannot size a window at all.
+    """
+    whole_model_token_bytes = per_token_kv_bytes(
+        model_card,
+        resolved_backend=shard.resolved_backend,
+        llama_server_settings=shard.llama_server_settings,
+    )
+    fraction = shard_fraction_of_model(shard)
+    if fraction is None or fraction <= 0.0 or whole_model_token_bytes <= 0:
+        return None
+    kv_budget = (
+        working_set
+        - model_card.storage_size * fraction * memory_overhead_factor(model_card)
+        - MEMORY_OVERHEAD_FLOOR
+        - estimate_recurrent_cache_bytes(
+            model_card,
+            resolved_backend=shard.resolved_backend,
+            llama_server_settings=shard.llama_server_settings,
+        )
+        * fraction
+        - fixed_memory
+    )
+    return max(0, int(kv_budget.in_bytes / (whole_model_token_bytes * fraction)))
+
+
 def instance_context_token_limit(
     shard_assignments: ShardAssignments,
     node_ram_totals: Mapping[NodeId, Memory],
     node_vram: Mapping[NodeId, Memory] | None = None,
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
+    fixed_memory_by_node: Mapping[NodeId, Memory] | None = None,
+    node_ram_available: Mapping[NodeId, Memory] | None = None,
 ) -> int | None:
-    """Deterministic context-token ceiling for one placed instance.
+    """Context-token ceiling for one placed instance, computed once at placement.
 
     For each hosting node: tokens that fit in the GPU working set after the
     node's weight share and overhead, at the shard's per-token KV cost. The
@@ -307,12 +620,16 @@ def instance_context_token_limit(
     first and takes the whole ring down), then min'd with the card's
     advertised ``context_length`` (0 means unadvertised).
 
-    Determinism is load-bearing: on multi-rank instances every rank admits or
-    rejects a request independently, and divergent verdicts deadlock the
-    collectives. All inputs here are static (``ram_total`` and a node's discrete
-    VRAM total never change for a node), and placement only happens after the
-    master has indexed memory for every hosting node, so every worker computes
-    the identical value. Time-varying ``ram_available`` must NOT be used here.
+    The master computes this once when it places the instance and stamps the
+    value on the replicated placement; every rank reads the stamp rather than
+    recomputing it, which is what keeps multi-rank admission verdicts
+    identical (divergent verdicts deadlock the collectives). The static
+    inputs (``ram_total``, discrete VRAM totals) give the memory-fit window.
+    ``node_ram_available`` is the live figure the master observed for each
+    hosting node at placement time, the same figure it admitted the placement
+    against; it is used for exactly one thing, sizing the served window of a
+    fixed-window engine on a node whose window lands in system RAM (see
+    below), and never by a worker after placement.
 
     ``node_vram`` (a node's usable GPU memory, see ``usable_vram_by_node``) is
     the working-set ceiling for a GPU-offload node, mirroring the memory-fit
@@ -320,16 +637,20 @@ def instance_context_token_limit(
     fit in GPU memory would get a negative KV budget and a 0-token ceiling
     (every request rejected), even though placement admitted it against that
     pool. ``unified_memory_gpu_nodes`` distinguishes APUs whose usable pool
-    includes host RAM from true discrete VRAM. Fixed-window served engines may
-    lift above the conservative context floor only on the latter: on an APU,
-    llama.cpp's load-time GPU allocation also consumes host pages and a
-    combined-pool steady-state fit does not bound that transient allocation.
+    includes host RAM from true discrete VRAM. A fixed-window served engine
+    lifts above the context floor freely on the latter. Everywhere else (Apple
+    unified memory, an APU, a CPU-resolved shard) the window is committed in
+    system RAM at load, so it is sized from the live ``ram_available`` the
+    master admitted against, capped at the static fit, and never below the
+    floor; without a live figure for every hosting node it stays at the floor.
 
     Returns ``None`` when no ceiling is enforceable (unknown KV cost or
     missing node memory, falling back to the card limit when that exists).
     """
     node_vram = node_vram or {}
     unified_memory_gpu_nodes = unified_memory_gpu_nodes or frozenset()
+    fixed_memory_by_node = fixed_memory_by_node or {}
+    node_ram_available = node_ram_available or {}
     model_card: ModelCard | None = None
     memory_limit: int | None = None
     for shard in shard_assignments.runner_to_shard.values():
@@ -347,25 +668,37 @@ def instance_context_token_limit(
         for shard in shard_assignments.runner_to_shard.values()
     )
 
-    whole_model_token_bytes = per_token_kv_bytes(model_card)
-    if whole_model_token_bytes > 0:
+    if per_token_kv_bytes(model_card) > 0:
         node_to_runner = shard_assignments.node_to_runner
         for node_id, runner_id in node_to_runner.items():
             shard = shard_assignments.runner_to_shard[runner_id]
-            fraction = shard_fraction_of_model(shard)
             ram_total = node_ram_totals.get(node_id)
-            if fraction is None or fraction <= 0.0 or ram_total is None:
+            # A shard explicitly resolved to a backend that does not offload
+            # (``-cpu``, a bare tag) lives in system RAM even on a host with a
+            # discrete GPU; its fit is the RAM working set, not the card's
+            # VRAM, or a small GPU would cap a large CPU placement. An
+            # unresolved shard on a GPU host keeps the VRAM fit placement
+            # admitted it against.
+            in_system_ram = (
+                shard.resolved_backend is not None
+                and not backend_offloads_to_vram(shard.resolved_backend)
+            )
+            working_set = (
+                None if in_system_ram else node_vram.get(node_id)
+            ) or (gpu_working_set_ceiling(ram_total) if ram_total is not None else None)
+            node_tokens = (
+                _node_window_tokens(
+                    model_card,
+                    shard,
+                    working_set,
+                    fixed_memory_by_node.get(node_id, Memory()),
+                )
+                if working_set is not None
+                else None
+            )
+            if node_tokens is None:
                 memory_limit = None
                 break
-            working_set = node_vram.get(node_id) or gpu_working_set_ceiling(ram_total)
-            kv_budget = (
-                working_set
-                - model_card.storage_size * fraction * memory_overhead_factor(model_card)
-                - MEMORY_OVERHEAD_FLOOR
-            )
-            node_tokens = max(
-                0, int(kv_budget.in_bytes / (whole_model_token_bytes * fraction))
-            )
             memory_limit = (
                 node_tokens if memory_limit is None else min(memory_limit, node_tokens)
             )
@@ -374,25 +707,25 @@ def instance_context_token_limit(
     # so it must fit the memory actually available then. On a discrete-VRAM node the
     # fit above is derived from VRAM -- the same pool placement admits against -- so
     # the lift is safe (and validated on GPU hardware). On a node WITHOUT discrete
-    # VRAM the fit is derived from static ``ram_total`` (for cross-rank determinism),
-    # but the load-time window competes with live ``ram_available`` (which placement
-    # admits against and which can be far lower under memory pressure), so a
-    # ram_total-sized window could OOM the node on load. Keep such placements at the
-    # budget floor; the memory-fit lift applies to discrete-VRAM (GPU) nodes.
-    # ``node_vram`` membership is static per node, so this stays deterministic.
+    # VRAM the fit above is derived from static ``ram_total``, but the load-time
+    # window competes with live ``ram_available`` (which placement admits against
+    # and which can be far lower under memory pressure), so a ram_total-sized window
+    # could OOM the node on load. Such placements are sized from the live figure
+    # the master admitted against instead (never above the static fit, never
+    # below the floor), and fall back to the floor when a live figure is missing.
     if served_preallocates and memory_limit is not None:
-        # Keep the lift only where the served window lands in DISCRETE VRAM (the
-        # pool placement admitted against): every hosting shard must both resolve
-        # to a GPU-offload backend (``-cuda`` / ``-rocm``; a ``-cpu`` / bare tag
-        # does not offload to the GPU and commits the window in SYSTEM RAM, which
-        # competes with live ram_available) AND run on a node reporting discrete
-        # VRAM. A unified-memory APU remains in ``node_vram`` for placement because
-        # its GPU can use the combined carve-out + GTT pool, but it is explicitly
-        # excluded here: llama.cpp's load-time amdgpu allocations consume host
-        # pages too, so a steady-state combined-pool fit can still globally OOM the
-        # node while committing a large fixed KV window. Anything else -- UMA,
-        # CPU-resolved on a GPU node, a non-VRAM node, or an unresolved backend --
-        # clamps to the floor to avoid a load-time OOM.
+        # The static fit stands only where the served window lands in DISCRETE
+        # VRAM (the pool placement admitted against): every hosting shard must
+        # both resolve to a GPU-offload backend (``-cuda`` / ``-rocm``; a ``-cpu``
+        # / bare tag does not offload to the GPU and commits the window in SYSTEM
+        # RAM, which competes with live ram_available) AND run on a node reporting
+        # discrete VRAM. A unified-memory APU remains in ``node_vram`` for
+        # placement because its GPU can use the combined carve-out + GTT pool, but
+        # it is excluded here: llama.cpp's load-time amdgpu allocations consume
+        # host pages too, so a steady-state combined-pool fit does not bound the
+        # fixed KV window it commits. Anything else -- Apple unified memory, an
+        # APU, CPU-resolved on a GPU node, a non-VRAM node, or an unresolved
+        # backend -- takes the live-RAM window below.
         lift_in_vram = all(
             node_vram.get(node_id) is not None
             and node_id not in unified_memory_gpu_nodes
@@ -402,7 +735,16 @@ def instance_context_token_limit(
             for node_id, runner_id in shard_assignments.node_to_runner.items()
         )
         if not lift_in_vram:
-            memory_limit = min(memory_limit, KV_CONTEXT_BUDGET_TOKENS)
+            memory_limit = min(
+                memory_limit,
+                _system_ram_window_tokens(
+                    shard_assignments,
+                    model_card,
+                    node_ram_totals,
+                    node_ram_available,
+                    fixed_memory_by_node,
+                ),
+            )
 
     card_limit = model_card.context_length if model_card.context_length > 0 else None
     if memory_limit is None:

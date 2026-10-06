@@ -17,9 +17,10 @@ Layout in the bucket::
     simple/<project>/index.html            # per-project file list, sha256 anchors
     wheels/<wheel filename>                # the artifacts themselves
 
-The script uploads any wheels given on the command line, then regenerates
-both index levels from the bucket's full current contents, so every run is
-idempotent and the index can never reference a missing file. R2 access uses
+The script uploads new wheels given on the command line, refuses to overwrite
+an existing filename with different bytes, then regenerates both index levels
+from the bucket's full current contents. Repeating the same publication is
+idempotent, and the index can never reference a missing file. R2 access uses
 the S3-compatible API via boto3; credentials come from the environment
 (``R2_ACCOUNT_ID``, ``R2_ACCESS_KEY_ID``, ``R2_SECRET_ACCESS_KEY``,
 ``R2_BUCKET``), which in CI are repository secrets.
@@ -72,9 +73,41 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _upload_wheels(client: Any, bucket: str, wheels: list[Path]) -> None:
-    """Upload the given wheels under ``wheels/`` with correct content type."""
+def _remote_sha256(client: Any, bucket: str, filename: str) -> str | None:
+    """Hash an existing wheel's bytes, or return None when its key is absent."""
+
+    try:
+        response = client.get_object(Bucket=bucket, Key=f"wheels/{filename}")
+    except client.exceptions.NoSuchKey:
+        return None
+    body = response["Body"]
+    digest = hashlib.sha256()
+    try:
+        for chunk in iter(lambda: body.read(1 << 20), b""):
+            digest.update(chunk)
+    finally:
+        body.close()
+    return digest.hexdigest()
+
+
+def _upload_wheels(
+    client: Any, bucket: str, wheels: list[Path], checksums: dict[str, str],
+) -> None:
+    """Publish only new wheel names after checking every existing digest."""
+
+    pending: dict[str, Path] = {}
     for wheel in wheels:
+        existing = _remote_sha256(client, bucket, wheel.name)
+        if existing is None:
+            pending[wheel.name] = wheel
+        elif existing != checksums[wheel.name]:
+            raise RuntimeError(
+                f"refusing to overwrite wheels/{wheel.name}: remote SHA-256 "
+                f"{existing} differs from local {checksums[wheel.name]}"
+            )
+        else:
+            print(f"already published {wheel.name} with identical SHA-256")
+    for wheel in pending.values():
         print(f"uploading {wheel.name} ({wheel.stat().st_size >> 20} MB)")
         client.upload_file(
             str(wheel),
@@ -203,8 +236,13 @@ def main(argv: list[str]) -> int:
             print(f"no such wheel: {wheel}", file=sys.stderr)
             return 2
     client = _client()
-    checksums = {wheel.name: _sha256(wheel) for wheel in wheels}
-    _upload_wheels(client, bucket, wheels)
+    checksums: dict[str, str] = {}
+    for wheel in wheels:
+        digest = _sha256(wheel)
+        if wheel.name in checksums and checksums[wheel.name] != digest:
+            raise RuntimeError(f"different local wheels share filename {wheel.name}")
+        checksums[wheel.name] = digest
+    _upload_wheels(client, bucket, wheels, checksums)
     _regenerate_index(client, bucket, checksums)
     return 0
 

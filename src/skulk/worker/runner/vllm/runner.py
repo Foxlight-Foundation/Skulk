@@ -50,23 +50,33 @@ generation and drains the pool before tearing down the server.
 import contextlib
 import ctypes
 import json
+import math
 import os
 import random
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, Literal, NamedTuple
+from typing import Any, Final, Literal, NamedTuple, cast
 
 import httpx
+import psutil
 
 from skulk.api.types import GenerationStats
 from skulk.download.download_utils import build_model_path
 from skulk.shared.backends import VLLM_BIN_ENV
-from skulk.shared.models.memory_estimate import VLLM_MAX_MODEL_LEN
-from skulk.shared.types.chunks import ErrorChunk, TokenChunk
+from skulk.shared.models.memory_estimate import (
+    VLLM_MAX_MODEL_LEN,
+    estimate_shard_footprint,
+    is_gb10_accelerator,
+    per_token_kv_bytes,
+)
+from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
     ChunkGenerated,
@@ -97,46 +107,87 @@ from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.generation_stats import (
     StreamStatsClock,
+    blocking_call_stats,
     subprocess_peak_memory,
 )
 from skulk.worker.runner.llama_cpp.runner import (
     map_finish_reason,
     messages_for_llama,
     serving_n_ctx,
+    tool_calls_from_message,
     wants_logprobs,
+)
+from skulk.worker.runner.llm_inference.reasoning_controls import (
+    muse_glimmer_strength_kwargs,
+)
+from skulk.worker.runner.llm_inference.scaffolding_scrub import (
+    StreamingScaffoldingScrub,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
 
 # vLLM startup can be slow: weight load + torch.compile + CUDA-graph capture on a
-# large model runs to a couple of minutes, so allow a generous health deadline.
-_HEALTH_DEADLINE_S: Final = 600.0
+# large model runs to minutes, and 0.28.0's torch-2.13 AOT compile chain pushed a
+# COLD-cache first start past 600s (observed live: a 27B FP8 model on A100-80GB
+# finished compiling at ~10:05 and was killed by the old 600s deadline moments
+# before health). Warm compile caches come up far faster; the ceiling must fit
+# the cold case because every fresh node hits it. A crashed server is caught
+# separately by process-exit detection, so a long ceiling does not delay real
+# failure reporting.
+_HEALTH_DEADLINE_S: Final = 1800.0
 
-# Fraction of GPU VRAM vLLM may use for weights + KV cache. Operator-tunable via
-# env; vLLM's own default is 0.90. Placement admits against the same usable-VRAM
-# figure, so this stays a node-local serving knob for now (a card-level override
-# is a follow-up when vLLM-aware admission lands).
+_PORT_COLLISION_ATTEMPTS: Final = 3
+"""Startup attempts allowed when the chosen server port is taken at bind time."""
+
+_ADDRESS_IN_USE_MARKER: Final = "Address already in use"
+"""Marker identifying a lost port race in a failed server's log tail."""
+
+# --gpu-memory-utilization is the fraction of the GPU's memory vLLM may use for
+# weights, activations and KV cache. By default the runner sizes it to the
+# instance's placement footprint, the estimate the master reserved and the
+# worker's fit guard checked, so vLLM takes the memory placement admitted rather
+# than a fixed share of the device. A fixed share failed on every shared GPU:
+# vLLM refuses to start unless free memory covers share x total, so a resident
+# model stopped it even when the placement fit, and on a lone GPU it claimed
+# memory the master still counted as free. The env var pins the share instead,
+# for a GPU dedicated to vLLM whose KV cache should take the rest of the device.
+# The default share remains only for launches that cannot be sized honestly
+# (see resolve_gpu_memory_utilization).
 _GPU_MEMORY_UTILIZATION_ENV: Final = "SKULK_VLLM_GPU_MEMORY_UTILIZATION"
 _DEFAULT_GPU_MEMORY_UTILIZATION: Final = 0.90
+
+_VLLM_RUNTIME_ALLOWANCE: Final = Memory.from_bytes(1024**3)
+"""Memory vLLM holds beyond weights and KV cache whatever the model's size:
+CUDA context, cuBLAS workspace and peak activations, measured at 0.63 GiB for a
+0.6B and 1.0 GiB for a 7B model on vLLM 0.28. The placement estimate's overhead
+scales with weights, so on the smallest models it can fall short of this."""
 
 # Upper bound on concurrent in-flight generations the runner streams to the one
 # ``vllm serve`` at once. This is a client-side admission bound (the thread-pool
 # width), NOT vLLM's batch width -- the server batches up to its own
-# ``--max-num-seqs`` (default 256). Kept below that so queued requests wait in the
-# runner's bounded pool rather than piling unbounded threads against the server.
+# ``--max-num-seqs`` (a version- and hardware-band-dependent default, 256 at
+# minimum on the validated matrix). Kept below every such default so queued
+# requests wait in the runner's bounded pool rather than piling unbounded
+# threads against the server.
 _MAX_CONCURRENT_REQUESTS_ENV: Final = "SKULK_VLLM_MAX_CONCURRENT_REQUESTS"
 _DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
 
-# vLLM scheduler defaults (vllm/config: max_num_batched_tokens / max_num_seqs
-# when the server flags are omitted). The scheduler reserves draft slots per
-# sequence out of the batched-token budget, so deep speculative depths need
-# the budget raised or engine init fails with a negative
-# max_num_scheduled_tokens. Depth 9 is where the default budget goes
-# non-positive (2048 - 256 * 8 = 0); the sizing kicks in at 8 because depth 8
-# leaves a degenerate 256-token budget. 8192 is the fresh-box-validated floor
-# (Laguna depth-15 card, vLLM 0.25.1, A100-80GB).
-_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS: Final = 2048
-_VLLM_DEFAULT_MAX_NUM_SEQS: Final = 256
+# Deep-speculation scheduler budget. vLLM reserves draft slots per sequence
+# out of --max-num-batched-tokens, so a deep drafter needs
+# batched >= seqs * (depth - 1) or engine init fails with a negative
+# max_num_scheduled_tokens ("set to -1536" observed live with the Laguna
+# depth-15 card on vLLM 0.25.1, whose effective defaults were 2048/256).
+# Both sides of that arithmetic are version- and hardware-band-dependent
+# (0.28.0 raises serve-time defaults as high as 16384/1024 on large GPUs),
+# so at deep depths the runner pins BOTH flags explicitly rather than
+# raising one against an assumed default: max-num-seqs is pinned to the
+# 0.25.1-validated 256 and the batched budget derives from it. Depth 9 is
+# where the historical default budget went non-positive (2048 - 256 * 8);
+# the sizing kicks in at 8 because depth 8 leaves a degenerate 256-token
+# budget. 8192 is the fresh-box-validated floor (Laguna depth-15 card,
+# A100-80GB).
+_SPEC_PINNED_BATCH_BASE_TOKENS: Final = 2048
+_SPEC_PINNED_MAX_NUM_SEQS: Final = 256
 _SPEC_DEPTH_NEEDING_BATCH_SIZING: Final = 8
 _SPEC_BATCHED_TOKENS_FLOOR: Final = 8192
 
@@ -177,30 +228,260 @@ class _StreamDelta(NamedTuple):
     usage: dict[str, Any] | None = None  # the include_usage final-chunk counts
 
 
-def _gpu_memory_utilization() -> float:
-    """The ``--gpu-memory-utilization`` fraction, from env or the 0.90 default.
+def _configured_gpu_memory_utilization() -> float | None:
+    """The operator's pinned ``--gpu-memory-utilization``, or ``None`` when unset.
 
-    An unparseable or out-of-range (0, 1] value falls back to the default rather
-    than passing vLLM a nonsense fraction that would fail the server at spawn.
+    An unparseable or out-of-range (0, 1] value is ignored with a warning, so the
+    runner sizes vLLM from its placement rather than passing a fraction that
+    would fail the server at spawn.
     """
     raw = os.environ.get(_GPU_MEMORY_UTILIZATION_ENV, "").strip()
     if not raw:
-        return _DEFAULT_GPU_MEMORY_UTILIZATION
+        return None
     try:
         value = float(raw)
     except ValueError:
         logger.warning(
-            f"{_GPU_MEMORY_UTILIZATION_ENV}={raw!r} is not a number; "
-            f"using {_DEFAULT_GPU_MEMORY_UTILIZATION}"
+            f"{_GPU_MEMORY_UTILIZATION_ENV}={raw!r} is not a number; ignoring it"
         )
-        return _DEFAULT_GPU_MEMORY_UTILIZATION
+        return None
     if not 0.0 < value <= 1.0:
         logger.warning(
-            f"{_GPU_MEMORY_UTILIZATION_ENV}={value} is outside (0, 1]; "
-            f"using {_DEFAULT_GPU_MEMORY_UTILIZATION}"
+            f"{_GPU_MEMORY_UTILIZATION_ENV}={value} is outside (0, 1]; ignoring it"
         )
-        return _DEFAULT_GPU_MEMORY_UTILIZATION
+        return None
     return value
+
+
+GpuMemoryShareBasis = Literal[
+    "pinned", "placement", "no_kv_geometry", "unknown_device_total"
+]
+"""Why a launch received its share: an operator pin, the placement footprint,
+or the fixed default because the artifact or the device could not be sized."""
+
+_SHARE_RESOLUTION: Final = 10_000
+"""Shares are passed in ten-thousandths of the device, rounded up, so the
+rounding never leaves more than that much memory outside the reservation."""
+
+_KV_CACHE_ELEMENT_BYTES: Final = 2
+"""vLLM keeps KV cache at the model's 16-bit precision unless a quantized cache
+dtype is requested, which the runner never does."""
+
+
+def artifact_kv_bytes_per_token(config: Mapping[str, object]) -> int | None:
+    """Upper bound on vLLM's KV cache bytes per token, from a model's config.
+
+    The card's KV estimate assumes 128-wide attention heads, and many models are
+    wider (Gemma 4 uses 256, and 512 on its full-attention layers), so a share
+    sized from the card alone can leave vLLM short of the served window. This
+    bound reads the artifact's own geometry and counts every decoder layer at
+    full context with the widest head and KV-head count the config names, keys
+    and values both, at 16-bit precision. Sliding-window, shared-KV and
+    linear-attention layers hold less than that, so the bound only ever raises
+    a share. Multimodal wrappers nest the decoder under ``text_config``.
+
+    Args:
+        config: The parsed ``config.json`` of the served artifact.
+
+    Returns:
+        Bytes per token of context, or ``None`` when the config does not name
+        the layer count, head width and KV-head count.
+    """
+    nested = config.get("text_config")
+    source = cast("Mapping[str, object]", nested) if isinstance(nested, dict) else config
+
+    def positive(key: str) -> int | None:
+        value = source.get(key)
+        return value if type(value) is int and value > 0 else None
+
+    layers = positive("num_hidden_layers")
+    attention_heads = positive("num_attention_heads")
+    kv_heads = positive("num_key_value_heads") or attention_heads
+    head_dim = positive("head_dim")
+    hidden_size = positive("hidden_size")
+    if head_dim is None and hidden_size is not None and attention_heads is not None:
+        head_dim = hidden_size // attention_heads
+    if layers is None or kv_heads is None or not head_dim:
+        return None
+    widest = kv_heads * head_dim
+    global_kv_heads = positive("num_global_key_value_heads") or kv_heads
+    global_head_dim = positive("global_head_dim") or head_dim
+    widest = max(widest, global_kv_heads * global_head_dim)
+    return 2 * layers * widest * _KV_CACHE_ELEMENT_BYTES
+
+
+def _read_artifact_kv_bytes_per_token(model_dir: Path) -> int | None:
+    """The artifact's KV bound from ``config.json``, or ``None`` when unreadable."""
+    try:
+        config = cast("object", json.loads((model_dir / "config.json").read_text()))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    return artifact_kv_bytes_per_token(cast("Mapping[str, object]", config))
+
+
+class GpuMemoryShare(NamedTuple):
+    """vLLM's ``--gpu-memory-utilization`` for one launch and how it was chosen."""
+
+    fraction: float
+    basis: GpuMemoryShareBasis
+
+
+def resolve_gpu_memory_utilization(
+    model_card: ModelCard,
+    context_tokens: int,
+    resolved_backend: str | None,
+    device_total_bytes: int | None,
+    pinned: float | None,
+    artifact_kv_per_token: int | None,
+) -> GpuMemoryShare:
+    """Choose vLLM's memory share for one placement. Pure, so it is unit-testable.
+
+    An operator pin wins. Otherwise the share holds the placement footprint:
+    weights with engine overhead, KV cache for the served window, and the flat
+    floor, from the estimator the master reserved with. vLLM fills whatever the
+    share leaves after weights, activations and runtime memory with KV cache, so
+    the overhead allowance becomes extra KV capacity rather than idle memory.
+
+    The share never drops below weights, the served window's KV cache at the
+    artifact's own geometry (``artifact_kv_bytes_per_token``, an upper bound)
+    and vLLM's fixed runtime memory (``_VLLM_RUNTIME_ALLOWANCE``). The card's
+    estimate assumes 128-wide attention heads and a proportional overhead, so
+    wide-head models and the smallest models would otherwise leave vLLM short
+    of its window, and it would refuse to start. The share is rounded up to the
+    next ten-thousandth, so vLLM's request (share times the device total it
+    reads) covers it while leaving no more than a ten-thousandth of the device
+    beyond what placement reserved, and it is capped at the fixed default:
+    sizing never asks for more than the historical share.
+
+    The fixed default remains when no honest size exists: the artifact's config
+    names no KV geometry, or the device total is unreadable.
+
+    Args:
+        model_card: The card the instance serves.
+        context_tokens: The served window, passed to vLLM as ``--max-model-len``.
+        resolved_backend: The engine tag placement stamped on the shard.
+        device_total_bytes: Total device memory, or ``None`` when unreadable.
+        pinned: A valid ``SKULK_VLLM_GPU_MEMORY_UTILIZATION``, or ``None``.
+        artifact_kv_per_token: The artifact's KV bound, or ``None`` when its
+            config could not be read.
+
+    Returns:
+        The share to pass to vLLM and the basis it was chosen on.
+    """
+    if pinned is not None:
+        return GpuMemoryShare(pinned, "pinned")
+    if artifact_kv_per_token is None or artifact_kv_per_token <= 0:
+        return GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "no_kv_geometry")
+    if device_total_bytes is None or device_total_bytes <= 0:
+        return GpuMemoryShare(_DEFAULT_GPU_MEMORY_UTILIZATION, "unknown_device_total")
+    # One vLLM server holds the whole model (tensor parallel size 1), so its
+    # footprint is the full-model one the master reserved for the instance.
+    footprint = estimate_shard_footprint(
+        model_card,
+        1.0,
+        context_budget=context_tokens,
+        resolved_backend=resolved_backend,
+    )
+    kv_per_token = max(
+        artifact_kv_per_token,
+        per_token_kv_bytes(model_card, resolved_backend=resolved_backend),
+    )
+    window_kv = Memory.from_bytes(kv_per_token * context_tokens)
+    share_bytes = max(
+        footprint.in_bytes,
+        (model_card.storage_size + window_kv + _VLLM_RUNTIME_ALLOWANCE).in_bytes,
+    )
+    units = math.ceil(share_bytes * _SHARE_RESOLUTION / device_total_bytes)
+    return GpuMemoryShare(
+        min(_DEFAULT_GPU_MEMORY_UTILIZATION, max(1, units) / _SHARE_RESOLUTION),
+        "placement",
+    )
+
+
+def _cuda_device_total() -> int | None:
+    """Total memory of the first CUDA-visible device, or ``None`` when unreadable.
+
+    vLLM applies its share to this device's total, so reading it through the
+    CUDA driver API gives the exact denominator: it follows
+    ``CUDA_VISIBLE_DEVICES``, CUDA's own device order and MIG slices, which
+    NVML's device 0 does not, and ``cuDeviceTotalMem`` opens no context in this
+    long-lived process.
+    """
+    try:
+        driver = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return None
+    device = ctypes.c_int()
+    total = ctypes.c_size_t()
+    try:
+        if cast("int", driver.cuInit(0)) != 0:
+            return None
+        if cast("int", driver.cuDeviceGet(ctypes.byref(device), 0)) != 0:
+            return None
+        if cast("int", driver.cuDeviceTotalMem_v2(ctypes.byref(total), device)) != 0:
+            return None
+    except AttributeError:
+        return None
+    return total.value if total.value > 0 else None
+
+
+def _device_memory_total(resolved_backend: str | None) -> int | None:
+    """Total memory of the GPU this server runs on, or ``None`` when unreadable.
+
+    vLLM's share is a fraction of the device total CUDA (or HIP) reports, so
+    NVIDIA devices read it from the CUDA driver (``_cuda_device_total``). When
+    the driver cannot be read, NVML's device 0 total stands in, and on an NVIDIA
+    GB10, where NVML reports no memory, the host's physical memory, which is
+    CUDA's total on that shared pool. AMD GPUs use the amdgpu sysfs total; an APU
+    whose GPU maps host memory has no single device total and stays unsized.
+    """
+    if sys.platform != "linux":
+        return None
+    if resolved_backend is not None and resolved_backend.endswith("-rocm"):
+        from skulk.utils.info_gatherer.linux_gpu import (
+            find_amd_gpu_device,
+            read_accelerator_metrics,
+        )
+
+        device = find_amd_gpu_device()
+        if device is None:
+            return None
+        amd = read_accelerator_metrics(device)
+        total = amd.vram_total_bytes
+        if total is None or total <= 0:
+            return None
+        gtt_total = amd.gtt_total_bytes
+        if (
+            gtt_total is not None
+            and gtt_total > total
+            and gtt_total >= psutil.virtual_memory().total
+        ):
+            return None
+        return total
+    cuda_total = _cuda_device_total()
+    if cuda_total is not None:
+        return cuda_total
+    from skulk.utils.info_gatherer.nvidia_gpu import (
+        has_nvidia_gpu,
+        load_nvml,
+    )
+    from skulk.utils.info_gatherer.nvidia_gpu import (
+        read_accelerator_metrics as read_nvidia_accelerator_metrics,
+    )
+
+    nvml = load_nvml()
+    if nvml is None or not has_nvidia_gpu(nvml):
+        return None
+    # No CUDA fallback: it would hold a CUDA context in this process for the
+    # instance's whole lifetime.
+    nvidia = read_nvidia_accelerator_metrics(nvml, cuda_memory_info=lambda: None)
+    if nvidia.vram_total_bytes is not None and nvidia.vram_total_bytes > 0:
+        return nvidia.vram_total_bytes
+    if is_gb10_accelerator(nvidia):
+        return psutil.virtual_memory().total
+    return None
 
 
 def build_vllm_serve_args(
@@ -215,6 +496,9 @@ def build_vllm_serve_args(
     spec_method: str | None = None,
     spec_num_tokens: int | None = None,
     spec_draft_repo: str | None = None,
+    spec_draft_revision: str | None = None,
+    tool_call_parser: str | None = None,
+    reasoning_parser: str | None = None,
 ) -> list[str]:
     """Build the ``vllm serve`` command line. Pure, so it is unit-testable.
 
@@ -239,7 +523,7 @@ def build_vllm_serve_args(
         "--max-model-len",
         str(max_model_len),
         "--gpu-memory-utilization",
-        f"{gpu_memory_utilization:.2f}",
+        f"{gpu_memory_utilization:.4f}",
         "--tensor-parallel-size",
         "1",
         # Off by default in vLLM; without it the include_usage final chunk
@@ -249,6 +533,20 @@ def build_vllm_serve_args(
     ]
     if trust_remote_code:
         args.append("--trust-remote-code")
+    if tool_call_parser is not None:
+        # vLLM refuses --tool-call-parser without --enable-auto-tool-choice;
+        # the pair enables server-side parsing of the model's native
+        # tool-call format into structured OpenAI tool_calls, mirroring the
+        # llama_server runner's --jinja role.
+        args.extend(
+            ["--enable-auto-tool-choice", "--tool-call-parser", tool_call_parser]
+        )
+    if reasoning_parser is not None:
+        # Card-pinned reasoning parser (runtime.vllm_reasoning_parser): vLLM
+        # only splits reasoning_content from content when one is configured;
+        # without it a reasoning model's thinking streams inline as answer
+        # text. Explicit only, like the tool parser.
+        args.extend(["--reasoning-parser", reasoning_parser])
     if spec_method is not None:
         # Card-declared speculative decoding (runtime.vllm_spec_method /
         # vllm_spec_num_tokens / vllm_spec_draft_repo): method "mtp" engages
@@ -264,28 +562,84 @@ def build_vllm_serve_args(
             speculative["num_speculative_tokens"] = spec_num_tokens
         if spec_draft_repo is not None:
             speculative["model"] = spec_draft_repo
+        if spec_draft_revision is not None:
+            speculative["revision"] = spec_draft_revision
         args.extend(["--speculative-config", json.dumps(speculative)])
         if (
             spec_num_tokens is not None
             and spec_num_tokens >= _SPEC_DEPTH_NEEDING_BATCH_SIZING
         ):
-            # vLLM budgets draft slots out of --max-num-batched-tokens: with
-            # its defaults (2048 batched tokens, 256 seqs) the scheduler
-            # computes 2048 - 256 * (depth - 1) scheduled tokens, which goes
-            # non-positive at depth 9 and the server refuses to start
-            # ("max_num_scheduled_tokens is set to -1536" observed live with
-            # the Laguna depth-15 card on vLLM 0.25.1). Deep block-parallel
-            # drafters therefore need the batch budget raised alongside the
-            # depth; shallow MTP depths keep vLLM's defaults untouched (the
-            # shape the #649 cards validated under). The 8192 floor is the
-            # value fresh-box validated with the depth-15 Laguna card.
+            # Deep block-parallel drafters need the scheduler budget sized
+            # to the depth, and BOTH flags pinned so the arithmetic cannot
+            # be broken by a vLLM default change underneath us (see the
+            # constant block above). Shallow MTP depths keep vLLM's
+            # defaults untouched (the shape the #649 cards validated
+            # under).
             batched = max(
                 _SPEC_BATCHED_TOKENS_FLOOR,
-                _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS
-                + _VLLM_DEFAULT_MAX_NUM_SEQS * (spec_num_tokens - 1),
+                _SPEC_PINNED_BATCH_BASE_TOKENS
+                + _SPEC_PINNED_MAX_NUM_SEQS * (spec_num_tokens - 1),
             )
-            args.extend(["--max-num-batched-tokens", str(batched)])
+            args.extend(
+                [
+                    "--max-num-batched-tokens",
+                    str(batched),
+                    "--max-num-seqs",
+                    str(_SPEC_PINNED_MAX_NUM_SEQS),
+                ]
+            )
     return args
+
+
+def tool_call_finish_surfaces(raw_finish: object) -> bool:
+    """Whether a non-streamed response's parsed tool calls may reach the caller.
+
+    "stop" is a COMPLETE generation and must surface its calls: with a named
+    ``tool_choice``, vLLM follows OpenAI semantics and reports the forced call
+    under finish_reason "stop" rather than "tool_calls" (observed live on
+    0.28.0; excluding it returned an empty stop chunk to the caller). Only
+    length/content_filter cut a call short with incomplete arguments, so those
+    finishes keep the calls unsurfaced and fall through to the prose path.
+
+    Args:
+        raw_finish: The server's raw ``finish_reason`` for the choice.
+
+    Returns:
+        ``True`` when parsed tool calls are complete and safe to surface.
+    """
+    return raw_finish in (None, "stop", "tool_calls")
+
+
+def resolve_vllm_reasoning_parser(card: ModelCard) -> str | None:
+    """The vLLM ``--reasoning-parser`` name a card pins, or ``None``.
+
+    Explicit ``runtime.vllm_reasoning_parser`` only, the same doctrine as
+    :func:`resolve_vllm_tool_call_parser`: there is no family fallback, so an
+    unpinned card launches without a reasoning parser and its thinking, if
+    any, arrives inline.
+    """
+    runtime = card.runtime
+    if runtime is not None and runtime.vllm_reasoning_parser is not None:
+        return runtime.vllm_reasoning_parser
+    return None
+
+
+def resolve_vllm_tool_call_parser(card: ModelCard) -> str | None:
+    """The vLLM tool parser this card should launch with, or None.
+
+    Explicit ``runtime.vllm_tool_call_parser`` only: there is deliberately
+    no family fallback, because one Skulk family string can span tool-call
+    generations with different wire formats (Qwen2.5 emits Hermes JSON
+    while Qwen3.6 emits the XML function format), and a wrong parser fails
+    at request time with opaque server errors rather than at card review.
+    A card without the field launches without the parser pair and tool
+    requests are rejected loudly at request time (the #385 no-silent-empty
+    contract).
+    """
+    runtime = card.runtime
+    if runtime is not None and runtime.vllm_tool_call_parser is not None:
+        return runtime.vllm_tool_call_parser
+    return None
 
 
 def vllm_generation_kwargs(task_params: Any) -> dict[str, Any]:
@@ -318,7 +672,9 @@ def vllm_generation_kwargs(task_params: Any) -> dict[str, Any]:
     return kwargs
 
 
-def vllm_reasoning_overrides(task_params: Any) -> dict[str, Any]:
+def vllm_reasoning_overrides(
+    task_params: Any, card: ModelCard | None = None
+) -> dict[str, Any]:
     """Map Skulk's thinking controls onto vLLM request fields.
 
     vLLM's OpenAI server exposes the same two levers as llama-server:
@@ -328,13 +684,19 @@ def vllm_reasoning_overrides(task_params: Any) -> dict[str, Any]:
     body carries no thinking control, so ``enable_thinking=False`` would be silently
     ignored and a reasoning model would think on every request. ``"none"`` effort is
     not a valid server value (disabling goes through ``enable_thinking=False``), so
-    it is dropped.
+    it is dropped. A Muse Glimmer card (resolved from ``card``) reads neither
+    lever: its template takes a ``reasoning_strength`` kwarg, which the effort
+    is translated onto instead.
     """
     overrides: dict[str, Any] = {}
+    effort = getattr(task_params, "reasoning_effort", None)
+    strength_kwargs = muse_glimmer_strength_kwargs(card, effort)
+    if strength_kwargs:
+        overrides["chat_template_kwargs"] = strength_kwargs
+        return overrides
     enable_thinking = getattr(task_params, "enable_thinking", None)
     if enable_thinking is not None:
         overrides["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
-    effort = getattr(task_params, "reasoning_effort", None)
     if effort is not None and effort != "none":
         overrides["reasoning_effort"] = effort
     return overrides
@@ -475,6 +837,9 @@ class Runner(ServedConcurrentDispatch):
         self.server_log: Any = None
         self.server_log_path: Path | None = None
         self.base_url: str | None = None
+        # Resolved at spawn; None means the server was launched without the
+        # tool-parser pair and tool requests must be rejected loudly.
+        self._tool_call_parser: str | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         logger.info("vllm runner created")
         self.update_status(RunnerIdle())
@@ -553,7 +918,11 @@ class Runner(ServedConcurrentDispatch):
 
         card = self.shard_metadata.model_card
         model_id = card.model_id
-        model_dir = build_model_path(ModelId(model_id), card.source_revision)
+        model_dir = build_model_path(
+            ModelId(model_id),
+            card.source_revision,
+            card.artifact_bundle.root if card.artifact_bundle is not None else None,
+        )
         # Placement stamps the vllm startup-cost cap into context_token_limit
         # (VLLM_MAX_MODEL_LEN at the stamp, so admission and the served
         # window agree); the min() here is defense in depth for instances
@@ -572,8 +941,7 @@ class Runner(ServedConcurrentDispatch):
                 task_id=task.task_id,
                 attrs={"model_dir": model_dir.name, "n_ctx": n_ctx},
             ):
-                self._spawn_server(model_dir, str(model_id), n_ctx)
-                self._await_health()
+                self._spawn_server_with_port_retry(model_dir, str(model_id), n_ctx)
         except Exception:
             self._teardown_server()
             raise
@@ -583,6 +951,42 @@ class Runner(ServedConcurrentDispatch):
             f"vllm runner ready in {time.time() - self.setup_start_time:.1f}s "
             f"(url={self.base_url})"
         )
+
+    def _spawn_server_with_port_retry(
+        self, model_dir: Path, served_model_name: str, n_ctx: int
+    ) -> None:
+        """Start the server, retrying a lost port race with a fresh port.
+
+        ``_pick_port`` proves a port free by binding and closing it, but the
+        server binds it seconds later, after Python and vLLM start up. The
+        probe range is the kernel's ephemeral range, so in that window any
+        outbound connection on a busy node (data plane, store transfers,
+        telemetry) can be assigned the same port and the server's own bind
+        fails with EADDRINUSE. Losing that race is transient and retryable;
+        every other startup failure is not, and is re-raised on the spot so
+        real faults still fail fast.
+        """
+        for attempt in range(1, _PORT_COLLISION_ATTEMPTS + 1):
+            self._spawn_server(model_dir, served_model_name, n_ctx)
+            try:
+                self._await_health()
+            except RuntimeError as exc:
+                lost_race = (
+                    _ADDRESS_IN_USE_MARKER in str(exc)
+                    and attempt < _PORT_COLLISION_ATTEMPTS
+                )
+                if not lost_race:
+                    raise
+                logger.warning(
+                    "vllm serve lost a port race on startup "
+                    f"(attempt {attempt}/{_PORT_COLLISION_ATTEMPTS}); "
+                    "retrying with a fresh port"
+                )
+                # Reclaim the failed process and its log before rebinding, so a
+                # retry cannot leak the previous attempt's handles.
+                self._teardown_server()
+                continue
+            return
 
     def _spawn_server(
         self, model_dir: Path, served_model_name: str, n_ctx: int
@@ -601,6 +1005,9 @@ class Runner(ServedConcurrentDispatch):
         port = self._pick_port()
         self.base_url = f"http://{host}:{port}"
         card_runtime = self.shard_metadata.model_card.runtime
+        self._tool_call_parser = resolve_vllm_tool_call_parser(
+            self.shard_metadata.model_card
+        )
         args = build_vllm_serve_args(
             binary,
             model_dir,
@@ -608,7 +1015,7 @@ class Runner(ServedConcurrentDispatch):
             host,
             port,
             n_ctx,
-            _gpu_memory_utilization(),
+            self._gpu_memory_share(model_dir, n_ctx),
             self.shard_metadata.model_card.trust_remote_code,
             spec_method=(
                 card_runtime.vllm_spec_method if card_runtime is not None else None
@@ -622,6 +1029,15 @@ class Runner(ServedConcurrentDispatch):
                 card_runtime.vllm_spec_draft_repo
                 if card_runtime is not None
                 else None
+            ),
+            spec_draft_revision=(
+                card_runtime.vllm_spec_draft_revision
+                if card_runtime is not None
+                else None
+            ),
+            tool_call_parser=self._tool_call_parser,
+            reasoning_parser=resolve_vllm_reasoning_parser(
+                self.shard_metadata.model_card
             ),
         )
         # Deterministic log path keyed by runner_id (matching llama_server), so
@@ -655,6 +1071,43 @@ class Runner(ServedConcurrentDispatch):
             preexec_fn=_set_pdeathsig if os.name == "posix" else None,
             start_new_session=True,
         )
+
+    def _gpu_memory_share(self, model_dir: Path, n_ctx: int) -> float:
+        """Resolve this launch's ``--gpu-memory-utilization`` and log its basis."""
+        shard = self.shard_metadata
+        pinned = _configured_gpu_memory_utilization()
+        share = resolve_gpu_memory_utilization(
+            shard.model_card,
+            n_ctx,
+            shard.resolved_backend,
+            None if pinned is not None else _device_memory_total(shard.resolved_backend),
+            pinned,
+            None if pinned is not None else _read_artifact_kv_bytes_per_token(model_dir),
+        )
+        match share.basis:
+            case "pinned":
+                logger.info(
+                    f"vllm gpu-memory-utilization {share.fraction:.4f}, pinned by "
+                    f"{_GPU_MEMORY_UTILIZATION_ENV}"
+                )
+            case "placement":
+                logger.info(
+                    f"vllm gpu-memory-utilization {share.fraction:.4f}, sized from "
+                    "the placement footprint"
+                )
+            case "no_kv_geometry":
+                logger.warning(
+                    f"vllm cannot size {shard.model_card.model_id} from its "
+                    "placement: its config.json names no layer count, head "
+                    "width and KV-head count; using the fixed "
+                    f"{share.fraction:.4f} share"
+                )
+            case "unknown_device_total":
+                logger.warning(
+                    "vllm cannot read this GPU's memory total; using the fixed "
+                    f"{share.fraction:.4f} share"
+                )
+        return share.fraction
 
     def _pick_port(self) -> int:
         """Pick a free ephemeral port for the server, avoiding the API port."""
@@ -773,7 +1226,9 @@ class Runner(ServedConcurrentDispatch):
         # Forward thinking control (enable_thinking / reasoning_effort) to vLLM;
         # without it a reasoning model thinks on every request regardless of the
         # request's toggle.
-        body.update(vllm_reasoning_overrides(task.task_params))
+        body.update(
+            vllm_reasoning_overrides(task.task_params, self.shard_metadata.model_card)
+        )
 
         record_runner_phase(
             "task_submission",
@@ -783,14 +1238,16 @@ class Runner(ServedConcurrentDispatch):
             attrs={"tools": bool(task.task_params.tools)},
         )
         try:
-            # Tool calling and per-token logprobs are out of scope for this slice:
-            # the tool-call round trip and logprob surfacing over the SSE proxy are
-            # follow-ups. Fail loud rather than silently drop them (matching the
-            # llama_server runner's #385 no-silent-empty contract).
-            if task.task_params.tools:
+            # Per-token logprobs remain out of scope for this slice: the SSE
+            # proxy does not surface them. Fail loud rather than silently
+            # drop them (the #385 no-silent-empty contract).
+            if task.task_params.tools and self._tool_call_parser is None:
                 raise RuntimeError(
-                    "Tool calling is not yet supported on the vllm engine; retry "
-                    "without tools or use a llama_cpp/llama_server card."
+                    "This model's card declares no vLLM tool-call parser "
+                    "(runtime.vllm_tool_call_parser; there is no family "
+                    "fallback), so the server was launched without tool "
+                    "support. Retry without tools or serve a card that pins "
+                    "a parser."
                 )
             if wants_logprobs(
                 task.task_params.logprobs, task.task_params.top_logprobs
@@ -808,7 +1265,10 @@ class Runner(ServedConcurrentDispatch):
                 task_id=task.task_id,
                 command_id=str(command_id),
             )
-            self._generate_streaming(task, body, model_id, command_id)
+            if task.task_params.tools:
+                self._generate_with_tools(task, body, model_id, command_id)
+            else:
+                self._generate_streaming(task, body, model_id, command_id)
         except Exception as exc:  # noqa: BLE001 - surface as an ErrorChunk
             record_runner_phase(
                 "error",
@@ -839,6 +1299,90 @@ class Runner(ServedConcurrentDispatch):
         # Ready only when the LAST in-flight generation drains (see
         # _note_generation_finished), so a peer generation still streaming keeps
         # the runner Running.
+
+    def _generate_with_tools(
+        self,
+        task: TextGeneration,
+        body: dict[str, Any],
+        model_id: ModelId,
+        command_id: CommandId,
+    ) -> None:
+        """Non-streamed tool round trip, mirroring the llama_server runner.
+
+        vLLM parses the model's native tool-call format server-side
+        (--enable-auto-tool-choice + --tool-call-parser at launch) and
+        returns assembled ``tool_calls``; the caller wants the whole call,
+        and the API's streaming adapter emits tool calls as one delta
+        anyway, so nothing is lost by skipping SSE here.
+        """
+        body["stream"] = False
+        body["tools"] = task.task_params.tools
+        if task.task_params.tool_choice is not None:
+            body["tool_choice"] = task.task_params.tool_choice
+        assert self.base_url is not None
+        if self._is_cancelled(task.task_id):
+            return
+        admission_in_flight = self._admission_concurrency(task.task_id)
+        timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
+        request_started = time.perf_counter()
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)
+            resp.raise_for_status()
+            result = cast("dict[str, Any]", resp.json())
+        request_seconds = time.perf_counter() - request_started
+        # A cancel that landed while the blocking POST was in flight: drain it
+        # (the streaming path checks per chunk; this path has no mid-flight
+        # checkpoint) so the task ends Cancelled and no tool call surfaces.
+        if self._is_cancelled(task.task_id):
+            logger.info(f"vllm tool generation cancelled: {task.task_id}")
+            return
+        choice = cast("dict[str, Any]", (result.get("choices") or [{}])[0])
+        message = cast("dict[str, Any]", choice.get("message") or {})
+        # vLLM responses carry OpenAI usage but no llama-server-style engine
+        # timings, so usage-derived whole-request wall rates are the honest
+        # stats here; cached-prefix subtraction does not apply to the
+        # blocking path (no prompt_tokens_details outside include_usage).
+        stats = blocking_call_stats(result.get("usage"), request_seconds, None)
+        if stats is not None:
+            stats = stats.model_copy(
+                update={"peak_memory_usage": self._server_peak_memory()}
+            )
+            # Runner attribution (#596): tool-call generations feed the
+            # performance envelope exactly like the streaming path.
+            stats = self.stamp_runner_stats(stats, admission_in_flight)
+        raw_finish = choice.get("finish_reason")
+        tool_calls = tool_calls_from_message(message)
+        if tool_calls and tool_call_finish_surfaces(raw_finish):
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=command_id,
+                    chunk=ToolCallChunk(
+                        model=model_id,
+                        tool_calls=tool_calls,
+                        usage=None,
+                        stats=stats,
+                    ),
+                )
+            )
+            return
+        # Prose answer, or a tool attempt cut short by length/content_filter:
+        # a truncated tool call has incomplete arguments and must NOT surface
+        # as an executable call, so those fall through here and the terminal
+        # chunk carries the server's real finish reason. content_filter is
+        # preserved exactly like the streaming parser does; everything else
+        # maps through the shared finish mapping.
+        reasoning = str(message.get("reasoning_content") or "")
+        content = str(message.get("content") or "")
+        if reasoning:
+            self._send_token(command_id, model_id, reasoning, is_thinking=True)
+        if content:
+            self._send_token(command_id, model_id, content)
+        finish = (
+            "content_filter"
+            if raw_finish == "content_filter"
+            else map_finish_reason(raw_finish)
+        ) or "stop"
+        self._send_token(command_id, model_id, "", finish_reason=finish, stats=stats)
 
     def _generate_streaming(
         self,
@@ -901,6 +1445,12 @@ class Runner(ServedConcurrentDispatch):
             return self.stamp_runner_stats(base, admission_in_flight)
 
         finish_reason: Literal["stop", "length", "content_filter"] | None = None
+        # With no tools offered the server's tool parser never runs, so a model
+        # writing a call anyway would leak dialect markers as content (#889).
+        # Same invariant the MLX path enforces with emit_calls=False.
+        scrub = (
+            StreamingScaffoldingScrub() if not task.task_params.tools else None
+        )
         # No read timeout: generation can pause between tokens on a busy GPU. The
         # connection is closed (aborting server generation) when we break out.
         timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
@@ -930,7 +1480,13 @@ class Runner(ServedConcurrentDispatch):
                         command_id, model_id, delta.reasoning, is_thinking=True
                     )
                 if delta.content:
-                    self._send_token(command_id, model_id, delta.content)
+                    emit = (
+                        scrub.feed(delta.content)
+                        if scrub is not None
+                        else delta.content
+                    )
+                    if emit:
+                        self._send_token(command_id, model_id, emit)
                 if delta.finish is not None:
                     # The terminal chunk is deferred past the loop: the
                     # include_usage counts arrive AFTER the finish_reason
@@ -940,6 +1496,10 @@ class Runner(ServedConcurrentDispatch):
         # fully drained, whether or not the server sent an explicit
         # finish_reason.
         if not self._is_cancelled(task.task_id):
+            if scrub is not None:
+                tail = scrub.flush()
+                if tail:
+                    self._send_token(command_id, model_id, tail)
             self._send_token(
                 command_id,
                 model_id,

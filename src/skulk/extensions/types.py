@@ -20,7 +20,7 @@ Design invariants (enforced by the call sites in :mod:`skulk.api.main` and
   loaded-extension list is empty.
 """
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, final, runtime_checkable
 
@@ -30,6 +30,7 @@ from skulk.extensions.calls import CapabilityCall, CapabilityError, CapabilityRe
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.streams import CapabilityStreamFrame, CapabilityStreamSession
 from skulk.extensions.telemetry import ClusterNodeView
+from skulk.shared.types.capability_nodes import CapabilityNodeSummary
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 
@@ -93,6 +94,35 @@ class WithdrawCapability(Protocol):
     def __call__(self, capability: str) -> None: ...
 
 
+class PublishCapabilityNode(Protocol):
+    """Synchronous callable that publishes a capability-node summary.
+
+    The topology half of advertising: where :class:`AdvertiseCapability`
+    announces a tag, this describes the managed node behind it (status,
+    surfaces, actions) so the dashboard can draw it as a satellite of this
+    host and open its surfaces. Publishing is keyed by plugin and node
+    identifier: republishing the same key replaces the previous summary, so
+    an owner reports status changes by publishing again. The summary is
+    gossiped on the host's normal telemetry cadence and must stay bounded and
+    credential free; validation happens at construction of the summary
+    itself. Hosts publish at most sixteen summaries; a seventeenth is
+    refused with a warning.
+    """
+
+    def __call__(self, summary: CapabilityNodeSummary) -> None: ...
+
+
+class WithdrawCapabilityNode(Protocol):
+    """Synchronous callable that withdraws a published capability-node summary.
+
+    Withdrawing a key that was never published is a no-op. Peers see the
+    withdrawal on the host's next telemetry poll; when the last summary goes,
+    one empty reading clears the host's entry everywhere.
+    """
+
+    def __call__(self, plugin_id: str, node_id: str) -> None: ...
+
+
 class DescribeNode(Protocol):
     """Async callable returning a node's full capability descriptors.
 
@@ -105,9 +135,7 @@ class DescribeNode(Protocol):
     cheap.
     """
 
-    async def __call__(
-        self, node_id: NodeId
-    ) -> tuple[CapabilityDescriptor, ...]: ...
+    async def __call__(self, node_id: NodeId) -> tuple[CapabilityDescriptor, ...]: ...
 
 
 @runtime_checkable
@@ -124,6 +152,35 @@ class CapabilityProvider(Protocol):
 
     def capabilities(self) -> Sequence[CapabilityDescriptor]:
         """Return the capability descriptors this extension serves."""
+        ...
+
+
+@runtime_checkable
+class DynamicCapabilityProvider(Protocol):
+    """Optional cached unary contracts for independently managed plugin runtimes.
+
+    Installation and activation can change this snapshot without restarting
+    Skulk. Reads must be bounded, synchronous and free of I/O. Static providers
+    retain priority; ambiguous dynamic contracts are unavailable.
+    """
+
+    def dynamic_capabilities(self) -> Sequence[CapabilityDescriptor]:
+        """Return current cached contracts; readiness is checked separately."""
+        ...
+
+
+@runtime_checkable
+class CapabilityReadiness(Protocol):
+    """Optional immediate readiness check for each installed capability.
+
+    Discovery and new unary/stream admission consult this facet. Return a cached
+    boolean without blocking or I/O; false or a raised exception hides the
+    descriptor and refuses new calls. Already admitted calls keep their ordinary
+    deadline and cancellation contract. Providers without this facet stay ready.
+    """
+
+    def capability_ready(self, qualified_id: str) -> bool:
+        """Return readiness for the exact ``id@version`` without side effects."""
         ...
 
 
@@ -284,6 +341,21 @@ class SupportsExtensionStartup(Protocol):
         ...
 
 
+@runtime_checkable
+class SupportsExtensionShutdown(Protocol):
+    """Optional asynchronous cleanup of extension-owned background resources.
+
+    The API withdraws provider discovery before invoking cleanup on its original
+    event loop. Hooks run concurrently under a thirty-second cancellation-shielded
+    budget. Implementations must cooperate with cancellation and keep blocking
+    work off the event loop; this trusted-code hook is not a process sandbox.
+    """
+
+    async def on_stop(self) -> None:
+        """Flush bounded state and stop owned tasks/processes before returning."""
+        ...
+
+
 @final
 @dataclass(frozen=True)
 class ExtensionContext:
@@ -302,12 +374,20 @@ class ExtensionContext:
             their own ``read_cluster`` snapshots.
         withdraw_capability: The advertise surface's liveness counterpart:
             stops advertising a tag so callers stop selecting this node for it.
+        publish_capability_node: The topology surface: publishes a bounded
+            summary of a managed capability node this host runs so dashboards
+            draw it as a satellite and open its surfaces.
+        withdraw_capability_node: Removes a published summary by plugin and
+            node identifier.
         describe_node: The heavy half of discovery: fetches a node's full
             capability descriptors (schemas, I/O modes, versions) on demand.
         call_capability: The generic call verb: invokes a capability on a
             provider node with a typed result (fabric-citizenship Phase 2b).
         stream_capability: Open a streaming capability whose active input and
             output directions travel on provider DATA (Phase 3).
+        steward_actions_allowed: Read intelligent-fabric mode and the global capability kill switch.
+            Adapters must recheck before proposal or approved-action dispatch; this
+            grants no operator approval. Hosts that omit it fail closed.
     """
 
     node_id: NodeId
@@ -319,6 +399,11 @@ class ExtensionContext:
     describe_node: DescribeNode
     call_capability: CallCapability
     stream_capability: StreamCapability
+    steward_actions_allowed: Callable[[], bool] = lambda: False
+    # Defaults keep hosts that predate capability-node summaries constructible;
+    # such a host simply publishes nothing for the topology layer.
+    publish_capability_node: PublishCapabilityNode = lambda summary: None
+    withdraw_capability_node: WithdrawCapabilityNode = lambda plugin_id, node_id: None
 
 
 @final

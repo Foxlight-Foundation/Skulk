@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Doctor registry tests: verdicts, consequences, and crash containment."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -12,6 +12,8 @@ from skulk.doctor.checks import (
     DoctorCheck,
     _check_capability_conflicts,
     _check_engine_available,
+    _check_hf_token,
+    _check_vllm_prerequisites,
     run_checks,
 )
 from skulk.facts.testing import (
@@ -251,3 +253,709 @@ def test_declared_management_needs_no_engine(
     monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "management")
     results = _check_engine_available(make_facts())
     assert [r.verdict for r in results] == ["ok"]
+
+
+# --- hugging face token ----------------------------------------------------
+
+
+def _clear_token_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Make token resolution hermetic: no ambient env var, file, or env file."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("SKULK_NODE_PARTICIPATION", raising=False)
+    monkeypatch.setattr("skulk.shared.constants.SKULK_OFFLINE", False)
+    # HF_TOKEN_PATH is resolved at huggingface_hub import time, so HF_HOME
+    # alone would leave these tests touching the real token file.
+    from huggingface_hub import constants as hf_constants
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
+    monkeypatch.setattr(
+        hf_constants, "HF_TOKEN_PATH", str(tmp_path / "hf-home" / "token")
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
+
+
+def _present_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pretend a skulk.yaml exists, so the check reaches its store branches.
+
+    skulk.yaml resolves against the working directory, so without this the
+    check reports the "no config here" case rather than the store layout the
+    test is exercising.
+    """
+    config_path = tmp_path / "skulk.yaml"
+    _ = config_path.write_text("{}\n")
+    monkeypatch.setattr(
+        "skulk.store.config.resolve_config_path", lambda: config_path
+    )
+
+
+def test_hf_token_ok_from_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_secret")
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "HF_TOKEN" in results[0].detail
+    # The token itself must never reach operator-facing output.
+    assert "hf_secret" not in results[0].detail
+
+
+def test_hf_token_ok_from_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_token_env(monkeypatch, tmp_path)
+    token_path = tmp_path / "hf-home" / "token"
+    token_path.parent.mkdir(parents=True)
+    _ = token_path.write_text("hf_from_file\n")
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "hf_from_file" not in results[0].detail
+
+
+def test_hf_token_degraded_when_this_node_downloads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No store configured means this node fetches, so a missing token bites."""
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: None)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "gated" in results[0].consequence
+    # The remediation must lead with the dashboard path (one entry covers the
+    # fleet via propagation) while keeping the restart-free local mechanism.
+    assert "dashboard Settings" in results[0].remediation
+    assert "propagates" in results[0].remediation
+    assert "hf auth login" in results[0].remediation
+
+
+def test_hf_token_ok_when_another_node_is_the_store_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A worker needs no token; warning there would be unactionable noise."""
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="some-other-machine",
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "expected" in results[0].detail
+    assert "some-other-machine" in results[0].detail
+
+
+def test_hf_token_degraded_when_this_node_is_the_store_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact silent misconfiguration #917 is about."""
+    import socket
+
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host=socket.gethostname(),
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "store host" in results[0].detail
+
+
+def test_hf_token_check_is_registered() -> None:
+    assert any(check.check_id == "hf-token" for check in REGISTRY)
+
+
+def test_hf_token_missing_config_says_so_instead_of_asserting_no_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """skulk.yaml resolves against the CWD, so absence is ambiguous.
+
+    Doctor run outside the install directory must not silently claim the node
+    has no model store; it still warns (a zero-config node really does
+    download for itself) but names the ambiguity.
+    """
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "skulk.store.config.resolve_config_path", lambda: tmp_path / "absent.yaml"
+    )
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "install directory" in results[0].detail
+
+
+def test_hf_token_ok_from_skulk_yaml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The dashboard-saved token must not read as absent in standalone doctor."""
+    from skulk.store.config import SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "skulk.store.config.load_skulk_config",
+        lambda: SkulkConfig(hf_token="from_config"),
+    )
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "skulk.yaml" in results[0].detail
+    assert "from_config" not in results[0].detail
+
+
+def test_hf_token_warns_when_store_host_is_a_node_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A peer-ID store_host is undecidable from doctor, so do not claim worker.
+
+    node_matches_store_host compares peer IDs exactly against the running
+    node's own ID, which doctor does not have. Reporting ok here would hide
+    the missing token on a real store host.
+    """
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="12D3KooWEn2jByBsnoeDhqzx7nxaX4d6Qvqs6EcbH6ppHPq26HAT",
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "cannot match" in results[0].detail
+
+
+def test_hf_token_ok_from_service_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Doctor tells operators to set HF_TOKEN here, so it must read it back.
+
+    Otherwise doctor keeps reporting degraded right after the operator follows
+    its own remediation and restarts.
+    """
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    env_file = tmp_path / "fake-home" / ".skulk" / "skulk.env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    _ = env_file.write_text("HF_TOKEN=from_service_env\n")
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "skulk.env" in results[0].detail
+    assert "from_service_env" not in results[0].detail
+
+
+@pytest.mark.parametrize("participation", ["management", "ffn_only"])
+def test_hf_token_ok_on_every_non_serving_participation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, participation: str
+) -> None:
+    """placement.py hard-filters every participation other than "full".
+
+    Neither a management node nor an ffn_only one is assigned an inference
+    shard, so neither downloads weights and neither should be warned.
+    """
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", participation)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert participation in results[0].detail
+
+
+def test_hf_token_worker_detail_notes_direct_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#657: a worker cut off from the store downloads from Hugging Face itself.
+
+    Still ok rather than degraded, because the fallback may never fire and
+    yellowing every worker in a fleet would drown the signal, but the caveat
+    has to be visible.
+    """
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="some-other-machine",
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "allow_hf_fallback" in results[0].detail
+
+
+def test_hf_token_warns_on_a_non_serving_store_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hosting the store is not an inference role.
+
+    A management node can be the configured store host, and would then fetch
+    for the whole fleet, so the participation exemption must not shadow it.
+    """
+    import socket
+
+    from skulk.store.config import ModelStoreConfig, SkulkConfig
+
+    _clear_token_env(monkeypatch, tmp_path)
+    _present_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("SKULK_NODE_PARTICIPATION", "management")
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host=socket.gethostname(),
+            store_path=str(tmp_path / "store"),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "store host" in results[0].detail
+
+
+def test_hf_token_ok_when_the_node_is_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Offline mode declares that this node fetches nothing."""
+    _clear_token_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("skulk.shared.constants.SKULK_OFFLINE", True)
+    results = _check_hf_token(make_facts())
+    assert [r.verdict for r in results] == ["ok"]
+    assert "offline" in results[0].detail
+
+
+# --- vllm prerequisites ------------------------------------------------------
+
+
+def _which_only(name: str, path: Path) -> Callable[[str], str | None]:
+    """A shutil.which stub resolving exactly one command name."""
+
+    def _which(candidate: str) -> str | None:
+        return str(path) if candidate == name else None
+
+    return _which
+
+
+def _gcc_only(name: str) -> str | None:
+    """A node with gcc but no g++: the shape Inductor cannot use."""
+    return "/usr/bin/gcc" if name in ("cc", "gcc") else None
+
+
+def _no_compiler(_name: str) -> str | None:
+    """Stand in for shutil.which on a node with no C toolchain."""
+    return None
+
+
+def _has_compiler(_name: str) -> str | None:
+    """Stand in for shutil.which on a node with a working C++ toolchain."""
+    return "/usr/bin/g++"
+
+
+def _include_dir_returning(include: Path | None) -> Callable[[str], Path | None]:
+    """Stand in for the venv interpreter's reported include directory."""
+
+    def _resolve(_binary_path: str) -> Path | None:
+        return include
+
+    return _resolve
+
+
+
+def _vllm_facts(tmp_path: Path) -> NodeFacts:
+    """Facts describing a node with a usable vLLM binary at a real path."""
+    from skulk.shared.types.node_facts import EngineBinaryFact
+
+    binary = tmp_path / "vllm-env" / "bin" / "vllm"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    _ = binary.write_text("#!/bin/sh\n")
+    return make_facts(
+        platform="linux",
+        vllm_bin=EngineBinaryFact(
+            env_var="SKULK_VLLM_BIN", configured_path=str(binary), state="ok"
+        ),
+    )
+
+
+def test_vllm_prerequisites_skipped_without_a_configured_engine() -> None:
+    """Nothing to prepare for, and engine-available already covers the rest."""
+    results = _check_vllm_prerequisites(make_facts(platform="linux"))
+    assert [r.verdict for r in results] == ["ok"]
+    assert "no vLLM engine configured" in results[0].detail
+
+
+def test_vllm_prerequisites_fails_without_a_compiler(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact fresh-box shape: wheel installed, toolchain absent."""
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _no_compiler)
+    include = tmp_path / "include"
+    include.mkdir()
+    _ = (include / "Python.h").write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["fail"]
+    assert "C++ compiler" in results[0].detail
+    assert "InductorError" in results[0].consequence
+    assert "python3-dev" in results[0].remediation
+    assert "gcc-c++" in results[0].remediation
+
+
+def test_vllm_prerequisites_fails_without_python_headers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _has_compiler)
+    include = tmp_path / "include-empty"
+    include.mkdir()
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["fail"]
+    assert "Python.h" in results[0].detail
+
+
+def test_vllm_prerequisites_ok_when_the_toolchain_is_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _has_compiler)
+    include = tmp_path / "include-ok"
+    include.mkdir()
+    _ = (include / "Python.h").write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["ok"]
+
+
+def test_vllm_prerequisites_unresolvable_interpreter_does_not_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Not knowing is not the same as knowing it is broken.
+
+    A console script whose interpreter cannot be located must not produce a
+    fail verdict telling an operator their working node cannot serve.
+    """
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _has_compiler)
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(None)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["ok"]
+    assert "not verified" in results[0].detail
+
+
+def test_vllm_interpreter_falls_back_to_the_console_script_shebang(
+    tmp_path: Path,
+) -> None:
+    """A user or pipx install has no sibling python; pip's shebang names it."""
+    from skulk.doctor.checks import _vllm_interpreter
+
+    interpreter = tmp_path / "real-python"
+    _ = interpreter.write_text("")
+    script = tmp_path / "bin" / "vllm"
+    script.parent.mkdir(parents=True)
+    _ = script.write_text(f"#!{interpreter}\nprint('x')\n")
+    assert _vllm_interpreter(str(script)) == interpreter
+
+
+def test_vllm_interpreter_prefers_the_adjacent_venv_python(tmp_path: Path) -> None:
+    from skulk.doctor.checks import _vllm_interpreter
+
+    bindir = tmp_path / "vllm-env" / "bin"
+    bindir.mkdir(parents=True)
+    adjacent = bindir / "python"
+    _ = adjacent.write_text("")
+    script = bindir / "vllm"
+    _ = script.write_text("#!/usr/bin/env python3\n")
+    assert _vllm_interpreter(str(script)) == adjacent
+
+
+def test_vllm_interpreter_resolves_an_env_shebang(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`#!/usr/bin/env python3` names the interpreter as an argument.
+
+    Returning /usr/bin/env would probe `env -c ...`, which fails and silently
+    skips header verification, defeating the fallback entirely.
+    """
+    from skulk.doctor.checks import _vllm_interpreter
+
+    real = tmp_path / "python3"
+    _ = real.write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks.shutil.which", _which_only("python3", real)
+    )
+    script = tmp_path / "bin" / "vllm"
+    script.parent.mkdir(parents=True)
+    _ = script.write_text("#!/usr/bin/env python3\n")
+    assert _vllm_interpreter(str(script)) == real
+
+
+def test_vllm_interpreter_handles_env_dash_s(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`env -S` puts flags before the interpreter name."""
+    from skulk.doctor.checks import _vllm_interpreter
+
+    real = tmp_path / "python3"
+    _ = real.write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks.shutil.which", _which_only("python3", real)
+    )
+    script = tmp_path / "bin" / "vllm"
+    script.parent.mkdir(parents=True)
+    _ = script.write_text("#!/usr/bin/env -S python3 -u\n")
+    assert _vllm_interpreter(str(script)) == real
+
+
+def test_vllm_prerequisites_requires_a_cxx_compiler(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Inductor drives g++, so gcc alone is not a usable toolchain.
+
+    torch._inductor.cpp_builder resolves $CXX and otherwise joins bin/g++, so a
+    box with gcc and no g++ still fails at engine init.
+    """
+    facts = _vllm_facts(tmp_path)
+    monkeypatch.setattr("skulk.doctor.checks.shutil.which", _gcc_only)
+    include = tmp_path / "include"
+    include.mkdir()
+    _ = (include / "Python.h").write_text("")
+    monkeypatch.setattr(
+        "skulk.doctor.checks._vllm_include_dir", _include_dir_returning(include)
+    )
+    results = _check_vllm_prerequisites(facts)
+    assert [r.verdict for r in results] == ["fail"]
+    assert "C++ compiler" in results[0].detail
+    # The remediation must name a package that actually provides g++.
+    assert "gcc-c++" in results[0].remediation
+
+
+def test_vllm_prerequisites_check_is_registered() -> None:
+    assert any(check.check_id == "vllm-prerequisites" for check in REGISTRY)
+
+
+def test_comfy_engine_check_verdicts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import skulk.doctor.checks as checks_module
+    import skulk.provisioning.comfy as comfy_module
+    from skulk.facts.testing import NVIDIA_A40, make_facts, ok_bin
+
+    monkeypatch.setattr(comfy_module, "SKULK_ENGINES_DIR", tmp_path / "engines")
+    monkeypatch.setattr(comfy_module.platform_module, "machine", lambda: "aarch64")
+    monkeypatch.delenv("SKULK_NO_ENGINE_AUTOPROVISION", raising=False)
+    gpu = make_facts(gpus=(NVIDIA_A40,))
+
+    monkeypatch.setattr(checks_module, "SKULK_ENABLE_VIDEO_MODELS", False, raising=False)
+    monkeypatch.setattr("skulk.shared.constants.SKULK_ENABLE_VIDEO_MODELS", False)
+    monkeypatch.setattr(comfy_module, "_video_models_enabled", lambda: False)
+    disabled = checks_module._check_comfy_engine(gpu)
+    assert disabled[0].verdict == "ok" and "disabled" in disabled[0].detail
+
+    monkeypatch.setattr("skulk.shared.constants.SKULK_ENABLE_VIDEO_MODELS", True)
+    monkeypatch.setattr(comfy_module, "_video_models_enabled", lambda: True)
+    absent = checks_module._check_comfy_engine(gpu)
+    assert absent[0].verdict == "degraded" and absent[0].fix_available is True
+
+    configured = gpu.model_copy(
+        update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
+    )
+    live = checks_module._check_comfy_engine(configured)
+    assert live[0].verdict == "ok" and "comfy-cuda" in live[0].detail
+    # Placement reads the build per backend tag first, so a tag-only override
+    # must show as that tag's build, beside the engine entry it does not touch.
+    monkeypatch.setenv("SKULK_ENGINE_BUILDS", '{"comfy-cuda": "custom-build"}')
+    overridden = checks_module._check_comfy_engine(configured)
+    assert "comfy-cuda=custom-build" in overridden[0].detail
+    monkeypatch.delenv("SKULK_ENGINE_BUILDS")
+    root_only = gpu.model_copy(update={"comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"})
+    assert checks_module._check_comfy_engine(root_only)[0].verdict == "fail"
+
+    broken = gpu.model_copy(update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/nowhere", "comfy_root_state": "missing"})
+    assert checks_module._check_comfy_engine(broken)[0].verdict == "fail"
+
+    no_wheels = make_facts().model_copy(update={"platform": "linux"})
+    assert checks_module._check_comfy_engine(no_wheels)[0].fix_available is False
+
+
+def test_installed_card_records_flag_complete_models_without_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skulk.doctor.checks as checks_module
+
+    root = tmp_path / "models"
+    root.mkdir()
+    def only_this_root(_staging_root: Path | None) -> tuple[Path, ...]:
+        return (root,)
+
+    monkeypatch.setattr(
+        "skulk.store.artifact_inventory.installed_artifact_roots", only_this_root
+    )
+    monkeypatch.setattr(checks_module, "_configured_store_roots", tuple)
+    for index in range(7):
+        legacy = root / f"org--legacy-{index}"
+        legacy.mkdir()
+        (legacy / "config.json").write_text("{}")
+        (legacy / "model.safetensors").write_bytes(b"weights")
+    partial = root / "org--partial"
+    partial.mkdir()
+    (partial / "model.safetensors.partial").write_bytes(b"half")
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "7 complete models without a card record" in results[0].detail
+    assert "org--legacy-0" in results[0].detail and "and 2 more" in results[0].detail
+    assert "1 incomplete download ignored" in results[0].detail
+    assert "network access" in results[0].remediation
+
+
+def test_installed_card_records_pass_when_nothing_is_unrecorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skulk.doctor.checks as checks_module
+
+    root = tmp_path / "models"
+    root.mkdir()
+    def only_this_root(_staging_root: Path | None) -> tuple[Path, ...]:
+        return (root,)
+
+    monkeypatch.setattr(
+        "skulk.store.artifact_inventory.installed_artifact_roots", only_this_root
+    )
+    monkeypatch.setattr(checks_module, "_configured_store_roots", tuple)
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["ok"]
+    assert results[0].detail == "0 installed models, each with its card record"
+
+
+def test_installed_card_records_include_the_configured_staging_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Store-staged models live outside the model directories and still count."""
+    import skulk.doctor.checks as checks_module
+    from skulk.store.config import ModelStoreConfig, SkulkConfig, StagingNodeConfig
+
+    staging = tmp_path / "staging"
+    staged = staging / "org--staged"
+    staged.mkdir(parents=True)
+    (staged / "config.json").write_text("{}")
+    (staged / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr(
+        "skulk.shared.constants.SKULK_MODELS_DIR", tmp_path / "models"
+    )
+    monkeypatch.setattr("skulk.shared.constants.SKULK_MODELS_PATH", None)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="some-other-machine",
+            store_path=str(tmp_path / "store"),
+            staging=StagingNodeConfig(node_cache_path=str(staging)),
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "org--staged" in results[0].detail
+
+    # With the store off, the staging cache is not a model root.
+    monkeypatch.setattr(
+        "skulk.store.config.load_skulk_config",
+        lambda: SkulkConfig(
+            model_store=ModelStoreConfig(
+                enabled=False,
+                store_host="some-other-machine",
+                store_path=str(tmp_path / "store"),
+                staging=StagingNodeConfig(node_cache_path=str(staging)),
+            )
+        ),
+    )
+    assert [
+        r.verdict
+        for r in checks_module._check_installed_card_records(
+            make_facts(platform="darwin")
+        )
+    ] == ["ok"]
+
+
+def test_installed_card_records_include_the_canonical_store_and_every_staging_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store host's canonical copies and a node-ID-keyed cache are audited.
+
+    Doctor cannot match an override keyed by the node's libp2p ID, so every
+    configured staging path is audited rather than only the base one.
+    """
+    import skulk.doctor.checks as checks_module
+    from skulk.store.config import (
+        ModelStoreConfig,
+        NodeOverrideConfig,
+        SkulkConfig,
+        StagingNodeConfig,
+    )
+
+    def legacy(root: Path, name: str) -> None:
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "config.json").write_text("{}")
+        (directory / "model.safetensors").write_bytes(b"weights")
+
+    store = tmp_path / "store"
+    override_cache = tmp_path / "override-cache"
+    legacy(store, "org--canonical")
+    legacy(override_cache, "org--overridden")
+    monkeypatch.setattr(
+        "skulk.shared.constants.SKULK_MODELS_DIR", tmp_path / "models"
+    )
+    monkeypatch.setattr("skulk.shared.constants.SKULK_MODELS_PATH", None)
+    _present_config(monkeypatch, tmp_path)
+    config = SkulkConfig(
+        model_store=ModelStoreConfig(
+            store_host="this-machine",
+            store_path=str(store),
+            staging=StagingNodeConfig(node_cache_path=str(tmp_path / "base")),
+            node_overrides={
+                "12D3KooWExamplePeerIdentifierForThisNode": NodeOverrideConfig(
+                    staging=StagingNodeConfig(node_cache_path=str(override_cache))
+                )
+            },
+        )
+    )
+    monkeypatch.setattr("skulk.store.config.load_skulk_config", lambda: config)
+
+    results = checks_module._check_installed_card_records(
+        make_facts(platform="darwin")
+    )
+
+    assert [r.verdict for r in results] == ["degraded"]
+    assert "2 complete models without a card record" in results[0].detail
+    assert "org--canonical" in results[0].detail
+    assert "org--overridden" in results[0].detail
+

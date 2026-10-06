@@ -1,8 +1,14 @@
-from pydantic import Field
+from typing import Literal
+
+from pydantic import ConfigDict, Field
 
 from skulk.api.types import (
     ImageEditsTaskParams,
     ImageGenerationTaskParams,
+)
+from skulk.shared.models.memory_estimate import (
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.types.audio import (
@@ -13,8 +19,21 @@ from skulk.shared.types.audio import (
 from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
+from skulk.shared.types.music import MusicGenerationTaskParams
+from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.steward_actions import (
+    StewardActionProposal,
+    StewardActionProposalId,
+)
 from skulk.shared.types.text_generation import TextGenerationTaskParams
-from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from skulk.shared.types.video import VideoGenerationTaskParams
+from skulk.shared.types.worker.downloads import DownloadAttemptId
+from skulk.shared.types.worker.instances import (
+    Instance,
+    InstanceFailureCode,
+    InstanceId,
+    InstanceMeta,
+)
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
 
@@ -35,6 +54,12 @@ class TestCommand(BaseCommand):
 class TextGeneration(BaseCommand):
     task_params: TextGenerationTaskParams
     owner_node: NodeId | None = None
+    # Pin this generation to one specific instance instead of least-loaded
+    # selection across all instances serving the model (mirrors
+    # SpeechSynthesis.target_instance_id). Used by the steward chat surface
+    # and the steward canary so their requests always land on the hidden
+    # system placement; None preserves normal selection.
+    target_instance_id: InstanceId | None = None
 
 
 class ImageGeneration(BaseCommand):
@@ -45,6 +70,33 @@ class ImageGeneration(BaseCommand):
 class ImageEdits(BaseCommand):
     task_params: ImageEditsTaskParams
     owner_node: NodeId | None = None
+
+
+class VideoGeneration(BaseCommand):
+    """Command to render one audio-video clip on a mounted video model."""
+
+    task_params: VideoGenerationTaskParams
+    owner_node: NodeId | None = None
+    """API node that owns the job, receives progress on DATA, and receives the
+    finished container on OUTPUT_MEDIA."""
+
+
+class MusicGeneration(BaseCommand):
+    """Command to generate one WAV on a mounted music model."""
+
+    task_params: MusicGenerationTaskParams
+    owner_node: NodeId
+
+
+class PrepareAudioCpp(BaseCommand):
+    """Ask one chosen worker to prepare its pinned music engine package."""
+
+    target_node: NodeId
+    owner_node: NodeId
+    variant: Literal["cpu", "vulkan", "cuda"] = Field(
+        default="cpu",
+        description="Pinned engine package variant to prepare before placement.",
+    )
 
 
 class TextEmbedding(BaseCommand):
@@ -81,25 +133,101 @@ class SetTracingEnabled(BaseCommand):
     enabled: bool
 
 
+class SetModelTrustApproval(BaseCommand):
+    """Ask the elected master to serialize one exact model trust decision."""
+
+    trust_identity: str = Field(
+        pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        description="Immutable signed-card or content-derived model trust identity.",
+    )
+    approved: bool = Field(
+        description="Whether repository code for the exact identity is authorized."
+    )
+
+
 class PlaceInstance(BaseCommand):
     model_card: ModelCard
     sharding: Sharding
     instance_meta: InstanceMeta
     min_nodes: int
+    prepared_node_resources: dict[NodeId, NodeResources] = Field(
+        default_factory=dict,
+        description="Worker-verified audio.cpp resources from this music mount preparation, scoped to this placement command.",
+    )
     # Per-placement node exclusions — the planner treats these nodes as if
     # they were absent from the topology when scoring this placement only.
     # Empty list (default) preserves the unfiltered behavior. Already-running
     # instances on these nodes are not affected — exclusion is purely a hint
     # to the candidate-cycle search for *this* placement.
     excluded_nodes: list[NodeId] = Field(default_factory=list)
+    # System-placement marker stamped onto the minted instance (the
+    # intelligent-fabric steward). Only the master's invariant pass and
+    # repair builders set this; the operator placement API never does.
+    system_role: Literal["steward"] | None = None
+    requested_context_tokens: int | None = Field(
+        default=None,
+        ge=MIN_REQUESTED_CONTEXT_TOKENS,
+        le=MAX_REQUESTED_CONTEXT_TOKENS,
+        description=(
+            "Caller-chosen context window. The placer honors it up to the "
+            "largest window the chosen placement can hold and refuses a larger "
+            "request; when omitted, engines that reserve their window at load "
+            "take the fleet's served context default."
+        ),
+    )
 
 
 class CreateInstance(BaseCommand):
     instance: Instance
+    prepared_node_resources: dict[NodeId, NodeResources] = Field(
+        default_factory=dict,
+        description="Worker-verified audio.cpp resources for the exact music node, scoped to this placement command.",
+    )
 
 
 class DeleteInstance(BaseCommand):
     instance_id: InstanceId
+
+
+class ProposeStewardAction(BaseCommand):
+    """Ask the master to order one inert, approval-gated steward proposal."""
+
+    proposal: StewardActionProposal
+
+
+class DecideStewardAction(BaseCommand):
+    """Atomically approve or reject one pending steward action proposal."""
+
+    proposal_id: StewardActionProposalId
+    approved: bool
+    decided_by: str = Field(min_length=1, max_length=128)
+
+
+class FailInstance(BaseCommand):
+    """Report a terminal runtime failure to the authoritative master.
+
+    The master records bounded operator failure truth before applying the
+    ordinary instance teardown path. The command therefore carries only a
+    stable category and payload-safe explanation; prompts, responses,
+    credentials, and raw diagnostic output must never be included.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    instance_id: InstanceId = Field(
+        description="Exact placement identity that must be retained and torn down."
+    )
+    error_code: InstanceFailureCode = Field(
+        description="Stable operator-facing category for the terminal failure."
+    )
+    error_message: str = Field(
+        min_length=1,
+        max_length=2048,
+        description=(
+            "Bounded payload-safe operator explanation retained after teardown; "
+            "never contains prompts, responses, credentials, or raw diagnostics."
+        ),
+    )
 
 
 class RefuseInstancePlacement(BaseCommand):
@@ -153,8 +281,17 @@ class DeleteDownload(BaseCommand):
 
 
 class CancelDownload(BaseCommand):
+    """Cancel a model download, optionally only for one observed attempt."""
+
     target_node_id: NodeId
     model_id: ModelId
+    attempt_id: DownloadAttemptId | None = Field(
+        default=None,
+        description=(
+            "Exact active attempt to cancel, or null for an ordinary operator "
+            "cancellation of the current model download."
+        ),
+    )
 
 
 class EvictStagedModel(BaseCommand):
@@ -188,11 +325,23 @@ class RestartNode(BaseCommand):
 
 
 class AddCustomModelCard(BaseCommand):
+    """Order one custom model-card addition across the cluster."""
+
     model_card: ModelCard
+    requires_qualification_ownership: bool = False
+    """Require the existing alias to be absent or service-owned at ordering time."""
 
 
 class DeleteCustomModelCard(BaseCommand):
+    """Order one custom model-card deletion across the cluster."""
+
     model_id: ModelId
+    requires_qualification_ownership: bool = False
+    """Require the existing alias to be service-owned at ordering time."""
+    expected_qualification_card: ModelCard | None = None
+    """Exact temporary card the service is authorized to remove."""
+    expected_card: ModelCard | None = None
+    """Exact card an operator retirement removes; a changed card refuses it."""
 
 
 DownloadCommand = (
@@ -213,14 +362,21 @@ Command = (
     | TextGeneration
     | ImageGeneration
     | ImageEdits
+    | VideoGeneration
+    | MusicGeneration
+    | PrepareAudioCpp
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription
     | RealtimeAudioTranscription
     | SetTracingEnabled
+    | SetModelTrustApproval
     | PlaceInstance
     | CreateInstance
     | DeleteInstance
+    | ProposeStewardAction
+    | DecideStewardAction
+    | FailInstance
     | RefuseInstancePlacement
     | TaskCancelled
     | TaskFinished

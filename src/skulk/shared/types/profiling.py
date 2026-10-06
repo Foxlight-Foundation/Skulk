@@ -1,4 +1,5 @@
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -7,8 +8,13 @@ from pathlib import Path
 from typing import Literal, Self, cast, final
 
 import psutil
-from pydantic import BaseModel, field_serializer, field_validator
+from anyio import to_thread
+from pydantic import UUID4, BaseModel, Field, field_serializer, field_validator
 
+from skulk.shared.models.llama_server_settings import (
+    LlamaServerSettings,
+    resolve_llama_server_settings,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.node_facts import CapabilityConflict
 from skulk.shared.types.thunderbolt import ThunderboltIdentifier
@@ -179,8 +185,16 @@ class DiskUsage(CamelCaseModel):
 
     @classmethod
     def from_path(cls, path: Path) -> Self:
-        """Get disk usage stats for the partition containing path."""
-        total, _used, free = shutil.disk_usage(path)
+        """Get disk usage stats for the partition containing path.
+
+        A fresh install has no models directory until its first download, so
+        the nearest existing parent is measured instead: it sits on the same
+        partition the directory will be created on.
+        """
+        existing = path
+        while not existing.exists() and existing.parent != existing:
+            existing = existing.parent
+        total, _used, free = shutil.disk_usage(existing)
         return cls(
             total=Memory.from_bytes(total),
             available=Memory.from_bytes(free),
@@ -263,6 +277,13 @@ class NetworkInterfaceInfo(CamelCaseModel):
 class NodeIdentity(CamelCaseModel):
     """Static and slow-changing node identification data."""
 
+    node_install_id: UUID4 | None = Field(
+        default=None,
+        description=(
+            "Stable per-installation operator identity, independent of the current "
+            "runtime libp2p node ID."
+        ),
+    )
     model_id: str = "Unknown"
     chip_id: str = "Unknown"
     friendly_name: str = "Unknown"
@@ -294,14 +315,35 @@ class NodeResources(CamelCaseModel):
 
     Mixes probed capability (``backends``) with operator-declared policy
     (``participation``) and the startup-resolved ``data_transport``; all ride the
-    same node-info telemetry path. The planner reads capability and policy to
-    hard-filter placement candidates, while cluster health compares transport
-    facts across live nodes. Defaults describe a normal Apple-Silicon
+    same node-info telemetry path. The planner reads capability, policy, and
+    positive data-plane isolation evidence to hard-filter placement candidates,
+    while cluster health also projects transport faults for operators. Defaults
+    describe a normal Apple-Silicon
     full-participation node so pre-upgrade telemetry stays non-breaking.
     """
 
     backends: frozenset[str] = frozenset({"mlx"})
+    architecture: str | None = Field(
+        default=None,
+        description="Observed host CPU architecture for exact engine package selection.",
+    )
+    engine_builds: dict[str, str] = Field(
+        default_factory=dict,
+        description="Exact installed build identities keyed by engine and backend tag.",
+    )
+    llama_server_settings: LlamaServerSettings | None = Field(
+        default=None,
+        description="Observed serving controls needed to budget per-slot recurrent state.",
+    )
+    hardware_classes: frozenset[str] = Field(
+        default_factory=frozenset,
+        description="Open observed hardware identifiers for support constraints.",
+    )
     participation: NodeParticipation = "full"
+    api_available: bool = True
+    """Whether this process exposes the Skulk HTTP/WebSocket API. Defaults to
+    true so mixed-version telemetry preserves the pre-existing all-nodes API
+    assumption; nodes launched with ``--no-api`` advertise false explicitly."""
     data_transport: NodeDataTransport = "gossipsub"
     zenoh_connected_peers: int | None = None
     """Live Zenoh peer transports on this node's data-plane session, sampled at
@@ -329,6 +371,14 @@ class NodeResources(CamelCaseModel):
             return frozenset(cast("Iterable[str]", v))
         return v
 
+    @field_validator("hardware_classes", mode="before")
+    @classmethod
+    def _coerce_hardware_classes(cls, v: object) -> object:
+        """Coerce JSON arrays into immutable hardware-class inventory."""
+        if isinstance(v, (list, tuple, set, frozenset)):
+            return frozenset(cast("Iterable[str]", v))
+        return v
+
     @field_validator("capability_conflicts", mode="before")
     @classmethod
     def _coerce_capability_conflicts(cls, v: object) -> object:
@@ -345,16 +395,23 @@ class NodeResources(CamelCaseModel):
         # both succeed and round-trip deterministically.
         return sorted(value)
 
+    @field_serializer("hardware_classes")
+    def _serialize_hardware_classes(self, value: frozenset[str]) -> list[str]:
+        """Emit stable JSON for open hardware-class identifiers."""
+        return sorted(value)
+
     @classmethod
     async def gather(
         cls,
         *,
+        api_available: bool = True,
         data_transport: NodeDataTransport = "gossipsub",
         zenoh_connected_peers: int | None = None,
     ) -> "NodeResources":
         """Probe backends and read node policy plus the resolved DATA transport.
 
         Args:
+            api_available: Whether this process exposes the API surface.
             data_transport: Transport already resolved during node startup. Passing
                 the resolved value avoids reinterpreting environment configuration
                 independently from the router that actually owns DATA delivery.
@@ -367,16 +424,48 @@ class NodeResources(CamelCaseModel):
         """
         # Function-level import: the facts package imports shared type modules,
         # so a module-level import here would risk a cycle as facts grows.
-        from skulk.facts import current_backend_derivation
+        from skulk.facts import (
+            current_backend_derivation,
+            current_node_facts,
+            engine_build_inventory,
+            hardware_class_inventory,
+        )
 
         derivation = current_backend_derivation()
+        facts = current_node_facts()
+        try:
+            # The inventory asks served engines for their build (a binary's
+            # version, a checkout's HEAD, the ComfyUI interpreter's torch)
+            # through blocking subprocesses; the first call pays them in full
+            # and a hung interpreter pays its whole timeout. Run it off the
+            # worker loop so heartbeats and event application keep moving.
+            engine_builds = await to_thread.run_sync(
+                engine_build_inventory, derivation.backends, facts
+            )
+        except ValueError as error:
+            from loguru import logger
+
+            logger.error(f"engine build inventory is invalid: {error}")
+            engine_builds = {}
         declared = os.environ.get("SKULK_NODE_PARTICIPATION", "full").strip().lower()
         participation: NodeParticipation = (
             declared if declared in ("full", "management", "ffn_only") else "full"
         )
         return cls(
             backends=derivation.backends,
+            architecture=platform.machine().lower(),
+            engine_builds=engine_builds,
+            llama_server_settings=(
+                resolve_llama_server_settings(os.environ)
+                if any(
+                    backend.startswith("llama_server")
+                    for backend in derivation.backends
+                )
+                else None
+            ),
+            hardware_classes=hardware_class_inventory(facts),
             participation=participation,
+            api_available=api_available,
             data_transport=data_transport,
             zenoh_connected_peers=zenoh_connected_peers,
             capability_conflicts=derivation.conflicts,

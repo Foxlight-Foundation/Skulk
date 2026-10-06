@@ -1,17 +1,58 @@
 import time
 from collections.abc import Generator
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, Literal, cast, final, get_args
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
-from skulk.shared.models.model_cards import AudioResponseFormat, ModelCard, ModelId
+from skulk.shared.models.memory_estimate import (
+    MAX_REQUESTED_CONTEXT_TOKENS,
+    MIN_REQUESTED_CONTEXT_TOKENS,
+)
+from skulk.shared.models.model_cards import (
+    AudioResponseFormat,
+    ModelCard,
+    ModelId,
+    VideoCardConfig,
+    VideoCompanionKind,
+    VideoMode,
+)
+from skulk.shared.models.registry import (
+    RegistryAdvisory,
+    RegistryCapabilityClaim,
+    RegistryEngineSupportClaim,
+)
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.music import MusicJobStatus, MusicOutputManifest
 from skulk.shared.types.text_generation import ReasoningEffort
+from skulk.shared.types.video import (
+    MAX_VIDEO_PROMPT_CHARS,
+    MAX_VIDEO_STYLES,
+    VIDEO_CODECS,
+    VIDEO_CONTROL_STRENGTH_MAX,
+    VIDEO_DEFAULT_CODEC,
+    VIDEO_DEFAULT_GUIDE,
+    VIDEO_DEFAULT_REFERENCE_FIDELITY,
+    VIDEO_DEFAULT_SAMPLER,
+    VIDEO_DEFAULT_SCHEDULER,
+    VIDEO_GUIDE_KINDS,
+    VIDEO_GUIDE_PREPROCESSORS,
+    VIDEO_REFERENCE_FIDELITIES,
+    VIDEO_SAMPLERS,
+    VIDEO_SCHEDULERS,
+    VIDEO_SHIFT_BOUNDS,
+    VideoCodecName,
+    VideoGuideKind,
+    VideoJobStatus,
+    VideoReferenceFidelity,
+    VideoSchedulerName,
+    derivable_guides,
+)
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
+from skulk.store.installed_cards import InstalledArtifactRole, InstalledCardRecord
 from skulk.store.staging_eviction import StagedModelInfo
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -102,6 +143,67 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
+@final
+class ModelRequirements(BaseModel):
+    """Advisory whole-model requirements from effective catalog metadata.
+
+    A result reserves no resources and grants no execution authority. Joined
+    node compatibility, current artifact identity and placement admission must
+    still be checked before loading a runner.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model_id: str = Field(description="Exact selectable model alias.")
+    card_digest: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="SHA-256 of canonical card JSON excluding registry_snapshot_id.",
+    )
+    registry_card_id: str | None = Field(
+        description="Signed card identity, when present."
+    )
+    context_tokens: int = Field(
+        ge=1, description="Requested per-sequence context budget."
+    )
+    context_limit: int | None = Field(
+        description="Advertised card context limit; null when unknown."
+    )
+    storage_bytes: int = Field(
+        ge=0,
+        description="Card weight bytes plus a declared GGUF vision projector; excludes runtime image, staging and caches.",
+    )
+    estimated_memory_bytes: int | None = Field(
+        ge=0,
+        description="Whole-model core footprint at the requested context; null when text KV geometry is unavailable or the task is not text generation.",
+    )
+    discrete_gpu_memory_fraction: float = Field(
+        gt=0,
+        le=1,
+        description="Core fraction of discrete VRAM usable for the estimated footprint; do not sum GPU memory without supported sharding.",
+    )
+    unified_memory_fraction: float = Field(
+        gt=0,
+        le=1,
+        description="Core Apple unified-memory working-set fraction of total RAM.",
+    )
+    compatible_backends: tuple[str, ...] = Field(
+        description="Declared backend tags; live platform and runner constraints still apply."
+    )
+    required_capabilities: tuple[str, ...] = Field(
+        description="Complete positively evidenced capability set required for signed engine support; an empty set cannot authorize matrix-only admission."
+    )
+    engine_support: tuple[RegistryEngineSupportClaim, ...] = Field(
+        description="Matching signed engine claims; status, exact build and hardware constraints remain authoritative."
+    )
+    incomplete_capabilities: tuple[str, ...] = Field(
+        description="Artifact capabilities explicitly marked incomplete; these block admission."
+    )
+    estimate_only: Literal[True] = Field(
+        default=True,
+        description="Estimates are neither measured fit nor a placement or spending authorization.",
+    )
+
+
 class ModelListModel(BaseModel):
     """Public model-catalog entry returned by the models endpoints."""
 
@@ -119,9 +221,140 @@ class ModelListModel(BaseModel):
     supports_tensor: bool = Field(default=False)
     tasks: list[str] = Field(default=[])
     is_custom: bool = Field(default=False)
+    system_role: Literal["steward"] | None = Field(
+        default=None,
+        description=(
+            "Set for fabric-managed system entries (\"steward\" = the "
+            "intelligent-fabric resident, addressable as a chat model but "
+            "not user-placeable). Model pickers should badge or separate "
+            "these rather than listing them as ordinary models."
+        ),
+    )
     family: str = Field(default="")
     quantization: str = Field(default="")
     base_model: str = Field(default="")
+    artifact_repository: str = Field(
+        default="",
+        description=(
+            "Upstream repository containing the active installed artifact when one "
+            "exists, otherwise the effective catalog artifact; distinct from id when "
+            "multiple registry cards select files from one repository."
+        ),
+    )
+    artifact_file: str | None = Field(
+        default=None,
+        description="Exact selected repository file for file-addressed artifacts.",
+    )
+    registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description=(
+            "Immutable signed identity of the active installed card when one exists, "
+            "otherwise the effective catalog card; null for local cards."
+        ),
+    )
+    registry_snapshot_id: str | None = Field(
+        default=None,
+        description="Signed snapshot that supplied this card, or null for local cards.",
+    )
+    registry_provenance: Literal["foxlight", "agent", "community"] | None = Field(
+        default=None,
+        description=(
+            "Audited signed-registry origin, or null for custom cards and installed cards without a registry identity."
+        ),
+    )
+    registry_architecture: str | None = Field(
+        default=None,
+        description="Trusted open architecture identity from signed metadata.",
+    )
+    capability_claims: list[RegistryCapabilityClaim] = Field(
+        default_factory=list,
+        description="Open signed model/artifact capabilities independent of engines.",
+    )
+    engine_support: list[RegistryEngineSupportClaim] = Field(
+        default_factory=list,
+        description="Active signed engine/build claims matching this exact artifact.",
+    )
+    installed: bool = Field(
+        default=False,
+        description=(
+            "Whether the authoritative cluster store, or the local node when the "
+            "store has no record, has an active complete installed generation."
+        ),
+    )
+    active_installed_identity: str | None = Field(
+        default=None,
+        description=(
+            "Durable identity of the active cluster-store generation, falling back "
+            "to the node-local generation when necessary."
+        ),
+    )
+    installed_verification: (
+        Literal["registry_verified", "local_legacy", "custom", "unresolved"] | None
+    ) = Field(
+        default=None,
+        description="Evidence level binding the active card to local artifact bytes.",
+    )
+    current_registry_identity: str | None = Field(
+        default=None,
+        description="Current signed card identity for this alias, when available.",
+    )
+    update_available: bool = Field(
+        default=False,
+        description="Whether registry truth names a newer generation than the active installation.",
+    )
+    advisories: list[RegistryAdvisory] = Field(
+        default_factory=list,
+        description="Active signed warnings affecting this installed or current card.",
+    )
+    catalog_source: Literal["registry", "installed", "custom"] = Field(
+        default="installed",
+        description=(
+            "Trust and precedence source for this catalog entry: the signed "
+            "registry, a card recorded with an installed model that carries "
+            "no registry identity, or an operator's custom card."
+        ),
+    )
+    remote_code_approval_required: bool = Field(
+        default=False,
+        deprecated=True,
+        description=(
+            "Deprecated compatibility field. Current cards are authorized by "
+            "signed publication or explicit addition and return false."
+        ),
+    )
+    remote_code_trust_identity: str | None = Field(
+        default=None,
+        pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        deprecated=True,
+        description=(
+            "Deprecated compatibility identity for the retired secondary "
+            "repository-code approval ceremony."
+        ),
+    )
+    remote_code_approved_for_cluster: bool = Field(
+        default=False,
+        deprecated=True,
+        description=(
+            "Deprecated compatibility state for a legacy cluster approval."
+        ),
+    )
+    remote_code_approved_on_this_node: bool = Field(
+        default=False,
+        deprecated=True,
+        description=(
+            "Deprecated compatibility alias for remote_code_approved_for_cluster; "
+            "model trust is no longer node-local."
+        ),
+    )
+    remote_code_automatically_trusted: bool = Field(
+        default=False,
+        description=(
+            "Whether repository code is authorized by the card's signed "
+            "publication, its explicit addition, or an installed card recorded "
+            "from an earlier release."
+        ),
+    )
     source_revision: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{40}$",
@@ -146,6 +379,10 @@ class ModelListModel(BaseModel):
         default=None,
         description="Optional declarative speech-serving metadata from the model card.",
     )
+    music: "MusicCapabilitySection | None" = Field(
+        default=None,
+        description="Text-to-music family, lyric rule, and generation-target bounds.",
+    )
     tooling: "ToolingCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative tool-calling metadata from the model card.",
@@ -153,6 +390,21 @@ class ModelListModel(BaseModel):
     runtime: "RuntimeCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative runtime integration hints from the model card.",
+    )
+    video: "VideoCapabilitySection | None" = Field(
+        default=None,
+        description=(
+            "Declared video generation contract from the model card: modes, "
+            "clip length range, canvas rules, audio output, and named adapters. "
+            "Present only on video model cards."
+        ),
+    )
+    license: "LicenseSection | None" = Field(
+        default=None,
+        description=(
+            "Operator-facing license facts from the model card, including the "
+            "product display name the license may require. Informational only."
+        ),
     )
     resolved_capabilities: "ResolvedModelCapabilities | None" = Field(
         default=None,
@@ -164,10 +416,40 @@ class ModelListModel(BaseModel):
     )
 
 
+class RemoteCodeApprovalView(BaseModel):
+    """Cluster approval state for one immutable model-card identity."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    card_id: str = Field(
+        pattern=r"^(?:card|local)_[a-z2-7]{52}$",
+        description=(
+            "Signed registry card ID or content-derived local identity for an "
+            "unsigned/custom card."
+        ),
+    )
+    approved_for_cluster: bool = Field(
+        description=(
+            "Whether cluster Settings permit the card to download or execute "
+            "repository code on every node."
+        )
+    )
+    approved_on_this_node: bool = Field(
+        deprecated=True,
+        description=(
+            "Deprecated compatibility alias for approved_for_cluster; trust "
+            "decisions are synchronized across the cluster."
+        ),
+    )
+
+
 class ResolvedModelCapabilities(BaseModel):
     """Normalized runtime behavior that UI and API consumers can safely inspect."""
 
-    family: str = Field(default="", description="Resolved model family used for runtime behavior decisions.")
+    family: str = Field(
+        default="",
+        description="Resolved model family used for runtime behavior decisions.",
+    )
     supports_thinking: bool = Field(
         default=False,
         description="Whether the runtime expects the model to expose a reasoning or thinking mode.",
@@ -300,7 +582,9 @@ class ReasoningCapabilitySection(BaseModel):
     disabled_effort: ReasoningEffort | None = None
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "ReasoningCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "ReasoningCapabilitySection | None":
         config = model_card.reasoning
         if config is None:
             return None
@@ -320,7 +604,9 @@ class ModalitiesCapabilitySection(BaseModel):
     supports_native_multimodal: bool | None = None
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "ModalitiesCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "ModalitiesCapabilitySection | None":
         config = model_card.modalities
         if config is None:
             return None
@@ -405,6 +691,361 @@ class AudioCapabilitySection(BaseModel):
         )
 
 
+class MusicCapabilitySection(BaseModel):
+    """Public music model contract for constructing a valid POST /v1/music."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    family: Literal["minimax_music3", "ace_step_1_5"] = Field(
+        description="Music model family."
+    )
+    lyrics: Literal["required", "optional", "unsupported"] = Field(
+        description="Whether lyrics are required or permitted."
+    )
+    min_seconds: int = Field(description="Shortest generation target accepted.")
+    max_seconds: int = Field(description="Longest generation target accepted.")
+    output_format: Literal["wav"] = Field(
+        default="wav", description="Only result format in the first music release."
+    )
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "MusicCapabilitySection | None":
+        """Project typed music truth, or None for a non-music model."""
+        config = model_card.music
+        if config is None:
+            return None
+        return cls(
+            family=config.family.value,
+            lyrics=config.lyrics.value,
+            min_seconds=config.min_seconds,
+            max_seconds=config.max_seconds,
+        )
+
+
+VideoModeName = Literal["t2va", "fl2va", "ref2va"]
+"""Wire spelling of a video generation mode, shared by the models-route
+projection and the video job request so generated clients see one enum."""
+
+
+class VideoAdapterSection(BaseModel):
+    """One named adapter (LoRA) a video card ships, selectable per request."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    name: str = Field(description="Adapter name accepted by the video job `lora` field.")
+    modes: list[VideoModeName] = Field(
+        default_factory=list,
+        description="Generation modes the adapter is trained for; empty means every mode.",
+    )
+    steps: int | None = Field(default=None, description="Sampling steps the adapter was trained for.")
+    strength: float | None = Field(default=None, description="Default adapter strength.")
+    video_shift: float | None = Field(
+        default=None,
+        description="Video sigma shift a render with this adapter uses when the request sets none; null keeps the card's.",
+    )
+    audio_shift: float | None = Field(
+        default=None,
+        description="Audio sigma shift a render with this adapter uses when the request sets none; null keeps the card's.",
+    )
+
+
+class VideoStyleSection(BaseModel):
+    """One style embedding a video card ships, selectable per request."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    name: str = Field(description="Style name accepted by the video job `styles` field.")
+    modes: list[VideoModeName] = Field(
+        default_factory=list,
+        description="Generation modes the style is declared for; empty means every mode.",
+    )
+
+
+class VideoGuideWeightsSection(BaseModel):
+    """Preprocessor weights a guide loads, with the license their repository declares."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    name: str = Field(description="The card companion's name.")
+    repository: str | None = Field(
+        default=None, description="Hosting repository when it is not the card's own."
+    )
+    license: str | None = Field(
+        default=None, description="License identifier the hosting repository declares."
+    )
+
+
+class VideoGuideSection(BaseModel):
+    """One guide a video card derives from an ordinary control clip."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    kind: VideoGuideKind = Field(
+        description="Value of the video job `control_kind` field: pose, depth, or edges."
+    )
+    modes: list[VideoModeName] = Field(
+        description="Generation modes the card derives this guide for."
+    )
+    weights: list[VideoGuideWeightsSection] = Field(
+        default_factory=list,
+        description="Preprocessor weights the guide loads; empty when it needs none.",
+    )
+
+
+class VideoReferenceLimitsSection(BaseModel):
+    """Per-kind reference attachment limits for reference-to-video cards."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    max_images: int = Field(default=0, description="Reference images accepted per request.")
+    max_videos: int = Field(default=0, description="Reference clips accepted per request.")
+    max_audio_clips: int = Field(default=0, description="Reference audio clips accepted per request.")
+    max_files: int | None = Field(default=None, description="Total attachments accepted, when bounded.")
+    clip_min_seconds: int | None = Field(default=None, description="Shortest reference clip accepted.")
+    clip_max_seconds: int | None = Field(default=None, description="Longest reference clip accepted.")
+    total_clip_seconds: int | None = Field(default=None, description="Combined reference clip length accepted.")
+
+
+class VideoCapabilitySection(BaseModel):
+    """Declared video generation contract from the model card.
+
+    Mirrors the card's ``video`` section so a client can build a valid
+    ``POST /v1/videos`` request without a copy of the card: which modes it
+    serves, the clip length range, the canvas rules, whether it renders a
+    synchronized audio track, and the named adapters with their trained
+    step counts.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    modes: list[VideoModeName] = Field(description="Generation modes the card serves.")
+    min_seconds: int = Field(description="Shortest clip length accepted.")
+    max_seconds: int = Field(description="Longest clip length accepted.")
+    fps: int = Field(description="Output frame rate.")
+    frame_grid_multiple: int = Field(description="Frame counts snap to this multiple plus the offset.")
+    frame_grid_offset: int = Field(description="Frame grid offset.")
+    canvas_multiple: int = Field(description="Canvas dimensions must be multiples of this.")
+    default_short_edge: int | None = Field(default=None, description="Trained short edge when `size` is omitted.")
+    max_pixels: int | None = Field(default=None, description="Pixel budget per frame.")
+    aspect_ratios: list[str] = Field(default_factory=list, description="Advisory aspect ratios the card lists.")
+    audio_output: bool = Field(description="Whether renders carry a synchronized audio track.")
+    audio_sample_rate: int | None = Field(default=None, description="Audio sample rate of rendered clips.")
+    audio_channels: int | None = Field(default=None, description="Audio channels of rendered clips.")
+    default_steps: int = Field(description="Sampling steps when no adapter is selected.")
+    reference_limits: VideoReferenceLimitsSection | None = Field(
+        default=None, description="Reference attachment limits for reference-to-video cards."
+    )
+    adapters: list[VideoAdapterSection] = Field(
+        default_factory=list, description="Named adapters (LoRAs) selectable through the job `lora` field."
+    )
+    styles: list[VideoStyleSection] = Field(
+        default_factory=list,
+        description="Style embeddings selectable through the job `styles` field.",
+    )
+    samplers: list[str] = Field(
+        default_factory=lambda: list(VIDEO_SAMPLERS),
+        description="Every sampler the job `sampler` field accepts: the engine's list, not a recommendation.",
+    )
+    default_sampler: str = Field(
+        default=VIDEO_DEFAULT_SAMPLER, description="Sampler a render uses when the request names none."
+    )
+    schedulers: list[str] = Field(
+        default_factory=lambda: list(VIDEO_SCHEDULERS),
+        description="Every sigma schedule the job `scheduler` field accepts.",
+    )
+    default_scheduler: str = Field(
+        default=VIDEO_DEFAULT_SCHEDULER, description="Sigma schedule a render uses when the request names none."
+    )
+    video_shift: float | None = Field(
+        default=None,
+        description="The card's trained video sigma shift, used when neither the request nor its adapter sets one; null keeps the model's built-in value.",
+    )
+    audio_shift: float | None = Field(
+        default=None,
+        description="The card's trained audio sigma shift, used when neither the request nor its adapter sets one; null keeps the model's built-in value.",
+    )
+    shift_bounds: list[float] = Field(
+        default_factory=lambda: list(VIDEO_SHIFT_BOUNDS),
+        description="Inclusive range the job `video_shift` and `audio_shift` fields accept.",
+    )
+    reference_fidelities: list[str] = Field(
+        default_factory=list,
+        description="Reference sizings the job `reference_fidelity` field accepts; empty when the card serves no `ref2va`.",
+    )
+    default_reference_fidelity: str | None = Field(
+        default=None, description="Reference sizing a `ref2va` render uses when the request names none."
+    )
+    codecs: list[str] = Field(
+        default_factory=lambda: list(VIDEO_CODECS), description="Every codec the job `codec` field accepts."
+    )
+    default_codec: str = Field(default=VIDEO_DEFAULT_CODEC, description="Codec a render is written with by default.")
+    guides: list[VideoGuideSection] = Field(
+        default_factory=list,
+        description=(
+            "Guides the card derives from a `control` clip, selectable through the "
+            "job `control_kind` field; empty when it has no ControlNet."
+        ),
+    )
+    default_guide: VideoGuideKind | None = Field(
+        default=None,
+        description="The guide a `control` clip gives when `control_kind` is omitted.",
+    )
+    control_strength_bounds: list[float] = Field(
+        default_factory=lambda: [0.0, VIDEO_CONTROL_STRENGTH_MAX],
+        description="Inclusive range the job `control_strength` field accepts.",
+    )
+    default_control_strength: float | None = Field(
+        default=None,
+        description=(
+            "ControlNet strength a render uses when `control_strength` is omitted: "
+            "the card's ControlNet's own, else 1; null when the card has no ControlNet."
+        ),
+    )
+    default_control_window: list[float] = Field(
+        default_factory=lambda: [0.0, 1.0],
+        description=(
+            "Schedule fractions `control_start` and `control_end` take when omitted: "
+            "the ControlNet steers across the whole schedule."
+        ),
+    )
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "VideoCapabilitySection | None":
+        """Project the card's declared video contract, or ``None`` for non-video cards."""
+        config = model_card.video
+        if config is None:
+            return None
+        limits = config.reference_limits
+        guides = _guide_sections(config)
+        return cls(
+            modes=cast("list[VideoModeName]", [mode.value for mode in config.modes]),
+            min_seconds=config.min_seconds,
+            max_seconds=config.max_seconds,
+            fps=config.fps,
+            frame_grid_multiple=config.frame_grid_multiple,
+            frame_grid_offset=config.frame_grid_offset,
+            canvas_multiple=config.canvas_multiple,
+            default_short_edge=config.default_short_edge,
+            max_pixels=config.max_pixels,
+            aspect_ratios=list(config.aspect_ratios),
+            audio_output=config.audio_output,
+            audio_sample_rate=config.audio_sample_rate,
+            audio_channels=config.audio_channels,
+            default_steps=config.default_steps,
+            video_shift=config.video_shift,
+            audio_shift=config.audio_shift,
+            reference_fidelities=(
+                list(VIDEO_REFERENCE_FIDELITIES) if VideoMode.ReferenceToAudioVideo in config.modes else []
+            ),
+            default_reference_fidelity=(
+                VIDEO_DEFAULT_REFERENCE_FIDELITY if VideoMode.ReferenceToAudioVideo in config.modes else None
+            ),
+            reference_limits=(
+                VideoReferenceLimitsSection(
+                    max_images=limits.max_images,
+                    max_videos=limits.max_videos,
+                    max_audio_clips=limits.max_audio_clips,
+                    max_files=limits.max_files,
+                    clip_min_seconds=limits.clip_min_seconds,
+                    clip_max_seconds=limits.clip_max_seconds,
+                    total_clip_seconds=limits.total_clip_seconds,
+                )
+                if limits is not None
+                else None
+            ),
+            adapters=[
+                VideoAdapterSection(
+                    name=companion.name,
+                    modes=cast("list[VideoModeName]", [mode.value for mode in companion.modes]),
+                    steps=companion.steps,
+                    strength=companion.strength,
+                    video_shift=companion.video_shift,
+                    audio_shift=companion.audio_shift,
+                )
+                for companion in config.companions
+                if companion.kind == VideoCompanionKind.Lora
+            ],
+            styles=[
+                VideoStyleSection(
+                    name=companion.name,
+                    modes=cast("list[VideoModeName]", [mode.value for mode in companion.modes]),
+                )
+                for companion in config.companions
+                if companion.kind == VideoCompanionKind.Embedding
+            ],
+            guides=guides,
+            default_guide=(
+                VIDEO_DEFAULT_GUIDE
+                if any(guide.kind == VIDEO_DEFAULT_GUIDE for guide in guides)
+                else None
+            ),
+            default_control_strength=next(
+                (
+                    companion.strength if companion.strength is not None else 1.0
+                    for companion in config.companions
+                    if companion.kind == VideoCompanionKind.ModelPatch
+                ),
+                None,
+            ),
+        )
+
+
+def _guide_sections(config: VideoCardConfig) -> list[VideoGuideSection]:
+    """Each guide kind the card derives, with the modes it derives it for."""
+    sections: list[VideoGuideSection] = []
+    for kind in VIDEO_GUIDE_KINDS:
+        modes = [
+            mode for mode in config.modes if kind in derivable_guides(config, mode)
+        ]
+        if not modes:
+            continue
+        roles = VIDEO_GUIDE_PREPROCESSORS[kind]
+        sections.append(
+            VideoGuideSection(
+                kind=cast("VideoGuideKind", kind),
+                modes=cast("list[VideoModeName]", [mode.value for mode in modes]),
+                weights=[
+                    VideoGuideWeightsSection(
+                        name=companion.name,
+                        repository=None if companion.repo is None else str(companion.repo),
+                        license=companion.license,
+                    )
+                    for companion in config.companions
+                    if companion.role is not None and companion.role in roles
+                ],
+            )
+        )
+    return sections
+
+
+class LicenseSection(BaseModel):
+    """Operator-facing license facts from the model card; nothing is enforced."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    name: str = Field(description="Human-readable license name.")
+    url: str | None = Field(default=None, description="Where the license text lives.")
+    spdx_id: str | None = Field(default=None, description="SPDX identifier when one exists.")
+    notice: str | None = Field(default=None, description="Terms the operator should see before fetching.")
+    display_name: str | None = Field(
+        default=None, description="Product display name the license requires, for example a model brand."
+    )
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "LicenseSection | None":
+        """Project the card's license section, or ``None`` when the card declares none."""
+        config = model_card.license
+        if config is None:
+            return None
+        return cls(
+            name=config.name,
+            url=config.url,
+            spdx_id=config.spdx_id,
+            notice=config.notice,
+            display_name=config.display_name,
+        )
+
+
 class ToolingCapabilitySection(BaseModel):
     """Snake-case tool-calling metadata exposed by the models API."""
 
@@ -413,7 +1054,9 @@ class ToolingCapabilitySection(BaseModel):
     tool_call_format: str | None = None
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "ToolingCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "ToolingCapabilitySection | None":
         config = model_card.tooling
         if config is None:
             return None
@@ -446,6 +1089,10 @@ class RuntimeCapabilitySection(BaseModel):
             "sidecar repo as a companion rather than a launchable entry."
         ),
     )
+    mtp_sidecar_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the MTP sidecar repository.",
+    )
     assistant_model_repo: str | None = Field(
         default=None,
         description=(
@@ -453,6 +1100,10 @@ class RuntimeCapabilitySection(BaseModel):
             "it declares one. A companion loaded with the base model, not "
             "independently placeable."
         ),
+    )
+    assistant_model_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the assistant-model repository.",
     )
     served_spec_draft_repo: str | None = Field(
         default=None,
@@ -462,9 +1113,27 @@ class RuntimeCapabilitySection(BaseModel):
             "independently placeable."
         ),
     )
+    served_spec_draft_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the served-engine draft repository.",
+    )
+    vllm_spec_draft_repo: str | None = Field(
+        default=None,
+        description=(
+            "Repo of this model's vLLM speculative-decoding drafter, when it "
+            "declares one. A companion loaded with the base model, not "
+            "independently placeable."
+        ),
+    )
+    vllm_spec_draft_revision: str | None = Field(
+        default=None,
+        description="Immutable commit of the vLLM drafter repository.",
+    )
 
     @classmethod
-    def from_model_card(cls, model_card: ModelCard) -> "RuntimeCapabilitySection | None":
+    def from_model_card(
+        cls, model_card: ModelCard
+    ) -> "RuntimeCapabilitySection | None":
         config = model_card.runtime
         if config is None:
             return None
@@ -478,8 +1147,13 @@ class RuntimeCapabilitySection(BaseModel):
                 config.output_parser.value if config.output_parser is not None else None
             ),
             mtp_sidecar_repo=config.mtp_sidecar_repo,
+            mtp_sidecar_revision=config.mtp_sidecar_revision,
             assistant_model_repo=config.assistant_model_repo,
+            assistant_model_revision=config.assistant_model_revision,
             served_spec_draft_repo=config.served_spec_draft_repo,
+            served_spec_draft_revision=config.served_spec_draft_revision,
+            vllm_spec_draft_repo=config.vllm_spec_draft_repo,
+            vllm_spec_draft_revision=config.vllm_spec_draft_revision,
         )
 
 
@@ -563,9 +1237,7 @@ class OpenUrlToolResponse(BaseModel):
     """Structured response returned by the generic URL-open tool endpoint."""
 
     url: str = Field(description="Original URL requested by the caller.")
-    final_url: str = Field(
-        description="Final URL after redirects were followed."
-    )
+    final_url: str = Field(description="Final URL after redirects were followed.")
     title: str | None = Field(
         default=None,
         description="Best-effort page title when one could be determined.",
@@ -601,9 +1273,7 @@ class ExtractPageToolResponse(BaseModel):
     """Structured response returned by the generic page-extraction tool endpoint."""
 
     url: str = Field(description="Original URL requested by the caller.")
-    final_url: str = Field(
-        description="Final URL after redirects were followed."
-    )
+    final_url: str = Field(description="Final URL after redirects were followed.")
     title: str | None = Field(
         default=None,
         description="Best-effort page title when one could be determined.",
@@ -688,11 +1358,42 @@ class ChatCompletionChoice(BaseModel):
 
 
 class ChatCompletionResponse(BaseModel):
+    """One complete, non-streaming chat completion.
+
+    The `object` discriminator is the first field strict OpenAI clients check,
+    so streaming must not reuse this model: see `ChatCompletionChunkResponse`.
+    """
+
     id: str
     object: Literal["chat.completion"] = "chat.completion"
     created: int
     model: str
-    choices: list[ChatCompletionChoice | StreamingChoiceResponse]
+    choices: list[ChatCompletionChoice]
+    usage: Usage | None = None
+    service_tier: str | None = None
+
+
+class ChatCompletionChunkResponse(BaseModel):
+    """One frame of a streaming chat completion.
+
+    Identical to `ChatCompletionResponse` except for the two things the OpenAI
+    streaming format requires to differ: the `object` discriminator is
+    `chat.completion.chunk`, and every choice carries a `delta` rather than a
+    complete `message`.
+
+    These were one model until the external-API compatibility suite caught the
+    streaming path emitting the non-streaming discriminator. Lenient clients
+    read `choices[0].delta` and never noticed; strict ones, including the
+    Vercel AI SDK's openai-compatible provider, reject the stream outright.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: list[StreamingChoiceResponse]
     usage: Usage | None = None
     service_tier: str | None = None
 
@@ -861,8 +1562,37 @@ class AddCustomModelParams(BaseModel):
         pattern=r"^[0-9a-f]{40}$",
         description=(
             "Immutable Hugging Face commit to inspect and persist on the custom "
-            "card. Omit to follow the repository's mutable main branch."
+            "card. When omitted, Skulk resolves main once and persists the "
+            "returned immutable commit."
         ),
+    )
+
+
+class AddExactCustomModelCardParams(BaseModel):
+    """Operator-supplied exact card retained as unsigned local model truth."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_card: ModelCard = Field(
+        description=(
+            "Complete exact model card to install temporarily or permanently as "
+            "an unsigned custom card. Skulk removes any claimed registry trust "
+            "metadata before persisting it."
+        )
+    )
+
+
+class DeleteExactCustomModelCardParams(BaseModel):
+    """Exact temporary card a qualification service intends to remove."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    model_card: ModelCard = Field(
+        description=(
+            "Complete candidate card originally supplied to /models/add-card. "
+            "Skulk applies the same unsigned-card normalization and deletes only "
+            "when that exact temporary card still owns the alias."
+        )
     )
 
 
@@ -941,9 +1671,13 @@ class GgufQuantOption(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True)
 
-    gguf_file: str = Field(description="Repo-relative first shard of the quant's group; pin this to download it.")
+    gguf_file: str = Field(
+        description="Repo-relative first shard of the quant's group; pin this to download it."
+    )
     label: str = Field(description="Human quant label, e.g. Q4_K_M or UD-Q2_K_XL.")
-    total_bytes: int = Field(description="Exact total bytes of the quant's shard group.")
+    total_bytes: int = Field(
+        description="Exact total bytes of the quant's shard group."
+    )
     shard_count: int = Field(description="Number of GGUF shards in the group.")
 
 
@@ -968,15 +1702,26 @@ class HuggingFaceCardSummary(BaseModel):
 
 
 class StoreDownloadRequest(BaseModel):
-    """Optional file selection for a shared-store model download."""
+    """Optional artifact selection for a shared-store model download."""
 
-    model_config = ConfigDict(frozen=True, strict=True)
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     gguf_file: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=2048,
         description=(
             "Exact repo-relative GGUF file whose shard group the store should "
             "download. Omit to use the repository's default quant selection."
+        ),
+    )
+    extra_gguf_files: list[
+        Annotated[str, Field(min_length=1, max_length=2048)]
+    ] = Field(
+        default_factory=list,
+        description=(
+            "Same-repository companion GGUF paths to fetch with the selected "
+            "base quant."
         ),
     )
     source_revision: str | None = Field(
@@ -985,6 +1730,299 @@ class StoreDownloadRequest(BaseModel):
         description=(
             "Immutable Hugging Face commit to download. Omit to resolve the "
             "repository's mutable main branch."
+        ),
+    )
+    registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description=(
+            "Optional immutable signed card identity. Omit to select the current "
+            "card for the model alias."
+        ),
+    )
+    artifact_bundle_id: str | None = Field(
+        default=None,
+        pattern=r"^bundle_[a-z2-7]{52}$",
+        description=(
+            "Optional immutable v2 artifact-bundle identity. When supplied, "
+            "the selected local card and canonical store must both match it."
+        ),
+    )
+    source_repository: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=512,
+        pattern=r"^[^/]+/.+$",
+        description=(
+            "Upstream owner/repository containing the bytes when model_id is "
+            "a distinct store alias."
+        ),
+    )
+    owner_model_id: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=512,
+        pattern=r"^[^/]+/.+$",
+        description="Owning base-model alias for a companion artifact.",
+    )
+    owner_registry_card_id: str | None = Field(
+        default=None,
+        pattern=r"^card_[a-z2-7]{52}$",
+        description="Immutable signed identity of the owning base card.",
+    )
+    artifact_role: InstalledArtifactRole = Field(
+        default="base",
+        description="Base or declared companion role retained in installed truth.",
+    )
+
+
+class StoreDownloadResponse(CamelCaseModel):
+    """Current state returned after requesting a canonical-store download."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model_id: str | None = Field(
+        default=None,
+        description="Store artifact alias accepted for download, when available.",
+    )
+    source_revision: str | None = Field(
+        default=None,
+        description="Immutable source commit selected for this transfer, or null for mutable main.",
+    )
+    status: str = Field(
+        description="Current store transfer state, or error when the store rejected the request."
+    )
+    progress: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Completed transfer fraction when the store supplied one.",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Operator-readable store error when status is error.",
+    )
+    destination: Literal["store", "node"] = Field(
+        default="store",
+        description=(
+            "Where the model downloads: `store` for the shared model store, or "
+            "`node` when no store is configured and the model downloads onto "
+            "the node that answered, as a launch would."
+        ),
+    )
+
+
+class CachedArtifactLocation(BaseModel):
+    """One node where an exact store artifact generation is available."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    node_id: str = Field(description="Fabric node retaining this exact generation.")
+    complete: bool = Field(description="Whether the node reported a complete manifest.")
+    installed_identity: str = Field(description="Durable installed generation identity.")
+    bytes: int = Field(ge=0, description="Artifact bytes retained on the node.")
+    last_use_epoch_seconds: float = Field(
+        ge=0,
+        description="Unix time of the node's most recent artifact use.",
+    )
+    in_use: bool = Field(description="Whether a live runner currently depends on the replica.")
+    location_kind: Literal["store_local", "node_cache"] = Field(
+        default="node_cache",
+        description="Whether the bytes are canonical-store-local or a node cache."
+    )
+
+
+class CacheInventoryStatus(BaseModel):
+    """Freshness and coverage of telemetry-derived fleet artifact availability."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    state: Literal["syncing", "current", "degraded", "unavailable"] = Field(
+        description="Whether current node availability is complete enough to rely on."
+    )
+    observed_nodes: int = Field(
+        ge=0,
+        description=(
+            "Live nodes with a usable artifact-inventory reading, including stale "
+            "readings retained as partial truth."
+        ),
+    )
+    expected_nodes: int = Field(
+        ge=0,
+        description="Nodes currently expected from live cluster topology.",
+    )
+    store_nodes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Live nodes currently advertising the authoritative canonical-store role."
+        ),
+    )
+
+
+class StoreRegistryEntry(BaseModel):
+    """Canonical store entry enriched with fleet cache and registry status."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model_id: str = Field(description="Canonical store artifact alias.")
+    store_path: str = Field(description="Artifact directory relative to the store root.")
+    files: list[str] = Field(description="Registered files relative to the artifact directory.")
+    downloaded_at: str = Field(description="ISO 8601 UTC registration time.")
+    total_bytes: int = Field(ge=0, description="Registered artifact byte total.")
+    source_revision: str | None = Field(
+        default=None,
+        description="Immutable Hugging Face source commit, or null for mutable main.",
+    )
+    source_repository: str | None = Field(
+        default=None,
+        description="Upstream byte repository when different from the store alias.",
+    )
+    repo_has_projector: bool | None = Field(
+        default=None,
+        description="Whether the registered repository contains a multimodal projector.",
+    )
+    installed_card: InstalledCardRecord | None = Field(
+        default=None,
+        description="Complete durable card, artifact identity, ownership, and manifest.",
+    )
+
+    cached_on_nodes: list[CachedArtifactLocation] = Field(
+        default_factory=list,
+        description="Complete replicas of this installed identity reported across the fleet.",
+    )
+    current_registry_identity: str | None = Field(
+        default=None,
+        description="Current signed card identity for the owning model alias.",
+    )
+    installed_not_current: bool = Field(
+        description="Whether the installed generation is absent from or superseded by the current registry."
+    )
+    update_available: bool = Field(
+        description="Whether a different signed generation is available for installation."
+    )
+    advisories: list[RegistryAdvisory] = Field(
+        default_factory=list,
+        description="Active signed warn-only advisories affecting the installed or current card.",
+    )
+    reconciliation_state: Literal[
+        "idle", "scanning", "importing", "complete", "failed"
+    ] = Field(description="Current fleet reconciliation state.")
+    last_verified_at: str | None = Field(
+        default=None,
+        description="ISO 8601 UTC completion time of the latest reconciliation pass.",
+    )
+
+
+class StoreRegistryResponse(BaseModel):
+    """Public model-store registry and fleet cache-placement view."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    entries: list[StoreRegistryEntry] = Field(
+        default_factory=list,
+        description="Canonical artifacts known to the authoritative model store.",
+    )
+    cache_inventory: CacheInventoryStatus = Field(
+        description="Telemetry freshness and coverage for cached_on_nodes projections."
+    )
+
+
+class ArtifactExportRequest(BaseModel):
+    """Request a short-lived capability for one exact staged artifact."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    installed_identity: str = Field(description="Installed generation to export.")
+    manifest_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="Exact manifest digest the store intends to import.",
+    )
+    target_node_id: str = Field(description="Store node allowed to redeem the token.")
+
+
+class ArtifactExportResponse(BaseModel):
+    """Issued artifact export capability and immutable manifest."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    capability_token: str = Field(
+        description=(
+            "Opaque, single-purpose bearer capability used to redeem files from "
+            "this exact artifact export before expiry."
+        )
+    )
+    expires_at_epoch_seconds: float = Field(
+        description="Unix epoch time after which the capability cannot be redeemed."
+    )
+    byte_ceiling: int = Field(
+        ge=0,
+        description=(
+            "Maximum cumulative artifact bytes the capability permits the target "
+            "node to read."
+        ),
+    )
+    record: InstalledCardRecord = Field(
+        description=(
+            "Immutable installed-card record whose manifest and generation the "
+            "capability exports."
+        )
+    )
+
+
+class ReconciliationStatus(BaseModel):
+    """Fleet cache-to-store reconciliation progress."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    state: Literal["idle", "scanning", "importing", "complete", "failed"] = Field(
+        default="idle",
+        description=(
+            "Current pass state: idle before scheduling, scanning inventories, "
+            "importing selected artifacts, complete after convergence, or failed "
+            "when one or more required operations did not converge."
+        ),
+    )
+    inventory_only: bool = Field(
+        default=True,
+        description=(
+            "Whether the pass reports eligible artifacts without importing them."
+        ),
+    )
+    scanned_nodes: int = Field(
+        default=0,
+        ge=0,
+        description="Number of reachable node inventories included in the pass.",
+    )
+    discovered_artifacts: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Distinct complete installed generations selected after replica "
+            "deduplication."
+        ),
+    )
+    imported_artifacts: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Selected generations newly committed to the canonical store by this pass."
+        ),
+    )
+    pending_imports: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Installed identities still absent from the canonical store, or all "
+            "eligible identities during an inventory-only pass."
+        ),
+    )
+    failures: tuple[str, ...] = Field(
+        default=(),
+        description="Operator-readable inventory or import failures from this pass.",
+    )
+    last_verified_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO 8601 UTC completion time of the latest finished reconciliation pass."
         ),
     )
 
@@ -1014,6 +2052,21 @@ class PlaceInstanceParams(BaseModel):
             "consider all nodes. Already-running instances on the listed "
             "nodes are not affected — exclusion is per-placement, not "
             "cluster-wide."
+        ),
+    )
+    context_tokens: int | None = Field(
+        default=None,
+        ge=MIN_REQUESTED_CONTEXT_TOKENS,
+        le=MAX_REQUESTED_CONTEXT_TOKENS,
+        description=(
+            "Optional context window for this placement, in tokens. The placer "
+            "honors it up to the largest window the chosen nodes hold "
+            "(`max_context_tokens` in the placement preview) and refuses a "
+            "larger request with 400. When omitted, llama-server, in-process "
+            "llama.cpp and vLLM placements take the fleet default "
+            "(`inference.served_context_tokens`, 32768 unless changed) because "
+            "they reserve the whole window's memory at load; MLX keeps the "
+            "full memory fit."
         ),
     )
 
@@ -1060,13 +2113,84 @@ class CreateInstanceParams(BaseModel):
 
 
 class PlacementPreview(BaseModel):
+    card_digest: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Canonical authorized-card content digest used to construct a launchable preview; compare with approved model requirements before submitting the exact instance. Null when no instance is present.",
+    )
     model_id: ModelId
     sharding: Sharding
     instance_meta: InstanceMeta
     instance: Instance | None = None
     # Keys are NodeId strings, values are additional bytes that would be used on that node
     memory_delta_by_node: dict[str, int] | None = None
+    max_context_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Largest context window this placement can hold (memory fit, card "
+            "maximum, engine caps); a `context_tokens` request above it is "
+            "refused. Null when no instance is present or no ceiling applies."
+        ),
+    )
+    default_context_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Window this placement gets when `context_tokens` is omitted: the "
+            "fleet default for engines that reserve at load, otherwise the "
+            "maximum."
+        ),
+    )
+    reserves_context_at_load: bool = Field(
+        default=False,
+        description=(
+            "Whether the engine reserves the whole window's KV memory when the "
+            "model loads (llama-server, in-process llama.cpp, vLLM), so the "
+            "chosen window costs memory whether or not requests use it."
+        ),
+    )
+    kv_bytes_per_token: int | None = Field(
+        default=None,
+        description=(
+            "Estimated KV-cache bytes one token of window costs across the "
+            "placement, for showing what a window reserves. Null when the "
+            "card's attention geometry is unknown."
+        ),
+    )
     error: str | None = None
+    error_code: Literal[
+        "no_valid_placement",
+        "placement_info_pending",
+        "model_code_approval_required",
+        "model_card_identity_mismatch",
+    ] | None = Field(
+        default=None,
+        description=(
+            "Stable placement failure category, or null for a launchable preview. "
+            "model_code_approval_required is retained only for older nodes; "
+            "current authorization policy does not emit it. Backend and "
+            "hardware identifiers remain open strings elsewhere."
+        ),
+    )
+    trust_requirement: str | None = Field(
+        default=None,
+        deprecated=True,
+        description=(
+            "Deprecated compatibility detail from the retired secondary "
+            "model-approval ceremony; current previews return null."
+        ),
+    )
+    compatibility_source: Literal["card", "signed_engine_support"] | None = Field(
+        default=None,
+        description="Truth source that admitted the selected backend, or null on error.",
+    )
+    support_claim_ids: list[str] = Field(
+        default_factory=list,
+        description="Active signed support claims applicable to this placement.",
+    )
+    compatibility_detail: str | None = Field(
+        default=None,
+        description="Operator-readable model, artifact, engine/build, or platform gap.",
+    )
     alternative: bool = Field(
         default=False,
         description=(
@@ -1106,6 +2230,9 @@ class DeleteInstanceTaskParams(BaseModel):
 class CreateInstanceResponse(BaseModel):
     message: str
     command_id: CommandId
+    instance_id: InstanceId = Field(
+        description="Exact placement identity created by the accepted command."
+    )
     model_card: ModelCard
 
 
@@ -1412,6 +2539,305 @@ class ImageListResponse(BaseModel, frozen=True):
     data: list[ImageListItem]
 
 
+class VideoCreateRequest(BaseModel):
+    """Body of ``POST /v1/videos``.
+
+    Sent as JSON for text-to-video, or as the string fields of a multipart
+    form whose file parts are the conditioning attachments. Types are
+    coerced leniently because form values arrive as strings.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(min_length=1, max_length=MAX_VIDEO_PROMPT_CHARS)
+    """Generation prompt; structured prompts pass through verbatim."""
+    model: str
+    """Card identifier of the placed video model."""
+    seconds: int | None = Field(default=None, ge=1, le=120)
+    """Requested duration; omitted means the card's shortest supported clip."""
+    size: str | None = None
+    """Output canvas as ``WIDTHxHEIGHT``; omitted lets the engine pick the
+    card's trained canvas."""
+    aspect_ratio: str | None = None
+    """Advisory ``W:H`` ratio used when ``size`` is omitted."""
+    mode: VideoModeName | None = None
+    """Generation mode; omitted derives it from the attachments."""
+    steps: int | None = Field(default=None, ge=1, le=200)
+    """Sampling steps; omitted defers to the adapter or the card."""
+    seed: int | None = Field(default=None, ge=0)
+    """Deterministic seed."""
+    lora: str | None = None
+    """Name of a card companion adapter to apply."""
+    lora_strength: float | None = Field(default=None, ge=0.0, le=2.0)
+    """Adapter strength override."""
+    audio: bool = True
+    """Whether the output must carry the model's synchronized audio track."""
+    sampler: str | None = None
+    """Sampler name from the engine's list; omitted keeps ``res_multistep``.
+    Samplers that cannot serve distilled H3 are refused by name."""
+    scheduler: VideoSchedulerName | None = None
+    """Sigma schedule; omitted keeps ``simple``."""
+    video_shift: float | None = Field(
+        default=None, ge=VIDEO_SHIFT_BOUNDS[0], le=VIDEO_SHIFT_BOUNDS[1]
+    )
+    """Video sigma shift; omitted takes the adapter's, else the card's."""
+    audio_shift: float | None = Field(
+        default=None, ge=VIDEO_SHIFT_BOUNDS[0], le=VIDEO_SHIFT_BOUNDS[1]
+    )
+    """Audio sigma shift; omitted takes the adapter's, else the card's."""
+    reference_fidelity: VideoReferenceFidelity | None = None
+    """``ref2va`` only: ``match`` (default) or ``max`` reference image sizing."""
+    styles: list[str] = Field(default_factory=list, max_length=MAX_VIDEO_STYLES)
+    """Card style embeddings to apply by name. A multipart form sends them
+    comma-separated in one field."""
+    codec: VideoCodecName | None = None
+    """Output video codec in MP4; omitted keeps ``h264``."""
+    control_strength: float | None = Field(
+        default=None, ge=0.0, le=VIDEO_CONTROL_STRENGTH_MAX
+    )
+    """ControlNet strength, with a ``control`` or ``mask`` part; omitted takes the card's."""
+    control_start: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Fraction of the schedule at which the ControlNet starts; omitted is 0."""
+    control_end: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Fraction of the schedule at which it stops; omitted is 1."""
+    control_kind: VideoGuideKind | None = None
+    """What to derive from the ``control`` clip, which is ordinary footage:
+    ``pose``, ``depth`` or ``edges``; omitted derives the card's default guide."""
+
+    @field_validator("styles", mode="before")
+    @classmethod
+    def _split_styles(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
+
+
+class VideoError(BaseModel, frozen=True):
+    """Why a video job ended without a result."""
+
+    code: str
+    """Stable code: ``job_failed`` or ``job_cancelled``."""
+    message: str
+    """Human-readable detail."""
+
+
+class VideoOutputInfo(BaseModel, frozen=True):
+    """Facts about the finished container as the producer described it."""
+
+    sha256: str
+    """Digest of the container bytes."""
+    size_bytes: int
+    """Container size in bytes."""
+    content_type: str
+    """Container MIME type."""
+    width: int
+    """Frame width in pixels."""
+    height: int
+    """Frame height in pixels."""
+    frame_count: int
+    """Number of video frames."""
+    fps: int
+    """Frames per second."""
+    seconds: float
+    """Duration as muxed."""
+    audio_sample_rate: int | None
+    """Audio sample rate when a track is present."""
+    audio_channels: int | None
+    """Audio channel count when a track is present."""
+    has_thumbnail: bool
+    """Whether ``variant=thumbnail`` content is available."""
+    thumbnail_sha256: str | None = None
+    """Digest of the JPEG thumbnail, so a client can verify what it fetches."""
+    thumbnail_size_bytes: int | None = None
+    """Size of the thumbnail in bytes when one is available."""
+
+
+class VideoEngineInfo(BaseModel, frozen=True):
+    """The engine settings a render resolved and ran with."""
+
+    sampler: str
+    """Sampler that integrated the render (a `KSamplerSelect` name)."""
+    scheduler: str
+    """Schedule that placed its noise levels (a `BasicScheduler` name)."""
+    steps: int
+    """Sampling steps the schedule ran."""
+    seed: int | None = None
+    """The noise seed the render drew from, resolved when the request gave none."""
+    video_shift: float | None
+    """Video sigma shift applied; null leaves the loader default."""
+    audio_shift: float | None
+    """Audio sigma shift applied; null leaves the loader default."""
+    adapter: str | None
+    """Adapter companion name, when one was applied."""
+    adapter_strength: float | None
+    """Strength the adapter was applied at; null without an adapter."""
+    width: int
+    """Output canvas width in pixels."""
+    height: int
+    """Output canvas height in pixels."""
+    frame_count: int
+    """Frames rendered, on the card's frame grid."""
+    reference_fidelity: str | None
+    """``match`` or ``max`` for ``ref2va``; null for other modes."""
+    styles: list[str]
+    """Style embeddings bound into the prompt, in request order."""
+    codec: str
+    """Video codec of the saved container (`h264` or `av1`)."""
+    control_inputs: list[str] = Field(default_factory=list)
+    """ControlNet inputs the render used: ``control``, ``mask``, ``source``."""
+    control_strength: float | None = None
+    """ControlNet strength applied; null when no ControlNet ran."""
+    control_start: float | None = None
+    """Fraction of the schedule the ControlNet started at, when it ran."""
+    control_end: float | None = None
+    """Fraction of the schedule the ControlNet stopped at, when it ran."""
+    control_kind: str | None = None
+    """The guide derived from the control clip; null without one."""
+
+
+class VideoStatsInfo(BaseModel, frozen=True):
+    """Runner-reported timing for one render."""
+
+    steps: int
+    """Sampling steps executed."""
+    seconds_per_step: float
+    """Mean wall time per step."""
+    total_generation_time: float
+    """Wall time from dispatch to a finished container."""
+    peak_memory_bytes: int | None
+    """Peak accelerator memory when the engine reports one."""
+    engine: VideoEngineInfo | None = None
+    """What the render ran with; null for renders from an older engine."""
+
+
+class VideoResource(BaseModel, frozen=True):
+    """One video generation job in the OpenAI ``video`` object shape.
+
+    The first block mirrors OpenAI's fields; the fields after ``error`` are
+    Skulk extensions.
+    """
+
+    id: str
+    """Job identifier."""
+    object: Literal["video"] = "video"
+    """Object type discriminator."""
+    model: str
+    """Card the job was placed on."""
+    status: VideoJobStatus
+    """``queued``, ``in_progress``, ``completed``, ``failed``, or ``cancelled``."""
+    progress: int
+    """Approximate completion percentage."""
+    created_at: int
+    """Creation time, unix seconds."""
+    completed_at: int | None
+    """Terminal time, unix seconds."""
+    expires_at: int | None
+    """When downloadable content expires, unix seconds."""
+    seconds: str
+    """Requested duration as a string, matching OpenAI's schema."""
+    size: str | None
+    """Requested canvas, if any."""
+    error: VideoError | None
+    """Failure detail for failed and cancelled jobs."""
+    prompt: str
+    """Prompt as submitted."""
+    mode: str
+    """Resolved generation mode."""
+    audio: bool
+    """Whether an audio track was required."""
+    stage: str | None
+    """Latest reported render phase."""
+    output: VideoOutputInfo | None
+    """Container facts once the render finished."""
+    stats: VideoStatsInfo | None
+    """Runner timing once the render finished."""
+
+
+class VideoListResponse(BaseModel, frozen=True):
+    """One page of video jobs, newest first by default."""
+
+    object: Literal["list"] = "list"
+    """Object type discriminator."""
+    data: list[VideoResource]
+    """Jobs on this page."""
+    first_id: str | None
+    """Id of the first job on the page."""
+    last_id: str | None
+    """Id of the last job on the page; pass it as ``after`` for the next page."""
+    has_more: bool
+    """Whether another page follows."""
+
+
+class VideoDeletedResponse(BaseModel, frozen=True):
+    """Acknowledgement of ``DELETE /v1/videos/{video_id}``."""
+
+    id: str
+    """Deleted job identifier."""
+    object: Literal["video.deleted"] = "video.deleted"
+    """Object type discriminator."""
+    deleted: bool = True
+    """Always true."""
+
+
+class MusicCreateRequest(BaseModel):
+    """Create one asynchronous text-to-music job."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    model: str = Field(min_length=1, description="Mounted text-to-music model.")
+    prompt: str = Field(min_length=1, max_length=8000, description="Nonblank musical description.")
+    lyrics: str | None = Field(default=None, min_length=1, max_length=20_000, description="Nonblank lyrics, required by MiniMax Music 3.")
+    seconds: int = Field(ge=1, le=120, description="Generation target or budget; MiniMax may yield a different duration.")
+    seed: int | None = Field(default=None, ge=0, le=2**32 - 1, description="Optional deterministic seed.")
+
+    @field_validator("prompt", "lyrics")
+    @classmethod
+    def _require_nonblank_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Music text must contain a non-whitespace character")
+        return value
+
+
+class MusicResource(BaseModel):
+    """Status and measured output facts for a music generation job."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    id: str = Field(description="Music job identifier.")
+    object: Literal["music"] = "music"
+    model: str = Field(description="Selected model card.")
+    prompt: str = Field(description="Submitted musical description.")
+    seconds: int = Field(description="Requested target or budget in seconds.")
+    status: MusicJobStatus = Field(description="Current job state.")
+    created_at: int = Field(description="Creation time in Unix seconds.")
+    completed_at: int | None = Field(description="Terminal time in Unix seconds.")
+    expires_at: int | None = Field(description="WAV expiry time in Unix seconds.")
+    error: str | None = Field(description="Failure detail, if any.")
+    output: MusicOutputManifest | None = Field(description="Actual WAV duration, sample rate, channels, size, and digest.")
+
+
+class MusicListResponse(BaseModel):
+    """One page of this API node's music jobs."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    object: Literal["list"] = "list"
+    data: list[MusicResource] = Field(description="Music jobs in newest-first order.")
+    first_id: str | None = Field(description="First job id on this page.")
+    last_id: str | None = Field(description="Last job id on this page.")
+    has_more: bool = Field(description="Whether another page is available.")
+
+
+class MusicDeletedResponse(BaseModel):
+    """Confirmation that a music job was deleted."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    id: str = Field(description="Deleted job identifier.")
+    object: Literal["music.deleted"] = "music.deleted"
+    deleted: bool = True
+
+
 class StartDownloadParams(CamelCaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -1507,9 +2933,7 @@ class TraceEventResponse(CamelCaseModel):
     model_id: str | None = None
     task_kind: TraceTaskKind | None = None
     tags: list[str] = Field(default_factory=list)
-    attrs: dict[str, str | int | float | bool | list[str]] = Field(
-        default_factory=dict
-    )
+    attrs: dict[str, str | int | float | bool | list[str]] = Field(default_factory=dict)
 
 
 class TraceResponse(CamelCaseModel):

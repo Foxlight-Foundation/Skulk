@@ -42,13 +42,14 @@ from skulk.shared.models.model_cards import (
 from skulk.shared.types.audio import SpeechSynthesisTaskParams
 from skulk.shared.types.chunks import AudioChunk, ErrorChunk
 from skulk.shared.types.commands import (
+    Command,
     ForwarderCommand,
     ForwarderDownloadCommand,
     SpeechSynthesis,
     TaskCancelled,
     TaskFinished,
 )
-from skulk.shared.types.common import CommandId, NodeId
+from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
@@ -130,11 +131,12 @@ def test_audio_speech_exposes_pcm_framing_headers_to_cors_clients() -> None:
         value.strip().casefold()
         for value in response.headers["access-control-expose-headers"].split(",")
     }
-    assert exposed == {
+    assert {
         "x-audio-sample-rate",
         "x-audio-channels",
         "x-audio-sample-format",
-    }
+        "x-skulk-placement-failure",
+    }.issubset(exposed)
 
 
 def _tts_card(
@@ -1876,7 +1878,9 @@ async def test_audio_speech_stream_finishes_cleanly_for_terminal_idle(
     finished_commands: list[object] = []
     cancel_sender, cancel_receiver = channel[ForwarderCommand]()
 
-    async def _record_finished(command: object) -> None:
+    async def _record_finished(
+        command: Command, *, expected_session: SystemId | None = None
+    ) -> None:
         finished_commands.append(command)
 
     api._send = _record_finished

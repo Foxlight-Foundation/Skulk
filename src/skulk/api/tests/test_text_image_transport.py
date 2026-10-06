@@ -20,9 +20,16 @@ from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
-from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
+from skulk.shared.types.worker.instances import (
+    InstanceId,
+    LlamaRpcInstance,
+    MlxRingInstance,
+)
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
-from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.shared.types.worker.shards import (
+    PipelineShardMetadata,
+    RpcDonorShardMetadata,
+)
 from skulk.utils.channels import Receiver, Sender, channel
 
 
@@ -208,7 +215,6 @@ async def test_text_image_transport_targets_authoritative_task_participants() ->
         task_params=command.task_params,
     )
     packets: list[VisionMediaPacket] = []
-
     async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
         api._dispatch_pending_vision_media(task)  # pyright: ignore[reportPrivateUsage]
         packets = await vision_receiver.receive_at_least(6)
@@ -224,6 +230,75 @@ async def test_text_image_transport_targets_authoritative_task_participants() ->
             "chunk",
             "completed",
         ]
+
+
+@pytest.mark.asyncio
+async def test_rpc_vision_media_targets_only_driver() -> None:
+    """RPC donors lend memory but never receive or execute image inference."""
+
+    api, command_receiver, vision_receiver, _ = _build_api()
+    await api._send_text_generation_with_images(_task_params("aGVsbG8="))  # pyright: ignore[reportPrivateUsage]
+    forwarded = await command_receiver.receive()
+    assert isinstance(forwarded.command, TextGeneration)
+    command = forwarded.command
+    model_id = command.task_params.model
+    driver, donor = NodeId("driver"), NodeId("donor")
+    driver_runner, donor_runner = RunnerId("driver-runner"), RunnerId("donor-runner")
+    instance_id = InstanceId("rpc-instance")
+    card = ModelCard(
+        model_id=model_id,
+        storage_size=Memory.from_mb(100),
+        n_layers=2,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    api.state = State(
+        instances={
+            instance_id: LlamaRpcInstance(
+                instance_id=instance_id,
+                shard_assignments=ShardAssignments(
+                    model_id=model_id,
+                    runner_to_shard={
+                        driver_runner: PipelineShardMetadata(
+                            model_card=card,
+                            device_rank=0,
+                            world_size=2,
+                            start_layer=0,
+                            end_layer=2,
+                            n_layers=2,
+                        ),
+                        donor_runner: RpcDonorShardMetadata(
+                            model_card=card,
+                            device_rank=1,
+                            world_size=2,
+                            start_layer=0,
+                            end_layer=0,
+                            n_layers=2,
+                        ),
+                    },
+                    node_to_runner={driver: driver_runner, donor: donor_runner},
+                ),
+                driver_node=driver,
+                donor_endpoints={donor: "10.0.0.2:50052"},
+            )
+        }
+    )
+    task = task_types.TextGeneration(
+        instance_id=instance_id,
+        command_id=command.command_id,
+        owner_node=NodeId("api-node"),
+        task_params=command.task_params,
+    )
+
+    packets: list[VisionMediaPacket] = []
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        api._dispatch_pending_vision_media(task)  # pyright: ignore[reportPrivateUsage]
+        packets = await vision_receiver.receive_at_least(3)
+        task_group.cancel_scope.cancel()
+
+    assert {packet.target_node for packet in packets} == {driver}
+    assert [packet.kind for packet in packets] == ["opened", "chunk", "completed"]
 
 
 @pytest.mark.asyncio

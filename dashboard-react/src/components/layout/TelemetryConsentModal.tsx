@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useModalFocus } from '../../hooks/useModalFocus';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
 import { useConfig, type FullConfig, type TelemetryConfig } from '../../hooks/useConfig';
 import { useSkulkTranslation } from '../../i18n/tolgee';
@@ -32,7 +33,7 @@ const Backdrop = styled.div`
   inset: 0;
   z-index: 60;
   background: ${({ theme }) => theme.colors.overlay};
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -43,21 +44,23 @@ const Card = styled.div`
   width: min(560px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
   overflow-y: auto;
-  background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: 14px;
-  padding: 24px;
+  background: ${({ theme }) => theme.colors.surfaceElevated};
+  border: 1px solid ${({ theme }) => theme.colors.borderControl};
+  border-radius: 12px;
+  box-shadow: ${({ theme }) => theme.colors.shadowPop};
+  padding: 20px;
   animation: ${riseIn} 200ms ease;
 `;
 
 const Title = styled.h2`
   margin: 0 0 6px;
-  font-size: 1.05rem;
+  font-size: 18px;
+  color: ${({ theme }) => theme.colors.text};
 `;
 
 const Body = styled.p`
   margin: 0 0 14px;
-  font-size: 0.86rem;
+  font-size: 14px;
   line-height: 1.55;
   opacity: 0.85;
 `;
@@ -65,7 +68,7 @@ const Body = styled.p`
 const FactList = styled.ul`
   margin: 0 0 14px;
   padding-left: 18px;
-  font-size: 0.82rem;
+  font-size: 13px;
   line-height: 1.5;
   opacity: 0.8;
 `;
@@ -79,7 +82,7 @@ const ToggleRow = styled.label`
   border-radius: 10px;
   margin-bottom: 10px;
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: 14px;
 
   input {
     margin-top: 3px;
@@ -88,8 +91,8 @@ const ToggleRow = styled.label`
 
 const ToggleHint = styled.span`
   display: block;
-  font-size: 0.76rem;
-  opacity: 0.65;
+  font-size: 12px;
+  color: ${({ theme }) => theme.colors.textSecondary};
   margin-top: 2px;
 `;
 
@@ -101,21 +104,24 @@ const Actions = styled.div`
 `;
 
 const Button = styled.button<{ $primary?: boolean }>`
-  padding: 8px 16px;
+  min-height: 36px;
+  padding: 0 16px;
   border-radius: 8px;
-  font-size: 0.84rem;
+  font-size: 14px;
   cursor: pointer;
   border: 1px solid ${({ theme }) => theme.colors.border};
-  background: ${({ $primary, theme }) => ($primary ? theme.colors.gold : 'transparent')};
+  background: ${({ $primary, theme }) => ($primary ? theme.colors.actionFill : 'transparent')};
   color: ${({ $primary, theme }) => ($primary ? theme.colors.textOnAccent : 'inherit')};
   font-weight: ${({ $primary }) => ($primary ? 600 : 400)};
 `;
 
 /** UUID even on non-secure origins (LAN HTTP dashboards lack crypto.randomUUID). */
+// eslint-disable-next-line react-refresh/only-export-components -- Settings shares this stateless identifier generator with the consent dialog.
 export function generateInstallId(): string {
   // Without Web Crypto entirely, return empty: the API backfills an id
   // server-side whenever consent is enabled without one.
   if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') return '';
+  // eslint-disable-next-line no-restricted-syntax -- guarded secure-context path
   if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -146,6 +152,7 @@ export function TelemetryConsentModal() {
   const { fullConfig, loading, saving, saveFullConfig } = useConfig(
     t('telemetry.errors.fetchConfigFailed', 'Failed to fetch config'),
   );
+  const modalRef = useRef<HTMLDivElement>(null);
   const [telemetryOn, setTelemetryOn] = useState(false);
   const [diagnosticsOn, setDiagnosticsOn] = useState(false);
   const [dismissed, setDismissed] = useState(false);
@@ -170,6 +177,8 @@ export function TelemetryConsentModal() {
     setDismissed(true);
   }, []);
 
+  useModalFocus(visible, modalRef, close);
+
   const save = useCallback(async () => {
     const telemetry: TelemetryConfig = {
       consent: telemetryOn ? 'enabled' : 'disabled',
@@ -192,7 +201,7 @@ export function TelemetryConsentModal() {
   if (!visible) return null;
 
   return (
-    <Backdrop role="dialog" aria-modal="true" aria-labelledby="telemetry-consent-title">
+    <Backdrop ref={modalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="telemetry-consent-title">
       <Card>
         <Title id="telemetry-consent-title">{t('telemetry.consent.title', 'Help make Skulk better?')}</Title>
         <Body>

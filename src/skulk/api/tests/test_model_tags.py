@@ -1,12 +1,15 @@
 # pyright: reportPrivateUsage=false
 """Tests for derived model tags exposed by the API."""
 
+import pytest
+
 from skulk.api.main import API
 from skulk.shared.models.model_cards import (
     AudioCardConfig,
     AudioCardKind,
     AudioResponseFormat,
     BuiltinToolType,
+    LicenseCardConfig,
     ModelCard,
     ModelTask,
     OutputParserType,
@@ -16,9 +19,19 @@ from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     ToolCallFormat,
     ToolingCardConfig,
+    VideoCardConfig,
+    VideoCompanionConfig,
+    VideoCompanionKind,
+    VideoMode,
+    VideoReferenceLimits,
+)
+from skulk.shared.models.registry import (
+    RegistryCapabilityClaim,
+    RegistryEngineSupportClaim,
 )
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.video import VIDEO_SAMPLERS
 
 
 def test_model_tags_include_vision() -> None:
@@ -96,6 +109,68 @@ def test_model_list_entry_exposes_declared_and_resolved_capabilities() -> None:
     assert entry.resolved_capabilities is not None
     assert entry.resolved_capabilities.supports_thinking_toggle is True
     assert entry.resolved_capabilities.prompt_renderer == "gemma4"
+
+
+def test_model_list_entry_exposes_signed_intrinsic_and_engine_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registry truth remains distinct from current platform compatibility."""
+    capability = RegistryCapabilityClaim.model_validate(
+        {
+            "capability_id": "video.generate",
+            "scope": "model",
+            "status": "claimed",
+            "source": "upstream_structured",
+            "confidence": 0.9,
+        },
+        strict=False,
+    )
+    support = RegistryEngineSupportClaim.model_validate(
+        {
+            "claim_id": "support_" + "b" * 52,
+            "engine": "future_engine",
+            "engine_build": "future-engine@1.0.0",
+            "architecture": "future_video_v1",
+            "artifact_format": "safetensors",
+            "quantization": None,
+            "capability_id": "video.generate",
+            "status": "experimental",
+            "evidence_kind": "upstream_compatibility",
+            "evidence_trust": "reproducible",
+            "source_url": "https://evidence.example/video",
+            "source_sha256": "c" * 64,
+            "rationale": "Upstream engine integration declares this architecture.",
+            "hardware_classes": [],
+            "recorded_by": "operator@example.com",
+            "created_at": "2026-08-16T12:00:00Z",
+        },
+        strict=False,
+    )
+    card = ModelCard(
+        model_id=ModelId("org/future-video"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        capabilities=["video"],
+        source_revision="a" * 40,
+        registry_card_id="card_" + "a" * 52,
+        registry_snapshot_id="snapshot-test",
+        registry_provenance="agent",
+        registry_architecture="future_video_v1",
+        registry_artifact_format="safetensors",
+        registry_capability_claims=(capability,),
+    )
+    monkeypatch.setattr(
+        "skulk.shared.models.model_cards._registry_engine_support", (support,)
+    )
+
+    entry = API._model_list_entry(card)
+
+    assert entry.registry_architecture == "future_video_v1"
+    assert entry.capability_claims == [capability]
+    assert entry.engine_support == [support]
 
 
 def test_model_list_entry_exposes_audio_capabilities() -> None:
@@ -330,3 +405,103 @@ def test_model_list_entry_serializes_builtin_tools_in_snake_case() -> None:
         "open_url",
         "extract_page",
     ]
+
+
+def test_model_list_entry_projects_the_video_and_license_sections() -> None:
+    """A video card's contract and license reach clients without a copy of the card."""
+    card = ModelCard(
+        model_id=ModelId("Comfy-Org/MiniMax-H3-Test"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToVideo, ModelTask.ReferenceToVideo],
+        video=VideoCardConfig(
+            modes=(VideoMode.TextToAudioVideo, VideoMode.ReferenceToAudioVideo),
+            min_seconds=4,
+            max_seconds=15,
+            fps=24,
+            frame_grid_multiple=17,
+            frame_grid_offset=5,
+            canvas_multiple=32,
+            default_short_edge=768,
+            max_pixels=1032192,
+            aspect_ratios=("16:9", "1:1"),
+            audio_output=True,
+            audio_sample_rate=32000,
+            audio_channels=2,
+            default_steps=20,
+            reference_limits=VideoReferenceLimits(max_images=4, max_videos=1, max_audio_clips=1),
+            companions=(
+                VideoCompanionConfig(kind=VideoCompanionKind.Lora, name="turbo_8step", path="loras/turbo.safetensors", modes=(VideoMode.TextToAudioVideo,), steps=8, strength=1.0),
+                VideoCompanionConfig(kind=VideoCompanionKind.Embedding, name="style", path="embeddings/style.safetensors"),
+            ),
+        ),
+        license=LicenseCardConfig(name="Test License", url="https://example.invalid/LICENSE", notice="Regional terms apply.", display_name="MiniMax H3"),
+    )
+
+    payload = API._model_list_entry(card).model_dump(by_alias=True)
+
+    assert payload["video"]["modes"] == ["t2va", "ref2va"]
+    assert (payload["video"]["min_seconds"], payload["video"]["max_seconds"], payload["video"]["fps"]) == (4, 15, 24)
+    assert (payload["video"]["frame_grid_multiple"], payload["video"]["frame_grid_offset"], payload["video"]["canvas_multiple"]) == (17, 5, 32)
+    assert payload["video"]["audio_output"] is True and payload["video"]["audio_sample_rate"] == 32000
+    assert payload["video"]["reference_limits"]["max_images"] == 4
+    # Adapters and style embeddings are selectable per request; model patches are not.
+    assert payload["video"]["adapters"] == [{"name": "turbo_8step", "modes": ["t2va"], "steps": 8, "strength": 1.0, "video_shift": None, "audio_shift": None}]
+    assert payload["video"]["styles"] == [{"name": "style", "modes": []}]
+    assert payload["video"]["reference_fidelities"] == ["match", "max"]
+    assert payload["video"]["default_reference_fidelity"] == "match"
+    # Without a ControlNet the card derives no guide from a control clip.
+    assert payload["video"]["guides"] == [] and payload["video"]["default_guide"] is None
+    assert payload["video"]["default_control_strength"] is None
+    assert payload["license"] == {"name": "Test License", "url": "https://example.invalid/LICENSE", "spdx_id": None, "notice": "Regional terms apply.", "display_name": "MiniMax H3"}
+
+    text_card = ModelCard(model_id=ModelId("mlx-community/text"), storage_size=Memory.from_bytes(1024), n_layers=1, hidden_size=1, supports_tensor=False, tasks=[ModelTask.TextGeneration])
+    text_payload = API._model_list_entry(text_card).model_dump(by_alias=True)
+    assert text_payload["video"] is None and text_payload["license"] is None
+
+
+def test_the_video_section_publishes_every_engine_setting_a_request_takes() -> None:
+    """A client builds any valid request, and sees its defaults, from the models route alone."""
+    card = ModelCard(
+        model_id=ModelId("Comfy-Org/MiniMax-H3-Shifts"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToVideo],
+        video=VideoCardConfig(
+            modes=(VideoMode.TextToAudioVideo,),
+            min_seconds=4,
+            max_seconds=15,
+            fps=24,
+            frame_grid_multiple=17,
+            frame_grid_offset=5,
+            canvas_multiple=32,
+            audio_output=True,
+            audio_sample_rate=32000,
+            audio_channels=2,
+            default_steps=20,
+            video_shift=12.0,
+            audio_shift=3.0,
+            companions=(
+                VideoCompanionConfig(kind=VideoCompanionKind.Lora, name="turbo_768p", path="loras/turbo.safetensors", steps=4, video_shift=6.0),
+            ),
+        ),
+    )
+
+    payload = API._model_list_entry(card).model_dump(by_alias=True)
+
+    assert payload["video"]["samplers"] == list(VIDEO_SAMPLERS) and "res_multistep" in payload["video"]["samplers"]
+    assert payload["video"]["default_sampler"] == "res_multistep"
+    assert payload["video"]["schedulers"] == ["simple", "normal", "sgm_uniform", "beta", "kl_optimal", "linear_quadratic", "karras", "exponential", "ddim_uniform"]
+    assert payload["video"]["default_scheduler"] == "simple"
+    assert (payload["video"]["video_shift"], payload["video"]["audio_shift"]) == (12.0, 3.0)
+    assert payload["video"]["shift_bounds"] == [0.01, 100.0]
+    # An adapter's own shift wins over the card's; an unset one keeps it.
+    assert (payload["video"]["adapters"][0]["video_shift"], payload["video"]["adapters"][0]["audio_shift"]) == (6.0, None)
+    # Reference sizing only applies to reference-to-video.
+    assert payload["video"]["reference_fidelities"] == [] and payload["video"]["default_reference_fidelity"] is None
+    assert payload["video"]["codecs"] == ["h264", "av1"] and payload["video"]["default_codec"] == "h264"
+

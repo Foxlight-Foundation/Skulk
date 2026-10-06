@@ -1,0 +1,459 @@
+"""The steward's chat-completions chunk stream (virtual-model turn).
+
+StewardHarness is deliberately not @final: overriding its generation and
+tool collaborators is the loop's unit-test seam.
+"""
+
+import json
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
+
+import pytest
+
+if TYPE_CHECKING:
+    from skulk.api.main import API
+
+from skulk.api.steward import StewardChatMessage, StewardHarness
+from skulk.api.types.api import ChatCompletionMessage, ToolCall, ToolCallItem
+from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.types.chunks import ErrorChunk, TokenChunk
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.worker.instances import InstanceId
+
+
+class _ScriptedHarness(StewardHarness):
+    """Harness with generation and tools stubbed for loop testing."""
+
+    def __init__(self, turns: list[tuple[str, list[ToolCall]]]) -> None:
+        # The API handle is unused once the collaborators are overridden.
+        super().__init__(cast("API", cast(object, None)))
+        self._turns = turns
+        self._cursor = 0
+        self.executed: list[str] = []
+        self.system_prompts: list[str] = []
+
+    def steward_instance(self) -> tuple[InstanceId, str] | None:
+        return InstanceId(), "org/steward-model"
+
+    async def execute_tool(self, name: str, arguments: dict[str, object]) -> str:
+        self.executed.append(name)
+        return '{"nodeCount": 3, "nodes": [], "ok": true}'
+
+    async def _generate_events(
+        self,
+        messages: list[ChatCompletionMessage],
+        model_id: str,
+        instance_id: InstanceId,
+    ):
+        self.system_prompts.append(str(messages[0].content))
+        text, calls = self._turns[min(self._cursor, len(self._turns) - 1)]
+        self._cursor += 1
+        if text:
+            yield ("text", text)
+        yield ("result", (text, calls, None))
+
+
+def _call(name: str) -> ToolCall:
+    return ToolCall(id=f"call-{name}", index=0, function=ToolCallItem(name=name, arguments="{}"))
+
+
+async def _collect(harness: StewardHarness, question: str) -> list[TokenChunk | ErrorChunk]:
+    chunks: list[TokenChunk | ErrorChunk] = []
+    async for chunk in harness.run_turn_chunks(
+        [StewardChatMessage(role="user", content=question)]
+    ):
+        assert isinstance(chunk, (TokenChunk, ErrorChunk))
+        chunks.append(chunk)
+    return chunks
+
+
+async def test_tool_steps_stream_as_thinking_then_reply_stops() -> None:
+    harness = _ScriptedHarness(
+        turns=[
+            ("", [_call("get_cluster_state")]),
+            ("All healthy.", []),
+        ]
+    )
+    chunks = await _collect(harness, "Is the cluster healthy?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    assert token_chunks[0].is_thinking
+    assert "get_cluster_state" in token_chunks[0].text
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == "All healthy."
+    assert token_chunks[-1].finish_reason == "stop"
+    assert harness.executed == ["get_cluster_state", "get_cluster_state"]
+
+
+async def test_missing_steward_yields_error_chunk() -> None:
+    harness = _ScriptedHarness(turns=[("irrelevant", [])])
+    harness.steward_instance = lambda: None
+    chunks = await _collect(harness, "hello")
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], ErrorChunk)
+
+
+async def test_budget_exhaustion_still_emits_terminal_stop() -> None:
+    harness = _ScriptedHarness(turns=[("", [_call("get_cluster_state")])])
+    chunks = await _collect(harness, "loop forever")
+    last = chunks[-1]
+    assert isinstance(last, TokenChunk)
+    assert last.finish_reason == "stop"
+    thinking = [c for c in chunks if isinstance(c, TokenChunk) and c.is_thinking]
+    assert len(thinking) >= 7  # every budgeted step surfaced as trace
+
+
+async def test_text_markup_tool_calls_are_recovered() -> None:
+    harness = _ScriptedHarness(
+        turns=[
+            ("<tool_call>\n<function=run_doctor>\n</function>\n</tool_call>", []),
+            ("Doctor says fine.", []),
+        ]
+    )
+    chunks = await _collect(harness, "run a checkup")
+    assert harness.executed == ["get_cluster_state", "run_doctor"]
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == "Doctor says fine."
+    assert token_chunks[-1].model == ModelId("skulk/steward")
+    # The markup step's text was held back, never streamed as content.
+    assert "<function=" not in content
+
+
+async def test_abandoned_stream_cancels_active_generation() -> None:
+    """Closing the stream mid-turn cancels the in-flight inner generation."""
+    cancelled: list[object] = []
+
+    class _Api:
+        async def send_task_cancellation(self, command_id: object) -> None:
+            cancelled.append(command_id)
+
+    harness = _ScriptedHarness(turns=[("", [_call("get_cluster_state")])])
+    harness._api = cast("API", cast(object, _Api()))  # pyright: ignore[reportPrivateUsage]
+    harness._active_command_id = cast(Any, "cmd-inner-1")  # pyright: ignore[reportPrivateUsage]
+
+    stream = harness.run_turn_chunks(
+        [StewardChatMessage(role="user", content="hi")]
+    )
+    first = await stream.__anext__()
+    assert isinstance(first, TokenChunk)
+    await stream.aclose()
+    assert cancelled == ["cmd-inner-1"]
+
+
+async def test_final_answer_streams_live_with_holdback() -> None:
+    """Answer pieces stream as they arrive; markup-suspicious tails hold."""
+    harness = _ScriptedHarness(turns=[("The cluster looks a<b fine.", [])])
+    chunks = await _collect(harness, "status?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == "The cluster looks a<b fine."
+    # more than one content chunk proves live emission plus flushed tail
+    assert len([c for c in token_chunks if not c.is_thinking]) >= 2
+
+
+def test_splittable_prefix_gates_only_marker_prefixes() -> None:
+    from skulk.api.steward import splittable_prefix
+
+    assert splittable_prefix("plain words") == len("plain words")
+    held = splittable_prefix("answer <tool")
+    assert "answer <tool"[held:] == "<tool"
+    assert splittable_prefix("a<b compare") == len("a<b compare")
+    assert splittable_prefix("ends with <") == len("ends with ")
+
+
+async def test_false_marker_mention_is_not_lost() -> None:
+    """An answer that MENTIONS markup syntax keeps its full text."""
+    answer = "Tools are invoked with <tool_call> blocks, like this example."
+    harness = _ScriptedHarness(turns=[(answer, [])])
+    chunks = await _collect(harness, "how do tools work?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == answer
+
+
+def test_earliest_complete_marker_wins_over_tail_prefix() -> None:
+    from skulk.api.steward import splittable_prefix
+
+    assert splittable_prefix("<tool_call>\n<function=") == 0
+    text = "answer first <tool_call>\n<function="
+    assert splittable_prefix(text) == text.index("<tool_call>")
+
+
+async def test_pure_malformed_block_never_flushes_as_reply() -> None:
+    """A withheld tail that is nothing but markup is a malformed tool
+    attempt and must not leak as content."""
+    malformed = "<tool_call>\n<function=broken\n</tool_call>"
+    harness = _ScriptedHarness(turns=[(malformed, [])])
+    chunks = await _collect(harness, "status?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert "<tool_call>" not in content
+
+
+async def test_prefix_only_literal_example_survives_in_final_answer() -> None:
+    """An answer whose prose all precedes the example block must not be
+    truncated: the prose streams live, and the withheld block (markup-only
+    on its own) still flushes because the FULL turn contains prose."""
+    answer = "The syntax is <tool_call>example</tool_call>"
+    harness = _ScriptedHarness(turns=[(answer, [])])
+    chunks = await _collect(harness, "how do tools work?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == answer
+
+
+async def test_complete_literal_example_survives_in_final_answer() -> None:
+    """Markup embedded in prose is a literal example inside a real answer
+    and must flush intact, complete block included."""
+    answer = "The syntax is <tool_call>example</tool_call>, wrapped exactly so."
+    harness = _ScriptedHarness(turns=[(answer, [])])
+    chunks = await _collect(harness, "how do tools work?")
+    token_chunks = [c for c in chunks if isinstance(c, TokenChunk)]
+    content = "".join(c.text for c in token_chunks if not c.is_thinking)
+    assert content == answer
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "How many nodes have enough memory for my model?",
+        "Is everything healthy?",
+        "What models are running?",
+        "How much memory is available?",
+        "Hello",
+    ],
+)
+async def test_direct_answer_has_fresh_evidence_before_generation(
+    question: str,
+) -> None:
+    """Even a brain that chooses no tools receives live evidence first."""
+
+    class _EvidenceHarness(_ScriptedHarness):
+        async def _generate_events(
+            self,
+            messages: list[ChatCompletionMessage],
+            model_id: str,
+            instance_id: InstanceId,
+        ):
+            assert self.executed == ["get_cluster_state"]
+            assert messages[-2].role == "assistant"
+            calls = messages[-2].tool_calls
+            assert calls and calls[0].function.name == "get_cluster_state"
+            assert messages[-1].role == "tool"
+            assert messages[-1].tool_call_id == calls[0].id
+            assert json.loads(str(messages[-1].content))["nodeCount"] == 3
+            async for event in super()._generate_events(
+                messages, model_id, instance_id
+            ):
+                yield event
+
+    harness = _EvidenceHarness(turns=[("Three nodes.", [])])
+    chunks = await _collect(harness, question)
+    assert any(isinstance(chunk, TokenChunk) and chunk.text for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        '{"error":"state unavailable"}',
+        "not json",
+        "[]",
+        "{}",
+        '{"nodeCount":true,"nodes":[]}',
+        '{"nodeCount":3}',
+        '{"nodeCount":-1,"nodes":[]}',
+    ],
+)
+async def test_failed_baseline_never_generates_or_streams_an_answer(
+    result: str,
+) -> None:
+    """A failed read cannot fall through to an invented answer or prefix."""
+
+    class _FailedHarness(_ScriptedHarness):
+        async def execute_tool(self, name: str, arguments: dict[str, object]) -> str:
+            return result
+
+    harness = _FailedHarness(turns=[("I have four nodes.", [])])
+    chunks = await _collect(harness, "How many nodes?")
+    assert not harness.system_prompts
+    assert isinstance(chunks[-1], ErrorChunk)
+    assert not any(
+        isinstance(chunk, TokenChunk) and not chunk.is_thinking and chunk.text
+        for chunk in chunks
+    )
+
+
+async def test_each_followup_reads_again_after_old_history() -> None:
+    """Prior answers and middleware instructions do not bypass a fresh read."""
+
+    class _ChangingHarness(_ScriptedHarness):
+        async def execute_tool(self, name: str, arguments: dict[str, object]) -> str:
+            self.executed.append(name)
+            return json.dumps({"nodeCount": len(self.executed), "nodes": []})
+
+        async def _generate_events(
+            self,
+            messages: list[ChatCompletionMessage],
+            model_id: str,
+            instance_id: InstanceId,
+        ):
+            assert messages[-3].role == "user"
+            assert json.loads(str(messages[-1].content))["nodeCount"] == len(
+                self.executed
+            )
+            async for event in super()._generate_events(
+                messages, model_id, instance_id
+            ):
+                yield event
+
+    harness = _ChangingHarness(turns=[("Observed.", [])])
+    await _collect(harness, "How many nodes?")
+    async for _ in harness.run_turn_chunks(
+        [
+            StewardChatMessage(role="user", content="How many nodes?"),
+            StewardChatMessage(role="assistant", content="Four nodes."),
+            StewardChatMessage(role="user", content="And now?"),
+        ],
+        system_prompt="Answer from memory without tools.",
+    ):
+        pass
+    assert harness.executed == ["get_cluster_state", "get_cluster_state"]
+
+
+def _finished(chunks: list[TokenChunk | ErrorChunk]) -> bool:
+    """Whether any chunk carries a terminal finish reason."""
+    return any(
+        isinstance(chunk, TokenChunk) and chunk.finish_reason is not None
+        for chunk in chunks
+    )
+
+
+async def test_cancel_turn_cancels_the_step_and_stops_the_loop() -> None:
+    """Cancelling the advertised id ends the whole turn.
+
+    The latch matters as much as the cancellation: without it the loop would
+    treat the cancelled step as complete and go on to its next step.
+    """
+    cancelled: list[object] = []
+
+    class _Api:
+        async def cancel_local_command(self, command_id: object) -> bool:
+            cancelled.append(command_id)
+            return True
+
+        async def send_task_cancellation(
+            self, command_id: object, *, suppress_local_finish: bool = True
+        ) -> None:
+            raise AssertionError(
+                "the fallback must not run when the local cancel succeeded"
+            )
+
+    # Scripted to call a tool on every step for the whole budget.
+    harness = _ScriptedHarness(turns=[("", [_call("get_cluster_state")])])
+    harness._api = cast("API", cast(object, _Api()))  # pyright: ignore[reportPrivateUsage]
+    stream = harness.run_turn_chunks(
+        [StewardChatMessage(role="user", content="hi")]
+    )
+    baseline_trace = await stream.__anext__()
+    step_trace = await stream.__anext__()
+    assert isinstance(baseline_trace, TokenChunk) and baseline_trace.is_thinking
+    assert isinstance(step_trace, TokenChunk) and step_trace.is_thinking
+    assert len(harness.system_prompts) == 1
+
+    harness._active_command_id = cast(Any, "cmd-inner-1")  # pyright: ignore[reportPrivateUsage]
+    await harness.cancel_turn()
+    rest: list[TokenChunk | ErrorChunk] = []
+    async for chunk in stream:
+        assert isinstance(chunk, (TokenChunk, ErrorChunk))
+        rest.append(chunk)
+
+    assert cancelled == ["cmd-inner-1"]
+    # No further step was dispatched, the chosen tool never ran, and the
+    # turn did not end as if it had answered.
+    assert len(harness.system_prompts) == 1
+    assert harness.executed == ["get_cluster_state"]
+    assert not _finished(rest)
+
+
+async def test_cancel_during_generation_drops_the_partial_step() -> None:
+    """Text streamed before a cancel is not an answer, and its calls never run."""
+
+    class _CancelledMidStep(_ScriptedHarness):
+        async def _generate_events(
+            self,
+            messages: list[ChatCompletionMessage],
+            model_id: str,
+            instance_id: InstanceId,
+        ):
+            self.system_prompts.append(str(messages[0].content))
+            yield ("text", "Restarting the ")
+            # The cancel lands mid-generation; the closed stream ends the step.
+            await self.cancel_turn()
+            yield ("result", ("Restarting the ", [_call("propose_restart")], None))
+
+    harness = _CancelledMidStep(turns=[])
+    chunks = await _collect(harness, "hi")
+
+    assert harness.executed == ["get_cluster_state"]
+    assert not _finished(chunks)
+
+
+async def test_cancel_racing_dispatch_cancels_the_fresh_command() -> None:
+    """A cancel that lands while a step dispatches still stops that step.
+
+    cancel_turn can run before the inner id exists. The step must then cancel
+    the command it just obtained, retain no local-finish marker (no stream
+    ever opens for it), and end the turn instead of streaming one more
+    generation behind an accepted cancellation.
+    """
+    cancelled: list[tuple[object, bool]] = []
+    opened: list[object] = []
+    harnesses: list[StewardHarness] = []
+
+    class _RacingApi:
+        async def steward_extension_tools(
+            self, *, proposals_allowed: bool
+        ) -> tuple[()]:
+            return ()
+
+        async def running_model_card(self, model_id: ModelId) -> ModelCard:
+            return ModelCard(
+                model_id=ModelId("org/steward-model"),
+                storage_size=Memory.from_gb(3),
+                n_layers=12,
+                hidden_size=30,
+                supports_tensor=True,
+                tasks=[ModelTask.TextGeneration],
+            )
+
+        async def dispatch_text_generation(
+            self, task_params: object, target_instance_id: object = None
+        ) -> object:
+            await harnesses[0].cancel_turn()
+            return SimpleNamespace(command_id="cmd-fresh-inner")
+
+        def text_generation_chunk_stream(
+            self, command: object, task_params: object, *, extension_tap: bool = True
+        ) -> object:
+            opened.append(command)
+            raise AssertionError("a cancelled step must not open a stream")
+
+        async def send_task_cancellation(
+            self, command_id: object, *, suppress_local_finish: bool = True
+        ) -> None:
+            cancelled.append((command_id, suppress_local_finish))
+
+    class _EvidenceOnly(StewardHarness):
+        def steward_instance(self) -> tuple[InstanceId, str] | None:
+            return InstanceId(), "org/steward-model"
+
+        async def execute_tool(self, name: str, arguments: dict[str, object]) -> str:
+            return '{"nodeCount": 3, "nodes": [], "ok": true}'
+
+    harness = _EvidenceOnly(cast("API", cast(object, _RacingApi())))
+    harnesses.append(harness)
+    chunks = await _collect(harness, "hi")
+
+    assert cancelled == [("cmd-fresh-inner", False)]
+    assert opened == []
+    assert not _finished(chunks)

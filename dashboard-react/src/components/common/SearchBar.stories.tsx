@@ -8,7 +8,7 @@ const meta: Meta<typeof SearchBar> = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 320, padding: 20, background: '#000' }}>
+      <div style={{ width: 'min(320px, calc(100vw - 48px))', padding: 20, }}>
         <Story />
       </div>
     ),
@@ -47,7 +47,7 @@ export const Debounced: Story = {
           placeholder="Debounced (500ms)…"
           debounceMs={500}
         />
-        <p style={{ color: '#999', fontSize: 12, marginTop: 8 }}>
+        <p style={{ color: 'inherit', fontSize: 12, marginTop: 8 }}>
           Committed: "{committed}"
         </p>
       </div>

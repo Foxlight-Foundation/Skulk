@@ -151,6 +151,117 @@ def test_plan_does_not_request_download_when_shard_already_downloaded():
     assert not isinstance(result, plan_mod.DownloadModel)
 
 
+def test_plan_redownloads_when_registry_artifact_replaces_same_alias() -> None:
+    """A stale completion cannot satisfy a newer immutable registry card."""
+    base_shard = get_pipeline_shard_metadata(model_id=MODEL_A_ID, device_rank=0)
+    stale_shard = base_shard.model_copy(
+        update={
+            "model_card": base_shard.model_card.model_copy(
+                update={
+                    "source_revision": "a" * 40,
+                    "registry_card_id": f"card_{'a' * 52}",
+                }
+            )
+        }
+    )
+    expected_shard = base_shard.model_copy(
+        update={
+            "model_card": base_shard.model_card.model_copy(
+                update={
+                    "source_revision": "b" * 40,
+                    "registry_card_id": f"card_{'b' * 52}",
+                }
+            )
+        }
+    )
+    instance = get_mlx_ring_instance(
+        instance_id=INSTANCE_1_ID,
+        model_id=MODEL_A_ID,
+        node_to_runner={NODE_A: RUNNER_1_ID},
+        runner_to_shard={RUNNER_1_ID: expected_shard},
+    )
+    runner = FakeRunnerSupervisor(
+        bound_instance=BoundInstance(
+            instance=instance,
+            bound_runner_id=RUNNER_1_ID,
+            bound_node_id=NODE_A,
+        ),
+        status=RunnerIdle(),
+    )
+
+    result = plan_mod.plan(
+        node_id=NODE_A,
+        runners={RUNNER_1_ID: runner},  # type: ignore
+        global_download_status={
+            NODE_A: [
+                DownloadCompleted(
+                    shard_metadata=stale_shard,
+                    node_id=NODE_A,
+                    total=Memory(),
+                )
+            ]
+        },
+        instances={INSTANCE_1_ID: instance},
+        all_runners={RUNNER_1_ID: RunnerIdle()},
+        tasks={},
+    )
+
+    assert isinstance(result, plan_mod.DownloadModel)
+    assert result.shard_metadata == expected_shard
+
+
+def test_plan_does_not_load_replaced_registry_artifact() -> None:
+    """Load waits for the newly signed artifact instead of stale alias bytes."""
+    base_shard = get_pipeline_shard_metadata(model_id=MODEL_A_ID, device_rank=0)
+    stale_shard = base_shard.model_copy(
+        update={
+            "model_card": base_shard.model_card.model_copy(
+                update={"registry_card_id": f"card_{'a' * 52}"}
+            )
+        }
+    )
+    expected_shard = base_shard.model_copy(
+        update={
+            "model_card": base_shard.model_card.model_copy(
+                update={"registry_card_id": f"card_{'b' * 52}"}
+            )
+        }
+    )
+    instance = get_mlx_ring_instance(
+        instance_id=INSTANCE_1_ID,
+        model_id=MODEL_A_ID,
+        node_to_runner={NODE_A: RUNNER_1_ID},
+        runner_to_shard={RUNNER_1_ID: expected_shard},
+    )
+    runner = FakeRunnerSupervisor(
+        bound_instance=BoundInstance(
+            instance=instance,
+            bound_runner_id=RUNNER_1_ID,
+            bound_node_id=NODE_A,
+        ),
+        status=RunnerConnected(),
+    )
+
+    result = plan_mod.plan(
+        node_id=NODE_A,
+        runners={RUNNER_1_ID: runner},  # type: ignore
+        global_download_status={
+            NODE_A: [
+                DownloadCompleted(
+                    shard_metadata=stale_shard,
+                    node_id=NODE_A,
+                    total=Memory(),
+                )
+            ]
+        },
+        instances={INSTANCE_1_ID: instance},
+        all_runners={RUNNER_1_ID: RunnerConnected()},
+        tasks={},
+    )
+
+    assert result is None
+
+
 def test_plan_does_not_load_model_until_all_shards_downloaded_globally():
     """
     LoadModel should not be emitted while some shards are still missing from

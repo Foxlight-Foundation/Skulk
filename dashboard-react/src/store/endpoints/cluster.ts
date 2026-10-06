@@ -89,6 +89,8 @@ export interface RawRdmaCtl {
 /** Resolved node policy and placement capability advertised over telemetry. */
 export interface RawNodeResources {
   backends?: string[];
+  engineBuilds?: Record<string, string>;
+  hardwareClasses?: string[];
   participation?: 'full' | 'management' | 'ffn_only';
   dataTransport?: 'gossipsub' | 'zenoh';
 }
@@ -104,6 +106,35 @@ export interface RawNodeHealthReason {
 export interface RawNodeHealth {
   level: 'ok' | 'warn' | 'error';
   reasons?: RawNodeHealthReason[];
+}
+
+/** One capability node summary as `GET /state` projects it (camelCase). */
+export interface RawCapabilityNodeSummary {
+  pluginId?: string;
+  nodeId?: string;
+  bundleId?: string;
+  version?: string;
+  title?: string | null;
+  status?: string;
+  ownerAvailable?: boolean;
+  surfaces?: Array<{
+    surfaceId?: string;
+    title?: string;
+    kind?: string;
+    url?: string;
+    ready?: boolean;
+  }>;
+  actions?: Array<{
+    actionId?: string;
+    title?: string;
+    kind?: string;
+    surfaceId?: string | null;
+    capabilityId?: string | null;
+    payload?: Record<string, unknown> | null;
+    url?: string | null;
+  }>;
+  operationsActive?: number;
+  observedAt?: string;
 }
 
 export interface RawStateResponse {
@@ -122,6 +153,8 @@ export interface RawStateResponse {
   nodeResources?: Record<string, RawNodeResources>;
   nodeHealth?: Record<string, RawNodeHealth>;
   nodeCapabilities?: Record<string, string[]>;
+  /** Capability-node summaries per host node id (topology satellites). */
+  capabilityNodes?: Record<string, RawCapabilityNodeSummary[]>;
   thunderboltBridgeCycles?: string[][];
 }
 
