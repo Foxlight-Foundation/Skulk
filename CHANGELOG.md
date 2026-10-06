@@ -611,8 +611,10 @@ This project records release notes here and mirrors public-facing notes in
   keyed by pin and wheel-set digest so a wheel change reprovisions),
   provisioned on Linux NVIDIA and AMD nodes that enable video models or by
   `skulk doctor --fix`, advertised as `comfy-cuda` or `comfy-rocm` (the
-  ROCm lane launches ComfyUI with `--bf16-vae --disable-mmap
-  --cache-none`), with `SKULK_COMFY_BIN` and
+  ROCm lane launches ComfyUI with `--bf16-vae` and `--cache-ram` keeping 40%
+  of host RAM free so models stay resident between renders, adding
+  `--disable-mmap` only for a weight file above 64 GiB), with
+  `SKULK_COMFY_BIN` and
   `SKULK_COMFY_ROOT` for hand-built installs. The ComfyUI runner drives that install headless:
   it exposes the staged H3 artifact through an `extra_model_paths.yaml`,
   binds each request onto ComfyUI's own MiniMax H3 node graph (text, first
