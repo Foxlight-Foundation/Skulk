@@ -55,7 +55,7 @@ desktop control for starting the node, opening the dashboard, and viewing logs.
 
 **Apple Silicon macOS 15 or newer:**
 
-[Download the signed and notarized Skulk 1.5.1 DMG](https://releases.foxlight.ai/desktop/macos/1.5.1/3/Skulk-1.5.1-3-macOS-arm64.dmg), or install with Homebrew:
+[Download the signed and notarized Skulk 2.0.0 DMG](https://releases.foxlight.ai/desktop/macos/2.0.0/1/Skulk-2.0.0-1-macOS-arm64.dmg), or install with Homebrew:
 
 ```bash
 brew install --cask Foxlight-Foundation/skulk/skulk
