@@ -348,11 +348,13 @@ it('preserves an unsaved draft across Devices and commits it only with Save', as
   await userEvent.fill(token, 'fixture-unsaved-token');
   const devices = [...container.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Devices & pairing')!;
   await userEvent.click(devices);
-  expect(container.textContent).toContain('Device actions fixture');
+  // React commits the view switch after the click resolves; a loaded CI runner
+  // once read the page before that commit, so wait for each view to render.
+  await vi.waitFor(() => expect(container?.textContent).toContain('Device actions fixture'));
   expect(saveFullConfig).not.toHaveBeenCalled();
   const back = [...container.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Back to Settings')!;
   await userEvent.click(back);
-  expect(container.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe('fixture-unsaved-token');
+  await vi.waitFor(() => expect(container?.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe('fixture-unsaved-token'));
   expect(saveFullConfig).not.toHaveBeenCalled();
   await userEvent.click([...container.querySelectorAll('button')].find(button => button.textContent === 'Save changes')!);
   expect(saveFullConfig).toHaveBeenCalledWith(expect.objectContaining({ hf_token: 'fixture-unsaved-token' }));
