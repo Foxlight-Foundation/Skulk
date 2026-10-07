@@ -20,7 +20,7 @@ from packaging.utils import canonicalize_name
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions import service_bootstrap
-from skulk.extensions.runtime_artifacts import Digest, measure_host
+from skulk.extensions.runtime_artifacts import Digest, QualifiedHost, measure_host
 from skulk.extensions.runtime_files import (
     RuntimeLock,
     is_desktop_metadata,
@@ -34,6 +34,21 @@ from skulk.utils.dashboard_path import find_resources
 
 _MAXIMUM_FILES = 200000
 _MAXIMUM_BYTES = 17179869184
+# Room kept free beyond the copy itself, so staging never leaves the volume
+# that also holds models and the event log full.
+_FREE_SPACE_MARGIN_BYTES = 2147483648
+
+
+def _require_free_space(destination: Path, needed: int) -> None:
+    """Refuse a copy that would leave the destination volume nearly full."""
+    free = shutil.disk_usage(destination).free
+    if free < needed + _FREE_SPACE_MARGIN_BYTES:
+        gibibyte = 1024**3
+        raise ValueError(
+            "Not enough free disk space to set up plugins: "
+            f"about {(needed + _FREE_SPACE_MARGIN_BYTES) / gibibyte:.1f} GB needed, "
+            f"{free / gibibyte:.1f} GB free"
+        )
 
 
 class ServiceSnapshot(BaseModel):
@@ -293,8 +308,10 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
 
     Dependencies are copied locally, never resolved or installed over the source.
     The effective core replaces editable .pth indirection. Completed copies retain
-    a full tree seal; interrupted copies remain retained and are never activated.
-    Cancellation waits for owned copy and qualification work to finish.
+    a full tree seal. A copy that fails keeps its small evidence files but not
+    its copied runtime, which is gigabytes and is never activated; a copy is
+    refused outright when the volume lacks room for it. Cancellation waits for
+    owned copy and qualification work to finish.
     """
     if os.geteuid() == 0:
         raise ValueError("service runtime preparation must run without root")
@@ -309,10 +326,33 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
             generation_id = uuid4().hex
             parent = root / "core-runtimes"
             private_directory(parent)
+            await asyncio.to_thread(
+                _require_free_space, parent, sum(item.size for item in source)
+            )
             generation = parent / generation_id
             private_directory(generation)
             runtime = generation / "runtime"
             private_directory(runtime)
+            try:
+                return await _stage_into(
+                    generation, runtime, source, host, inventory, lock
+                )
+            except Exception:
+                # The unselected copy is never activated; keep the evidence
+                # beside it, but give the volume its gigabytes back so a
+                # retried setup cannot fill the disk one attempt at a time.
+                await asyncio.to_thread(shutil.rmtree, runtime, True)
+                raise
+
+        async def _stage_into(
+            generation: Path,
+            runtime: Path,
+            source: tuple[_SourceFile, ...],
+            host: QualifiedHost,
+            inventory: dict[str, str],
+            lock: RuntimeLock,
+        ) -> ServiceSnapshot:
+            generation_id = generation.name
             await asyncio.to_thread(
                 venv.EnvBuilder(symlinks=True, with_pip=False).create, runtime
             )

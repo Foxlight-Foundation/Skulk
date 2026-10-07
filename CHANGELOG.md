@@ -12,7 +12,7 @@ This project records release notes here and mirrors public-facing notes in
 - Plugins no longer need a terminal or an administrator password to set up. The
   first time **Plugins** opens on a host, Skulk registers its plugin service for
   your user (a launchd agent on macOS, a systemd user unit on Linux) and shows
-  its progress; it starts and stops with Skulk itself. `skulk-plugin-service
+  its progress; it runs under your account alongside Skulk. `skulk-plugin-service
   setup` does the same from a terminal, and `skulk-plugin-service setup
   --system` still registers a system service, for hosts that run unattended.
   Hosts that already run the system service keep it. New routes:

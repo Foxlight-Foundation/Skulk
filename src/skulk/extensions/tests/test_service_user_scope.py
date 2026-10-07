@@ -628,3 +628,22 @@ def test_a_staged_runtime_is_made_private_whatever_the_umask(tmp_path: Path) -> 
     assert runtime.stat().st_mode & 0o777 == 0o755
     assert (runtime / "bin").stat().st_mode & 0o777 == 0o755
     assert script.stat().st_mode & 0o777 == 0o644
+
+
+async def test_the_extensions_kill_switch_stops_node_driven_setup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _layouts(monkeypatch, tmp_path)
+    _connect(monkeypatch, tmp_path, None)
+
+    async def setup(_scope: str | None, _report: object) -> SetupOperation:
+        raise AssertionError("a node with extensions turned off sets up nothing")
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setenv("SKULK_EXTENSIONS_DISABLE", "1")
+    runner = ServiceSetupRunner()
+    runner.start()
+
+    status = await runner.status()
+    assert status.state == "unsupported"
+    assert status.error is not None and "SKULK_EXTENSIONS_DISABLE" in status.error
