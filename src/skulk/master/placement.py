@@ -18,6 +18,7 @@ from skulk.master.placement_utils import (
 )
 from skulk.shared.backends import (
     EngineType,
+    backend_hardware_present,
     describe_backend_hardware,
     engine_of,
     engine_supports_multi_node,
@@ -913,14 +914,17 @@ def place_instance(
     pending_matrix_nodes: set[NodeId] = set()
     ineligible_nodes: set[NodeId] = set()
     compatible_backend_summary: set[str] = set()
-    # Nodes advertising one of the model's engines whatever their role, so a
-    # management-only Mac is never reported as a missing Mac.
+    # Nodes advertising one of the model's engines whatever their role.
     backend_capable_nodes: set[NodeId] = set()
-    unreported_nodes: set[NodeId] = set()
+    # Nodes whose engines alone cannot show the hardware is absent: one that
+    # has not reported yet, one that does not participate (management nodes
+    # advertise no engines at all), or one whose hardware classes show the
+    # machine the model needs. Any of them keeps the detailed message.
+    unjudged_nodes: set[NodeId] = set()
     for node_id in topology.list_nodes():
         resources = resolved_node_resources.get(node_id)
         if resources is None:
-            unreported_nodes.add(node_id)
+            unjudged_nodes.add(node_id)
             if matrix_only:
                 pending_matrix_nodes.add(node_id)
             continue
@@ -928,6 +932,11 @@ def place_instance(
         compatible_backend_summary.update(compatible_backends)
         if resources.backends & compatible_backends:
             backend_capable_nodes.add(node_id)
+        if resources.participation != "full" or backend_hardware_present(
+            command.model_card.placement.compatible_backends,
+            resources.hardware_classes,
+        ):
+            unjudged_nodes.add(node_id)
         if resources.participation != "full" or not (
             resources.backends & compatible_backends
         ):
@@ -945,13 +954,13 @@ def place_instance(
                     "Exact engine-build and hardware info has not been gossiped "
                     "for a matrix-only model. Retry shortly."
                 )
-            # Name the hardware only once every node has reported its engines;
-            # a node still joining may be the machine the model needs.
+            # Name the hardware only when every node has reported and none
+            # could be the machine the model needs.
             required_hardware = (
                 describe_backend_hardware(
                     command.model_card.placement.compatible_backends
                 )
-                if not backend_capable_nodes and not unreported_nodes
+                if not backend_capable_nodes and not unjudged_nodes
                 else None
             )
             if required_hardware is not None:
