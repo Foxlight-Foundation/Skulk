@@ -685,10 +685,6 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
             f"comfy-{variant}" for variant in facts.comfy_on_demand_variants
         }
         tags |= on_demand
-        notes.append(
-            "comfy video engine is not installed; this node installs it (about "
-            "7 GB) the first time a video model is placed here"
-        )
 
     if any(gpu.detection_source == "nvidia_device_node" for gpu in facts.gpus):
         # The #612 class: hardware is visibly present but the node cannot read

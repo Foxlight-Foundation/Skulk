@@ -511,7 +511,8 @@ def test_comfy_on_demand_is_advertised_before_the_install() -> None:
     assert {"comfy", "comfy-cuda"} <= derivation.backends
     assert derivation.on_demand_backends == frozenset({"comfy", "comfy-cuda"})
     assert not derivation.installed_backends & {"comfy", "comfy-cuda"}
-    assert any("installs it" in note for note in derivation.notes)
+    # A normal state: no warning-level note and no conflict.
+    assert derivation.notes == ()
     assert derivation.conflicts == ()
 
 

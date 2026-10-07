@@ -59,9 +59,16 @@ def _log_derivation(facts: NodeFacts, derivation: BackendDerivation) -> None:
         )
         or "none"
     )
+    # An engine that installs on demand is a normal state, not a warning: it
+    # rides the summary line rather than a derivation note.
+    on_demand = (
+        f" installs on first use={sorted(derivation.on_demand_backends)}"
+        if derivation.on_demand_backends
+        else ""
+    )
     logger.info(
         f"node facts: platform={facts.platform} gpus=[{gpu_summary}] "
-        f"backends={sorted(derivation.backends)}"
+        f"backends={sorted(derivation.installed_backends)}{on_demand}"
     )
     for note in derivation.notes:
         logger.warning(f"backend derivation: {note}")
