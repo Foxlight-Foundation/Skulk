@@ -180,6 +180,24 @@ def _sources() -> tuple[_SourceFile, ...]:
     return tuple(sorted(result, key=lambda item: item.relative))
 
 
+def _protect(tree: Path) -> None:
+    """Remove group and other write from everything staged under ``tree``.
+
+    The standard library's venv builds its skeleton with the process umask,
+    which on Ubuntu (0002) leaves directories and scripts group-writable, and
+    the service bootstrap rightly refuses a runtime another account could
+    change. The staged runtime belongs to the service alone, so it is made
+    private before it is qualified and sealed.
+    """
+    for path in (tree, *tree.rglob("*")):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            continue
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o022:
+            path.chmod(mode & ~0o022)
+
+
 def _copy(source: tuple[_SourceFile, ...], destination: Path) -> None:
     for item in source:
         target = destination / item.relative
@@ -299,9 +317,11 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
                 venv.EnvBuilder(symlinks=True, with_pip=False).create, runtime
             )
             await asyncio.to_thread(_copy, source, runtime)
+            await asyncio.to_thread(_protect, runtime)
             bootstrap = Path(service_bootstrap.__file__).read_bytes()
             write_private(generation / "bootstrap.py", bootstrap)
             raw = await _qualify(runtime, lock)
+            await asyncio.to_thread(_protect, runtime)
             expected = {
                 "platform": host.platform,
                 "python_version": host.python_version,

@@ -523,3 +523,23 @@ def test_group_write_in_the_owners_private_group_is_still_private(
         assert not writable(_stat(0o100646, 1000, 1000), 1000)
     finally:
         runtime_files._private_group.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_staged_runtime_is_made_private_whatever_the_umask(tmp_path: Path) -> None:
+    """A 0002 umask leaves venv's skeleton group-writable; staging removes it."""
+    from skulk.extensions import service_snapshot
+
+    runtime = tmp_path / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    script = runtime / "bin" / "activate"
+    script.write_text("# shell\n")
+    runtime.chmod(0o775)
+    (runtime / "bin").chmod(0o775)
+    script.chmod(0o664)
+    (runtime / "lib64").symlink_to("lib")
+
+    service_snapshot._protect(runtime)  # pyright: ignore[reportPrivateUsage]
+
+    assert runtime.stat().st_mode & 0o777 == 0o755
+    assert (runtime / "bin").stat().st_mode & 0o777 == 0o755
+    assert script.stat().st_mode & 0o777 == 0o644
