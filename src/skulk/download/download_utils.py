@@ -52,6 +52,13 @@ if TYPE_CHECKING:
     from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
+
+MODEL_FILES_INCOMPLETE_MARKER = "model_files_incomplete"
+"""Marks a runner failure whose model files are missing or incomplete at load.
+
+Terminal for the instance: relaunching the runner reopens the same bytes, so a
+retry only repeats the failure until the model is downloaded again.
+"""
 _SOURCE_REVISION_STAGING_MARKER = ".skulk-source-revision-staging"
 _MODEL_SWAP_BACKUP_SUFFIX = ".skulk-swap-backup"
 DownloadCapacityPreflight = Callable[

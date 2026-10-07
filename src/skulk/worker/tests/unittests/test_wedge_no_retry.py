@@ -7,6 +7,7 @@ especially because wedges take ~300s each and would never trip the
 3-in-60s crash window.
 """
 
+from skulk.download.download_utils import MODEL_FILES_INCOMPLETE_MARKER
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.models.remote_code_approval import (
     MODEL_TRUST_FAILURE_MARKER,
@@ -16,9 +17,11 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerReady
 from skulk.worker.main import (
+    _model_files_incomplete_message,  # pyright: ignore[reportPrivateUsage] — unit under test
     _model_load_trust_failure_message,  # pyright: ignore[reportPrivateUsage] — unit under test
     _require_worker_model_execution_identity,  # pyright: ignore[reportPrivateUsage] — unit under test
     _runner_failed_wedged,  # pyright: ignore[reportPrivateUsage] — unit under test
+    model_files_incomplete_live_instances,
     model_trust_failed_live_instances,
 )
 from skulk.worker.runner.bootstrap import WEDGE_EXIT_CODE, WEDGE_FAILURE_MARKER
@@ -172,12 +175,83 @@ def test_durable_model_trust_failure_excludes_raw_exception_detail() -> None:
     )
 
 
-def test_missing_model_path_is_a_terminal_trust_failure() -> None:
-    """A vanished staged path carries the stable non-retry marker."""
-    message = _model_load_trust_failure_message(FileNotFoundError("model missing"))
+def test_missing_model_files_are_terminal_but_not_a_trust_refusal() -> None:
+    """Incomplete files carry their own non-retry marker, not a trust denial.
+
+    A download whose index lists a weight the folder lacks is a file problem;
+    labeling it a trust refusal sent operators to card approval instead of a
+    fresh download.
+    """
+    message = _model_files_incomplete_message(FileNotFoundError("model missing"))
+
+    assert message.startswith(f"{MODEL_FILES_INCOMPLETE_MARKER}:")
+    assert MODEL_TRUST_FAILURE_MARKER not in message
+    assert "model missing" in message
+
+
+def test_trust_refusals_keep_the_trust_marker() -> None:
+    """An identity refusal is still reported as a trust failure."""
+    message = _model_load_trust_failure_message(PermissionError("identity mismatch"))
 
     assert message.startswith(f"{MODEL_TRUST_FAILURE_MARKER}:")
-    assert "model missing" in message
+    assert MODEL_FILES_INCOMPLETE_MARKER not in message
+
+
+def test_incomplete_model_files_are_terminal_for_live_instance() -> None:
+    """Incomplete files are selected for immediate teardown, apart from trust."""
+    from types import SimpleNamespace
+    from typing import cast
+
+    from skulk.shared.types.worker.instances import InstanceId
+    from skulk.shared.types.worker.runners import RunnerId
+    from skulk.worker.runner.runner_supervisor import RunnerSupervisor
+
+    def supervisor(instance_id: str, model_id: str, message: str) -> object:
+        return SimpleNamespace(
+            bound_instance=SimpleNamespace(
+                instance=SimpleNamespace(instance_id=instance_id)
+            ),
+            shard_metadata=SimpleNamespace(
+                model_card=SimpleNamespace(model_id=model_id)
+            ),
+            status=RunnerFailed(error_message=message),
+        )
+
+    incomplete = f"{MODEL_FILES_INCOMPLETE_MARKER}: weight missing"
+    runners = cast(
+        "dict[RunnerId, RunnerSupervisor]",
+        cast(
+            object,
+            {
+                "runner-a": supervisor("inst-a", "org/model", incomplete),
+                "runner-b": supervisor(
+                    "inst-b", "org/trust", f"{MODEL_TRUST_FAILURE_MARKER}: denied"
+                ),
+                "runner-c": supervisor("inst-gone", "org/gone", incomplete),
+            },
+        ),
+    )
+    live = cast("set[InstanceId]", {"inst-a", "inst-b"})
+
+    assert model_files_incomplete_live_instances(runners, live) == [
+        ("inst-a", "org/model", incomplete)
+    ]
+    assert [entry[0] for entry in model_trust_failed_live_instances(runners, live)] == [
+        "inst-b"
+    ]
+
+
+def test_durable_incomplete_files_failure_names_the_remedy() -> None:
+    """The replicated failure text is classified guidance, not raw detail."""
+    from skulk.worker.main import (
+        _model_files_incomplete_instance_failure_message,  # pyright: ignore[reportPrivateUsage] - durable boundary under test
+    )
+
+    message = _model_files_incomplete_instance_failure_message(ModelId("org/model"))
+
+    assert message.startswith("runner for org/model found the model's files incomplete")
+    assert "downloaded again" in message
+    assert "trust" not in message
 
 
 def test_worker_needs_no_secondary_approval_for_published_card() -> None:

@@ -280,11 +280,17 @@ def test_plan_shuts_down_a_single_node_runner_that_died() -> None:
 
 
 def test_plan_leaves_terminal_failures_to_the_worker() -> None:
-    """A GPU wedge or a trust refusal is given up directly, never relaunched."""
+    """A GPU wedge, a trust refusal, or incomplete model files are given up
+    directly, never relaunched."""
+    from skulk.download.download_utils import MODEL_FILES_INCOMPLETE_MARKER
     from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
     from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 
-    for marker in (WEDGE_FAILURE_MARKER, MODEL_TRUST_FAILURE_MARKER):
+    for marker in (
+        WEDGE_FAILURE_MARKER,
+        MODEL_TRUST_FAILURE_MARKER,
+        MODEL_FILES_INCOMPLETE_MARKER,
+    ):
         result = _plan_single_node(RunnerFailed(error_message=f"Terminated ({marker})"))
         assert not isinstance(result, Shutdown), marker
 
