@@ -155,7 +155,9 @@ address and the publisher trust to verify it, often as a single invitation
 code. Add it under **Browse** with **Add a private catalog**; it replaces the
 store as the host's catalog until you select **Use the Foxlight store**. Browse
 lists the catalog's plugins and says which releases fit this host (see
-[From a catalog](#from-a-catalog)). From a terminal,
+[From a catalog](#from-a-catalog)). A plugin installed from the store keeps
+running as Skulk renews the store's trust for it; if the store revokes its
+publisher or release, it stops. From a terminal,
 `skulk-plugin-service catalog` lists the releases that match this host, and
 `skulk-plugin-service install-plugin --from-catalog BUNDLE_ID` installs one
 through the same consent steps as a single release (prefix both with

@@ -312,12 +312,21 @@ class RuntimeDownloads:
             trust_revision=trust_revision,
         )
 
-    async def configure(self, update: SourceUpdate) -> SourceStatus:
+    async def configure(
+        self, update: SourceUpdate, *, carry_revocations: bool = True
+    ) -> SourceStatus:
         """Apply direct owner source/trust changes without borrowing any native vault.
 
         Credentials are provisioned before their reference is published. Trust
         may tighten before source replacement on a disk fault; runtime admission
         then fails closed and the unchanged source revision allows correction.
+
+        Args:
+            update: The reviewed source and trust change.
+            carry_revocations: Keep every revocation the current trust holds
+                when the trust revision rises. Only a binding to the built-in
+                capability store passes ``False``: its trust applies as the
+                store published it.
         """
         if self.guard.locked():
             raise ValueError("release source is busy")
@@ -368,7 +377,11 @@ class RuntimeDownloads:
                     )
                 ):
                     raise ValueError("publisher trust revision conflict or expiry")
-                if trust is not None and next_trust.revision > trust.revision:
+                if (
+                    carry_revocations
+                    and trust is not None
+                    and next_trust.revision > trust.revision
+                ):
                     # Source credential rotation must never silently restore a
                     # publisher or artifact previously rejected by the owner.
                     next_trust = RuntimeTrust.model_validate(
@@ -421,6 +434,76 @@ class RuntimeDownloads:
                     self.root / "release-source.json", source.model_dump_json().encode()
                 )
                 return self.source_status()
+            finally:
+                lock.close()
+
+    async def follow_trust(self, trust: RuntimeTrust) -> bool:
+        """Bring this installation's publisher trust up to ``trust``'s content.
+
+        For an installation bound to the built-in capability store: its trust
+        becomes the store's current trust (publishers, expiry, revocations) at
+        the next revision of the installation's own history, which the
+        installer's trust floor requires to rise. The source and its revision
+        are untouched, so a reviewed install in flight keeps its fence. The
+        running owner's periodic verification reads the new trust: a renewal
+        keeps it running past the old expiry, a revocation stops it.
+
+        Args:
+            trust: The store's verified trust, still in force.
+
+        Returns:
+            Whether the installation's trust changed.
+
+        Raises:
+            ValueError: The installation is busy, closed, or ``trust`` has
+                expired; nothing was written.
+            BlockingIOError: Another operation still held the installation
+                fence after a short wait.
+        """
+        if self.guard.locked():
+            raise ValueError("release source is busy")
+        async with self.guard:
+            if self.closed or (self.work is not None and not self.work.done()):
+                raise ValueError("installation is busy or closed")
+            if trust.expires_at <= time.time():
+                raise ValueError("store trust has expired")
+            # The running owner's periodic verification holds this fence for
+            # moments at a time; wait that out rather than skip a renewal.
+            deadline = time.monotonic() + 2.0
+            while True:
+                try:
+                    lock = RuntimeLock(self.installer.installer)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    await asyncio.sleep(0.05)
+            try:
+                try:
+                    current: RuntimeTrust | None = RuntimeTrust.model_validate_json(
+                        read_private(self.root / "publisher-trust.json")
+                    )
+                except FileNotFoundError:
+                    current = None
+                if (
+                    current is not None
+                    and trust.model_copy(update={"revision": current.revision})
+                    == current
+                ):
+                    return False
+                write_private(
+                    self.root / "publisher-trust.json",
+                    trust.model_copy(
+                        update={
+                            "revision": current.revision + 1
+                            if current is not None
+                            else 1
+                        }
+                    )
+                    .model_dump_json()
+                    .encode(),
+                )
+                return True
             finally:
                 lock.close()
 

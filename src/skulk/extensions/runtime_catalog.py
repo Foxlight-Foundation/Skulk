@@ -923,6 +923,28 @@ class HostCatalog:
         except (StoreTrustUnavailableError, TimeoutError):
             return None
 
+    def on_builtin_store(self) -> bool:
+        """Whether the host's catalog source is the built-in store, seeded or not yet."""
+        return self._uses_store(self._state())
+
+    async def builtin_store_trust(self, *, offline: bool) -> RuntimeTrust | None:
+        """The built-in store's verified trust in force, whatever the current source.
+
+        Installations bound from the store follow this trust even after the
+        host's catalog moves to a private one: their publishers are the
+        store's. Network access and expiry follow ``StoreTrustClient.load``.
+
+        Args:
+            offline: Use only the store's last verified trust.
+
+        Returns:
+            The trust, or ``None`` when this build has no store or no
+            verified trust is in force.
+        """
+        if not self._store_ready():
+            return None
+        return await self._store_trust(offline=offline)
+
     def _store_source(self, revision: int) -> CatalogSource:
         """The built-in store's catalog address at ``revision``, read anonymously."""
         assert self.store is not None

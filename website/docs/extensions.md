@@ -1058,6 +1058,18 @@ the ordinary path, where the release record itself is verified against
 installation trust. An existing installation keeps its bundle and never goes
 back through a listing.
 
+An installation bound from the built-in store follows the store's trust while
+it runs. Its publisher trust is the store's (publishers, expiry and
+revocations, as published), and the node asks the plugin manager to renew it
+every hour and after each store catalog read; the manager raises the
+installation's own trust revision without touching its source. The owner's
+periodic verification then reads the renewed trust, so a renewal keeps the
+capability running past its earlier expiry, and a store revocation of its
+publisher or release stops it. Offline, or when the store cannot be reached,
+the installation keeps running on the trust it holds until that expires. An
+installation bound from a private catalog, or whose source its owner
+configured directly, keeps the trust it was given, as before.
+
 ## Public node setup exports
 
 An installed management provider may implement `NodeSetupProvider` from
