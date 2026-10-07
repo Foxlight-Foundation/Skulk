@@ -441,6 +441,9 @@ async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
                 "artifact_size": 4096,
                 "transfer_bytes": 4096,
                 "platforms": ["darwin", "linux"],
+                # Built for a platform no test host runs; its Skulk build
+                # differs too, which alone would not keep it from fitting.
+                "runtime_platform": "freebsd-libc-riscv64",
                 "skulk_build_sha256": "b" * 64,
                 "permissions": ["local synthetic operation"],
                 "descriptors": ["example.echo@1.0.0"],

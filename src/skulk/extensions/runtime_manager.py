@@ -899,9 +899,7 @@ class RuntimeManager:
             async with self.catalog_read:
                 verified = await self.catalog.fetch()
                 host = await self._measured_host()
-            return verified.review(
-                skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
-            ).model_dump(mode="json")
+            return verified.review(platform=host.platform).model_dump(mode="json")
         if isinstance(request, CatalogRegistration):
             # Configuration takes the same lock as reads and bindings, so a
             # binding cannot see catalog state change between accepting a
@@ -1107,11 +1105,7 @@ class RuntimeManager:
                 raise ValueError(
                     "listed release publisher is not trusted for discovery"
                 )
-            listing = verified.entry_review(
-                entry,
-                skulk_build_sha256=host.skulk_build_sha256,
-                platform=host.platform,
-            )
+            listing = verified.entry_review(entry, platform=host.platform)
             if not listing.matches_host:
                 raise ValueError("listed release does not match this host")
             token = self.catalog.credential_for(entry.feed_url)

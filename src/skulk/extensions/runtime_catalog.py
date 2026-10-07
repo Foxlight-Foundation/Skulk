@@ -364,7 +364,10 @@ class CatalogEntryReview(BaseModel):
         "runtime-bearing release, every wheel it lists."
     )
     platforms: tuple[str, ...] = Field(description="Operating systems supported.")
-    skulk_build_sha256: str = Field(description="Skulk build the release binds to.")
+    skulk_build_sha256: str = Field(
+        description="Skulk build the publisher qualified the release against; "
+        "recorded for provenance, not required to match this host."
+    )
     permissions: tuple[str, ...] = Field(description="Signed permission summaries.")
     descriptors: tuple[str, ...] = Field(description="Qualified capability ids.")
     surfaces: tuple[str, ...] = Field(description="Titles of declared surfaces.")
@@ -374,7 +377,8 @@ class CatalogEntryReview(BaseModel):
     )
     expires_at: int = Field(description="Release expiry as a Unix timestamp.")
     matches_host: bool = Field(
-        description="Whether this host's Skulk build and platform match the release."
+        description="Whether the release's platforms fit this host. Its Skulk "
+        "version range is checked when it is installed."
     )
 
 
@@ -444,7 +448,7 @@ class VerifiedCatalog:
                 return entry
         return None
 
-    def review(self, *, skulk_build_sha256: str, platform: str) -> CatalogReview:
+    def review(self, *, platform: str) -> CatalogReview:
         """Project the catalog for operators, naming what fits this host."""
         return CatalogReview(
             publisher=self.claims.publisher,
@@ -453,18 +457,19 @@ class VerifiedCatalog:
             expires_at=self.claims.expires_at,
             catalog_sha256=self.sha256,
             entries=tuple(
-                self.entry_review(
-                    entry, skulk_build_sha256=skulk_build_sha256, platform=platform
-                )
+                self.entry_review(entry, platform=platform)
                 for entry in self.entries
             ),
         )
 
     @staticmethod
-    def entry_review(
-        entry: _CatalogEntryClaims, *, skulk_build_sha256: str, platform: str
-    ) -> CatalogEntryReview:
-        """One listing as consent facts, with whether it fits this host."""
+    def entry_review(entry: _CatalogEntryClaims, *, platform: str) -> CatalogEntryReview:
+        """One listing as consent facts, with whether it fits this host.
+
+        A listing fits on platform alone: the Skulk build it was qualified
+        against does not have to match, so a Skulk update never hides the
+        capabilities a host can still run.
+        """
         expected_os = (
             "darwin" if platform.startswith("macos") else platform.split("-")[0]
         )
@@ -487,8 +492,7 @@ class VerifiedCatalog:
             operations=entry.operations,
             steward_risks=entry.steward_risks,
             expires_at=entry.expires_at,
-            matches_host=entry.skulk_build_sha256 == skulk_build_sha256
-            and expected_os in entry.platforms
+            matches_host=expected_os in entry.platforms
             and (
                 entry.runtime_platform is None
                 or platform_matches(entry.runtime_platform, platform)

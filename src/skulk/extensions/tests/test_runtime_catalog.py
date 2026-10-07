@@ -102,13 +102,16 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
     assert verified.sha256 == hashlib.sha256(document).hexdigest()
     assert verified.entry("example.plugin", 2, None) is not None
     assert verified.entry("example.plugin", 3, None) is None
-    review = verified.review(skulk_build_sha256="a" * 64, platform="macos-arm64")
+    review = verified.review(platform="macos-arm64")
     assert [e.sequence for e in review.entries] == [1, 2]
     assert all(e.matches_host for e in review.entries)
     assert "feed_url" not in review.model_dump_json()
     assert "releases.example.test" not in review.model_dump_json()
-    other = verified.review(skulk_build_sha256="b" * 64, platform="linux-x86_64")
-    assert not any(e.matches_host for e in other.entries)
+    # Any host whose operating system a listing names fits it; the Skulk build
+    # the publisher qualified against is recorded, never compared.
+    assert all(e.skulk_build_sha256 == "a" * 64 for e in review.entries)
+    other = verified.review(platform="linux-x86_64")
+    assert all(e.matches_host for e in other.entries)
     # A runtime-bearing entry names its artifact family; one sequence may be
     # listed once per family, and only the matching family fits this host.
     families = verify_catalog(
@@ -121,7 +124,7 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
         ),
         _trust(key),
         now=now,
-    ).review(skulk_build_sha256="a" * 64, platform="macos-arm64")
+    ).review(platform="macos-arm64")
     assert [e.matches_host for e in families.entries] == [True, False]
     listed = verify_catalog(
         _catalog(
@@ -244,9 +247,7 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     with pytest.raises(ValueError, match="digest required"):
         catalog.retained("../catalog-state")
     assert "hidden-catalog-token" not in json.dumps(
-        verified.review(
-            skulk_build_sha256="a" * 64, platform="macos-arm64"
-        ).model_dump()
+        verified.review(platform="macos-arm64").model_dump()
     )
     # The accepted revision only moves forward: another document at the
     # same revision, or an older revision, is refused; a newer one accepted.
@@ -407,7 +408,7 @@ def test_a_revoked_release_or_artifact_is_not_offered() -> None:
     )
     assert [e.sequence for e in verified.entries] == [3]
     assert verified.entry("example.plugin", 1, None) is None
-    review = verified.review(skulk_build_sha256="a" * 64, platform="macos-arm64")
+    review = verified.review(platform="macos-arm64")
     assert [e.sequence for e in review.entries] == [3]
 
 
