@@ -2123,7 +2123,12 @@ only the fsynced completion marker publishes a staged generation. Staging never
 switches the active owner or changes cleanup state.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can
-execute startup code; runtime commands disable bytecode writes.
+execute startup code; runtime commands disable bytecode writes. The interpreter
+is the one member that may change under a sealed generation: when an application
+update or move leaves the sealed base behind, `adopt_current_interpreter`
+re-points the interpreter links and `pyvenv.cfg` at the running interpreter of
+the same Python minor version and reseals, but only after every other member
+matches the seal exactly.
 `runtime_selection.py` adds revision-fenced stopped-owner activation and rollback.
 It revalidates the staged runtime under installer ownership, acquires the existing
 supervisor lock, journals intent and atomically publishes one desired selection.

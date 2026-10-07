@@ -929,6 +929,17 @@ installation evidence, not publisher metadata or a sandbox against the service
 user. A missing or mismatched seal requires explicit recovery; the installer does
 not bless existing changed files by creating a replacement seal.
 
+The one exception is the base interpreter itself. An application update replaces
+the bundled interpreter and moving the application changes its path, so when a
+generation fails verification the installer checks whether the sealed interpreter
+differs from the interpreter running it. When it does, every other sealed member
+still matches exactly, `pyvenv.cfg` is the sealed bytes, and the environment
+targets the same Python minor version, the installer re-points the interpreter
+links and the interpreter values in `pyvenv.cfg` at the running interpreter
+(the same base a fresh installation would record) and reseals. A private
+journal lets an interrupted adoption finish on the next start. Any other
+difference, or a different Python minor version, is refused as before.
+
 Staging does not change active selection, logical plugin identities, configuration,
 credentials or cleanup obligations. Installer output is bounded and stored only
 as protected host-local evidence. These are local installation primitives; the
