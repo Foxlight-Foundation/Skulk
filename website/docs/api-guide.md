@@ -4526,7 +4526,11 @@ moved). On macOS, setup refuses an app running from a translocated location
 (opened straight from a download) and asks for it to be moved to Applications
 first. When a user service stops answering because the interpreter it starts
 was replaced or moved, for example by an app update, the node registers it
-again once on its own; the status route then reports `setting_up`.
+again once, the next time the status route is read (the Plugins page reads it
+while open); the route then reports `setting_up`. Setup refuses to start when
+the volume lacks room for the copy (it names the space needed), a copy that
+fails removes its copied runtime, and `SKULK_EXTENSIONS_DISABLE=1` makes the
+status `unsupported` and setup refuse.
 
 Setup records a generated `operation_id` and phases `preparing`, `staged`,
 `selected`, `registered`, `ready`. The service verifies the digest of every file

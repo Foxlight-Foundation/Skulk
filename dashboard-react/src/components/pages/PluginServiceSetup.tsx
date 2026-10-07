@@ -57,7 +57,10 @@ export function PluginServiceSetup({ direct, header, children }: PluginServiceSe
 
   const retry = <Button type="button" disabled={starting.isLoading} onClick={() => void startSetup()}>{t('plugins.service.retry', 'Try again')}</Button>;
   const status = service.data;
-  if (status.state === 'setting_up' || (status.state === 'absent' && direct)) {
+  // Absent after this page already started setup means the node restarted or
+  // the request failed: offer the start again instead of spinning forever.
+  const awaitingFirstStart = status.state === 'absent' && direct && !startedAutomatically.current;
+  if (status.state === 'setting_up' || awaitingFirstStart) {
     return <>{header}<Notice role="status" data-testid="plugin-service-setting-up">
       <h2><Spinner size={16} /> {t('plugins.service.settingUp', 'Setting up plugins on this host')}</h2>
       <p>{t('plugins.service.settingUpDetail', 'This happens once and takes a few minutes. You can leave this page; setup continues on the host.')}</p>
@@ -67,7 +70,13 @@ export function PluginServiceSetup({ direct, header, children }: PluginServiceSe
   if (status.state === 'absent') {
     return <>{header}<Notice role="status">
       <h2>{t('plugins.service.needsHost', 'Plugins are not set up on this host yet')}</h2>
-      <p>{t('plugins.service.needsHostDetail', 'Open Plugins on the host itself, or over Tailscale, to set them up. It takes a few minutes and happens once.')}</p>
+      {direct
+        ? <>
+          <p>{t('plugins.service.setUpDetail', 'Setting up takes a few minutes and happens once.')}</p>
+          {starting.isError ? <p role="alert">{t('plugins.service.startFailed', 'The host did not start setup. Try again.')}</p> : null}
+          <Button type="button" disabled={starting.isLoading} onClick={() => void startSetup()}>{t('plugins.service.setUp', 'Set up plugins')}</Button>
+        </>
+        : <p>{t('plugins.service.needsHostDetail', 'Open Plugins on the host itself, or over Tailscale, to set them up. It takes a few minutes and happens once.')}</p>}
     </Notice></>;
   }
   if (status.state === 'unsupported') {

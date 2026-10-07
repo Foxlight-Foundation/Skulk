@@ -10,6 +10,7 @@ command, because registering a system service needs local elevation.
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import Literal, final
@@ -58,6 +59,16 @@ class PluginServiceStatus(BaseModel):
     )
 
 
+_EXTENSIONS_DISABLED = (
+    "Plugins are turned off on this node (SKULK_EXTENSIONS_DISABLE=1)."
+)
+
+
+def _extensions_disabled() -> bool:
+    """The node-wide extensions kill switch, read as the extension loader reads it."""
+    return os.environ.get("SKULK_EXTENSIONS_DISABLE", "").strip() == "1"
+
+
 _SYSTEM_REPAIR = (
     "This host runs the plugin service as a system service; repair it from a "
     "terminal with: skulk-plugin-service setup --system"
@@ -90,6 +101,9 @@ class ServiceSetupRunner:
         needs elevation, which a node never requests on its own.
         """
         if self._task is not None and not self._task.done():
+            return
+        if _extensions_disabled():
+            self._error = _EXTENSIONS_DISABLED
             return
         try:
             scope = connected_scope()
@@ -153,6 +167,10 @@ class ServiceSetupRunner:
         if self._task is not None and not self._task.done():
             return PluginServiceStatus(
                 state="setting_up", scope="user", progress=self._progress, error=None
+            )
+        if _extensions_disabled():
+            return PluginServiceStatus(
+                state="unsupported", scope=None, progress=None, error=_EXTENSIONS_DISABLED
             )
         try:
             scope = connected_scope()

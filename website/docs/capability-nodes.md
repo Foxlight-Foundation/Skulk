@@ -171,7 +171,7 @@ itself that authority.
 
 The first time **Plugins** opens on a host, Skulk sets up that host's
 plugin-management service: a per-user service (Apple Silicon macOS, or Linux
-with systemd) that starts and stops with Skulk itself. It needs no terminal and
+with systemd) that runs under your account alongside Skulk. It needs no terminal and
 no administrator password; the first setup copies Skulk's environment into a
 verified manager runtime and takes a few minutes, and **Plugins** shows its
 progress. From a terminal, `uv run skulk-plugin-service setup` runs the same

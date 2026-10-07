@@ -92,3 +92,15 @@ it('keeps an older host without the status route working', async () => {
   await render(true);
   await act(async () => { await vi.waitFor(() => expect(host?.textContent).toContain('plugin content')); });
 });
+
+it('offers setup again when the host comes back without it instead of spinning', async () => {
+  // The first answer starts setup; the host then restarts and reports absent.
+  serve(() => status('absent'));
+  await render(true);
+  await act(async () => { await vi.waitFor(() => expect(posts).toBe(1)); });
+  await act(async () => { await vi.waitFor(() => expect(host?.textContent).toContain('Set up plugins')); });
+  expect(host?.textContent).not.toContain('Setting up plugins on this host');
+  const setUp = [...(host?.querySelectorAll('button') ?? [])].find((button) => button.textContent === 'Set up plugins');
+  await act(async () => { setUp?.click(); });
+  await act(async () => { await vi.waitFor(() => expect(posts).toBe(2)); });
+});

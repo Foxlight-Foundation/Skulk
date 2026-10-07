@@ -186,6 +186,29 @@ async def test_interrupted_copy_does_not_publish_over_existing_selection(
     assert read_private(tmp_path / "core-runtime.json") == b"retained current selection"
     generations = list((tmp_path / "core-runtimes").iterdir())
     assert len(generations) == 1 and not (generations[0] / "staged.json").exists()
+    # The failed copy's runtime (gigabytes in a real environment) is gone, so
+    # retried setups cannot fill the disk; the generation stays as evidence.
+    assert not (generations[0] / "runtime").exists()
+    RuntimeLock(tmp_path).close()
+
+
+async def test_staging_refuses_a_copy_the_volume_has_no_room_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup says how much space it needs instead of filling the disk."""
+    import shutil
+
+    from skulk.extensions import service_snapshot
+
+    monkeypatch.setattr(service_snapshot, "_sources", lambda: ())
+
+    def nearly_full(_path: object) -> shutil._ntuple_diskusage:  # pyright: ignore[reportPrivateUsage]
+        return shutil._ntuple_diskusage(total=10**12, used=10**12, free=10**9)  # pyright: ignore[reportPrivateUsage]
+
+    monkeypatch.setattr(service_snapshot.shutil, "disk_usage", nearly_full)
+    with pytest.raises(ValueError, match="Not enough free disk space"):
+        await stage_service_runtime(tmp_path)
+    assert not any((tmp_path / "core-runtimes").iterdir())
     RuntimeLock(tmp_path).close()
 
 
