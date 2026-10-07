@@ -912,7 +912,8 @@ class HostCatalog:
 
         Verification runs in a thread (python-tuf is synchronous) under its
         own budget. A refresh that outlives the budget keeps running and
-        retains what it verifies; this read uses the trust already held.
+        retains what it verifies; this call falls back to the store's last
+        verified copy, read without the network or the refresh fence.
         """
         store = self.store
         if store is None:
@@ -920,8 +921,13 @@ class HostCatalog:
         try:
             async with asyncio.timeout(_STORE_TRUST_SECONDS):
                 return await asyncio.to_thread(store.load, offline=offline, now=now)
-        except (StoreTrustUnavailableError, TimeoutError):
+        except StoreTrustUnavailableError:
             return None
+        except TimeoutError:
+            try:
+                return store.last_known_good(now=now)
+            except StoreTrustUnavailableError:
+                return None
 
     def on_builtin_store(self) -> bool:
         """Whether the host's catalog source is the built-in store, seeded or not yet."""
@@ -945,6 +951,46 @@ class HostCatalog:
             return None
         return await self._store_trust(offline=offline)
 
+    async def apply_store_trust(self, trust: RuntimeTrust) -> bool:
+        """Record verified store trust as the built-in source's discovery trust.
+
+        Keeps the catalog in step with each verified renewal made outside a
+        catalog read, so an install from a retained listing is checked
+        against the trust the store's followers hold. Applies only while the
+        source is the built-in store and only a strictly newer revision, as a
+        read would. A catalog operation in progress already renews the trust
+        itself, so this then changes nothing.
+
+        Args:
+            trust: The store's verified trust, still in force.
+
+        Returns:
+            Whether the catalog's discovery trust changed.
+        """
+        if self.closed or self.guard.locked():
+            return False
+        async with self.guard:
+            state = self._state()
+            if (
+                state.source is None
+                or not self._is_store(state.source)
+                or state.trust is None
+                or trust.revision <= state.trust.revision
+                or time.time() >= trust.expires_at
+            ):
+                return False
+            self._save(
+                state.model_copy(
+                    update={
+                        "trust": trust,
+                        "trust_floor": AcceptedFloor(
+                            revision=trust.revision, sha256=_trust_digest(trust)
+                        ),
+                    }
+                )
+            )
+            return True
+
     def _store_source(self, revision: int) -> CatalogSource:
         """The built-in store's catalog address at ``revision``, read anonymously."""
         assert self.store is not None
@@ -960,9 +1006,10 @@ class HostCatalog:
         """Seed or renew the built-in store's trust in the state document.
 
         First use records the store's address and verified trust together.
-        Later reads apply a renewed trust only when its revision is newer,
-        or when the held trust has expired and the store vouches for a
-        current one; an older trust never replaces a current one. The
+        Later reads apply a renewed trust only when its revision is strictly
+        newer, whether or not the held trust has expired: an older or
+        altered trust never replaces the one the host accepted, even when
+        the store client's own retained copy was lost. The
         renewed trust applies exactly as the store published it, its
         revocations included: TUF and the store client's floor already keep
         that document from moving backward, so nothing is merged in. With no
@@ -977,9 +1024,7 @@ class HostCatalog:
                     "catalog_store_trust_unavailable", "store trust unavailable"
                 )
             source, trust = self._store_source(1), renewed
-        elif renewed is not None and (
-            held is None or renewed.revision > held.revision or now >= held.expires_at
-        ):
+        elif renewed is not None and (held is None or renewed.revision > held.revision):
             source, trust = state.source, renewed
         elif held is None or now >= held.expires_at:
             raise CatalogRefusedError(

@@ -49,10 +49,14 @@ class MemoryFetcher(FetcherInterface):
         """Serve ``files``, keyed by absolute URL."""
         self.files = files
         self.reachable = True
+        self.delay = 0.0
         self.requests: list[str] = []
 
     def _fetch(self, url: str) -> Iterator[bytes]:
         self.requests.append(url)
+        if self.delay:
+            # A slow store: the refresh outlives its budget in its thread.
+            time.sleep(self.delay)
         if not self.reachable:
             raise DownloadError("store unreachable")
         data = self.files.get(url)

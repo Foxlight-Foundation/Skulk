@@ -66,7 +66,7 @@ from skulk.extensions.service_snapshot import (
     stage_service_runtime,
 )
 from skulk.extensions.terminal_install import TerminalInstaller
-from skulk.shared.constants import SKULK_CONFIG_HOME
+from skulk.shared.constants import SKULK_CONFIG_HOME, offline_mode
 
 # The service's bootstrap verifies the seal of its whole copied runtime (every
 # file's digest, gigabytes for a full Skulk environment) before the manager
@@ -823,7 +823,9 @@ def main() -> None:
             reply = asyncio.run(
                 manager_request(
                     Path(connection.manager_root),
-                    CatalogRequest(action="read_catalog"),
+                    # The node's offline mode reaches the manager per request:
+                    # offline, the built-in store's trust is not refreshed.
+                    CatalogRequest(action="read_catalog", offline=offline_mode()),
                 )
             )
             listing = reply.get("result")
@@ -867,7 +869,7 @@ def main() -> None:
                         file=sys.stderr,
                     )
                 raise SystemExit(1)
-            print(json.dumps(listing, indent=2))
+            print(json.dumps(listing.get("review", listing), indent=2))
         elif action == "manage":
             if os.geteuid() == 0:
                 raise ValueError("plugin management requires the nonroot service owner")

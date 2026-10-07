@@ -355,3 +355,38 @@ def test_pending_readiness_cli_identifies_retained_operation(
     assert "skulk-plugin-service status" in output.err
     assert "without restarting" in output.err
     assert "command incomplete" not in output.err
+
+
+def test_the_catalog_command_reads_in_the_hosts_offline_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Offline, the terminal's catalog read asks for no store trust refresh."""
+    from pydantic import JsonValue
+
+    from skulk.extensions.runtime_attachment import ServiceConnection
+    from skulk.extensions.runtime_manager import CatalogRequest
+
+    config = tmp_path / "config"
+    write_private(
+        config / "managed-service" / "connection.json",
+        ServiceConnection(manager_root=str(tmp_path / "manager"), profile_id="a" * 32)
+        .model_dump_json()
+        .encode(),
+    )
+    sent: list[object] = []
+    review: dict[str, JsonValue] = {"publisher": "fixture", "entries": []}
+
+    async def request(root: Path, sent_request: object) -> dict[str, JsonValue]:
+        del root
+        sent.append(sent_request)
+        return {"result": {"review": review, "store_trust_deferred": []}}
+
+    monkeypatch.setattr(service_setup, "SKULK_CONFIG_HOME", config)
+    monkeypatch.setattr(service_setup, "manager_request", request)
+    monkeypatch.setattr(service_setup, "offline_mode", lambda: True)
+    monkeypatch.setattr(sys, "argv", ["skulk-plugin-service", "catalog"])
+    service_setup.main()
+    assert sent == [CatalogRequest(action="read_catalog", offline=True)]
+    assert json.loads(capsys.readouterr().out) == review

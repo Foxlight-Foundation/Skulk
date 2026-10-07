@@ -44,6 +44,7 @@ from skulk.extensions.runtime_catalog import (
     BuiltinCatalogSelection,
     CatalogEntryReview,
     CatalogRefusedError,
+    CatalogReview,
     CatalogSourceUpdate,
     HostCatalog,
     catalog_refusal_payload,
@@ -341,8 +342,9 @@ class StoreTrustRefresh(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     trust_revision: int | None = Field(
         description="Revision of the store trust in force, or null when no "
-        "installation follows the store (nothing is fetched then), this build "
-        "has no store, or no verified store trust is in force."
+        "installation follows the store (nothing is fetched then) or this "
+        "build has no store. With followers and no verified store trust in "
+        "force, the request is refused instead, so the node retries soon."
     )
     followed: tuple[str, ...] = Field(
         description="Installations bound to the store whose trust changed to it."
@@ -352,45 +354,6 @@ class StoreTrustRefresh(BaseModel):
         description="Installations bound to the store that were busy and still "
         "hold their earlier trust; the next refresh retries them.",
     )
-
-
-STORE_BINDING_FILE: Final = "store-binding.json"
-"""Marker, in an installation's root, that its publisher trust follows the store."""
-
-
-class StoreBinding(BaseModel):
-    """An installation whose publisher trust follows the built-in capability store.
-
-    Written when the installation is bound to a listing read from the store;
-    removed when it is bound from a private catalog, or when its owner
-    configures its source directly, since the owner's trust then governs it.
-    """
-
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
-    source: Literal["builtin_store"] = Field(
-        default="builtin_store", description="The trust source the installation follows."
-    )
-
-
-def store_bound(root: Path) -> bool:
-    """Whether the installation at ``root`` follows the built-in store's trust.
-
-    An absent or unreadable marker reads as not bound: the installation then
-    keeps the trust it holds, which can only expire, never widen.
-    """
-    try:
-        StoreBinding.model_validate_json(read_private(root / STORE_BINDING_FILE, 4096))
-    except (OSError, ValueError):
-        return False
-    return True
-
-
-def _mark_store_bound(root: Path, bound: bool) -> None:
-    """Record whether the installation at ``root`` follows the store's trust."""
-    if bound:
-        write_private(root / STORE_BINDING_FILE, StoreBinding().model_dump_json().encode())
-    else:
-        (root / STORE_BINDING_FILE).unlink(missing_ok=True)
 
 
 def _store_release_trust(
@@ -433,6 +396,31 @@ def _store_release_trust(
     return store.model_copy(
         update={"revision": current.revision + 1 if current is not None else 1}
     )
+
+
+class CatalogRead(BaseModel):
+    """A verified catalog review, and what renewing the store's trust left undone."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    review: CatalogReview = Field(description="The verified catalog, as reviewed.")
+    store_trust_deferred: tuple[str, ...] = Field(
+        default=(),
+        description="Installations following the built-in store that were busy "
+        "when this read renewed the store's trust; the node retries them within "
+        "minutes rather than at its next hourly renewal.",
+    )
+
+
+_STORE_FOLLOW_SECONDS: Final = 10.0
+"""One deadline for bringing every follower up to a renewed trust.
+
+Shared across installations rather than per installation: sixteen busy
+installations must not multiply the wait past the manager's request deadline.
+A follower still busy when it runs out is deferred and retried soon."""
+
+_READ_FOLLOW_SECONDS: Final = 2.0
+"""The same deadline inside a catalog read, which already spends most of the
+request deadline on the store's trust and the catalog download."""
 
 
 class CatalogStoreRequest(_Request):
@@ -1051,14 +1039,21 @@ class RuntimeManager:
                 renewed = (
                     self.catalog.trust() if self.catalog.on_builtin_store() else None
                 )
+            deferred: tuple[str, ...] = ()
             if renewed is not None:
                 # The read renewed the store's trust: installations bound to
-                # the store follow it now, not only at the next periodic refresh.
-                await self._follow_store_trust(renewed)
-            return verified.review(
-                skulk_version=host.skulk_version,
-                skulk_build_sha256=host.skulk_build_sha256,
-                platform=host.platform,
+                # the store follow it now, not only at the next periodic
+                # refresh. Busy ones are named so the node retries them soon.
+                _, deferred = await self._follow_store_trust(
+                    renewed, budget=_READ_FOLLOW_SECONDS
+                )
+            return CatalogRead(
+                review=verified.review(
+                    skulk_version=host.skulk_version,
+                    skulk_build_sha256=host.skulk_build_sha256,
+                    platform=host.platform,
+                ),
+                store_trust_deferred=deferred,
             ).model_dump(mode="json")
         if isinstance(request, CatalogRegistration):
             # Configuration takes the same lock as reads and bindings, so a
@@ -1090,13 +1085,21 @@ class RuntimeManager:
                     trust_revision=None, followed=(), deferred=()
                 ).model_dump(mode="json")
             trust = await self.catalog.builtin_store_trust(offline=request.offline)
-            followed, deferred = (
-                await self._follow_store_trust(trust) if trust is not None else ((), ())
+            if trust is None:
+                # Installations follow the store and no verified trust is in
+                # force: a failed renewal, refused so the node retries soon.
+                raise CatalogRefusedError(
+                    "catalog_store_trust_unavailable", "no store trust for followers"
+                )
+            # The built-in catalog's discovery trust moves with every verified
+            # renewal, so a later install from a retained listing is checked
+            # against the same trust the followers now hold.
+            await self.catalog.apply_store_trust(trust)
+            followed, deferred = await self._follow_store_trust(
+                trust, budget=_STORE_FOLLOW_SECONDS
             )
             return StoreTrustRefresh(
-                trust_revision=trust.revision if trust is not None else None,
-                followed=followed,
-                deferred=deferred,
+                trust_revision=trust.revision, followed=followed, deferred=deferred
             ).model_dump(mode="json")
         if isinstance(request, CatalogInstallRequest):
             return (await self._install_from_catalog(request.request)).model_dump(
@@ -1138,12 +1141,11 @@ class RuntimeManager:
                 )
             ).model_dump(mode="json")
         if isinstance(request, SourceRegistration):
-            downloads = self.downloads[identifier]
-            status = await downloads.configure(request.request)
             # The owner's own source and trust now govern the installation;
-            # it no longer follows the built-in store's trust.
-            _mark_store_bound(downloads.root, False)
-            return status.model_dump(mode="json")
+            # the same record write ends any following of the store's trust.
+            return (
+                await self.downloads[identifier].configure(request.request)
+            ).model_dump(mode="json")
         if isinstance(request, ReleaseRequest):
             downloads = self.downloads[identifier]
             if request.action == "source_status":
@@ -1253,25 +1255,29 @@ class RuntimeManager:
             await self._load(identifier)
 
     async def _follow_store_trust(
-        self, trust: RuntimeTrust
+        self, trust: RuntimeTrust, *, budget: float
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Bring every store-bound installation's trust up to ``trust``.
 
-        Held under the manager guard, like other installation changes. An
-        installation that is busy (a download or another source change) or
-        unreadable is deferred to the next refresh; a failure here never
-        fails the request that triggered it.
+        Held under the manager guard, like other installation changes. Every
+        installation shares one deadline of ``budget`` seconds for its fence:
+        an installation that is busy (a download, another source change, or
+        a fence held past the deadline) or unreadable is deferred to a retry;
+        a failure here never fails the request that triggered it.
 
         Returns:
             The installations whose trust changed, and those deferred.
         """
         changed: list[str] = []
         deferred: list[str] = []
+        deadline = time.monotonic() + budget
         async with self.guard:
             for identifier in self._store_followers():
                 downloads = self.downloads[identifier]
                 try:
-                    if await downloads.follow_trust(trust):
+                    if await downloads.follow_trust(
+                        trust, wait_seconds=max(0.0, deadline - time.monotonic())
+                    ):
                         changed.append(identifier)
                 except (OSError, ValueError):
                     deferred.append(identifier)
@@ -1287,7 +1293,7 @@ class RuntimeManager:
             identifier
             for identifier in identifiers
             if identifier in self.downloads
-            and store_bound(self.downloads[identifier].root)
+            and self.downloads[identifier].follows_store()
         ]
 
     async def _measured_host(self) -> QualifiedHost:
@@ -1318,6 +1324,13 @@ class RuntimeManager:
         if self.catalog_read.locked():
             raise CatalogRefusedError("catalog_busy", "catalog source is busy")
         async with self.catalog_read, self.guard:
+            if self.catalog.on_builtin_store():
+                # A periodic renewal may have verified newer store trust since
+                # the listing was read; consent is checked against it, never
+                # against an older trust it already replaced.
+                latest = await self.catalog.builtin_store_trust(offline=True)
+                if latest is not None:
+                    await self.catalog.apply_store_trust(latest)
             verified = self.catalog.accepted(
                 install.catalog_sha256, now=int(time.time())
             )
@@ -1394,7 +1407,7 @@ class RuntimeManager:
                 previous: ReleaseSource | None = downloads.source()
             except FileNotFoundError:
                 previous = None
-            following = store_bound(downloads.root)
+            following = downloads.follows_store()
             # A store binding replaces the trust wholesale; if the listing is
             # then refused, the installation must return to this authority.
             try:
@@ -1429,8 +1442,8 @@ class RuntimeManager:
                 # The store's trust applies as published; a private catalog's
                 # binding keeps the installation's revocations as before.
                 carry_revocations=not from_store,
+                follows_store=from_store,
             )
-            _mark_store_bound(downloads.root, from_store)
         # Inspection reaches the feed; like inspect_release it runs outside
         # the manager-wide lock so a slow server blocks nothing else.
         try:
@@ -1480,8 +1493,9 @@ class RuntimeManager:
         binding replaced the trust wholesale (publishers, expiry,
         revocations), so ``previous_trust`` is given and its content is put
         back at the installation's next trust revision, which the installer's
-        trust floor requires to rise; the store-binding marker returns to
-        ``following``. All three change under one manager guard. A restore
+        trust floor requires to rise. The restored source record carries
+        ``following``, the follower status it had. All of it changes under
+        one manager guard. A restore
         that itself fails is named, so the operator inspects source status
         rather than trusting the refusal alone.
         """
@@ -1500,11 +1514,11 @@ class RuntimeManager:
                         metadata_filename=previous.metadata_filename,
                         token=SecretStr(token) if token is not None else None,
                         clear_token=token is None,
-                    )
+                    ),
+                    follows_store=following,
                 )
                 if previous_trust is not None:
                     await downloads.restore_trust(previous_trust)
-                _mark_store_bound(downloads.root, following)
         except (OSError, ValueError):
             raise ValueError(
                 "listed feed refused and the prior source could not be restored; "

@@ -36,6 +36,7 @@ from skulk.extensions.runtime_manager import (
     CatalogInstall,
     CatalogInstallation,
     CatalogInstallRequest,
+    CatalogRead,
     CatalogRequest,
     InstallationRequest,
     InstallRecoveryRequest,
@@ -551,13 +552,13 @@ class TerminalInstaller:
             plugin_id if plugin_id is not None else "managed." + uuid4().hex,
             strict=True,
         )
-        review = CatalogReview.model_validate_json(
+        review = CatalogRead.model_validate_json(
             json.dumps(
                 await self._call(
                     CatalogRequest(action="read_catalog", offline=offline_mode())
                 )
             )
-        )
+        ).review
         listing = self._listed(review, bundle_id, sequence, platform)
         self.output(json.dumps(listing.model_dump(mode="json"), indent=2))
         self.output("Resume: skulk-plugin-service install-plugin " + identifier)

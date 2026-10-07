@@ -509,6 +509,8 @@ class ManagedServices:
         # background on its own schedule; None until the first one is due.
         self.store_trust: asyncio.Task[None] | None = None
         self.store_trust_due: float | None = None
+        # One warning per run of failed renewals, not one every five minutes.
+        self.store_trust_failing = False
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -822,14 +824,34 @@ class ManagedServices:
             return
         payload = result.get("result")
         if set(result) != {"result"} or not isinstance(payload, dict):
-            logger.warning(
-                "the plugin manager could not renew the built-in capability "
-                "store's trust for its installations; retrying in five minutes"
-            )
+            # Includes the manager refusing because installations follow the
+            # store and no verified store trust is in force: those keep
+            # running on the trust they hold until it expires.
+            if not self.store_trust_failing:
+                logger.warning(
+                    "the plugin manager could not renew the built-in capability "
+                    "store's trust for its installations; retrying every five "
+                    "minutes"
+                )
+            self.store_trust_failing = True
             return
+        self.store_trust_failing = False
         # A busy installation is retried soon rather than in an hour.
         if not payload.get("deferred"):
             self.store_trust_due = time.monotonic() + _STORE_TRUST_SECONDS
+
+    def _retry_deferred_followers(self, payload: dict[str, JsonValue]) -> None:
+        """Bring the next renewal forward when a catalog read deferred followers.
+
+        A read renews the store's trust and follows it at once, but an
+        installation busy at that moment keeps its earlier trust; the node's
+        next renewal then runs within five minutes instead of up to an hour.
+        """
+        if not payload.get("store_trust_deferred"):
+            return
+        soon = time.monotonic() + _STORE_TRUST_RETRY_SECONDS
+        if self.store_trust_due is None or self.store_trust_due > soon:
+            self.store_trust_due = soon
 
     async def _settle_store_trust(self) -> None:
         """Let a renewal in flight finish rather than abandon it mid-write."""
@@ -859,6 +881,8 @@ class ManagedServices:
             if catalog_refused is not None:
                 raise catalog_refused
             raise ValueError("managed service request refused")
+        if isinstance(request, CatalogRequest) and request.action == "read_catalog":
+            self._retry_deferred_followers(payload)
         return payload
 
     async def refresh(self) -> ManagedInventory:

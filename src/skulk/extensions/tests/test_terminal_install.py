@@ -36,6 +36,7 @@ from skulk.extensions.runtime_files import (
 from skulk.extensions.runtime_manager import (
     CatalogInstall,
     CatalogInstallRequest,
+    CatalogRead,
     CatalogRegistration,
     CatalogRequest,
     InstallationRequest,
@@ -226,7 +227,7 @@ class Journey:
     async def catalog_review(self) -> CatalogReview:
         """Read the catalog as the terminal does."""
         response = await self.request(CatalogRequest(action="read_catalog"))
-        return CatalogReview.model_validate_json(json.dumps(response["result"]))
+        return CatalogRead.model_validate_json(json.dumps(response["result"])).review
 
 
 @asynccontextmanager

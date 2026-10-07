@@ -21,10 +21,15 @@ from skulk.extensions.capability_store import (
 )
 from skulk.extensions.runtime_artifacts import RuntimeTrust, canonical_json
 from skulk.extensions.runtime_attachment import HostSettings
-from skulk.extensions.runtime_catalog import CatalogReview, CatalogSourceUpdate
+from skulk.extensions.runtime_catalog import CatalogRefusedError, CatalogSourceUpdate
 from skulk.extensions.runtime_controller import LifecycleRequest
-from skulk.extensions.runtime_download import RuntimeDownloads, SourceUpdate
+from skulk.extensions.runtime_download import (
+    LEGACY_STORE_BINDING_FILE,
+    RuntimeDownloads,
+    SourceUpdate,
+)
 from skulk.extensions.runtime_files import (
+    RuntimeLock,
     private_directory,
     read_private,
     write_private,
@@ -33,6 +38,7 @@ from skulk.extensions.runtime_manager import (
     CatalogInstall,
     CatalogInstallation,
     CatalogInstallRequest,
+    CatalogRead,
     CatalogRequest,
     InstallationRequest,
     RuntimeManager,
@@ -40,7 +46,6 @@ from skulk.extensions.runtime_manager import (
     StoreTrustRefresh,
     StoreTrustRequest,
     SubmitRequest,
-    store_bound,
 )
 from skulk.extensions.tests.store_repository import StoreRepository, trust_document
 from skulk.extensions.tests.test_runtime_install import artifacts
@@ -138,19 +143,30 @@ class _Host:
             json.dumps(await self.manager.dispatch(StoreTrustRequest(offline=offline)))
         )
 
-    async def bind(self, plugin_id: str) -> CatalogInstallation:
-        """Read the catalog and bind ``plugin_id`` to its one listing."""
-        review = CatalogReview.model_validate_json(
+    async def read(self) -> CatalogRead:
+        """Read the catalog as the node does."""
+        return CatalogRead.model_validate_json(
             json.dumps(
                 await self.manager.dispatch(CatalogRequest(action="read_catalog"))
             )
         )
+
+    async def bind(self, plugin_id: str) -> CatalogInstallation:
+        """Read the catalog and bind ``plugin_id`` to its one listing."""
+        return await self.bind_reviewed(
+            plugin_id, (await self.read()).review.catalog_sha256
+        )
+
+    async def bind_reviewed(
+        self, plugin_id: str, catalog_sha256: str
+    ) -> CatalogInstallation:
+        """Bind ``plugin_id`` to the listing in an earlier reviewed catalog."""
         return CatalogInstallation.model_validate_json(
             json.dumps(
                 await self.manager.dispatch(
                     CatalogInstallRequest(
                         request=CatalogInstall(
-                            catalog_sha256=review.catalog_sha256,
+                            catalog_sha256=catalog_sha256,
                             bundle_id="example.plugin",
                             sequence=1,
                             runtime_platform="macos-arm64",
@@ -263,7 +279,7 @@ async def test_a_running_store_installation_follows_renewal_and_revocation(
         host.publish(1)
         bound = await host.bind("managed.store")
         installation = host.manager.downloads["managed.store"]
-        assert store_bound(installation.root)
+        assert installation.follows_store()
         bind_time = host.trust("managed.store")
         assert bind_time.revision == 1
         assert bind_time.publishers == {
@@ -313,7 +329,7 @@ async def test_a_running_store_installation_follows_renewal_and_revocation(
         await _state(host, "managed.store", "verification_failed")
         # The private installation never followed any of it.
         assert host.trust("managed.private") == private
-        assert not store_bound(host.manager.downloads["managed.private"].root)
+        assert not host.manager.downloads["managed.private"].follows_store()
 
 
 async def test_an_offline_store_installation_runs_on_its_held_trust_until_expiry(
@@ -344,8 +360,8 @@ async def test_only_a_binding_from_the_store_follows_it(
     async with _store_host(tmp_path, monkeypatch) as host:
         host.publish(1)
         bound = await host.bind("managed.store")
-        root = host.manager.downloads["managed.store"].root
-        assert store_bound(root)
+        installation = host.manager.downloads["managed.store"]
+        assert installation.follows_store()
         # The owner configures the source directly: the owner's trust governs.
         await host.manager.dispatch(
             SourceRegistration(
@@ -355,7 +371,7 @@ async def test_only_a_binding_from_the_store_follows_it(
                 ),
             )
         )
-        assert not store_bound(root)
+        assert not installation.follows_store()
         host.publish(2)
         held = host.trust("managed.store")
         # Nothing follows the store now, so the renewal does not contact it.
@@ -367,7 +383,7 @@ async def test_only_a_binding_from_the_store_follows_it(
         # Bound from the store again, it follows again, and takes the
         # store's revocations exactly as published.
         await host.bind("managed.store")
-        assert store_bound(root)
+        assert installation.follows_store()
         current = host.manager.catalog.trust()
         assert current.revision == 2
         assert host.trust("managed.store").model_copy(update={"revision": 2}) == current
@@ -388,7 +404,7 @@ async def test_only_a_binding_from_the_store_follows_it(
             )
         )
         await host.bind("managed.store")
-        assert not store_bound(root)
+        assert not installation.follows_store()
         followed = host.trust("managed.store")
         host.publish(3, publishers=("fixture",))
         assert (await host.refresh()).followed == ()
@@ -439,7 +455,7 @@ async def test_a_refused_store_binding_restores_the_private_trust(
         # Bound at revision 2, restored at 3: the trust floor only rises.
         assert before.trust_revision == 1 and restored.revision == 3
         assert restored.model_copy(update={"revision": private.revision}) == private
-        assert not store_bound(installation.root)
+        assert not installation.follows_store()
         assert installation.source().base_url == PRIVATE
         assert installation.source_status().revision > before.revision
         # The selected release still verifies under the restored trust.
@@ -463,6 +479,7 @@ async def test_the_node_renews_store_trust_hourly_and_retries_busy_installations
     replies: list[dict[str, JsonValue]] = [
         {"result": {"trust_revision": 2, "followed": [], "deferred": ["managed.x"]}},
         {"result": {"trust_revision": 2, "followed": ["managed.x"], "deferred": []}},
+        {"error": "catalog_refused", "code": "catalog_store_trust_unavailable"},
     ]
 
     async def request(root: Path, sent_request: object) -> dict[str, JsonValue]:
@@ -487,3 +504,202 @@ async def test_the_node_renews_store_trust_hourly_and_retries_busy_installations
     assert len(sent) == 2
     due = services.store_trust_due
     assert due is not None and due - time.monotonic() > 3000
+    # A catalog read that deferred followers brings the renewal forward.
+    services._retry_deferred_followers(  # pyright: ignore[reportPrivateUsage]
+        {"review": {}, "store_trust_deferred": []}
+    )
+    assert services.store_trust_due == due
+    services._retry_deferred_followers(  # pyright: ignore[reportPrivateUsage]
+        {"review": {}, "store_trust_deferred": ["managed.x"]}
+    )
+    due = services.store_trust_due
+    assert due is not None and due - time.monotonic() <= 300
+    # A refused renewal keeps the five-minute retry.
+    services.store_trust_due = time.monotonic()
+    services._schedule_store_trust(tmp_path)  # pyright: ignore[reportPrivateUsage]
+    await services._settle_store_trust()  # pyright: ignore[reportPrivateUsage]
+    assert len(sent) == 3 and services.store_trust_failing
+    due = services.store_trust_due
+    assert due is not None and due - time.monotonic() <= 300
+
+
+def _runtime_digest(metadata: bytes) -> str:
+    """The digest a catalog listing and a selection name the release by."""
+    runtime = _OBJECT.validate_python(_OBJECT.validate_json(metadata)["runtime"])
+    return hashlib.sha256(canonical_json(runtime)).hexdigest()
+
+
+async def test_follower_status_lives_in_the_source_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An earlier build's marker moves into the record on read, and is then gone."""
+    async with _store_host(tmp_path, monkeypatch) as host:
+        host.publish(1)
+        await host.bind("managed.store")
+        installation = host.manager.downloads["managed.store"]
+        record = installation.root / "release-source.json"
+        marker = installation.root / LEGACY_STORE_BINDING_FILE
+        assert _OBJECT.validate_json(read_private(record))["follows_store"] is True
+        assert not marker.exists()
+        # As an earlier build left it: the marker beside a record without
+        # the field.
+        legacy = _OBJECT.validate_json(read_private(record))
+        del legacy["follows_store"]
+        write_private(record, _OBJECT.dump_json(legacy))
+        write_private(marker, b'{"source":"builtin_store"}')
+        assert installation.follows_store()
+        assert not marker.exists()
+        assert _OBJECT.validate_json(read_private(record))["follows_store"] is True
+        # A private record carries no field at all, which earlier builds read.
+        await host.manager.dispatch(
+            SourceRegistration(
+                plugin_id="managed.store",
+                request=SourceUpdate(
+                    expected_revision=installation.source_status().revision,
+                    base_url=PRIVATE,
+                ),
+            )
+        )
+        assert "follows_store" not in _OBJECT.validate_json(read_private(record))
+        assert not installation.source_status().follows_store
+        # An unreadable marker meant not following before, and still does.
+        write_private(marker, b"not a marker")
+        assert not installation.follows_store()
+        assert not marker.exists()
+
+
+async def test_no_crash_lets_a_renewal_overwrite_trust_the_store_does_not_govern(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leaving the store is recorded before the owner's trust; joining, after."""
+    from skulk.extensions import runtime_download
+
+    async with _store_host(tmp_path, monkeypatch) as host:
+        host.publish(1)
+        await host.bind("managed.store")
+        installation = host.manager.downloads["managed.store"]
+        store_trust = host.trust("managed.store")
+        written = runtime_download.write_private
+
+        def lose_trust_write(path: Path, content: bytes) -> None:
+            if path.name == "publisher-trust.json":
+                raise OSError("power lost")
+            written(path, content)
+
+        # The owner takes the installation over and the trust write is lost.
+        monkeypatch.setattr(runtime_download, "write_private", lose_trust_write)
+        with pytest.raises(OSError):
+            await installation.configure(
+                SourceUpdate(
+                    expected_revision=installation.source_status().revision,
+                    base_url=PRIVATE,
+                    trust=store_trust.model_copy(
+                        update={"revision": 9, "revoked_artifacts": ("e" * 64,)}
+                    ),
+                )
+            )
+        monkeypatch.setattr(runtime_download, "write_private", written)
+        # Following already ended, so no renewal touches this installation.
+        assert not installation.follows_store()
+        host.publish(2)
+        assert (await host.refresh()).followed == ()
+        assert host.trust("managed.store") == store_trust
+        # Joining again with the trust write lost: the record that says it
+        # follows lands first, and the next renewal writes the store's trust.
+        monkeypatch.setattr(runtime_download, "write_private", lose_trust_write)
+        with pytest.raises(OSError):
+            await installation.configure(
+                SourceUpdate(
+                    expected_revision=installation.source_status().revision,
+                    base_url=FEED,
+                    trust=store_trust.model_copy(update={"revision": 2}),
+                ),
+                carry_revocations=False,
+                follows_store=True,
+            )
+        monkeypatch.setattr(runtime_download, "write_private", written)
+        assert installation.follows_store()
+        assert (await host.refresh()).followed == ("managed.store",)
+        assert host.trust("managed.store").expires_at > store_trust.expires_at
+
+
+async def test_followers_without_verified_store_trust_get_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A renewal that verifies nothing for its followers is refused, not reported as done."""
+    async with _store_host(tmp_path, monkeypatch) as host:
+        host.publish(1)
+        await host.bind("managed.store")
+        client = host.manager.catalog.store
+        assert client is not None
+        client.retained_path.unlink()
+        host.repository.fetcher.reachable = False
+        with pytest.raises(CatalogRefusedError) as refused:
+            await host.refresh()
+        assert refused.value.code == "catalog_store_trust_unavailable"
+
+
+async def test_a_read_names_busy_followers_and_renewals_keep_the_catalog_in_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deferred followers come back with the read; installs see the newest trust."""
+    async with _store_host(tmp_path, monkeypatch) as host:
+        host.publish(1)
+        await host.bind("managed.store")
+        installation = host.manager.downloads["managed.store"]
+        host.publish(2)
+        async with installation.guard:
+            read = await host.read()
+        assert read.store_trust_deferred == ("managed.store",)
+        assert (await host.read()).store_trust_deferred == ()
+        # A periodic renewal moves the catalog's trust too, with no read.
+        host.publish(3)
+        assert (await host.refresh()).trust_revision == 3
+        assert host.manager.catalog.trust().revision == 3
+        reviewed = (await host.read()).review.catalog_sha256
+        # A renewal revokes the listed release while another catalog
+        # operation holds the catalog: an install from the listing reviewed
+        # before is still checked against that newest verified trust.
+        host.publish(4, artifacts=(_runtime_digest(host.metadata),))
+        async with host.manager.catalog.guard:
+            await host.refresh()
+        assert host.manager.catalog.trust().revision == 3
+        with pytest.raises(ValueError, match="not listed"):
+            await host.bind_reviewed("managed.other", reviewed)
+        assert host.manager.catalog.trust().revision == 4
+
+
+async def test_busy_followers_share_one_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Many busy installations wait out one deadline together, then are deferred."""
+    async with _store_host(tmp_path, monkeypatch) as host:
+        host.publish(1)
+        for plugin_id in ("managed.first", "managed.second", "managed.third"):
+            await host.bind(plugin_id)
+        monkeypatch.setattr(
+            "skulk.extensions.runtime_manager._STORE_FOLLOW_SECONDS", 0.5
+        )
+        host.publish(2)
+        held = [
+            RuntimeLock(host.manager.downloads[plugin_id].installer.installer)
+            for plugin_id in ("managed.first", "managed.second", "managed.third")
+        ]
+        try:
+            started = time.monotonic()
+            refreshed = await host.refresh()
+            elapsed = time.monotonic() - started
+        finally:
+            for lock in held:
+                lock.close()
+        assert set(refreshed.deferred) == {
+            "managed.first",
+            "managed.second",
+            "managed.third",
+        }
+        assert elapsed < 1.5
+        assert set((await host.refresh()).followed) == {
+            "managed.first",
+            "managed.second",
+            "managed.third",
+        }

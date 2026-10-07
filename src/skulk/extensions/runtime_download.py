@@ -6,7 +6,7 @@ import os
 import time
 from itertools import islice
 from pathlib import Path
-from typing import Annotated, Literal, Self, final
+from typing import Annotated, Final, Literal, Self, final
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
@@ -33,11 +33,36 @@ from skulk.extensions.runtime_files import (
     RuntimeLock,
     private_directory,
     read_private,
+    remove_private,
     write_private,
 )
 from skulk.extensions.runtime_install import RuntimeInstaller, finish_runtime_work
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
+
+LEGACY_STORE_BINDING_FILE: Final = "store-binding.json"
+"""Where an earlier build marked an installation following the built-in store.
+
+Follower status now lives in the source record itself; ``source()`` carries a
+marker it finds into the record and removes it."""
+
+
+class _LegacyStoreBinding(BaseModel):
+    """The marker an earlier build wrote for a store-following installation."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    source: Literal["builtin_store"]
+
+
+def _source_document(source: "ReleaseSource") -> bytes:
+    """The source record as written; ``follows_store`` only when it is set.
+
+    Leaving the default out keeps a private installation's record readable by
+    builds that predate the field.
+    """
+    return source.model_dump_json(
+        exclude=None if source.follows_store else {"follows_store"}
+    ).encode()
 
 
 def _source_trust(value: object) -> RuntimeTrust:
@@ -65,6 +90,12 @@ class ReleaseSource(BaseModel):
     credential_reference: ProfileIdentifier | None = Field(
         default=None,
         description="Protected local feed credential reference, never its value.",
+    )
+    follows_store: bool = Field(
+        default=False,
+        description="Whether the installation's publisher trust follows the "
+        "built-in capability store. Recorded with the source, so a change of "
+        "trust authority is one durable write.",
     )
 
     @model_validator(mode="after")
@@ -163,6 +194,11 @@ class SourceStatus(BaseModel):
     )
     trust_revision: int | None = Field(
         default=None, description="Configured publisher trust revision."
+    )
+    follows_store: bool = Field(
+        default=False,
+        description="Whether the publisher trust follows the built-in capability "
+        "store: bound from a store listing and renewed by the host.",
     )
 
 
@@ -270,10 +306,43 @@ class RuntimeDownloads:
         self.closed = False
 
     def source(self) -> ReleaseSource:
-        """Read the fixed owner-configured source; missing credentials never fall back."""
-        return ReleaseSource.model_validate_json(
-            read_private(self.root / "release-source.json", 8192)
-        )
+        """Read the fixed owner-configured source; missing credentials never fall back.
+
+        A store-binding marker left by an earlier build is carried into the
+        record (``follows_store``) and then removed, durably and in that
+        order, before the record is returned: the record is the one place
+        follower status lives, so no later write can disagree with a marker.
+        """
+        marker = self.root / LEGACY_STORE_BINDING_FILE
+        try:
+            source = ReleaseSource.model_validate_json(
+                read_private(self.root / "release-source.json", 8192)
+            )
+        except FileNotFoundError:
+            # A marker without a source names nothing to follow.
+            if marker.exists() or marker.is_symlink():
+                remove_private(marker)
+            raise
+        if not (marker.exists() or marker.is_symlink()):
+            return source
+        try:
+            _LegacyStoreBinding.model_validate_json(read_private(marker, 4096))
+            marked = True
+        except (OSError, ValueError):
+            # An earlier build read an unreadable marker as not following.
+            marked = False
+        if marked and not source.follows_store:
+            source = source.model_copy(update={"follows_store": True})
+            write_private(self.root / "release-source.json", _source_document(source))
+        remove_private(marker)
+        return source
+
+    def follows_store(self) -> bool:
+        """Whether this installation's trust follows the built-in capability store."""
+        try:
+            return self.source().follows_store
+        except (OSError, ValueError):
+            return False
 
     def source_status(self) -> SourceStatus:
         """Read source readiness without network I/O or disclosing its credential."""
@@ -310,10 +379,15 @@ class RuntimeDownloads:
             credential_reference=source.credential_reference,
             credential_ready=ready,
             trust_revision=trust_revision,
+            follows_store=source.follows_store,
         )
 
     async def configure(
-        self, update: SourceUpdate, *, carry_revocations: bool = True
+        self,
+        update: SourceUpdate,
+        *,
+        carry_revocations: bool = True,
+        follows_store: bool = False,
     ) -> SourceStatus:
         """Apply direct owner source/trust changes without borrowing any native vault.
 
@@ -321,12 +395,22 @@ class RuntimeDownloads:
         may tighten before source replacement on a disk fault; runtime admission
         then fails closed and the unchanged source revision allows correction.
 
+        Follower status is part of the source record, and the writes are
+        ordered so that no crash can let a store renewal overwrite trust the
+        store does not govern: an installation that stops following has that
+        recorded before its new trust lands, and one that starts following
+        has its record written first, so a lost trust write is completed by
+        the next renewal with exactly the trust the binding chose.
+
         Args:
             update: The reviewed source and trust change.
             carry_revocations: Keep every revocation the current trust holds
                 when the trust revision rises. Only a binding to the built-in
                 capability store passes ``False``: its trust applies as the
                 store published it.
+            follows_store: Whether the installation's trust follows the
+                built-in store from now on. Only a store binding, or the
+                restore of a store-following source, passes ``True``.
         """
         if self.guard.locked():
             raise ValueError("release source is busy")
@@ -425,19 +509,33 @@ class RuntimeDownloads:
                     base_url=base_url,
                     metadata_filename=metadata_filename,
                     credential_reference=reference,
+                    follows_store=follows_store,
                 )
-                write_private(
-                    self.root / "publisher-trust.json",
-                    next_trust.model_dump_json().encode(),
-                )
-                write_private(
-                    self.root / "release-source.json", source.model_dump_json().encode()
-                )
+                trust_path = self.root / "publisher-trust.json"
+                source_path = self.root / "release-source.json"
+                if follows_store:
+                    write_private(source_path, _source_document(source))
+                    write_private(trust_path, next_trust.model_dump_json().encode())
+                    return self.source_status()
+                if previous is not None and previous.follows_store:
+                    # Stop following first: until the owner's trust is in
+                    # place, the installation keeps the store's last trust
+                    # rather than letting a renewal replace the owner's.
+                    write_private(
+                        source_path,
+                        _source_document(
+                            previous.model_copy(update={"follows_store": False})
+                        ),
+                    )
+                write_private(trust_path, next_trust.model_dump_json().encode())
+                write_private(source_path, _source_document(source))
                 return self.source_status()
             finally:
                 lock.close()
 
-    async def follow_trust(self, trust: RuntimeTrust) -> bool:
+    async def follow_trust(
+        self, trust: RuntimeTrust, *, wait_seconds: float = 2.0
+    ) -> bool:
         """Bring this installation's publisher trust up to ``trust``'s content.
 
         For an installation bound to the built-in capability store: its trust
@@ -448,21 +546,31 @@ class RuntimeDownloads:
         running owner's periodic verification reads the new trust: a renewal
         keeps it running past the old expiry, a revocation stops it.
 
+        Follower status is read again under the installation fence, so a
+        source change that ended following can never be overwritten here.
+
         Args:
             trust: The store's verified trust, still in force.
+            wait_seconds: How long to wait for the installation fence, which
+                the running owner's periodic verification holds for moments
+                at a time; the caller shares one deadline across
+                installations.
 
         Returns:
-            Whether the installation's trust changed.
+            Whether the installation's trust changed. ``False`` as well when
+            the installation no longer follows the store.
 
         Raises:
             ValueError: The installation is busy, closed, or ``trust`` has
                 expired; nothing was written.
             BlockingIOError: Another operation still held the installation
-                fence after a short wait.
+                fence when the wait ran out.
         """
         if trust.expires_at <= time.time():
             raise ValueError("store trust has expired")
-        return await self._rewrite_trust(trust)
+        return await self._rewrite_trust(
+            trust, wait_seconds=wait_seconds, following_only=True
+        )
 
     async def restore_trust(self, trust: RuntimeTrust) -> bool:
         """Put earlier publisher trust content back after a refused store binding.
@@ -484,9 +592,13 @@ class RuntimeDownloads:
             BlockingIOError: Another operation still held the installation
                 fence after a short wait.
         """
-        return await self._rewrite_trust(trust)
+        return await self._rewrite_trust(
+            trust, wait_seconds=2.0, following_only=False
+        )
 
-    async def _rewrite_trust(self, trust: RuntimeTrust) -> bool:
+    async def _rewrite_trust(
+        self, trust: RuntimeTrust, *, wait_seconds: float, following_only: bool
+    ) -> bool:
         """Write ``trust``'s content at the next revision unless it is already in force."""
         if self.guard.locked():
             raise ValueError("release source is busy")
@@ -495,7 +607,7 @@ class RuntimeDownloads:
                 raise ValueError("installation is busy or closed")
             # The running owner's periodic verification holds this fence for
             # moments at a time; wait that out rather than skip a renewal.
-            deadline = time.monotonic() + 2.0
+            deadline = time.monotonic() + wait_seconds
             while True:
                 try:
                     lock = RuntimeLock(self.installer.installer)
@@ -505,6 +617,8 @@ class RuntimeDownloads:
                         raise
                     await asyncio.sleep(0.05)
             try:
+                if following_only and not self.follows_store():
+                    return False
                 try:
                     current: RuntimeTrust | None = RuntimeTrust.model_validate_json(
                         read_private(self.root / "publisher-trust.json")
