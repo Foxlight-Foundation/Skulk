@@ -25,12 +25,14 @@ import json
 import os
 import platform as platform_module
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Final, cast
 
@@ -465,7 +467,94 @@ class ComfyInstallError(RuntimeError):
         self.detail = detail
 
 
+class ComfyInstallCancelledError(Exception):
+    """The on-demand install stopped because the worker that asked for it is
+    shutting down (a node stop or a master change); the next worker asks again."""
+
+
 _INSTALL_LOCK: Final = threading.Lock()
+_STOP_POLL_SECONDS: Final = 0.5
+_STOP_GRACE_SECONDS: Final = 5.0
+
+
+def _end_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Terminate a command's whole process group, then kill what remains."""
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGTERM)
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=_STOP_GRACE_SECONDS)
+    # pip and git start helpers of their own; the group outlives its leader.
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=_STOP_GRACE_SECONDS)
+
+
+def stoppable_runner(stop: threading.Event) -> Runner:
+    """A ``subprocess.run`` stand-in whose commands end when ``stop`` is set.
+
+    The installer's commands can run for hours on a slow link, so a worker
+    that is shutting down sets ``stop`` instead of waiting: each command runs
+    in its own session, a stop terminates its whole process group (pip's
+    build helpers, git's transport) and kills what has not exited after a
+    short grace, and the caller sees ``ComfyInstallCancelledError``. Output goes
+    to temporary files rather than pipes, so a chatty command never blocks on
+    a full pipe while it is polled.
+
+    Args:
+        stop: Set by the worker when the install must end now.
+
+    Returns:
+        A runner accepting the keyword arguments the installer passes to
+        ``subprocess.run``.
+    """
+
+    def run(
+        args: Sequence[str],
+        *,
+        capture_output: bool = False,
+        text: bool = True,
+        timeout: float | None = None,
+        check: bool = False,
+        env: Mapping[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del text  # Output is always decoded; the installer asks for text.
+        if stop.is_set():
+            raise ComfyInstallCancelledError("the install was stopped before its next command")
+        command = list(args)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            process = subprocess.Popen(
+                command,
+                stdout=stdout_file if capture_output else None,
+                stderr=stderr_file if capture_output else None,
+                env=None if env is None else dict(env),
+                start_new_session=True,
+            )
+            while True:
+                try:
+                    returncode = process.wait(timeout=_STOP_POLL_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if stop.is_set():
+                    _end_process_group(process)
+                    raise ComfyInstallCancelledError(
+                        "the worker that asked for the install is shutting down"
+                    ) from None
+                if deadline is not None and time.monotonic() >= deadline:
+                    _end_process_group(process)
+                    raise subprocess.TimeoutExpired(command, timeout or 0.0)
+            _ = stdout_file.seek(0)
+            _ = stderr_file.seek(0)
+            stdout = stdout_file.read().decode(errors="replace") if capture_output else ""
+            stderr = stderr_file.read().decode(errors="replace") if capture_output else ""
+        completed = subprocess.CompletedProcess(command, returncode, stdout, stderr)
+        if check:
+            completed.check_returncode()
+        return completed
+
+    return run
 
 
 def _remove_abandoned_staging(variants: Sequence[EngineVariant]) -> None:
@@ -503,7 +592,10 @@ def _verify_gpu(root: Path, run: Runner) -> None:
 
 
 def install_comfy_on_demand(
-    facts: NodeFacts, *, offline: bool, run: Runner = subprocess.run
+    facts: NodeFacts,
+    *,
+    offline: bool,
+    run: Runner = subprocess.run,
 ) -> Path:
     """Install the managed ComfyUI engine because a video model was placed here.
 
@@ -518,13 +610,14 @@ def install_comfy_on_demand(
     Args:
         facts: This node's current facts.
         offline: Whether the node runs in offline mode.
-        run: Subprocess runner (injectable for tests).
+        run: Subprocess runner; the worker passes ``stoppable_runner``.
 
     Returns:
         The install root.
 
     Raises:
         ComfyInstallError: The install could not complete; ``step`` names where.
+        ComfyInstallCancelledError: ``run`` was stopped; nothing is left installed.
     """
     with _INSTALL_LOCK:
         existing = managed_comfy_install(facts)
@@ -554,12 +647,18 @@ def install_comfy_on_demand(
             )
             try:
                 root = provision_comfy(variant, run=run)
+            except ComfyInstallCancelledError:
+                raise
             except Exception as error:  # noqa: BLE001 - try the next variant
                 logger.warning(f"ComfyUI {variant} install failed: {error}")
                 last_error = error
                 continue
             try:
                 _verify_gpu(root, run)
+            except ComfyInstallCancelledError:
+                # An unchecked install must not stay: startup would wire it.
+                shutil.rmtree(root, ignore_errors=True)
+                raise
             except RuntimeError as error:
                 # Startup wires any complete install on disk without checking
                 # it again, so an engine that cannot see the GPU must not stay.

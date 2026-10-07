@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
+import type { SkulkTranslate } from '../i18n/tolgee';
 import { deriveInstanceStatus } from './instanceStatus';
 
-const t = (_key: string, fallback: string, params?: Record<string, unknown>) =>
+// Tolgee's translator type is heavily overloaded; the status helper only uses
+// the key, the English fallback, and named parameters.
+const t = ((_key: string, fallback: string, params?: Record<string, unknown>) =>
   params
     ? fallback.replace(/\{(\w+)\}/g, (_, name: string) => String(params[name] ?? ''))
-    : fallback;
+    : fallback) as unknown as SkulkTranslate;
 
 describe('deriveInstanceStatus', () => {
   const idle = { 'runner-1': { RunnerIdle: {} } };

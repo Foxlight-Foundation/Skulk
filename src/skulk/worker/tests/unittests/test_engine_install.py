@@ -1,10 +1,15 @@
 # pyright: reportPrivateUsage=false
 """On-demand engine installs: one shared job, each waiter released or failed once."""
 
+import sys
+import threading
+import time
 from pathlib import Path
 from typing import cast
 
+import anyio
 import pytest
+from anyio import to_thread
 
 import skulk.facts as facts_module
 import skulk.provisioning.comfy as comfy_module
@@ -131,7 +136,7 @@ async def test_a_finished_install_releases_every_waiter(
     worker, events, commands = _worker(tmp_path)
     offline_requests: list[bool] = []
 
-    def install(_facts: object, *, offline: bool) -> Path:
+    def install(_facts: object, *, offline: bool, **_kwargs: object) -> Path:
         offline_requests.append(offline)
         return tmp_path
 
@@ -169,7 +174,7 @@ async def test_a_failed_install_gives_each_waiter_up_with_the_step(
 ) -> None:
     worker, events, commands = _worker(tmp_path)
 
-    def refuse(_facts: object, *, offline: bool) -> Path:
+    def refuse(_facts: object, *, offline: bool, **_kwargs: object) -> Path:
         raise comfy_module.ComfyInstallError("the disk-space check", "2.0 GB free")
 
     monkeypatch.setattr(comfy_module, "install_comfy_on_demand", refuse)
@@ -208,7 +213,7 @@ async def test_an_install_the_node_does_not_report_as_usable_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     worker, events, commands = _worker(tmp_path)
-    def install(_facts: object, *, offline: bool) -> Path:
+    def install(_facts: object, *, offline: bool, **_kwargs: object) -> Path:
         return tmp_path
 
     monkeypatch.setattr(comfy_module, "install_comfy_on_demand", install)
@@ -259,3 +264,50 @@ def test_a_runner_that_finds_no_engine_is_terminal_for_its_instance() -> None:
     assert engine_unavailable_live_instances(
         runners, {InstanceId("instance-a"), InstanceId("instance-b")}
     ) == [("instance-a", "org/video", missing)]
+
+
+@pytest.mark.usefixtures("node_facts")
+async def test_a_worker_shutting_down_ends_the_install_promptly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A master change replaces the worker; the install must not hold that up."""
+    worker, events, commands = _worker(tmp_path)
+    started = threading.Event()
+    finished = threading.Event()
+    outcome: list[str] = []
+
+    def install(
+        _facts: object, *, offline: bool, run: comfy_module.Runner, **_kwargs: object
+    ) -> Path:
+        started.set()
+        try:
+            run(
+                [sys.executable, "-c", "import time; time.sleep(120)"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+                env=None,
+            )
+            outcome.append("finished")
+        except comfy_module.ComfyInstallCancelledError:
+            outcome.append("stopped")
+            raise
+        finally:
+            finished.set()
+        return tmp_path
+
+    monkeypatch.setattr(comfy_module, "install_comfy_on_demand", install)
+    job = _EngineInstallJob(engine="comfy", waiters={_FIRST: TaskId("task-first")})
+
+    began = time.monotonic()
+    async with anyio.create_task_group() as group:
+        group.start_soon(worker._run_engine_install, job)
+        assert await to_thread.run_sync(started.wait, 30)
+        group.cancel_scope.cancel()
+    assert time.monotonic() - began < 30
+    assert await to_thread.run_sync(finished.wait, 30)
+    assert outcome == ["stopped"]
+    # The waiters are left for the next worker, which plans the install again.
+    assert not job.finished
+    assert events.collect() == [] and commands.collect() == []

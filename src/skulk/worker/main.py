@@ -5,6 +5,7 @@ import ipaddress
 import mimetypes
 import shutil
 import sys
+import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Container, Mapping
@@ -3762,18 +3763,37 @@ class Worker:
             current_node_facts,
             refresh_node_facts,
         )
-        from skulk.provisioning.comfy import ComfyInstallError, install_comfy_on_demand
+        from skulk.provisioning.comfy import (
+            ComfyInstallError,
+            install_comfy_on_demand,
+            stoppable_runner,
+        )
 
         failure_step: str | None = None
+        stop = threading.Event()
         try:
             if job.engine != "comfy":
                 raise ComfyInstallError(
                     "the engine check", f"no on-demand installer for {job.engine}"
                 )
             facts = await to_thread.run_sync(current_node_facts)
-            await to_thread.run_sync(
-                lambda: install_comfy_on_demand(facts, offline=self._offline)
-            )
+            try:
+                # A worker shutting down (a node stop, or a master change that
+                # replaces this worker) must not wait out a download measured
+                # in minutes: the thread is abandoned on cancellation and told
+                # to end its commands, and the next worker plans the install
+                # again for any instance still waiting.
+                await to_thread.run_sync(
+                    lambda: install_comfy_on_demand(
+                        facts,
+                        offline=self._offline,
+                        run=stoppable_runner(stop),
+                    ),
+                    abandon_on_cancel=True,
+                )
+            except anyio.get_cancelled_exc_class():
+                stop.set()
+                raise
             await to_thread.run_sync(refresh_node_facts)
             derivation = await to_thread.run_sync(current_backend_derivation)
             still_on_demand = any(

@@ -49,7 +49,7 @@ import { operatorSession } from './auth/operatorSession';
 import { apiSlice } from './store/api';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
-import { useSkulkTranslation, type SkulkTranslate } from './i18n/tolgee';
+import { useSkulkTranslation } from './i18n/tolgee';
 import { modelSupportsTextChat } from './types/models';
 import { parseBackendTag } from './utils/servingEngine';
 

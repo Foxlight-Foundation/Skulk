@@ -7,6 +7,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -16,6 +18,7 @@ import skulk.provisioning.comfy as comfy
 from skulk.facts.testing import AMD_STRIX, NVIDIA_A40, make_facts, ok_bin
 from skulk.provisioning.comfy import (
     RECORD_FILENAME,
+    ComfyInstallCancelledError,
     ComfyInstallError,
     comfy_on_demand_variants,
     dormant_comfy,
@@ -25,6 +28,7 @@ from skulk.provisioning.comfy import (
     managed_comfy_install,
     provision_comfy,
     select_comfy_variant_chain,
+    stoppable_runner,
 )
 from skulk.provisioning.manifest import (
     COMFY_PIN,
@@ -448,4 +452,97 @@ def test_uv_falls_back_to_the_bundled_package(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(bundled, "find_uv_bin", lambda: sys.executable, raising=False)
     monkeypatch.setitem(sys.modules, "uv", bundled)
     assert comfy._uv_executable() == sys.executable
+
+
+class _StoppedRun(_FakeRun):
+    """A fake runner whose command matching ``on`` is stopped mid-install."""
+
+    def __init__(self, on: str) -> None:
+        super().__init__()
+        self.on = on
+
+    def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if self.on in " ".join(args):
+            raise ComfyInstallCancelledError("stopped")
+        return super().__call__(args, **kwargs)
+
+
+def _staging_left(variant: EngineVariant = "cuda") -> list[Path]:
+    target = comfy.managed_comfy_root(variant, "aarch64")
+    return sorted(target.parent.glob(f".{target.name}-*")) if target.parent.is_dir() else []
+
+
+def test_a_stopped_install_leaves_nothing_behind(monkeypatch: pytest.MonkeyPatch) -> None:
+    _eligible(monkeypatch)
+    facts = make_facts(gpus=(NVIDIA_A40,))
+    with pytest.raises(ComfyInstallCancelledError):
+        install_comfy_on_demand(facts, offline=False, run=_StoppedRun("pip install"))
+    assert managed_comfy_install(facts) is None
+    assert _staging_left() == []
+    assert COMFY_BIN_ENV not in os.environ
+
+
+def test_a_stop_during_the_gpu_check_removes_the_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    _eligible(monkeypatch)
+    facts = make_facts(gpus=(NVIDIA_A40,))
+    with pytest.raises(ComfyInstallCancelledError):
+        install_comfy_on_demand(facts, offline=False, run=_StoppedRun("torch.cuda.is_available"))
+    assert managed_comfy_install(facts) is None
+
+
+def test_stoppable_runner_runs_a_command_and_captures_its_output() -> None:
+    run = stoppable_runner(threading.Event())
+    completed = run(
+        [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=None,
+    )
+    assert completed.returncode == 3
+    assert completed.stdout == "out\n" and completed.stderr == "err\n"
+
+
+def _process_gone(pid: int, within_seconds: float) -> bool:
+    deadline = time.monotonic() + within_seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_stoppable_runner_ends_the_whole_command_group_when_stopped(tmp_path: Path) -> None:
+    stop = threading.Event()
+    child_pid_file = tmp_path / "child.pid"
+    script = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); "
+        f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid)); "
+        "time.sleep(120)"
+    )
+    timer = threading.Timer(1.0, stop.set)
+    timer.start()
+    began = time.monotonic()
+    try:
+        with pytest.raises(ComfyInstallCancelledError):
+            stoppable_runner(stop)([sys.executable, "-c", script], capture_output=True, timeout=300)
+    finally:
+        timer.cancel()
+    assert time.monotonic() - began < 30
+    assert _process_gone(int(child_pid_file.read_text()), within_seconds=10)
+
+
+def test_stoppable_runner_times_out_and_refuses_once_stopped() -> None:
+    with pytest.raises(subprocess.TimeoutExpired):
+        stoppable_runner(threading.Event())(
+            [sys.executable, "-c", "import time; time.sleep(120)"], capture_output=True, timeout=0.5
+        )
+    stopped = threading.Event()
+    stopped.set()
+    with pytest.raises(ComfyInstallCancelledError):
+        stoppable_runner(stopped)([sys.executable, "-c", "print('never')"], capture_output=True)
 

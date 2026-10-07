@@ -833,7 +833,10 @@ dashboard tells the operator, before the first placement, that the engine will
 be installed with the model and placement will take longer. When the instance
 lands, the worker plans an `InstallEngine` task beside the model download,
 holds `LoadModel` until it finishes, then re-derives its facts and publishes
-fresh resources. Instances waiting for the same engine share one install. The
+fresh resources. Instances waiting for the same engine share one install. A
+worker that shuts down mid-install, including the replacement that follows a
+master change, ends the installer's commands and returns at once instead of
+waiting out the download; the next worker plans the install again. The
 install checks free disk space, provisions each eligible variant, and must see
 the GPU from the new environment; an install that fails that check is removed,
 because startup wires any complete install without checking it again. A failure
