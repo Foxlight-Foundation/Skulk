@@ -6,13 +6,13 @@ import { apiSlice } from '../../store/api';
 import { useAppDispatch } from '../../store/hooks';
 import { Button } from '../common/Button';
 import { SectionLabel, Surface } from '../common/Surfaces';
-import { pluginRefusalDetail, type CatalogSourceUpdate, type RuntimeSourceStatus } from '../../store/endpoints/plugins';
+import { pluginRefusalDetail, type CatalogSourceStatus, type CatalogSourceUpdate } from '../../store/endpoints/plugins';
 import { decodeInvitation, isCatalogAddress, trustRevision, type CatalogInvitation } from './catalogJourney';
 
 /** Props for connecting this host to a capability catalog. */
 export interface CatalogConnectPanelProps {
   /** Current catalog source readiness; its revision fences the change. */
-  status: RuntimeSourceStatus;
+  status: CatalogSourceStatus;
   /** Called once the host has accepted the catalog source. */
   onConnected: () => void;
   /** Leave without changing anything; offered when a catalog is already configured. */
@@ -59,7 +59,13 @@ export function CatalogConnectPanel({ status, onConnected, onCancel, replacesSto
     const update: CatalogSourceUpdate = {
       expected_revision: status.revision,
       base_url: chosen.baseUrl,
-      trust: { revision: trustRevision(status.trust_revision, openedAt), expires_at: chosen.trustExpiresAt, publishers: { [chosen.publisher]: chosen.publicKey } },
+      // The host picks the next revision of that catalog's own history when it
+      // can; an older host gets one from the panel's clock instead.
+      ...(status.assigns_trust_revisions ? { assign_trust_revision: true } : {}),
+      trust: {
+        revision: status.assigns_trust_revisions ? 1 : trustRevision(status.trust_revision, openedAt),
+        expires_at: chosen.trustExpiresAt, publishers: { [chosen.publisher]: chosen.publicKey },
+      },
       ...(chosen.token ? { token: chosen.token } : {}),
     };
     let body = JSON.stringify(update);

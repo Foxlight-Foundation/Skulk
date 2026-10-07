@@ -197,6 +197,8 @@ export interface CatalogSourceStatus extends RuntimeSourceStatus {
   builtin_store?: boolean;
   /** Whether this Skulk build includes the built-in store, so the host can switch to it. */
   builtin_store_available?: boolean;
+  /** Whether the host assigns the next trust revision on request; absent on hosts that predate it. */
+  assigns_trust_revisions?: boolean;
 }
 
 /** One release a signed catalog lists: the consent facts, never an address or credential. */
@@ -270,6 +272,8 @@ export interface CatalogSourceUpdate {
   trust?: { revision: number; expires_at: number; publishers: Record<string, string> };
   token?: string;
   clear_token?: boolean;
+  /** Have the host give the trust the next revision of that catalog address's own history. */
+  assign_trust_revision?: boolean;
 }
 
 /**

@@ -402,7 +402,7 @@ def create_managed_plugins_router(
             result = await services.request(
                 CatalogRequest(action="read_catalog", offline=offline_mode())
             )
-            return CatalogRead.model_validate_json(json.dumps(result)).review
+            return CatalogRead.from_reply(result).review
 
         return await invoke(action)
 

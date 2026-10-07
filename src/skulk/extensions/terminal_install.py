@@ -552,11 +552,12 @@ class TerminalInstaller:
             plugin_id if plugin_id is not None else "managed." + uuid4().hex,
             strict=True,
         )
-        review = CatalogRead.model_validate_json(
-            json.dumps(
-                await self._call(
-                    CatalogRequest(action="read_catalog", offline=offline_mode())
-                )
+        # Either reply shape: a manager mid-reload may still answer with the
+        # bare review. A read that deferred followers sets the manager's retry
+        # flag, which the node reads and renews within five minutes.
+        review = CatalogRead.from_reply(
+            await self._call(
+                CatalogRequest(action="read_catalog", offline=offline_mode())
             )
         ).review
         listing = self._listed(review, bundle_id, sequence, platform)

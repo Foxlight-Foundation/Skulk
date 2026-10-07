@@ -442,6 +442,12 @@ class ManagedInventory(BaseModel):
         default=False,
         description="Whether this manager can select a staged runtime and restart on request.",
     )
+    store_trust_retry: bool = Field(
+        default=False,
+        description="Whether installations following the built-in capability "
+        "store were busy when its trust was last followed, so the host renews "
+        "it again within minutes.",
+    )
 
 
 type ManagementRequest = (
@@ -511,6 +517,11 @@ class ManagedServices:
         self.store_trust_due: float | None = None
         # One warning per run of failed renewals, not one every five minutes.
         self.store_trust_failing = False
+        # Counts deferral notices; a renewal that started before one arrived
+        # must not push the retry it asked for back out to an hour.
+        self.store_trust_deferrals = 0
+        # The manager's retry flag as last read, so only its rise is a notice.
+        self.store_trust_retry_seen = False
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -816,6 +827,7 @@ class ManagedServices:
 
     async def _refresh_store_trust(self, root: Path) -> None:
         """Ask the manager to renew store trust; a refusal is retried sooner."""
+        deferrals = self.store_trust_deferrals
         try:
             result = await manager_request(
                 root, StoreTrustRequest(offline=offline_mode())
@@ -836,9 +848,14 @@ class ManagedServices:
             self.store_trust_failing = True
             return
         self.store_trust_failing = False
-        # A busy installation is retried soon rather than in an hour.
-        if not payload.get("deferred"):
+        # A busy installation is retried soon rather than in an hour, and so is
+        # one a catalog read deferred while this renewal was in flight.
+        if not payload.get("deferred") and self.store_trust_deferrals == deferrals:
             self.store_trust_due = time.monotonic() + _STORE_TRUST_SECONDS
+            # Every follower was reached, which cleared the manager's flag; a
+            # flag seen again after this is a new deferral, even if no
+            # inventory read caught it cleared in between.
+            self.store_trust_retry_seen = False
 
     def _retry_deferred_followers(self, payload: dict[str, JsonValue]) -> None:
         """Bring the next renewal forward when a catalog read deferred followers.
@@ -847,8 +864,12 @@ class ManagedServices:
         installation busy at that moment keeps its earlier trust; the node's
         next renewal then runs within five minutes instead of up to an hour.
         """
-        if not payload.get("store_trust_deferred"):
-            return
+        if payload.get("store_trust_deferred"):
+            self._note_store_trust_deferral()
+
+    def _note_store_trust_deferral(self) -> None:
+        """Bring the next renewal within five minutes, and keep it there."""
+        self.store_trust_deferrals += 1
         soon = time.monotonic() + _STORE_TRUST_RETRY_SECONDS
         if self.store_trust_due is None or self.store_trust_due > soon:
             self.store_trust_due = soon
@@ -915,6 +936,10 @@ class ManagedServices:
                 inventory = ManagedInventory.model_validate_json(
                     json.dumps(result["result"])
                 )
+                if inventory.store_trust_retry and not self.store_trust_retry_seen:
+                    # Any deferral the manager saw, a terminal read's included.
+                    self._note_store_trust_deferral()
+                self.store_trust_retry_seen = inventory.store_trust_retry
                 identifiers = [item.plugin_id for item in inventory.installations]
                 if len(set(identifiers)) != len(identifiers):
                     raise ValueError("ambiguous managed installation inventory")
