@@ -10,6 +10,25 @@ def _env(key: str, default: str | None = None) -> str | None:
     return os.environ.get(key, default)
 
 
+_DISABLED_SWITCH_VALUES = frozenset({"false", "0", "no", "off"})
+
+
+def env_switch_enabled(value: str | None, *, default: bool) -> bool:
+    """Interpret an on/off environment switch.
+
+    Args:
+        value: The raw environment value, or ``None`` when unset.
+        default: The result for an unset or blank value.
+
+    Returns:
+        ``False`` for ``false``, ``0``, ``no`` or ``off`` in any case, ``True``
+        for any other non-blank value, and ``default`` otherwise.
+    """
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() not in _DISABLED_SWITCH_VALUES
+
+
 def preferred_env_value(*keys: str, default: str | None = None) -> str | None:
     """Return the value of the first *present* env var among *keys*, else default.
 
@@ -200,9 +219,13 @@ SKULK_EVENT_LOG_DIR = SKULK_DATA_HOME / "event_log"
 SKULK_IMAGE_CACHE_DIR = SKULK_CACHE_HOME / "images"
 SKULK_TRACING_CACHE_DIR = SKULK_CACHE_HOME / "traces"
 
-SKULK_ENABLE_IMAGE_MODELS = (
-    _env("SKULK_ENABLE_IMAGE_MODELS", "false") or "false"
-).lower() == "true"
+# Image cards are in the catalog by default: a packaged install has no launch
+# environment its owner could use to opt in. An operator can still hide them
+# with SKULK_ENABLE_IMAGE_MODELS=false; placement names the missing hardware
+# when no Apple Silicon Mac can serve one.
+SKULK_ENABLE_IMAGE_MODELS = env_switch_enabled(
+    _env("SKULK_ENABLE_IMAGE_MODELS"), default=True
+)
 
 # Video cards stay out of the catalog until a node can serve them; the served
 # video engines flip this by default once they exist, the same way image

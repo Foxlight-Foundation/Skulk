@@ -1619,10 +1619,11 @@ models (for example the registry's FLUX cards).
 
 Availability note: these routes are always registered, but they return
 **404 No instance found** until an instance of the requested image model is
-placed and running. Image model cards are hidden from the model catalog
-(`GET /v1/models`, placement previews, and the dashboard) unless the node runs
-with `SKULK_ENABLE_IMAGE_MODELS=true`, so in practice serving image models
-requires setting that environment variable before launching one.
+placed and running. Image model cards appear in the model catalog
+(`GET /v1/models`, placement previews, and the dashboard) by default; an
+operator can hide them on a node with `SKULK_ENABLE_IMAGE_MODELS=false`. The
+image engine runs on Apple Silicon Macs, so on a cluster without one the
+placement preview's `compatibility_detail` says that the model needs one.
 
 ### Generate images
 
