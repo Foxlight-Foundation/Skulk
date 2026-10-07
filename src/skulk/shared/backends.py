@@ -279,12 +279,14 @@ def engine_of(tag: str) -> EngineType | None:
 
 # The hardware an engine needs, in an operator's words, for engines whose
 # availability the machine alone decides: every Apple Silicon Mac advertises
-# MLX. Engines that also need software a node may lack (vLLM, or the video
-# engine before it is installed) are deliberately absent, so a cluster missing
-# them is never told it is missing hardware it already owns.
-_ENGINE_HARDWARE: Final[dict[EngineType, str]] = {
-    "mlx": "an Apple Silicon Mac",
-    "mlx_audio": "an Apple Silicon Mac",
+# MLX. Each entry also names the hardware classes that reveal such a machine,
+# so a node owning the hardware without advertising the engine (a failed
+# import, say) keeps the detailed message. Engines that also need software a
+# node may lack (mlx-audio advertises only when its package imports, vLLM, or
+# the video engine before it is installed) are deliberately absent, so a
+# cluster missing them is never told it is missing hardware it already owns.
+_ENGINE_HARDWARE: Final[dict[EngineType, tuple[str, frozenset[str]]]] = {
+    "mlx": ("an Apple Silicon Mac", frozenset({"platform:darwin"})),
 }
 
 
@@ -303,12 +305,33 @@ def describe_backend_hardware(backends: AbstractSet[str]) -> str | None:
     descriptions: list[str] = []
     for tag in sorted(backends):
         engine = engine_of(tag)
-        description = _ENGINE_HARDWARE.get(engine) if engine is not None else None
-        if description is None:
+        entry = _ENGINE_HARDWARE.get(engine) if engine is not None else None
+        if entry is None:
             return None
-        if description not in descriptions:
-            descriptions.append(description)
+        if entry[0] not in descriptions:
+            descriptions.append(entry[0])
     return " or ".join(descriptions) if descriptions else None
+
+
+def backend_hardware_present(
+    backends: AbstractSet[str], hardware_classes: AbstractSet[str]
+) -> bool:
+    """Whether a node's hardware classes show it owns hardware these backends need.
+
+    Args:
+        backends: The card's compatible backend tags.
+        hardware_classes: One node's reported hardware classes.
+
+    Returns:
+        ``True`` when any tag's engine has a hardware entry whose identifying
+        classes the node reports, even if the node advertises no such engine.
+    """
+    for tag in backends:
+        engine = engine_of(tag)
+        entry = _ENGINE_HARDWARE.get(engine) if engine is not None else None
+        if entry is not None and entry[1] & hardware_classes:
+            return True
+    return False
 
 
 # Engines that can serve a model sharded across multiple nodes. MLX has the
