@@ -989,8 +989,10 @@ capability store (`extensions/capability_store.py`): a TUF root shipped as
 package data (`capability_store_root.json`, absent until the root exists, in
 which case the store is inactive) anchors one signed target, the store's
 publisher trust, which `HostCatalog` seeds on a host with no source and renews
-on every read while on the store (newer revision only, held revocations kept,
-hash-bound last verified copy offline). A private catalog replaces it;
+on every read while on the store (newer revision only, applied as published
+with no revocation merge, hash-bound last verified copy offline). Revocations
+carry forward only within a private catalog's own history, never across a
+source switch. A private catalog replaces it;
 `use_builtin_catalog` / `POST /v1/plugins/managed/catalog/source/builtin`
 switches back. The node passes its offline mode per request because the
 manager runs with a fixed environment.

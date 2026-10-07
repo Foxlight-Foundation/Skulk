@@ -1034,8 +1034,8 @@ built-in capability store, which needs no configuration, or a private catalog
 the owner configures in its place. Skulk verifies which publishers the built-in
 store trusts through the store's TUF repository, from a root shipped inside
 Skulk, and renews that trust by itself on each catalog read: a newer trust
-revision is applied, an older one never, and revocations already held stay in
-force. A host that cannot reach the store, or runs offline, uses the trust it
+revision is applied, an older one never, and the store's revocations apply
+exactly as its current trust lists them. A host that cannot reach the store, or runs offline, uses the trust it
 last verified until that trust expires. A private catalog
 (`POST /v1/plugins/managed/catalog/source`) replaces the store, and
 `POST /v1/plugins/managed/catalog/source/builtin` switches back. A build that

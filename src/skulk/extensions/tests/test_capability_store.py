@@ -266,10 +266,10 @@ async def test_an_expired_trust_is_refused(tmp_path: Path) -> None:
     assert store.trust_revision() == 4
 
 
-async def test_a_revoked_publisher_is_refused_and_stays_revoked(
+async def test_the_stores_current_revocations_are_what_applies(
     tmp_path: Path,
 ) -> None:
-    """The store's revocations apply at once and are never silently restored."""
+    """A revocation applies at once; a later document that drops it restores nothing held."""
     store = _Store(tmp_path)
     store.publish(1)
     await store.catalog.fetch()
@@ -277,12 +277,87 @@ async def test_a_revoked_publisher_is_refused_and_stays_revoked(
     assert (await store.catalog.fetch()).entries == ()
     store.publish(3, revoked_publishers=("fixture",))
     assert await store.refused() == "catalog_trust_refused"
+    # The store withdrew a mistaken revocation: its current document is the
+    # whole truth, so the publisher and the artifact are offered again.
     store.publish(4)
-    assert await store.refused() == "catalog_trust_refused"
+    assert [entry.sequence for entry in (await store.catalog.fetch()).entries] == [1]
     trust = store.catalog.trust()
     assert trust.revision == 4
-    assert trust.revoked_publishers == ("fixture",)
-    assert trust.revoked_artifacts == ("2" * 64,)
+    assert (trust.revoked_publishers, trust.revoked_artifacts) == ((), ())
+
+
+async def test_store_revocations_past_the_trust_bounds_never_accumulate(
+    tmp_path: Path,
+) -> None:
+    """Two revisions whose revocations together exceed a bound still renew cleanly."""
+    store = _Store(tmp_path)
+    first = tuple(f"{index:064x}" for index in range(100))
+    second = tuple(f"{index:064x}" for index in range(100, 140))
+    store.publish(1, revoked_artifacts=first)
+    await store.catalog.fetch()
+    assert len(store.catalog.trust().revoked_artifacts) == 100
+    store.publish(2, revoked_artifacts=second)
+    await store.catalog.fetch()
+    trust = store.catalog.trust()
+    assert trust.revision == 2
+    assert trust.revoked_artifacts == second
+
+
+async def test_revocations_never_cross_between_the_store_and_a_private_catalog(
+    tmp_path: Path,
+) -> None:
+    """A publisher name means nothing across sources; neither side's revocations follow."""
+    store = _Store(tmp_path)
+    store.publish(1, revoked_publishers=("fixture",))
+    assert await store.refused() == "catalog_trust_refused"
+    private_key = Ed25519PrivateKey.generate()
+    private_public = private_key.public_key().public_bytes_raw().hex()
+    # The store revoked "fixture"; a private catalog's own "fixture" is not.
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=1,
+            base_url="https://private.example.test/",
+            trust=RuntimeTrust(
+                revision=2,
+                expires_at=int(time.time()) + 3600,
+                publishers={"fixture": private_public},
+            ),
+        )
+    )
+    assert store.catalog.trust().revoked_publishers == ()
+    store.served[0] = _catalog(private_key)
+    assert (await store.catalog.fetch()).claims.publisher == "fixture"
+    # Within the private catalog's own history revocations still carry.
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=2,
+            trust=RuntimeTrust(
+                revision=3,
+                expires_at=int(time.time()) + 3600,
+                publishers={"fixture": private_public},
+                revoked_publishers=("fixture",),
+            ),
+        )
+    )
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=3,
+            trust=RuntimeTrust(
+                revision=4,
+                expires_at=int(time.time()) + 3600,
+                publishers={"fixture": private_public},
+            ),
+        )
+    )
+    assert store.catalog.trust().revoked_publishers == ("fixture",)
+    # The private revocation of "fixture" does not follow the host back to
+    # the store, whose current document no longer revokes it.
+    store.publish(2)
+    status = await store.catalog.use_builtin_store(4)
+    assert status.builtin_store and status.trust_revision == 2
+    assert store.catalog.trust().revoked_publishers == ()
+    store.served[0] = _catalog(store.publisher)
+    assert (await store.catalog.fetch()).claims.publisher == "fixture"
 
 
 async def test_offline_uses_the_last_verified_trust(tmp_path: Path) -> None:

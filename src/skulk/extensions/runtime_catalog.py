@@ -795,15 +795,15 @@ def _trust_digest(trust: RuntimeTrust) -> str:
     return hashlib.sha256(canonical_json(trust.model_dump(mode="json"))).hexdigest()
 
 
-def _carry_revocations(trust: RuntimeTrust, held: RuntimeTrust | None) -> RuntimeTrust:
+def _carry_revocations(trust: RuntimeTrust, held: RuntimeTrust) -> RuntimeTrust:
     """``trust`` with every revocation ``held`` carries added to its own.
 
-    A trust change never silently restores a publisher or artifact revoked
-    before it, whether the owner supplies the new trust or the built-in store
-    renews it.
+    Only within a private catalog's own history: an owner's trust update
+    never silently restores a publisher or artifact the owner revoked before
+    it. The built-in store's trust is never merged: it applies as the store
+    published it, and a source switch carries no revocation in either
+    direction, since a publisher name means nothing across sources.
     """
-    if held is None:
-        return trust
     return RuntimeTrust.model_validate(
         {
             **trust.model_dump(),
@@ -854,7 +854,7 @@ class HostCatalog:
     trust through TUF and records it in the same state document as an owner's
     configuration, so every floor and rollback check applies unchanged. While
     the source is the built-in store, each read renews that trust first and
-    applies a newer revision, never an older one.
+    applies a newer revision, never an older one, exactly as published.
     """
 
     def __init__(
@@ -940,10 +940,12 @@ class HostCatalog:
         First use records the store's address and verified trust together.
         Later reads apply a renewed trust only when its revision is newer,
         or when the held trust has expired and the store vouches for a
-        current one; an older trust never replaces a current one. Held
-        revocations are always kept. With no verified trust available, a
-        current held trust keeps serving; an expired or absent one is
-        refused by name.
+        current one; an older trust never replaces a current one. The
+        renewed trust applies exactly as the store published it, its
+        revocations included: TUF and the store client's floor already keep
+        that document from moving backward, so nothing is merged in. With no
+        verified trust available, a current held trust keeps serving; an
+        expired or absent one is refused by name.
         """
         renewed = await self._store_trust(offline=offline, now=now)
         held = state.trust
@@ -956,7 +958,7 @@ class HostCatalog:
         elif renewed is not None and (
             held is None or renewed.revision > held.revision or now >= held.expires_at
         ):
-            source, trust = state.source, _carry_revocations(renewed, held)
+            source, trust = state.source, renewed
         elif held is None or now >= held.expires_at:
             raise CatalogRefusedError(
                 "catalog_store_trust_unavailable", "store trust expired"
@@ -1151,9 +1153,15 @@ class HostCatalog:
                         "catalog_trust_update_refused",
                         "discovery trust rollback refused",
                     )
-                if trust is not None and next_trust.revision > trust.revision:
+                if (
+                    trust is not None
+                    and not self._is_store(previous)
+                    and next_trust.revision > trust.revision
+                ):
                     # A trust update never silently restores a publisher or
-                    # artifact the owner previously revoked.
+                    # artifact the owner previously revoked. The built-in
+                    # store's revocations are the store's own and do not
+                    # follow the host to a private catalog.
                     next_trust = _carry_revocations(next_trust, trust)
                 reference = previous.credential_reference if previous else None
                 if update.clear_token:
@@ -1206,10 +1214,11 @@ class HostCatalog:
         """Make the built-in capability store the source again, under the host fence.
 
         The private catalog's address is replaced by the store's, read
-        anonymously, and the discovery trust by the store's verified trust,
-        with every held revocation kept. The private trust's revision history
-        does not bind the store's: the store's own history is its retained
-        TUF trust, which never moves backward. Revision floors stay keyed by
+        anonymously, and the discovery trust by the store's verified trust as
+        the store published it: the private trust's revocations stay with
+        the private catalog. The private trust's revision history does not
+        bind the store's either: the store's own history is its retained TUF
+        trust, which never moves backward. Revision floors stay keyed by
         address, so the store meets its earlier floor again. Nothing is
         fetched from the catalog.
 
@@ -1250,7 +1259,7 @@ class HostCatalog:
                     raise CatalogRefusedError(
                         "catalog_store_trust_unavailable", "store trust unavailable"
                     )
-                trust = _carry_revocations(renewed, state.trust)
+                trust = renewed
                 self._save(
                     state.model_copy(
                         update={

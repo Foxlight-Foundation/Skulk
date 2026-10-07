@@ -14,8 +14,9 @@ This project records release notes here and mirrors public-facing notes in
   its own. Skulk verifies which publishers the store trusts through the
   store's TUF repository, anchored in a root shipped inside Skulk, and renews
   that trust by itself on each catalog read: a newer trust revision is
-  applied, an older one never, and revocations the host already holds stay in
-  force. A host that cannot reach the store, or runs offline, keeps using the
+  applied, an older one never, and the store's revocations apply exactly as
+  its current trust lists them. Revocations never carry between the store and
+  a private catalog. A host that cannot reach the store, or runs offline, keeps using the
   trust it last verified until that trust expires; a tampered or expired trust
   is refused. A private catalog still works: **Add a private catalog**
   replaces the store as the host's source, and **Use the Foxlight store** (or
