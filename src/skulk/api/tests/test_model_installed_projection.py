@@ -736,6 +736,36 @@ def test_store_projection_rejects_mismatched_alias(
     assert records == {}
 
 
+def test_store_projection_skips_companions_without_warning(tmp_path: Path) -> None:
+    """Companion entries are ordinary store content, read on every node's pass."""
+    from loguru import logger
+
+    card = _card("a")
+    companion = _installed_record(tmp_path, card).model_copy(
+        update={
+            "artifact_role": "vision_weights",
+            "owner_model_id": str(card.model_id),
+            "owner_card_id": card.registry_card_id,
+        }
+    )
+    messages: list[str] = []
+    handler = logger.add(lambda message: messages.append(str(message)), level="WARNING")
+    try:
+        records = API._store_installed_records(
+            [
+                {
+                    "model_id": str(card.model_id),
+                    "installed_card": companion.model_dump(mode="json"),
+                }
+            ]
+        )
+    finally:
+        logger.remove(handler)
+
+    assert records == {}
+    assert not any("Ignoring" in message for message in messages)
+
+
 async def test_requirements_bind_store_card_and_context_estimate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

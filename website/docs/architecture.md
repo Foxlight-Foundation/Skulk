@@ -1933,7 +1933,15 @@ SHA-256 manifest. Startup resolves installed generations before registry
 access, so air-gapped nodes keep serving complete local artifacts indefinitely.
 Registry changes are update information: the active installed generation does
 not switch until the replacement generation has transferred, verified, and
-published atomically.
+published atomically. In a cluster with a model store, that commit happens at
+the store, which is the cluster's installed truth. Each node reads the store's
+registry on every inventory pass and remembers which signed generation it holds
+per alias; once the store holds the current signed card, a node's own staged
+copy of an older generation (left from before an update) is a stale cache and no
+longer keeps the old card active. Without that, a node holding the old copy
+would place with a card the store can no longer verify, and every node that
+must fetch would be refused. A store that cannot be read leaves the last answer
+in place, and a store that still holds the old generation changes nothing.
 
 Legacy association requires an existing complete artifact, not merely a trusted
 card with a matching directory name. Every successful artifact-removal path

@@ -669,6 +669,9 @@ from skulk.store.installed_cards import (
     read_installed_card,
     verify_installed_card,
 )
+from skulk.store.installed_cards import (
+    store_installed_records as validate_store_installed_records,
+)
 from skulk.store.model_store import read_reconciliation_tombstones
 from skulk.store.peer_exports import ArtifactExportManager
 from skulk.store.staging_eviction import StagedModelInfo
@@ -10131,54 +10134,10 @@ class API:
     ) -> dict[ModelId, InstalledCardRecord]:
         """Validate central-store base records for the cluster model projection.
 
-        Companion entries do not represent independently launchable model-list
-        aliases. Malformed or internally mismatched records are ignored rather
-        than allowing store-index corruption to manufacture installed state.
-
-        Args:
-            entries: Raw entries returned by the authoritative store server.
-
-        Returns:
-            Valid base installed-card records keyed by their exact model alias.
+        See :func:`skulk.store.installed_cards.store_installed_records`.
         """
 
-        records: dict[ModelId, InstalledCardRecord] = {}
-        for entry in entries:
-            model_id_raw = entry.get("model_id")
-            installed_raw = entry.get("installed_card")
-            if not isinstance(model_id_raw, str) or not isinstance(installed_raw, dict):
-                continue
-            try:
-                model_id = ModelId(model_id_raw)
-                record = InstalledCardRecord.model_validate(
-                    installed_raw,
-                    strict=False,
-                )
-            except (ValidationError, ValueError):
-                logger.warning(
-                    "Ignoring malformed installed-card record from the model store "
-                    "for alias {}",
-                    model_id_raw,
-                )
-                continue
-            if (
-                record.artifact_role != "base"
-                or record.artifact_model_id != model_id_raw
-                or record.model_card.model_id != model_id
-            ):
-                logger.warning(
-                    "Ignoring mismatched installed-card record from the model store "
-                    "for alias {}",
-                    model_id_raw,
-                )
-                continue
-            if record.model_card.qualification_only:
-                # Qualification keeps exact bytes in the central store, but the
-                # temporary unsigned card is not installed catalog truth.  It
-                # must not override a later signed card sharing the same alias.
-                continue
-            records[model_id] = record
-        return records
+        return validate_store_installed_records(entries)
 
     async def _cached_store_installed_records(
         self,

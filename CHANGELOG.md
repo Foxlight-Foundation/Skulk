@@ -88,6 +88,12 @@ This project records release notes here and mirrors public-facing notes in
   interpreter when the Python minor version is the same and every other
   installed file still matches what was installed. A capability built for a
   different Python minor version still needs reinstalling.
+- Updating a model in the model store no longer leaves placements on the old
+  card. A node that had staged the previous version kept treating it as the
+  installed one, so placements from that node carried the old card and every
+  node that had to fetch the model was refused by the store ("store host
+  cannot verify the requested registry card"). Nodes now follow the version the
+  store holds once it holds the current signed card.
 - The bundled Node.js that builds the dashboard on install is now the stable
   24.19.0 LTS release instead of a 25.2.1 release candidate.
 - A model whose files turn out to be incomplete when it loads is no longer
