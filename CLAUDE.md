@@ -1532,8 +1532,12 @@ support; controllers must obtain fresh previews and recheck live target support
 before submission and throughout readiness.
 
 
-Managed-plugin system setup is `skulk-plugin-service setup`, implemented by
-`extensions/service_setup.py`. Run it as the existing nonroot owner. It journals
+Managed-plugin setup is `skulk-plugin-service setup`, implemented by
+`extensions/service_setup.py`; the node also runs it itself on first use through
+`POST /v1/plugins/managed/service/setup` (`extensions/service_autosetup.py`). The
+default scope is a per-user launchd agent or systemd user unit registered by the
+owner with no elevation (`service_registration.register_user`); `setup --system`
+registers a system service through the sudo helper. Run it as the existing nonroot owner. It journals
 setup stages, preserves generated profile identity and copies exact qualified
 runtime dependencies without modifying Skulk's environment. Its fixed local sudo
 entrypoint `service_registration.py` must remain standard-library-only and execute

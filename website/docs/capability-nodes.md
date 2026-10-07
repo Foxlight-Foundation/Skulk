@@ -173,13 +173,16 @@ Open **Plugins** on the host that will manage the installation. Initial service
 setup and publisher trust require owner access; a paired browser cannot grant
 itself that authority.
 
-First, set up the host's plugin-management service once. On a source install,
-run `uv run skulk-plugin-service setup` from the Skulk directory as the user who
-runs Skulk (see [Install](install.md#add-capabilities-optional)). It asks for
-your administrator password to register the service (Apple Silicon macOS, or
-Linux with systemd). Until it is ready, **Plugins** reports that local runtime
-management is unavailable; `uv run skulk-plugin-service status` shows its
-progress.
+The first time **Plugins** opens on a host, Skulk sets up that host's
+plugin-management service: a per-user service (Apple Silicon macOS, or Linux
+with systemd) that runs under your account alongside Skulk. It needs no terminal and
+no administrator password; the first setup copies Skulk's environment into a
+verified manager runtime and takes a few minutes, and **Plugins** shows its
+progress. From a terminal, `uv run skulk-plugin-service setup` runs the same
+setup and `uv run skulk-plugin-service status` shows its state. A host that runs
+unattended can use `skulk-plugin-service setup --system` instead, which registers
+a system service and asks for your administrator password once (see
+[Install](install.md#add-capabilities-optional)).
 
 ### From a catalog
 

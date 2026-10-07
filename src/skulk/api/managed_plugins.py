@@ -63,6 +63,10 @@ from skulk.extensions.runtime_manager import (
     SubmitRequest,
 )
 from skulk.extensions.runtime_selection import RuntimeSelection
+from skulk.extensions.service_autosetup import (
+    PluginServiceStatus,
+    ServiceSetupRunner,
+)
 from skulk.operator.pairing import OperatorPairingService
 from skulk.operator.plugin_scopes import PluginScope
 from skulk.shared.constants import offline_mode
@@ -215,6 +219,42 @@ def create_managed_plugins_router(
         """Read the live local manager and reconcile cached plugin membership."""
         services = await authorized(request, response, "plugins:read")
         return await invoke(services.refresh)
+
+    setup_runner = ServiceSetupRunner()
+
+    @router.get(
+        "/service",
+        response_model=PluginServiceStatus,
+        summary="Read this host's plugin service setup",
+        description="Whether this host's plugin manager is set up and answering: absent (never set up), setting_up (with the current step), ready, unavailable (set up but not answering), failed (with the reason), or unsupported (this host cannot run it). Answers before any setup exists. Requires plugins:read or direct owner authority.",
+    )
+    async def service_setup_status(
+        request: Request, response: Response
+    ) -> PluginServiceStatus:
+        """Report setup state without requiring a connected manager."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return await setup_runner.status()
+
+    @router.post(
+        "/service/setup",
+        response_model=PluginServiceStatus,
+        summary="Set up this host's plugin service",
+        description="Direct localhost/Tailscale owner administration only. Starts a one-time setup of the plugin manager as a per-user service (a launchd agent on macOS, a systemd user unit on Linux) with the node's own lifetime: no terminal and no administrator password. It copies the node's environment into a verified manager runtime, so the first setup takes a few minutes. Returns the status at once; poll GET /v1/plugins/managed/service for progress. A running setup is not restarted; a host that already runs the manager as a system service is not changed and is told to repair it from a terminal.",
+    )
+    async def service_setup_start(
+        request: Request, response: Response
+    ) -> PluginServiceStatus:
+        """Start node-driven manager setup and report its state."""
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:manage", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        setup_runner.start()
+        return await setup_runner.status()
 
     @router.post(
         "/installations",

@@ -996,10 +996,16 @@ The installed Skulk package includes its declarative model resources. Setup does
 not require a Git checkout or a `SKULK_RESOURCES_DIR` override. If resources are
 missing, reinstall the complete qualified package before retrying setup.
 
-The `skulk-plugin-service setup` command prepares a verified independent
-manager runtime and registers a fixed nonroot system service on Apple Silicon
-macOS or Linux with systemd. Run it as the existing Skulk owner; only its fixed registration helper requests local elevation.
-It generates service storage and a local profile connection without configuration
+Setup prepares a verified independent manager runtime and registers it as a
+per-user service (a launchd agent on Apple Silicon macOS, a systemd user unit on
+Linux) with the same lifetime as the Skulk node, so it needs no elevation. The
+node runs it the first time capabilities are used
+(`POST /v1/plugins/managed/service/setup`, which the dashboard's Plugins page
+calls), and `skulk-plugin-service setup` runs the same setup from a terminal as
+the existing Skulk owner. `skulk-plugin-service setup --system` registers a
+system service instead, for hosts that run unattended; only its fixed
+registration helper requests local elevation.
+Setup generates service storage and a local profile connection without configuration
 file editing. `skulk-plugin-service status` separates retained setup progress from
 current management availability and registered-runtime integrity.
 If registration succeeds but readiness is still pending, setup reports
@@ -1008,7 +1014,7 @@ both runtime integrity and management availability, repeat setup from the same
 verified runtime to complete that operation without elevation or restarting
 the healthy service.
 
-See the [local setup contract](api-guide.md#local-system-service-setup) for supported
+See the [local setup contract](api-guide.md#local-plugin-service-setup) for supported
 paths, interruption recovery, privileges and current qualification boundaries.
 This installs no private SDK into Skulk, provisions no provider credentials, and
 grants no spending approval. Existing independent cleanup supervision is untouched.

@@ -27,6 +27,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- Plugins no longer need a terminal or an administrator password to set up. The
+  first time **Plugins** opens on a host, Skulk registers its plugin service for
+  your user (a launchd agent on macOS, a systemd user unit on Linux) and shows
+  its progress; it runs under your account alongside Skulk. `skulk-plugin-service
+  setup` does the same from a terminal, and `skulk-plugin-service setup
+  --system` still registers a system service, for hosts that run unattended.
+  Hosts that already run the system service keep it. New routes:
+  `GET /v1/plugins/managed/service` and `POST /v1/plugins/managed/service/setup`.
 - Updating Skulk no longer breaks installed capabilities. A capability
   release declares the Skulk versions it runs on, and Skulk accepts it on any
   version in that range; it used to require the exact Skulk build the release

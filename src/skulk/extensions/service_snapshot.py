@@ -20,12 +20,13 @@ from packaging.utils import canonicalize_name
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions import service_bootstrap
-from skulk.extensions.runtime_artifacts import Digest, measure_host
+from skulk.extensions.runtime_artifacts import Digest, QualifiedHost, measure_host
 from skulk.extensions.runtime_files import (
     RuntimeLock,
     is_desktop_metadata,
     private_directory,
     read_private,
+    writable_only_by,
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
@@ -33,6 +34,21 @@ from skulk.utils.dashboard_path import find_resources
 
 _MAXIMUM_FILES = 200000
 _MAXIMUM_BYTES = 17179869184
+# Room kept free beyond the copy itself, so staging never leaves the volume
+# that also holds models and the event log full.
+_FREE_SPACE_MARGIN_BYTES = 2147483648
+
+
+def _require_free_space(destination: Path, needed: int) -> None:
+    """Refuse a copy that would leave the destination volume nearly full."""
+    free = shutil.disk_usage(destination).free
+    if free < needed + _FREE_SPACE_MARGIN_BYTES:
+        gibibyte = 1024**3
+        raise ValueError(
+            "Not enough free disk space to set up plugins: "
+            f"about {(needed + _FREE_SPACE_MARGIN_BYTES) / gibibyte:.1f} GB needed, "
+            f"{free / gibibyte:.1f} GB free"
+        )
 
 
 class ServiceSnapshot(BaseModel):
@@ -81,8 +97,26 @@ def _distributions() -> dict[str, str]:
     return dict(sorted(values.items()))
 
 
+PACKAGED_RUNTIME_MARKER = "skulk-packaged-runtime.json"
+"""File in an interpreter's prefix that declares it dedicated to Skulk.
+
+The packaged apps ship a relocatable standalone Python with Skulk installed in
+its own site-packages instead of a virtual environment (a virtual environment
+records an absolute path, and an app bundle can be moved). The marker tells
+setup that every package in that interpreter belongs to Skulk, which is what a
+virtual environment otherwise proves.
+"""
+
+
+def dedicated_skulk_interpreter() -> bool:
+    """Whether this interpreter is isolated for Skulk: a venv or a packaged runtime."""
+    if sys.prefix != sys.base_prefix:
+        return True
+    return (Path(sys.prefix) / PACKAGED_RUNTIME_MARKER).is_file()
+
+
 def _sources() -> tuple[_SourceFile, ...]:
-    if sys.prefix == sys.base_prefix or sysconfig.get_path(
+    if not dedicated_skulk_interpreter() or sysconfig.get_path(
         "purelib"
     ) != sysconfig.get_path("platlib"):
         raise ValueError(
@@ -123,7 +157,9 @@ def _sources() -> tuple[_SourceFile, ...]:
                 raise ValueError("installed dependency has an unresolved link")
             if stat.S_ISDIR(info.st_mode):
                 continue
-            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022:
+            if not stat.S_ISREG(info.st_mode) or not writable_only_by(
+                info, os.getuid()
+            ):
                 raise ValueError("installed dependency is not a protected regular file")
             if primary and relative == Path("skulk.pth"):
                 # The effective imported core is copied explicitly above. Never
@@ -157,6 +193,24 @@ def _sources() -> tuple[_SourceFile, ...]:
     if len(set(names)) != len(names):
         raise ValueError("core service source identity is ambiguous")
     return tuple(sorted(result, key=lambda item: item.relative))
+
+
+def _protect(tree: Path) -> None:
+    """Remove group and other write from everything staged under ``tree``.
+
+    The standard library's venv builds its skeleton with the process umask,
+    which on Ubuntu (0002) leaves directories and scripts group-writable, and
+    the service bootstrap rightly refuses a runtime another account could
+    change. The staged runtime belongs to the service alone, so it is made
+    private before it is qualified and sealed.
+    """
+    for path in (tree, *tree.rglob("*")):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            continue
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & 0o022:
+            path.chmod(mode & ~0o022)
 
 
 def _copy(source: tuple[_SourceFile, ...], destination: Path) -> None:
@@ -254,8 +308,10 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
 
     Dependencies are copied locally, never resolved or installed over the source.
     The effective core replaces editable .pth indirection. Completed copies retain
-    a full tree seal; interrupted copies remain retained and are never activated.
-    Cancellation waits for owned copy and qualification work to finish.
+    a full tree seal. A copy that fails keeps its small evidence files but not
+    its copied runtime, which is gigabytes and is never activated; a copy is
+    refused outright when the volume lacks room for it. Cancellation waits for
+    owned copy and qualification work to finish.
     """
     if os.geteuid() == 0:
         raise ValueError("service runtime preparation must run without root")
@@ -270,17 +326,42 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
             generation_id = uuid4().hex
             parent = root / "core-runtimes"
             private_directory(parent)
+            await asyncio.to_thread(
+                _require_free_space, parent, sum(item.size for item in source)
+            )
             generation = parent / generation_id
             private_directory(generation)
             runtime = generation / "runtime"
             private_directory(runtime)
+            try:
+                return await _stage_into(
+                    generation, runtime, source, host, inventory, lock
+                )
+            except Exception:
+                # The unselected copy is never activated; keep the evidence
+                # beside it, but give the volume its gigabytes back so a
+                # retried setup cannot fill the disk one attempt at a time.
+                await asyncio.to_thread(shutil.rmtree, runtime, True)
+                raise
+
+        async def _stage_into(
+            generation: Path,
+            runtime: Path,
+            source: tuple[_SourceFile, ...],
+            host: QualifiedHost,
+            inventory: dict[str, str],
+            lock: RuntimeLock,
+        ) -> ServiceSnapshot:
+            generation_id = generation.name
             await asyncio.to_thread(
                 venv.EnvBuilder(symlinks=True, with_pip=False).create, runtime
             )
             await asyncio.to_thread(_copy, source, runtime)
+            await asyncio.to_thread(_protect, runtime)
             bootstrap = Path(service_bootstrap.__file__).read_bytes()
             write_private(generation / "bootstrap.py", bootstrap)
             raw = await _qualify(runtime, lock)
+            await asyncio.to_thread(_protect, runtime)
             expected = {
                 "platform": host.platform,
                 "python_version": host.python_version,

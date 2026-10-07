@@ -186,7 +186,8 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
     def service_unit(self: ServiceLayout) -> Path:
         return unit
 
-    def fixture_layout(uid: int) -> ServiceLayout:
+    def fixture_layout(uid: int, scope: str = "system") -> ServiceLayout:
+        # This test drives the system-service path whatever scope is asked.
         return layout
 
     monkeypatch.setattr(ServiceLayout, "root", property(service_root))
