@@ -4077,7 +4077,7 @@ class API:
         deadline = time.monotonic() + _PLACEMENT_INFO_WAIT_SECONDS
         while True:
             try:
-                get_instance_placements(
+                planned = get_instance_placements(
                     copy.deepcopy(command),
                     topology=self.state.topology,
                     current_instances=self.state.instances,
@@ -4126,11 +4126,21 @@ class API:
 
         await self._send(command)
 
+        instance_id = InstanceId(str(command.command_id))
+        # The master places the command itself; this node's dry run is the same
+        # algorithm over the same replicated state, so it is what a quick launch
+        # without a preview can show about an engine install.
+        planned_instance = planned.get(instance_id)
         return CreateInstanceResponse(
             message="Command received.",
             command_id=command.command_id,
-            instance_id=InstanceId(str(command.command_id)),
+            instance_id=instance_id,
             model_card=command.model_card,
+            engine_install=(
+                None
+                if planned_instance is None
+                else self._engine_install_for_instance(planned_instance)
+            ),
         )
 
     async def create_instance(

@@ -38,6 +38,12 @@ This project records release notes here and mirrors public-facing notes in
   cluster without a machine that can run video models is told which machine
   it needs. The Linux packages now carry `uv`, which the install uses; the
   node also needs `git`.
+- The video engine notice is harder to miss. In the placement dialog it is a
+  warning callout with an icon instead of a line of small print; a quick
+  launch from the Model Store, which skips the dialog, now says the same thing
+  in its toast (`POST /place_instance` returns the notice as `engine_install`);
+  and the instance reads "Installing video engine (about 7 GB)..." while the
+  install runs.
 
 ### Fixed
 

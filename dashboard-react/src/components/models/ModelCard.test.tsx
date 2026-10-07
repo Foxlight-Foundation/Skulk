@@ -65,8 +65,11 @@ describe('ModelCard engine install notice', () => {
 
     const notice = view.querySelector('[data-testid="engine-install-notice"]');
     expect(notice?.textContent).toBe(
-      'The video engine (about 7GB) will be installed with this model, so placement will take longer.',
+      'The video engine (about 7 GB) will be installed with this model, so placement will take longer.',
     );
+    // A warning callout with its icon, not a line of fine print.
+    expect(notice?.getAttribute('role')).toBe('note');
+    expect(notice?.querySelector('svg')).not.toBeNull();
   });
 
   it('shows the server notice for an engine it has no wording for', () => {

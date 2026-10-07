@@ -78,6 +78,8 @@ def test_engine_install_starts_while_the_model_downloads() -> None:
     task = _plan(downloaded=False)
     assert isinstance(task, InstallEngine)
     assert task.instance_id == INSTANCE_1_ID and task.engine == "comfy"
+    # The size rides on the task so the dashboard can quote it while it runs.
+    assert task.approximate_download_bytes == 7 * 1024**3
 
 
 def test_engine_install_is_requested_once_and_the_load_waits_for_it() -> None:

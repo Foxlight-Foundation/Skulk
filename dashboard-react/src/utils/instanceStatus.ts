@@ -1,5 +1,6 @@
 import type { InstanceStatus, NodeRunnerState } from '../components/cluster/RunningInstanceCard';
 import type { SkulkTranslate } from '../i18n/tolgee';
+import { engineInstallSize } from './engineInstall';
 
 /** Runner status → instance status mapping for the running-instance cards. */
 
@@ -24,15 +25,16 @@ export function runnerNodeState(runner: Record<string, unknown> | undefined): No
  * @param runnerIds - The instance's runner ids.
  * @param runners - Every runner's tagged status from cluster state.
  * @param t - Translation function.
- * @param installingEngine - Whether the instance's node is installing an
- *   on-demand engine (the video engine) before the model can load.
+ * @param engineInstallBytes - The approximate download of the on-demand engine
+ *   (the video engine) the instance's node is installing before the model can
+ *   load, zero when its size is unknown, or null when no install is running.
  * @returns The status category, an optional message, and load progress.
  */
 export function deriveInstanceStatus(
   runnerIds: string[],
   runners: Record<string, Record<string, unknown>>,
   t: SkulkTranslate,
-  installingEngine = false,
+  engineInstallBytes: number | null = null,
 ): { status: InstanceStatus; message?: string; progress?: number } {
   if (runnerIds.length === 0) {
     return {
@@ -84,10 +86,13 @@ export function deriveInstanceStatus(
 
   // The runner waits idle while its node installs an on-demand engine (the
   // video engine) beside the model download.
-  if (installingEngine) {
+  if (engineInstallBytes !== null) {
+    const size = engineInstallSize(engineInstallBytes);
     return {
       status: 'loading',
-      message: t('app.instanceStatus.installingVideoEngine', 'Installing video engine...'),
+      message: size
+        ? t('app.instanceStatus.installingVideoEngineSize', 'Installing video engine (about {size})...', { size })
+        : t('app.instanceStatus.installingVideoEngine', 'Installing video engine...'),
     };
   }
 

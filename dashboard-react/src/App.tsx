@@ -161,7 +161,7 @@ export function App() {
     capabilityNodes,
     nodeResources,
     thunderboltBridgeCycles,
-    engineInstallingInstanceIds,
+    engineInstallBytesByInstance,
   } = useClusterState();
   const realtimeTranscriptionAvailable = Boolean(
     localNodeId && nodeCapabilities[localNodeId]?.includes('stt.realtime'),
@@ -551,7 +551,7 @@ export function App() {
         runnerIds,
         runners,
         t,
-        engineInstallingInstanceIds.has(instanceId),
+        engineInstallBytesByInstance.get(instanceId) ?? null,
       );
 
       // Per-node status for EVERY node the instance is placed on (all ranks of a
@@ -581,7 +581,7 @@ export function App() {
       });
     }
     return cards;
-  }, [visibleInstances, runners, topology, t, engineInstallingInstanceIds]);
+  }, [visibleInstances, runners, topology, t, engineInstallBytesByInstance]);
 
   const hasInstances = instanceCards.length > 0;
 

@@ -830,7 +830,9 @@ names them. Placement treats such a node as capable, preferring a node whose
 engine is already installed when nothing more important separates two
 candidates, and the placement preview carries an `engine_install` notice so the
 dashboard tells the operator, before the first placement, that the engine will
-be installed with the model and placement will take longer. When the instance
+be installed with the model and placement will take longer; `POST
+/place_instance` returns the same notice from its dry run, so a launch without a
+preview is told too. When the instance
 lands, the worker plans an `InstallEngine` task beside the model download,
 holds `LoadModel` until it finishes, then re-derives its facts and publishes
 fresh resources. Instances waiting for the same engine share one install. A
