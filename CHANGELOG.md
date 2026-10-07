@@ -72,6 +72,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Installed capabilities keep working after the Skulk app is updated or moved.
+  Each capability's environment records the Python interpreter it was built
+  with, and an app update replaces that interpreter (a move changes its path),
+  so every installed capability used to refuse to start until it was removed
+  and installed again. Skulk now re-points the environment at the current
+  interpreter when the Python minor version is the same and every other
+  installed file still matches what was installed. A capability built for a
+  different Python minor version still needs reinstalling.
 - The bundled Node.js that builds the dashboard on install is now the stable
   24.19.0 LTS release instead of a 25.2.1 release candidate.
 - A model whose files turn out to be incomplete when it loads is no longer
