@@ -727,3 +727,60 @@ async def test_registry_reports_store_node_for_unresolved_legacy_entry(
     assert response.cache_inventory.state == "current"
     assert response.cache_inventory.store_nodes == ["store-node"]
     assert response.entries[0].cached_on_nodes == []
+
+
+class _RegistryStoreClient:
+    """A model store client whose registry answers, then fails."""
+
+    def __init__(self, entries: list[dict[str, object]]) -> None:
+        self.entries = entries
+        self.fail = False
+
+    async def fetch_registry(
+        self, *, raise_on_error: bool = False
+    ) -> list[dict[str, object]]:
+        assert raise_on_error
+        if self.fail:
+            raise OSError("store unreachable")
+        return self.entries
+
+
+async def test_node_follows_the_generation_the_store_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each inventory pass learns the store's generations; a failed read keeps them."""
+    from skulk.store.installed_cards import build_installed_card_record
+
+    card = ModelCard(
+        model_id=ModelId("org/updated"),
+        storage_size=Memory.from_mb(1),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        registry_card_id=f"card_{'a' * 52}",
+        source_revision="a" * 40,
+    )
+    artifact = tmp_path / "store-copy"
+    artifact.mkdir()
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(f"{card.source_revision}\n")
+    record = build_installed_card_record(artifact, card).model_copy(
+        update={"verification": "registry_verified"}
+    )
+    client = _RegistryStoreClient(
+        [{"model_id": str(card.model_id), "installed_card": record.model_dump(mode="json")}]
+    )
+    recorded: list[dict[ModelId, str]] = []
+    def remember(identities: dict[ModelId, str]) -> None:
+        recorded.append(dict(identities))
+
+    monkeypatch.setattr(skulk_main, "record_store_installed_identities", remember)
+    node = object.__new__(Node)
+    node.store_client = cast(ModelStoreClient, cast(object, client))
+
+    await node._refresh_store_installed_identities()
+    client.fail = True
+    await node._refresh_store_installed_identities()
+
+    assert recorded == [{card.model_id: str(card.registry_card_id)}]

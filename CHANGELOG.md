@@ -47,6 +47,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Updating a model in the model store no longer leaves placements on the old
+  card. A node that had staged the previous version kept treating it as the
+  installed one, so placements from that node carried the old card and every
+  node that had to fetch the model was refused by the store ("store host
+  cannot verify the requested registry card"). Nodes now follow the version the
+  store holds once it holds the current signed card.
 - A model whose files turn out to be incomplete when it loads is no longer
   reported as refused by model trust policy. The instance still fails without
   retrying, now as a download failure that says a file the model needs is

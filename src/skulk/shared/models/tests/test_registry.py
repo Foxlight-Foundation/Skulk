@@ -1834,3 +1834,115 @@ async def test_offline_association_uses_the_cached_catalog_without_listing_it(
     await model_cards_module._load_offline_catalog_cards()
     assert await model_cards_module.get_association_cards() == [listed]
 
+
+
+class _CatalogState:
+    """The model_cards caches a test changes, captured to restore afterwards."""
+
+    def __init__(self) -> None:
+        self.cards = dict(model_cards_module._card_cache)
+        self.installed = dict(model_cards_module._installed_card_cache)
+        self.installed_current = dict(
+            model_cards_module._installed_current_registry_ids
+        )
+        self.current = dict(model_cards_module._registry_current_cards)
+        self.store = dict(model_cards_module._store_installed_identities)
+
+    @classmethod
+    def capture(cls) -> "_CatalogState":
+        return cls()
+
+    def restore(self) -> None:
+        model_cards_module._card_cache.clear()
+        model_cards_module._card_cache.update(self.cards)
+        model_cards_module._installed_card_cache.clear()
+        model_cards_module._installed_card_cache.update(self.installed)
+        model_cards_module._installed_current_registry_ids.clear()
+        model_cards_module._installed_current_registry_ids.update(
+            self.installed_current
+        )
+        model_cards_module._registry_current_cards.clear()
+        model_cards_module._registry_current_cards.update(self.current)
+        model_cards_module._store_installed_identities.clear()
+        model_cards_module._store_installed_identities.update(self.store)
+
+
+def _stale_and_current(tmp_path: Path) -> tuple[ModelCard, ModelCard, InstalledCardRecord]:
+    current = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0]
+    stale = current.model_copy(update={"registry_card_id": f"card_{'z' * 52}"})
+    artifact = tmp_path / "staged-stale"
+    artifact.mkdir()
+    (artifact / "model-Q4_K_M.gguf").write_bytes(b"old weights")
+    (artifact / ".skulk-source-revision").write_text(f"{stale.source_revision}\n")
+    return current, stale, build_installed_card_record(artifact, stale)
+
+
+@pytest.mark.parametrize("store_holds", ["current", "stale", "nothing"])
+def test_an_update_the_store_committed_supersedes_a_stale_staged_copy(
+    tmp_path: Path, store_holds: str
+) -> None:
+    """A node's staged copy from before an update cannot keep the old card active.
+
+    The store is the cluster's installed truth: once it holds the current
+    signed generation, placement must carry that card, or every node without
+    the old copy is refused by the store. A store that still holds the old
+    generation (or none) leaves the node's own installed generation active.
+    """
+    current, stale, record = _stale_and_current(tmp_path)
+    saved = _CatalogState.capture()
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    model_cards_module._registry_current_cards.clear()
+    model_cards_module._store_installed_identities.clear()
+    model_cards_module._registry_current_cards[current.model_id] = current
+    model_cards_module._card_cache[current.model_id] = current
+    held = {
+        "current": current.registry_card_id,
+        "stale": stale.registry_card_id,
+        "nothing": None,
+    }[store_holds]
+    try:
+        if held is not None:
+            model_cards_module.record_store_installed_identities(
+                {current.model_id: str(held)}
+            )
+        # The node's inventory pass re-registers the staged copy it finds.
+        model_cards_module.register_installed_card_record(record)
+
+        expected = current if store_holds == "current" else stale
+        assert model_cards_module.get_card(current.model_id) == expected
+        # The staged copy is still known as installed on this node.
+        assert model_cards_module.get_installed_card_record(current.model_id) == record
+    finally:
+        saved.restore()
+
+
+async def test_startup_scan_follows_the_store_over_a_stale_installed_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directory scan applies the same rule as a live registration."""
+    current, stale, record = _stale_and_current(tmp_path)
+    write_installed_card(tmp_path / "staged-stale", record)
+    saved = _CatalogState.capture()
+    model_cards_module._card_cache.clear()
+    model_cards_module._installed_card_cache.clear()
+    model_cards_module._installed_current_registry_ids.clear()
+    model_cards_module._registry_current_cards.clear()
+    model_cards_module._store_installed_identities.clear()
+    model_cards_module._registry_current_cards[current.model_id] = current
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants_module, "SKULK_MODELS_PATH", None)
+    try:
+        await model_cards_module._refresh_installed_cards()
+        assert model_cards_module.get_card(current.model_id) == stale
+
+        model_cards_module.record_store_installed_identities(
+            {current.model_id: str(current.registry_card_id)}
+        )
+        await model_cards_module._refresh_installed_cards()
+        assert model_cards_module.get_card(current.model_id) == current
+    finally:
+        saved.restore()

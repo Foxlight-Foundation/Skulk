@@ -52,6 +52,7 @@ from skulk.shared.models.model_cards import (
     get_all_model_cards,
     get_association_cards,
     get_current_registry_cards,
+    record_store_installed_identities,
     register_installed_card_record,
 )
 from skulk.shared.session_carryover import seed_state_for_new_session
@@ -95,7 +96,10 @@ from skulk.store.config import (
     resolve_node_staging,
     write_bootstrap_config_if_absent,
 )
-from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
+from skulk.store.installed_cards import (
+    VerifiedDetachedInstalledCardCache,
+    store_installed_records,
+)
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 from skulk.store.model_store_server import ModelStoreServer
@@ -109,6 +113,10 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.stack_dump import install_stack_dump_signal
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.main import Worker
+
+# One read of the model store's registry per inventory pass; a store that does
+# not answer in time leaves the last answer in place.
+_STORE_REGISTRY_READ_SECONDS = 10.0
 
 
 def _derive_zenoh_namespace(raw: str) -> str:
@@ -1248,6 +1256,31 @@ class Node:
                 except EndOfStream:
                     return
 
+    async def _refresh_store_installed_identities(self) -> None:
+        """Learn which signed generation the model store holds for each alias.
+
+        After an update the store holds the new generation while this node may
+        still hold a staged copy of the old one; the catalog must follow the
+        store, or placement carries a card the store can no longer serve. A
+        failed read keeps the last answer, so an unreachable store never makes
+        a stale copy active again.
+        """
+        if self.store_client is None:
+            return
+        try:
+            with anyio.fail_after(_STORE_REGISTRY_READ_SECONDS):
+                entries = await self.store_client.fetch_registry(raise_on_error=True)
+        except Exception as error:  # noqa: BLE001 - keep last-known store truth
+            logger.debug(f"Store generation read kept its last answer: {error}")
+            return
+        record_store_installed_identities(
+            {
+                model_id: record.installed_identity
+                for model_id, record in store_installed_records(entries).items()
+                if record.verification == "registry_verified"
+            }
+        )
+
     async def _publish_artifact_inventory(self) -> None:
         """Scan compact node-cache truth and offer one telemetry snapshot."""
 
@@ -1257,6 +1290,8 @@ class Node:
             and config.model_store is not None
             and config.model_store.enabled
         )
+        if store_enabled:
+            await self._refresh_store_installed_identities()
         canonical_root = (
             self.store_client.local_store_path
             if self.store_client is not None

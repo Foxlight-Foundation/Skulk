@@ -1027,7 +1027,12 @@ owner, verification state, and SHA-256 file manifest. Sidecars are durable
 installed truth; the central `registry.json` is a rebuildable index. Installed
 generations load before registry access and remain usable in `SKULK_OFFLINE=true`
 while complete. A registry replacement is reported as an update and becomes
-active only after its new generation commits atomically.
+active only after its new generation commits atomically. With a model store,
+the store's generation is the cluster's installed truth: every node reads the
+store registry on each inventory pass (`record_store_installed_identities`), and
+once the store holds the current signed card, a node's staged copy of an older
+generation no longer keeps the old card active (placement would otherwise carry
+a card the store refuses).
 
 Signed registry-v2 cards may carry an exact `artifact_bundle` with a
 repository-relative loader root, immutable required-file metadata, download

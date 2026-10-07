@@ -94,6 +94,11 @@ _installed_card_mutation_versions: dict[ModelId, int] = {}
 _registry_advisories: tuple[RegistryAdvisory, ...] = ()
 _registry_engine_support: tuple[RegistryEngineSupportClaim, ...] = ()
 _registry_current_cards: dict[ModelId, "ModelCard"] = {}
+# The signed generation the cluster's model store holds for each alias, as the
+# node last read it. The store is the cluster's installed truth: once it holds
+# the current signed generation, a node's own cached copy of an older one is a
+# stale cache, not the generation to place. Kept across failed reads.
+_store_installed_identities: dict[ModelId, str] = {}
 # Cards from the last verified catalog, loaded when the registry cannot be
 # read (offline, or unreachable past the freshness window). They are never
 # listed or placed from this map; they only let installed artifacts that
@@ -665,6 +670,9 @@ def _apply_installed_card_snapshot(
             continue
         if existing is not None and existing.is_custom:
             continue
+        if _superseded_at_store(model_id, record):
+            _card_cache[model_id] = _registry_current_cards[model_id]
+            continue
         if (
             existing is not None
             and existing.registry_card_id is not None
@@ -672,6 +680,44 @@ def _apply_installed_card_snapshot(
         ):
             continue
         _card_cache[model_id] = record.model_card
+
+
+def _superseded_at_store(model_id: ModelId, record: "InstalledCardRecord") -> bool:
+    """Whether the store already holds a newer signed generation than ``record``.
+
+    True only when the store's installed generation is the current signed card
+    and ``record`` is a different one: an update the store has committed. A
+    store that still holds the old generation, or a registry the node cannot
+    read, leaves the node's own installed generation active, as before.
+    """
+    held = _store_installed_identities.get(model_id)
+    current = _registry_current_cards.get(model_id)
+    return (
+        held is not None
+        and current is not None
+        and current.registry_card_id == held
+        and record.model_card.registry_card_id != held
+    )
+
+
+def record_store_installed_identities(identities: Mapping[ModelId, str]) -> None:
+    """Remember which signed generation the cluster's model store holds per alias.
+
+    Called with every successful read of the store's registry. After an update
+    the store holds the new generation while nodes may still hold staged
+    copies of the old one; those copies must not keep the old card active on
+    any node, because placement would carry a card the store can no longer
+    serve. The change takes effect at the next catalog read.
+
+    Args:
+        identities: Registry-verified base generation per alias at the store.
+    """
+    global _card_cache_dirty  # noqa: PLW0603
+    if dict(identities) == _store_installed_identities:
+        return
+    _store_installed_identities.clear()
+    _store_installed_identities.update(identities)
+    _card_cache_dirty = True
 
 
 def _installed_record_rank(
@@ -718,6 +764,11 @@ def register_installed_card_record(record: "InstalledCardRecord") -> None:
         return
     existing = _card_cache.get(model_id)
     if existing is None or not existing.is_custom or record.verification == "custom":
+        if _superseded_at_store(model_id, record):
+            # A staged copy from before an update: keep the generation the
+            # store holds active instead of letting this cache displace it.
+            _card_cache[model_id] = _registry_current_cards[model_id]
+            return
         _card_cache[model_id] = record.model_card
 
 
