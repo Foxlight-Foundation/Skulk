@@ -4253,13 +4253,16 @@ Providers retain raw failure evidence in protected host-local storage.
 
 The Plugins page and these routes use the same independently supervised manager
 as terminal operations. All JSON fields in this lifecycle contract use
-`snake_case`. Local `skulk-plugin-service setup` supplies the protected connection;
+`snake_case`. Plugin service setup (started by the node through the routes below,
+or by `skulk-plugin-service setup`) supplies the protected connection;
 HTTP requests cannot choose a manager root, executable or attachment identity.
 A running Skulk API discovers subsequent local setup and installation registration
 without restart. Missing setup returns an actionable unavailable response.
 
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
+| GET | `/v1/plugins/managed/service` | Requires `plugins:read`. Answers before any setup exists. Returns `state` (`absent`: never set up; `setting_up`; `ready`: the manager answers; `unavailable`: set up but not answering; `failed`; `unsupported`: this host cannot run the manager), `scope` (`user` or `system`, once set up), `progress` (the current step while setting up) and `error` (why the last setup failed or the host is unsupported). |
+| POST | `/v1/plugins/managed/service/setup` | Direct localhost/Tailscale owner administration only; no body. Starts the one-time per-user setup described under [Local plugin service setup](#local-plugin-service-setup) in the background and returns the status at once; poll the GET route for progress. The first setup copies the node's environment and takes a few minutes. A running setup is not restarted. A host connected to a system service is not changed: its status names the terminal repair command, because registering a system service needs local elevation, which a node never requests. |
 | GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `release`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. `release` names the selected signed release from its staged metadata: `bundle_id`, `title` (null when the manifest declares none), `bundle_version`, `publisher` and `sequence`. It is null before a release is staged or when that metadata cannot be read, and it is display information only, never a trust or compatibility decision. `reload_runtime` is true when the manager can select a staged runtime and restart on request; a host reads it before asking, so a manager from before that request is told apart from one refusing a generation. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
 | POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
@@ -4478,15 +4481,24 @@ owner built before the setting never reads `serve.json`, and neither does a
 manager built before it.
 
 
-### Local system-service setup
+### Local plugin service setup
 
-Run `skulk-plugin-service setup` in the existing qualified Skulk environment, as
-the nonroot Skulk owner. From a source environment the equivalent is
-`python -m skulk.extensions.service_setup setup`. Do not run the whole command
-under sudo. Setup invokes a fixed standard-library-only local helper through sudo
-for parent-directory provisioning and OS registration; runtime copying, activation,
-configuration and all manager/plugin processes execute as the existing owner.
-No HTTP route invokes this helper, supplies unit contents or accepts an executable.
+The plugin manager runs as a service of its own, so it stays available while a
+plugin is disabled, broken or being upgraded. By default it is a per-user
+service with the same lifetime as the Skulk node itself, and registering it needs
+no elevation: the node sets it up the first time capabilities are used, through
+`POST /v1/plugins/managed/service/setup` (the dashboard's Plugins page does this),
+or the owner runs `skulk-plugin-service setup`. From a source environment the
+equivalent is `python -m skulk.extensions.service_setup setup`. Either way setup
+runs as the nonroot Skulk owner and never under sudo. Rerunning setup keeps the
+scope a host already uses.
+
+`skulk-plugin-service setup --system` instead registers a system service that
+also runs with nobody logged in, for hosts that run unattended. It invokes a fixed
+standard-library-only local helper through sudo for parent-directory provisioning
+and OS registration; runtime copying, activation, configuration and all
+manager/plugin processes still execute as the existing owner. No HTTP route
+invokes this helper, supplies unit contents or accepts an executable.
 
 The command creates an independent verified manager runtime, a generated local
 profile ID, protected setup operations and `SKULK_CONFIG_HOME/managed-service/connection.json`.
@@ -4496,10 +4508,15 @@ configuration per OS account; a different configuration is refused without
 adopting or rewriting its binding. The base Python installation and existing Skulk
 configuration must live outside Git checkouts and remain available after boot.
 
-| Platform | Durable service root | System registration |
+| Scope and platform | Durable service root | Registration |
 | --- | --- | --- |
-| Apple Silicon macOS | `/Library/Application Support/SkulkPluginServices/<uid>` | `/Library/LaunchDaemons/foundation.foxlight.skulk.plugins.u<uid>.plist`, using the system domain and a nonroot `UserName` |
-| Linux with a running systemd (any architecture) | `/var/lib/skulk-plugin-services/<uid>` | `/etc/systemd/system/foundation.foxlight.skulk.plugins.u<uid>.service`, using a nonroot numeric `User` and `multi-user.target` |
+| User, Apple Silicon macOS | `~/Library/Application Support/Skulk/plugin-service` | `~/Library/LaunchAgents/foundation.foxlight.skulk.plugins.plist`, a launchd agent in the owner's `gui/<uid>` domain (the domain Skulk's own agent uses) |
+| User, Linux with a running systemd (any architecture) | `$XDG_STATE_HOME/skulk/plugin-service` (default `~/.local/state/skulk/plugin-service`) | `$XDG_CONFIG_HOME/systemd/user/foundation.foxlight.skulk.plugins.service` (default under `~/.config`), a systemd user unit wanted by `default.target`; it starts with the user's session, or at boot when lingering is enabled, like Skulk's own user unit |
+| System, Apple Silicon macOS | `/Library/Application Support/SkulkPluginServices/<uid>` | `/Library/LaunchDaemons/foundation.foxlight.skulk.plugins.u<uid>.plist`, using the system domain and a nonroot `UserName` |
+| System, Linux with a running systemd (any architecture) | `/var/lib/skulk-plugin-services/<uid>` | `/etc/systemd/system/foundation.foxlight.skulk.plugins.u<uid>.service`, using a nonroot numeric `User` and `multi-user.target` |
+
+A user-scope definition must belong to the owner and not be writable by others;
+a system definition must belong to root.
 
 Setup records a generated `operation_id` and phases `preparing`, `staged`,
 `selected`, `registered`, `ready`. Rerunning after interruption reuses the exact
@@ -4533,7 +4550,7 @@ Root-owned unit definitions have fixed arguments; service output
 is not a channel for private plugin diagnostics. Protected plugin evidence remains
 host-local.
 
-These are system services, so qualification begins after OS boot and disk unlock;
+System services start after OS boot and disk unlock;
 setup does not bypass encryption authentication. Apple's
 [launchd guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
 distinguishes system daemons from login-session agents. Linux uses the systemd

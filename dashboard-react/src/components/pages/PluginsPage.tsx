@@ -15,6 +15,7 @@ import { NodeSetupActionsPanel } from './NodeSetupActionsPanel';
 import { NodeProposalsPanel } from './NodeProposalsPanel';
 import { OperatorAccessPanel } from './OperatorAccessPanel';
 import { PluginCatalogBrowse } from './PluginCatalogBrowse';
+import { PluginServiceSetup } from './PluginServiceSetup';
 import { operatorSession } from '../../auth/operatorSession';
 import { FiExternalLink } from 'react-icons/fi';
 import { useClusterState } from '../../hooks/useClusterState';
@@ -195,8 +196,9 @@ function PluginInventory() {
   };
   // Setup hands a plugin that needs its settings over to the Installed drawer.
   const manage = (pluginId: string) => { chooseView('installed'); setSelected(pluginId); };
-  if (view === 'browse') return <>{heading()}{tabs}<BrowseArea><PluginCatalogBrowse onManage={manage} /></BrowseArea>{accessDrawer}</>;
-  return <>
+  const direct = session.mode === 'direct';
+  if (view === 'browse') return <><PluginServiceSetup direct={direct} header={<>{heading()}{tabs}</>}>{heading()}{tabs}<BrowseArea><PluginCatalogBrowse onManage={manage} /></BrowseArea></PluginServiceSetup>{accessDrawer}</>;
+  return <PluginServiceSetup direct={direct} header={<>{heading()}{tabs}{accessDrawer}</>}>
     <ManagedRuntimesPanel renderHeader={registrationAction => <>
       {heading(registrationAction)}
       {tabs}
@@ -222,7 +224,7 @@ function PluginInventory() {
       {query.data?.find(plugin => plugin.pluginId === selected)?.nodes.map(node => <NodeCard key={node.nodeId} pluginId={selected!} node={node} />)}
       </div>
     </RightDrawer>
-  </>;
+  </PluginServiceSetup>;
 }
 
 /** Remount sensitive drafts when the browser changes its authorization identity. */

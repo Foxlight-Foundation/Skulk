@@ -1,5 +1,17 @@
 import { apiSlice } from '../api';
 
+/** Whether this host's plugin manager is set up and answering (`GET /v1/plugins/managed/service`). */
+export interface PluginServiceStatus {
+  /** absent: never set up; setting_up; ready; unavailable: set up but not answering; failed; unsupported. */
+  state: 'absent' | 'setting_up' | 'ready' | 'unavailable' | 'failed' | 'unsupported';
+  /** `user` (a per-user service) or `system`, once set up. */
+  scope: 'user' | 'system' | null;
+  /** The current step while setup runs. */
+  progress: string | null;
+  /** Why the last setup failed or the host is unsupported. */
+  error: string | null;
+}
+
 /** Stable installed node identity, independent of its capabilities and transport. */
 export interface ConfigurableNode {
   nodeId: string;
@@ -400,6 +412,14 @@ const pluginsApi = apiSlice.injectEndpoints({
       query: (body) => ({ url: '/v1/plugins/managed/catalog/install', method: 'POST', headers, body }),
       invalidatesTags: ['Plugins'],
     }),
+    getPluginService: build.query<PluginServiceStatus, void>({
+      query: () => ({ url: '/v1/plugins/managed/service', headers, cache: 'no-store' }),
+      providesTags: ['PluginService'],
+    }),
+    startPluginServiceSetup: build.mutation<PluginServiceStatus, void>({
+      query: () => ({ url: '/v1/plugins/managed/service/setup', method: 'POST', headers }),
+      invalidatesTags: ['PluginService'],
+    }),
     getPluginNodes: build.query<PluginNodes[], void>({
       query: () => ({ url: '/v1/plugins', headers, cache: 'no-store' }),
       providesTags: ['Plugins'],
@@ -419,4 +439,4 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useGetPluginCatalogQuery, useGetCatalogSourceQuery, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useGetPluginServiceQuery, useStartPluginServiceSetupMutation, useGetPluginCatalogQuery, useGetCatalogSourceQuery, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;

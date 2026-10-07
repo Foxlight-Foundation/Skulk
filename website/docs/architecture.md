@@ -2211,10 +2211,17 @@ address, which covers new registrations and repairs an interrupted one.
 older owner or manager must keep starting; owners that speak plugin protocol 3
 hand the address to their children as `Startup.serve_host`.
 `service_setup.py` now owns the resumable local setup command. It stages a verified
-runtime as the owner, generates the profile connection, and invokes the standalone
-standard-library-only `service_registration.py` helper for fixed system definitions.
-Only that local helper runs elevated; LaunchDaemons/systemd run the manager as the
-existing nonroot account from durable system storage. Retained setup phase is
+runtime as the owner, generates the profile connection, and registers the manager in
+one of two scopes. The default is a per-user service (a launchd agent in the owner's
+`gui/<uid>` domain, or a systemd user unit) with the node's own lifetime, registered
+by the owner through `service_registration.register_user` with no elevation; the node
+runs this itself through `service_autosetup.ServiceSetupRunner` behind
+`GET /v1/plugins/managed/service` and `POST /v1/plugins/managed/service/setup`, which
+the dashboard's Plugins page calls on first use. `skulk-plugin-service setup --system`
+instead registers a system LaunchDaemon or systemd service, for hosts that run
+unattended, through the standalone standard-library-only `service_registration.py`
+helper; only that helper runs elevated, and the manager still runs as the existing
+nonroot account. Setup keeps whichever scope a configuration is already connected to. Retained setup phase is
 separate from current runtime integrity and manager availability. HTTP lifecycle and dynamic installation registration use this manager; setup progress, runtime integrity and live management availability remain separate observations.
 
 `terminal_install.py` composes the manager's existing operations for the interactive

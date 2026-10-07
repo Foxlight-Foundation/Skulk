@@ -27,6 +27,7 @@ export const apiSlice = createApi({
     'RemotePairing',
     'OperatorDevices',
     'Plugins',
+    'PluginService',
     'PluginConfiguration',
     'PluginCatalog',
     'StewardStatus',

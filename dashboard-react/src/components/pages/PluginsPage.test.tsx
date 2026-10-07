@@ -68,6 +68,7 @@ beforeEach(async () => {
     if (path === '/node_id') return response('host-node');
     if (path === '/node/identity') return response({ nodeId: 'host-node', friendlyName: 'host' });
     expect(request.headers.get('X-Skulk-Dashboard')).toBe('pairing-v1');
+    if (path === '/v1/plugins/managed/service') return response({ state: 'ready', scope: 'user', progress: null, error: null });
     if (new URL(request.url).pathname === '/v1/plugins/managed') return response({ installations: [] });
     if (new URL(request.url).pathname === '/v1/plugins') return response([{ pluginId: 'bridge', available: true, nodes: [
       { nodeId: 'node-1', bundleId: 'test.bundle', version: '1.0.0', status: 'disabled', configurable: true },

@@ -1,4 +1,4 @@
-"""One local owner command for independent managed-plugin system services."""
+"""One local owner command for independent managed-plugin services."""
 
 import argparse
 import asyncio
@@ -10,6 +10,7 @@ import stat
 import sys
 import time
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, Self, final
 from uuid import uuid4
@@ -47,7 +48,11 @@ from skulk.extensions.runtime_manager import (
     ReloadRuntimeRequest,
     manager_request,
 )
-from skulk.extensions.service_registration import ServiceLayout, local_layout
+from skulk.extensions.service_registration import (
+    ServiceLayout,
+    ServiceScope,
+    local_layout,
+)
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
     activate_service_runtime,
@@ -197,6 +202,51 @@ async def _elevate(
         raise ValueError("explicit local service registration did not complete")
 
 
+async def _register(
+    layout: ServiceLayout, action: Literal["prepare", "stop", "install"]
+) -> None:
+    """Perform one registration action in this layout's scope.
+
+    A system service needs one explicit elevation for the fixed helper; a user
+    service registers as the owner, with no elevation, so the node itself can
+    set it up.
+    """
+    if layout.scope == "user":
+        await asyncio.to_thread(service_registration.register_user, layout, action)
+        return
+    await _elevate(layout, action)
+
+
+def connected_scope() -> ServiceScope | None:
+    """The scope of the manager this Skulk configuration is connected to, if any.
+
+    Setup keeps the scope a host already uses, so rerunning it repairs that
+    service instead of creating a second one beside it.
+    """
+    try:
+        connection = ServiceConnection.model_validate_json(
+            read_private(SKULK_CONFIG_HOME / "managed-service" / "connection.json")
+        )
+    except FileNotFoundError:
+        return None
+    root = Path(connection.manager_root)
+    scopes: tuple[ServiceScope, ...] = ("user", "system")
+    for scope in scopes:
+        if local_layout(os.getuid(), scope).root == root:
+            return scope
+    return None
+
+
+def _definition_owner_protected(layout: ServiceLayout, info: os.stat_result) -> bool:
+    """A system definition belongs to root; a user definition to its owner."""
+    owner = 0 if layout.scope == "system" else os.getuid()
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == owner
+        and not info.st_mode & 0o022
+    )
+
+
 async def _selected_within(root: Path, generation: str, seconds: float) -> bool:
     """Whether the manager selects ``generation`` before ``seconds`` pass."""
     deadline = time.monotonic() + seconds
@@ -221,8 +271,12 @@ def registered_unit_names_base(base: Path) -> bool:
     A generation staged from this process is sealed to its interpreter; a
     service registered to invoke another one cannot start on it, so a host
     checks this before it selects a generation the OS service must start.
+    The service checked is the one this configuration is connected to.
     """
-    return _unit_names_base(local_layout(os.getuid()), base)
+    scope = connected_scope()
+    if scope is None:
+        return False
+    return _unit_names_base(local_layout(os.getuid(), scope), base)
 
 
 def _unit_names_base(layout: ServiceLayout, base: Path) -> bool:
@@ -250,29 +304,42 @@ def _ready_installation(
         service_bootstrap.verified_runtime(layout.root)
         descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor, "rb") as source:
-            info = os.fstat(source.fileno())
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_uid != 0
-                or info.st_mode & 0o022
-            ):
+            if not _definition_owner_protected(layout, os.fstat(source.fileno())):
                 return False
             return source.read(65537) == layout.definition(base)
     except (OSError, ValueError):
         return False
 
 
-async def setup_service() -> SetupOperation:
-    """Prepare, register and verify the owner's fixed system service without paid work.
+def _print_progress(message: str) -> None:
+    print(message, flush=True)
+
+
+async def setup_service(
+    scope: ServiceScope | None = None,
+    report: Callable[[str], None] = _print_progress,
+) -> SetupOperation:
+    """Prepare, register and verify the owner's fixed manager service without paid work.
 
     Rerunning resumes a retained staged runtime. A verified healthy registration
     is completed without elevation or stopping it. Preparation uses the existing
-    qualified core environment read-only; local sudo only provisions its parent
-    directory and installs/stops/starts the fixed nonroot OS service definition.
+    qualified core environment read-only. A user-scope service needs no
+    elevation at all; for a system service, local sudo only provisions its
+    parent directory and installs/stops/starts the fixed nonroot OS service
+    definition.
+
+    Args:
+        scope: Where to register the manager. ``None`` keeps the scope this
+            configuration is already connected to, and otherwise chooses
+            ``user``.
+        report: Receives each progress sentence (the terminal by default).
+
+    Returns:
+        The completed setup operation.
     """
     if os.geteuid() == 0 or os.geteuid() != os.getuid():
         raise ValueError("run setup as the existing Skulk owner, not under sudo")
-    layout = local_layout(os.getuid())
+    layout = local_layout(os.getuid(), scope or connected_scope() or "user")
     base = Path(sys.executable).resolve(strict=True)
     configuration = SKULK_CONFIG_HOME.resolve()
     _outside_checkout(base)
@@ -295,7 +362,7 @@ async def setup_service() -> SetupOperation:
             or bool(root_info.st_mode & 0o077)
         )
     if prepared:
-        await finish_runtime_work(asyncio.create_task(_elevate(layout, "prepare")))
+        await finish_runtime_work(asyncio.create_task(_register(layout, "prepare")))
     lock = RuntimeLock(layout.root, "setup.lock")
     try:
 
@@ -398,10 +465,7 @@ async def setup_service() -> SetupOperation:
                 # The OS service is registered and answering; only the Skulk
                 # environment moved. Stage a matching runtime here and let the
                 # running manager select it and restart itself: no elevation.
-                print(
-                    "Refreshing the manager runtime to the live Skulk build...",
-                    flush=True,
-                )
+                report("Refreshing the manager runtime to the live Skulk build...")
                 snapshot = await stage_service_runtime(layout.root)
                 if (
                     snapshot.skulk_build_sha256 != host.skulk_build_sha256
@@ -431,7 +495,7 @@ async def setup_service() -> SetupOperation:
                     # re-registers it with elevation. A lost reply is not a
                     # refusal: the manager may have selected the generation
                     # while restarting, which the pointer shows.
-                    print("Manager did not reload; re-registering.", flush=True)
+                    report("Manager did not reload; re-registering.")
                     reply = None
             if refresh and reply is not None and operation.snapshot is not None:
                 selected = operation.snapshot
@@ -452,9 +516,9 @@ async def setup_service() -> SetupOperation:
                 _save(layout.root, operation)
                 return operation
             if not prepared:
-                await _elevate(layout, "prepare")
+                await _register(layout, "prepare")
             if operation.snapshot is None:
-                print("Preparing verified independent manager runtime...", flush=True)
+                report("Preparing verified independent manager runtime...")
                 snapshot = await stage_service_runtime(layout.root)
                 if (
                     snapshot.skulk_build_sha256 != host.skulk_build_sha256
@@ -467,8 +531,12 @@ async def setup_service() -> SetupOperation:
                 )
                 _save(layout.root, operation)
             assert operation.snapshot is not None
-            print("Registering nonroot system service...", flush=True)
-            await _elevate(layout, "stop")
+            report(
+                "Registering the plugin service for this user..."
+                if layout.scope == "user"
+                else "Registering nonroot system service..."
+            )
+            await _register(layout, "stop")
             # The selector repeats complete seal verification with the manager
             # stopped; failed activation retains every prior generation/state file.
             await asyncio.to_thread(
@@ -495,7 +563,7 @@ async def setup_service() -> SetupOperation:
                 with_owner.close()
             operation = operation.model_copy(update={"phase": "selected"})
             _save(layout.root, operation)
-            await _elevate(layout, "install")
+            await _register(layout, "install")
             operation = operation.model_copy(update={"phase": "registered"})
             _save(layout.root, operation)
             deadline = time.monotonic() + _READINESS_WAIT_SECONDS
@@ -514,7 +582,7 @@ async def setup_service() -> SetupOperation:
 
 async def service_status() -> dict[str, str | bool]:
     """Distinguish historical setup completion from current management and integrity."""
-    layout = local_layout(os.getuid())
+    layout = local_layout(os.getuid(), connected_scope() or "user")
     operation = SetupOperation.model_validate_json(
         read_private(layout.root / "setup.json")
     )
@@ -699,6 +767,16 @@ def main() -> None:
                 )
                 raise SystemExit(1)
             print(json.dumps(reply["result"]))
+            return
+        if action == "setup" and remaining == ["--system"]:
+            # The explicit opt-in for a service that also runs with nobody
+            # logged in; registering it asks for one local elevation.
+            operation = asyncio.run(setup_service("system"))
+            print(
+                json.dumps(
+                    {"operation_id": operation.operation_id, "phase": operation.phase}
+                )
+            )
             return
         if remaining:
             raise ValueError("this service action accepts no additional arguments")

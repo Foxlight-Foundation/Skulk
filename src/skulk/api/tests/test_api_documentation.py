@@ -26,6 +26,7 @@ from skulk.utils.channels import channel
 # lose its public request schema without making the omission visible in review.
 _BODYLESS_MUTATIONS = {
     ("POST", "/models/remote-code-approvals/{card_id}"),
+    ("POST", "/v1/plugins/managed/service/setup"),
     ("POST", "/v1/videos/{video_id}/cancel"),
     ("POST", "/v1/music/{music_id}/cancel"),
     ("POST", "/v1/cancel/{command_id}"),
