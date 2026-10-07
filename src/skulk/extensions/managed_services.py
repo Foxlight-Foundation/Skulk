@@ -852,6 +852,10 @@ class ManagedServices:
         # one a catalog read deferred while this renewal was in flight.
         if not payload.get("deferred") and self.store_trust_deferrals == deferrals:
             self.store_trust_due = time.monotonic() + _STORE_TRUST_SECONDS
+            # Every follower was reached, which cleared the manager's flag; a
+            # flag seen again after this is a new deferral, even if no
+            # inventory read caught it cleared in between.
+            self.store_trust_retry_seen = False
 
     def _retry_deferred_followers(self, payload: dict[str, JsonValue]) -> None:
         """Bring the next renewal forward when a catalog read deferred followers.

@@ -812,11 +812,15 @@ async def test_the_node_keeps_a_deferral_that_arrives_during_a_renewal(
     due = services.store_trust_due
     assert due is not None and due - time.monotonic() <= 300
     # Without a notice in flight, a clean renewal waits the hour.
+    services.store_trust_retry_seen = True
     services.store_trust_due = time.monotonic()
     services._schedule_store_trust(tmp_path)  # pyright: ignore[reportPrivateUsage]
     await services._settle_store_trust()  # pyright: ignore[reportPrivateUsage]
     due = services.store_trust_due
     assert due is not None and due - time.monotonic() > 3000
+    # The clean renewal reached every follower, so the manager's flag raised
+    # again before any inventory read saw it cleared is a new deferral.
+    assert not services.store_trust_retry_seen
 
 
 def test_a_catalog_read_is_accepted_in_either_reply_shape() -> None:
