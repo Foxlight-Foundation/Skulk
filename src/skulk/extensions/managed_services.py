@@ -48,6 +48,7 @@ from skulk.extensions.runtime_manager import (
     ReleaseRequest,
     ReloadRuntimeRequest,
     SourceRegistration,
+    StoreTrustRequest,
     SubmitRequest,
     manager_request,
 )
@@ -65,8 +66,18 @@ from skulk.extensions.service_snapshot import (
     stage_service_runtime,
 )
 from skulk.extensions.types import ExtensionContext
+from skulk.shared.constants import offline_mode
 
 _WINDOW = TypeAdapter(list[int])
+
+_STORE_TRUST_SECONDS: Final = 3600.0
+"""How often installations bound to the built-in store have its trust renewed.
+
+Hourly keeps a store revocation, such as a compromised publisher key, from
+waiting long, and keeps renewals far ahead of any trust expiry."""
+
+_STORE_TRUST_RETRY_SECONDS: Final = 300.0
+"""How soon a renewal the manager could not complete is tried again."""
 
 
 def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError | None:
@@ -494,6 +505,10 @@ class ManagedServices:
         self.runtimes_pruned_for: str | None = None
         # Monotonic time before which a failed or partial prune is not retried.
         self.runtime_prune_retry_at = 0.0
+        # The store's trust renewal for installations bound to it runs in the
+        # background on its own schedule; None until the first one is due.
+        self.store_trust: asyncio.Task[None] | None = None
+        self.store_trust_due: float | None = None
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -782,6 +797,46 @@ class ManagedServices:
         if task is not None and not task.done():
             await asyncio.gather(task, return_exceptions=True)
 
+    def _schedule_store_trust(self, root: Path) -> None:
+        """Renew the built-in store's trust for installations bound to it.
+
+        The manager runs with a fixed environment, so the node drives the
+        renewal and states its own offline mode: offline, the manager uses
+        only the store's last verified trust. Runs in the background so a
+        slow store never holds the inventory refresh.
+        """
+        if self.store_trust is not None and not self.store_trust.done():
+            return
+        if self.store_trust_due is not None and time.monotonic() < self.store_trust_due:
+            return
+        self.store_trust_due = time.monotonic() + _STORE_TRUST_RETRY_SECONDS
+        self.store_trust = asyncio.create_task(self._refresh_store_trust(root))
+
+    async def _refresh_store_trust(self, root: Path) -> None:
+        """Ask the manager to renew store trust; a refusal is retried sooner."""
+        try:
+            result = await manager_request(
+                root, StoreTrustRequest(offline=offline_mode())
+            )
+        except (OSError, ValueError, TimeoutError):
+            return
+        payload = result.get("result")
+        if set(result) != {"result"} or not isinstance(payload, dict):
+            logger.warning(
+                "the plugin manager could not renew the built-in capability "
+                "store's trust for its installations; retrying in five minutes"
+            )
+            return
+        # A busy installation is retried soon rather than in an hour.
+        if not payload.get("deferred"):
+            self.store_trust_due = time.monotonic() + _STORE_TRUST_SECONDS
+
+    async def _settle_store_trust(self) -> None:
+        """Let a renewal in flight finish rather than abandon it mid-write."""
+        task, self.store_trust = self.store_trust, None
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
         """Send one typed local management request; never accept an attachment override.
 
@@ -898,6 +953,7 @@ class ManagedServices:
                         and item.service.state == "running"
                         and item.service.active_digest == item.selected_digest
                     )
+                self._schedule_store_trust(Path(self.connection.manager_root))
                 return inventory
             except (OSError, ValueError, TimeoutError):
                 # Keep unavailable installations visible for configuration, but
@@ -920,6 +976,7 @@ class ManagedServices:
     async def _detach(self) -> None:
         await self._settle_runtime_refresh()
         await self._settle_runtime_prune()
+        await self._settle_store_trust()
         owners, self.owners = tuple(self.owners.values()), {}
         await asyncio.gather(*(owner.on_stop() for owner in owners))
         if self.attachment is not None:
@@ -938,5 +995,6 @@ class ManagedServices:
             self.task = None
         await self._settle_runtime_refresh()
         await self._settle_runtime_prune()
+        await self._settle_store_trust()
         async with self.guard:
             await self._detach()

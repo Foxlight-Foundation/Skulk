@@ -24,6 +24,13 @@ This project records release notes here and mirrors public-facing notes in
   `GET /v1/plugins/managed/catalog/source` reports `builtin_store` and
   `builtin_store_available`. A build that does not ship the store's root has
   no built-in store, and Browse behaves as before.
+- A capability installed from the built-in store follows the store's trust
+  while it runs. Skulk renews that trust for it every hour and after each
+  catalog read, so the capability keeps running past the expiry its trust had
+  when it was installed, and a store revocation of its publisher or release
+  stops it. Offline, it keeps running on the trust it holds until that
+  expires. Capabilities installed from a private catalog, or whose source the
+  owner configured directly, keep the trust they were given.
 
 ### Changed
 
