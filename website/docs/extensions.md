@@ -796,11 +796,18 @@ See the [owner action HTTP contract](api-guide.md#plugin-owner-proposal-actions)
 
 Skulk's `extensions/runtime_artifacts.py` verifies the v2 signed runtime envelope
 without importing a plugin SDK. Generic claims bind the publisher, exact bundle
-and wheel bytes, supported platform/Python version, qualified Skulk build, state
-schema and permission summary. Plugin-specific manifest policy stays opaque but
-is covered by the signature. Trust comes from owner-provisioned protected local
-storage, not the release. Revoked or expired artifacts and incompatible hosts
-are refused. Compatibility across releases is a window, not a pin: the release
+and wheel bytes, supported platform/Python version, the Skulk version range the
+manifest declares, state schema and permission summary. The release also records
+the Skulk build its publisher qualified it against, for provenance only: a
+release runs on any Skulk whose version is in its range, so updating Skulk never
+breaks the capabilities already installed, the way an operating system update
+leaves installed applications running. Catalog listings (catalog protocol 2) carry
+the same range, so the catalog marks a release as fitting by this host's version;
+a protocol 1 listing, which predates the range, fits only the exact build it was
+published for. Plugin-specific manifest policy stays
+opaque but is covered by the signature. Trust comes from owner-provisioned
+protected local storage, not the release. Revoked or expired artifacts and
+incompatible hosts are refused. Compatibility across releases is a window, not a pin: the release
 record and the isolated runtime envelope each carry a protocol number, and the
 host accepts the current protocol and, once there is one, the previous, so a
 capability published against the previous protocol keeps installing for one

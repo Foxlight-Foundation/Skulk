@@ -9,6 +9,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- Updating Skulk no longer breaks installed capabilities. A capability
+  release declares the Skulk versions it runs on, and Skulk accepts it on any
+  version in that range; it used to require the exact Skulk build the release
+  was built against, so every update, even a patch, refused every installed
+  capability until its publisher rebuilt it. The build is still recorded, for
+  provenance. Plugin catalogs move to protocol 2, whose listings carry each
+  release's Skulk version range, so the catalog shows a release as fitting by
+  the host's version; protocol 1 catalogs are still read and keep their
+  exact-build rule.
 - Image models (FLUX.1 and Qwen-Image) now appear in the model catalog by
   default, so the packaged Mac and Linux apps, which have no launch
   environment to opt in through, can use them. `SKULK_ENABLE_IMAGE_MODELS=false`

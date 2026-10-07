@@ -178,7 +178,9 @@ class ReleaseReview(BaseModel):
     sequence: int = Field(ge=1, description="Signed publisher release sequence.")
     platform: RuntimePlatform = Field(description="Verified compatible host platform.")
     python_requires: str = Field(description="Signed supported Python version range.")
-    skulk_build_sha256: Digest = Field(description="Exact qualified Skulk build.")
+    skulk_build_sha256: Digest = Field(
+        description="Skulk build the publisher qualified the release against."
+    )
     permissions: tuple[str, ...] = Field(
         description="Signed declared plugin permissions."
     )

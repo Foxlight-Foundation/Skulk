@@ -191,7 +191,10 @@ export interface CatalogEntry {
   /** The artifact plus every wheel the runtime needs: what a download costs. */
   transfer_bytes: number;
   platforms: string[];
+  /** Skulk build the publisher qualified the release against; provenance only. */
   skulk_build_sha256: string;
+  /** Skulk versions the release runs on; null for an older listing tied to one build. */
+  skulk_requires: string | null;
   permissions: string[];
   /** Capability ids it serves, such as `images.edit@1.0.0`. */
   descriptors: string[];
@@ -202,7 +205,7 @@ export interface CatalogEntry {
   /** Steward risk classes; `billable` means an action can spend money. */
   steward_risks: string[];
   expires_at: number;
-  /** Whether this release was built for this host's exact Skulk build and platform. */
+  /** Whether this release fits this host: platform, and this host's Skulk version in its range. */
   matches_host: boolean;
 }
 

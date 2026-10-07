@@ -900,7 +900,9 @@ class RuntimeManager:
                 verified = await self.catalog.fetch()
                 host = await self._measured_host()
             return verified.review(
-                skulk_build_sha256=host.skulk_build_sha256, platform=host.platform
+                skulk_version=host.skulk_version,
+                skulk_build_sha256=host.skulk_build_sha256,
+                platform=host.platform,
             ).model_dump(mode="json")
         if isinstance(request, CatalogRegistration):
             # Configuration takes the same lock as reads and bindings, so a
@@ -1109,6 +1111,7 @@ class RuntimeManager:
                 )
             listing = verified.entry_review(
                 entry,
+                skulk_version=host.skulk_version,
                 skulk_build_sha256=host.skulk_build_sha256,
                 platform=host.platform,
             )

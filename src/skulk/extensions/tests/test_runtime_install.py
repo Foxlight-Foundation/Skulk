@@ -180,12 +180,12 @@ def artifacts(
 
 
 @pytest.mark.parametrize(
-    "fault", ["signature", "expired", "revoked", "core", "platform", "python"]
+    "fault", ["signature", "expired", "revoked", "skulk", "platform", "python"]
 )
 def test_generic_runtime_refuses_untrusted_or_incompatible(
     tmp_path: Path, fault: str
 ) -> None:
-    """Exact authenticated claims gate every platform and build before execution."""
+    """Authenticated claims gate platform, Python and Skulk version before execution."""
     metadata, trust, host = artifacts(tmp_path)
     now = int(time.time())
     if fault == "signature":
@@ -197,14 +197,26 @@ def test_generic_runtime_refuses_untrusted_or_incompatible(
     elif fault == "revoked":
         digest = verify_runtime(metadata, trust, host, now=now).digest
         trust = trust.model_copy(update={"revoked_artifacts": (digest,)})
-    elif fault == "core":
-        host = replace(host, skulk_build_sha256="b" * 64)
+    elif fault == "skulk":
+        host = replace(host, skulk_version="1.6.0")
     elif fault == "platform":
         host = replace(host, platform="ubuntu-24.04-x86_64")
     else:
         host = replace(host, python_version="3.14.0")
     with pytest.raises(ValueError):
         verify_runtime(metadata, trust, host, now=now)
+
+
+def test_a_skulk_update_keeps_an_installed_release_running(tmp_path: Path) -> None:
+    """A release declares Skulk versions, not one build: an update stays inside it."""
+    metadata, trust, host = artifacts(
+        tmp_path, manifest_extra={"skulk_requires": ">=1.5.2,<2"}
+    )
+    now = int(time.time())
+    updated = replace(host, skulk_version="1.9.4", skulk_build_sha256="f" * 64)
+    assert verify_runtime(metadata, trust, updated, now=now).digest
+    with pytest.raises(ValueError):
+        verify_runtime(metadata, trust, replace(updated, skulk_version="2.0.0"), now=now)
 
 
 @pytest.mark.parametrize(

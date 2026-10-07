@@ -395,13 +395,17 @@ def verify_runtime(
     runtime = VerifiedRuntime(metadata, payload, claims)
     family = canonical_platform(host.platform)
     expected_os = "darwin" if family.startswith("macos") else family.split("-")[0]
+    # Skulk is the platform and a capability is software installed on it: a
+    # release declares the Skulk versions it runs on, and the protocol windows
+    # above refuse an incompatible host by name. The build the publisher
+    # qualified against is recorded, never required, so a Skulk update does not
+    # break the capabilities already installed.
     if (
         not release.created_at <= now < release.expires_at
         or not platform_matches(claims.platform, host.platform)
         or expected_os not in release.platforms
         or host.python_version not in SpecifierSet(release.python_requires)
         or host.skulk_version not in SpecifierSet(release.manifest.skulk_requires)
-        or host.skulk_build_sha256 != release.skulk_build_sha256
         or runtime.digest in trust.revoked_artifacts
         or release.manifest.executable_sha256 in trust.revoked_artifacts
         or any(wheel.sha256 in trust.revoked_artifacts for wheel in claims.wheels)

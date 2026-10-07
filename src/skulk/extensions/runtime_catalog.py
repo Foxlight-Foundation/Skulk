@@ -21,6 +21,7 @@ from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 import httpx
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -51,9 +52,12 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 
-ACCEPTED_CATALOG_PROTOCOLS: tuple[int, ...] = (1,)
-"""Catalog record protocols this host reads: the current and, once there is
-one, the previous."""
+ACCEPTED_CATALOG_PROTOCOLS: tuple[int, ...] = (1, 2)
+"""Catalog record protocols this host reads: the current and the previous.
+
+Protocol 2 listings carry the Skulk version range of the release they name,
+so a host judges fit by its version. Protocol 1 listings predate that and
+were published for one exact Skulk build, so they keep that rule."""
 
 _OBJECT: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
@@ -270,6 +274,7 @@ class _CatalogEntryClaims(_Contract):
         min_length=1, max_length=2
     )
     skulk_build_sha256: Digest
+    skulk_requires: str | None = Field(default=None, max_length=128)
     permissions: tuple[_Text, ...] = Field(min_length=1, max_length=16)
     descriptors: tuple[Annotated[str, Field(max_length=200)], ...] = Field(
         min_length=1, max_length=8
@@ -286,6 +291,11 @@ class _CatalogEntryClaims(_Contract):
     @model_validator(mode="after")
     def served_from_a_directory(self) -> Self:
         """A feed is an explicit HTTPS directory, like a configured release source."""
+        if self.skulk_requires is not None:
+            try:
+                SpecifierSet(self.skulk_requires)
+            except InvalidSpecifier:
+                raise ValueError("catalog entry Skulk range is not a version range") from None
         if self.transfer_bytes < self.artifact_size:
             raise ValueError("catalog entry transfer size cannot be below its artifact")
         parsed = urlsplit(self.feed_url)
@@ -316,6 +326,15 @@ class _CatalogClaims(_Contract):
         """The listing is the signer's own and names a bundle sequence once."""
         if not self.created_at < self.expires_at:
             raise ValueError("catalog expiry must follow creation")
+        # A protocol 2 listing always states its Skulk range; protocol 1 never
+        # did, so a range in one would be a document no protocol describes.
+        if any(
+            (entry.skulk_requires is None) == (self.protocol >= 2)
+            for entry in self.entries
+        ):
+            raise ValueError(
+                "catalog protocol 2 entries state their Skulk range; protocol 1 entries do not"
+            )
         seen: set[tuple[str, int, str | None]] = set()
         for entry in self.entries:
             if entry.publisher != self.publisher:
@@ -364,7 +383,15 @@ class CatalogEntryReview(BaseModel):
         "runtime-bearing release, every wheel it lists."
     )
     platforms: tuple[str, ...] = Field(description="Operating systems supported.")
-    skulk_build_sha256: str = Field(description="Skulk build the release binds to.")
+    skulk_build_sha256: str = Field(
+        description="Skulk build the publisher qualified the release against; "
+        "recorded for provenance, not required to match this host."
+    )
+    skulk_requires: str | None = Field(
+        default=None,
+        description="Skulk versions the release runs on (catalog protocol 2); "
+        "null for a protocol 1 listing, which fits one exact Skulk build.",
+    )
     permissions: tuple[str, ...] = Field(description="Signed permission summaries.")
     descriptors: tuple[str, ...] = Field(description="Qualified capability ids.")
     surfaces: tuple[str, ...] = Field(description="Titles of declared surfaces.")
@@ -374,7 +401,9 @@ class CatalogEntryReview(BaseModel):
     )
     expires_at: int = Field(description="Release expiry as a Unix timestamp.")
     matches_host: bool = Field(
-        description="Whether this host's Skulk build and platform match the release."
+        description="Whether the release fits this host: its platforms, and "
+        "this host's Skulk version inside its range (for a protocol 1 listing, "
+        "this host's exact Skulk build)."
     )
 
 
@@ -444,7 +473,9 @@ class VerifiedCatalog:
                 return entry
         return None
 
-    def review(self, *, skulk_build_sha256: str, platform: str) -> CatalogReview:
+    def review(
+        self, *, skulk_version: str, skulk_build_sha256: str, platform: str
+    ) -> CatalogReview:
         """Project the catalog for operators, naming what fits this host."""
         return CatalogReview(
             publisher=self.claims.publisher,
@@ -454,7 +485,10 @@ class VerifiedCatalog:
             catalog_sha256=self.sha256,
             entries=tuple(
                 self.entry_review(
-                    entry, skulk_build_sha256=skulk_build_sha256, platform=platform
+                    entry,
+                    skulk_version=skulk_version,
+                    skulk_build_sha256=skulk_build_sha256,
+                    platform=platform,
                 )
                 for entry in self.entries
             ),
@@ -462,9 +496,20 @@ class VerifiedCatalog:
 
     @staticmethod
     def entry_review(
-        entry: _CatalogEntryClaims, *, skulk_build_sha256: str, platform: str
+        entry: _CatalogEntryClaims,
+        *,
+        skulk_version: str,
+        skulk_build_sha256: str,
+        platform: str,
     ) -> CatalogEntryReview:
-        """One listing as consent facts, with whether it fits this host."""
+        """One listing as consent facts, with whether it fits this host.
+
+        A listing states the Skulk versions its release runs on, so it fits
+        any host whose version is in that range whatever build it runs, and a
+        Skulk update never hides what the host can still install. A protocol 1
+        listing has no range: it was published for one exact Skulk build and
+        keeps that rule.
+        """
         expected_os = (
             "darwin" if platform.startswith("macos") else platform.split("-")[0]
         )
@@ -487,8 +532,13 @@ class VerifiedCatalog:
             operations=entry.operations,
             steward_risks=entry.steward_risks,
             expires_at=entry.expires_at,
-            matches_host=entry.skulk_build_sha256 == skulk_build_sha256
-            and expected_os in entry.platforms
+            skulk_requires=entry.skulk_requires,
+            matches_host=expected_os in entry.platforms
+            and (
+                skulk_version in SpecifierSet(entry.skulk_requires)
+                if entry.skulk_requires is not None
+                else entry.skulk_build_sha256 == skulk_build_sha256
+            )
             and (
                 entry.runtime_platform is None
                 or platform_matches(entry.runtime_platform, platform)
