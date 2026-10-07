@@ -838,3 +838,76 @@ def test_a_catalog_read_is_accepted_in_either_reply_shape() -> None:
         ("managed.x",),
         (),
     )
+
+
+async def test_an_interrupted_change_lands_before_the_owner_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart completes a pending change before any owner verifies under old trust."""
+    from skulk.extensions import runtime_download
+    from skulk.extensions.runtime_controller import RuntimeController
+
+    async with _store_host(tmp_path, monkeypatch) as host:
+        host.publish(1)
+        await host.bind("managed.store")
+        installation = host.manager.downloads["managed.store"]
+        root = installation.root
+        journal = root / "trust-transition.json"
+        revoking = host.trust("managed.store").model_copy(
+            update={"revision": 9, "revoked_artifacts": (_runtime_digest(host.metadata),)}
+        )
+        written = runtime_download.write_private
+
+        def lose_trust_write(path: Path, content: bytes) -> None:
+            if path.name == "publisher-trust.json":
+                raise OSError("power lost")
+            written(path, content)
+
+        monkeypatch.setattr(runtime_download, "write_private", lose_trust_write)
+        with pytest.raises(OSError):
+            await installation.configure(
+                SourceUpdate(
+                    expected_revision=installation.source_status().revision,
+                    base_url=PRIVATE,
+                    trust=revoking,
+                )
+            )
+        monkeypatch.setattr(runtime_download, "write_private", written)
+        await host.manager.close()
+        assert journal.exists()
+        # The owner's controller starts only after the change has landed.
+        seen: list[bool] = []
+        start = RuntimeController.start
+
+        async def observed(controller: RuntimeController) -> None:
+            seen.append(journal.exists())
+            await start(controller)
+
+        monkeypatch.setattr(RuntimeController, "start", observed)
+        restarted = RuntimeManager(host.manager.root)
+        await restarted.start()
+        try:
+            async with asyncio.timeout(10):
+                while "managed.store" not in restarted.controllers:
+                    await asyncio.sleep(0.02)
+            assert seen == [False]
+            trust = RuntimeTrust.model_validate_json(
+                read_private(root / "publisher-trust.json")
+            )
+            assert trust.revoked_artifacts == revoking.revoked_artifacts
+        finally:
+            await restarted.close()
+        # An unreadable journal keeps the installation from starting at all.
+        write_private(journal, b"not a journal")
+        seen.clear()
+        refused = RuntimeManager(host.manager.root)
+        await refused.start()
+        try:
+            async with asyncio.timeout(10):
+                while "managed.store" not in refused.errors:
+                    await asyncio.sleep(0.02)
+            assert refused.errors["managed.store"] == "installation_unavailable"
+            assert "managed.store" not in refused.controllers
+            assert seen == []
+        finally:
+            await refused.close()

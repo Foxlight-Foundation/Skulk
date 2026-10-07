@@ -409,6 +409,37 @@ class RuntimeDownloads:
         )
         write_private(self.root / "release-source.json", _source_document(source))
 
+    async def recover_transition(self) -> None:
+        """Complete a source and trust change a crash interrupted, before anything runs.
+
+        The manager calls this when it loads an installation, before its
+        owner can start: the owner's verification reads the trust file
+        directly, so a journaled change (a revocation, or a change of trust
+        authority) must land before any generation is verified under it.
+
+        Raises:
+            ValueError: The journal cannot be read; the installation must not
+                start until it is repaired.
+            BlockingIOError: Another operation still held the installation
+                fence after a short wait.
+        """
+        journal = self.root / _TRANSITION_FILE
+        if not (journal.exists() or journal.is_symlink()):
+            return
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                lock = RuntimeLock(self.installer.installer)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(0.05)
+        try:
+            self._complete_transition()
+        finally:
+            lock.close()
+
     def _complete_transition(self) -> None:
         """Finish a journaled source and trust change a crash interrupted.
 

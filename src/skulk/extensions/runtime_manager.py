@@ -866,10 +866,14 @@ class RuntimeManager:
                     root / "serve.json",
                     ServeBinding(serve_host=self.serve_host).model_dump_json().encode(),
                 )
-            controller = RuntimeController(root)
-            await controller.start()
             if identifier not in self.downloads:
                 self.downloads[identifier] = RuntimeDownloads(root)
+            # A source and trust change a crash interrupted lands before the
+            # owner can start and verify its generation under the old trust;
+            # an unreadable one keeps the installation from starting at all.
+            await self.downloads[identifier].recover_transition()
+            controller = RuntimeController(root)
+            await controller.start()
             self.controllers[identifier] = controller
             self.errors.pop(identifier, None)
         except (OSError, ValueError):
