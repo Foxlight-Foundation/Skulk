@@ -380,7 +380,12 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     assert isinstance(floors, dict)
     retained_documents = list((tmp_path / "catalog").iterdir())
     assert len(retained_documents) <= 8 + len(floors)
-    for floor in floors.values():
+    catalog_floors = {
+        key: floor for key, floor in floors.items() if not key.startswith("trust\n")
+    }
+    # Each address this host read keeps its discovery trust floor in the map.
+    assert len(catalog_floors) < len(floors)
+    for floor in catalog_floors.values():
         assert isinstance(floor, dict)
         sha256 = floor["sha256"]
         assert isinstance(sha256, str)

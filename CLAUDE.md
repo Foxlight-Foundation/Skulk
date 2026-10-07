@@ -992,7 +992,10 @@ publisher trust, which `HostCatalog` seeds on a host with no source and renews
 on every read while on the store (newer revision only, applied as published
 with no revocation merge, hash-bound last verified copy offline). Revocations
 carry forward only within a private catalog's own history, never across a
-source switch. Installations bound from the store (`store-binding.json`)
+source switch. Discovery trust floors are kept per catalog address (inside
+the state's `floors` map under a `trust\n` key prefix), so a switch to the
+store never lowers a private catalog's floor and leaving the store compares a
+private trust only with that address's own history. Installations bound from the store (`store-binding.json`)
 follow its trust while running: the node's hourly `refresh_store_trust` (and
 store catalog reads) rewrite their `publisher-trust.json` at the next
 installation trust revision via `RuntimeDownloads.follow_trust`, without

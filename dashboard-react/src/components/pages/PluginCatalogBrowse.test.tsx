@@ -191,7 +191,10 @@ it('connects a catalog from an invitation code before browsing it', async () => 
   await contains('catalog.example.ts.net');
   await click('Connect');
   await contains('Browse capabilities');
-  expect(posts[0]).toMatchObject({ path: '/v1/plugins/managed/catalog/source', body: { expected_revision: 0, base_url: 'https://catalog.example.ts.net/', trust: { revision: 1, expires_at: 4_000_000_000, publishers: { example: 'f'.repeat(64) } } } });
+  expect(posts[0]).toMatchObject({ path: '/v1/plugins/managed/catalog/source', body: { expected_revision: 0, base_url: 'https://catalog.example.ts.net/', trust: { expires_at: 4_000_000_000, publishers: { example: 'f'.repeat(64) } } } });
+  // Above anything an earlier panel created, so a returning catalog is never refused as a rollback.
+  const trust = posts[0].body.trust as { revision: number };
+  expect(trust.revision).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000) - 60);
 });
 
 it('continues a new installation whose binding reply was lost instead of registering another', async () => {
