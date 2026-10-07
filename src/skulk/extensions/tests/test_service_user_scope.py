@@ -451,6 +451,13 @@ async def test_runner_re_registers_a_user_service_whose_interpreter_moved(
         return False
 
     monkeypatch.setattr(service_autosetup, "registered_unit_names_base", moved)
+
+    def sealed(_root: Path, _base: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        service_autosetup.service_bootstrap, "selected_base_matches", sealed
+    )
     runner = ServiceSetupRunner()
 
     repairing = await runner.status()
@@ -482,9 +489,87 @@ async def test_runner_leaves_a_silent_service_on_the_right_interpreter_alone(
     def same(_base: Path) -> bool:
         return True
 
+    def sealed(_root: Path, _base: Path) -> bool:
+        return True
+
     monkeypatch.setattr(service_autosetup, "registered_unit_names_base", same)
+    monkeypatch.setattr(
+        service_autosetup.service_bootstrap, "selected_base_matches", sealed
+    )
 
     assert (await ServiceSetupRunner().status()).state == "unavailable"
+
+
+async def test_runner_re_registers_when_an_update_replaced_the_interpreter_in_place(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An app update keeps the interpreter's path but changes its bytes."""
+    layouts = _layouts(monkeypatch, tmp_path)
+    _connect(monkeypatch, tmp_path, layouts["user"].root)
+    scopes: list[str | None] = []
+
+    async def setup(scope: str | None, _report: object) -> SetupOperation:
+        scopes.append(scope)
+        return _operation()
+
+    async def silent(_root: Path) -> bool:
+        return False
+
+    def same_path(_base: Path) -> bool:
+        return True
+
+    def resealed(_root: Path, _base: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", silent)
+    monkeypatch.setattr(service_autosetup, "registered_unit_names_base", same_path)
+    monkeypatch.setattr(
+        service_autosetup.service_bootstrap, "selected_base_matches", resealed
+    )
+    runner = ServiceSetupRunner()
+
+    assert (await runner.status()).state == "setting_up"
+    await _settle(runner)
+    assert scopes == ["user"]
+
+
+def test_selected_base_matches_tracks_the_interpreters_bytes(tmp_path: Path) -> None:
+    import hashlib
+    import json
+
+    from skulk.extensions import service_bootstrap
+
+    root = tmp_path / "service"
+    (root / "core-runtimes" / ("a" * 32)).mkdir(mode=0o700, parents=True)
+    for directory in (root, root / "core-runtimes"):
+        directory.chmod(0o700)
+    base = tmp_path / "python3.13"
+    base.write_bytes(b"interpreter v1")
+    generation = "a" * 32
+    manifest = json.dumps(
+        {
+            "base_python": str(base),
+            "base_sha256": service_bootstrap.digest_file(base),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    write_private(root / "core-runtimes" / generation / "snapshot.json", manifest)
+    write_private(
+        root / "core-runtime.json",
+        json.dumps(
+            {
+                "generation": generation,
+                "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            }
+        ).encode(),
+    )
+
+    assert service_bootstrap.selected_base_matches(root, base)
+    base.write_bytes(b"interpreter v2, re-signed by an app update")
+    assert not service_bootstrap.selected_base_matches(root, base)
+    assert not service_bootstrap.selected_base_matches(tmp_path / "missing", base)
 
 
 def _stat(mode: int, uid: int, gid: int) -> os.stat_result:

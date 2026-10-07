@@ -17,6 +17,7 @@ from typing import Literal, final
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
+from skulk.extensions import service_bootstrap
 from skulk.extensions.runtime_attachment import ServiceConnection
 from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_manager import InventoryRequest, manager_request
@@ -102,18 +103,23 @@ class ServiceSetupRunner:
         self._progress = "Starting plugin setup..."
         self._task = asyncio.create_task(self._run())
 
-    async def _repair_moved_interpreter(self) -> bool:
-        """Re-register a silent user service whose interpreter moved, once.
+    async def _repair_moved_interpreter(self, root: Path) -> bool:
+        """Re-register a silent user service whose interpreter changed, once.
 
-        Updating or moving the packaged app replaces the interpreter the
-        registered service starts, so the service cannot come back on its own.
-        A user service needs no elevation to register again, so the node does
-        it instead of asking the owner to.
+        Moving the packaged app changes the interpreter path the registered
+        service starts, and updating it replaces the interpreter's bytes at the
+        same path; either way the service's sealed runtime can no longer
+        start. A user service needs no elevation to register again, so the
+        node does it instead of asking the owner to.
         """
         if self._repair_attempted:
             return False
         base = Path(sys.executable).resolve(strict=True)
-        if await asyncio.to_thread(registered_unit_names_base, base):
+        if await asyncio.to_thread(
+            registered_unit_names_base, base
+        ) and await asyncio.to_thread(
+            service_bootstrap.selected_base_matches, root, base
+        ):
             return False
         self._repair_attempted = True
         logger.info("plugin service names another interpreter; setting it up again")
@@ -168,7 +174,9 @@ class ServiceSetupRunner:
             return PluginServiceStatus(
                 state="ready", scope=scope, progress=None, error=None
             )
-        if scope == "user" and await self._repair_moved_interpreter():
+        if scope == "user" and await self._repair_moved_interpreter(
+            Path(connection.manager_root)
+        ):
             return PluginServiceStatus(
                 state="setting_up", scope="user", progress=self._progress, error=None
             )
