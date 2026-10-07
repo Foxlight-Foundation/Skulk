@@ -55,6 +55,12 @@ def manager_fixture(root: Path, monkeypatch: pytest.MonkeyPatch) -> RuntimeManag
         "skulk.extensions.managed_attachment.measure_host", lambda: HOST
     )
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: HOST)
+    # Callers in other test packages miss this package's conftest; the manager
+    # under test has no built-in store unless a test gives it one.
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_manager.EMBEDDED_CAPABILITY_STORE_ROOT",
+        root / "no-capability-store-root.json",
+    )
     return RuntimeManager(root)
 
 

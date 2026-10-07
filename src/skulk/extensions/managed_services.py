@@ -37,6 +37,7 @@ from skulk.extensions.runtime_manager import (
     CatalogInstallRequest,
     CatalogRegistration,
     CatalogRequest,
+    CatalogStoreRequest,
     InstallationRequest,
     InstalledRelease,
     InstallRecoveryRequest,
@@ -436,6 +437,7 @@ type ManagementRequest = (
     InventoryRequest
     | CatalogRequest
     | CatalogRegistration
+    | CatalogStoreRequest
     | CatalogInstallRequest
     | InstallationRequest
     | SubmitRequest

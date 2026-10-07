@@ -47,6 +47,7 @@ from skulk.extensions.runtime_manager import (
     SubmitRequest,
 )
 from skulk.extensions.runtime_selection import RuntimeSelection
+from skulk.shared.constants import offline_mode
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 _IDENTIFIER = TypeAdapter[str](InstallationIdentifier)
@@ -551,7 +552,11 @@ class TerminalInstaller:
             strict=True,
         )
         review = CatalogReview.model_validate_json(
-            json.dumps(await self._call(CatalogRequest(action="read_catalog")))
+            json.dumps(
+                await self._call(
+                    CatalogRequest(action="read_catalog", offline=offline_mode())
+                )
+            )
         )
         listing = self._listed(review, bundle_id, sequence, platform)
         self.output(json.dumps(listing.model_dump(mode="json"), indent=2))

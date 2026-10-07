@@ -32,6 +32,7 @@ from skulk.extensions.runtime_attachment import (
     ProfileIdentifier,
 )
 from skulk.extensions.runtime_catalog import (
+    BuiltinCatalogSelection,
     CatalogRefusedError,
     CatalogReview,
     CatalogSourceStatus,
@@ -52,6 +53,7 @@ from skulk.extensions.runtime_manager import (
     CatalogInstallRequest,
     CatalogRegistration,
     CatalogRequest,
+    CatalogStoreRequest,
     InstallationRequest,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -63,6 +65,7 @@ from skulk.extensions.runtime_manager import (
 from skulk.extensions.runtime_selection import RuntimeSelection
 from skulk.operator.pairing import OperatorPairingService
 from skulk.operator.plugin_scopes import PluginScope
+from skulk.shared.constants import offline_mode
 
 
 class PurgedInstallation(BaseModel):
@@ -348,14 +351,16 @@ def create_managed_plugins_router(
         "/catalog",
         response_model=CatalogReview,
         summary="Read the host's signed capability catalog",
-        description="Fetch the owner-configured signed catalog and verify it against the host's discovery trust before listing its releases: identity, sequence, platforms, size and digests, the signed permissions, capability ids, surfaces, durable operations and steward risk classes, and whether each release matches this host. Requires plugins:read. Returns no addresses or credentials; selects, stages and installs nothing. A refused read answers 409 with one sentence naming the cause and the next step, such as an unconfigured or unreachable catalog, the HTTP status the catalog server answered, an untrusted publisher or an expired catalog.",
+        description="Fetch the host's signed catalog, from the owner-configured private catalog or the built-in capability store, and verify it against the host's discovery trust before listing its releases: identity, sequence, platforms, size and digests, the signed permissions, capability ids, surfaces, durable operations and steward risk classes, and whether each release matches this host. When the source is the built-in store, its publisher trust is first verified and renewed through the store's TUF repository from the root this build ships (a newer revision is applied as published, never an older one; offline, the last verified copy is used). Requires plugins:read. Returns no addresses or credentials; selects, stages and installs nothing. A refused read answers 409 with one sentence naming the cause and the next step, such as an unconfigured or unreachable catalog, the HTTP status the catalog server answered, an untrusted publisher, an expired catalog, or built-in store trust that could not be verified.",
     )
     async def catalog(request: Request, response: Response) -> CatalogReview:
         """Read the one host-scoped catalog without touching any installation."""
         services = await authorized(request, response, "plugins:read")
 
         async def action() -> CatalogReview:
-            result = await services.request(CatalogRequest(action="read_catalog"))
+            result = await services.request(
+                CatalogRequest(action="read_catalog", offline=offline_mode())
+            )
             return CatalogReview.model_validate_json(json.dumps(result))
 
         return await invoke(action)
@@ -364,7 +369,7 @@ def create_managed_plugins_router(
         "/catalog/source",
         response_model=CatalogSourceStatus,
         summary="Read the host's catalog source readiness",
-        description="Report whether a catalog address and discovery trust are configured and whether the catalog credential is readable, without network I/O, addresses, paths or credential values. Requires plugins:read.",
+        description="Report whether a catalog address and discovery trust are configured and whether the catalog credential is readable, without network I/O, addresses, paths or credential values. builtin_store says whether the source is the built-in capability store (configured from the start; its trust_revision is null until the first read verifies it), and builtin_store_available whether this build includes that store. Requires plugins:read.",
     )
     async def catalog_source(
         request: Request, response: Response
@@ -382,7 +387,7 @@ def create_managed_plugins_router(
         "/catalog/source",
         response_model=CatalogSourceStatus,
         summary="Configure the host's catalog source",
-        description="Direct localhost/Tailscale owner administration only: set the HTTPS catalog directory, document basename and the publishers trusted for discovery at expected_revision, optionally provisioning a write-only bearer. Omitted fields retain configured values; initial setup requires the directory and trust. Existing revocations remain in force; moving the catalog requires supplying its credential again. Nothing is fetched or installed. A refused change answers 409 naming the cause, such as a stale expected_revision or an expired or older trust.",
+        description="Direct localhost/Tailscale owner administration only: set a private catalog's HTTPS directory, document basename and the publishers trusted for discovery at expected_revision, optionally provisioning a write-only bearer. This replaces the built-in capability store as the source. Omitted fields retain configured values; initial setup, and moving from the built-in store, require the directory and trust. The built-in store's own address is refused as a private catalog. A private catalog's existing revocations remain in force across its own trust updates; the built-in store's revocations do not carry to it. Moving the catalog requires supplying its credential again. Nothing is fetched or installed. A refused change answers 409 naming the cause, such as a stale expected_revision or an expired or older trust.",
     )
     async def configure_catalog(
         body: CatalogSourceUpdate, request: Request, response: Response
@@ -393,6 +398,27 @@ def create_managed_plugins_router(
 
         async def action() -> CatalogSourceStatus:
             result = await services.request(CatalogRegistration(request=body))
+            return CatalogSourceStatus.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.post(
+        "/catalog/source/builtin",
+        response_model=CatalogSourceStatus,
+        summary="Use the built-in capability store as the catalog source",
+        description="Direct localhost/Tailscale owner administration only. Body: expected_revision (the current catalog source revision). Replaces a private catalog with the built-in capability store: the source becomes the store's catalog address, read anonymously, and the discovery trust becomes the store's publisher trust, verified through its TUF repository from the root this build ships, exactly as the store published it; the private catalog's revocations do not carry over. A host already on the store is left unchanged. Nothing is fetched from the catalog or installed. A refused change answers 409 naming the cause: this build does not include the store, expected_revision is not the current revision, the store's trust could not be verified and no current verified copy is held, or another catalog operation is in progress.",
+    )
+    async def use_builtin_catalog(
+        body: BuiltinCatalogSelection, request: Request, response: Response
+    ) -> CatalogSourceStatus:
+        """Return the host to the built-in store through a fixed operation."""
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+        services = await authorized(request, response, "plugins:manage")
+
+        async def action() -> CatalogSourceStatus:
+            result = await services.request(
+                CatalogStoreRequest(request=body, offline=offline_mode())
+            )
             return CatalogSourceStatus.model_validate_json(json.dumps(result))
 
         return await invoke(action)

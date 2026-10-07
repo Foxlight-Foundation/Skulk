@@ -3,7 +3,7 @@ import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   pluginRefusalDetail, pluginRequestRefused, useGetCatalogSourceQuery, useGetManagedRuntimesQuery, useGetPluginCatalogQuery,
-  useInstallFromCatalogMutation, useInstallRuntimeReleaseMutation, type CatalogListing,
+  useInstallFromCatalogMutation, useInstallRuntimeReleaseMutation, useSelectBuiltinCatalogMutation, type CatalogListing,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
 import { Button } from '../common/Button';
@@ -41,8 +41,10 @@ export interface PluginCatalogBrowseProps {
 }
 
 /**
- * Browse the host's signed catalog: connect one, review a release, install
- * or update it, and see what it still needs. An install this browser left
+ * Browse the host's signed catalog: review a release, install or update it,
+ * and see what it still needs. A host on the built-in Foxlight store lists it
+ * with nothing to paste; a private catalog is added behind its own control,
+ * and a host on one can return to the store. An install this browser left
  * unfinished is picked up where it stopped.
  */
 export function PluginCatalogBrowse({ onManage }: PluginCatalogBrowseProps = {}) {
@@ -50,6 +52,10 @@ export function PluginCatalogBrowse({ onManage }: PluginCatalogBrowseProps = {})
   const [view, setView] = useState<BrowseView>(resumedView);
   const source = useGetCatalogSourceQuery();
   const configured = !!source.data?.configured;
+  const onStore = !!source.data?.builtin_store;
+  const storeAvailable = !!source.data?.builtin_store_available;
+  const [selectStore, storeSwitch] = useSelectBuiltinCatalogMutation();
+  const [storeNotice, setStoreNotice] = useState('');
   const catalog = useGetPluginCatalogQuery(undefined, { skip: !configured || view.kind === 'connect' });
   const runtimes = useGetManagedRuntimesQuery();
   const [bind] = useInstallFromCatalogMutation();
@@ -74,6 +80,22 @@ export function PluginCatalogBrowse({ onManage }: PluginCatalogBrowseProps = {})
     if (!catalog.isUninitialized) void catalog.refetch();
     if (!runtimes.isUninitialized) void runtimes.refetch();
   };
+  // Opening the panel reads the source again: the store's first catalog read
+  // records it, so the revision this page loaded with may be behind.
+  const openConnect = () => {
+    setStoreNotice('');
+    setView({ kind: 'connect' });
+    void source.refetch();
+  };
+  const switchToStore = async () => {
+    if (!source.data || storeSwitch.isLoading) return;
+    setStoreNotice('');
+    try {
+      await selectStore({ expected_revision: source.data.revision }).unwrap();
+    } catch (error) {
+      setStoreNotice(pluginRefusalDetail(error) ?? t('plugins.catalog.useStoreFailed', 'The host did not switch to the Foxlight store. Try again.'));
+    }
+  };
   const resume = (journey: BoundJourney, updating: boolean) => setView({
     kind: 'install', title: journey.title, publisher: journey.publisher, sequence: journey.sequence, transferBytes: journey.transferBytes, updating, journey, refusal: null,
   });
@@ -92,17 +114,28 @@ export function PluginCatalogBrowse({ onManage }: PluginCatalogBrowseProps = {})
   if (source.error) return <Notice role="alert">{pluginRefusalDetail(source.error) ?? t('plugins.catalog.sourceUnavailable', 'The catalog settings of this host could not be read.')}</Notice>;
   if (!source.data) return null;
   if (!configured || view.kind === 'connect') {
-    return <CatalogConnectPanel status={source.data} onConnected={() => { setView({ kind: 'list' }); void source.refetch(); }}
+    return <CatalogConnectPanel status={source.data} replacesStore={onStore} onConnected={() => { setView({ kind: 'list' }); void source.refetch(); }}
       onCancel={configured ? () => setView({ kind: 'list' }) : undefined} />;
   }
+  const updated = catalog.data ? new Date(catalog.data.created_at * 1000).toLocaleDateString() : '';
   return <section aria-labelledby="catalog-browse-title">
     <Heading>
       <div>
         <h2 id="catalog-browse-title">{t('plugins.catalog.browseTitle', 'Browse capabilities')}</h2>
-        {catalog.data ? <p>{t('plugins.catalog.browseLead', 'From the {publisher} catalog. Signature verified; listing updated {date}.', { publisher: catalog.data.publisher, date: new Date(catalog.data.created_at * 1000).toLocaleDateString() })}</p> : null}
+        {catalog.data ? <p>{onStore
+          ? t('plugins.catalog.storeLead', 'From the Foxlight capability store. Signatures verified; listing updated {date}.', { date: updated })
+          : t('plugins.catalog.browseLead', 'From the {publisher} catalog. Signature verified; listing updated {date}.', { publisher: catalog.data.publisher, date: updated })}</p> : null}
       </div>
-      <Button variant="ghost" size="sm" onClick={() => setView({ kind: 'connect' })}>{t('plugins.catalog.changeCatalog', 'Change catalog')}</Button>
+      <SourceActions>
+        {onStore
+          ? <Button variant="ghost" size="sm" onClick={openConnect}>{t('plugins.catalog.addPrivate', 'Add a private catalog')}</Button>
+          : <>
+            {storeAvailable ? <Button variant="outline" size="sm" disabled={storeSwitch.isLoading} onClick={() => void switchToStore()}>{t('plugins.catalog.useStore', 'Use the Foxlight store')}</Button> : null}
+            <Button variant="ghost" size="sm" onClick={openConnect}>{t('plugins.catalog.changeCatalog', 'Change catalog')}</Button>
+          </>}
+      </SourceActions>
     </Heading>
+    {storeNotice ? <Notice role="alert">{storeNotice}</Notice> : null}
     {catalog.isFetching && !catalog.data ? <Centered><Spinner size={22} /><span>{t('plugins.catalog.reading', 'Reading and verifying the catalog…')}</span></Centered> : null}
     {catalog.error ? <Notice role="alert">
       {pluginRefusalDetail(catalog.error) ?? t('plugins.catalog.readFailed', 'The catalog could not be read.')}
@@ -124,6 +157,7 @@ const Heading = styled.div`
   h2 { font-size: 22px; margin: 0; letter-spacing: -.01em; color: ${({ theme }) => theme.colors.text}; }
   p { margin: 6px 0 0; font-size: 14px; color: ${({ theme }) => theme.colors.textSecondary}; }
 `;
+const SourceActions = styled.div`display: flex; flex-wrap: wrap; gap: 8px;`;
 const Offers = styled.div`display: flex; flex-direction: column; gap: 12px;`;
 const Centered = styled.div`display: flex; align-items: center; gap: 12px; padding: 24px 4px; color: ${({ theme }) => theme.colors.textSecondary}; font-size: 14px;`;
 const Notice = styled.div`

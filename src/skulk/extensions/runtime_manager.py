@@ -18,6 +18,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, TypeAdapter
 
+from skulk.extensions.capability_store import (
+    EMBEDDED_CAPABILITY_STORE_ROOT,
+    StoreTrustClient,
+)
 from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
     QualifiedHost,
@@ -37,6 +41,7 @@ from skulk.extensions.runtime_attachment import (
     recover_attachment,
 )
 from skulk.extensions.runtime_catalog import (
+    BuiltinCatalogSelection,
     CatalogEntryReview,
     CatalogRefusedError,
     CatalogSourceUpdate,
@@ -300,6 +305,12 @@ class CatalogRequest(_Request):
     """Read the host's signed catalog or its source readiness; nothing installs."""
 
     action: Literal["read_catalog", "catalog_status"]
+    offline: bool = Field(
+        default=False,
+        description="The calling node runs offline: the built-in store's trust "
+        "comes from its last verified copy, without network access. The manager "
+        "runs with a fixed environment, so the node states it per request.",
+    )
 
 
 class CatalogRegistration(_Request):
@@ -307,6 +318,20 @@ class CatalogRegistration(_Request):
 
     action: Literal["configure_catalog"] = "configure_catalog"
     request: CatalogSourceUpdate = Field(description="Owner-supplied catalog settings.")
+
+
+class CatalogStoreRequest(_Request):
+    """Make the built-in capability store the host's catalog source again."""
+
+    action: Literal["use_builtin_catalog"] = "use_builtin_catalog"
+    request: BuiltinCatalogSelection = Field(
+        description="The source revision the owner reviewed."
+    )
+    offline: bool = Field(
+        default=False,
+        description="The calling node runs offline: use the store's last "
+        "verified trust without network access.",
+    )
 
 
 def _release_trust(
@@ -469,6 +494,7 @@ type ManagerRequest = (
     | ReloadRuntimeRequest
     | CatalogRequest
     | CatalogRegistration
+    | CatalogStoreRequest
     | CatalogInstallRequest
     | InstallationRequest
     | SubmitRequest
@@ -513,7 +539,14 @@ class RuntimeManager:
         self.path = manager_socket(self.root)
         self.controllers: dict[str, RuntimeController] = {}
         self.downloads: dict[str, RuntimeDownloads] = {}
-        self.catalog = HostCatalog(root)
+        # The store client reads the embedded root at call time through this
+        # module, so a build without the root simply has no built-in store.
+        self.catalog = HostCatalog(
+            root,
+            store=StoreTrustClient(
+                root / "store-trust", embedded_root=EMBEDDED_CAPABILITY_STORE_ROOT
+            ),
+        )
         # One catalog read at a time: a second reader is refused as busy.
         # The host is measured once per manager lifetime (its environment
         # is fixed while it runs), so no read repeats the tree hash and a
@@ -897,7 +930,7 @@ class RuntimeManager:
             if self.catalog_read.locked():
                 raise CatalogRefusedError("catalog_busy", "catalog source is busy")
             async with self.catalog_read:
-                verified = await self.catalog.fetch()
+                verified = await self.catalog.fetch(offline=request.offline)
                 host = await self._measured_host()
             return verified.review(
                 skulk_version=host.skulk_version,
@@ -914,6 +947,17 @@ class RuntimeManager:
                 return (await self.catalog.configure(request.request)).model_dump(
                     mode="json"
                 )
+        if isinstance(request, CatalogStoreRequest):
+            # The same lock as configuration: a binding never sees the source
+            # switch between accepting a listing and configuring its release.
+            if self.catalog_read.locked():
+                raise CatalogRefusedError("catalog_busy", "catalog source is busy")
+            async with self.catalog_read:
+                return (
+                    await self.catalog.use_builtin_store(
+                        request.request.expected_revision, offline=request.offline
+                    )
+                ).model_dump(mode="json")
         if isinstance(request, CatalogInstallRequest):
             return (await self._install_from_catalog(request.request)).model_dump(
                 mode="json"
