@@ -306,14 +306,21 @@ def engine_of(tag: str) -> EngineType | None:
 
 # The hardware an engine needs, in an operator's words, for engines whose
 # availability the machine alone decides: every Apple Silicon Mac advertises
-# MLX. Each entry also names the hardware classes that reveal such a machine,
-# so a node owning the hardware without advertising the engine (a failed
-# import, say) keeps the detailed message. Engines that also need software a
-# node may lack (mlx-audio advertises only when its package imports, vLLM, or
-# the video engine before it is installed) are deliberately absent, so a
-# cluster missing them is never told it is missing hardware it already owns.
+# MLX, and every Linux machine the video engine's wheel sets cover advertises
+# the video engine before installing it on demand. Each entry also names the
+# hardware classes that reveal such a machine, so a node owning the hardware
+# without advertising the engine (a failed import, an offline node) keeps the
+# detailed message. Engines that also need software a node may lack
+# (mlx-audio advertises only when its package imports, vLLM) are deliberately
+# absent, so a cluster missing them is never told it is missing hardware it
+# already owns. The video engine's AMD class mirrors
+# ``provisioning.manifest.COMFY_ROCM_PCI_DEVICE_IDS``; a test keeps them equal.
 _ENGINE_HARDWARE: Final[dict[EngineType, tuple[str, frozenset[str]]]] = {
     "mlx": ("an Apple Silicon Mac", frozenset({"platform:darwin"})),
+    "comfy": (
+        "a Linux machine with an NVIDIA GPU or an AMD Strix Halo GPU",
+        frozenset({"nvidia", "amd:pci-1002-1586"}),
+    ),
 }
 
 

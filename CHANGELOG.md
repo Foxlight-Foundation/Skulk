@@ -16,6 +16,19 @@ This project records release notes here and mirrors public-facing notes in
 - When no machine in a cluster has the hardware a model needs, placement and
   the dashboard now say so in plain words (for example "it needs an Apple
   Silicon Mac") instead of listing engine tags.
+- Video models (MiniMax H3) now appear in the model catalog by default too;
+  `SKULK_ENABLE_VIDEO_MODELS=false` hides them on a node. The video engine
+  (about 7 GB) is no longer installed when a node starts: a Linux node with an
+  NVIDIA GPU or an AMD Strix Halo GPU installs it the first time a video model
+  is placed there, while the model downloads. The placement preview and the
+  dashboard say beforehand that the engine will be installed with the model
+  and that placement will take longer, the instance shows "Installing video
+  engine..." meanwhile, and an install that fails (no internet, too little
+  disk space, a GPU the engine cannot use) fails the placement with the step
+  that failed. `skulk doctor --fix` installs the engine ahead of time, and a
+  cluster without a machine that can run video models is told which machine
+  it needs. The Linux packages now carry `uv`, which the install uses; the
+  node also needs `git`.
 
 ### Fixed
 

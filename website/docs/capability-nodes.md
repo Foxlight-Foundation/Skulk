@@ -101,14 +101,13 @@ The Studio renders through Skulk, so the cluster must be able to serve MiniMax
 H3 before a render can start:
 
 - **A render node.** A Linux node with an NVIDIA GPU (CUDA) or an AMD Strix
-  Halo (ROCm), with about 64 GB of GPU memory. Skulk provisions the ComfyUI
-  engine that serves H3 on these nodes; `uv run skulk doctor` reports its
-  state. Apple Silicon nodes cannot render H3.
-- **Video models turned on.** Add `SKULK_ENABLE_VIDEO_MODELS=true` to
-  `~/.skulk/skulk.env` on each node and restart Skulk. Video model cards stay
-  hidden until then.
+  Halo (ROCm), with about 64 GB of GPU memory. The node installs the ComfyUI
+  engine that serves H3 (about 7 GB) the first time a video model is placed on
+  it; `uv run skulk doctor` reports its state and `uv run skulk doctor --fix`
+  installs it ahead of time. Apple Silicon nodes cannot render H3.
 - **A placed model.** Place a MiniMax H3 card (FL2VA or Ref2VA) from **Model
-  Store**. Each is about 49 GB to download. Place it before installing the
+  Store**. Each is about 49 GB to download, and the first placement on a node
+  also installs the video engine, which the placement preview mentions. Place it before installing the
   Studio; if the Studio was installed first and its setup check reports that
   no video model is placed, disable and re-enable it in **Plugins** once the
   model is ready.

@@ -551,11 +551,21 @@ A model card's `placement.compatible_backends` selects which engine serves it
   channel publishes no digests, so they are recorded by downloading each
   artifact once).
   Provisioned under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>-<wheel-set
-  digest>` (a wheel-set change reprovisions, never reuses) at node
-  startup only when `SKULK_ENABLE_VIDEO_MODELS=true` (the wheel set is
-  gigabytes), or by `skulk doctor --fix`; `SKULK_COMFY_BIN` (the
-  environment's python) plus `SKULK_COMFY_ROOT` (the checkout) point at a
-  hand-built install instead. The runner spawns ComfyUI headless (loopback
+  digest>` (a wheel-set change reprovisions, never reuses) ON DEMAND, never
+  at startup (startup only wires an install already on disk): video cards
+  are listed by default (`SKULK_ENABLE_VIDEO_MODELS=false` hides them), an
+  eligible node (Linux NVIDIA, or AMD only on the gfx1151 Strix Halo PCI id
+  the ROCm wheels target; online; git and uv found, uv via the Linux `uv`
+  PyPI dependency in packaged runtimes) advertises the comfy tags in
+  `NodeResources.on_demand_backends` as well as `backends`, the placement
+  preview's `engine_install` warns that the ~7 GB engine installs with the
+  model, and the worker's `InstallEngine` task installs it beside the model
+  download (one shared job per engine; `LoadModel` waits; the new interpreter
+  must see the GPU or the install is removed; failure gives each waiter up
+  with `engine_install_failed`). Placement prefers an installed engine among
+  equals. `skulk doctor --fix` installs through the same path;
+  `SKULK_COMFY_BIN` (the environment's python) plus `SKULK_COMFY_ROOT` (the
+  checkout) point at a hand-built install instead. The runner spawns ComfyUI headless (loopback
   port, custom and API nodes disabled, Skulk-owned input/output/temp/user
   directories, an `extra_model_paths.yaml` exposing the staged artifact),
   binds the card and request onto ComfyUI's own MiniMax H3 node graph

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Final, cast
@@ -59,6 +60,8 @@ _VENV_TIMEOUT_SECONDS: Final = 300.0
 # a budget that a slow connection can still meet.
 _INSTALL_TIMEOUT_SECONDS: Final = 14400.0
 _GPU_CHECK_TIMEOUT_SECONDS: Final = 300.0
+# Older than any live install could be: two pip-install budgets.
+_ABANDONED_STAGING_SECONDS: Final = 2 * _INSTALL_TIMEOUT_SECONDS
 _PYPI_INDEX: Final = "https://pypi.org/simple/"
 _DIGEST_KEY_LENGTH: Final = 12
 
@@ -465,6 +468,29 @@ class ComfyInstallError(RuntimeError):
 _INSTALL_LOCK: Final = threading.Lock()
 
 
+def _remove_abandoned_staging(variants: Sequence[EngineVariant]) -> None:
+    """Delete staging trees an interrupted install left beside its target.
+
+    A node restarted mid-install leaves a staging tree of several gigabytes.
+    Only trees older than any live install could be are removed, so a
+    concurrent install in another process (``skulk doctor --fix``) keeps its own.
+    """
+    machine = platform_module.machine()
+    cutoff = time.time() - _ABANDONED_STAGING_SECONDS
+    for variant in variants:
+        target = managed_comfy_root(variant, machine)
+        if not target.parent.is_dir():
+            continue
+        for staging in target.parent.glob(f".{target.name}-*"):
+            try:
+                abandoned = staging.is_dir() and staging.stat().st_mtime < cutoff
+            except OSError:
+                continue
+            if abandoned:
+                logger.info(f"Removing an interrupted video engine install at {staging}")
+                shutil.rmtree(staging, ignore_errors=True)
+
+
 def _verify_gpu(root: Path, run: Runner) -> None:
     """Fail an install whose torch cannot see this node's GPU (an old driver)."""
     probe = "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 3)"
@@ -512,6 +538,7 @@ def install_comfy_on_demand(
                 "the eligibility check", "this node cannot install the video engine"
             )
         SKULK_ENGINES_DIR.mkdir(parents=True, exist_ok=True)
+        _remove_abandoned_staging(variants)
         free = shutil.disk_usage(SKULK_ENGINES_DIR).free
         if free < COMFY_INSTALL_FREE_BYTES:
             raise ComfyInstallError(

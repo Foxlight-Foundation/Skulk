@@ -411,6 +411,25 @@ def test_on_demand_install_reports_a_failed_download(monkeypatch: pytest.MonkeyP
     assert raised.value.step == "the engine download and install"
 
 
+def test_on_demand_install_removes_only_abandoned_staging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _eligible(monkeypatch)
+    target = comfy.managed_comfy_root("cuda", "aarch64")
+    target.parent.mkdir(parents=True)
+    abandoned = target.parent / f".{target.name}-interrupted"
+    live = target.parent / f".{target.name}-running"
+    for staging in (abandoned, live):
+        (staging / "venv").mkdir(parents=True)
+    stale = abandoned.stat().st_mtime - comfy._ABANDONED_STAGING_SECONDS - 60
+    os.utime(abandoned, (stale, stale))
+
+    install_comfy_on_demand(make_facts(gpus=(NVIDIA_A40,)), offline=False, run=_FakeRun())
+
+    assert not abandoned.exists()
+    assert live.is_dir()
+
+
 def test_installed_managed_comfy_finds_the_install_for_its_backend() -> None:
     assert installed_managed_comfy("comfy-cuda") is None
     root = provision_comfy("cuda", run=_FakeRun())
