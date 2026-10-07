@@ -148,10 +148,14 @@ platforms, exact runtime compatibility, permissions, required services, costs,
 and cleanup procedures before installing. A matching version label alone is not
 proof of compatible bytes or dependencies.
 
-A publisher can also give you a signed catalog: an address and the publisher
-trust to verify it, often as a single invitation code. Connect it under
-**Plugins**, then **Browse**, which lists its plugins and says which releases fit
-this host (see [From a catalog](#from-a-catalog)). From a terminal,
+When your Skulk build includes the built-in capability store, **Plugins**, then
+**Browse** lists it with nothing to set up: Skulk verifies and renews the store's
+publisher trust by itself. A publisher can also give you a private catalog: an
+address and the publisher trust to verify it, often as a single invitation
+code. Add it under **Browse** with **Add a private catalog**; it replaces the
+store as the host's catalog until you select **Use the Foxlight store**. Browse
+lists the catalog's plugins and says which releases fit this host (see
+[From a catalog](#from-a-catalog)). From a terminal,
 `skulk-plugin-service catalog` lists the releases that match this host, and
 `skulk-plugin-service install-plugin --from-catalog BUNDLE_ID` installs one
 through the same consent steps as a single release (prefix both with
@@ -182,11 +186,14 @@ a system service and asks for your administrator password once (see
 
 ### From a catalog
 
-1. Open **Plugins**, then **Browse**. If the host has no catalog yet, paste the
+1. Open **Plugins**, then **Browse**. A host on the built-in store lists it
+   right away. To use a private catalog instead, select **Add a private
+   catalog** (on a build without the store, the form opens directly), paste the
    invitation code from the publisher (it starts with `skulk-catalog:`), or
    enter the catalog address, publisher name and publisher key, then select
    **Connect**. The code carries no authority of its own: every release is still
-   verified against the publisher key before anything installs.
+   verified against the publisher key before anything installs. **Use the
+   Foxlight store** returns the host to the built-in store.
 2. Each card is one plugin. **Review and install** opens its review. An installed
    plugin with a newer release that fits this host offers **Review update**
    instead, including one that stopped fitting after a Skulk update. A card that

@@ -929,6 +929,17 @@ installation evidence, not publisher metadata or a sandbox against the service
 user. A missing or mismatched seal requires explicit recovery; the installer does
 not bless existing changed files by creating a replacement seal.
 
+The one exception is the base interpreter itself. An application update replaces
+the bundled interpreter and moving the application changes its path, so when a
+generation fails verification the installer checks whether the sealed interpreter
+differs from the interpreter running it. When it does, every other sealed member
+still matches exactly, `pyvenv.cfg` is the sealed bytes, and the environment
+targets the same Python minor version, the installer re-points the interpreter
+links and the interpreter values in `pyvenv.cfg` at the running interpreter
+(the same base a fresh installation would record) and reseals. A private
+journal lets an interrupted adoption finish on the next start. Any other
+difference, or a different Python minor version, is refused as before.
+
 Staging does not change active selection, logical plugin identities, configuration,
 credentials or cleanup obligations. Installer output is bounded and stored only
 as protected host-local evidence. These are local installation primitives; the
@@ -1035,7 +1046,17 @@ preflight commands before enabling capability work. This command adds no provide
 policy or spending authority to core.
 
 
-The host can also read a signed catalog for discovery. A publisher lists the
+The host can also read a signed catalog for discovery. Its source is the
+built-in capability store, which needs no configuration, or a private catalog
+the owner configures in its place. Skulk verifies which publishers the built-in
+store trusts through the store's TUF repository, from a root shipped inside
+Skulk, and renews that trust by itself on each catalog read: a newer trust
+revision is applied, an older one never, and the store's revocations apply
+exactly as its current trust lists them. A host that cannot reach the store, or runs offline, uses the trust it
+last verified until that trust expires. A private catalog
+(`POST /v1/plugins/managed/catalog/source`) replaces the store, and
+`POST /v1/plugins/managed/catalog/source/builtin` switches back. A build that
+does not ship the store's root has no built-in store. A publisher lists the
 releases it signed (identity, sequence, platforms, size and digests, the signed
 permissions, capability ids, surfaces, durable operations and steward risk
 classes, and where each signed release record is served); the host verifies the

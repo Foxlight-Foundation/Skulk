@@ -33,7 +33,10 @@ from skulk.extensions.runtime_files import (
     read_private,
     write_private,
 )
-from skulk.extensions.runtime_integrity import seal_runtime, verify_installed_runtime
+from skulk.extensions.runtime_integrity import (
+    seal_runtime,
+    verify_or_adopt_installed_runtime,
+)
 
 _INVENTORY = """import importlib.metadata,json,re
 def name(d): return re.sub(r"[-_.]+", "-", d.metadata["Name"].lower())
@@ -271,6 +274,10 @@ class RuntimeInstaller:
         process exits; ordinary owners and verification callers do not inherit it.
         Local entrypoints may wait up to 30 seconds for ownership before any
         verification or execution; no command is retried after acquiring the lock.
+        A generation whose only difference is a moved or updated base interpreter
+        of the same Python minor version is re-pointed at the running interpreter
+        and resealed when verification fails, so an application update keeps
+        installed plugins.
         """
         digest = _RUNTIME_DIGEST.validate_python(runtime_digest, strict=True)
         lock = await self._ownership_lock(wait_for_ownership)
@@ -289,7 +296,9 @@ class RuntimeInstaller:
                 await asyncio.to_thread(
                     verified_artifacts, runtime, generation / "artifacts"
                 )
-                await asyncio.to_thread(verify_installed_runtime, generation, digest)
+                await asyncio.to_thread(
+                    verify_or_adopt_installed_runtime, generation, digest
+                )
                 current_host = await asyncio.to_thread(measure_host)
                 self._verify(runtime.metadata, current_host)
                 return runtime, current_host
@@ -354,7 +363,8 @@ class RuntimeInstaller:
         operation status instead of resubmitting installation.
         Explicit recovery preserves incomplete generations as evidence before
         rebuilding the same signed bytes. Selected or completed generations are
-        never moved or resealed by recovery.
+        never moved or resealed by recovery; only interpreter adoption reseals
+        one, and it changes nothing but the interpreter links and pyvenv.cfg.
         Managed downloads may set wait_for_ownership to wait up to 30 seconds
         for a competing local lock before any staging effects. Verification
         runs after ownership is acquired; cancellation while waiting is safe.
@@ -418,7 +428,7 @@ class RuntimeInstaller:
                         verified_artifacts, runtime, generation / "artifacts"
                     )
                     await asyncio.to_thread(
-                        verify_installed_runtime, generation, runtime.digest
+                        verify_or_adopt_installed_runtime, generation, runtime.digest
                     )
                 else:
                     supplied = await asyncio.to_thread(

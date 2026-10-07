@@ -187,6 +187,18 @@ export interface RuntimeSourceStatus {
   trust_revision: number | null;
 }
 
+/**
+ * The host's catalog source readiness. The built-in capability store reads as
+ * configured from the start; its `trust_revision` stays null until the first
+ * catalog read verifies the store's trust.
+ */
+export interface CatalogSourceStatus extends RuntimeSourceStatus {
+  /** Whether the source is the built-in capability store rather than a private catalog. */
+  builtin_store?: boolean;
+  /** Whether this Skulk build includes the built-in store, so the host can switch to it. */
+  builtin_store_available?: boolean;
+}
+
 /** One release a signed catalog lists: the consent facts, never an address or credential. */
 export interface CatalogEntry {
   bundle_id: string;
@@ -404,9 +416,14 @@ const pluginsApi = apiSlice.injectEndpoints({
       providesTags: ['PluginCatalog'],
       keepUnusedDataFor: 0,
     }),
-    getCatalogSource: build.query<RuntimeSourceStatus, void>({
+    getCatalogSource: build.query<CatalogSourceStatus, void>({
       query: () => ({ url: '/v1/plugins/managed/catalog/source', headers, cache: 'no-store' }),
       providesTags: ['PluginCatalog'],
+    }),
+    // Owner-only. Carries no credential, so it can be an ordinary mutation.
+    selectBuiltinCatalog: build.mutation<CatalogSourceStatus, { expected_revision: number }>({
+      query: (body) => ({ url: '/v1/plugins/managed/catalog/source/builtin', method: 'POST', headers, body }),
+      invalidatesTags: ['PluginCatalog'],
     }),
     installFromCatalog: build.mutation<CatalogInstallation, CatalogInstallRequest>({
       query: (body) => ({ url: '/v1/plugins/managed/catalog/install', method: 'POST', headers, body }),
@@ -439,4 +456,4 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useGetPluginServiceQuery, useStartPluginServiceSetupMutation, useGetPluginCatalogQuery, useGetCatalogSourceQuery, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useGetPluginServiceQuery, useStartPluginServiceSetupMutation, useGetPluginCatalogQuery, useGetCatalogSourceQuery, useSelectBuiltinCatalogMutation, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
