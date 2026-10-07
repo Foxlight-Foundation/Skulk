@@ -55,6 +55,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The bundled Node.js that builds the dashboard on install is now the stable
+  24.19.0 LTS release instead of a 25.2.1 release candidate.
 - A model whose files turn out to be incomplete when it loads is no longer
   reported as refused by model trust policy. The instance still fails without
   retrying, now as a download failure that says a file the model needs is
