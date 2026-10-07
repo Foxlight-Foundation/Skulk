@@ -61,6 +61,7 @@ from skulk.extensions.runtime_download import (
     RuntimeDownloads,
     SourceStatus,
     SourceUpdate,
+    store_trust_record,
 )
 from skulk.extensions.runtime_files import (
     RuntimeLock,
@@ -410,6 +411,18 @@ class CatalogRead(BaseModel):
         "minutes rather than at its next hourly renewal.",
     )
 
+    @classmethod
+    def from_reply(cls, reply: dict[str, JsonValue]) -> "CatalogRead":
+        """Read a manager's ``read_catalog`` result in either shape.
+
+        A manager from before this result was wrapped answers with the bare
+        review; it is still running during the moments a Skulk update takes
+        to reload it, and a terminal command can reach it then.
+        """
+        if "review" in reply:
+            return cls.model_validate_json(json.dumps(reply))
+        return cls(review=CatalogReview.model_validate_json(json.dumps(reply)))
+
 
 _STORE_FOLLOW_SECONDS: Final = 10.0
 """One deadline for bringing every follower up to a renewed trust.
@@ -656,6 +669,9 @@ class RuntimeManager:
         # is fixed while it runs), so no read repeats the tree hash and a
         # cancelled first measurement cannot overlap a later one.
         self.catalog_read = asyncio.Lock()
+        # Set when a store trust follow deferred busy installations, cleared by
+        # one that reached them all; reported in the inventory for the node.
+        self.store_trust_retry = False
         self.host: asyncio.Task[QualifiedHost] | None = None
         self.errors: dict[str, str] = {}
         # A generation's staged metadata never changes once written, so its
@@ -1018,12 +1034,15 @@ class RuntimeManager:
         if isinstance(request, InventoryRequest):
             # Naming reload support lets a host tell a manager from before the
             # request apart from one refusing it, before it sends the request.
-            return {
+            inventory: dict[str, JsonValue] = {
                 "installations": [
                     self._summary(identifier) for identifier in self._identifiers()
                 ],
                 "reload_runtime": True,
             }
+            if self.store_trust_retry:
+                inventory["store_trust_retry"] = True
+            return inventory
         if isinstance(request, AttachmentRequest):
             return await finish_runtime_work(asyncio.create_task(self._attach(request)))
         if isinstance(request, CatalogRequest):
@@ -1281,6 +1300,10 @@ class RuntimeManager:
                         changed.append(identifier)
                 except (OSError, ValueError):
                     deferred.append(identifier)
+            # Whoever asked for this follow (the node, the dashboard or a
+            # terminal read), the node learns of a deferral from its next
+            # inventory read and retries within minutes.
+            self.store_trust_retry = bool(deferred)
         return tuple(changed), tuple(deferred)
 
     def _store_followers(self) -> list[str]:
@@ -1416,12 +1439,18 @@ class RuntimeManager:
                 )
             except FileNotFoundError:
                 previous_trust = None
+            # An installation that already took a newer store trust keeps it:
+            # a binding never moves it back to the catalog's older view.
+            taken = downloads.followed_store_trust() if from_store else None
+            keep_newer = taken is not None and taken.revision > discovery.revision
             source = await downloads.configure(
                 SourceUpdate(
                     expected_revision=downloads.source_status().revision,
                     base_url=entry.feed_url,
                     metadata_filename="release.json",
-                    trust=_store_release_trust(
+                    trust=None
+                    if keep_newer
+                    else _store_release_trust(
                         downloads, entry.publisher, discovery, following=following
                     )
                     if from_store
@@ -1443,6 +1472,11 @@ class RuntimeManager:
                 # binding keeps the installation's revocations as before.
                 carry_revocations=not from_store,
                 follows_store=from_store,
+                store_trust=taken
+                if keep_newer
+                else store_trust_record(discovery)
+                if from_store
+                else None,
             )
         # Inspection reaches the feed; like inspect_release it runs outside
         # the manager-wide lock so a slow server blocks nothing else.
@@ -1494,8 +1528,9 @@ class RuntimeManager:
         revocations), so ``previous_trust`` is given and its content is put
         back at the installation's next trust revision, which the installer's
         trust floor requires to rise. The restored source record carries
-        ``following``, the follower status it had. All of it changes under
-        one manager guard. A restore
+        ``following``, the follower status it had, and the store revision it
+        had taken. Source and trust go back as one journaled step under the
+        manager guard. A restore
         that itself fails is named, so the operator inspects source status
         rather than trusting the refusal alone.
         """
@@ -1516,9 +1551,12 @@ class RuntimeManager:
                         clear_token=token is None,
                     ),
                     follows_store=following,
+                    store_trust=previous.store_trust,
+                    # The earlier trust goes back in the same journaled step as
+                    # the source, so no crash leaves the old feed under the
+                    # store's trust.
+                    restore_trust=previous_trust,
                 )
-                if previous_trust is not None:
-                    await downloads.restore_trust(previous_trust)
         except (OSError, ValueError):
             raise ValueError(
                 "listed feed refused and the prior source could not be restored; "

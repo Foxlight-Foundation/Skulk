@@ -27,6 +27,7 @@ from skulk.extensions.runtime_download import (
     LEGACY_STORE_BINDING_FILE,
     RuntimeDownloads,
     SourceUpdate,
+    store_trust_record,
 )
 from skulk.extensions.runtime_files import (
     RuntimeLock,
@@ -41,6 +42,7 @@ from skulk.extensions.runtime_manager import (
     CatalogRead,
     CatalogRequest,
     InstallationRequest,
+    InventoryRequest,
     RuntimeManager,
     SourceRegistration,
     StoreTrustRefresh,
@@ -568,10 +570,10 @@ async def test_follower_status_lives_in_the_source_record(
         assert not marker.exists()
 
 
-async def test_no_crash_lets_a_renewal_overwrite_trust_the_store_does_not_govern(
+async def test_a_change_of_trust_authority_is_one_durable_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Leaving the store is recorded before the owner's trust; joining, after."""
+    """An interrupted change is completed before anything reads source or trust."""
     from skulk.extensions import runtime_download
 
     async with _store_host(tmp_path, monkeypatch) as host:
@@ -579,6 +581,7 @@ async def test_no_crash_lets_a_renewal_overwrite_trust_the_store_does_not_govern
         await host.bind("managed.store")
         installation = host.manager.downloads["managed.store"]
         store_trust = host.trust("managed.store")
+        journal = installation.root / "trust-transition.json"
         written = runtime_download.write_private
 
         def lose_trust_write(path: Path, content: bytes) -> None:
@@ -586,41 +589,61 @@ async def test_no_crash_lets_a_renewal_overwrite_trust_the_store_does_not_govern
                 raise OSError("power lost")
             written(path, content)
 
-        # The owner takes the installation over and the trust write is lost.
+        # The owner takes the installation over; power is lost after the
+        # journal lands but before either file is written.
+        owner_trust = store_trust.model_copy(
+            update={"revision": 9, "revoked_artifacts": ("e" * 64,)}
+        )
         monkeypatch.setattr(runtime_download, "write_private", lose_trust_write)
         with pytest.raises(OSError):
             await installation.configure(
                 SourceUpdate(
                     expected_revision=installation.source_status().revision,
                     base_url=PRIVATE,
-                    trust=store_trust.model_copy(
-                        update={"revision": 9, "revoked_artifacts": ("e" * 64,)}
-                    ),
+                    trust=owner_trust,
                 )
             )
         monkeypatch.setattr(runtime_download, "write_private", written)
-        # Following already ended, so no renewal touches this installation.
+        assert journal.exists()
+        # The next read completes it: the owner's source and trust together,
+        # so no renewal can ever overwrite the owner's trust.
         assert not installation.follows_store()
+        assert not journal.exists()
+        assert host.trust("managed.store").revoked_artifacts == ("e" * 64,)
         host.publish(2)
         assert (await host.refresh()).followed == ()
-        assert host.trust("managed.store") == store_trust
-        # Joining again with the trust write lost: the record that says it
-        # follows lands first, and the next renewal writes the store's trust.
+        # Joining again, interrupted the same way: completed on the next read,
+        # with the store revision it took recorded beside it.
+        renewed = trust_document(host.key, revision=2)
+        joined = RuntimeTrust.model_validate_json(renewed).model_copy(
+            update={"revision": 10}
+        )
         monkeypatch.setattr(runtime_download, "write_private", lose_trust_write)
         with pytest.raises(OSError):
             await installation.configure(
                 SourceUpdate(
                     expected_revision=installation.source_status().revision,
                     base_url=FEED,
-                    trust=store_trust.model_copy(update={"revision": 2}),
+                    trust=joined,
                 ),
                 carry_revocations=False,
                 follows_store=True,
+                store_trust=store_trust_record(
+                    RuntimeTrust.model_validate_json(renewed)
+                ),
             )
         monkeypatch.setattr(runtime_download, "write_private", written)
         assert installation.follows_store()
-        assert (await host.refresh()).followed == ("managed.store",)
-        assert host.trust("managed.store").expires_at > store_trust.expires_at
+        assert host.trust("managed.store") == joined
+        taken = installation.followed_store_trust()
+        assert taken is not None and taken.revision == 2
+        # A journal that cannot be read refuses release operations until it
+        # is repaired; nothing is guessed.
+        write_private(journal, b"not a journal")
+        with pytest.raises(ValueError, match="local maintenance"):
+            installation.source()
+        with pytest.raises(ValueError):
+            await installation.inspect()
 
 
 async def test_followers_without_verified_store_trust_get_a_refusal(
@@ -703,3 +726,115 @@ async def test_busy_followers_share_one_deadline(
             "managed.second",
             "managed.third",
         }
+
+
+async def test_a_follower_never_takes_older_store_trust_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read racing a renewal, or a binding from an older view, cannot roll it back."""
+    async with _store_host(tmp_path, monkeypatch) as host:
+        host.publish(1)
+        await host.bind("managed.store")
+        installation = host.manager.downloads["managed.store"]
+        client = host.manager.catalog.store
+        assert client is not None
+        host.publish(2)
+        older = client.load(offline=False)
+        host.publish(3)
+        assert (await host.refresh()).followed == ("managed.store",)
+        newest = host.trust("managed.store")
+        taken = installation.followed_store_trust()
+        assert taken is not None and taken.revision == 3
+        # The older trust a slow read verified before the renewal finished.
+        assert not await installation.follow_trust(older)
+        assert host.trust("managed.store") == newest
+        reviewed = (await host.read()).review.catalog_sha256
+        # The catalog holds revision 3; a renewal to 4 lands while another
+        # catalog operation holds the catalog, and the store client's retained
+        # copy is then lost, so a rebinding sees only the catalog's older view.
+        host.publish(4)
+        async with host.manager.catalog.guard:
+            assert (await host.refresh()).followed == ("managed.store",)
+        assert host.manager.catalog.trust().revision == 3
+        client.retained_path.unlink()
+        took_four = host.trust("managed.store")
+        await host.bind_reviewed("managed.store", reviewed)
+        assert host.trust("managed.store") == took_four
+        taken = installation.followed_store_trust()
+        assert taken is not None and taken.revision == 4
+
+
+async def test_any_deferral_reaches_the_node_and_keeps_the_short_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manager reports deferrals in its inventory; a renewal in flight keeps them."""
+    async with _store_host(tmp_path, monkeypatch) as host:
+        host.publish(1)
+        await host.bind("managed.store")
+        installation = host.manager.downloads["managed.store"]
+        # A read (a terminal's as much as the dashboard's) defers a busy follower.
+        host.publish(2)
+        async with installation.guard:
+            await host.read()
+        inventory = await host.manager.dispatch(InventoryRequest())
+        assert inventory["store_trust_retry"] is True
+        # A renewal that reaches every follower clears it.
+        await host.refresh()
+        assert "store_trust_retry" not in await host.manager.dispatch(
+            InventoryRequest()
+        )
+
+
+async def test_the_node_keeps_a_deferral_that_arrives_during_a_renewal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A renewal that started before a deferral notice must not push it to an hour."""
+    from skulk.extensions import managed_services
+    from skulk.extensions.managed_services import ManagedServices
+
+    services = ManagedServices(tmp_path / "connection.json")
+    release = asyncio.Event()
+
+    async def request(root: Path, sent_request: object) -> dict[str, JsonValue]:
+        del root, sent_request
+        await release.wait()
+        return {"result": {"trust_revision": 2, "followed": [], "deferred": []}}
+
+    monkeypatch.setattr(managed_services, "manager_request", request)
+    services._schedule_store_trust(tmp_path)  # pyright: ignore[reportPrivateUsage]
+    await asyncio.sleep(0)
+    # A catalog read reports a deferred follower while the renewal is in flight.
+    services._retry_deferred_followers(  # pyright: ignore[reportPrivateUsage]
+        {"store_trust_deferred": ["managed.x"]}
+    )
+    release.set()
+    await services._settle_store_trust()  # pyright: ignore[reportPrivateUsage]
+    due = services.store_trust_due
+    assert due is not None and due - time.monotonic() <= 300
+    # Without a notice in flight, a clean renewal waits the hour.
+    services.store_trust_due = time.monotonic()
+    services._schedule_store_trust(tmp_path)  # pyright: ignore[reportPrivateUsage]
+    await services._settle_store_trust()  # pyright: ignore[reportPrivateUsage]
+    due = services.store_trust_due
+    assert due is not None and due - time.monotonic() > 3000
+
+
+def test_a_catalog_read_is_accepted_in_either_reply_shape() -> None:
+    """A manager reloading onto a new build may still answer with the bare review."""
+    review: dict[str, JsonValue] = {
+        "publisher": "fixture",
+        "revision": 1,
+        "created_at": 1,
+        "expires_at": 2,
+        "catalog_sha256": "c" * 64,
+        "entries": [],
+    }
+    wrapped = CatalogRead.from_reply(
+        {"review": review, "store_trust_deferred": ["managed.x"]}
+    )
+    bare = CatalogRead.from_reply(review)
+    assert wrapped.review == bare.review
+    assert (wrapped.store_trust_deferred, bare.store_trust_deferred) == (
+        ("managed.x",),
+        (),
+    )

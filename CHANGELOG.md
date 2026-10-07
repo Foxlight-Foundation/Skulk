@@ -15,11 +15,14 @@ This project records release notes here and mirrors public-facing notes in
   store's TUF repository, anchored in a root shipped inside Skulk, and renews
   that trust by itself on each catalog read: a newer trust revision is
   applied, an older one never, and the store's revocations apply exactly as
-  its current trust lists them. Revocations never carry between the store and
-  a private catalog, and each catalog address keeps its own trust history: a
-  private catalog's first trust is accepted whatever the store's revision, and
-  returning to a private catalog still refuses a trust older than the one the
-  host accepted there before. A host that cannot reach the store, or runs offline, keeps using the
+  its current trust lists them. Each catalog address keeps its own trust
+  history and its own revocations: a private catalog's first trust is accepted
+  whatever the store's revision, returning to a private catalog still refuses
+  a trust older than the one the host accepted there before and keeps the
+  revocations that catalog's trust held, and revocations never move between
+  the store and a private catalog or between two catalogs. The dashboard asks
+  the host to number a new private trust, so re-adding a catalog is never
+  refused as a rollback. A host that cannot reach the store, or runs offline, keeps using the
   trust it last verified until that trust expires; a tampered or expired trust
   is refused. A private catalog still works: **Add a private catalog**
   replaces the store as the host's source, and **Use the Foxlight store** (or
@@ -35,9 +38,11 @@ This project records release notes here and mirrors public-facing notes in
   expires. A renewal that cannot verify the store's trust, or finds the
   capability busy, is retried within five minutes, and an install from a
   listing read earlier is checked against the newest trust Skulk has
-  verified. Which capabilities follow the store is recorded with each one's
-  source, so an interrupted change of source never hands an owner's trust to
-  the store. Capabilities installed from a private catalog, or whose source the
+  verified. Which capabilities follow the store, and the store trust each one
+  last took, are recorded with its source and changed together with its trust
+  in one step, so an interrupted change never leaves a capability half moved,
+  and a capability never takes back an older store trust than the one it
+  holds. Capabilities installed from a private catalog, or whose source the
   owner configured directly, keep the trust they were given.
 
 ### Changed

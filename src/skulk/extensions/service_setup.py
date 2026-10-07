@@ -46,6 +46,7 @@ from skulk.extensions.runtime_files import (
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_manager import (
     MANAGER_REQUEST,
+    CatalogRead,
     CatalogRequest,
     InstallationRequest,
     InventoryRequest,
@@ -869,7 +870,15 @@ def main() -> None:
                         file=sys.stderr,
                     )
                 raise SystemExit(1)
-            print(json.dumps(listing.get("review", listing), indent=2))
+            # Either reply shape (a manager mid-reload answers with the bare
+            # review). A read that deferred followers sets the manager's retry
+            # flag, which the node reads and renews within five minutes.
+            print(
+                json.dumps(
+                    CatalogRead.from_reply(listing).review.model_dump(mode="json"),
+                    indent=2,
+                )
+            )
         elif action == "manage":
             if os.geteuid() == 0:
                 raise ValueError("plugin management requires the nonroot service owner")

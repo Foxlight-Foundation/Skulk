@@ -428,6 +428,23 @@ def test_the_floor_map_refuses_a_new_history_at_the_bound() -> None:
     }
     # Existing histories keep recording at the bound; a new one is refused.
     assert bounded_floors(floors, f"{prefix}publisher-3", prefix) == floors
+    # Discovery trust floors are bounded on their own: a full catalog history
+    # still takes them, and they never take its room.
+    with_trust = {
+        **floors,
+        **{
+            f"trust\nhttps://catalog-{i}.example.test/\ncatalog.json": AcceptedFloor(
+                revision=1, sha256="d" * 64
+            )
+            for i in range(32)
+        },
+    }
+    assert bounded_floors(with_trust, f"{prefix}publisher-3", prefix) == with_trust
+    with_trust["trust\nhttps://one-more.example.test/\ncatalog.json"] = (
+        AcceptedFloor(revision=1, sha256="d" * 64)
+    )
+    with pytest.raises(ValueError, match="local maintenance"):
+        bounded_floors(with_trust, f"{prefix}publisher-3", prefix)
     floors[f"{prefix}publisher-32"] = AcceptedFloor(revision=1, sha256="c" * 64)
     with pytest.raises(ValueError, match="local maintenance"):
         bounded_floors(floors, f"{prefix}publisher-32", prefix)

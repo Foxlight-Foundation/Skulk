@@ -816,3 +816,103 @@ async def test_verified_store_trust_applies_to_the_catalog_only_when_newer(
     )
     assert not await store.catalog.apply_store_trust(newest)
     assert store.trust_revision() == 5
+
+
+async def test_a_private_catalogs_revocations_survive_a_round_trip_through_the_store(
+    tmp_path: Path,
+) -> None:
+    """Revocations stay with their catalog address, never move to the store or elsewhere."""
+    store = _Store(tmp_path)
+    store.publish(1)
+    await store.catalog.fetch()
+    private_key = Ed25519PrivateKey.generate()
+    revoked = _private_trust(
+        private_key, 5, revoked_publishers=("gone",), revoked_artifacts=("4" * 64,)
+    )
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=1, base_url="https://private.example.test/", trust=revoked
+        )
+    )
+    await store.catalog.use_builtin_store(2)
+    # The store's trust is the store's: the private revocations stay behind.
+    assert store.catalog.trust().revoked_publishers == ()
+    state = (store.catalog.root / "catalog-state.json").read_bytes()
+    assert b'"revocations"' in state
+    # Back at the private address, a newer trust that omits them still has them.
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=3,
+            base_url="https://private.example.test/",
+            trust=_private_trust(private_key, 6),
+        )
+    )
+    trust = store.catalog.trust()
+    assert (trust.revoked_publishers, trust.revoked_artifacts) == (("gone",), ("4" * 64,))
+    # Another private address starts with none of them.
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=4,
+            base_url="https://other-private.example.test/",
+            trust=_private_trust(private_key, 1),
+        )
+    )
+    assert store.catalog.trust().revoked_artifacts == ()
+    # And they are still there for the first address.
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=5,
+            base_url="https://private.example.test/",
+            trust=_private_trust(private_key, 7),
+        )
+    )
+    assert store.catalog.trust().revoked_artifacts == ("4" * 64,)
+    # A host that never left a catalog with revocations keeps the document
+    # shape earlier builds read.
+    plain = _Store(tmp_path / "plain")
+    plain.publish(1)
+    await plain.catalog.fetch()
+    assert b'"revocations"' not in (
+        plain.catalog.root / "catalog-state.json"
+    ).read_bytes()
+
+
+async def test_the_host_assigns_the_next_revision_of_an_address(tmp_path: Path) -> None:
+    """Asked to, the host numbers a trust above that address's own floor."""
+    store = _Store(tmp_path)
+    store.publish(10)
+    await store.catalog.fetch()
+    private_key = Ed25519PrivateKey.generate()
+    status = await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=1,
+            base_url="https://private.example.test/",
+            trust=_private_trust(private_key, 1),
+            assign_trust_revision=True,
+        )
+    )
+    assert status.assigns_trust_revisions and status.trust_revision == 1
+    await store.catalog.use_builtin_store(2)
+    # Re-added later with a new code: never refused as a rollback, whatever
+    # revision the caller supplied.
+    status = await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=3,
+            base_url="https://private.example.test/",
+            trust=_private_trust(private_key, 1).model_copy(
+                update={"expires_at": int(time.time()) + 7200}
+            ),
+            assign_trust_revision=True,
+        )
+    )
+    assert status.trust_revision == 2
+    # A caller choosing its own revision still meets the floor.
+    assert (
+        await _configure_refused(
+            store.catalog,
+            CatalogSourceUpdate(expected_revision=4, trust=_private_trust(private_key, 1)),
+        )
+        == "catalog_trust_update_refused"
+    )
+    with pytest.raises(ValueError, match="requires the trust"):
+        CatalogSourceUpdate(expected_revision=4, assign_trust_revision=True)

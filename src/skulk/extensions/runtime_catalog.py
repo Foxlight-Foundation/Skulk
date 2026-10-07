@@ -697,7 +697,7 @@ class CatalogSourceUpdate(BaseModel):
     )
     trust: Annotated[RuntimeTrust, BeforeValidator(_catalog_trust)] | None = Field(
         default=None,
-        description="Publishers trusted for discovery; omission retains trust. Existing revocations cannot be removed here.",
+        description="Publishers trusted for discovery; omission retains trust. Revocations this host holds for the target catalog address carry into it and cannot be removed here.",
     )
     token: SecretStr | None = Field(
         default=None, description="Write-only catalog bearer; omission retains it."
@@ -705,10 +705,19 @@ class CatalogSourceUpdate(BaseModel):
     clear_token: bool = Field(
         default=False, description="Explicitly read the catalog anonymously."
     )
+    assign_trust_revision: bool = Field(
+        default=False,
+        description="Have the host give ``trust`` the next revision of the target "
+        "address's own trust history, in place of the revision supplied. The "
+        "dashboard sets this, so re-adding a catalog is never refused as a "
+        "rollback whatever revision it last held; requires ``trust``.",
+    )
 
     @model_validator(mode="after")
     def valid_source(self) -> Self:
         """Validate the address and credential shape before touching local files."""
+        if self.assign_trust_revision and self.trust is None:
+            raise ValueError("assigning a trust revision requires the trust")
         CatalogSource(
             revision=self.expected_revision + 1,
             base_url=self.base_url
@@ -764,6 +773,12 @@ class CatalogSourceStatus(BaseModel):
         description="Whether this Skulk build includes the built-in capability "
         "store, so the host can switch to it.",
     )
+    assigns_trust_revisions: bool = Field(
+        default=True,
+        description="Whether this host accepts ``assign_trust_revision`` on a "
+        "source update. Absent from hosts that predate it, which need the "
+        "revision chosen by the caller.",
+    )
 
 
 class BuiltinCatalogSelection(BaseModel):
@@ -782,43 +797,63 @@ class AcceptedFloor(_Contract):
     sha256: Digest
 
 
+class RetainedRevocations(_Contract):
+    """The revocations a private catalog's trust held when the host left its address."""
+
+    revoked_publishers: tuple[Identifier, ...] = Field(
+        default=(), max_length=16, description="Publishers revoked for that catalog."
+    )
+    revoked_artifacts: tuple[Digest, ...] = Field(
+        default=(), max_length=128, description="Artifacts revoked for that catalog."
+    )
+
+
 class _CatalogState(_Contract):
     """Everything host-scoped about the catalog, replaced as one document.
 
     ``trust_floor`` is the current source's trust floor, written with its
     trust. ``floors`` holds every address's history: catalog revision floors
     keyed by address, document and publisher, and discovery trust floors
-    keyed by ``_trust_floor_key`` per address.
+    keyed by ``_trust_floor_key`` per address. ``revocations`` keeps, per
+    private catalog address the host has left, the revocations its trust
+    held, so a later trust for that address carries them again; it is
+    written only when not empty, so most state documents keep the shape
+    earlier builds read.
     """
 
     source: CatalogSource | None = None
     trust: RuntimeTrust | None = None
     trust_floor: AcceptedFloor | None = None
     floors: dict[str, AcceptedFloor] = Field(default_factory=dict)
+    revocations: dict[str, RetainedRevocations] = Field(default_factory=dict)
 
 
 def _trust_digest(trust: RuntimeTrust) -> str:
     return hashlib.sha256(canonical_json(trust.model_dump(mode="json"))).hexdigest()
 
 
-def _carry_revocations(trust: RuntimeTrust, held: RuntimeTrust) -> RuntimeTrust:
-    """``trust`` with every revocation ``held`` carries added to its own.
+def _carry_revocations(
+    trust: RuntimeTrust, *, publishers: set[str], artifacts: set[str]
+) -> RuntimeTrust:
+    """``trust`` with the given revocations added to its own.
 
-    Only within a private catalog's own history: an owner's trust update
-    never silently restores a publisher or artifact the owner revoked before
-    it. The built-in store's trust is never merged: it applies as the store
-    published it, and a source switch carries no revocation in either
-    direction, since a publisher name means nothing across sources.
+    Only within one private catalog address's history: an owner's trust
+    update never silently restores a publisher or artifact revoked for that
+    catalog before it, including across a detour through the store. The
+    built-in store's trust is never merged: it applies as the store published
+    it, and no revocation moves between addresses, since a publisher name
+    means nothing across sources.
+
+    Raises:
+        ValueError: The combined revocations exceed the trust's bounds.
     """
     return RuntimeTrust.model_validate(
         {
             **trust.model_dump(),
             "revoked_publishers": tuple(
-                sorted(set(held.revoked_publishers) | set(trust.revoked_publishers))
+                sorted(publishers | set(trust.revoked_publishers))
             ),
-            "revoked_artifacts": tuple(
-                sorted(set(held.revoked_artifacts) | set(trust.revoked_artifacts))
-            ),
+            "revoked_artifacts": tuple(sorted(artifacts | set(trust.revoked_artifacts))),
         }
     )
 
@@ -833,7 +868,10 @@ def bounded_floors(
     the explicit maintenance path, while existing histories keep recording.
     """
     del prefix  # every history is kept; the address no longer orders eviction
-    if len(floors) > bound:
+    # Discovery trust floors share the map but are bounded on their own, so
+    # they never take room from catalog revision histories.
+    trust = sum(1 for name in floors if name.startswith(_TRUST_FLOOR_PREFIX))
+    if trust > bound or len(floors) - trust > bound:
         raise ValueError("catalog history requires local maintenance")
     return dict(floors)
 
@@ -889,7 +927,11 @@ def _below_floor(trust: RuntimeTrust, floor: AcceptedFloor | None) -> bool:
 
 
 def _with_trust(
-    state: "_CatalogState", source: CatalogSource, trust: RuntimeTrust
+    state: "_CatalogState",
+    source: CatalogSource,
+    trust: RuntimeTrust,
+    *,
+    keep_revocations: bool,
 ) -> "_CatalogState":
     """``state`` reading ``source`` under ``trust``, with each address's trust floor kept.
 
@@ -898,17 +940,34 @@ def _with_trust(
     (recorded here when a state from before per-source floors held it only in
     ``trust_floor``), so returning there meets its own history again, and a
     switch never overwrites another address's floor.
+
+    With ``keep_revocations`` (the address being left is a private catalog),
+    that catalog's revocations are kept for its address, for a later trust
+    there to carry. The store's never are: its trust applies as published.
+    The address arrived at drops its kept set, which its new trust carries.
     """
     accepted = AcceptedFloor(revision=trust.revision, sha256=_trust_digest(trust))
+    key = _trust_floor_key(source.base_url, source.document_filename)
+    revocations = dict(state.revocations)
+    if state.source is not None and state.trust is not None and keep_revocations:
+        left = _trust_floor_key(state.source.base_url, state.source.document_filename)
+        held = state.trust
+        if left != key and (held.revoked_publishers or held.revoked_artifacts):
+            revocations[left] = RetainedRevocations(
+                revoked_publishers=held.revoked_publishers,
+                revoked_artifacts=held.revoked_artifacts,
+            )
+    revocations.pop(key, None)
+    if len(revocations) > 32:
+        raise ValueError("catalog history requires local maintenance")
     floors = dict(state.floors)
     if state.source is not None and state.trust_floor is not None:
         left = _trust_floor_key(state.source.base_url, state.source.document_filename)
         kept = floors.get(left)
         if kept is None or state.trust_floor.revision > kept.revision:
             floors[left] = state.trust_floor
-    key = _trust_floor_key(source.base_url, source.document_filename)
-    held = floors.get(key)
-    if held is None or accepted.revision >= held.revision:
+    floor = floors.get(key)
+    if floor is None or accepted.revision >= floor.revision:
         floors[key] = accepted
     return state.model_copy(
         update={
@@ -916,6 +975,7 @@ def _with_trust(
             "trust": trust,
             "trust_floor": accepted,
             "floors": bounded_floors(floors, key, ""),
+            "revocations": revocations,
         }
     )
 
@@ -1065,7 +1125,7 @@ class HostCatalog:
                 return False
             # The same helper as a read: the store address's own trust floor
             # rises with the trust, so a later switch away and back meets it.
-            self._save(_with_trust(state, state.source, trust))
+            self._save(_with_trust(state, state.source, trust, keep_revocations=False))
             return True
 
     def _store_source(self, revision: int) -> CatalogSource:
@@ -1116,7 +1176,7 @@ class HostCatalog:
             )
         else:
             return state
-        updated = _with_trust(state, source, trust)
+        updated = _with_trust(state, source, trust, keep_revocations=False)
         self._save(updated)
         return updated
 
@@ -1159,9 +1219,15 @@ class HostCatalog:
 
     def _save(self, state: "_CatalogState") -> None:
         # One document, replaced atomically: no ordering between the source,
-        # the trust, its floor and the revision floors can be observed.
+        # the trust, its floor and the revision floors can be observed. Kept
+        # revocations are written only when there are any, so a host that
+        # never left a private catalog with revocations keeps a document
+        # earlier builds still read.
         write_private(
-            self.root / "catalog-state.json", state.model_dump_json().encode()
+            self.root / "catalog-state.json",
+            state.model_dump_json(
+                exclude=None if state.revocations else {"revocations"}
+            ).encode(),
         )
 
     def source(self) -> CatalogSource:
@@ -1270,45 +1336,63 @@ class HostCatalog:
                         "catalog_source_reserved",
                         "the built-in store's address is not a private catalog",
                     )
-                # Each catalog address keeps its own trust history. Leaving the
-                # store, a private trust is compared only with that address's
-                # own history, never with the store's revisions; returning to
-                # an address meets the floor it left behind.
-                leaving_store = self._is_store(previous)
-                if next_trust.expires_at <= time.time() or (
-                    trust is not None
-                    and not leaving_store
-                    and (
-                        next_trust.revision < trust.revision
-                        or (
-                            next_trust.revision == trust.revision
-                            and next_trust != trust
-                        )
+                # Each catalog address keeps its own trust history: a trust is
+                # compared only with the floor its own address left behind,
+                # never with another address's revisions or the store's.
+                floor = _source_trust_floor(state, base_url, filename)
+                if update.assign_trust_revision:
+                    # The host, not the caller's clock, picks the next revision
+                    # of this address's history.
+                    next_trust = next_trust.model_copy(
+                        update={
+                            "revision": (floor.revision if floor is not None else 0)
+                            + 1
+                        }
                     )
-                ):
+                if next_trust.expires_at <= time.time():
                     raise CatalogRefusedError(
                         "catalog_trust_update_refused",
                         "discovery trust revision conflict or expiry",
                     )
-                if _below_floor(
-                    next_trust, _source_trust_floor(state, base_url, filename)
-                ) or (
-                    not leaving_store and _below_floor(next_trust, state.trust_floor)
-                ):
+                if _below_floor(next_trust, floor):
                     raise CatalogRefusedError(
                         "catalog_trust_update_refused",
-                        "discovery trust rollback refused",
+                        "discovery trust revision conflict or rollback refused",
                     )
+                # Revocations belong to the address that set them: an update at
+                # the same private address keeps the held trust's, a return to
+                # an address keeps those it held when the host left it, and
+                # nothing moves between addresses or out of the store.
+                carried_publishers: set[str] = set()
+                carried_artifacts: set[str] = set()
                 if (
                     trust is not None
+                    and previous is not None
                     and not self._is_store(previous)
-                    and next_trust.revision > trust.revision
+                    and (previous.base_url, previous.document_filename)
+                    == (base_url, filename)
                 ):
-                    # A trust update never silently restores a publisher or
-                    # artifact the owner previously revoked. The built-in
-                    # store's revocations are the store's own and do not
-                    # follow the host to a private catalog.
-                    next_trust = _carry_revocations(next_trust, trust)
+                    carried_publishers |= set(trust.revoked_publishers)
+                    carried_artifacts |= set(trust.revoked_artifacts)
+                kept = state.revocations.get(_trust_floor_key(base_url, filename))
+                if kept is not None:
+                    carried_publishers |= set(kept.revoked_publishers)
+                    carried_artifacts |= set(kept.revoked_artifacts)
+                if not (
+                    carried_publishers <= set(next_trust.revoked_publishers)
+                    and carried_artifacts <= set(next_trust.revoked_artifacts)
+                ):
+                    try:
+                        next_trust = _carry_revocations(
+                            next_trust,
+                            publishers=carried_publishers,
+                            artifacts=carried_artifacts,
+                        )
+                    except ValueError:
+                        raise CatalogRefusedError(
+                            "catalog_trust_update_refused",
+                            "carried revocations exceed the trust bounds",
+                        ) from None
                 reference = previous.credential_reference if previous else None
                 if update.clear_token:
                     reference = None
@@ -1338,7 +1422,14 @@ class HostCatalog:
                 # Revision and trust floors are keyed by address and kept
                 # across moves: another address starts its own history, and
                 # returning to an old one meets its old floors again.
-                self._save(_with_trust(state, source, next_trust))
+                self._save(
+                    _with_trust(
+                        state,
+                        source,
+                        next_trust,
+                        keep_revocations=not self._is_store(previous),
+                    )
+                )
                 return self.source_status()
             finally:
                 lock.close()
@@ -1408,7 +1499,14 @@ class HostCatalog:
                         "catalog_store_trust_unavailable",
                         "store trust older than this host accepted",
                     )
-                self._save(_with_trust(state, source, renewed))
+                self._save(
+                    _with_trust(
+                        state,
+                        source,
+                        renewed,
+                        keep_revocations=not self._is_store(previous),
+                    )
+                )
                 return self.source_status()
             finally:
                 lock.close()

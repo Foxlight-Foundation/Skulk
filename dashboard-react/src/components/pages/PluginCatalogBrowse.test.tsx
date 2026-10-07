@@ -29,6 +29,7 @@ let loseNextBind: boolean;
 let onStore: boolean;
 let storeAvailable: boolean;
 let refuseStoreOnce: boolean;
+let assignsRevisions: boolean;
 
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -51,6 +52,7 @@ beforeEach(async () => {
   onStore = false;
   storeAvailable = false;
   refuseStoreOnce = false;
+  assignsRevisions = false;
   localStorage.removeItem('skulk-plugin-install-journeys');
   installed = {
     plugin_id: pluginId, release: { bundle_id: 'example.studio', title: 'Example Studio', bundle_version: '0.1.0', publisher: 'example', sequence: 50 },
@@ -89,7 +91,7 @@ beforeEach(async () => {
       return json({ detail: 'unexpected' }, 404);
     }
     if (path === '/v1/plugins/managed/catalog/source') {
-      return json({ revision: configured ? 1 : 0, configured, credential_reference: null, credential_ready: configured, trust_revision: configured ? 1 : null, builtin_store: onStore, builtin_store_available: storeAvailable });
+      return json({ revision: configured ? 1 : 0, configured, credential_reference: null, credential_ready: configured, trust_revision: configured ? 1 : null, builtin_store: onStore, builtin_store_available: storeAvailable, ...(assignsRevisions ? { assigns_trust_revisions: true } : {}) });
     }
     if (path === '/v1/plugins/managed/catalog') return json({ publisher: 'example', revision: 34, created_at: 1_790_000_000, expires_at: 1_800_000_000, catalog_sha256: 'c'.repeat(64), entries: [entry] });
     if (path === '/v1/plugins/managed') return json({ installations: freshHost ? [] : [installed] });
@@ -136,6 +138,23 @@ it('updates an installed capability from its catalog listing after one consent',
   expect(posts[1].body).toMatchObject({ runtime_digest: newDigest, expected_source_revision: 7 });
   expect(posts[2].body).toMatchObject({ action: 'activate', expected_revision: 3, runtime_digest: newDigest, accept_permissions: true });
   expect(readJourneys()).toEqual([]);
+});
+
+it('lets a host that assigns trust revisions pick the next one itself', async () => {
+  configured = false;
+  assignsRevisions = true;
+  await render();
+  await contains('Connect a capability catalog');
+  const code = encodeInvitation({ baseUrl: 'https://catalog.example.ts.net/', publisher: 'example', publicKey: 'f'.repeat(64), trustExpiresAt: 4_000_000_000 });
+  const field = host.querySelector('#catalog-invitation') as HTMLTextAreaElement;
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+    setter.call(field, code);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await click('Connect');
+  await contains('Browse capabilities');
+  expect(posts[0]).toMatchObject({ path: '/v1/plugins/managed/catalog/source', body: { expected_revision: 0, assign_trust_revision: true, trust: { revision: 1, expires_at: 4_000_000_000 } } });
 });
 
 it('lists the Foxlight store with nothing to paste and keeps a private catalog behind its own control', async () => {

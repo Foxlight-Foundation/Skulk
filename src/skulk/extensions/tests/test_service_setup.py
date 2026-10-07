@@ -376,17 +376,31 @@ def test_the_catalog_command_reads_in_the_hosts_offline_mode(
         .encode(),
     )
     sent: list[object] = []
-    review: dict[str, JsonValue] = {"publisher": "fixture", "entries": []}
+    review: dict[str, JsonValue] = {
+        "publisher": "fixture",
+        "revision": 1,
+        "created_at": 1,
+        "expires_at": 2,
+        "catalog_sha256": "c" * 64,
+        "entries": [],
+    }
+    replies: list[dict[str, JsonValue]] = [
+        {"review": review, "store_trust_deferred": []},
+        # A manager still running the previous build answers with the bare
+        # review while a Skulk update reloads it.
+        review,
+    ]
 
     async def request(root: Path, sent_request: object) -> dict[str, JsonValue]:
         del root
         sent.append(sent_request)
-        return {"result": {"review": review, "store_trust_deferred": []}}
+        return {"result": replies.pop(0)}
 
     monkeypatch.setattr(service_setup, "SKULK_CONFIG_HOME", config)
     monkeypatch.setattr(service_setup, "manager_request", request)
     monkeypatch.setattr(service_setup, "offline_mode", lambda: True)
     monkeypatch.setattr(sys, "argv", ["skulk-plugin-service", "catalog"])
-    service_setup.main()
-    assert sent == [CatalogRequest(action="read_catalog", offline=True)]
-    assert json.loads(capsys.readouterr().out) == review
+    for _ in range(2):
+        service_setup.main()
+        assert json.loads(capsys.readouterr().out) == review
+    assert sent == [CatalogRequest(action="read_catalog", offline=True)] * 2
