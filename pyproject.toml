@@ -89,7 +89,7 @@ dependencies = [
   # HARD dependency of the normal installer on macOS and Linux. A fresh Skulk
   # node includes the dashboard without relying on a separately installed
   # Node.js toolchain; --headless is the explicit API-only opt-out.
-  "nodejs-wheel-binaries==25.2.1rc0; sys_platform == 'darwin' or sys_platform == 'linux'",
+  "nodejs-wheel-binaries==24.19.0; sys_platform == 'darwin' or sys_platform == 'linux'",
 ]
 
 [project.scripts]
