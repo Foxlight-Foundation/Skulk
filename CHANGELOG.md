@@ -53,6 +53,8 @@ This project records release notes here and mirrors public-facing notes in
   node that had to fetch the model was refused by the store ("store host
   cannot verify the requested registry card"). Nodes now follow the version the
   store holds once it holds the current signed card.
+- The bundled Node.js that builds the dashboard on install is now the stable
+  24.19.0 LTS release instead of a 25.2.1 release candidate.
 - A model whose files turn out to be incomplete when it loads is no longer
   reported as refused by model trust policy. The instance still fails without
   retrying, now as a download failure that says a file the model needs is
