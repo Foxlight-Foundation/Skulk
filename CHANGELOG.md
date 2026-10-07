@@ -7,6 +7,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- A model whose files turn out to be incomplete when it loads is no longer
+  reported as refused by model trust policy. The instance still fails without
+  retrying, now as a download failure that says a file the model needs is
+  missing and that downloading the model again is the remedy.
+
 ## [2.0.0] - 2026-10-06
 
 ### Changed

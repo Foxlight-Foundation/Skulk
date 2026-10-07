@@ -24,6 +24,7 @@ from loguru import logger
 from PIL import Image
 
 from skulk.download.download_utils import (
+    MODEL_FILES_INCOMPLETE_MARKER,
     build_model_path,
     companion_download_specs,
     installed_artifact_in_path,
@@ -330,6 +331,16 @@ def _instance_failure_message(reason: str) -> str:
     return normalized[:_INSTANCE_FAILURE_MESSAGE_LIMIT]
 
 
+def _model_files_incomplete_instance_failure_message(model_id: ModelId) -> str:
+    """Return safe operator guidance for model files missing at load."""
+    return _instance_failure_message(
+        f"runner for {model_id} found the model's files incomplete on this node; "
+        "not retrying until the model is downloaded again. If a file the model "
+        "lists is missing from its published repository, its catalog card "
+        "needs fixing."
+    )
+
+
 def _model_trust_instance_failure_message(model_id: ModelId) -> str:
     """Return safe operator guidance for a terminal model-trust rejection."""
     return _instance_failure_message(
@@ -358,6 +369,36 @@ def _wedged_live_instances(
         if supervisor.bound_instance.instance.instance_id in live_instances
         and _runner_failed_wedged(supervisor.status)
     ]
+
+
+def model_files_incomplete_live_instances(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+) -> list[tuple[InstanceId, ModelId, str]]:
+    """Return live instances whose runner found the model's files incomplete.
+
+    Like a trust denial, the files on disk do not change when the same runner
+    is spawned again, so the caller gives these instances up at once instead
+    of looping through relaunches.
+    """
+    incomplete: list[tuple[InstanceId, ModelId, str]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        status = supervisor.status
+        if (
+            instance_id in live_instances
+            and isinstance(status, RunnerFailed)
+            and status.error_message is not None
+            and MODEL_FILES_INCOMPLETE_MARKER in status.error_message
+        ):
+            incomplete.append(
+                (
+                    instance_id,
+                    supervisor.shard_metadata.model_card.model_id,
+                    status.error_message,
+                )
+            )
+    return incomplete
 
 
 def model_trust_failed_live_instances(
@@ -449,6 +490,19 @@ async def _require_installed_artifact_for_load(
         await to_thread.run_sync(
             require_registry_installed_artifact, model_directory, model_card
         )
+
+
+def _model_files_incomplete_message(error: FileNotFoundError) -> str:
+    """Return a terminal runner failure for model files missing at load.
+
+    Kept apart from trust refusals: the cause is the bytes on disk, not the
+    card's authorization, and the remedy is a fresh download.
+    """
+    return (
+        f"{MODEL_FILES_INCOMPLETE_MARKER}: {error} The download finished but a "
+        "file the model needs is missing, so the runner cannot load it; "
+        "download the model again."
+    )
 
 
 def _model_load_trust_failure_message(error: Exception) -> str:
@@ -1205,7 +1259,9 @@ class Worker:
         self._crash_breaker: CrashWindow[InstanceId] = CrashWindow(
             _RUNNER_CRASH_THRESHOLD, _RUNNER_CRASH_WINDOW_SECONDS
         )
-        self._model_trust_failures_handled: set[InstanceId] = set()
+        # Instances already given up for a deterministic load failure (a
+        # trust denial or incomplete model files), so each is failed once.
+        self._terminal_load_failures_handled: set[InstanceId] = set()
         self._stopped: anyio.Event = anyio.Event()
 
     async def _prepare_audio_cpp_engine(
@@ -3042,15 +3098,15 @@ class Worker:
             # this is where dead-instance keys are reclaimed.
             self._crash_breaker.retain(self.state.instances)
             self._refresh_in_use_markers()
-            self._model_trust_failures_handled.intersection_update(self.state.instances)
+            self._terminal_load_failures_handled.intersection_update(self.state.instances)
 
             for (
                 trust_instance_id,
                 trust_model_id,
                 trust_error,
             ) in model_trust_failed_live_instances(self.runners, self.state.instances):
-                if trust_instance_id not in self._model_trust_failures_handled:
-                    self._model_trust_failures_handled.add(trust_instance_id)
+                if trust_instance_id not in self._terminal_load_failures_handled:
+                    self._terminal_load_failures_handled.add(trust_instance_id)
                     logger.error(
                         f"Worker: model trust rejection for instance "
                         f"{trust_instance_id}: {trust_error}"
@@ -3059,6 +3115,27 @@ class Worker:
                         trust_instance_id,
                         _model_trust_instance_failure_message(trust_model_id),
                         error_code="model_trust_rejected",
+                    )
+
+            for (
+                incomplete_instance_id,
+                incomplete_model_id,
+                incomplete_error,
+            ) in model_files_incomplete_live_instances(
+                self.runners, self.state.instances
+            ):
+                if incomplete_instance_id not in self._terminal_load_failures_handled:
+                    self._terminal_load_failures_handled.add(incomplete_instance_id)
+                    logger.error(
+                        f"Worker: incomplete model files for instance "
+                        f"{incomplete_instance_id}: {incomplete_error}"
+                    )
+                    await self._give_up_on_instance(
+                        incomplete_instance_id,
+                        _model_files_incomplete_instance_failure_message(
+                            incomplete_model_id
+                        ),
+                        error_code="download_failed",
                     )
 
             # Wedge-marked LOCAL runner deaths give their instance up here, on
@@ -3676,7 +3753,11 @@ class Worker:
                         shard.model_card,
                     )
                 except (FileNotFoundError, PermissionError) as error:
-                    message = _model_load_trust_failure_message(error)
+                    message = (
+                        _model_files_incomplete_message(error)
+                        if isinstance(error, FileNotFoundError)
+                        else _model_load_trust_failure_message(error)
+                    )
                     logger.error(message)
                     failed = RunnerFailed(error_message=message)
                     runner.status = failed

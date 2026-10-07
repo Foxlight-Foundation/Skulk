@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence, Set
 
+from skulk.download.download_utils import MODEL_FILES_INCOMPLETE_MARKER
 from skulk.shared.models.capabilities import is_gemma4_family
 from skulk.shared.models.model_cards import same_model_artifact
 from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
@@ -104,16 +105,24 @@ def plan(
 def _retried_on_failure(status: RunnerStatus) -> bool:
     """Whether a local runner's failure goes through shutdown and relaunch.
 
-    A GPU wedge and a model-trust refusal are terminal for the instance: the
-    worker gives the instance up as soon as it observes them, because
-    relaunching into either repeats the failure (a wedge also leaks wired GPU
-    memory each time). Every other failure is a crash the worker's circuit
-    breaker relaunches and, past its threshold, gives up.
+    A GPU wedge, a model-trust refusal, and incomplete model files are
+    terminal for the instance: the worker gives the instance up as soon as it
+    observes them, because relaunching into any of them repeats the failure (a
+    wedge also leaks wired GPU memory each time). Every other failure is a
+    crash the worker's circuit breaker relaunches and, past its threshold,
+    gives up.
     """
     if not isinstance(status, RunnerFailed):
         return False
     message = status.error_message or ""
-    return WEDGE_FAILURE_MARKER not in message and MODEL_TRUST_FAILURE_MARKER not in message
+    return not any(
+        marker in message
+        for marker in (
+            WEDGE_FAILURE_MARKER,
+            MODEL_TRUST_FAILURE_MARKER,
+            MODEL_FILES_INCOMPLETE_MARKER,
+        )
+    )
 
 
 def _kill_runner(
