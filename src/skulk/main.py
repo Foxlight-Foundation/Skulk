@@ -1934,6 +1934,15 @@ def main():
     else:
         logger.info(f"{_LIBP2P_NAMESPACE_ENV_VAR} unset, using default")
 
+    # Before engine provisioning: the node's facts decide whether it may
+    # install engines later, and an offline node must not promise one.
+    if args.offline:
+        # The flag, not only the environment variable, must keep the model
+        # registry out of reach: an air-gapped node started with --offline
+        # alone would otherwise still try the network for its card catalog.
+        set_offline_mode()
+        logger.info("Running in OFFLINE mode — no internet checks, local models only")
+
     # Engine auto-provisioning (#614 Phase 3): before any serving decision,
     # ensure a Linux node without an explicit llama-server override has the
     # pinned managed build (fetch + checksum-verify on first run), then
@@ -1960,9 +1969,11 @@ def main():
         rehydrate_cached_audio_cpp()
         facts = current_node_facts()
         wired = ensure_llama_server(facts, allow_download=not args.offline) is not None
-        # The managed ComfyUI install only provisions when video models are
-        # enabled on this node; the torch wheel set is several gigabytes.
-        wired = ensure_comfy(facts, allow_download=not args.offline) is not None or wired
+        # ComfyUI is never downloaded at startup: its torch wheel set is
+        # several gigabytes and most nodes never render video. Startup only
+        # wires an install already on disk; a placement installs the engine
+        # on demand (install_comfy_on_demand) alongside the model download.
+        wired = ensure_comfy(facts) is not None or wired
         if wired:
             refresh_node_facts()
 
@@ -2033,13 +2044,6 @@ def main():
     # Detect it early and tell the operator how to grant access.
     if check_local_network_access() == "blocked":
         logger.warning(local_network_denied_message())
-
-    if args.offline:
-        # The flag, not only the environment variable, must keep the model
-        # registry out of reach: an air-gapped node started with --offline
-        # alone would otherwise still try the network for its card catalog.
-        set_offline_mode()
-        logger.info("Running in OFFLINE mode — no internet checks, local models only")
 
     if args.bootstrap_peers:
         logger.info(f"Bootstrap peers: {args.bootstrap_peers}")

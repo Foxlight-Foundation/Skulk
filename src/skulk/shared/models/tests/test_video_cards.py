@@ -348,7 +348,8 @@ def test_bundled_video_cards_validate_and_pin_every_byte() -> None:
     assert seen_test_engine
 
 
-def test_video_cards_hidden_until_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_video_cards_hidden_only_when_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Video cards are listed by default; SKULK_ENABLE_VIDEO_MODELS=false hides them."""
     card = _card()
     text = _card(
         model_id=ModelId("example/text"),

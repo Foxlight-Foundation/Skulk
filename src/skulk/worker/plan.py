@@ -3,6 +3,11 @@
 from collections.abc import Mapping, Sequence, Set
 
 from skulk.download.download_utils import MODEL_FILES_INCOMPLETE_MARKER
+from skulk.shared.backends import (
+    ENGINE_UNAVAILABLE_FAILURE_MARKER,
+    EngineType,
+    engine_of,
+)
 from skulk.shared.models.capabilities import is_gemma4_family
 from skulk.shared.models.model_cards import same_model_artifact
 from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
@@ -16,6 +21,7 @@ from skulk.shared.types.tasks import (
     DownloadModel,
     ImageEdits,
     ImageGeneration,
+    InstallEngine,
     LoadModel,
     MusicGeneration,
     RealtimeAudioTranscription,
@@ -77,6 +83,8 @@ def plan(
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None = None,
     speech_media_ready: Set[CommandId] | None = None,
     reference_media_ready: Set[CommandId] | None = None,
+    on_demand_backends: Set[str] = frozenset(),
+    engine_install_requested: Set[InstanceId] = frozenset(),
 ) -> Task | None:
     # Python short circuiting OR logic should evaluate these sequentially.
     return (
@@ -88,8 +96,9 @@ def plan(
         or _cancel_tasks(runners, tasks)
         or _create_runner(node_id, runners, instances)
         or _model_needs_download(node_id, runners, global_download_status)
+        or _engine_needs_install(runners, on_demand_backends, engine_install_requested)
         or _init_distributed_backend(runners, all_runners)
-        or _load_model(runners, all_runners, global_download_status)
+        or _load_model(runners, all_runners, global_download_status, on_demand_backends)
         or _ready_to_warmup(runners, all_runners)
         or _pending_tasks(
             runners,
@@ -105,12 +114,12 @@ def plan(
 def _retried_on_failure(status: RunnerStatus) -> bool:
     """Whether a local runner's failure goes through shutdown and relaunch.
 
-    A GPU wedge, a model-trust refusal, and incomplete model files are
-    terminal for the instance: the worker gives the instance up as soon as it
-    observes them, because relaunching into any of them repeats the failure (a
-    wedge also leaks wired GPU memory each time). Every other failure is a
-    crash the worker's circuit breaker relaunches and, past its threshold,
-    gives up.
+    A GPU wedge, a model-trust refusal, incomplete model files, and a missing
+    on-demand engine are terminal for the instance: the worker gives the
+    instance up as soon as it observes them, because relaunching into any of
+    them repeats the failure (a wedge also leaks wired GPU memory each time).
+    Every other failure is a crash the worker's circuit breaker relaunches
+    and, past its threshold, gives up.
     """
     if not isinstance(status, RunnerFailed):
         return False
@@ -121,6 +130,7 @@ def _retried_on_failure(status: RunnerStatus) -> bool:
             WEDGE_FAILURE_MARKER,
             MODEL_TRUST_FAILURE_MARKER,
             MODEL_FILES_INCOMPLETE_MARKER,
+            ENGINE_UNAVAILABLE_FAILURE_MARKER,
         )
     )
 
@@ -271,14 +281,56 @@ def _init_distributed_backend(
     return None
 
 
+def awaited_engine(shard: ShardMetadata, on_demand_backends: Set[str]) -> EngineType | None:
+    """The on-demand engine a shard still waits for on this node, if any.
+
+    Placement stamps the backend each shard resolved to; when that backend is
+    advertised but not installed yet, the shard needs its engine installed
+    before the model can load. Unstamped shards resolve their engine in the
+    runner, which reports a missing engine itself.
+    """
+    backend = shard.resolved_backend
+    if backend is None or backend not in on_demand_backends:
+        return None
+    return engine_of(backend)
+
+
+def _engine_needs_install(
+    runners: Mapping[RunnerId, RunnerSupervisor],
+    on_demand_backends: Set[str],
+    engine_install_requested: Set[InstanceId],
+) -> InstallEngine | None:
+    """Request the on-demand engine an idle runner needs, once per instance.
+
+    Scheduled right after the model download so both proceed together.
+    """
+    if not on_demand_backends:
+        return None
+    for runner in runners.values():
+        if _is_rpc_donor(runner) or not isinstance(runner.status, RunnerIdle):
+            continue
+        instance_id = runner.bound_instance.instance.instance_id
+        if instance_id in engine_install_requested:
+            continue
+        engine = awaited_engine(runner.bound_instance.bound_shard, on_demand_backends)
+        if engine is not None:
+            return InstallEngine(instance_id=instance_id, engine=engine)
+    return None
+
+
 def _load_model(
     runners: Mapping[RunnerId, RunnerSupervisor],
     all_runners: Mapping[RunnerId, RunnerStatus],
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
+    on_demand_backends: Set[str] = frozenset(),
 ) -> LoadModel | None:
     for runner in runners.values():
         instance = runner.bound_instance.instance
         shard_assignments = instance.shard_assignments
+
+        # A shard whose engine installs on demand loads only once installed.
+        if awaited_engine(runner.bound_instance.bound_shard, on_demand_backends):
+            continue
 
         # RPC placements (#328) are role-asymmetric: donors never load (their
         # runner reports Ready by itself), and the DRIVER loads when the model

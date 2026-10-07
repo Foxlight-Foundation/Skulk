@@ -63,3 +63,24 @@ def test_warming_up_node_without_entry_does_not_block_preference() -> None:
     cycle = Cycle(node_ids=[NodeId("a"), NodeId("missing")])
     resources = {NodeId("a"): _node("llama_cpp-vulkan")}
     assert _cycle_backend_preference_score(cycle, resources, preference) == 1
+
+
+def test_installed_engine_outranks_an_on_demand_install() -> None:
+    from skulk.master.placement import _cycle_engine_ready_score
+
+    compatible = frozenset({"comfy"})
+    installed = Cycle(node_ids=[NodeId("installed")])
+    on_demand = Cycle(node_ids=[NodeId("on-demand")])
+    resources = {
+        NodeId("installed"): _node("comfy", "comfy-cuda"),
+        NodeId("on-demand"): NodeResources(
+            backends=frozenset({"comfy", "comfy-rocm"}),
+            on_demand_backends=frozenset({"comfy", "comfy-rocm"}),
+            participation="full",
+        ),
+    }
+    assert _cycle_engine_ready_score(installed, resources, compatible) == 1
+    assert _cycle_engine_ready_score(on_demand, resources, compatible) == 0
+    # A node not yet in node_resources is not counted against the cycle.
+    warming = Cycle(node_ids=[NodeId("installed"), NodeId("missing")])
+    assert _cycle_engine_ready_score(warming, resources, compatible) == 1

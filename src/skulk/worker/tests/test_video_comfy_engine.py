@@ -12,7 +12,11 @@ from typing import Any, cast
 
 import pytest
 
-from skulk.shared.backends import COMFY_BIN_ENV, COMFY_ROOT_ENV
+from skulk.shared.backends import (
+    COMFY_BIN_ENV,
+    COMFY_ROOT_ENV,
+    ENGINE_UNAVAILABLE_FAILURE_MARKER,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -844,16 +848,58 @@ def test_the_server_serves_consecutive_renders(fake_comfy: Path) -> None:
         runner._teardown_server()
 
 
-def test_runner_refuses_to_start_without_a_configured_install(
+def test_runner_without_any_install_reports_the_engine_not_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """No override and no managed install: the runner fails with the marker the
+    worker uses to give the instance up instead of relaunching it."""
     monkeypatch.delenv(COMFY_BIN_ENV, raising=False)
+    monkeypatch.delenv(COMFY_ROOT_ENV, raising=False)
+    def _no_install(_backend: str | None) -> None:
+        return None
+
+    monkeypatch.setattr("skulk.provisioning.comfy.installed_managed_comfy", _no_install)
+    runner = _runner(_Sender(), _Cancels())
+    with pytest.raises(RuntimeError, match=ENGINE_UNAVAILABLE_FAILURE_MARKER):
+        runner.handle_task(
+            LoadModel(instance_id=runner.bound_instance.instance.instance_id)
+        )
+
+
+def test_runner_refuses_a_half_set_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A half-set override stays an error rather than falling back silently."""
+    monkeypatch.setenv(COMFY_BIN_ENV, sys.executable)
     monkeypatch.delenv(COMFY_ROOT_ENV, raising=False)
     runner = _runner(_Sender(), _Cancels())
     with pytest.raises(RuntimeError, match="not both set"):
         runner.handle_task(
             LoadModel(instance_id=runner.bound_instance.instance.instance_id)
         )
+
+
+def test_runner_finds_the_managed_install_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner process starts before an on-demand install finishes, so with
+    no override it locates the managed install on disk by its backend."""
+    monkeypatch.delenv(COMFY_BIN_ENV, raising=False)
+    monkeypatch.delenv(COMFY_ROOT_ENV, raising=False)
+    checkout = tmp_path / "ComfyUI"
+    checkout.mkdir()
+    (checkout / "main.py").write_text("")
+    requested: list[str | None] = []
+
+    def _installed(backend: str | None) -> tuple[Path, Path]:
+        requested.append(backend)
+        return Path(sys.executable), checkout
+
+    monkeypatch.setattr("skulk.provisioning.comfy.installed_managed_comfy", _installed)
+
+    assert runner_module._configured_install("comfy-cuda") == (
+        Path(sys.executable),
+        checkout,
+    )
+    assert requested == ["comfy-cuda"]
 
 
 def test_runner_dies_when_the_server_dies(fake_comfy: Path) -> None:

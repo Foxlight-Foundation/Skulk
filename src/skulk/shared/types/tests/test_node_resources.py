@@ -34,6 +34,17 @@ def test_node_resources_survives_json_wire_round_trip() -> None:
     assert restored.data_transport == "zenoh"
 
 
+def test_node_resources_on_demand_backends_survive_wire_round_trip() -> None:
+    original = NodeResources(
+        backends=frozenset({"comfy", "comfy-cuda", "llama_server-cuda"}),
+        on_demand_backends=frozenset({"comfy", "comfy-cuda"}),
+    )
+    restored = NodeResources.model_validate(original.model_dump(mode="json"))
+    assert restored == original
+    assert restored.on_demand_backends == frozenset({"comfy", "comfy-cuda"})
+    assert NodeResources().on_demand_backends == frozenset()
+
+
 def test_node_resources_coerces_list_backends() -> None:
     # A JSON array (how the wire and any list-shaped input arrive).
     restored = NodeResources.model_validate(

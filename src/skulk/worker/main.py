@@ -9,6 +9,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Container, Mapping
 from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +39,11 @@ from skulk.routing.trace_data import TraceDataPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.apply import apply
+from skulk.shared.backends import (
+    ENGINE_UNAVAILABLE_FAILURE_MARKER,
+    EngineType,
+    engine_of,
+)
 from skulk.shared.constants import (
     SKULK_IMAGE_TRANSPORT_DEBUG,
     SKULK_MAX_CHUNK_SIZE,
@@ -120,6 +126,7 @@ from skulk.shared.types.tasks import (
     CreateRunner,
     DownloadModel,
     ImageEdits,
+    InstallEngine,
     LoadModel,
     RealtimeAudioTranscription,
     Shutdown,
@@ -341,6 +348,35 @@ def _model_files_incomplete_instance_failure_message(model_id: ModelId) -> str:
     )
 
 
+def _engine_install_failure_message(step: str | None) -> str:
+    """Return safe operator guidance for a failed on-demand engine install."""
+    return _instance_failure_message(
+        f"Could not install the video engine on this node: {step or 'the install'} "
+        "failed. Check the node's internet connection and free disk space, then "
+        "place the model again; `skulk doctor --fix` installs the engine without "
+        "placing a model."
+    )
+
+
+def _engine_unavailable_instance_failure_message(model_id: ModelId) -> str:
+    """Return safe operator guidance for a runner that found no engine installed."""
+    return _instance_failure_message(
+        f"runner for {model_id} started without its video engine installed on "
+        "this node; not retrying. Place the model again to install the engine, "
+        "or run `skulk doctor --fix` on this node."
+    )
+
+
+@dataclass
+class _EngineInstallJob:
+    """One on-demand engine install shared by every instance waiting for it."""
+
+    engine: EngineType
+    waiters: dict[InstanceId, TaskId] = field(default_factory=dict)
+    finished: bool = False
+    succeeded: bool = False
+
+
 def _model_trust_instance_failure_message(model_id: ModelId) -> str:
     """Return safe operator guidance for a terminal model-trust rejection."""
     return _instance_failure_message(
@@ -399,6 +435,36 @@ def model_files_incomplete_live_instances(
                 )
             )
     return incomplete
+
+
+def engine_unavailable_live_instances(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+) -> list[tuple[InstanceId, ModelId, str]]:
+    """Return live instances whose runner started without its on-demand engine.
+
+    The worker normally holds the load until the engine is installed; this
+    catches a runner that reached its engine anyway (an install removed by
+    hand, say), so the instance is given up once instead of relaunched.
+    """
+    unavailable: list[tuple[InstanceId, ModelId, str]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        status = supervisor.status
+        if (
+            instance_id in live_instances
+            and isinstance(status, RunnerFailed)
+            and status.error_message is not None
+            and ENGINE_UNAVAILABLE_FAILURE_MARKER in status.error_message
+        ):
+            unavailable.append(
+                (
+                    instance_id,
+                    supervisor.shard_metadata.model_card.model_id,
+                    status.error_message,
+                )
+            )
+    return unavailable
 
 
 def model_trust_failed_live_instances(
@@ -1262,6 +1328,13 @@ class Worker:
         # Instances already given up for a deterministic load failure (a
         # trust denial or incomplete model files), so each is failed once.
         self._terminal_load_failures_handled: set[InstanceId] = set()
+        # The video engine installs on demand. These track the backends this
+        # node advertises but has not installed (cached from the facts
+        # snapshot so planning never waits on the facts lock), the install
+        # task each waiting instance was given, and one shared job per engine.
+        self._on_demand_backends: frozenset[str] = frozenset()
+        self._engine_install_tasks: dict[InstanceId, TaskId] = {}
+        self._engine_install_jobs: dict[EngineType, _EngineInstallJob] = {}
         self._stopped: anyio.Event = anyio.Event()
 
     async def _prepare_audio_cpp_engine(
@@ -1588,6 +1661,13 @@ class Worker:
         # Same shape for the video engine: a ComfyUI server whose runner died
         # keeps the diffusion weights resident on the GPU.
         sweep_orphaned_comfy_servers()
+        # Planning reads which advertised engines still install on demand; the
+        # facts snapshot was gathered at startup, so this is a cached read.
+        from skulk.facts import current_backend_derivation
+
+        self._on_demand_backends = (
+            await to_thread.run_sync(current_backend_derivation)
+        ).on_demand_backends
 
         info_send, info_recv = channel[GatheredInfo]()
         info_gatherer: InfoGatherer = InfoGatherer(
@@ -3099,6 +3179,31 @@ class Worker:
             self._crash_breaker.retain(self.state.instances)
             self._refresh_in_use_markers()
             self._terminal_load_failures_handled.intersection_update(self.state.instances)
+            for finished_instance in [
+                instance_id
+                for instance_id in self._engine_install_tasks
+                if instance_id not in self.state.instances
+            ]:
+                del self._engine_install_tasks[finished_instance]
+
+            for (
+                unavailable_instance_id,
+                unavailable_model_id,
+                unavailable_error,
+            ) in engine_unavailable_live_instances(self.runners, self.state.instances):
+                if unavailable_instance_id not in self._terminal_load_failures_handled:
+                    self._terminal_load_failures_handled.add(unavailable_instance_id)
+                    logger.error(
+                        f"Worker: engine not installed for instance "
+                        f"{unavailable_instance_id}: {unavailable_error}"
+                    )
+                    await self._give_up_on_instance(
+                        unavailable_instance_id,
+                        _engine_unavailable_instance_failure_message(
+                            unavailable_model_id
+                        ),
+                        error_code="engine_install_failed",
+                    )
 
             for (
                 trust_instance_id,
@@ -3236,6 +3341,8 @@ class Worker:
                                 task_status=TaskStatus.Running,
                             )
                         )
+                case InstallEngine():
+                    await self._start_engine_install(task)
                 case Shutdown(runner_id=runner_id):
                     runner = self.runners.pop(runner_id)
                     shard_for_eviction = runner.shard_metadata
@@ -3619,6 +3726,113 @@ class Worker:
                 case task:
                     await self._start_runner_task(task)
 
+    async def _start_engine_install(self, task: InstallEngine) -> None:
+        """Join or start the on-demand engine install an instance's runner needs.
+
+        One job per engine serves every waiting instance; a finished,
+        successful job releases a late waiter at once, and a failed one is
+        replaced so a new placement gets a fresh attempt.
+        """
+        self._engine_install_tasks[task.instance_id] = task.task_id
+        await self.event_sender.send(
+            TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Running)
+        )
+        job = self._engine_install_jobs.get(task.engine)
+        if job is not None and job.finished and job.succeeded:
+            await self.event_sender.send(
+                TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Complete)
+            )
+            return
+        if job is None or job.finished:
+            job = _EngineInstallJob(engine=task.engine)
+            self._engine_install_jobs[task.engine] = job
+            self._tg.start_soon(self._run_engine_install, job)
+        job.waiters[task.instance_id] = task.task_id
+
+    async def _run_engine_install(self, job: _EngineInstallJob) -> None:
+        """Install one on-demand engine, then release or fail every waiter.
+
+        Side effects: downloads and installs the engine, refreshes the facts
+        snapshot and the cached on-demand backends, publishes fresh node
+        resources, and marks each waiting instance's install task complete or
+        gives the instance up with an explained ``engine_install_failed``.
+        """
+        from skulk.facts import (
+            current_backend_derivation,
+            current_node_facts,
+            refresh_node_facts,
+        )
+        from skulk.provisioning.comfy import ComfyInstallError, install_comfy_on_demand
+
+        failure_step: str | None = None
+        try:
+            if job.engine != "comfy":
+                raise ComfyInstallError(
+                    "the engine check", f"no on-demand installer for {job.engine}"
+                )
+            facts = await to_thread.run_sync(current_node_facts)
+            await to_thread.run_sync(
+                lambda: install_comfy_on_demand(facts, offline=self._offline)
+            )
+            await to_thread.run_sync(refresh_node_facts)
+            derivation = await to_thread.run_sync(current_backend_derivation)
+            still_on_demand = any(
+                engine_of(tag) == job.engine for tag in derivation.on_demand_backends
+            )
+            installed = any(
+                engine_of(tag) == job.engine for tag in derivation.installed_backends
+            )
+            if still_on_demand or not installed:
+                raise ComfyInstallError(
+                    "the engine check",
+                    "the installed engine does not report as usable on this node",
+                )
+            self._on_demand_backends = derivation.on_demand_backends
+            await self._publish_fresh_node_resources()
+            job.succeeded = True
+        except ComfyInstallError as error:
+            failure_step = error.step
+            logger.error(f"Video engine install failed at {error.step}: {error.detail}")
+        except Exception as error:  # noqa: BLE001 - each waiter gets one explained failure
+            failure_step = "the engine install"
+            logger.opt(exception=error).error("Video engine install failed")
+        job.finished = True
+        waiters = dict(job.waiters)
+        job.waiters.clear()
+        for instance_id, task_id in waiters.items():
+            if job.succeeded:
+                await self.event_sender.send(
+                    TaskStatusUpdated(task_id=task_id, task_status=TaskStatus.Complete)
+                )
+                continue
+            await self.event_sender.send(
+                TaskStatusUpdated(task_id=task_id, task_status=TaskStatus.Failed)
+            )
+            if instance_id in self.state.instances:
+                await self._give_up_on_instance(
+                    instance_id,
+                    _engine_install_failure_message(failure_step),
+                    error_code="engine_install_failed",
+                )
+
+    async def _publish_fresh_node_resources(self) -> None:
+        """Advertise this node's resources now rather than at the next poll."""
+        if self._telemetry_sender is None:
+            return
+        peers = (
+            await self._zenoh_peer_sampler.advertised_count()
+            if self._zenoh_peer_sampler is not None
+            else None
+        )
+        resources = await NodeResources.gather(
+            api_available=self._api_available,
+            data_transport=self._data_transport,
+            zenoh_connected_peers=peers,
+        )
+        await self._telemetry_sender.send(
+            NodeTelemetry(node_id=self.node_id, info=resources)
+        )
+
     async def _plan_next_task_with_staging_guard(self) -> Task | None:
         """Plan one task while excluding runtime staging eviction.
 
@@ -3663,6 +3877,8 @@ class Worker:
                 self.input_chunk_buffer,
                 self._speech_media_ready,
                 self._reference_media_ready,
+                on_demand_backends=self._on_demand_backends,
+                engine_install_requested=frozenset(self._engine_install_tasks),
             )
             if not isinstance(task, CreateRunner):
                 return task

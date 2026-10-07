@@ -25,7 +25,11 @@ import psutil
 from loguru import logger
 from PIL import Image
 
-from skulk.shared.backends import COMFY_BIN_ENV, COMFY_ROOT_ENV
+from skulk.shared.backends import (
+    COMFY_BIN_ENV,
+    COMFY_ROOT_ENV,
+    ENGINE_UNAVAILABLE_FAILURE_MARKER,
+)
 from skulk.shared.constants import (
     SKULK_CACHE_HOME,
     SKULK_VIDEO_INPUT_DIR,
@@ -191,14 +195,31 @@ def launch_flags(
     return flags
 
 
-def _configured_install() -> tuple[Path, Path]:
-    """The interpreter and checkout this node's facts exported."""
+def _configured_install(resolved_backend: str | None = None) -> tuple[Path, Path]:
+    """The interpreter and checkout this runner starts ComfyUI from.
+
+    An operator override (``SKULK_COMFY_BIN`` with ``SKULK_COMFY_ROOT``) wins.
+    Without one, the managed install on disk is used: the runner process
+    starts before an on-demand install finishes, so it cannot rely on the
+    environment the worker exported afterwards. A half-set override stays an
+    error rather than silently falling back.
+    """
     interpreter = os.environ.get(COMFY_BIN_ENV, "").strip()
     root = os.environ.get(COMFY_ROOT_ENV, "").strip()
+    if not interpreter and not root:
+        from skulk.provisioning.comfy import installed_managed_comfy
+
+        managed = installed_managed_comfy(resolved_backend)
+        if managed is not None:
+            return managed
+        raise RuntimeError(
+            f"{ENGINE_UNAVAILABLE_FAILURE_MARKER}: the video engine is not "
+            "installed on this node, so the comfy runner cannot start ComfyUI."
+        )
     if not interpreter or not root:
         raise RuntimeError(
             f"{COMFY_BIN_ENV} and {COMFY_ROOT_ENV} are not both set; the comfy runner cannot start "
-            "ComfyUI. This node should not have been a placement candidate for a comfy card."
+            "ComfyUI. Set both to an install, or unset both to use the managed one."
         )
     interpreter_path = Path(interpreter)
     root_path = Path(root)
@@ -429,7 +450,7 @@ class Runner(ServedConcurrentDispatch):
     def _load_model(self) -> None:
         if self.card.video is None:
             raise RuntimeError(f"{self.model_id} has no [video] section")
-        interpreter, root = _configured_install()
+        interpreter, root = _configured_install(self.shard_metadata.resolved_backend)
         model_dir = _model_directory(self.card)
         files = resolve_model_files(self.card)
         weight_files: list[Path] = []

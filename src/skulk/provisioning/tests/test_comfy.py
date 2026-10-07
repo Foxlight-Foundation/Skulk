@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -14,8 +16,12 @@ import skulk.provisioning.comfy as comfy
 from skulk.facts.testing import AMD_STRIX, NVIDIA_A40, make_facts, ok_bin
 from skulk.provisioning.comfy import (
     RECORD_FILENAME,
+    ComfyInstallError,
+    comfy_on_demand_variants,
     dormant_comfy,
     ensure_comfy,
+    install_comfy_on_demand,
+    installed_managed_comfy,
     managed_comfy_install,
     provision_comfy,
     select_comfy_variant_chain,
@@ -28,6 +34,7 @@ from skulk.provisioning.manifest import (
     wheel_set_digest,
 )
 from skulk.shared.backends import COMFY_BIN_ENV, COMFY_ROOT_ENV
+from skulk.shared.types.node_facts import GpuDeviceFact
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +46,7 @@ def isolated_comfy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv(COMFY_ROOT_ENV, raising=False)
     monkeypatch.delenv("SKULK_NO_ENGINE_AUTOPROVISION", raising=False)
     monkeypatch.setattr(comfy, "_require_tool", _fake_tool)
+    monkeypatch.setattr(comfy, "_tool_path", _fake_tool)
 
 
 def _fake_tool(name: str) -> str:
@@ -211,19 +219,10 @@ def test_install_root_changes_with_the_wheel_set(monkeypatch: pytest.MonkeyPatch
     assert after.name.startswith("cuda-") and len(after.name) == len("cuda-") + 12
 
 
-def test_ensure_provisions_and_exports_both_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_provision(variant: str, *, run: object = None) -> Path:
-        return provision_comfy(variant, run=_FakeRun())  # pyright: ignore[reportArgumentType]
-
-    monkeypatch.setattr(comfy, "provision_comfy", fake_provision)
-    root = ensure_comfy(make_facts(gpus=(NVIDIA_A40,)))
-    assert root is not None
-    assert os.environ[COMFY_BIN_ENV] == str(root / "venv" / "bin" / "python")
-    assert os.environ[COMFY_ROOT_ENV] == str(root / "ComfyUI")
-
-
 def test_ensure_honors_override_opt_out_and_the_video_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     facts = make_facts(gpus=(NVIDIA_A40,))
+    provision_comfy("cuda", run=_FakeRun())
+    # Even with an install on disk, an override or a closed gate wins.
     assert ensure_comfy(facts.model_copy(update={"comfy_binary": ok_bin(COMFY_BIN_ENV)})) is None
     # A half-set override is an operator decision too; never overwrite it.
     assert ensure_comfy(facts.model_copy(update={"comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"})) is None
@@ -235,23 +234,23 @@ def test_ensure_honors_override_opt_out_and_the_video_gate(monkeypatch: pytest.M
     assert COMFY_BIN_ENV not in os.environ
 
 
-def test_ensure_offline_wires_only_an_existing_install(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_wires_only_an_existing_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_provision(variant: str, *, run: object = None) -> Path:
+        calls.append(variant)
+        raise AssertionError("startup must never download the video engine")
+
     facts = make_facts(gpus=(NVIDIA_A40,))
-    assert ensure_comfy(facts, allow_download=False) is None
+    monkeypatch.setattr(comfy, "provision_comfy", fake_provision)
+    assert ensure_comfy(facts) is None
+    # The module-level name is the real provisioner, imported before the patch.
     root = provision_comfy("cuda", run=_FakeRun())
     assert dormant_comfy(facts) == root and managed_comfy_install(facts) == root
     assert COMFY_BIN_ENV not in os.environ
-    assert ensure_comfy(facts, allow_download=False) == root
+    assert ensure_comfy(facts) == root and calls == []
+    assert os.environ[COMFY_BIN_ENV] == str(root / "venv" / "bin" / "python")
     assert os.environ[COMFY_ROOT_ENV] == str(root / "ComfyUI")
-
-
-def test_ensure_degrades_when_provisioning_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    def broken(variant: str, *, run: object = None) -> Path:
-        raise RuntimeError("no network")
-
-    monkeypatch.setattr(comfy, "provision_comfy", broken)
-    assert ensure_comfy(make_facts(gpus=(NVIDIA_A40,))) is None
-    assert COMFY_BIN_ENV not in os.environ
 
 
 def test_sanitized_environment_drops_index_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,21 +269,6 @@ def test_pinned_wheel_requirement_shape() -> None:
     wheel = PinnedWheel(name="torch", version="1.0+cu130", filename="torch-1.0.whl", sha256="a" * 64, index="https://x/")
     assert wheel.url() == "https://x/torch-1.0.whl"
     assert wheel.requirement() == "torch @ https://x/torch-1.0.whl --hash=sha256:" + "a" * 64
-
-
-def test_startup_provisions_when_the_gates_pass(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
-
-    def fake_provision(variant: str, *, run: object = None) -> Path:
-        calls.append(variant)
-        return provision_comfy(variant, run=_FakeRun())  # pyright: ignore[reportArgumentType]
-
-    monkeypatch.setattr(comfy, "provision_comfy", fake_provision)
-    facts = make_facts(gpus=(NVIDIA_A40,))
-    # Offline startup never downloads; an online one provisions unasked
-    # because video models are enabled on this node.
-    assert ensure_comfy(facts, allow_download=False) is None and calls == []
-    assert ensure_comfy(facts) is not None and calls == ["cuda"]
 
 
 def test_legacy_layout_install_is_reused_when_its_record_matches(tmp_path: Path) -> None:
@@ -307,3 +291,142 @@ def test_legacy_layout_install_is_reused_when_its_record_matches(tmp_path: Path)
     (legacy / RECORD_FILENAME).write_text(json.dumps({"pin": COMFY_PIN, "variant": "cuda", "wheels": [{"filename": "torch-old.whl", "sha256": "0" * 64}]}))
     assert managed_comfy_install(make_facts(gpus=(NVIDIA_A40,))) is None
     assert provision_comfy("cuda", run=_FakeRun()) == _root(tmp_path, "aarch64", "cuda")
+
+
+def test_variant_chain_skips_amd_gpus_the_rocm_wheels_cannot_drive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(comfy.platform_module, "machine", lambda: "x86_64")
+    other_amd = AMD_STRIX.model_copy(update={"pci_device_id": "1002:744c"})
+    assert select_comfy_variant_chain(make_facts(gpus=(other_amd,))) == ()
+    assert select_comfy_variant_chain(make_facts(gpus=(AMD_STRIX,))) == ("rocm",)
+
+
+def _no_uv(name: str) -> str | None:
+    return None if name == "uv" else _fake_tool(name)
+
+
+def test_on_demand_variants_require_every_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    facts = make_facts(gpus=(NVIDIA_A40,))
+    assert comfy_on_demand_variants(facts, offline=False, environ={}) == ("cuda",)
+    assert comfy_on_demand_variants(facts, offline=True, environ={}) == ()
+    assert (
+        comfy_on_demand_variants(
+            facts, offline=False, environ={"SKULK_NODE_PARTICIPATION": "management"}
+        )
+        == ()
+    )
+    assert (
+        comfy_on_demand_variants(
+            facts, offline=False, environ={"SKULK_NO_ENGINE_AUTOPROVISION": "1"}
+        )
+        == ()
+    )
+    overridden = facts.model_copy(update={"comfy_binary": ok_bin(COMFY_BIN_ENV)})
+    assert comfy_on_demand_variants(overridden, offline=False, environ={}) == ()
+    assert comfy_on_demand_variants(make_facts(), offline=False, environ={}) == ()
+    monkeypatch.setattr(comfy, "_tool_path", _no_uv)
+    assert comfy_on_demand_variants(facts, offline=False, environ={}) == ()
+    monkeypatch.setattr(comfy, "_tool_path", _fake_tool)
+    monkeypatch.setattr(comfy, "_video_models_enabled", lambda: False)
+    assert comfy_on_demand_variants(facts, offline=False, environ={}) == ()
+
+
+def _eligible(monkeypatch: pytest.MonkeyPatch, *, free_bytes: int = 10**15) -> None:
+    def disk_usage(_path: object) -> types.SimpleNamespace:
+        return types.SimpleNamespace(free=free_bytes)
+
+    monkeypatch.setattr(comfy.shutil, "disk_usage", disk_usage)
+
+
+def test_on_demand_install_provisions_checks_the_gpu_and_exports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _eligible(monkeypatch)
+    run = _FakeRun()
+    root = install_comfy_on_demand(make_facts(gpus=(NVIDIA_A40,)), offline=False, run=run)
+    assert os.environ[COMFY_BIN_ENV] == str(root / "venv" / "bin" / "python")
+    assert os.environ[COMFY_ROOT_ENV] == str(root / "ComfyUI")
+    assert any(
+        len(args) > 2 and args[1] == "-c" and "torch.cuda.is_available" in args[2]
+        for args in run.commands
+    )
+
+
+def test_on_demand_install_wires_an_existing_install_without_downloading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _eligible(monkeypatch)
+    root = provision_comfy("cuda", run=_FakeRun())
+    untouched = _FakeRun(fail_on="")
+    assert install_comfy_on_demand(make_facts(gpus=(NVIDIA_A40,)), offline=True, run=untouched) == root
+    assert untouched.commands == []
+
+
+@pytest.mark.parametrize(
+    ("offline", "gpus", "free_bytes", "step"),
+    [
+        (True, (NVIDIA_A40,), 10**15, "the download"),
+        (False, (), 10**15, "the eligibility check"),
+        (False, (NVIDIA_A40,), 1024**3, "the disk-space check"),
+    ],
+)
+def test_on_demand_install_refuses_with_a_named_step(
+    monkeypatch: pytest.MonkeyPatch,
+    offline: bool,
+    gpus: tuple[GpuDeviceFact, ...],
+    free_bytes: int,
+    step: str,
+) -> None:
+    _eligible(monkeypatch, free_bytes=free_bytes)
+    with pytest.raises(ComfyInstallError) as raised:
+        install_comfy_on_demand(
+            make_facts(gpus=gpus),
+            offline=offline,
+            run=_FakeRun(),
+        )
+    assert raised.value.step == step
+    assert COMFY_BIN_ENV not in os.environ
+
+
+def test_on_demand_install_fails_the_gpu_check_on_an_unusable_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _eligible(monkeypatch)
+    facts = make_facts(gpus=(NVIDIA_A40,))
+    with pytest.raises(ComfyInstallError) as raised:
+        install_comfy_on_demand(facts, offline=False, run=_FakeRun(fail_on="torch.cuda.is_available"))
+    assert raised.value.step == "the GPU check"
+    assert COMFY_BIN_ENV not in os.environ
+    # Startup would wire a complete install without checking it again.
+    assert managed_comfy_install(facts) is None
+
+
+def test_on_demand_install_reports_a_failed_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    _eligible(monkeypatch)
+    with pytest.raises(ComfyInstallError) as raised:
+        install_comfy_on_demand(
+            make_facts(gpus=(NVIDIA_A40,)), offline=False, run=_FakeRun(fail_on="pip install")
+        )
+    assert raised.value.step == "the engine download and install"
+
+
+def test_installed_managed_comfy_finds_the_install_for_its_backend() -> None:
+    assert installed_managed_comfy("comfy-cuda") is None
+    root = provision_comfy("cuda", run=_FakeRun())
+    expected = (root / "venv" / "bin" / "python", root / "ComfyUI")
+    assert installed_managed_comfy("comfy-cuda") == expected
+    assert installed_managed_comfy(None) == expected
+    assert installed_managed_comfy("comfy-rocm") is None
+
+
+def test_uv_falls_back_to_the_bundled_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    def not_on_path(_name: str) -> None:
+        return None
+
+    monkeypatch.setattr(comfy.shutil, "which", not_on_path)
+    bundled = types.ModuleType("uv")
+    monkeypatch.setattr(bundled, "find_uv_bin", lambda: sys.executable, raising=False)
+    monkeypatch.setitem(sys.modules, "uv", bundled)
+    assert comfy._uv_executable() == sys.executable
+

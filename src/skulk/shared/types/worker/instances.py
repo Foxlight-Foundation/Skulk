@@ -30,6 +30,7 @@ InstanceFailureCode = Literal[
     "node_unavailable",
     "placement_failed",
     "download_failed",
+    "engine_install_failed",
 ]
 """Stable operator-facing categories for terminal instance failures."""
 

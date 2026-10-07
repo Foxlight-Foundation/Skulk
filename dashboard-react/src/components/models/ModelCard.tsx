@@ -451,6 +451,21 @@ export function ModelCard({
         </div>
       )}
 
+      {apiPreview?.engine_install && (
+        <div
+          data-testid="engine-install-notice"
+          style={{ color: theme.colors.warning, fontSize: 11, lineHeight: 1.4, marginBottom: 8 }}
+        >
+          {apiPreview.engine_install.engine === 'comfy'
+            ? t(
+                'modelCard.videoEngineInstallNotice',
+                'The video engine (about {size}) will be installed with this model, so placement will take longer.',
+                { size: formatBytes(apiPreview.engine_install.approximate_download_bytes, 0) },
+              )
+            : apiPreview.engine_install.detail}
+        </div>
+      )}
+
       {/* Per-node download progress */}
       {perNode.length > 0 && (
         <div style={{ marginBottom: 8 }}>

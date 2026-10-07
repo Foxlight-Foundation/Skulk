@@ -921,6 +921,19 @@ def _is_video_card(card: "ModelCard") -> bool:
     return card_serves_video(card)
 
 
+def card_visible_in_catalog(card: "ModelCard") -> bool:
+    """Whether this node's feature switches show ``card`` in its catalog.
+
+    Image and video cards are shown unless an operator hid them with
+    ``SKULK_ENABLE_IMAGE_MODELS=false`` or ``SKULK_ENABLE_VIDEO_MODELS=false``.
+    Every catalog surface (the card list and store-installed models) uses this
+    one rule so a hidden family stays hidden everywhere.
+    """
+    return (SKULK_ENABLE_IMAGE_MODELS or not _is_image_card(card)) and (
+        SKULK_ENABLE_VIDEO_MODELS or not _is_video_card(card)
+    )
+
+
 def get_card(model_id: ModelId) -> "ModelCard | None":
     """Look up a single model card from the cache by ID."""
     return _card_cache.get(model_id)
@@ -1111,12 +1124,7 @@ def _cached_registry_card_by_id(card_id: str) -> "ModelCard | None":
 async def get_model_cards() -> list["ModelCard"]:
     """Return model cards visible under this node's feature configuration."""
     cards = await get_all_model_cards()
-    return [
-        card
-        for card in cards
-        if (SKULK_ENABLE_IMAGE_MODELS or not _is_image_card(card))
-        and (SKULK_ENABLE_VIDEO_MODELS or not _is_video_card(card))
-    ]
+    return [card for card in cards if card_visible_in_catalog(card)]
 
 
 def _split_limit(card: "ModelCard") -> int:

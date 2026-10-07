@@ -504,6 +504,38 @@ def test_comfy_is_gpu_only_and_honors_declarations() -> None:
     assert derive_node_backends(make_facts(gpus=(NVIDIA_A40,))).backends & {"comfy", "comfy-cuda"} == set()
 
 
+def test_comfy_on_demand_is_advertised_before_the_install() -> None:
+    derivation = derive_node_backends(
+        make_facts(gpus=(NVIDIA_A40,), comfy_on_demand_variants=("cuda",))
+    )
+    assert {"comfy", "comfy-cuda"} <= derivation.backends
+    assert derivation.on_demand_backends == frozenset({"comfy", "comfy-cuda"})
+    assert not derivation.installed_backends & {"comfy", "comfy-cuda"}
+    assert any("installs it" in note for note in derivation.notes)
+    assert derivation.conflicts == ()
+
+
+def test_configured_comfy_is_never_on_demand() -> None:
+    valid = {"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
+    derivation = derive_node_backends(
+        make_facts(gpus=(NVIDIA_A40,), comfy_on_demand_variants=("cuda",)).model_copy(update=valid)
+    )
+    assert {"comfy", "comfy-cuda"} <= derivation.installed_backends
+    assert derivation.on_demand_backends == frozenset()
+
+
+def test_on_demand_engine_does_not_hide_cpu_only_serving() -> None:
+    # Only installed engines count toward GPU serving: an engine that is not
+    # installed yet must not mask a GPU node whose installed engines run on CPU.
+    facts = make_facts(
+        gpus=(NVIDIA_A40,),
+        llama_cpp_importable=True,
+        llama_cpp_gpu_offload=False,
+        comfy_on_demand_variants=("cuda",),
+    )
+    assert conflict_codes(facts) == ["gpu_serving_disabled"]
+
+
 def test_comfy_skips_inherited_declarations_it_cannot_use() -> None:
     valid = {"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
     # The documented AMD launch path declares vulkan for llama.cpp; ComfyUI

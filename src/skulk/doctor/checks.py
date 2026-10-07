@@ -143,7 +143,9 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
                 "this node serves no inference shards and needs no engine",
             )
         ]
-    derived = derive_node_backends(facts).backends
+    # Only installed engines serve now; one that installs on demand (the video
+    # engine) does not make this node usable for ordinary models.
+    derived = derive_node_backends(facts).installed_backends
     engines: list[str] = []
     if "mlx" in derived:
         engines.append("mlx (in-process)")
@@ -260,8 +262,8 @@ def _fix_engine_available(facts: NodeFacts) -> str | None:
     """Provision the pinned llama-server build when no engine is available."""
     if not _provisioning_fix_applicable(facts):
         return None
-    if derive_node_backends(facts).backends:
-        # Some engine already derives usable tags; nothing to provision.
+    if derive_node_backends(facts).installed_backends:
+        # Some installed engine already derives usable tags; nothing to provision.
         return None
     from skulk.provisioning import ensure_llama_server
 
@@ -280,7 +282,7 @@ def _fix_engine_available(facts: NodeFacts) -> str | None:
 def _comfy_fix_applicable(facts: NodeFacts) -> bool:
     """Whether --fix can provision the managed ComfyUI install on this node.
 
-    Mirrors ensure_comfy's gates: full participation, no explicit override,
+    Mirrors the managed-install gates: full participation, no explicit override,
     auto-provisioning not opted out, video models enabled, and a recorded
     wheel set for this machine and GPU vendor.
     """
@@ -301,7 +303,24 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
     if _declared_participation() != "full":
         return [_ok(check_id, title, "management node; no video engine expected")]
     derivation = derive_node_backends(facts)
-    derived = derivation.backends
+    derived = derivation.installed_backends
+    if "comfy" in derivation.on_demand_backends:
+        variants = sorted(
+            tag for tag in derivation.on_demand_backends if tag.startswith("comfy-")
+        )
+        return [
+            CheckResult(
+                check_id=check_id,
+                title=title,
+                verdict="ok",
+                detail=(
+                    f"not installed yet ({', '.join(variants)}); this node installs "
+                    "the video engine (about 7 GB) the first time a video model is "
+                    "placed here, or `skulk doctor --fix` installs it now"
+                ),
+                fix_available=True,
+            )
+        ]
     if "comfy" in derived:
         from skulk.facts.inventory import engine_build_inventory
 
@@ -396,19 +415,19 @@ def _check_comfy_engine(facts: NodeFacts) -> Sequence[CheckResult]:
 
 
 def _fix_comfy_engine(facts: NodeFacts) -> str | None:
-    """Provision the managed ComfyUI install when video models are enabled."""
+    """Install the managed ComfyUI engine now instead of at first placement.
+
+    Uses the placement install path, so the same eligibility, disk-space, and
+    GPU checks apply and a failure names the step that failed.
+    """
     if not _comfy_fix_applicable(facts):
         return None
-    if "comfy" in derive_node_backends(facts).backends:
+    if "comfy" in derive_node_backends(facts).installed_backends:
         return None
-    from skulk.provisioning import ensure_comfy
+    from skulk.provisioning.comfy import install_comfy_on_demand
+    from skulk.shared.constants import offline_mode
 
-    root = ensure_comfy(facts)
-    if root is None:
-        raise RuntimeError(
-            "ComfyUI provisioning did not produce an install (override present, "
-            "opted out, video models disabled, or the install failed; see the log)"
-        )
+    root = install_comfy_on_demand(facts, offline=offline_mode())
     return f"provisioned pinned ComfyUI at {root}"
 
 
@@ -1050,12 +1069,15 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         check_id="comfy-engine",
         title="ComfyUI video engine",
         docs=(
-            "When video models are enabled (SKULK_ENABLE_VIDEO_MODELS), verifies "
-            "the served ComfyUI video engine is configured (SKULK_COMFY_BIN plus "
-            "SKULK_COMFY_ROOT) or provisioned as the managed install under the "
-            "engines directory. A Linux NVIDIA or AMD node without one is degraded: "
-            "video cards never place there. Management nodes and nodes with "
-            "video models disabled pass."
+            "Verifies the served ComfyUI video engine. A node passes when the "
+            "engine is configured (SKULK_COMFY_BIN plus SKULK_COMFY_ROOT), already "
+            "installed under the engines directory, or installable on demand: a "
+            "Linux node with a supported NVIDIA or AMD GPU installs it (about 7 GB) "
+            "the first time a video model is placed there, and `--fix` installs "
+            "it now. A GPU node that cannot install it (opted out, offline, git or "
+            "uv missing, or an unsupported GPU) is degraded: video cards never "
+            "place there. Management nodes and nodes with video models hidden "
+            "(SKULK_ENABLE_VIDEO_MODELS=false) pass."
         ),
         run=_check_comfy_engine,
         fix=_fix_comfy_engine,

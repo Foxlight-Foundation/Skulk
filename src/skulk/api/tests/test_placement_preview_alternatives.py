@@ -640,3 +640,45 @@ async def test_placement_apis_forward_unified_memory_classification(
         )
     assert seen_unified_nodes
     assert all(value == expected_unified_nodes for value in seen_unified_nodes)
+
+
+def test_preview_names_the_engine_a_placement_installs() -> None:
+    """A shard whose stamped backend installs on demand carries the notice."""
+    api = _build_api()
+    on_demand = NodeId("on-demand-node")
+    ready = NodeId("ready-node")
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=on_demand,
+            info=NodeResources(
+                backends=frozenset({"comfy", "comfy-cuda"}),
+                on_demand_backends=frozenset({"comfy", "comfy-cuda"}),
+            ),
+        )
+    )
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=ready, info=NodeResources(backends=frozenset({"comfy", "comfy-cuda"}))
+        )
+    )
+    engine_install = api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+        _single_node_instance(str(on_demand), resolved_backend="comfy-cuda")
+    )
+    assert engine_install is not None
+    assert engine_install.engine == "comfy"
+    assert engine_install.node_ids == [str(on_demand)]
+    assert engine_install.approximate_download_bytes == 7 * 1024**3
+    assert "will be installed with this model" in engine_install.detail
+
+    assert (
+        api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+            _single_node_instance(str(ready), resolved_backend="comfy-cuda")
+        )
+        is None
+    )
+    assert (
+        api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+            _single_node_instance(str(on_demand))
+        )
+        is None
+    )

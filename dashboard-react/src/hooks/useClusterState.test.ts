@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { ensureCapabilityHostsPresent, normalizeCapabilityNodes, transformTopology } from './useClusterState';
+import {
+  engineInstallingInstanceIds,
+  ensureCapabilityHostsPresent,
+  normalizeCapabilityNodes,
+  transformTopology,
+} from './useClusterState';
 
 const GIB = 1024 ** 3;
 
@@ -184,3 +189,22 @@ describe('ensureCapabilityHostsPresent', () => {
     expect(ensureCapabilityHostsPresent(topology, [], {}, {})).toBe(topology);
   });
 });
+
+describe('engineInstallingInstanceIds', () => {
+  it('includes instances with a pending or running engine install only', () => {
+    const tasks = {
+      't-running': { InstallEngine: { taskStatus: 'Running', instanceId: 'inst-a', engine: 'comfy' } },
+      't-pending': { InstallEngine: { taskStatus: 'Pending', instanceId: 'inst-b', engine: 'comfy' } },
+      't-done': { InstallEngine: { taskStatus: 'Complete', instanceId: 'inst-c', engine: 'comfy' } },
+      't-failed': { InstallEngine: { taskStatus: 'Failed', instanceId: 'inst-d', engine: 'comfy' } },
+      't-download': { DownloadModel: { taskStatus: 'Running', instanceId: 'inst-e' } },
+    };
+
+    expect([...engineInstallingInstanceIds(tasks)].sort()).toEqual(['inst-a', 'inst-b']);
+  });
+
+  it('returns an empty set without tasks', () => {
+    expect(engineInstallingInstanceIds(undefined).size).toBe(0);
+  });
+});
+

@@ -165,6 +165,33 @@ COMFY_ROOT_ENV: Final = "SKULK_COMFY_ROOT"
 # declaration chain vLLM uses, then to the observed GPU vendor.
 COMFY_BACKENDS_ENV: Final = "SKULK_COMFY_BACKENDS"
 
+ON_DEMAND_ENGINE_DOWNLOAD_BYTES: Final[dict[EngineType, int]] = {"comfy": 7 * 1024**3}
+"""Approximate download a node makes to install an on-demand engine, quoted to
+operators before a placement that triggers it (binary gigabytes, matching the
+dashboard's byte formatting)."""
+
+def engine_install_notice(engine: str, size_bytes: int) -> str:
+    """The sentence an operator sees before a placement installs an engine.
+
+    Args:
+        engine: The engine that installs on demand.
+        size_bytes: Approximate download, or zero when unknown.
+
+    Returns:
+        A one-sentence notice naming the engine and its approximate size.
+    """
+    name = "video engine" if engine == "comfy" else f"{engine} engine"
+    size = f" (about {round(size_bytes / 1024**3)} GB)" if size_bytes else ""
+    return (
+        f"The {name}{size} will be installed with this model, so placement will "
+        "take longer."
+    )
+
+
+ENGINE_UNAVAILABLE_FAILURE_MARKER: Final = "engine-not-installed"
+"""Marks a runner that started without its on-demand engine installed. The
+worker gives the instance up instead of relaunching into the same gap."""
+
 # audio.cpp is absent from the base environment. Only a verified installed
 # executable is eligible for placement; the on-demand package preparation path
 # sets this variable after it has checked the immutable wheel and binary.

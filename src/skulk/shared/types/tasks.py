@@ -6,6 +6,7 @@ from skulk.api.types import (
     ImageEditsTaskParams,
     ImageGenerationTaskParams,
 )
+from skulk.shared.backends import EngineType
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
     RealtimeAudioTranscriptionTaskParams,
@@ -50,6 +51,16 @@ class CreateRunner(BaseTask):  # emitted by Worker
 
 class DownloadModel(BaseTask):  # emitted by Worker
     shard_metadata: ShardMetadata
+
+
+class InstallEngine(BaseTask):  # emitted by Worker
+    """Install an on-demand engine this instance's runner needs before loading.
+
+    Runs beside the model download; the worker loads the model only after both
+    finish. One install serves every instance waiting for the same engine.
+    """
+
+    engine: EngineType
 
 
 class LoadModel(BaseTask):  # emitted by Worker
@@ -178,6 +189,7 @@ class Shutdown(BaseTask):  # emitted by Worker
 Task = (
     CreateRunner
     | DownloadModel
+    | InstallEngine
     | ConnectToGroup
     | LoadModel
     | StartWarmup

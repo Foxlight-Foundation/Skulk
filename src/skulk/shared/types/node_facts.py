@@ -275,6 +275,14 @@ class NodeFacts(CamelCaseModel):
     declared_comfy_backends: str | None = None
     """Raw ``SKULK_COMFY_BACKENDS`` value, verbatim, or ``None`` when unset."""
 
+    comfy_on_demand_variants: tuple[Literal["cuda", "rocm"], ...] = ()
+    """ComfyUI variants this node may install when a video model is placed on it.
+
+    Empty when an install is configured or wired, or when any install gate
+    fails (opted out, offline, video models hidden, no supported GPU, git or uv
+    missing). Non-empty makes the node advertise the video engine before it is
+    installed."""
+
     audio_cpp_binary: EngineBinaryFact = Field(
         default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_BIN")
     )
