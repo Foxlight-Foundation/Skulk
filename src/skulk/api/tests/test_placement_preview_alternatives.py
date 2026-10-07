@@ -459,6 +459,42 @@ async def test_previews_surface_per_host_alternatives(
     ]
 
 
+async def test_preview_names_missing_hardware_as_compatibility_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model no machine can run says which machine it needs beneath the card."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    api.state.topology.add_node(NodeId("linux-gpu"))
+    message = (
+        "No machine in this cluster can run this model: it needs an Apple "
+        "Silicon Mac."
+    )
+
+    async def _load(_model_id: object) -> ModelCard:
+        return _card()
+
+    def _no_capable_machine(
+        command: PlaceInstance,
+        **kwargs: object,
+    ) -> dict[InstanceId, MlxRingInstance]:
+        raise placement_module.PlacementNoCapableMachineError(message)
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    monkeypatch.setattr(api_main, "get_instance_placements", _no_capable_machine)
+
+    response = client.get("/instance/previews", params={"model_id": str(_MODEL_ID)})
+
+    assert response.status_code == 200
+    payload = cast("dict[str, object]", cast(object, response.json()))
+    previews = cast("list[dict[str, object]]", payload["previews"])
+    assert previews
+    assert all(preview["error"] == message for preview in previews)
+    assert all(preview["compatibility_detail"] == message for preview in previews)
+    assert all(preview["error_code"] == "no_valid_placement" for preview in previews)
+
+
 async def test_alternatives_skipped_when_caller_pins_nodes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

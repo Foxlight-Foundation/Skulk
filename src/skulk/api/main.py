@@ -348,6 +348,7 @@ from skulk.master.image_store import ImageStore
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    PlacementNoCapableMachineError,
     require_instance_model_card_identity,
     require_instance_model_code_approval,
     served_context_window,
@@ -4472,7 +4473,14 @@ class API:
                                 if isinstance(exc, PlacementError)
                                 else "no_valid_placement"
                             ),
-                            compatibility_detail=support_gap_detail,
+                            # The dashboard shows the compatibility detail
+                            # beneath the model, so missing hardware is named
+                            # there rather than only coloring the card.
+                            compatibility_detail=(
+                                str(exc)
+                                if isinstance(exc, PlacementNoCapableMachineError)
+                                else support_gap_detail
+                            ),
                         )
                     )
                 seen.add((model_card.model_id, sharding, instance_meta, 0))

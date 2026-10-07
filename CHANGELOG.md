@@ -7,6 +7,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- Image models (FLUX.1 and Qwen-Image) now appear in the model catalog by
+  default, so the packaged Mac and Linux apps, which have no launch
+  environment to opt in through, can use them. `SKULK_ENABLE_IMAGE_MODELS=false`
+  hides them on a node; the switch also accepts `0`, `no` and `off`.
+- When no machine in a cluster has the hardware a model needs, placement and
+  the dashboard now say so in plain words (for example "it needs an Apple
+  Silicon Mac") instead of listing engine tags.
+
 ### Fixed
 
 - A model whose files turn out to be incomplete when it loads is no longer

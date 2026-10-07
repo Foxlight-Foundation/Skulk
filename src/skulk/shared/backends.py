@@ -277,6 +277,40 @@ def engine_of(tag: str) -> EngineType | None:
     return None
 
 
+# The hardware an engine needs, in an operator's words, for engines whose
+# availability the machine alone decides: every Apple Silicon Mac advertises
+# MLX. Engines that also need software a node may lack (vLLM, or the video
+# engine before it is installed) are deliberately absent, so a cluster missing
+# them is never told it is missing hardware it already owns.
+_ENGINE_HARDWARE: Final[dict[EngineType, str]] = {
+    "mlx": "an Apple Silicon Mac",
+    "mlx_audio": "an Apple Silicon Mac",
+}
+
+
+def describe_backend_hardware(backends: AbstractSet[str]) -> str | None:
+    """Name the hardware a card's backend tags require, in plain words.
+
+    Args:
+        backends: The card's compatible backend tags.
+
+    Returns:
+        A phrase such as ``"an Apple Silicon Mac"``, or ``None`` when any tag
+        names an engine whose availability hardware alone does not decide (or
+        names no known engine), so callers keep their detailed message instead
+        of claiming a requirement the card does not have.
+    """
+    descriptions: list[str] = []
+    for tag in sorted(backends):
+        engine = engine_of(tag)
+        description = _ENGINE_HARDWARE.get(engine) if engine is not None else None
+        if description is None:
+            return None
+        if description not in descriptions:
+            descriptions.append(description)
+    return " or ".join(descriptions) if descriptions else None
+
+
 # Engines that can serve a model sharded across multiple nodes. MLX has the
 # multi-node ring / jaccl path. The served ``llama_server`` engine pools memory
 # across nodes via llama.cpp's RPC backend (#328): one driver node runs
