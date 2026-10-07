@@ -37,7 +37,12 @@ from skulk.extensions.runtime_attachment import (
     ServiceConnection,
 )
 from skulk.extensions.runtime_catalog import catalog_refusal, catalog_refusal_sentence
-from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
+from skulk.extensions.runtime_files import (
+    RuntimeLock,
+    read_private,
+    writable_only_by,
+    write_private,
+)
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_manager import (
     MANAGER_REQUEST,
@@ -436,7 +441,7 @@ async def setup_service(
             if (
                 not stat.S_ISDIR(info.st_mode)
                 or info.st_uid != os.getuid()
-                or info.st_mode & 0o022
+                or not writable_only_by(info, os.getuid())
             ):
                 raise ValueError(
                     "Skulk configuration must be owned by this account and not writable by others"

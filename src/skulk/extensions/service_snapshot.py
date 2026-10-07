@@ -26,6 +26,7 @@ from skulk.extensions.runtime_files import (
     is_desktop_metadata,
     private_directory,
     read_private,
+    writable_only_by,
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
@@ -141,7 +142,9 @@ def _sources() -> tuple[_SourceFile, ...]:
                 raise ValueError("installed dependency has an unresolved link")
             if stat.S_ISDIR(info.st_mode):
                 continue
-            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022:
+            if not stat.S_ISREG(info.st_mode) or not writable_only_by(
+                info, os.getuid()
+            ):
                 raise ValueError("installed dependency is not a protected regular file")
             if primary and relative == Path("skulk.pth"):
                 # The effective imported core is copied explicitly above. Never

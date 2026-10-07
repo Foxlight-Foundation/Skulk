@@ -1,11 +1,51 @@
 """Protected local files and exclusive ownership for managed plugin runtimes."""
 
 import fcntl
+import functools
+import grp
 import os
+import pwd
 import stat
 from pathlib import Path
 from typing import final
 from uuid import uuid4
+
+
+@functools.cache
+def _private_group(group_id: int, user_id: int) -> bool:
+    """Whether ``group_id`` is the account's own group with no other members."""
+    try:
+        group = grp.getgrgid(group_id)
+        account = pwd.getpwuid(user_id)
+    except KeyError:
+        return False
+    return (
+        account.pw_gid == group_id
+        and group.gr_name == account.pw_name
+        and not group.gr_mem
+    )
+
+
+def writable_only_by(info: os.stat_result, user_id: int) -> bool:
+    """Whether no account other than ``user_id``, or root, can change a file.
+
+    Group write counts as private when the file belongs to the account and its
+    group is the account's own private group with no other members: that is
+    what Ubuntu's default 0002 umask gives every file a user creates, so a
+    Python environment installed there is still the owner's alone.
+
+    Args:
+        info: The file's ``lstat`` result.
+        user_id: The account the file must be private to.
+
+    Returns:
+        False when others can write it; True otherwise.
+    """
+    if info.st_mode & 0o002:
+        return False
+    if not info.st_mode & 0o020:
+        return True
+    return info.st_uid == user_id and _private_group(info.st_gid, user_id)
 
 
 def is_desktop_metadata(path: Path) -> bool:

@@ -485,3 +485,41 @@ async def test_runner_leaves_a_silent_service_on_the_right_interpreter_alone(
     monkeypatch.setattr(service_autosetup, "registered_unit_names_base", same)
 
     assert (await ServiceSetupRunner().status()).state == "unavailable"
+
+
+def _stat(mode: int, uid: int, gid: int) -> os.stat_result:
+    return os.stat_result((mode, 0, 0, 1, uid, gid, 0, 0, 0, 0))
+
+
+def test_group_write_in_the_owners_private_group_is_still_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ubuntu's 0002 umask leaves every file group-writable in a private group."""
+    import grp
+    import pwd
+
+    from skulk.extensions import runtime_files
+
+    runtime_files._private_group.cache_clear()  # pyright: ignore[reportPrivateUsage]
+    account = pwd.struct_passwd(("owner", "x", 1000, 1000, "", "/home/owner", "/bin/sh"))
+    groups = {
+        1000: grp.struct_group(("owner", "x", 1000, [])),
+        1001: grp.struct_group(("shared", "x", 1001, ["owner", "colleague"])),
+    }
+    def account_for(_user_id: int) -> pwd.struct_passwd:
+        return account
+
+    def group_for(group_id: int) -> grp.struct_group:
+        return groups[group_id]
+
+    monkeypatch.setattr(runtime_files.pwd, "getpwuid", account_for)
+    monkeypatch.setattr(runtime_files.grp, "getgrgid", group_for)
+    try:
+        writable = runtime_files.writable_only_by
+        assert writable(_stat(0o100644, 1000, 1000), 1000)
+        assert writable(_stat(0o100664, 1000, 1000), 1000)
+        assert not writable(_stat(0o100664, 1000, 1001), 1000)
+        assert not writable(_stat(0o100664, 1002, 1000), 1000)
+        assert not writable(_stat(0o100646, 1000, 1000), 1000)
+    finally:
+        runtime_files._private_group.cache_clear()  # pyright: ignore[reportPrivateUsage]
