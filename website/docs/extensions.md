@@ -1004,7 +1004,10 @@ node runs it the first time capabilities are used
 calls), and `skulk-plugin-service setup` runs the same setup from a terminal as
 the existing Skulk owner. `skulk-plugin-service setup --system` registers a
 system service instead, for hosts that run unattended; only its fixed
-registration helper requests local elevation.
+registration helper requests local elevation. When the interpreter lives inside
+the Mac app, the launchd definition names the app's bundle identifier
+(`AssociatedBundleIdentifiers`), so Login Items lists Skulk rather than the
+interpreter.
 Setup generates service storage and a local profile connection without configuration
 file editing. `skulk-plugin-service status` separates retained setup progress from
 current management availability and registered-runtime integrity.

@@ -3,6 +3,7 @@
 import asyncio
 import os
 import plistlib
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Literal, cast
@@ -46,7 +47,9 @@ def test_user_scope_lives_in_the_owners_directories(
     assert layout.root == tmp_path / "state" / "plugin-service"
     assert layout.label == "foundation.foxlight.skulk.plugins"
     suffix = ".plist" if platform.startswith("macos") else ".service"
-    assert layout.unit == tmp_path / "units" / ("foundation.foxlight.skulk.plugins" + suffix)
+    assert layout.unit == tmp_path / "units" / (
+        "foundation.foxlight.skulk.plugins" + suffix
+    )
 
 
 def test_user_scope_requires_absolute_owner_directories() -> None:
@@ -167,9 +170,7 @@ def test_install_and_stop_use_the_owners_service_manager(
     commands.clear()
     register_user(layout, "stop")
     if platform.startswith("macos"):
-        assert commands == [
-            ("/bin/launchctl", "bootout", f"gui/{uid}/{layout.label}")
-        ]
+        assert commands == [("/bin/launchctl", "bootout", f"gui/{uid}/{layout.label}")]
     else:
         assert commands[0] == ("/usr/bin/systemctl", "--user", "stop", layout.unit.name)
         assert commands[1][:3] == ("/usr/bin/systemctl", "--user", "show")
@@ -325,7 +326,9 @@ async def test_runner_reports_why_setup_failed(
     _connect(monkeypatch, tmp_path, None)
 
     async def setup(_scope: str | None, _report: object) -> SetupOperation:
-        raise ValueError("service interpreter and Skulk configuration must be outside Git checkouts")
+        raise ValueError(
+            "service interpreter and Skulk configuration must be outside Git checkouts"
+        )
 
     monkeypatch.setattr(service_autosetup, "setup_service", setup)
     runner = ServiceSetupRunner()
@@ -447,6 +450,7 @@ async def test_runner_re_registers_a_user_service_whose_interpreter_moved(
 
     monkeypatch.setattr(service_autosetup, "setup_service", setup)
     monkeypatch.setattr(service_autosetup, "_manager_answers", silent)
+
     def moved(_base: Path) -> bool:
         return False
 
@@ -486,6 +490,7 @@ async def test_runner_leaves_a_silent_service_on_the_right_interpreter_alone(
 
     monkeypatch.setattr(service_autosetup, "setup_service", setup)
     monkeypatch.setattr(service_autosetup, "_manager_answers", silent)
+
     def same(_base: Path) -> bool:
         return True
 
@@ -586,11 +591,14 @@ def test_group_write_in_the_owners_private_group_is_still_private(
     from skulk.extensions import runtime_files
 
     runtime_files._private_group.cache_clear()  # pyright: ignore[reportPrivateUsage]
-    account = pwd.struct_passwd(("owner", "x", 1000, 1000, "", "/home/owner", "/bin/sh"))
+    account = pwd.struct_passwd(
+        ("owner", "x", 1000, 1000, "", "/home/owner", "/bin/sh")
+    )
     groups = {
         1000: grp.struct_group(("owner", "x", 1000, [])),
         1001: grp.struct_group(("shared", "x", 1001, ["owner", "colleague"])),
     }
+
     def account_for(_user_id: int) -> pwd.struct_passwd:
         return account
 
@@ -647,3 +655,54 @@ async def test_the_extensions_kill_switch_stops_node_driven_setup(
     status = await runner.status()
     assert status.state == "unsupported"
     assert status.error is not None and "SKULK_EXTENSIONS_DISABLE" in status.error
+
+
+def _bundled_python(tmp_path: Path, identifier: object) -> Path:
+    """An interpreter inside a Mac app bundle laid out like the packaged app."""
+    contents = tmp_path / "Applications" / "Skulk.app" / "Contents"
+    python = contents / "Resources" / "Runtime" / "python" / "bin" / "python3.13"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+    (contents / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleIdentifier": identifier, "CFBundleName": "Skulk"})
+    )
+    return python
+
+
+def test_an_agent_from_the_mac_app_names_the_app(tmp_path: Path) -> None:
+    """Login Items shows Skulk, not the interpreter, for the packaged app's agent."""
+    layout = _user_layout(tmp_path, "macos-arm64")
+    python = _bundled_python(tmp_path, "ai.foxlight.skulk")
+
+    agent = cast(dict[str, object], plistlib.loads(layout.definition(python)))
+
+    assert agent["AssociatedBundleIdentifiers"] == ["ai.foxlight.skulk"]
+    layout.verify_existing(layout.definition(python))
+    # A source install's interpreter is in no bundle and names nothing.
+    plain = layout.definition(Path("/opt/python/bin/python3.13"))
+    assert b"AssociatedBundleIdentifiers" not in plain
+
+
+def test_an_agent_whose_app_moved_is_still_recognized(tmp_path: Path) -> None:
+    """Repair after an app move must not refuse the agent the app wrote."""
+    layout = _user_layout(tmp_path, "macos-arm64")
+    python = _bundled_python(tmp_path, "ai.foxlight.skulk")
+    written = layout.definition(python)
+    shutil.rmtree(tmp_path / "Applications")
+
+    layout.verify_existing(written)
+    with pytest.raises(ValueError, match="association"):
+        layout.verify_existing(
+            written.replace(b"ai.foxlight.skulk", b"ai.foxlight.skulk;x")
+        )
+    with pytest.raises(ValueError, match="differs"):
+        layout.verify_existing(written.replace(b"RunAtLoad", b"RunAtLoaded"))
+
+
+@pytest.mark.parametrize("identifier", [7, "", "bad identifier", "x" * 300])
+def test_a_bundle_without_a_valid_identifier_names_nothing(
+    tmp_path: Path, identifier: object
+) -> None:
+    python = _bundled_python(tmp_path, identifier)
+
+    assert service_registration.associated_bundle(python) is None
