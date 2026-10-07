@@ -1697,6 +1697,61 @@ def test_mac_only_model_without_a_mac_names_the_missing_hardware() -> None:
         )
 
 
+def test_management_only_mac_keeps_the_detailed_message() -> None:
+    """Management nodes advertise no engines, so a management-only Mac must not
+    be reported as a missing Mac."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(PlacementError) as raised:
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(
+                    participation="management",
+                    backends=frozenset(),
+                    hardware_classes=frozenset({"platform:darwin"}),
+                ),
+                node_b: NodeResources(
+                    backends=frozenset({"llama_server-cuda"}),
+                    hardware_classes=frozenset({"platform:linux", "nvidia"}),
+                ),
+            },
+        )
+    assert not isinstance(raised.value, PlacementNoCapableMachineError)
+
+
+def test_mac_without_mlx_keeps_the_detailed_message() -> None:
+    """A Mac whose MLX engine failed to load owns the hardware, so the planner
+    does not claim the cluster lacks one."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(PlacementError) as raised:
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(
+                    backends=frozenset({"llama_cpp-metal"}),
+                    hardware_classes=frozenset({"platform:darwin"}),
+                ),
+                node_b: NodeResources(
+                    backends=frozenset({"llama_server-cuda"}),
+                    hardware_classes=frozenset({"platform:linux", "nvidia"}),
+                ),
+            },
+        )
+    assert not isinstance(raised.value, PlacementNoCapableMachineError)
+
+
 def test_missing_hardware_is_not_claimed_before_every_node_reports() -> None:
     """A node that has not reported its engines may be the Mac, so a failed
     two-node placement keeps the detailed message."""
