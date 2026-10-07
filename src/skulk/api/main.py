@@ -4033,7 +4033,9 @@ class API:
             detail="audio.cpp could not be prepared on an eligible node: " + "; ".join(errors),
         )
 
-    async def place_instance(self, payload: PlaceInstanceParams):
+    async def place_instance(
+        self, payload: PlaceInstanceParams
+    ) -> CreateInstanceResponse:
         card = await self._load_authorized_model_card(payload.model_id)
         prepared = await self._prepare_music_engine_for_mount(
             card, set(payload.excluded_nodes)

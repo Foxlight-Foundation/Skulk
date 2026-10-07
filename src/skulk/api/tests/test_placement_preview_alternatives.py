@@ -6,6 +6,7 @@ every other host that passes admission. The alternatives pass re-runs the
 planner per remaining host and surfaces the viable single-node options.
 """
 
+import json
 from datetime import datetime, timezone
 from typing import cast
 from unittest.mock import AsyncMock
@@ -731,4 +732,14 @@ def test_quick_launch_returns_the_engine_install_notice(
     assert engine_install["node_ids"] == [str(node)]
     assert engine_install["approximate_download_bytes"] == 7 * 1024**3
     assert "will be installed with this model" in str(engine_install["detail"])
+
+
+def test_quick_launch_documents_its_response_in_openapi() -> None:
+    """Generated clients can discover the engine-install notice on quick launch."""
+    schema = cast(dict[str, dict[str, object]], _build_api().app.openapi())
+    path = cast(dict[str, dict[str, object]], schema["paths"]["/place_instance"])
+    responses = cast(dict[str, object], path["post"]["responses"])
+    assert '"#/components/schemas/CreateInstanceResponse"' in json.dumps(responses["200"])
+    schemas = cast(dict[str, object], schema["components"]["schemas"])
+    assert '"engine_install"' in json.dumps(schemas["CreateInstanceResponse"])
 
