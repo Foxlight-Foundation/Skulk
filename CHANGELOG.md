@@ -7,6 +7,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Skulk can now read a built-in capability store with nothing to paste or
+  configure. **Plugins**, **Browse** lists it on a host that has no catalog of
+  its own. Skulk verifies which publishers the store trusts through the
+  store's TUF repository, anchored in a root shipped inside Skulk, and renews
+  that trust by itself on each catalog read: a newer trust revision is
+  applied, an older one never, and the store's revocations apply exactly as
+  its current trust lists them. Revocations never carry between the store and
+  a private catalog. A host that cannot reach the store, or runs offline, keeps using the
+  trust it last verified until that trust expires; a tampered or expired trust
+  is refused. A private catalog still works: **Add a private catalog**
+  replaces the store as the host's source, and **Use the Foxlight store** (or
+  `POST /v1/plugins/managed/catalog/source/builtin`) switches back.
+  `GET /v1/plugins/managed/catalog/source` reports `builtin_store` and
+  `builtin_store_available`. A build that does not ship the store's root has
+  no built-in store, and Browse behaves as before.
+
 ### Changed
 
 - Updating Skulk no longer breaks installed capabilities. A capability

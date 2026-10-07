@@ -11,6 +11,7 @@ from typing import Literal
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import JsonValue
 
 from skulk.api.plugins import create_plugins_router
 from skulk.api.tests.test_operator_gateway import paired_service
@@ -564,6 +565,153 @@ async def test_http_catalog_routes_read_a_verified_listing_without_disclosure(
             inventory = await client.get(prefix, headers=bearer)
             assert inventory.status_code == 200
             assert b"managed." not in inventory.content
+    finally:
+        await extensions.run_shutdown_hooks()
+        await manager.close()
+
+
+async def test_http_builtin_store_is_the_default_source_and_the_owner_returns_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh host lists the built-in store unconfigured; switching back is owner-only."""
+    import time
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from skulk.extensions.capability_store import (
+        CAPABILITY_STORE_CATALOG_URL,
+        StoreTrustClient,
+    )
+    from skulk.extensions.runtime_artifacts import canonical_json
+    from skulk.extensions.runtime_catalog import (
+        CatalogReview,
+        CatalogSourceStatus,
+        catalog_refusal_sentence,
+    )
+    from skulk.extensions.tests.store_repository import StoreRepository, trust_document
+
+    manager = manager_fixture(tmp_path / "manager", monkeypatch)
+    repository = StoreRepository()
+    (tmp_path / "store-root.json").write_bytes(repository.embedded_root)
+    manager.catalog.store = StoreTrustClient(
+        tmp_path / "manager" / "store-trust",
+        embedded_root=tmp_path / "store-root.json",
+        fetcher=repository.fetcher,
+    )
+    key = Ed25519PrivateKey.generate()
+    repository.publish_trust(trust_document(key, revision=1))
+    now = int(time.time())
+    catalog: dict[str, JsonValue] = {
+        "protocol": 2,
+        "publisher": "fixture",
+        "revision": 1,
+        "created_at": now - 1,
+        "expires_at": now + 3600,
+        "entries": [
+            {
+                "bundle_id": "example.plugin",
+                "bundle_version": "1.0.0",
+                "title": "Example plugin",
+                "publisher": "fixture",
+                "sequence": 1,
+                "feed_url": "https://skulkapps.foxlight.ai/releases/example/1/",
+                "release_sha256": "1" * 64,
+                "release_digest": "2" * 64,
+                "artifact_sha256": "3" * 64,
+                "artifact_size": 4096,
+                "transfer_bytes": 4096,
+                "platforms": ["darwin", "linux"],
+                "skulk_build_sha256": "a" * 64,
+                "skulk_requires": ">=1.5.0,<3",
+                "permissions": ["local synthetic operation"],
+                "descriptors": ["example.echo@1.0.0"],
+                "expires_at": now + 86400,
+            }
+        ],
+    }
+    document = json.dumps(
+        {"catalog": catalog, "signature": key.sign(canonical_json(catalog)).hex()}
+    ).encode()
+
+    def served(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == CAPABILITY_STORE_CATALOG_URL + "catalog.json":
+            assert "authorization" not in request.headers
+            return httpx.Response(200, content=document)
+        return httpx.Response(404)
+
+    manager.catalog.transport = httpx.MockTransport(served)
+    await manager.start()
+    path = tmp_path / "config/managed-service/connection.json"
+    connect(path, manager.root)
+    services = ManagedServices(path)
+    extensions = LoadedExtensions([], managed_services=services)
+    extensions.run_startup_hooks(replace(context(), skulk_version="1.5.2"))
+    pairing, exchange = paired_service(tmp_path / "pairing")
+    app = FastAPI()
+    app.include_router(create_plugins_router(extensions, pairing))
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 52000))
+    bearer = {"Authorization": f"Bearer {exchange.access_token}"}
+    owner = {"X-Skulk-Dashboard": "pairing-v1", "Origin": "https://localhost"}
+    prefix = "/v1/plugins/managed"
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://localhost"
+        ) as client:
+            pairing.set_plugin_grant(
+                exchange.device_id,
+                PluginGrantUpdate(
+                    expected_revision=0, scopes=("plugins:read", "plugins:manage")
+                ),
+            )
+            fresh = CatalogSourceStatus.model_validate_json(
+                (await client.get(prefix + "/catalog/source", headers=bearer)).content
+            )
+            assert fresh.configured and fresh.builtin_store
+            assert fresh.builtin_store_available and fresh.trust_revision is None
+            listed = await client.get(prefix + "/catalog", headers=bearer)
+            assert listed.status_code == 200
+            review = CatalogReview.model_validate_json(listed.content)
+            assert [entry.bundle_id for entry in review.entries] == ["example.plugin"]
+            assert "skulkapps" not in listed.text
+            # A private catalog replaces the store at the owner's request.
+            private = {
+                "expected_revision": 1,
+                "base_url": "https://catalog.example.test/private/",
+                "trust": {
+                    "revision": 2,
+                    "expires_at": now + 3600,
+                    "publishers": {"fixture": "f" * 64},
+                },
+            }
+            changed = await client.post(
+                prefix + "/catalog/source", headers=owner, json=private
+            )
+            assert changed.status_code == 200
+            assert not CatalogSourceStatus.model_validate_json(
+                changed.content
+            ).builtin_store
+            # Returning to the store is owner administration, fenced by revision.
+            builtin = prefix + "/catalog/source/builtin"
+            assert (
+                await client.post(
+                    builtin, headers=bearer, json={"expected_revision": 2}
+                )
+            ).status_code == 403
+            stale = await client.post(
+                builtin, headers=owner, json={"expected_revision": 1}
+            )
+            assert stale.status_code == 409
+            assert stale.json() == {
+                "detail": catalog_refusal_sentence("catalog_source_conflict")
+            }
+            returned = await client.post(
+                builtin, headers=owner, json={"expected_revision": 2}
+            )
+            assert returned.status_code == 200
+            status = CatalogSourceStatus.model_validate_json(returned.content)
+            assert status.builtin_store
+            assert (status.revision, status.trust_revision) == (3, 1)
+            assert (await client.get(prefix + "/catalog", headers=bearer)).status_code == 200
     finally:
         await extensions.run_shutdown_hooks()
         await manager.close()

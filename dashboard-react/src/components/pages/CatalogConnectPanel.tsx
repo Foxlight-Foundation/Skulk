@@ -17,6 +17,8 @@ export interface CatalogConnectPanelProps {
   onConnected: () => void;
   /** Leave without changing anything; offered when a catalog is already configured. */
   onCancel?: () => void;
+  /** The host reads the built-in Foxlight store now; a private catalog would replace it. */
+  replacesStore?: boolean;
 }
 
 const DAY_SECONDS = 86_400;
@@ -26,7 +28,7 @@ const DAY_SECONDS = 86_400;
  * facts entered by hand. Nothing installs here: the host only learns where to
  * look and which key signs the listings it will show.
  */
-export function CatalogConnectPanel({ status, onConnected, onCancel }: CatalogConnectPanelProps) {
+export function CatalogConnectPanel({ status, onConnected, onCancel, replacesStore = false }: CatalogConnectPanelProps) {
   const { t } = useSkulkTranslation();
   const dispatch = useAppDispatch();
   const [busy, setBusy] = useState(false);
@@ -84,8 +86,10 @@ export function CatalogConnectPanel({ status, onConnected, onCancel }: CatalogCo
     }
   };
   return <Panel aria-labelledby="catalog-connect-title">
-    <h2 id="catalog-connect-title">{t('plugins.catalog.connectTitle', 'Connect a capability catalog')}</h2>
-    <Lead>{t('plugins.catalog.connectLead', 'Paste the invitation code you were given. It names the catalog and the key its releases are signed with.')}</Lead>
+    <h2 id="catalog-connect-title">{replacesStore ? t('plugins.catalog.addPrivate', 'Add a private catalog') : t('plugins.catalog.connectTitle', 'Connect a capability catalog')}</h2>
+    <Lead>{replacesStore
+      ? t('plugins.catalog.privateLead', 'Paste the invitation code you were given. This host then reads that catalog instead of the Foxlight store; you can switch back at any time.')
+      : t('plugins.catalog.connectLead', 'Paste the invitation code you were given. It names the catalog and the key its releases are signed with.')}</Lead>
     {!manual ? <>
       <Label htmlFor="catalog-invitation">{t('plugins.catalog.invitationCode', 'Invitation code')}</Label>
       <CodeInput id="catalog-invitation" value={code} rows={3} spellCheck={false} autoComplete="off" autoCapitalize="off"

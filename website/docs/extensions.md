@@ -1040,7 +1040,17 @@ preflight commands before enabling capability work. This command adds no provide
 policy or spending authority to core.
 
 
-The host can also read a signed catalog for discovery. A publisher lists the
+The host can also read a signed catalog for discovery. Its source is the
+built-in capability store, which needs no configuration, or a private catalog
+the owner configures in its place. Skulk verifies which publishers the built-in
+store trusts through the store's TUF repository, from a root shipped inside
+Skulk, and renews that trust by itself on each catalog read: a newer trust
+revision is applied, an older one never, and the store's revocations apply
+exactly as its current trust lists them. A host that cannot reach the store, or runs offline, uses the trust it
+last verified until that trust expires. A private catalog
+(`POST /v1/plugins/managed/catalog/source`) replaces the store, and
+`POST /v1/plugins/managed/catalog/source/builtin` switches back. A build that
+does not ship the store's root has no built-in store. A publisher lists the
 releases it signed (identity, sequence, platforms, size and digests, the signed
 permissions, capability ids, surfaces, durable operations and steward risk
 classes, and where each signed release record is served); the host verifies the
