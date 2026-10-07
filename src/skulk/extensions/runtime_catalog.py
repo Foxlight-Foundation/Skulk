@@ -783,7 +783,13 @@ class AcceptedFloor(_Contract):
 
 
 class _CatalogState(_Contract):
-    """Everything host-scoped about the catalog, replaced as one document."""
+    """Everything host-scoped about the catalog, replaced as one document.
+
+    ``trust_floor`` is the current source's trust floor, written with its
+    trust. ``floors`` holds every address's history: catalog revision floors
+    keyed by address, document and publisher, and discovery trust floors
+    keyed by ``_trust_floor_key`` per address.
+    """
 
     source: CatalogSource | None = None
     trust: RuntimeTrust | None = None
@@ -834,6 +840,84 @@ def bounded_floors(
 
 def _floor_key(source: CatalogSource, publisher: str) -> str:
     return "\n".join((source.base_url, source.document_filename, publisher))
+
+
+_TRUST_FLOOR_PREFIX: Final = "trust\n"
+"""Key prefix of discovery trust floors inside the ``floors`` map.
+
+Catalog revision floors are keyed by address, document and publisher, and an
+address is an HTTPS URL, so no catalog floor key can start with this. Keeping
+trust floors in the same map leaves the state document's shape unchanged:
+builds that predate per-source trust floors still read it, and simply never
+look these entries up."""
+
+
+def _trust_floor_key(base_url: str, document_filename: str) -> str:
+    """The floor key of one catalog address's discovery trust history."""
+    return _TRUST_FLOOR_PREFIX + "\n".join((base_url, document_filename))
+
+
+def _source_trust_floor(
+    state: "_CatalogState", base_url: str, document_filename: str
+) -> AcceptedFloor | None:
+    """The newest discovery trust this host accepted for one catalog address.
+
+    Each address keeps its own trust history, as each keeps its own catalog
+    revision history. A state written before per-source trust floors held
+    only the current source's floor, in ``trust_floor``; it counts for the
+    current address.
+    """
+    floor = state.floors.get(_trust_floor_key(base_url, document_filename))
+    current = state.source
+    if (
+        current is not None
+        and (current.base_url, current.document_filename)
+        == (base_url, document_filename)
+        and state.trust_floor is not None
+        and (floor is None or state.trust_floor.revision > floor.revision)
+    ):
+        return state.trust_floor
+    return floor
+
+
+def _below_floor(trust: RuntimeTrust, floor: AcceptedFloor | None) -> bool:
+    """Whether ``trust`` is older than ``floor``, or another document at its revision."""
+    return floor is not None and (
+        trust.revision < floor.revision
+        or (trust.revision == floor.revision and _trust_digest(trust) != floor.sha256)
+    )
+
+
+def _with_trust(
+    state: "_CatalogState", source: CatalogSource, trust: RuntimeTrust
+) -> "_CatalogState":
+    """``state`` reading ``source`` under ``trust``, with each address's trust floor kept.
+
+    ``trust_floor`` moves with the current trust, as it always has. The
+    per-address floors only rise: the address being left keeps its floor
+    (recorded here when a state from before per-source floors held it only in
+    ``trust_floor``), so returning there meets its own history again, and a
+    switch never overwrites another address's floor.
+    """
+    accepted = AcceptedFloor(revision=trust.revision, sha256=_trust_digest(trust))
+    floors = dict(state.floors)
+    if state.source is not None and state.trust_floor is not None:
+        left = _trust_floor_key(state.source.base_url, state.source.document_filename)
+        kept = floors.get(left)
+        if kept is None or state.trust_floor.revision > kept.revision:
+            floors[left] = state.trust_floor
+    key = _trust_floor_key(source.base_url, source.document_filename)
+    held = floors.get(key)
+    if held is None or accepted.revision >= held.revision:
+        floors[key] = accepted
+    return state.model_copy(
+        update={
+            "source": source,
+            "trust": trust,
+            "trust_floor": accepted,
+            "floors": bounded_floors(floors, key, ""),
+        }
+    )
 
 
 _STORE_TRUST_SECONDS: Final = 8
@@ -979,16 +1063,9 @@ class HostCatalog:
                 or time.time() >= trust.expires_at
             ):
                 return False
-            self._save(
-                state.model_copy(
-                    update={
-                        "trust": trust,
-                        "trust_floor": AcceptedFloor(
-                            revision=trust.revision, sha256=_trust_digest(trust)
-                        ),
-                    }
-                )
-            )
+            # The same helper as a read: the store address's own trust floor
+            # rises with the trust, so a later switch away and back meets it.
+            self._save(_with_trust(state, state.source, trust))
             return True
 
     def _store_source(self, revision: int) -> CatalogSource:
@@ -1024,6 +1101,13 @@ class HostCatalog:
                     "catalog_store_trust_unavailable", "store trust unavailable"
                 )
             source, trust = self._store_source(1), renewed
+            if _below_floor(
+                trust,
+                _source_trust_floor(state, source.base_url, source.document_filename),
+            ):
+                raise CatalogRefusedError(
+                    "catalog_store_trust_unavailable", "store trust below its floor"
+                )
         elif renewed is not None and (held is None or renewed.revision > held.revision):
             source, trust = state.source, renewed
         elif held is None or now >= held.expires_at:
@@ -1032,15 +1116,7 @@ class HostCatalog:
             )
         else:
             return state
-        updated = state.model_copy(
-            update={
-                "source": source,
-                "trust": trust,
-                "trust_floor": AcceptedFloor(
-                    revision=trust.revision, sha256=_trust_digest(trust)
-                ),
-            }
-        )
+        updated = _with_trust(state, source, trust)
         self._save(updated)
         return updated
 
@@ -1194,9 +1270,14 @@ class HostCatalog:
                         "catalog_source_reserved",
                         "the built-in store's address is not a private catalog",
                     )
-                floor = state.trust_floor
+                # Each catalog address keeps its own trust history. Leaving the
+                # store, a private trust is compared only with that address's
+                # own history, never with the store's revisions; returning to
+                # an address meets the floor it left behind.
+                leaving_store = self._is_store(previous)
                 if next_trust.expires_at <= time.time() or (
                     trust is not None
+                    and not leaving_store
                     and (
                         next_trust.revision < trust.revision
                         or (
@@ -1209,12 +1290,10 @@ class HostCatalog:
                         "catalog_trust_update_refused",
                         "discovery trust revision conflict or expiry",
                     )
-                if floor is not None and (
-                    next_trust.revision < floor.revision
-                    or (
-                        next_trust.revision == floor.revision
-                        and _trust_digest(next_trust) != floor.sha256
-                    )
+                if _below_floor(
+                    next_trust, _source_trust_floor(state, base_url, filename)
+                ) or (
+                    not leaving_store and _below_floor(next_trust, state.trust_floor)
                 ):
                     raise CatalogRefusedError(
                         "catalog_trust_update_refused",
@@ -1256,21 +1335,10 @@ class HostCatalog:
                     document_filename=filename,
                     credential_reference=reference,
                 )
-                # Revision floors are keyed by address and publisher and kept
+                # Revision and trust floors are keyed by address and kept
                 # across moves: another address starts its own history, and
-                # returning to an old one meets its old floor again.
-                self._save(
-                    state.model_copy(
-                        update={
-                            "source": source,
-                            "trust": next_trust,
-                            "trust_floor": AcceptedFloor(
-                                revision=next_trust.revision,
-                                sha256=_trust_digest(next_trust),
-                            ),
-                        }
-                    )
-                )
+                # returning to an old one meets its old floors again.
+                self._save(_with_trust(state, source, next_trust))
                 return self.source_status()
             finally:
                 lock.close()
@@ -1285,9 +1353,10 @@ class HostCatalog:
         the store published it: the private trust's revocations stay with
         the private catalog. The private trust's revision history does not
         bind the store's either: the store's own history is its retained TUF
-        trust, which never moves backward. Revision floors stay keyed by
-        address, so the store meets its earlier floor again. Nothing is
-        fetched from the catalog.
+        trust, which never moves backward. Revision and trust floors stay
+        keyed by address: the store meets its own earlier floors again, and
+        the private catalog's trust floor is kept for a later return there.
+        Nothing is fetched from the catalog.
 
         Args:
             expected_revision: The source revision the owner reviewed.
@@ -1326,18 +1395,20 @@ class HostCatalog:
                     raise CatalogRefusedError(
                         "catalog_store_trust_unavailable", "store trust unavailable"
                     )
-                trust = renewed
-                self._save(
-                    state.model_copy(
-                        update={
-                            "source": self._store_source(expected_revision + 1),
-                            "trust": trust,
-                            "trust_floor": AcceptedFloor(
-                                revision=trust.revision, sha256=_trust_digest(trust)
-                            ),
-                        }
+                source = self._store_source(expected_revision + 1)
+                # The store's own floor, not the private catalog's, binds it;
+                # the private catalog's floor stays for a later return there.
+                if _below_floor(
+                    renewed,
+                    _source_trust_floor(
+                        state, source.base_url, source.document_filename
+                    ),
+                ):
+                    raise CatalogRefusedError(
+                        "catalog_store_trust_unavailable",
+                        "store trust older than this host accepted",
                     )
-                )
+                self._save(_with_trust(state, source, renewed))
                 return self.source_status()
             finally:
                 lock.close()
@@ -1476,7 +1547,12 @@ class HostCatalog:
         A catalog that updates regularly would otherwise fill its retention
         and stop; superseded documents are evidence with a short life.
         """
-        accepted = {floor.sha256 for floor in floors.values()}
+        # Trust floors share the map but name trust documents, not catalogs.
+        accepted = {
+            floor.sha256
+            for key, floor in floors.items()
+            if not key.startswith(_TRUST_FLOOR_PREFIX)
+        }
         retained = sorted(
             (path for path in islice(self.directory.iterdir(), 256)),
             key=lambda path: path.stat().st_mtime,

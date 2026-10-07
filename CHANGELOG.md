@@ -16,7 +16,10 @@ This project records release notes here and mirrors public-facing notes in
   that trust by itself on each catalog read: a newer trust revision is
   applied, an older one never, and the store's revocations apply exactly as
   its current trust lists them. Revocations never carry between the store and
-  a private catalog. A host that cannot reach the store, or runs offline, keeps using the
+  a private catalog, and each catalog address keeps its own trust history: a
+  private catalog's first trust is accepted whatever the store's revision, and
+  returning to a private catalog still refuses a trust older than the one the
+  host accepted there before. A host that cannot reach the store, or runs offline, keeps using the
   trust it last verified until that trust expires; a tampered or expired trust
   is refused. A private catalog still works: **Add a private catalog**
   replaces the store as the host's source, and **Use the Foxlight store** (or
@@ -85,6 +88,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- On the Mac app, the background plugin service is listed as Skulk in System
+  Settings, Login Items, instead of as `python3.13`.
 - Installed capabilities keep working after the Skulk app is updated or moved.
   Each capability's environment records the Python interpreter it was built
   with, and an app update replaces that interpreter (a move changes its path),

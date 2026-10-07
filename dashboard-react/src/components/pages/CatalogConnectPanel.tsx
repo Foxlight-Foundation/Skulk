@@ -7,7 +7,7 @@ import { useAppDispatch } from '../../store/hooks';
 import { Button } from '../common/Button';
 import { SectionLabel, Surface } from '../common/Surfaces';
 import { pluginRefusalDetail, type CatalogSourceUpdate, type RuntimeSourceStatus } from '../../store/endpoints/plugins';
-import { decodeInvitation, isCatalogAddress, type CatalogInvitation } from './catalogJourney';
+import { decodeInvitation, isCatalogAddress, trustRevision, type CatalogInvitation } from './catalogJourney';
 
 /** Props for connecting this host to a capability catalog. */
 export interface CatalogConnectPanelProps {
@@ -22,6 +22,7 @@ export interface CatalogConnectPanelProps {
 }
 
 const DAY_SECONDS = 86_400;
+
 
 /**
  * Connect this host to a catalog from an invitation code, or from the same
@@ -58,7 +59,7 @@ export function CatalogConnectPanel({ status, onConnected, onCancel, replacesSto
     const update: CatalogSourceUpdate = {
       expected_revision: status.revision,
       base_url: chosen.baseUrl,
-      trust: { revision: (status.trust_revision ?? 0) + 1, expires_at: chosen.trustExpiresAt, publishers: { [chosen.publisher]: chosen.publicKey } },
+      trust: { revision: trustRevision(status.trust_revision, openedAt), expires_at: chosen.trustExpiresAt, publishers: { [chosen.publisher]: chosen.publicKey } },
       ...(chosen.token ? { token: chosen.token } : {}),
     };
     let body = JSON.stringify(update);

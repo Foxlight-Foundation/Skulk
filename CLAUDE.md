@@ -992,15 +992,19 @@ publisher trust, which `HostCatalog` seeds on a host with no source and renews
 on every read while on the store (newer revision only, applied as published
 with no revocation merge, hash-bound last verified copy offline). Revocations
 carry forward only within a private catalog's own history, never across a
-source switch. Installations bound from the store (`follows_store` in their
-`release-source.json`, the one durable record of trust authority; a legacy
-`store-binding.json` marker is migrated into it on read) follow its trust
-while running: the node's hourly `refresh_store_trust` (and store catalog
-reads) rewrite their `publisher-trust.json` at the next installation trust
-revision via `RuntimeDownloads.follow_trust` under one shared deadline,
-without touching the source revision, and keep the built-in catalog's trust
-in step; no verified trust for followers is a refusal, and busy followers are
-retried within five minutes. Private-catalog installations are unchanged. A private catalog replaces it;
+source switch. Discovery trust floors are kept per catalog address (inside
+the state's `floors` map under a `trust\n` key prefix), so a switch to the
+store never lowers a private catalog's floor and leaving the store compares a
+private trust only with that address's own history. Installations bound from
+the store (`follows_store` in their `release-source.json`, the one durable
+record of trust authority; a legacy `store-binding.json` marker is migrated
+into it on read) follow its trust while running: the node's hourly
+`refresh_store_trust` (and store catalog reads) rewrite their
+`publisher-trust.json` at the next installation trust revision via
+`RuntimeDownloads.follow_trust` under one shared deadline, without touching
+the source revision, and keep the built-in catalog's trust in step; no
+verified trust for followers is a refusal, and busy followers are retried
+within five minutes. Private-catalog installations are unchanged. A private catalog replaces it;
 `use_builtin_catalog` / `POST /v1/plugins/managed/catalog/source/builtin`
 switches back. The node passes its offline mode per request because the
 manager runs with a fixed environment.

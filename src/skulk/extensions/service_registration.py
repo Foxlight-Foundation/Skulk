@@ -13,6 +13,7 @@ import os
 import platform
 import plistlib
 import pwd
+import re
 import stat
 import subprocess
 import sys
@@ -32,6 +33,44 @@ pair of names, so the manager service could not register on any host the
 runtime could not, and for the same reason."""
 
 _LEGACY_PLATFORMS: dict[str, str] = {"ubuntu-24.04-x86_64": "linux-glibc-x86_64"}
+
+# A reverse-DNS bundle identifier as Info.plist carries it; nothing else may
+# reach the launchd definition from the app bundle.
+_BUNDLE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,254}")
+
+
+def associated_bundle(python: Path) -> str | None:
+    """The identifier of the Mac app that ships ``python``, if it lives in one.
+
+    macOS lists a login item by its program, so the plugin service would show as
+    a bare interpreter name. launchd's ``AssociatedBundleIdentifiers`` lets it
+    name the app instead when both are signed by the same team.
+
+    Args:
+        python: The absolute interpreter path the service will run.
+
+    Returns:
+        The enclosing ``.app`` bundle's ``CFBundleIdentifier``, or None for an
+        interpreter outside an app bundle or a bundle without a valid one.
+    """
+    for parent in python.parents:
+        if parent.suffix != ".app":
+            continue
+        try:
+            info = cast(
+                object,
+                plistlib.loads((parent / "Contents" / "Info.plist").read_bytes()),
+            )
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            return None
+        if not isinstance(info, dict):
+            return None
+        identifier = cast(dict[str, object], info).get("CFBundleIdentifier")
+        if isinstance(identifier, str) and _BUNDLE_IDENTIFIER.fullmatch(identifier):
+            return identifier
+        return None
+    return None
+
 
 ServiceScope = Literal["system", "user"]
 """Where the manager service is registered.
@@ -137,7 +176,16 @@ class ServiceLayout:
         return Path("/etc/systemd/system") / (self.label + suffix)
 
     def definition(self, python: Path) -> bytes:
-        """Render an exact nonroot OS definition with a fixed verified bootstrap."""
+        """Render an exact nonroot OS definition with a fixed verified bootstrap.
+
+        On macOS an interpreter inside an app bundle also names that bundle, so
+        Login Items shows the app rather than the interpreter.
+        """
+        return self._render(
+            python, associated_bundle(python) if _is_macos(self.platform) else None
+        )
+
+    def _render(self, python: Path, bundle: str | None) -> bytes:
         if not python.is_absolute() or any(ord(c) < 32 for c in str(python)):
             raise ValueError("invalid base interpreter path")
         arguments = [
@@ -156,10 +204,14 @@ class ServiceLayout:
                 if self.scope == "user"
                 else {"UserName": self.username, "GroupName": self.groupname}
             )
+            association: dict[str, object] = (
+                {"AssociatedBundleIdentifiers": [bundle]} if bundle is not None else {}
+            )
             return plistlib.dumps(
                 {
                     "Label": self.label,
                     **account,
+                    **association,
                     "ProgramArguments": arguments,
                     "WorkingDirectory": str(self.root),
                     "RunAtLoad": True,
@@ -217,7 +269,24 @@ class ServiceLayout:
             ):
                 raise ValueError("invalid existing service arguments")
             python = arguments[0]
+            # The bundle that named the existing agent may have moved or gone,
+            # so compare against the association it was written with.
+            existing: object = cast(dict[str, object], payload).get(
+                "AssociatedBundleIdentifiers"
+            )
+            if existing is None:
+                bundle = None
+            elif (
+                isinstance(existing, list)
+                and len(cast(list[object], existing)) == 1
+                and isinstance(cast(list[object], existing)[0], str)
+                and _BUNDLE_IDENTIFIER.fullmatch(cast(list[str], existing)[0])
+            ):
+                bundle = cast(list[str], existing)[0]
+            else:
+                raise ValueError("invalid existing service association")
         else:
+            bundle = None
             lines = content.decode().splitlines()
             if not lines:
                 raise ValueError("existing service definition is empty")
@@ -229,7 +298,7 @@ class ServiceLayout:
             if not isinstance(value, str):
                 raise ValueError("invalid existing interpreter identity")
             python = value
-        expected = self.definition(Path(python))
+        expected = self._render(Path(python), bundle)
         if not _is_macos(self.platform) and self.scope == "system":
             # Permit repair of only the exact prior generated unit. systemd
             # rejects its quoted WorkingDirectory before starting any process.
@@ -390,7 +459,9 @@ def _execute(
 def _stop_systemd(unit: str, scope: ServiceScope = "system") -> None:
     # A rejected generated unit reports "not loaded" (5), even though it has no
     # process to stop. Independently confirm quiescence before any replacement.
-    manager = ("/usr/bin/systemctl", "--user") if scope == "user" else ("/usr/bin/systemctl",)
+    manager = (
+        ("/usr/bin/systemctl", "--user") if scope == "user" else ("/usr/bin/systemctl",)
+    )
     _execute((*manager, "stop", unit), (0, 5), scope)
     result = subprocess.run(
         (
@@ -567,7 +638,9 @@ def register_user(
     if _is_macos(layout.platform):
         _execute(("/bin/launchctl", "enable", f"{domain}/{layout.label}"), scope="user")
         # Setup stops the old agent before activating a new copied runtime.
-        _execute(("/bin/launchctl", "bootstrap", domain, str(layout.unit)), scope="user")
+        _execute(
+            ("/bin/launchctl", "bootstrap", domain, str(layout.unit)), scope="user"
+        )
     else:
         _execute(("/usr/bin/systemctl", "--user", "daemon-reload"), scope="user")
         _execute(

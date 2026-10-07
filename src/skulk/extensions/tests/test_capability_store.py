@@ -573,6 +573,159 @@ def test_the_manager_snapshot_stages_package_data_beside_its_module(
     assert EMBEDDED_CAPABILITY_STORE_ROOT.parent.name == "extensions"
 
 
+def _private_trust(key: Ed25519PrivateKey, revision: int, **extra: object) -> RuntimeTrust:
+    """A private catalog's discovery trust naming ``key`` for the fixture publisher."""
+    return RuntimeTrust.model_validate(
+        {
+            "revision": revision,
+            "expires_at": int(time.time()) + 3600,
+            "publishers": {"fixture": key.public_key().public_bytes_raw().hex()},
+            **extra,
+        }
+    )
+
+
+async def _configure_refused(
+    catalog: HostCatalog, update: CatalogSourceUpdate
+) -> CatalogRefusal:
+    with pytest.raises(CatalogRefusedError) as refused:
+        await catalog.configure(update)
+    return refused.value.code
+
+
+async def test_each_catalog_address_keeps_its_own_trust_floor(tmp_path: Path) -> None:
+    """A round trip through the store never lowers a private catalog's trust floor."""
+    store = _Store(tmp_path)
+    store.publish(1)
+    await store.catalog.fetch()
+    private_key = Ed25519PrivateKey.generate()
+    held = _private_trust(private_key, 5, revoked_artifacts=("4" * 64,))
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=1,
+            base_url="https://private.example.test/",
+            trust=held,
+        )
+    )
+    status = await store.catalog.use_builtin_store(2)
+    assert status.builtin_store and status.trust_revision == 1
+    # Back at the private address, a stale trust from before revision 5 is
+    # refused, as is another document at revision 5, though both are newer
+    # than the store's trust the host held a moment ago.
+    for stale in (
+        _private_trust(private_key, 2),
+        _private_trust(private_key, 5),
+    ):
+        assert (
+            await _configure_refused(
+                store.catalog,
+                CatalogSourceUpdate(
+                    expected_revision=3,
+                    base_url="https://private.example.test/",
+                    trust=stale,
+                ),
+            )
+            == "catalog_trust_update_refused"
+        )
+    # The trust it accepted there before, and a newer one, are accepted.
+    status = await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=3, base_url="https://private.example.test/", trust=held
+        )
+    )
+    assert (status.builtin_store, status.trust_revision) == (False, 5)
+    status = await store.catalog.configure(
+        CatalogSourceUpdate(expected_revision=4, trust=_private_trust(private_key, 6))
+    )
+    assert status.trust_revision == 6
+    # The store kept its own floor across the detour as well.
+    status = await store.catalog.use_builtin_store(5)
+    assert status.trust_revision == 1
+
+
+async def test_leaving_the_store_compares_only_the_private_catalogs_history(
+    tmp_path: Path,
+) -> None:
+    """A private catalog's first trust is accepted whatever the store's revision."""
+    store = _Store(tmp_path)
+    store.publish(10)
+    await store.catalog.fetch()
+    assert store.trust_revision() == 10
+    first = Ed25519PrivateKey.generate()
+    status = await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=1,
+            base_url="https://private.example.test/",
+            trust=_private_trust(first, 1),
+        )
+    )
+    assert (status.builtin_store, status.trust_revision) == (False, 1)
+    # Another document at the store's own revision is no conflict either.
+    await store.catalog.use_builtin_store(2)
+    status = await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=3,
+            base_url="https://other-private.example.test/",
+            trust=_private_trust(Ed25519PrivateKey.generate(), 10),
+        )
+    )
+    assert status.trust_revision == 10
+    # Expiry still applies on the way out of the store.
+    await store.catalog.use_builtin_store(4)
+    assert (
+        await _configure_refused(
+            store.catalog,
+            CatalogSourceUpdate(
+                expected_revision=5,
+                base_url="https://third-private.example.test/",
+                trust=_private_trust(first, 1).model_copy(
+                    update={"expires_at": int(time.time()) - 1}
+                ),
+            ),
+        )
+        == "catalog_trust_update_refused"
+    )
+
+
+async def test_a_state_from_before_per_address_trust_floors_keeps_its_floor(
+    tmp_path: Path,
+) -> None:
+    """The current source's single floor carries over the first time the host leaves it."""
+    store = _Store(tmp_path)
+    store.publish(1)
+    await store.catalog.fetch()
+    private_key = Ed25519PrivateKey.generate()
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=1,
+            base_url="https://private.example.test/",
+            trust=_private_trust(private_key, 5),
+        )
+    )
+    # Rewrite the state as an earlier build kept it: no per-address floors.
+    path = store.catalog.root / "catalog-state.json"
+    record = TypeAdapter(dict[str, JsonValue])
+    state = record.validate_json(path.read_bytes())
+    floors = state["floors"]
+    assert isinstance(floors, dict)
+    state["floors"] = {
+        key: value for key, value in floors.items() if not key.startswith("trust\n")
+    }
+    path.write_bytes(record.dump_json(state))
+    await store.catalog.use_builtin_store(2)
+    assert (
+        await _configure_refused(
+            store.catalog,
+            CatalogSourceUpdate(
+                expected_revision=3,
+                base_url="https://private.example.test/",
+                trust=_private_trust(private_key, 2),
+            ),
+        )
+        == "catalog_trust_update_refused"
+    )
+
+
 async def test_an_older_trust_never_replaces_an_expired_one(tmp_path: Path) -> None:
     """Even with the store client's retained copy lost, only a newer revision renews."""
     store = _Store(tmp_path)
@@ -629,6 +782,16 @@ async def test_verified_store_trust_applies_to_the_catalog_only_when_newer(
     assert renewed.revision == 2
     assert await store.catalog.apply_store_trust(renewed)
     assert store.trust_revision() == 2
+    # The store address's own trust floor rises with it, as a read's does.
+    record = TypeAdapter(dict[str, JsonValue])
+    floors = record.validate_json(
+        (store.catalog.root / "catalog-state.json").read_bytes()
+    )["floors"]
+    assert isinstance(floors, dict)
+    floor = floors[
+        f"trust\n{CAPABILITY_STORE_CATALOG_URL}\n{CAPABILITY_STORE_CATALOG_DOCUMENT}"
+    ]
+    assert isinstance(floor, dict) and floor["revision"] == 2
     # The same, an older, or one arriving during another catalog operation
     # changes nothing.
     assert not await store.catalog.apply_store_trust(renewed)
