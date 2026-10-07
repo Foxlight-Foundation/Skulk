@@ -102,16 +102,17 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
     assert verified.sha256 == hashlib.sha256(document).hexdigest()
     assert verified.entry("example.plugin", 2, None) is not None
     assert verified.entry("example.plugin", 3, None) is None
-    review = verified.review(platform="macos-arm64")
+    review = verified.review(skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64")
     assert [e.sequence for e in review.entries] == [1, 2]
     assert all(e.matches_host for e in review.entries)
     assert "feed_url" not in review.model_dump_json()
     assert "releases.example.test" not in review.model_dump_json()
-    # Any host whose operating system a listing names fits it; the Skulk build
-    # the publisher qualified against is recorded, never compared.
-    assert all(e.skulk_build_sha256 == "a" * 64 for e in review.entries)
-    other = verified.review(platform="linux-x86_64")
-    assert all(e.matches_host for e in other.entries)
+    # A protocol 1 listing was published for one exact Skulk build and keeps
+    # that rule: another build does not fit it.
+    other = verified.review(
+        skulk_version="2.0.1", skulk_build_sha256="b" * 64, platform="linux-x86_64"
+    )
+    assert not any(e.matches_host for e in other.entries)
     # A runtime-bearing entry names its artifact family; one sequence may be
     # listed once per family, and only the matching family fits this host.
     families = verify_catalog(
@@ -124,7 +125,7 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
         ),
         _trust(key),
         now=now,
-    ).review(platform="macos-arm64")
+    ).review(skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64")
     assert [e.matches_host for e in families.entries] == [True, False]
     listed = verify_catalog(
         _catalog(
@@ -247,7 +248,7 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     with pytest.raises(ValueError, match="digest required"):
         catalog.retained("../catalog-state")
     assert "hidden-catalog-token" not in json.dumps(
-        verified.review(platform="macos-arm64").model_dump()
+        verified.review(skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64").model_dump()
     )
     # The accepted revision only moves forward: another document at the
     # same revision, or an older revision, is refused; a newer one accepted.
@@ -408,7 +409,7 @@ def test_a_revoked_release_or_artifact_is_not_offered() -> None:
     )
     assert [e.sequence for e in verified.entries] == [3]
     assert verified.entry("example.plugin", 1, None) is None
-    review = verified.review(platform="macos-arm64")
+    review = verified.review(skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64")
     assert [e.sequence for e in review.entries] == [3]
 
 
@@ -576,3 +577,56 @@ async def test_the_host_catalog_names_why_it_refused(tmp_path: Path) -> None:
     assert reference is not None
     (tmp_path / "catalog-credentials" / reference).unlink()
     assert (await _refused(catalog.fetch())).code == "catalog_credential_unavailable"
+
+
+def test_a_protocol_2_listing_fits_by_skulk_version_whatever_the_build() -> None:
+    """A Skulk update keeps a listing installable; a version outside its range does not."""
+    key = Ed25519PrivateKey.generate()
+    now = int(time.time())
+    verified = verify_catalog(
+        _catalog(
+            key,
+            [
+                _entry(1, skulk_requires=">=2.0.0,<3"),
+                _entry(2, skulk_requires=">=2.1.0,<3"),
+            ],
+            protocol=2,
+        ),
+        _trust(key),
+        now=now,
+    )
+    updated = verified.review(
+        skulk_version="2.0.1", skulk_build_sha256="f" * 64, platform="macos-arm64"
+    )
+    # The newer release needs a later Skulk: it is listed, but not as fitting,
+    # so a consumer picking the newest fitting release picks the older one.
+    assert [(e.sequence, e.matches_host) for e in updated.entries] == [(1, True), (2, False)]
+    assert updated.entries[0].skulk_requires == ">=2.0.0,<3"
+    later = verified.review(
+        skulk_version="2.4.0", skulk_build_sha256="e" * 64, platform="linux-x86_64"
+    )
+    assert all(e.matches_host for e in later.entries)
+    major = verified.review(
+        skulk_version="3.0.0", skulk_build_sha256="a" * 64, platform="macos-arm64"
+    )
+    assert not any(e.matches_host for e in major.entries)
+
+
+@pytest.mark.parametrize(
+    ("protocol", "entry_overrides"),
+    [
+        (2, {}),
+        (1, {"skulk_requires": ">=2.0.0,<3"}),
+        (2, {"skulk_requires": "two point oh"}),
+    ],
+)
+def test_a_listing_states_its_skulk_range_exactly_when_its_protocol_does(
+    protocol: int, entry_overrides: dict[str, object]
+) -> None:
+    """Protocol 2 entries carry a valid range and protocol 1 entries carry none."""
+    key = Ed25519PrivateKey.generate()
+    document = _catalog(key, [_entry(1, **entry_overrides)], protocol=protocol)
+    with pytest.raises(CatalogRefusedError) as refused:
+        verify_catalog(document, _trust(key), now=int(time.time()))
+    assert refused.value.code == "catalog_invalid"
+

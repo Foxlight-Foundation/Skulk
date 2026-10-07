@@ -801,7 +801,10 @@ manifest declares, state schema and permission summary. The release also records
 the Skulk build its publisher qualified it against, for provenance only: a
 release runs on any Skulk whose version is in its range, so updating Skulk never
 breaks the capabilities already installed, the way an operating system update
-leaves installed applications running. Plugin-specific manifest policy stays
+leaves installed applications running. Catalog listings (catalog protocol 2) carry
+the same range, so the catalog marks a release as fitting by this host's version;
+a protocol 1 listing, which predates the range, fits only the exact build it was
+published for. Plugin-specific manifest policy stays
 opaque but is covered by the signature. Trust comes from owner-provisioned
 protected local storage, not the release. Revoked or expired artifacts and
 incompatible hosts are refused. Compatibility across releases is a window, not a pin: the release

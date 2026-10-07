@@ -35,7 +35,7 @@ async function click(label: string) { await act(async () => { button(label)?.cli
 const entry: CatalogEntry = {
   bundle_id: 'example.studio', bundle_version: '0.1.0', title: 'Example Studio', publisher: 'example', sequence: 51,
   release_digest: 'd'.repeat(64), runtime_platform: 'macos-arm64', artifact_sha256: 'a'.repeat(64), artifact_bytes: 4096, transfer_bytes: 12_086_479,
-  platforms: ['darwin'], skulk_build_sha256: 'b'.repeat(64), permissions: ['Use models on the fabric through the host API'],
+  platforms: ['darwin'], skulk_build_sha256: 'b'.repeat(64), skulk_requires: '>=2.0.0,<3', permissions: ['Use models on the fabric through the host API'],
   descriptors: ['studio.render@1.0.0'], surfaces: ['Example Studio'], operations: true, steward_risks: ['observation'],
   expires_at: 1_900_000_000, matches_host: true,
 };
