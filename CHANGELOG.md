@@ -80,6 +80,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- On the Mac app, the background plugin service is listed as Skulk in System
+  Settings, Login Items, instead of as `python3.13`.
 - Installed capabilities keep working after the Skulk app is updated or moved.
   Each capability's environment records the Python interpreter it was built
   with, and an app update replaces that interpreter (a move changes its path),
