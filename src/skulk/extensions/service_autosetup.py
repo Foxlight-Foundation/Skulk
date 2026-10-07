@@ -10,6 +10,7 @@ command, because registering a system service needs local elevation.
 """
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Literal, final
 
@@ -23,6 +24,7 @@ from skulk.extensions.service_registration import ServiceScope
 from skulk.extensions.service_setup import (
     ServiceReadinessPendingError,
     connected_scope,
+    registered_unit_names_base,
     setup_service,
 )
 from skulk.shared.constants import SKULK_CONFIG_HOME
@@ -78,6 +80,7 @@ class ServiceSetupRunner:
         self._task: asyncio.Task[None] | None = None
         self._progress: str | None = None
         self._error: str | None = None
+        self._repair_attempted = False
 
     def start(self) -> None:
         """Begin setup in the background unless one is already running.
@@ -98,6 +101,24 @@ class ServiceSetupRunner:
         self._error = None
         self._progress = "Starting plugin setup..."
         self._task = asyncio.create_task(self._run())
+
+    async def _repair_moved_interpreter(self) -> bool:
+        """Re-register a silent user service whose interpreter moved, once.
+
+        Updating or moving the packaged app replaces the interpreter the
+        registered service starts, so the service cannot come back on its own.
+        A user service needs no elevation to register again, so the node does
+        it instead of asking the owner to.
+        """
+        if self._repair_attempted:
+            return False
+        base = Path(sys.executable).resolve(strict=True)
+        if await asyncio.to_thread(registered_unit_names_base, base):
+            return False
+        self._repair_attempted = True
+        logger.info("plugin service names another interpreter; setting it up again")
+        self.start()
+        return self._task is not None and not self._task.done()
 
     def _report(self, message: str) -> None:
         self._progress = message
@@ -146,6 +167,10 @@ class ServiceSetupRunner:
         if await _manager_answers(Path(connection.manager_root)):
             return PluginServiceStatus(
                 state="ready", scope=scope, progress=None, error=None
+            )
+        if scope == "user" and await self._repair_moved_interpreter():
+            return PluginServiceStatus(
+                state="setting_up", scope="user", progress=self._progress, error=None
             )
         return PluginServiceStatus(
             state="failed" if self._error else "unavailable",

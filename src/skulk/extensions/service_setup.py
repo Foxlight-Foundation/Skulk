@@ -181,6 +181,16 @@ def _outside_checkout(path: Path) -> None:
         )
 
 
+def _not_translocated(path: Path) -> None:
+    # macOS runs an app opened straight from a download at a randomized
+    # read-only path that disappears when it quits; a service registered to
+    # that path could never start again.
+    if "AppTranslocation" in path.parts:
+        raise ValueError(
+            "Move Skulk to the Applications folder and open it from there, then set up plugins"
+        )
+
+
 async def _elevate(
     layout: ServiceLayout, action: Literal["prepare", "stop", "install"]
 ) -> None:
@@ -342,6 +352,7 @@ async def setup_service(
     layout = local_layout(os.getuid(), scope or connected_scope() or "user")
     base = Path(sys.executable).resolve(strict=True)
     configuration = SKULK_CONFIG_HOME.resolve()
+    _not_translocated(base)
     _outside_checkout(base)
     _outside_checkout(configuration)
     host = await asyncio.to_thread(measure_host)

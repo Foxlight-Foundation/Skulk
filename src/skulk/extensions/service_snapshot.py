@@ -81,8 +81,26 @@ def _distributions() -> dict[str, str]:
     return dict(sorted(values.items()))
 
 
+PACKAGED_RUNTIME_MARKER = "skulk-packaged-runtime.json"
+"""File in an interpreter's prefix that declares it dedicated to Skulk.
+
+The packaged apps ship a relocatable standalone Python with Skulk installed in
+its own site-packages instead of a virtual environment (a virtual environment
+records an absolute path, and an app bundle can be moved). The marker tells
+setup that every package in that interpreter belongs to Skulk, which is what a
+virtual environment otherwise proves.
+"""
+
+
+def dedicated_skulk_interpreter() -> bool:
+    """Whether this interpreter is isolated for Skulk: a venv or a packaged runtime."""
+    if sys.prefix != sys.base_prefix:
+        return True
+    return (Path(sys.prefix) / PACKAGED_RUNTIME_MARKER).is_file()
+
+
 def _sources() -> tuple[_SourceFile, ...]:
-    if sys.prefix == sys.base_prefix or sysconfig.get_path(
+    if not dedicated_skulk_interpreter() or sysconfig.get_path(
         "purelib"
     ) != sysconfig.get_path("platlib"):
         raise ValueError(

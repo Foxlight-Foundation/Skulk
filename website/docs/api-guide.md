@@ -4518,6 +4518,16 @@ configuration must live outside Git checkouts and remain available after boot.
 A user-scope definition must belong to the owner and not be writable by others;
 a system definition must belong to root.
 
+Setup copies the node's own Python environment, which must be dedicated to
+Skulk: a virtual environment, or a packaged runtime whose interpreter prefix
+holds `skulk-packaged-runtime.json` (the packaged apps ship a relocatable
+interpreter with Skulk in its own site-packages, since an app bundle can be
+moved). On macOS, setup refuses an app running from a translocated location
+(opened straight from a download) and asks for it to be moved to Applications
+first. When a user service stops answering because the interpreter it starts
+was replaced or moved, for example by an app update, the node registers it
+again once on its own; the status route then reports `setting_up`.
+
 Setup records a generated `operation_id` and phases `preparing`, `staged`,
 `selected`, `registered`, `ready`. Rerunning after interruption reuses the exact
 completed staged copy and generated profile. A changed source core, Python or

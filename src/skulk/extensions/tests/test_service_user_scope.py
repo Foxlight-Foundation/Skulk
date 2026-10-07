@@ -397,3 +397,91 @@ async def test_setup_routes_answer_before_setup_and_start_it_for_the_owner(
                 break
             await asyncio.sleep(0.01)
         assert started == ["user"]
+
+
+def test_a_packaged_interpreter_with_the_marker_counts_as_dedicated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skulk.extensions import service_snapshot
+
+    monkeypatch.setattr(service_snapshot.sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(service_snapshot.sys, "base_prefix", str(tmp_path))
+    assert not service_snapshot.dedicated_skulk_interpreter()
+
+    (tmp_path / service_snapshot.PACKAGED_RUNTIME_MARKER).write_text("{}\n")
+    assert service_snapshot.dedicated_skulk_interpreter()
+
+    # A virtual environment is dedicated whatever its base holds.
+    monkeypatch.setattr(service_snapshot.sys, "prefix", str(tmp_path / "venv"))
+    (tmp_path / service_snapshot.PACKAGED_RUNTIME_MARKER).unlink()
+    assert service_snapshot.dedicated_skulk_interpreter()
+
+
+def test_setup_refuses_a_translocated_app() -> None:
+    translocated = Path(
+        "/private/var/folders/xy/T/AppTranslocation/ABCD/d/Skulk.app/Contents/"
+        "Resources/Runtime/python/bin/python3.13"
+    )
+    with pytest.raises(ValueError, match="Applications folder"):
+        service_setup._not_translocated(translocated)  # pyright: ignore[reportPrivateUsage]
+    service_setup._not_translocated(  # pyright: ignore[reportPrivateUsage]
+        Path("/Applications/Skulk.app/Contents/Resources/Runtime/python/bin/python3.13")
+    )
+
+
+async def test_runner_re_registers_a_user_service_whose_interpreter_moved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    layouts = _layouts(monkeypatch, tmp_path)
+    _connect(monkeypatch, tmp_path, layouts["user"].root)
+    scopes: list[str | None] = []
+    release = asyncio.Event()
+
+    async def setup(scope: str | None, _report: object) -> SetupOperation:
+        scopes.append(scope)
+        await release.wait()
+        return _operation()
+
+    async def silent(_root: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", silent)
+    def moved(_base: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(service_autosetup, "registered_unit_names_base", moved)
+    runner = ServiceSetupRunner()
+
+    repairing = await runner.status()
+    assert (repairing.state, repairing.scope) == ("setting_up", "user")
+    release.set()
+    await _settle(runner)
+
+    # Once per process: a service still silent after its repair is reported,
+    # not re-registered in a loop.
+    after = await runner.status()
+    assert after.state == "unavailable"
+    assert scopes == ["user"]
+
+
+async def test_runner_leaves_a_silent_service_on_the_right_interpreter_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    layouts = _layouts(monkeypatch, tmp_path)
+    _connect(monkeypatch, tmp_path, layouts["user"].root)
+
+    async def setup(_scope: str | None, _report: object) -> SetupOperation:
+        raise AssertionError("a restarting service is not set up again")
+
+    async def silent(_root: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", silent)
+    def same(_base: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(service_autosetup, "registered_unit_names_base", same)
+
+    assert (await ServiceSetupRunner().status()).state == "unavailable"
