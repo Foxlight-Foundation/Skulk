@@ -1493,9 +1493,13 @@ def store_installed_records(
                 model_id_raw,
             )
             continue
+        if record.artifact_role != "base":
+            # Companions (vision weights, sidecars, drafts) are ordinary store
+            # entries, not launchable aliases; every node reads this on every
+            # inventory pass, so they are skipped without a warning.
+            continue
         if (
-            record.artifact_role != "base"
-            or record.artifact_model_id != model_id_raw
+            record.artifact_model_id != model_id_raw
             or record.model_card.model_id != model_id
         ):
             logger.warning(
