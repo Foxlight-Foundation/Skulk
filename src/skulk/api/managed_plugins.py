@@ -51,6 +51,7 @@ from skulk.extensions.runtime_manager import (
     CatalogInstall,
     CatalogInstallation,
     CatalogInstallRequest,
+    CatalogRead,
     CatalogRegistration,
     CatalogRequest,
     CatalogStoreRequest,
@@ -401,7 +402,7 @@ def create_managed_plugins_router(
             result = await services.request(
                 CatalogRequest(action="read_catalog", offline=offline_mode())
             )
-            return CatalogReview.model_validate_json(json.dumps(result))
+            return CatalogRead.model_validate_json(json.dumps(result)).review
 
         return await invoke(action)
 

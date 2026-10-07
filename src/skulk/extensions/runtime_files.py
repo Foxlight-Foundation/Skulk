@@ -117,6 +117,20 @@ def write_private(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def remove_private(path: Path) -> None:
+    """Remove a private file, if present, and sync its directory.
+
+    The removal is durable before this returns: a crash afterwards cannot
+    bring the file back with the directory's earlier contents.
+    """
+    path.unlink(missing_ok=True)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 @final
 class RuntimeLock:
     """Hold a nonblocking file lock until all owned runtime work has finished."""

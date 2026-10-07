@@ -724,3 +724,95 @@ async def test_a_state_from_before_per_address_trust_floors_keeps_its_floor(
         )
         == "catalog_trust_update_refused"
     )
+
+
+async def test_an_older_trust_never_replaces_an_expired_one(tmp_path: Path) -> None:
+    """Even with the store client's retained copy lost, only a newer revision renews."""
+    store = _Store(tmp_path)
+    store.publish(2, expires_in=3600)
+    await store.catalog.fetch()
+    store.client.retained_path.unlink()
+    store.publish(1)
+    later = int(time.time()) + 7200
+    assert await store.refused(now=later) == "catalog_store_trust_unavailable"
+    assert store.trust_revision() == 2
+    store.publish(3)
+    await store.catalog.fetch(now=later)
+    assert store.trust_revision() == 3
+
+
+async def test_a_slow_store_falls_back_to_its_retained_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Switching back while the store answers slowly uses the trust it last verified."""
+    store = _Store(tmp_path)
+    store.publish(1)
+    await store.catalog.fetch()
+    private_key = Ed25519PrivateKey.generate()
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=1,
+            base_url="https://private.example.test/",
+            trust=RuntimeTrust(
+                revision=2,
+                expires_at=int(time.time()) + 3600,
+                publishers={
+                    "fixture": private_key.public_key().public_bytes_raw().hex()
+                },
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_catalog._STORE_TRUST_SECONDS", 0.2
+    )
+    store.repository.fetcher.delay = 0.4
+    status = await store.catalog.use_builtin_store(2)
+    assert status.builtin_store and status.trust_revision == 1
+
+
+async def test_verified_store_trust_applies_to_the_catalog_only_when_newer(
+    tmp_path: Path,
+) -> None:
+    """A renewal made outside a read keeps the built-in catalog's trust in step."""
+    store = _Store(tmp_path)
+    store.publish(1)
+    await store.catalog.fetch()
+    store.publish(2)
+    renewed = store.client.load(offline=False)
+    assert renewed.revision == 2
+    assert await store.catalog.apply_store_trust(renewed)
+    assert store.trust_revision() == 2
+    # The store address's own trust floor rises with it, as a read's does.
+    record = TypeAdapter(dict[str, JsonValue])
+    floors = record.validate_json(
+        (store.catalog.root / "catalog-state.json").read_bytes()
+    )["floors"]
+    assert isinstance(floors, dict)
+    floor = floors[
+        f"trust\n{CAPABILITY_STORE_CATALOG_URL}\n{CAPABILITY_STORE_CATALOG_DOCUMENT}"
+    ]
+    assert isinstance(floor, dict) and floor["revision"] == 2
+    # The same, an older, or one arriving during another catalog operation
+    # changes nothing.
+    assert not await store.catalog.apply_store_trust(renewed)
+    store.publish(3)
+    newest = store.client.load(offline=False)
+    async with store.catalog.guard:
+        assert not await store.catalog.apply_store_trust(newest)
+    assert store.trust_revision() == 2
+    # Never on a private catalog.
+    await store.catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=1,
+            base_url="https://private.example.test/",
+            trust=RuntimeTrust(
+                revision=5,
+                expires_at=int(time.time()) + 3600,
+                publishers={
+                    "fixture": store.publisher.public_key().public_bytes_raw().hex()
+                },
+            ),
+        )
+    )
+    assert not await store.catalog.apply_store_trust(newest)
+    assert store.trust_revision() == 5

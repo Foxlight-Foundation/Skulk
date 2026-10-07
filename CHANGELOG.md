@@ -32,7 +32,12 @@ This project records release notes here and mirrors public-facing notes in
   catalog read, so the capability keeps running past the expiry its trust had
   when it was installed, and a store revocation of its publisher or release
   stops it. Offline, it keeps running on the trust it holds until that
-  expires. Capabilities installed from a private catalog, or whose source the
+  expires. A renewal that cannot verify the store's trust, or finds the
+  capability busy, is retried within five minutes, and an install from a
+  listing read earlier is checked against the newest trust Skulk has
+  verified. Which capabilities follow the store is recorded with each one's
+  source, so an interrupted change of source never hands an owner's trust to
+  the store. Capabilities installed from a private catalog, or whose source the
   owner configured directly, keep the trust they were given.
 
 ### Changed
