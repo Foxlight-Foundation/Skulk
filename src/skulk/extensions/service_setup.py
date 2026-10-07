@@ -63,7 +63,14 @@ from skulk.extensions.service_snapshot import (
 from skulk.extensions.terminal_install import TerminalInstaller
 from skulk.shared.constants import SKULK_CONFIG_HOME
 
-_READINESS_WAIT_SECONDS = 60.0
+# The service's bootstrap verifies the seal of its whole copied runtime (every
+# file's digest, gigabytes for a full Skulk environment) before the manager
+# starts, so a first start from a cold disk takes minutes, not seconds.
+_READINESS_WAIT_SECONDS = 600.0
+_STARTING_MESSAGE = (
+    "Starting the plugin service; it verifies its runtime first, "
+    "which can take a few minutes..."
+)
 # How long a manager that answered nothing gets to show the selection it made.
 _RELOAD_SETTLE_SECONDS = 10.0
 
@@ -512,6 +519,7 @@ async def setup_service(
                 selected = operation.snapshot
                 operation = operation.model_copy(update={"phase": "registered"})
                 _save(layout.root, operation)
+                report(_STARTING_MESSAGE)
                 deadline = time.monotonic() + _READINESS_WAIT_SECONDS
                 while not (
                     await _observe(layout.root)
@@ -577,6 +585,7 @@ async def setup_service(
             await _register(layout, "install")
             operation = operation.model_copy(update={"phase": "registered"})
             _save(layout.root, operation)
+            report(_STARTING_MESSAGE)
             deadline = time.monotonic() + _READINESS_WAIT_SECONDS
             while not await _observe(layout.root):
                 if time.monotonic() >= deadline:

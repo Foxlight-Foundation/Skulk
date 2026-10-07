@@ -4529,7 +4529,10 @@ was replaced or moved, for example by an app update, the node registers it
 again once on its own; the status route then reports `setting_up`.
 
 Setup records a generated `operation_id` and phases `preparing`, `staged`,
-`selected`, `registered`, `ready`. Rerunning after interruption reuses the exact
+`selected`, `registered`, `ready`. The service verifies the digest of every file
+of its copied runtime before the manager starts, so the first start after setup
+or a Skulk update can take a few minutes; setup waits up to ten minutes for it
+to answer. Rerunning after interruption reuses the exact
 completed staged copy and generated profile. A changed source core, Python or
 dependency inventory starts a new setup operation, including when a corrected build
 replaces failed setup. Prior operations, runtime generations and the generated
