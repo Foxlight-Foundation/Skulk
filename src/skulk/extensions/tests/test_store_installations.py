@@ -118,6 +118,7 @@ class _Host:
     metadata: bytes
     source: Path
     clock: _ShiftedClock
+    feed_up: list[bool]
 
     def publish(self, revision: int, **revocations: tuple[str, ...]) -> None:
         """Sign a store trust revision naming the release's publisher key."""
@@ -205,8 +206,10 @@ async def _store_host(
     monkeypatch.setattr("skulk.extensions.runtime_service._CHECK_SECONDS", 0.05)
     listing = _listing(metadata, key)
 
+    feed_up = [True]
+
     def feed(request: httpx.Request) -> httpx.Response:
-        if str(request.url) == FEED + "release.json":
+        if feed_up[0] and str(request.url) == FEED + "release.json":
             return httpx.Response(200, content=metadata)
         return httpx.Response(404)
 
@@ -239,7 +242,7 @@ async def _store_host(
     manager.catalog.transport = httpx.MockTransport(catalogs)
     await manager.start()
     try:
-        yield _Host(manager, repository, key, metadata, source, clock)
+        yield _Host(manager, repository, key, metadata, source, clock, feed_up)
     finally:
         await manager.close()
 
@@ -390,6 +393,63 @@ async def test_only_a_binding_from_the_store_follows_it(
         host.publish(3, publishers=("fixture",))
         assert (await host.refresh()).followed == ()
         assert host.trust("managed.store") == followed
+
+
+async def test_a_refused_store_binding_restores_the_private_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store binding whose release is refused leaves the owner's authority as it was."""
+    async with _store_host(tmp_path, monkeypatch) as host:
+        # This test asserts verification explicitly; the owner's periodic
+        # check must not race the binding for the installation fence.
+        monkeypatch.setattr("skulk.extensions.runtime_service._CHECK_SECONDS", 30.0)
+        other = Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+        private = RuntimeTrust(
+            revision=1,
+            expires_at=int(time.time()) + 3600,
+            publishers={
+                "fixture": host.key.public_key().public_bytes_raw().hex(),
+                "other": other,
+            },
+            revoked_artifacts=("e" * 64,),
+        )
+        await host.manager.dispatch(
+            InstallationRequest(action="register", plugin_id="managed.private")
+        )
+        await host.manager.dispatch(
+            SourceRegistration(
+                plugin_id="managed.private",
+                request=SourceUpdate(
+                    expected_revision=0,
+                    base_url=PRIVATE,
+                    metadata_filename="release.json",
+                    trust=private,
+                ),
+            )
+        )
+        await host.run("managed.private")
+        installation = host.manager.downloads["managed.private"]
+        before = installation.source_status()
+        # The store lists the same release; binding to it fails at inspection.
+        host.publish(1)
+        host.feed_up[0] = False
+        with pytest.raises(ValueError):
+            await host.bind("managed.private")
+        restored = host.trust("managed.private")
+        # Bound at revision 2, restored at 3: the trust floor only rises.
+        assert before.trust_revision == 1 and restored.revision == 3
+        assert restored.model_copy(update={"revision": private.revision}) == private
+        assert not store_bound(installation.root)
+        assert installation.source().base_url == PRIVATE
+        assert installation.source_status().revision > before.revision
+        # The selected release still verifies under the restored trust.
+        selection = host.manager.controllers["managed.private"].selector.current()
+        assert selection is not None
+        async with installation.installer.locked_generation(selection.runtime_digest):
+            pass
+        # A later store renewal leaves it alone.
+        assert (await host.refresh()).followed == ()
+        assert host.trust("managed.private") == restored
 
 
 async def test_the_node_renews_store_trust_hourly_and_retries_busy_installations(

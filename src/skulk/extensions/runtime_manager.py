@@ -1395,6 +1395,14 @@ class RuntimeManager:
             except FileNotFoundError:
                 previous = None
             following = store_bound(downloads.root)
+            # A store binding replaces the trust wholesale; if the listing is
+            # then refused, the installation must return to this authority.
+            try:
+                previous_trust: RuntimeTrust | None = RuntimeTrust.model_validate_json(
+                    read_private(downloads.root / "publisher-trust.json")
+                )
+            except FileNotFoundError:
+                previous_trust = None
             source = await downloads.configure(
                 SourceUpdate(
                     expected_revision=downloads.source_status().revision,
@@ -1442,24 +1450,40 @@ class RuntimeManager:
             # so the cancellation that reached this task cannot cut it short.
             if previous is not None:
                 await asyncio.shield(
-                    self._restore_source(downloads, previous, source.revision)
+                    self._restore_source(
+                        downloads,
+                        previous,
+                        source.revision,
+                        previous_trust=previous_trust if from_store else None,
+                        following=following,
+                    )
                 )
-                _mark_store_bound(downloads.root, following)
             raise
         return CatalogInstallation(
             plugin_id=identifier, listing=listing, source=source, review=review
         )
 
     async def _restore_source(
-        self, downloads: RuntimeDownloads, previous: ReleaseSource, revision: int
+        self,
+        downloads: RuntimeDownloads,
+        previous: ReleaseSource,
+        revision: int,
+        *,
+        previous_trust: RuntimeTrust | None,
+        following: bool,
     ) -> None:
         """Put an installation's source back after a refused catalog binding.
 
         The prior credential file is retained by configuration, so the same
-        token is supplied again under a fresh reference; trust is left as
-        raised, since it only tightened. A restore that itself fails is
-        named, so the operator inspects source status rather than trusting
-        the refusal alone.
+        token is supplied again under a fresh reference. A private catalog's
+        binding only tightened trust, so its trust is left as raised. A store
+        binding replaced the trust wholesale (publishers, expiry,
+        revocations), so ``previous_trust`` is given and its content is put
+        back at the installation's next trust revision, which the installer's
+        trust floor requires to rise; the store-binding marker returns to
+        ``following``. All three change under one manager guard. A restore
+        that itself fails is named, so the operator inspects source status
+        rather than trusting the refusal alone.
         """
         token: str | None = None
         try:
@@ -1478,6 +1502,9 @@ class RuntimeManager:
                         clear_token=token is None,
                     )
                 )
+                if previous_trust is not None:
+                    await downloads.restore_trust(previous_trust)
+                _mark_store_bound(downloads.root, following)
         except (OSError, ValueError):
             raise ValueError(
                 "listed feed refused and the prior source could not be restored; "

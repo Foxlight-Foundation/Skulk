@@ -460,13 +460,39 @@ class RuntimeDownloads:
             BlockingIOError: Another operation still held the installation
                 fence after a short wait.
         """
+        if trust.expires_at <= time.time():
+            raise ValueError("store trust has expired")
+        return await self._rewrite_trust(trust)
+
+    async def restore_trust(self, trust: RuntimeTrust) -> bool:
+        """Put earlier publisher trust content back after a refused store binding.
+
+        Like ``follow_trust``, the content is written at the installation's
+        next trust revision, since its trust floor never moves backward and
+        refuses another document at a revision it has seen. Unlike it, an
+        expired earlier trust is restored as it was: a rollback returns the
+        authority the installation had, never a wider one.
+
+        Args:
+            trust: The installation's trust before the binding.
+
+        Returns:
+            Whether the installation's trust changed.
+
+        Raises:
+            ValueError: The installation is busy or closed.
+            BlockingIOError: Another operation still held the installation
+                fence after a short wait.
+        """
+        return await self._rewrite_trust(trust)
+
+    async def _rewrite_trust(self, trust: RuntimeTrust) -> bool:
+        """Write ``trust``'s content at the next revision unless it is already in force."""
         if self.guard.locked():
             raise ValueError("release source is busy")
         async with self.guard:
             if self.closed or (self.work is not None and not self.work.done()):
                 raise ValueError("installation is busy or closed")
-            if trust.expires_at <= time.time():
-                raise ValueError("store trust has expired")
             # The running owner's periodic verification holds this fence for
             # moments at a time; wait that out rather than skip a renewal.
             deadline = time.monotonic() + 2.0
