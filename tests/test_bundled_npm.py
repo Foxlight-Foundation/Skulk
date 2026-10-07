@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import subprocess
@@ -45,7 +46,9 @@ def test_bundled_npm_exposes_node_to_lifecycle_scripts(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "v25." in completed.stdout
+    # The bundled Node.js is the one the pinned wheel carries.
+    major = importlib.metadata.version("nodejs-wheel-binaries").split(".")[0]
+    assert f"v{major}." in completed.stdout
 
 
 def test_bundled_npm_probe_retries_a_transient_launch_failure(
