@@ -378,22 +378,25 @@ export type RawRunners = Record<string, Record<string, unknown>>;
 /**
  * Instances whose node is installing an on-demand engine (the video engine)
  * before the model can load: those with a pending or running `InstallEngine`
- * task in cluster state.
+ * task in cluster state, each with the install's approximate download.
  *
  * @param tasks - The raw `tasks` map from `GET /state`.
- * @returns The instance ids currently waiting on an engine install.
+ * @returns Instance id to approximate download bytes (zero when unknown).
  */
-export function engineInstallingInstanceIds(
+export function engineInstallBytesByInstance(
   tasks: Record<string, unknown> | undefined,
-): ReadonlySet<string> {
-  const installing = new Set<string>();
+): ReadonlyMap<string, number> {
+  const installing = new Map<string, number>();
   for (const tagged of Object.values(tasks ?? {})) {
     if (!tagged || typeof tagged !== 'object') continue;
     const task = (tagged as Record<string, unknown>).InstallEngine;
     if (!task || typeof task !== 'object') continue;
-    const { taskStatus, instanceId } = task as Record<string, unknown>;
+    const { taskStatus, instanceId, approximateDownloadBytes } = task as Record<string, unknown>;
     if ((taskStatus === 'Pending' || taskStatus === 'Running') && typeof instanceId === 'string') {
-      installing.add(instanceId);
+      installing.set(
+        instanceId,
+        typeof approximateDownloadBytes === 'number' ? approximateDownloadBytes : 0,
+      );
     }
   }
   return installing;
@@ -416,8 +419,9 @@ export interface ClusterState {
   capabilityNodes: Record<string, CapabilityNodeSummary[]>;
   nodeResources: Record<string, RawNodeResources>;
   thunderboltBridgeCycles: string[][];
-  /** Instances waiting for their node to install an on-demand engine. */
-  engineInstallingInstanceIds: ReadonlySet<string>;
+  /** Instances waiting for their node to install an on-demand engine, with
+   *  each install's approximate download in bytes. */
+  engineInstallBytesByInstance: ReadonlyMap<string, number>;
 }
 
 const CAPABILITY_NODE_STATUSES: ReadonlySet<string> = new Set([
@@ -588,7 +592,7 @@ export function useClusterState(): ClusterState {
     [data?.capabilityNodes],
   );
   const installingEngine = useMemo(
-    () => engineInstallingInstanceIds(data?.tasks),
+    () => engineInstallBytesByInstance(data?.tasks),
     [data?.tasks],
   );
 
@@ -608,6 +612,6 @@ export function useClusterState(): ClusterState {
     nodeCapabilities: data?.nodeCapabilities ?? {},
     capabilityNodes,
     thunderboltBridgeCycles: data?.thunderboltBridgeCycles ?? [],
-    engineInstallingInstanceIds: installingEngine,
+    engineInstallBytesByInstance: installingEngine,
   };
 }

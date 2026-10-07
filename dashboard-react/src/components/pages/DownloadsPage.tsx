@@ -12,6 +12,7 @@ import { extractErrorDetail, ModelSearchModal, readAcceptedDownload } from './Mo
 import { FiTrash2, FiSearch } from 'react-icons/fi';
 import { Button } from '../common/Button';
 import { addToast } from '../../hooks/useToast';
+import { engineInstallFromPlacement, engineInstallNotice } from '../../utils/engineInstall';
 import { PlacementManager } from '../cluster/PlacementManager';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
@@ -483,10 +484,22 @@ export function ModelStorePage({ topology, nodeResources = {}, downloads, instan
         }),
       });
       if (res.ok) {
-        addToast({
-          type: 'success',
-          message: t('downloads.toasts.launchingModel', 'Launching {modelId}', { modelId: params.modelId }),
-        });
+        // A quick launch skips the preview, so the response carries the same
+        // engine-install notice the placement dialog would have shown.
+        const install = engineInstallFromPlacement(await res.json().catch(() => null));
+        addToast(install
+          ? {
+              type: 'success',
+              message: t('downloads.toasts.launchingModelWithEngine', 'Launching {modelId}. {notice}', {
+                modelId: params.modelId,
+                notice: engineInstallNotice(t, install),
+              }),
+              duration: 10000,
+            }
+          : {
+              type: 'success',
+              message: t('downloads.toasts.launchingModel', 'Launching {modelId}', { modelId: params.modelId }),
+            });
       } else {
         const err: unknown = await res.json().catch(() => ({}));
         const errorRecord =

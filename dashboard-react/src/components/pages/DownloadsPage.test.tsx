@@ -21,9 +21,18 @@ vi.mock('../../hooks/useToast', () => ({
 }));
 
 vi.mock('../layout/StoreRegistryTable', () => ({
-  StoreRegistryTable: ({ entries }: { entries: Array<{ model_id: string }> }) => (
-    <div data-testid="store-registry">
-      {entries.map((entry) => entry.model_id).join(',')}
+  StoreRegistryTable: ({
+    entries,
+    onLaunch,
+  }: {
+    entries: Array<{ model_id: string }>;
+    onLaunch?: (modelId: string) => void;
+  }) => (
+    <div>
+      <div data-testid="store-registry">
+        {entries.map((entry) => entry.model_id).join(',')}
+      </div>
+      <button data-testid="mock-quick-launch" onClick={() => onLaunch?.('org/video-model')} />
     </div>
   ),
 }));
@@ -382,5 +391,61 @@ describe('ModelStorePage failed-download retry', () => {
     await flushEffects();
 
     expect(addToast).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ModelStorePage quick launch', () => {
+  function stubLaunch(placement: object): void {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/models') return jsonResponse({ data: [] });
+      if (path === '/store/downloads') return jsonResponse({ downloads: [] });
+      if (path === '/store/reconciliation') return reconciliationResponse();
+      if (path === '/store/registry') return jsonResponse({ entries: [] });
+      if (path === '/place_instance') return jsonResponse(placement);
+      throw new Error(`unexpected fetch: ${path}`);
+    }));
+  }
+
+  async function quickLaunch(): Promise<void> {
+    await renderModelStore();
+    await flushEffects();
+    await act(async () => {
+      container?.querySelector<HTMLButtonElement>('[data-testid="mock-quick-launch"]')?.click();
+    });
+    await flushEffects();
+  }
+
+  it('says the video engine installs with the model when the placement installs it', async () => {
+    const { addToast } = await import('../../hooks/useToast');
+    stubLaunch({
+      message: 'Command received.',
+      command_id: 'c-1',
+      instance_id: 'c-1',
+      engine_install: {
+        engine: 'comfy',
+        node_ids: ['node-a'],
+        approximate_download_bytes: 7 * 1024 ** 3,
+        detail: 'server wording',
+      },
+    });
+
+    await quickLaunch();
+
+    expect(addToast).toHaveBeenCalledWith({
+      type: 'success',
+      message:
+        'Launching org/video-model. The video engine (about 7 GB) will be installed with this model, so placement will take longer.',
+      duration: 10000,
+    });
+  });
+
+  it('keeps the plain launch toast when nothing installs', async () => {
+    const { addToast } = await import('../../hooks/useToast');
+    stubLaunch({ message: 'Command received.', command_id: 'c-2', instance_id: 'c-2', engine_install: null });
+
+    await quickLaunch();
+
+    expect(addToast).toHaveBeenCalledWith({ type: 'success', message: 'Launching org/video-model' });
   });
 });

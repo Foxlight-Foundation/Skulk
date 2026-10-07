@@ -2538,6 +2538,12 @@ A successful response includes both `command_id` and `instance_id`. For
 owns exactly that resulting placement identity. Clients should retain
 `instance_id` and correlate progress against that runtime rather than guessing
 from model name or observation order. The field is additive for older clients.
+`POST /place_instance` also returns `engine_install`, the same object a
+placement preview carries (see below), when the accepted placement installs an
+engine first, and null otherwise. It comes from the receiving node's dry run of
+the placement, so a client that launches without a preview, such as the
+dashboard's quick launch, can still tell the operator that placement will take
+longer.
 
 Memory fitting is checked **per node, not summed across the cycle**: Tensor
 sharding splits weights evenly, Pipeline allocates layers proportionally to
@@ -2614,7 +2620,8 @@ sentence to show the operator before placing ("The video engine (about 7 GB)
 will be installed with this model, so placement will take longer."). Among
 otherwise equal candidates, placement prefers a node whose engine is already
 installed. While the install runs, the instance's `InstallEngine` task is
-pending or running in `GET /state` `tasks`; a failed install fails the instance
+pending or running in `GET /state` `tasks`, carrying the same
+`approximateDownloadBytes`; a failed install fails the instance
 with `engine_install_failed` in `instanceFailures`, and the message names the
 step that failed (the download, the disk-space check, or the GPU check).
 

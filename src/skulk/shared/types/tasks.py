@@ -61,6 +61,14 @@ class InstallEngine(BaseTask):  # emitted by Worker
     """
 
     engine: EngineType
+    approximate_download_bytes: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Approximate download the install makes, quoted to operators while "
+            "it runs; zero when unknown."
+        ),
+    )
 
 
 class LoadModel(BaseTask):  # emitted by Worker

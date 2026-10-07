@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence, Set
 from skulk.download.download_utils import MODEL_FILES_INCOMPLETE_MARKER
 from skulk.shared.backends import (
     ENGINE_UNAVAILABLE_FAILURE_MARKER,
+    ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
     EngineType,
     engine_of,
 )
@@ -314,7 +315,11 @@ def _engine_needs_install(
             continue
         engine = awaited_engine(runner.bound_instance.bound_shard, on_demand_backends)
         if engine is not None:
-            return InstallEngine(instance_id=instance_id, engine=engine)
+            return InstallEngine(
+                instance_id=instance_id,
+                engine=engine,
+                approximate_download_bytes=ON_DEMAND_ENGINE_DOWNLOAD_BYTES.get(engine, 0),
+            )
     return None
 
 

@@ -2255,6 +2255,15 @@ class CreateInstanceResponse(BaseModel):
         description="Exact placement identity created by the accepted command."
     )
     model_card: ModelCard
+    engine_install: PlacementEngineInstall | None = Field(
+        default=None,
+        description=(
+            "Set when the accepted placement first installs an on-demand engine "
+            "(the video engine) on a node, so loading takes longer than usual. "
+            "The same notice a placement preview carries; computed from this "
+            "node's dry run of the placement."
+        ),
+    )
 
 
 class DeleteInstanceResponse(BaseModel):

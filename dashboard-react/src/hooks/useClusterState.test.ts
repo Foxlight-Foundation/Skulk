@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  engineInstallingInstanceIds,
+  engineInstallBytesByInstance,
   ensureCapabilityHostsPresent,
   normalizeCapabilityNodes,
   transformTopology,
@@ -190,21 +190,32 @@ describe('ensureCapabilityHostsPresent', () => {
   });
 });
 
-describe('engineInstallingInstanceIds', () => {
-  it('includes instances with a pending or running engine install only', () => {
+describe('engineInstallBytesByInstance', () => {
+  it('includes instances with a pending or running engine install only, with sizes', () => {
     const tasks = {
-      't-running': { InstallEngine: { taskStatus: 'Running', instanceId: 'inst-a', engine: 'comfy' } },
+      't-running': {
+        InstallEngine: {
+          taskStatus: 'Running',
+          instanceId: 'inst-a',
+          engine: 'comfy',
+          approximateDownloadBytes: 7 * 1024 ** 3,
+        },
+      },
       't-pending': { InstallEngine: { taskStatus: 'Pending', instanceId: 'inst-b', engine: 'comfy' } },
       't-done': { InstallEngine: { taskStatus: 'Complete', instanceId: 'inst-c', engine: 'comfy' } },
       't-failed': { InstallEngine: { taskStatus: 'Failed', instanceId: 'inst-d', engine: 'comfy' } },
       't-download': { DownloadModel: { taskStatus: 'Running', instanceId: 'inst-e' } },
     };
 
-    expect([...engineInstallingInstanceIds(tasks)].sort()).toEqual(['inst-a', 'inst-b']);
+    const installs = engineInstallBytesByInstance(tasks);
+    expect([...installs.keys()].sort()).toEqual(['inst-a', 'inst-b']);
+    expect(installs.get('inst-a')).toBe(7 * 1024 ** 3);
+    // A task without a size still counts as installing; its size is unknown.
+    expect(installs.get('inst-b')).toBe(0);
   });
 
-  it('returns an empty set without tasks', () => {
-    expect(engineInstallingInstanceIds(undefined).size).toBe(0);
+  it('returns an empty map without tasks', () => {
+    expect(engineInstallBytesByInstance(undefined).size).toBe(0);
   });
 });
 
