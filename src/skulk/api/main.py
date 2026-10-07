@@ -238,6 +238,7 @@ from skulk.api.types import (
     OpenUrlToolRequest,
     OpenUrlToolResponse,
     PlaceInstanceParams,
+    PlacementEngineInstall,
     PlacementPreview,
     PlacementPreviewResponse,
     PurgeStagingRequest,
@@ -377,13 +378,15 @@ from skulk.shared.backends import (
     AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
+    ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
+    EngineType,
     audio_cpp_cuda_hardware_matches,
+    engine_install_notice,
     engine_of,
 )
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
-    SKULK_ENABLE_IMAGE_MODELS,
     SKULK_EVENT_LOG_DIR,
     SKULK_IMAGE_CACHE_DIR,
     SKULK_IMAGE_TRANSPORT_DEBUG,
@@ -421,6 +424,7 @@ from skulk.shared.models.model_cards import (
     VideoMode,
     add_to_card_cache,
     authorized_model_card_digest,
+    card_visible_in_catalog,
     custom_card_mutation_applied,
     delete_custom_card,
     get_all_model_cards,
@@ -4669,10 +4673,51 @@ class API:
                         "card_digest": authorized_model_card_digest(model_card)
                         if preview.instance is not None
                         else None,
+                        "engine_install": self._engine_install_for_instance(
+                            preview.instance
+                        )
+                        if preview.instance is not None
+                        else None,
                     }
                 )
                 for preview in previews
             ]
+        )
+
+    def _engine_install_for_instance(
+        self, instance: Instance
+    ) -> PlacementEngineInstall | None:
+        """The on-demand engine this placement installs before loading, if any.
+
+        A shard whose stamped backend its node advertises but has not installed
+        waits for that engine to install beside the model download, so the
+        preview says so before the operator places it.
+        """
+        node_resources = self._telemetry_view.node_resources
+        installing: dict[EngineType, list[str]] = {}
+        assignments = instance.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard.get(runner_id)
+            resources = node_resources.get(node_id)
+            backend = shard.resolved_backend if shard is not None else None
+            if (
+                resources is None
+                or backend is None
+                or backend not in resources.on_demand_backends
+            ):
+                continue
+            engine = engine_of(backend)
+            if engine is not None:
+                installing.setdefault(engine, []).append(str(node_id))
+        if not installing:
+            return None
+        engine, node_ids = next(iter(installing.items()))
+        size = ON_DEMAND_ENGINE_DOWNLOAD_BYTES.get(engine, 0)
+        return PlacementEngineInstall(
+            engine=engine,
+            node_ids=node_ids,
+            approximate_download_bytes=size,
+            detail=engine_install_notice(engine, size),
         )
 
     def get_instance(self, instance_id: InstanceId) -> Instance:
@@ -10175,12 +10220,9 @@ class API:
 
     @staticmethod
     def _model_list_card_visible(card: ModelCard) -> bool:
-        """Apply the catalog's existing image-model visibility policy."""
+        """Apply the catalog's image and video visibility switches."""
 
-        return SKULK_ENABLE_IMAGE_MODELS or not any(
-            task in {ModelTask.TextToImage, ModelTask.ImageToImage}
-            for task in card.tasks
-        )
+        return card_visible_in_catalog(card)
 
     async def _model_catalog(
         self,

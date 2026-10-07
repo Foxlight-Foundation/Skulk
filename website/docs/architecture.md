@@ -774,9 +774,10 @@ revision, the same rule as MTP sidecars and vision weights. A card may also
 carry a `[license]` section with operator-facing facts, including a
 `display_name` that user interfaces must show prominently when the license
 requires attribution; Skulk surfaces it and never enforces it. Video cards
-stay out of the catalog until `SKULK_ENABLE_VIDEO_MODELS=true`, mirroring the
-image gate, so a fleet without a video engine does not advertise models it
-cannot serve. The registry's MiniMax H3 cards pin every file of the ComfyUI
+are listed by default, as image cards are, because the packaged apps have no
+launch environment to opt in through; `SKULK_ENABLE_VIDEO_MODELS=false` hides
+them on a node. A cluster with no machine that can run the video engine is
+told so in plain words when it places one. The registry's MiniMax H3 cards pin every file of the ComfyUI
 repack by size and content identity. The test engine's card ships beside the
 engine in `worker/runner/test_video/`: it names no artifact, so the registry can
 never supply it.
@@ -815,10 +816,37 @@ on demand, verified before use, and installed under the engines directory
 keyed by pin, variant, and the wheel set's digest (a wheel change without
 a pin change reprovisions rather than reusing an environment built on
 other torch builds), built in a staging directory and renamed into place so
-a half-finished install is never adopted. Two gates beyond the llama-server
-ones apply: the node must have video models enabled, since the wheel set is
-several gigabytes and most nodes never render video, and a variant is
-offered only where a wheel set is recorded for the machine. Two lanes are
+a half-finished install is never adopted.
+
+Unlike llama-server, the video engine is never fetched at startup: its wheel
+set is about 7 GB and most nodes never render video. Startup only wires an
+install already on disk. A node that could install it (full participation,
+video models enabled, online, no `SKULK_COMFY_BIN`/`SKULK_COMFY_ROOT` override
+or autoprovision opt-out, git and uv available, and a wheel set recorded for
+its machine and GPU; on AMD, only the Strix Halo GPU the ROCm wheels are built
+for) advertises the `comfy` tags before installing anything:
+`NodeResources.backends` includes them and `NodeResources.on_demand_backends`
+names them. Placement treats such a node as capable, preferring a node whose
+engine is already installed when nothing more important separates two
+candidates, and the placement preview carries an `engine_install` notice so the
+dashboard tells the operator, before the first placement, that the engine will
+be installed with the model and placement will take longer. When the instance
+lands, the worker plans an `InstallEngine` task beside the model download,
+holds `LoadModel` until it finishes, then re-derives its facts and publishes
+fresh resources. Instances waiting for the same engine share one install. A
+worker that shuts down mid-install, including the replacement that follows a
+master change, ends the installer's commands and returns at once instead of
+waiting out the download; the next worker plans the install again. The
+install checks free disk space, provisions each eligible variant, and must see
+the GPU from the new environment; an install that fails that check is removed,
+because startup wires any complete install without checking it again. A failure
+gives every waiting instance up with the `engine_install_failed` code and a
+message naming the step that failed, and the next placement tries again. The
+runner process starts before the install finishes, so it looks the managed
+install up on disk rather than trusting its inherited environment; a runner that
+finds no engine fails with the `engine-not-installed` marker and is not
+relaunched. `skulk doctor --fix` installs the engine ahead of time through the
+same path. Two lanes are
 recorded: cu130 wheels from the PyTorch index for NVIDIA nodes (aarch64
 and x86_64), and for x86_64 AMD nodes AMD's own stable ROCm 10.0.0 channel,
 where torch is a host wheel plus a gfx1151 device package on top of the

@@ -494,6 +494,27 @@ def _cycle_download_score(
     )
 
 
+def _cycle_engine_ready_score(
+    cycle: Cycle,
+    node_resources: Mapping[NodeId, NodeResources],
+    compatible_backends: frozenset[str],
+) -> int:
+    """Prefer a cycle whose nodes already have the model's engine installed.
+
+    A node that installs an engine on demand can serve the model, but its
+    first placement waits for a multi-gigabyte install, so a node with the
+    engine ready wins when nothing more important separates them. Nodes
+    without a resources entry are not counted against the cycle.
+    """
+    return int(
+        all(
+            bool((resources.backends - resources.on_demand_backends) & compatible_backends)
+            for node_id in cycle
+            if (resources := node_resources.get(node_id)) is not None
+        )
+    )
+
+
 def _cycle_backend_preference_score(
     cycle: Cycle,
     node_resources: Mapping[NodeId, NodeResources],
@@ -1304,7 +1325,8 @@ def place_instance(
     # compatible_backends has already hard-filtered, so this only ranks). This
     # dominates the download/memory tie-breakers because serving a model on its
     # faster backend is the whole point of the preference; among cycles with the
-    # same preference rank, download locality then free memory still decide.
+    # same preference rank, download locality, then an engine that is already
+    # installed (rather than installed on demand), then free memory decide.
     backend_preference = command.model_card.placement.backend_preference
     selected_cycle = max(
         candidate_cycles,
@@ -1314,6 +1336,11 @@ def place_instance(
             ),
             _cycle_download_score(
                 cycle, command.model_card.model_id, resolved_download_status
+            ),
+            _cycle_engine_ready_score(
+                cycle,
+                resolved_node_resources,
+                command.model_card.placement.compatible_backends,
             ),
             sum(
                 (node_memory[node_id].ram_available for node_id in cycle),

@@ -282,6 +282,18 @@ export interface DownloadProgress {
   }>;
 }
 
+/** An engine a placement installs on its node before the model can load. */
+export interface PlacementEngineInstall {
+  /** Engine that installs on demand, such as `comfy` (the video engine). */
+  engine: string;
+  /** Nodes in the placement that install it first. */
+  node_ids: string[];
+  /** Approximate download the install adds on each node. */
+  approximate_download_bytes: number;
+  /** Server-written notice, used for engines the dashboard has no wording for. */
+  detail: string;
+}
+
 /** Placement preview returned by the Skulk placement preview endpoint. */
 export interface PlacementPreview {
   model_id: string;
@@ -304,6 +316,9 @@ export interface PlacementPreview {
   support_claim_ids?: string[];
   /** Operator-readable missing artifact, engine/build, or platform detail. */
   compatibility_detail?: string | null;
+  /** Set when this placement first installs an on-demand engine (the video
+   * engine), so placing it takes longer than usual. */
+  engine_install?: PlacementEngineInstall | null;
   /** Per-host alternative to the ranked pick: a single-node placement on a
    * host that passes admission but lost the planner ranking (#557). */
   alternative?: boolean;

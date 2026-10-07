@@ -121,6 +121,8 @@ def summarize_task_for_log(task: task_types.Task) -> str:
         return (
             f"Shutdown(instance_id={task.instance_id!r}, runner_id={task.runner_id!r})"
         )
+    if isinstance(task, task_types.InstallEngine):
+        return f"InstallEngine(instance_id={task.instance_id!r}, engine={task.engine!r})"
     if isinstance(task, task_types.LoadModel):
         return f"LoadModel(instance_id={task.instance_id!r})"
     if isinstance(task, task_types.StartWarmup):

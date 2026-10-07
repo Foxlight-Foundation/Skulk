@@ -774,6 +774,12 @@ def test_comfy_engine_check_verdicts(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     absent = checks_module._check_comfy_engine(gpu)
     assert absent[0].verdict == "degraded" and absent[0].fix_available is True
 
+    # A node that can install the engine at first placement is healthy as is.
+    on_demand = gpu.model_copy(update={"comfy_on_demand_variants": ("cuda",)})
+    pending = checks_module._check_comfy_engine(on_demand)
+    assert pending[0].verdict == "ok" and pending[0].fix_available is True
+    assert "first time a video model is placed" in pending[0].detail
+
     configured = gpu.model_copy(
         update={"comfy_binary": ok_bin("SKULK_COMFY_BIN"), "comfy_root": "/opt/ComfyUI", "comfy_root_state": "ok"}
     )
@@ -793,6 +799,36 @@ def test_comfy_engine_check_verdicts(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     no_wheels = make_facts().model_copy(update={"platform": "linux"})
     assert checks_module._check_comfy_engine(no_wheels)[0].fix_available is False
+
+
+def test_comfy_fix_installs_through_the_placement_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import skulk.doctor.checks as checks_module
+    import skulk.provisioning.comfy as comfy_module
+    from skulk.facts.testing import NVIDIA_A40, make_facts
+
+    monkeypatch.setattr(comfy_module, "SKULK_ENGINES_DIR", tmp_path / "engines")
+    monkeypatch.setattr(comfy_module.platform_module, "machine", lambda: "aarch64")
+    monkeypatch.setattr(comfy_module, "_video_models_enabled", lambda: True)
+    monkeypatch.delenv("SKULK_NO_ENGINE_AUTOPROVISION", raising=False)
+    offline_requests: list[bool] = []
+
+    def installed(_facts: object, *, offline: bool) -> Path:
+        offline_requests.append(offline)
+        return tmp_path / "engines" / "comfy"
+
+    monkeypatch.setattr(comfy_module, "install_comfy_on_demand", installed)
+    action = checks_module._fix_comfy_engine(make_facts(gpus=(NVIDIA_A40,)))
+    assert action is not None and action.startswith("provisioned pinned ComfyUI")
+    assert offline_requests == [False]
+
+    def refused(_facts: object, *, offline: bool) -> Path:
+        raise comfy_module.ComfyInstallError("the GPU check", "no GPU")
+
+    monkeypatch.setattr(comfy_module, "install_comfy_on_demand", refused)
+    with pytest.raises(comfy_module.ComfyInstallError, match="the GPU check"):
+        checks_module._fix_comfy_engine(make_facts(gpus=(NVIDIA_A40,)))
 
 
 def test_installed_card_records_flag_complete_models_without_one(

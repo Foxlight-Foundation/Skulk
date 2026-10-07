@@ -8,6 +8,8 @@ facts and doctor test suites (and any future consumer's tests) share it.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from skulk.shared.types.node_facts import (
     EngineBinaryFact,
     GpuDeviceFact,
@@ -58,6 +60,7 @@ def make_facts(
     declared_llama_cpp: str | None = None,
     declared_llama_server: str | None = None,
     declared_vllm: str | None = None,
+    comfy_on_demand_variants: tuple[Literal["cuda", "rocm"], ...] = (),
 ) -> NodeFacts:
     """Build a synthetic facts record with unconfigured-binary defaults."""
     return NodeFacts(
@@ -75,6 +78,7 @@ def make_facts(
         declared_llama_cpp_backends=declared_llama_cpp,
         declared_llama_server_backends=declared_llama_server,
         declared_vllm_backends=declared_vllm,
+        comfy_on_demand_variants=comfy_on_demand_variants,
     )
 
 

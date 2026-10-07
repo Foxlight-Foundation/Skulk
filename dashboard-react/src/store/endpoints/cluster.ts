@@ -141,6 +141,8 @@ export interface RawStateResponse {
   topology?: RawTopology;
   instances?: Record<string, unknown>;
   runners?: Record<string, unknown>;
+  /** Tasks by id, each tagged by its type (e.g. `{ "InstallEngine": {...} }`). */
+  tasks?: Record<string, unknown>;
   downloads?: Record<string, unknown[]>;
   nodeIdentities?: Record<string, RawNodeIdentity>;
   nodeMemory?: Record<string, RawMemoryUsage>;

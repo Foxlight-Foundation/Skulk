@@ -212,6 +212,21 @@ def wheel_set_digest(wheels: Sequence[PinnedWheel]) -> str:
     return hashlib.sha256("".join(sorted(wheel.sha256 for wheel in wheels)).encode()).hexdigest()
 
 
+COMFY_ROCM_PCI_DEVICE_IDS: Final[frozenset[str]] = frozenset({"1002:1586"})
+"""AMD GPUs the recorded ROCm wheel set can drive (Strix Halo, gfx1151).
+
+The ROCm torch build is compiled for one GPU architecture, so any other AMD GPU
+would install several gigabytes that cannot render. Extend this only with a
+qualified wheel set for the new architecture.
+"""
+
+COMFY_INSTALL_FREE_BYTES: Final = 15 * 1024**3
+"""Free space required beside the engines directory before installing ComfyUI.
+
+A finished install measures about 7 GB; the installer's download cache holds the
+torch wheel set while it installs, so the check leaves room for both.
+"""
+
 # (machine, variant) -> the torch wheel set installed into the managed
 # ComfyUI environment, for sys.platform == "linux" and cp313. The CUDA
 # lane's checksums are the PyTorch index's own link digests, recorded

@@ -227,12 +227,14 @@ SKULK_ENABLE_IMAGE_MODELS = env_switch_enabled(
     _env("SKULK_ENABLE_IMAGE_MODELS"), default=True
 )
 
-# Video cards stay out of the catalog until a node can serve them; the served
-# video engines flip this by default once they exist, the same way image
-# models are gated today.
-SKULK_ENABLE_VIDEO_MODELS = (
-    _env("SKULK_ENABLE_VIDEO_MODELS", "false") or "false"
-).lower() == "true"
+# Video cards are in the catalog by default, for the same reason as image cards.
+# A Linux node with a supported NVIDIA or AMD GPU advertises the video engine
+# before it is installed and installs it (about 7 GB) the first time a video
+# model is placed on it. SKULK_ENABLE_VIDEO_MODELS=false hides video cards and
+# stops the node from offering the engine.
+SKULK_ENABLE_VIDEO_MODELS = env_switch_enabled(
+    _env("SKULK_ENABLE_VIDEO_MODELS"), default=True
+)
 
 # Video generation moves whole containers between processes by path rather
 # than inline: a worker writes verified reference media here for its runner,

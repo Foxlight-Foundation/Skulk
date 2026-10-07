@@ -1697,6 +1697,66 @@ def test_mac_only_model_without_a_mac_names_the_missing_hardware() -> None:
         )
 
 
+def _video_engine_card() -> ModelCard:
+    card = _small_model_card()
+    return card.model_copy(
+        update={
+            "placement": card.placement.model_copy(
+                update={"compatible_backends": frozenset({"comfy"})}
+            )
+        }
+    )
+
+
+def test_video_model_on_a_mac_only_cluster_names_the_missing_hardware() -> None:
+    """Video models are listed by default, so a Mac-only cluster is told which
+    machine runs one instead of reading engine tags."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    mac = NodeResources(
+        backends=frozenset({"mlx", "mlx-metal"}),
+        hardware_classes=frozenset({"platform:darwin"}),
+    )
+
+    with pytest.raises(
+        PlacementNoCapableMachineError,
+        match="it needs a Linux machine with an NVIDIA GPU or an AMD Strix Halo GPU",
+    ):
+        place_instance(
+            place_instance_command(_video_engine_card()),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={node_a: mac, node_b: mac},
+        )
+
+
+def test_gpu_node_without_the_video_engine_keeps_the_detailed_message() -> None:
+    """An NVIDIA node that cannot install the video engine right now (offline,
+    say) owns the hardware, so the planner does not claim the cluster lacks it."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+
+    with pytest.raises(PlacementError) as raised:
+        place_instance(
+            place_instance_command(_video_engine_card()),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(
+                    backends=frozenset({"mlx"}),
+                    hardware_classes=frozenset({"platform:darwin"}),
+                ),
+                node_b: NodeResources(
+                    backends=frozenset({"llama_server-cuda"}),
+                    hardware_classes=frozenset({"platform:linux", "nvidia"}),
+                ),
+            },
+        )
+    assert not isinstance(raised.value, PlacementNoCapableMachineError)
+
+
 def test_management_only_mac_keeps_the_detailed_message() -> None:
     """Management nodes advertise no engines, so a management-only Mac must not
     be reported as a missing Mac."""

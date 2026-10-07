@@ -608,6 +608,7 @@ uv run skulk --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 | `SKULK_MODELS_DIR` | Primary downloaded-model directory | platform-specific |
 | `SKULK_OFFLINE` | Use only local or pre-staged models | `false` |
 | `SKULK_ENABLE_IMAGE_MODELS` | Show image model cards and image workflows; set to `false` to hide them | `true` |
+| `SKULK_ENABLE_VIDEO_MODELS` | Show video model cards; set to `false` to hide them. A Linux node with an NVIDIA GPU or an AMD Strix Halo GPU installs the video engine the first time a video model is placed on it | `true` |
 | `SKULK_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
 | `SKULK_FAST_SYNCH` | Control MLX fast synch behavior | Auto |
 | `SKULK_TRACING_ENABLED` | Developer boot override for tracing. Prefer the dashboard traces toggle or `PUT /v1/tracing` for normal use. Legacy `SKULK_TRACING_ENABLED` is still accepted. | `false` |

@@ -1723,10 +1723,12 @@ contract (modes, duration range, canvas rules, reference limits) before
 anything is dispatched.
 
 Availability note: these routes are always registered. Video model cards are
-hidden from the catalog unless the node runs with
-`SKULK_ENABLE_VIDEO_MODELS=true`, and a create request needs a placed
-instance of the model on a node with a video engine; without one the job
-fails at placement with `video_mode_unavailable`. To exercise the routes
+listed by default and hidden on a node that runs with
+`SKULK_ENABLE_VIDEO_MODELS=false`. A create request needs a placed instance of
+the model on a node with a video engine; without one the job fails at
+placement with `video_mode_unavailable`. A Linux node with an NVIDIA GPU or an
+AMD Strix Halo GPU installs the engine the first time a video model is placed
+on it (see the placement preview's `engine_install`). To exercise the routes
 without a GPU, start a node with `SKULK_TEST_VIDEO_ENGINE=1` and place the
 bundled `foxlight/test-video` card: it renders small seeded synthetic clips
 through the whole pipeline. The card is registered on the node that
@@ -2601,6 +2603,20 @@ engine/build, hardware, or incomplete-artifact gaps. A positive matrix claim
 must match the node's advertised exact build and hardware class. Missing,
 stale, experimental, or unsupported claims do not widen placement; legacy
 `compatible_backends` remain valid for existing cards.
+
+A preview whose placement would install an engine first carries
+`engine_install`; otherwise the field is null. Today that is the video engine:
+a Linux node with an NVIDIA GPU or an AMD Strix Halo GPU installs it the first
+time a video model is placed there, beside the model download, so that first
+placement takes longer. The object holds `engine` (`comfy`), `node_ids` (the
+nodes that would install it), `approximate_download_bytes`, and `detail`, a
+sentence to show the operator before placing ("The video engine (about 7 GB)
+will be installed with this model, so placement will take longer."). Among
+otherwise equal candidates, placement prefers a node whose engine is already
+installed. While the install runs, the instance's `InstallEngine` task is
+pending or running in `GET /state` `tasks`; a failed install fails the instance
+with `engine_install_failed` in `instanceFailures`, and the message names the
+step that failed (the download, the disk-space check, or the GPU check).
 
 | Query parameter | Meaning |
 |-----------------|---------|
