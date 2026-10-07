@@ -14,6 +14,7 @@ import pytest
 import skulk.facts
 from skulk.facts.derive import BackendDerivation
 from skulk.shared.backends import (
+    describe_backend_hardware,
     engine_of,
     engine_supports_multi_node,
     make_backend_tag,
@@ -49,6 +50,25 @@ def test_make_backend_tag_is_compound() -> None:
 )
 def test_engine_of(tag: str, expected: str | None) -> None:
     assert engine_of(tag) == expected
+
+
+@pytest.mark.parametrize(
+    ("backends", "expected"),
+    [
+        (frozenset({"mlx"}), "an Apple Silicon Mac"),
+        (frozenset({"mlx", "mlx-metal", "mlx_audio"}), "an Apple Silicon Mac"),
+        # vLLM and llama.cpp depend on installed software as well as hardware,
+        # so a card that can use them never claims a hardware requirement.
+        (frozenset({"mlx", "llama_server-cuda"}), None),
+        (frozenset({"vllm-cuda"}), None),
+        (frozenset({"bogus"}), None),
+        (frozenset[str](), None),
+    ],
+)
+def test_describe_backend_hardware(
+    backends: frozenset[str], expected: str | None
+) -> None:
+    assert describe_backend_hardware(backends) == expected
 
 
 def test_probe_includes_mlx_on_darwin() -> None:

@@ -6,6 +6,7 @@ from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
     PlacementModelCardIdentityError,
+    PlacementNoCapableMachineError,
     add_instance_to_placements,
     fallback_command_for_refused_instance,
     get_transition_events,
@@ -1671,6 +1672,51 @@ def test_backend_incompatible_node_is_excluded() -> None:
     assert len(placements) == 1
     instance = next(iter(placements.values()))
     assert set(instance.shard_assignments.node_to_runner.keys()) == {node_b}
+
+
+def test_mac_only_model_without_a_mac_names_the_missing_hardware() -> None:
+    """Every node reported and none advertises MLX, so placement names the
+    machine the model needs instead of listing engine tags."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(
+        PlacementNoCapableMachineError,
+        match="No machine in this cluster can run this model: it needs an Apple Silicon Mac",
+    ):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(backends=frozenset({"llama_server-cuda"})),
+                node_b: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+            },
+        )
+
+
+def test_missing_hardware_is_not_claimed_before_every_node_reports() -> None:
+    """A node that has not reported its engines may be the Mac, so a failed
+    two-node placement keeps the detailed message."""
+    topology, node_a, _node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card()).model_copy(
+        update={"min_nodes": 2}
+    )
+
+    with pytest.raises(PlacementError) as raised:
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(backends=frozenset({"llama_server-cuda"})),
+            },
+        )
+    assert not isinstance(raised.value, PlacementNoCapableMachineError)
 
 
 def test_signed_engine_support_adds_backend_without_card_replacement(

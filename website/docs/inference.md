@@ -77,7 +77,8 @@ task, verifies it, and waits for their acknowledgements before generation. Input
 bytes do not enter replicated cluster state or the event log.
 
 Image synthesis and editing use a separate model task and dedicated endpoints.
-Enable their catalog on the relevant nodes with `SKULK_ENABLE_IMAGE_MODELS=true`.
+Image models appear in the catalog by default and run on Apple Silicon Macs; an
+operator can hide them on a node with `SKULK_ENABLE_IMAGE_MODELS=false`.
 Generation takes JSON; editing takes multipart image upload. Responses can contain
 inline base64 bytes or a URL to content stored on the accepting API node. Optional
 SSE partial images expose progress. Use the same origin for stored-image reads,
