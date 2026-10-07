@@ -110,6 +110,21 @@ export interface CatalogInvitation {
   token?: string;
 }
 
+/**
+ * The revision for discovery trust the connect panel creates.
+ *
+ * The host keeps each catalog address's trust history and refuses a trust
+ * older than the one it accepted there, or a different one at the same
+ * revision. The current revision only describes the catalog in use now, so a
+ * returning catalog could sit at or above it. The panel's opening time, in
+ * seconds, is above any revision an earlier panel created and above the
+ * current one, so re-adding a catalog with a new code is never refused as a
+ * rollback.
+ */
+export function trustRevision(current: number | null, openedAtSeconds: number): number {
+  return Math.max((current ?? 0) + 1, openedAtSeconds);
+}
+
 /** Prefix of an invitation code, so a pasted code is recognizable. */
 export const INVITATION_PREFIX = 'skulk-catalog:';
 

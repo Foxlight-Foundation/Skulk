@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { CatalogEntry, CatalogInstallation, CatalogListing, ManagedRuntime, RuntimeInstallation } from '../../store/endpoints/plugins';
 import {
   catalogOffers, clearJourney, decodeInvitation, encodeInvitation, isStartRefusal, journeyInProgress,
-  platformLabel, readJourneys, saveJourney, startCatalogInstall, type InstallJourney,
+  platformLabel, readJourneys, saveJourney, startCatalogInstall, trustRevision, type InstallJourney,
 } from './catalogJourney';
 
 function entry(sequence: number, overrides: Partial<CatalogEntry> = {}): CatalogEntry {
@@ -174,5 +174,14 @@ describe('journeys', () => {
     expect(readJourneys(storage)).toEqual([]);
     storage.setItem('skulk-plugin-install-journeys', '{broken');
     expect(readJourneys(storage)).toEqual([]);
+  });
+});
+
+describe('trustRevision', () => {
+  it('stays above the current revision and every revision an earlier panel created', () => {
+    expect(trustRevision(null, 1_800_000_000)).toBe(1_800_000_000);
+    expect(trustRevision(7, 1_800_000_000)).toBe(1_800_000_000);
+    expect(trustRevision(1_800_000_000, 1_800_000_000)).toBe(1_800_000_001);
+    expect(trustRevision(1_800_000_005, 1_800_000_000)).toBe(1_800_000_006);
   });
 });
