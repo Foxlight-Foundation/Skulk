@@ -984,7 +984,16 @@ an installation to a listing with consent (`install_from_catalog`, the
 owner-only `POST /v1/plugins/managed/catalog/install`,
 `install-plugin --from-catalog`): the listed feed becomes the source under the
 discovery trust and the served record must be the one listed; staging and
-activation stay separate consents.
+activation stay separate consents. The default source is the built-in
+capability store (`extensions/capability_store.py`): a TUF root shipped as
+package data (`capability_store_root.json`, absent until the root exists, in
+which case the store is inactive) anchors one signed target, the store's
+publisher trust, which `HostCatalog` seeds on a host with no source and renews
+on every read while on the store (newer revision only, held revocations kept,
+hash-bound last verified copy offline). A private catalog replaces it;
+`use_builtin_catalog` / `POST /v1/plugins/managed/catalog/source/builtin`
+switches back. The node passes its offline mode per request because the
+manager runs with a fixed environment.
 
 Optional `StewardToolProvider` offers bounded `extension_*` read and inert-proposal
 tools through `extensions/steward.py`. The steward binds each model step to the

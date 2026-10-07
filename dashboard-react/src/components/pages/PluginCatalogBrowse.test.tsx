@@ -26,6 +26,9 @@ let installed: ManagedRuntime;
 let posts: { path: string; body: Record<string, unknown> }[];
 let freshHost: boolean;
 let loseNextBind: boolean;
+let onStore: boolean;
+let storeAvailable: boolean;
+let refuseStoreOnce: boolean;
 
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -45,6 +48,9 @@ beforeEach(async () => {
   configured = true;
   freshHost = false;
   loseNextBind = false;
+  onStore = false;
+  storeAvailable = false;
+  refuseStoreOnce = false;
   localStorage.removeItem('skulk-plugin-install-journeys');
   installed = {
     plugin_id: pluginId, release: { bundle_id: 'example.studio', title: 'Example Studio', bundle_version: '0.1.0', publisher: 'example', sequence: 50 },
@@ -59,7 +65,15 @@ beforeEach(async () => {
     if (request.method === 'POST') {
       const body = await request.json() as Record<string, unknown>;
       posts.push({ path, body });
-      if (path === '/v1/plugins/managed/catalog/source') { configured = true; return json({ revision: 1, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1 }); }
+      if (path === '/v1/plugins/managed/catalog/source') { configured = true; onStore = false; return json({ revision: 1, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1 }); }
+      if (path === '/v1/plugins/managed/catalog/source/builtin') {
+        if (refuseStoreOnce) {
+          refuseStoreOnce = false;
+          return json({ detail: 'The catalog source changed since its revision was read. Read the catalog source status and apply the change at its current revision.' }, 409);
+        }
+        onStore = true;
+        return json({ revision: 2, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1, builtin_store: true, builtin_store_available: true });
+      }
       if (path === '/v1/plugins/managed/catalog/install') {
         // The host acts on the request, but the reply never arrives.
         if (loseNextBind) { loseNextBind = false; throw new TypeError('network'); }
@@ -74,7 +88,9 @@ beforeEach(async () => {
       }
       return json({ detail: 'unexpected' }, 404);
     }
-    if (path === '/v1/plugins/managed/catalog/source') return json({ revision: configured ? 1 : 0, configured, credential_reference: null, credential_ready: configured, trust_revision: configured ? 1 : null });
+    if (path === '/v1/plugins/managed/catalog/source') {
+      return json({ revision: configured ? 1 : 0, configured, credential_reference: null, credential_ready: configured, trust_revision: configured ? 1 : null, builtin_store: onStore, builtin_store_available: storeAvailable });
+    }
     if (path === '/v1/plugins/managed/catalog') return json({ publisher: 'example', revision: 34, created_at: 1_790_000_000, expires_at: 1_800_000_000, catalog_sha256: 'c'.repeat(64), entries: [entry] });
     if (path === '/v1/plugins/managed') return json({ installations: freshHost ? [] : [installed] });
     if (path.endsWith('/install')) return json({ operation: installOperationId ? { request: { operation_id: installOperationId, runtime_digest: newDigest, expected_source_revision: 7 }, review: {}, state: 'staged', downloaded_bytes: 12_000_000, error_code: null } : null });
@@ -120,6 +136,45 @@ it('updates an installed capability from its catalog listing after one consent',
   expect(posts[1].body).toMatchObject({ runtime_digest: newDigest, expected_source_revision: 7 });
   expect(posts[2].body).toMatchObject({ action: 'activate', expected_revision: 3, runtime_digest: newDigest, accept_permissions: true });
   expect(readJourneys()).toEqual([]);
+});
+
+it('lists the Foxlight store with nothing to paste and keeps a private catalog behind its own control', async () => {
+  onStore = true;
+  storeAvailable = true;
+  await render();
+  await contains('From the Foxlight capability store.');
+  await contains('Update available');
+  expect(host.querySelector('#catalog-invitation')).toBeNull();
+  expect(button('Change catalog')).toBeNull();
+  expect(button('Use the Foxlight store')).toBeNull();
+  await click('Add a private catalog');
+  await contains('This host then reads that catalog instead of the Foxlight store');
+  expect(host.querySelector('#catalog-invitation')).not.toBeNull();
+  await click('Cancel');
+  await contains('From the Foxlight capability store.');
+  expect(posts).toEqual([]);
+});
+
+it('returns a host on a private catalog to the Foxlight store', async () => {
+  storeAvailable = true;
+  refuseStoreOnce = true;
+  await render();
+  await contains('From the example catalog.');
+  // A refusal is named in the host's own words and changes nothing.
+  await click('Use the Foxlight store');
+  await contains('The catalog source changed since its revision was read.');
+  await click('Use the Foxlight store');
+  await contains('From the Foxlight capability store.');
+  expect(posts.map((post) => post.path)).toEqual(['/v1/plugins/managed/catalog/source/builtin', '/v1/plugins/managed/catalog/source/builtin']);
+  expect(posts[1].body).toEqual({ expected_revision: 1 });
+  expect(button('Add a private catalog')).not.toBeNull();
+});
+
+it('offers no way to the store on a build without one', async () => {
+  await render();
+  await contains('From the example catalog.');
+  expect(button('Use the Foxlight store')).toBeNull();
+  expect(button('Change catalog')).not.toBeNull();
 });
 
 it('connects a catalog from an invitation code before browsing it', async () => {
