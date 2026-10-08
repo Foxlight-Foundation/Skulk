@@ -68,7 +68,7 @@ export function CatalogReviewPanel({ offer, onInstall, onCancel }: CatalogReview
       <label htmlFor="catalog-consent">{t('plugins.catalog.accept', 'I accept these permissions for this release.')}</label>
     </Consent>
     <Actions>
-      <Button variant="ghost" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button>
+      <Button variant="outline" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button>
       <Button variant="primary" disabled={!accepted} onClick={onInstall}>{updating ? t('plugins.catalog.update', 'Update') : t('plugins.catalog.install', 'Install')}</Button>
     </Actions>
   </Panel>;
@@ -118,7 +118,7 @@ export function CatalogRetryReviewPanel({ title, updating, stopped = true, revie
       <label htmlFor="catalog-retry-consent">{t('plugins.catalog.accept', 'I accept these permissions for this release.')}</label>
     </Consent>
     <Actions>
-      <Button variant="ghost" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button>
+      <Button variant="outline" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button>
       <Button variant="primary" disabled={!accepted} onClick={onRetry}>{stopped ? t('plugins.catalog.retryAccepted', 'Retry install') : t('plugins.catalog.followAccepted', 'Finish install')}</Button>
     </Actions>
   </Panel>;

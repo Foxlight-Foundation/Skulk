@@ -234,7 +234,10 @@ a system service and asks for your administrator password once (see
      You can also open them from the plugin's node in the **Cluster** view.
 
    **Done** returns to the list of installed plugins. An installed plugin's
-   **Browse** card offers **Set up**, which opens the same page.
+   **Browse** card says what it needs: **Open**, followed by the screen's
+   name, opens a running plugin in a new tab; **Set up** opens this page when a
+   node is turned off, needs settings or stopped; **Manage** opens it
+   otherwise, such as while the plugin starts.
 
 An update replaces the release on the same installation; its settings and saved
 work stay.

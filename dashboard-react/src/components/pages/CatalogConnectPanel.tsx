@@ -125,8 +125,8 @@ export function CatalogConnectPanel({ status, onConnected, onCancel, replacesSto
     {notice ? <Warning role="alert">{notice}</Warning> : null}
     <Actions>
       <Button variant="primary" disabled={!chosen || busy} onClick={() => void connect()}>{t('plugins.catalog.connect', 'Connect')}</Button>
-      {onCancel ? <Button variant="ghost" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button> : null}
-      <Button variant="ghost" onClick={() => { setManual(!manual); setNotice(''); }}>{manual ? t('plugins.catalog.useCode', 'Use an invitation code instead') : t('plugins.catalog.enterDetails', 'Enter the catalog details instead')}</Button>
+      {onCancel ? <Button variant="outline" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button> : null}
+      <Button variant="outline" onClick={() => { setManual(!manual); setNotice(''); }}>{manual ? t('plugins.catalog.useCode', 'Use an invitation code instead') : t('plugins.catalog.enterDetails', 'Enter the catalog details instead')}</Button>
     </Actions>
   </Panel>;
 }

@@ -360,7 +360,7 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
     <Actions>
       {target ? <Button variant="primary" onClick={() => onDone(target)}>{t('plugins.catalog.setItUp', 'Set it up')}</Button> : null}
       {retryable ? <Button variant="primary" onClick={onRetry}>{t('plugins.catalog.retryInstall', 'Retry')}</Button> : null}
-      <Button variant="outline" onClick={onBack}>{t('plugins.catalog.backToBrowse', 'Back to Browse')}</Button>
+      <Button variant="outline" onClick={onBack}>{t('common.close', 'Close')}</Button>
     </Actions>
   </Panel>;
 }

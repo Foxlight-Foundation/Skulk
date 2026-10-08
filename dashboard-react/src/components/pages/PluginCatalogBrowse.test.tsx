@@ -287,7 +287,7 @@ it('continues a new installation whose binding reply was lost instead of registe
   await act(async () => { (host.querySelector('#catalog-consent') as HTMLInputElement).click(); });
   await click('Install');
   await contains('The host did not confirm this release, so it may already be bound.');
-  await click('Back to Browse');
+  await click('Close');
   await contains('Review and install');
   await click('Review and install');
   await act(async () => { (host.querySelector('#catalog-consent') as HTMLInputElement).click(); });
@@ -306,7 +306,7 @@ it('returns to an install in progress instead of offering the release again', as
   await render();
   // Opening Browse picks the install up where it was.
   await contains('Installing Example Studio');
-  await click('Back to Browse');
+  await click('Close');
   await contains('Show progress');
   expect(host.textContent).toContain('Installing');
   expect(button('Review and install')).toBeNull();
@@ -424,7 +424,7 @@ it('keeps a retry of an older release on its card while it runs, though the cata
   await contains('Installing release 51 stopped before it finished.');
   await click('Resume install');
   await act(async () => { await vi.waitFor(() => expect(posts.filter((post) => post.path.endsWith('/recover'))).toHaveLength(1), { timeout: 5000 }); });
-  await click('Back to Browse');
+  await click('Close');
   // The retry is still the bundle's only installation: release 52 is not offered beside it.
   await contains('Show progress');
   expect(button('Review and install')).toBeNull();

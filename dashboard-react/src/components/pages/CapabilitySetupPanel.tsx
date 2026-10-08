@@ -10,10 +10,10 @@ import { capabilityNodeKey, capabilityNodeTitle, type CapabilityNodeStatus, type
 import { Button } from '../common/Button';
 import { Spinner } from '../common/Spinner';
 import { StatusPill, Surface, type StatusTone } from '../common/Surfaces';
-import { resolveSurfaceUrl } from '../topology/capabilityActions';
 import { NodePreflightPanel } from './NodePreflightPanel';
 import type { SetupTarget } from './CatalogInstallProgress';
 import { turnOnNodes, type TurnOnRefusal } from './turnOnCapability';
+import { hostedCapabilityNodes, openableSurfaces } from './installedCapability';
 
 /** Props for the setup page of one installed plugin. */
 export interface CapabilitySetupPanelProps {
@@ -70,23 +70,11 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
   const [refusal, setRefusal] = useState<TurnOnRefusal | null>(target.turnOnRefusal ?? null);
   // A decided refusal runs the node's setup checks, which say what is missing.
   const [checkRequest, setCheckRequest] = useState(target.turnOnRefusal && target.turnOnRefusal.status !== null ? 1 : 0);
-  const hosted = useMemo(() => Object.entries(capabilityNodes).flatMap(([hostNodeId, nodes]) => nodes
-    .filter((node) => node.pluginId === target.pluginId).map((summary) => ({ hostNodeId, summary }))), [capabilityNodes, target.pluginId]);
+  const hosted = useMemo(() => hostedCapabilityNodes(capabilityNodes, target.pluginId), [capabilityNodes, target.pluginId]);
   const summaries = useMemo(() => hosted.map((item) => item.summary), [hosted]);
   const withChecks = new Set(plugins.data?.find((plugin) => plugin.pluginId === target.pluginId)?.nodes.filter((node) => node.preflightAvailable).map((node) => node.nodeId) ?? []);
-  // The summary carries only surfaces the plugin reported ready to open. As in
-  // the topology, a loopback one opens only from a browser on its own host.
-  const surfaces = useMemo(() => {
-    const unique = new Map<string, { surface: CapabilityNodeSurface; reachable: boolean }>();
-    for (const { hostNodeId, summary } of hosted) {
-      for (const surface of summary.surfaces) {
-        if (surface.kind !== 'link' || !surface.url || unique.has(surface.url)) continue;
-        const resolved = resolveSurfaceUrl(surface.url, { isLocalHost: hostNodeId === localNodeId, dashboardHostname: window.location.hostname });
-        unique.set(surface.url, { surface: { ...surface, url: resolved.url }, reachable: resolved.reachable });
-      }
-    }
-    return [...unique.values()];
-  }, [hosted, localNodeId]);
+  // As in the topology, a loopback screen opens only from a browser on its own host.
+  const surfaces = useMemo(() => openableSurfaces(hosted, localNodeId, window.location.hostname), [hosted, localNodeId]);
   const reachable = surfaces.filter((item) => item.reachable);
   const unreachable = surfaces.filter((item) => !item.reachable);
 

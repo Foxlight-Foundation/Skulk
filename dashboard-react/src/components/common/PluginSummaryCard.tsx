@@ -53,7 +53,7 @@ const Actions = styled.div`display: flex; align-items: center; gap: 6px;`;
 const Primary = styled(Button)`@media(max-width: 600px) { display: none; } @container(max-width: 700px) { display: none; }`;
 const Menu = styled.details<{ $above: boolean; $availableHeight: number }>`
   position: relative;
-  summary { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; list-style: none; color: ${({ theme }) => theme.colors.textSecondary}; }
+  summary { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 1px solid ${({ theme }) => theme.colors.border}; border-radius: 8px; cursor: pointer; list-style: none; color: ${({ theme }) => theme.colors.textSecondary}; }
   summary::-webkit-details-marker { display: none; }
   &[open] > summary, summary:hover { border-color: ${({ theme }) => theme.colors.borderStrong}; background: ${({ theme }) => theme.colors.surfaceHover}; }
   > div { position: absolute; right: 0; top: ${({ $above }) => $above ? 'auto' : '38px'}; bottom: ${({ $above }) => $above ? '38px' : 'auto'}; max-height: ${({ $availableHeight }) => $availableHeight}px; overflow-y: auto; z-index: 5; width: 240px; max-width: calc(100vw - 48px); background: ${({ theme }) => theme.colors.surfaceElevated}; border: 1px solid ${({ theme }) => theme.colors.borderControl}; padding: 6px; border-radius: 10px; box-shadow: ${({ theme }) => theme.colors.shadowPop}; }

@@ -269,3 +269,43 @@ it('turns a node on from its setup page with one action and ends ready to open',
   expect(enables().map((post) => post.body)).toEqual([{ operation: 'enable', expectedRevision: 0, expectedSchemaDigest: schemaDigest }]);
   expect((host.querySelector('a[href]') as HTMLAnchorElement).href).toBe(screenUrl);
 });
+
+it('labels an installed card by what its nodes report: Open when running, Set up when it needs the owner, Manage otherwise', async () => {
+  runtime = running(newDigest, 51);
+  nodeStatus = 'ready';
+  await renderAt('/plugins?view=browse');
+  // Running with a screen: the card opens it in a new tab, resolved as the plugin's own page resolves it.
+  await act(async () => { await vi.waitFor(() => expect(host.querySelector('a[href]')).not.toBeNull(), { timeout: 10_000 }); });
+  const open = host.querySelector('a[href]') as HTMLAnchorElement;
+  expect(open.href).toBe(screenUrl);
+  expect(open.target).toBe('_blank');
+  expect(open.textContent).toBe('Open Example Studio');
+  expect(open.title).toBe('Opens in a new tab');
+  expect(button('Set up')).toBeNull();
+  // Turned off: it needs the owner.
+  nodeStatus = 'disabled';
+  await act(async () => { await vi.waitFor(() => expect(button('Set up')).not.toBeNull(), { timeout: 5000 }); });
+  expect(host.querySelector('a[href]')).toBeNull();
+  // Starting: nothing to do but follow it on its page.
+  nodeStatus = 'starting';
+  await act(async () => { await vi.waitFor(() => expect(button('Manage')).not.toBeNull(), { timeout: 5000 }); });
+  expect(button('Set up')).toBeNull();
+  await click('Manage');
+  await setupTitleIs('Example Studio is installed');
+  await contains('It is starting. This page updates by itself.');
+  expect(enables()).toEqual([]);
+});
+
+it('closes an install\'s progress back to the capability list with a bordered Close', async () => {
+  // The install is followed but has not finished, so its progress stays open.
+  installOperation = null;
+  saveJourney({ pluginId, title: 'Example Studio', bundleId: 'example.studio', sequence: 51, publisher: 'example', runtimeDigest: newDigest, transferBytes: 12_000_000,
+    installOperationId: '5'.repeat(32), activationOperationId: null, startedAt: 1 });
+  runtime = { plugin_id: pluginId, release: null, selected_digest: null, selection_revision: 0, enabled: false, stale: true, error_code: null, operation_id: null, operation_state: null, service: null };
+  await renderAt('/plugins?view=browse');
+  await contains('Installing Example Studio');
+  expect(button('Back to Browse')).toBeNull();
+  await click('Close');
+  await contains('Browse capabilities');
+  expect(setupTitle()).toBeNull();
+});

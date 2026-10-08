@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { useClusterState } from '../../hooks/useClusterState';
 import {
   installOperationIds, pluginRefusalDetail, pluginRequestRefused, useGetCatalogSourceQuery, useGetInstallOperationsQuery, useGetManagedRuntimesQuery,
   useGetPluginCatalogQuery, useInstallFromCatalogMutation, useInstallRuntimeReleaseMutation, useLazyGetRuntimeInstallationQuery,
@@ -18,6 +19,7 @@ import {
   canSpendMoney, catalogOffers, displayTitle, isConsentNeeded, isFollowed, isStartRefusal, offerProgress, readJourneys, startCatalogInstall, unfinishedInstalls,
   startInstallRetry, type BoundJourney, type CatalogOffer, type InstallStartRefusal, type RetryRequest,
 } from './catalogJourney';
+import { hostedCapabilityNodes, installedCardAction } from './installedCapability';
 
 type BrowseView =
   | { kind: 'list' }
@@ -91,6 +93,8 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken }: 
   const [readInstall] = useLazyGetRuntimeInstallationQuery();
   const [readSource] = useLazyGetRuntimeSourceStatusQuery();
   const [recover] = useRecoverRuntimeInstallationMutation();
+  // What an installed plugin's nodes report now decides what its card offers.
+  const { capabilityNodes, localNodeId } = useClusterState();
   const offers = useMemo(() => catalog.data
     ? catalogOffers(catalog.data, runtimes.data?.installations ?? [], unfinishedInstalls(runtimes.data?.installations ?? [], installs.data))
     : [], [catalog.data, runtimes.data, installs.data]);
@@ -219,10 +223,10 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken }: 
       </div>
       <SourceActions>
         {onStore
-          ? <Button variant="ghost" size="sm" onClick={openConnect}>{t('plugins.catalog.addPrivate', 'Add a private catalog')}</Button>
+          ? <Button variant="outline" size="sm" onClick={openConnect}>{t('plugins.catalog.addPrivate', 'Add a private catalog')}</Button>
           : <>
             {storeAvailable ? <Button variant="outline" size="sm" disabled={storeSwitch.isLoading} onClick={() => void switchToStore()}>{t('plugins.catalog.useStore', 'Use the Foxlight store')}</Button> : null}
-            <Button variant="ghost" size="sm" onClick={openConnect}>{t('plugins.catalog.changeCatalog', 'Change catalog')}</Button>
+            <Button variant="outline" size="sm" onClick={openConnect}>{t('plugins.catalog.changeCatalog', 'Change catalog')}</Button>
           </>}
       </SourceActions>
     </Heading>
@@ -251,6 +255,7 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken }: 
           });
         }}
         onReview={() => setView({ kind: 'review', offer, listing: catalog.data! })}
+        installedAction={offer.installed ? installedCardAction(hostedCapabilityNodes(capabilityNodes, offer.installed.plugin_id), localNodeId, window.location.hostname) : undefined}
         onSetUp={() => offer.installed && setUp({ pluginId: offer.installed.plugin_id, title: displayTitle(offer.entry), spendsMoney: canSpendMoney(offer.entry) })} />;
     }) : null}</Offers>
   </section>;

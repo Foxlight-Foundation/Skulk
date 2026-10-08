@@ -124,7 +124,11 @@ This project records release notes here and mirrors public-facing notes in
   Storage and Status report) instead of raw check codes.
 - An installed capability's **Browse** card could name another platform's
   build of the same release, such as "Linux, ARM64" on a Mac. It now names the
-  build for this host.
+  build for this host. The card also says what the capability needs instead of
+  always **Set up**: **Open** with the screen's name (in a new tab) once it
+  runs, **Set up** when it is off, needs settings or stopped, and **Manage**
+  otherwise. The install page closes with a bordered **Close**, and the
+  Plugins page no longer uses borderless buttons.
 - A capability install from **Plugins**, **Browse** that stops during its
   download or while its runtime is prepared can now be finished from the
   dashboard. The install page explains which step stopped and offers

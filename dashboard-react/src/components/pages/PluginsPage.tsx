@@ -277,7 +277,7 @@ function PluginInventory() {
     </p>
     <OtherHosts />
 </div><HeaderActions>
-        <AccessButton variant="ghost" size="sm" onClick={() => setAccessOpen(true)}><AccessDot $direct={session.mode === 'direct'} aria-hidden />{session.mode === 'direct' ? t('operator.direct', 'Direct host access') : t('operator.browserAccess', 'Browser access')}</AccessButton>
+        <AccessButton variant="outline" size="sm" onClick={() => setAccessOpen(true)}><AccessDot $direct={session.mode === 'direct'} aria-hidden />{session.mode === 'direct' ? t('operator.direct', 'Direct host access') : t('operator.browserAccess', 'Browser access')}</AccessButton>
         {registrationAction}
       </HeaderActions></PageHeading>;
   // A tab opens its own list, leaving any setup page.
@@ -337,7 +337,7 @@ function PluginInventory() {
       </Filters>
     </>} filter={filter} onRetryInstall={retryInstall} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.nodeId) ?? []}
       renderDetails={nodeCards} />
-    <Button type="button" variant="ghost" size="sm" disabled={query.isFetching || runtimes.isFetching} onClick={() => { void query.refetch(); void runtimes.refetch(); }}>{t('plugins.refresh', 'Refresh')}</Button>
+    <Button type="button" variant="outline" size="sm" disabled={query.isFetching || runtimes.isFetching} onClick={() => { void query.refetch(); void runtimes.refetch(); }}>{t('plugins.refresh', 'Refresh')}</Button>
     {query.isLoading ? <p>{t('plugins.loading', 'Loading plugins…')}</p> : null}
     {query.error ? <p role="alert">{t('plugins.accessRequired', 'Plugin management is unavailable. Open the host dashboard through localhost or Tailscale, or use a paired operator with plugin access.')}</p> : null}
 
