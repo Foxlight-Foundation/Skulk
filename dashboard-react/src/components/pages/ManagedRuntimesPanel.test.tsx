@@ -30,6 +30,8 @@ let retried: RetryRequest[];
 // The catalog this host reads; null when it has none.
 let listing: CatalogEntry[] | null;
 let updates: string[];
+// Whether the host refuses to start the release.
+let refuseStart: boolean;
 
 function makeStore() {
   return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) });
@@ -85,6 +87,7 @@ beforeEach(async () => {
   retried = [];
   listing = null;
   updates = [];
+  refuseStart = false;
   localStorage.removeItem('skulk-plugin-install-journeys');
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
@@ -99,6 +102,7 @@ beforeEach(async () => {
         runtime = { ...runtime, operation_state: 'complete', enabled: false };
         return response(operation);
       }
+      if (body?.action === 'activate' && refuseStart) return response({ detail: 'The installation changed since it was read. Refresh it, then try again.' }, 409);
       const id = String(body?.operation_id);
       operation = { request: { operation_id: id, action: body?.action === 'uninstall' ? 'uninstall' : 'disable' }, state: 'applying', error_code: null };
       runtime = { ...runtime, operation_id: id, operation_state: 'applying' };
@@ -458,4 +462,17 @@ it('offers an update only when a newer release fits this host, as Browse does', 
   await click('Update to 1.1.0');
   expect(updates).toEqual(['example.plugin']);
   expect(posts).toEqual([]);
+});
+
+it('shows a refused start even after a completed stop', async () => {
+  // Stopped by a disable that completed; starting it is then refused.
+  operation = { request: { operation_id: 'e'.repeat(32), action: 'disable' }, state: 'complete', error_code: null };
+  runtime = { ...runtime, enabled: false, service: null, release: releaseOne, operation_id: operation.request.operation_id, operation_state: 'complete' };
+  refuseStart = true;
+  await remount();
+  await click('Start plugin');
+  await contains('It was not started. The host said: The installation changed since it was read. Refresh it, then try again.');
+  expect(posts).toHaveLength(1);
+  // Nothing was created, so starting is not held behind an operation that never existed.
+  expect(find('Start plugin')?.disabled).toBe(false);
 });

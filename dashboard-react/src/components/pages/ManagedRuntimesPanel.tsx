@@ -83,6 +83,9 @@ function RuntimeControls({ runtime, installations, unavailable, nodes, details, 
     setActivationSubmitted(null);
   }
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // A decided refusal to start is shown on its own: no operation was created,
+  // so the last completed one must not hide it.
+  const [startRefusal, setStartRefusal] = useState('');
   const [withdraw, withdrawing] = useWithdrawManagedRuntimeMutation();
   const [activate, activating] = useActivateRuntimeReleaseMutation();
   const [recover, recovering] = useRecoverManagedOperationMutation();
@@ -143,6 +146,7 @@ function RuntimeControls({ runtime, installations, unavailable, nodes, details, 
     const id = randomHex32();
     setSubmitted(id);
     setNotice('');
+    setStartRefusal('');
     try {
       await activate({ pluginId: runtime.plugin_id, operationId: id, expectedRevision: runtime.selection_revision, runtimeDigest: runtime.selected_digest, rollback: false, acceptPermissions: false }).unwrap();
     } catch (error) {
@@ -153,7 +157,7 @@ function RuntimeControls({ runtime, installations, unavailable, nodes, details, 
       }
       setSubmitted(null);
       const detail = pluginRefusalDetail(error);
-      setNotice(detail ? `${t('plugins.runtime.startRefused', 'It was not started.')} ${t('plugins.hostSaid', 'The host said: {reason}', { reason: detail })}`
+      setStartRefusal(detail ? `${t('plugins.runtime.startRefused', 'It was not started.')} ${t('plugins.hostSaid', 'The host said: {reason}', { reason: detail })}`
         : t('plugins.runtime.startRefusedGeneric', 'It was not started. Check your access, then refresh its status.'));
     }
   };
@@ -310,6 +314,7 @@ function RuntimeControls({ runtime, installations, unavailable, nodes, details, 
           : t('plugins.purgeWarning', 'Removing deletes everything this uninstalled plugin retained: records, staged releases, credentials and cleanup state. It cannot be reinstalled from this installation afterwards.')}</Notice> : null}
         {purgeNotice ? <Notice $problem role="status">{purgeNotice}</Notice> : null}
         {notice && state !== 'complete' ? <Notice role="status">{notice}</Notice> : null}
+        {startRefusal ? <Notice $problem role="status">{startRefusal}</Notice> : null}
       </Section>
       <Section>
         <DetailsToggle type="button" variant="outline" size="sm" $open={detailsOpen} aria-expanded={detailsOpen} aria-controls={`${runtime.plugin_id}-details`} onClick={() => setDetailsOpen(!detailsOpen)}>
