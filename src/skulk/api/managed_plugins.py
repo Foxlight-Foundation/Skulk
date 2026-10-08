@@ -22,6 +22,7 @@ from skulk.extensions.managed_services import (
     ManagedInstallation,
     ManagedInventory,
     ManagedServices,
+    RuntimeUpdate,
 )
 from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
@@ -71,6 +72,14 @@ from skulk.extensions.service_autosetup import (
 from skulk.operator.pairing import OperatorPairingService
 from skulk.operator.plugin_scopes import PluginScope
 from skulk.shared.constants import offline_mode
+
+_FIRST_OBSERVATION_SECONDS = 15.0
+"""How long the first service status read after a start waits for the manager.
+
+Until the node's first manager observation, a manager still on the previous
+Skulk build answers like a ready one; the observation measures this host's
+build once (seconds on a large environment) and asks the manager to attach.
+Past this, the read answers from what it has."""
 
 
 class PurgedInstallation(BaseModel):
@@ -223,11 +232,19 @@ def create_managed_plugins_router(
 
     setup_runner = ServiceSetupRunner()
 
+    async def runtime_update() -> RuntimeUpdate | None:
+        """Where bringing the manager to this host's Skulk build stands, if anywhere."""
+        services = extensions.managed_services
+        if services is None:
+            return None
+        await services.first_observed(_FIRST_OBSERVATION_SECONDS)
+        return services.runtime_update()
+
     @router.get(
         "/service",
         response_model=PluginServiceStatus,
         summary="Read this host's plugin service setup",
-        description="Whether this host's plugin manager is set up and answering: absent (never set up), setting_up (with the current step), ready, unavailable (set up but not answering), failed (with the reason), or unsupported (this host cannot run it). Answers before any setup exists. Requires plugins:read or direct owner authority.",
+        description="Whether this host's plugin manager is set up and answering: absent (never set up), setting_up (with the current step), ready, unavailable (set up but not answering), failed (with the reason), or unsupported (this host cannot run it). After a Skulk update, the minutes the host spends bringing the plugin service to the new build (copying a matching runtime, restarting the service on it, or registering it again) also read as setting_up, with purpose update and a progress sentence saying so; if that update fails, the status is failed with purpose update and an error naming the next step. Answers before any setup exists, and never waits on the runtime copy. Requires plugins:read or direct owner authority.",
     )
     async def service_setup_status(
         request: Request, response: Response
@@ -237,13 +254,13 @@ def create_managed_plugins_router(
             request, pairing_service, "plugins:read", tailnet_peer_verifier
         )
         response.headers["Cache-Control"] = "no-store"
-        return await setup_runner.status()
+        return await setup_runner.status(await runtime_update())
 
     @router.post(
         "/service/setup",
         response_model=PluginServiceStatus,
         summary="Set up this host's plugin service",
-        description="Direct localhost/Tailscale owner administration only. Starts a one-time setup of the plugin manager as a per-user service (a launchd agent on macOS, a systemd user unit on Linux) with the node's own lifetime: no terminal and no administrator password. It copies the node's environment into a verified manager runtime, so the first setup takes a few minutes. Returns the status at once; poll GET /v1/plugins/managed/service for progress. A running setup is not restarted; a host that already runs the manager as a system service is not changed and is told to repair it from a terminal.",
+        description="Direct localhost/Tailscale owner administration only. Starts a one-time setup of the plugin manager as a per-user service (a launchd agent on macOS, a systemd user unit on Linux) with the node's own lifetime: no terminal and no administrator password. It copies the node's environment into a verified manager runtime, so the first setup takes a few minutes. Returns the status at once; poll GET /v1/plugins/managed/service for progress. A running setup is not restarted, and no setup starts while a refresh attempt for a new Skulk build is copying a runtime or restarting the manager on it, a background retry included; a host that already runs the manager as a system service is not changed and is told to repair it from a terminal.",
     )
     async def service_setup_start(
         request: Request, response: Response
@@ -254,8 +271,13 @@ def create_managed_plugins_router(
             request, pairing_service, "plugins:manage", tailnet_peer_verifier
         )
         response.headers["Cache-Control"] = "no-store"
-        setup_runner.start()
-        return await setup_runner.status()
+        update = await runtime_update()
+        # A refresh attempt is staging or restarting the manager, possibly as
+        # a background retry under a reported failure; a setup now would
+        # contend with it and register the service under it.
+        if update is None or not update.refresh_running:
+            setup_runner.start()
+        return await setup_runner.status(update)
 
     @router.post(
         "/installations",

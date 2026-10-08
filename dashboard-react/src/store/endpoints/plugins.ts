@@ -14,6 +14,13 @@ export interface PluginServiceStatus {
   progress: string | null;
   /** Why the last setup failed or the host is unsupported. */
   error: string | null;
+  /**
+   * While `setting_up`, and when `failed`: `setup` (the first setup, or one the
+   * owner started) or `update` (bringing the plugin service in line with a
+   * Skulk that was updated or moved; installed plugins are kept). Null, or
+   * absent from an older host, otherwise.
+   */
+  purpose?: 'setup' | 'update' | null;
 }
 
 /** Stable installed node identity, independent of its capabilities and transport. */
@@ -322,6 +329,18 @@ export function pluginRequestRefused(error: unknown): number | null {
   if (!error || typeof error !== 'object' || !('status' in error)) return null;
   const status = (error as { status?: unknown }).status;
   return typeof status === 'number' && status >= 400 && status < 500 ? status : null;
+}
+
+/**
+ * Whether a failed plugin read was refused for lack of access (401 or 403).
+ *
+ * Only then is the viewer asked to check how they reached the host or their
+ * plugin access. Any other failure means the host's plugin service did not
+ * answer, which no change of access fixes.
+ */
+export function pluginAccessRefused(error: unknown): boolean {
+  const status = pluginRequestRefused(error);
+  return status === 401 || status === 403;
 }
 
 const headers = { 'X-Skulk-Dashboard': 'pairing-v1' };

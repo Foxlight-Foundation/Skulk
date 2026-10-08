@@ -5,12 +5,14 @@ import os
 import plistlib
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Literal, cast
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import JsonValue
 
 from skulk.api.plugins import create_plugins_router
 from skulk.extensions import (
@@ -18,6 +20,11 @@ from skulk.extensions import (
     service_autosetup,
     service_registration,
     service_setup,
+)
+from skulk.extensions.managed_services import (
+    ManagedServices,
+    RuntimeUpdate,
+    RuntimeUpdateFailure,
 )
 from skulk.extensions.runtime_files import write_private
 from skulk.extensions.service_autosetup import ServiceSetupRunner
@@ -706,3 +713,337 @@ def test_a_bundle_without_a_valid_identifier_names_nothing(
     python = _bundled_python(tmp_path, identifier)
 
     assert service_registration.associated_bundle(python) is None
+
+
+def _updating_services(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> tuple[ManagedServices, asyncio.Event, dict[str, bool]]:
+    """A node observing a manager left on the previous Skulk build by an update.
+
+    Staging waits for the returned event, and the attachment refuses the build
+    while the returned flag says the manager still runs the previous one.
+    """
+    from skulk.extensions import managed_services
+    from skulk.extensions.managed_attachment import ManagedAttachment
+    from skulk.extensions.runtime_manager import (
+        InventoryRequest,
+        ManagerBuildMismatchError,
+    )
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+    from skulk.extensions.tests.test_steward_tools import context
+
+    copied = asyncio.Event()
+    manager = {"previous_build": True}
+
+    async def stage(_root: Path) -> ServiceSnapshot:
+        await copied.wait()
+        return ServiceSnapshot(
+            generation="d" * 32,
+            manifest_sha256="e" * 64,
+            skulk_build_sha256="f" * 64,
+            copied_files=1,
+            copied_bytes=1,
+        )
+
+    async def request(_root: Path, sent: object) -> dict[str, JsonValue]:
+        if isinstance(sent, InventoryRequest):
+            return {"result": {"installations": [], "reload_runtime": True}}
+        return {"result": {"generation": "d" * 32, "restarting": True}}
+
+    services = ManagedServices(root / "unused-connection.json")
+
+    async def attach() -> None:
+        if manager["previous_build"]:
+            raise ManagerBuildMismatchError("a" * 64, "f" * 64)
+
+    monkeypatch.setattr(managed_services, "stage_service_runtime", stage)
+    monkeypatch.setattr(managed_services, "manager_request", request)
+    monkeypatch.setattr(managed_services, "service_source_identity", lambda: "9" * 64)
+    monkeypatch.setattr(services, "_connect", attach)
+    services.connection = ServiceConnection(manager_root=str(root), profile_id="a" * 32)
+    services.context = context()
+    services.attachment = ManagedAttachment(root, "a" * 32)
+    return services, copied, manager
+
+
+async def test_a_skulk_update_reads_as_setting_up_until_the_manager_attaches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The minutes an update spends refreshing the manager are not an outage."""
+    from skulk.extensions.runtime_manager import ManagerBuildMismatchError
+
+    layouts = _layouts(monkeypatch, tmp_path)
+    root = layouts["user"].root
+    _connect(monkeypatch, tmp_path, root)
+    setups: list[str | None] = []
+
+    async def setup(scope: str | None, _report: object) -> SetupOperation:
+        setups.append(scope)
+        return _operation()
+
+    async def answers(_root: Path) -> bool:
+        # The previous build's manager keeps answering while the copy runs.
+        return True
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", answers)
+    services, copied, manager = _updating_services(monkeypatch, root)
+    app = FastAPI()
+    app.include_router(
+        create_plugins_router(LoadedExtensions([], managed_services=services), None)
+    )
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 52000))
+    owner = {"X-Skulk-Dashboard": "pairing-v1", "Origin": "https://localhost"}
+    prefix = "/v1/plugins/managed/service"
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://localhost"
+    ) as client:
+        with pytest.raises(ManagerBuildMismatchError):
+            await services.refresh()
+        assert services.first_observation.is_set()
+        refresh = services.runtime_refresh
+        assert refresh is not None and not refresh.done()
+
+        # The copy is still running: the status answers without waiting on it.
+        staging = await client.get(prefix, headers=owner)
+        assert staging.status_code == 200, staging.text
+        assert staging.json() == {
+            "state": "setting_up",
+            "scope": "user",
+            "progress": (
+                "Skulk was updated. Updating the plugin service to match; "
+                "plugins come back in a minute or two."
+            ),
+            "error": None,
+            "purpose": "update",
+        }
+        # The owner cannot start a setup under the refresh.
+        started = await client.post(prefix + "/setup", headers=owner)
+        assert started.status_code == 200, started.text
+        assert started.json()["state"] == "setting_up"
+        await asyncio.sleep(0)
+        assert setups == []
+
+        copied.set()
+        await refresh
+        # Reloaded, but the manager has not attached on the new build yet.
+        restarting = await client.get(prefix, headers=owner)
+        assert restarting.json()["state"] == "setting_up"
+        assert restarting.json()["purpose"] == "update"
+
+        manager["previous_build"] = False
+        await services.refresh()
+        ready = await client.get(prefix, headers=owner)
+        assert ready.json() == {
+            "state": "ready",
+            "scope": "user",
+            "progress": None,
+            "error": None,
+            "purpose": None,
+        }
+    assert services.runtime_update() is None
+    assert setups == []
+    await services._settle_store_trust()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("failure", "scope", "remedy"),
+    [
+        ("refused", "user", "Try again"),
+        ("other_interpreter", "user", "Try again"),
+        ("not_restarted", "user", "Try again"),
+        ("staging_failed", "user", "Free some disk space"),
+        ("refused", "system", "setup --system"),
+    ],
+)
+async def test_a_failed_update_names_its_next_step_until_a_setup_supersedes_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: RuntimeUpdateFailure,
+    scope: Literal["user", "system"],
+    remedy: str,
+) -> None:
+    """An update that did not finish is a failure, not a ready manager."""
+    layouts = _layouts(monkeypatch, tmp_path)
+    _connect(monkeypatch, tmp_path, layouts[scope].root)
+
+    async def setup(_scope: str | None, _report: object) -> SetupOperation:
+        return _operation()
+
+    async def answers(_root: Path) -> bool:
+        # The previous build's manager answers even though it cannot attach.
+        return True
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", answers)
+    runner = ServiceSetupRunner()
+    update = RuntimeUpdate("failed", time.monotonic(), failure)
+
+    failed = await runner.status(update)
+    assert (failed.state, failed.scope, failed.purpose) == ("failed", scope, "update")
+    assert failed.error is not None
+    assert failed.error.startswith("Skulk was updated, but")
+    assert remedy in failed.error
+    if scope == "system":
+        return
+
+    # Try again re-registers the service; while it runs it reads as the update.
+    runner.start()
+    retrying = await runner.status(update)
+    assert (retrying.state, retrying.purpose) == ("setting_up", "update")
+    assert retrying.progress is not None and "Skulk was updated" in retrying.progress
+    await _settle(runner)
+    # The setup ended after the failure; its outcome is the newer answer.
+    assert (await runner.status(update)).state == "ready"
+
+
+async def test_no_setup_starts_under_a_background_retry_of_a_failed_update(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Try again must not contend with a refresh retry that is already running."""
+    layouts = _layouts(monkeypatch, tmp_path)
+    root = layouts["user"].root
+    _connect(monkeypatch, tmp_path, root)
+    setups: list[str | None] = []
+
+    async def setup(scope: str | None, _report: object) -> SetupOperation:
+        setups.append(scope)
+        return _operation()
+
+    async def silent(_root: Path) -> bool:
+        return False
+
+    def moved(_base: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", silent)
+    monkeypatch.setattr(service_autosetup, "registered_unit_names_base", moved)
+    services = ManagedServices(tmp_path / "unused-connection.json")
+    services.update_started = time.monotonic()
+    services._update_failed("refused")  # pyright: ignore[reportPrivateUsage]
+    retrying = asyncio.Event()
+
+    async def retry() -> None:
+        await retrying.wait()
+
+    services.runtime_refresh = asyncio.create_task(retry())
+    app = FastAPI()
+    app.include_router(
+        create_plugins_router(LoadedExtensions([], managed_services=services), None)
+    )
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 52000))
+    owner = {"X-Skulk-Dashboard": "pairing-v1", "Origin": "https://localhost"}
+    prefix = "/v1/plugins/managed/service"
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://localhost"
+        ) as client:
+            # Neither the owner's retry nor the silent-service repair starts.
+            pressed = await client.post(prefix + "/setup", headers=owner)
+            assert pressed.status_code == 200, pressed.text
+            assert pressed.json()["state"] == "failed"
+            assert pressed.json()["purpose"] == "update"
+            await asyncio.sleep(0)
+            assert setups == []
+
+            retrying.set()
+            await services.runtime_refresh
+            # With no attempt running, the owner's retry starts setup.
+            started = await client.post(prefix + "/setup", headers=owner)
+            assert started.json()["state"] == "setting_up"
+            for _ in range(100):
+                if setups:
+                    break
+                await asyncio.sleep(0.01)
+            assert setups == ["user"]
+    finally:
+        retrying.set()
+
+
+async def test_a_retry_that_fails_keeps_the_update_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The previous build's manager answering is not readiness after a failed retry."""
+    layouts = _layouts(monkeypatch, tmp_path)
+    _connect(monkeypatch, tmp_path, layouts["user"].root)
+
+    async def setup(_scope: str | None, _report: object) -> SetupOperation:
+        raise ValueError("the volume needs 2.1 GB free for the plugin runtime copy")
+
+    async def answers(_root: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", answers)
+    runner = ServiceSetupRunner()
+    update = RuntimeUpdate("failed", time.monotonic(), "staging_failed")
+
+    runner.start()
+    await _settle(runner)
+    retried = await runner.status(update)
+    assert (retried.state, retried.purpose) == ("failed", "update")
+    assert retried.error == "the volume needs 2.1 GB free for the plugin runtime copy"
+
+
+async def test_a_moved_interpreter_reads_as_an_update_not_a_first_setup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Registering a silent service again keeps the owner's plugins; say so."""
+    layouts = _layouts(monkeypatch, tmp_path)
+    _connect(monkeypatch, tmp_path, layouts["user"].root)
+    release = asyncio.Event()
+
+    async def setup(_scope: str | None, report: object) -> SetupOperation:
+        assert callable(report)
+        report("Registering the plugin service for this user...")
+        await release.wait()
+        return _operation()
+
+    async def silent(_root: Path) -> bool:
+        return False
+
+    def moved(_base: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", silent)
+    monkeypatch.setattr(service_autosetup, "registered_unit_names_base", moved)
+    runner = ServiceSetupRunner()
+
+    repairing = await runner.status()
+    assert (repairing.state, repairing.purpose) == ("setting_up", "update")
+    assert repairing.progress is not None
+    assert repairing.progress.startswith("Skulk moved or was updated.")
+    # Its registration steps are not what the owner needs to read.
+    await asyncio.sleep(0)
+    assert (await runner.status()).progress == repairing.progress
+    release.set()
+    await _settle(runner)
+
+
+async def test_a_first_setup_keeps_its_step_by_step_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _layouts(monkeypatch, tmp_path)
+    _connect(monkeypatch, tmp_path, None)
+    release = asyncio.Event()
+
+    async def setup(_scope: str | None, report: object) -> SetupOperation:
+        assert callable(report)
+        report("Preparing verified independent manager runtime...")
+        await release.wait()
+        return _operation()
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    runner = ServiceSetupRunner()
+    runner.start()
+    await asyncio.sleep(0)
+    first = await runner.status()
+    assert (first.state, first.purpose, first.progress) == (
+        "setting_up",
+        "setup",
+        "Preparing verified independent manager runtime...",
+    )
+    release.set()
+    await _settle(runner)

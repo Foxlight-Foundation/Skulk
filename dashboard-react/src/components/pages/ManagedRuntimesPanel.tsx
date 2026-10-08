@@ -5,7 +5,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
-  installOperationIds, pluginRefusalDetail, pluginRequestRefused, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useGetInstallOperationsQuery,
+  installOperationIds, pluginAccessRefused, pluginRefusalDetail, pluginRequestRefused, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useGetInstallOperationsQuery,
   useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, useActivateRuntimeReleaseMutation,
   useRegisterManagedRuntimeMutation, usePurgeManagedRuntimeMutation, useGetCatalogSourceQuery, useGetPluginCatalogQuery, useGetRuntimeSourceStatusQuery,
   type ManagedRuntime, type RuntimeInstallation,
@@ -393,11 +393,39 @@ export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, node
       <Button type="button" onClick={() => { setSetupId(null); setRegistrationUncertain(false); }}>{t('plugins.closeSourceSetup', 'Close source setup')}</Button>
     </> : null}
     {query.isLoading ? <p>{t('plugins.loadingRuntimes', 'Loading local services…')}</p> : null}
-    {query.error ? <InventoryNotice role="status"><h2>{t('plugins.inventoryUnavailable', 'Plugin inventory unavailable')}</h2><p>{t('plugins.managerUnavailable', 'Local runtime management is unavailable. Check local service setup and your plugin permissions.')}</p><Button disabled={query.isFetching} onClick={() => void query.refetch()}>{t('plugins.retryInventory', 'Retry inventory')}</Button></InventoryNotice> : null}
+    {query.error ? <InventoryUnavailable error={query.error} retrying={query.isFetching} onRetry={() => void query.refetch()} /> : null}
     {!query.error && query.data?.installations.length === 0 ? <p>{t('plugins.noManagedRuntimes', 'No managed runtimes are installed.')}</p> : null}
     {query.data?.installations.map((runtime) => <RuntimeControls key={runtime.plugin_id} runtime={runtime} filter={filter} nodeEvidence={nodeEvidence?.(runtime.plugin_id)} unavailable={!!query.error} nodes={nodeNames(runtime.plugin_id)} details={renderDetails?.(runtime.plugin_id)}
       installOperation={installs.data?.[runtime.plugin_id] ?? null} onRetryInstall={onRetryInstall} installations={query.data?.installations ?? []} onUpdate={onUpdate} />)}
   </section>;
+}
+
+/**
+ * Why the inventory could not be read, and a retry.
+ *
+ * Only an access refusal (401 or 403) points the viewer at how they reached
+ * the host or their plugin access; any other failure is the host's plugin
+ * service not answering, which the page asks about again by itself.
+ */
+function InventoryUnavailable({ error, retrying, onRetry }: {
+  /** The failed inventory read. */
+  error: unknown;
+  /** Whether a read is in flight, which the retry waits for. */
+  retrying: boolean;
+  /** Read the inventory again now. */
+  onRetry: () => void;
+}) {
+  const { t } = useSkulkTranslation();
+  const access = pluginAccessRefused(error);
+  const detail = access ? pluginRefusalDetail(error) : null;
+  return <InventoryNotice role="status" data-testid="plugin-inventory-unavailable">
+    <h2>{t('plugins.inventoryUnavailable', 'Plugin inventory unavailable')}</h2>
+    <p>{access
+      ? t('plugins.inventoryAccessRefused', 'This browser does not have access to this host’s plugins. Open the host dashboard through localhost or Tailscale, or use a paired operator with plugin access.')
+      : t('plugins.inventoryNotAnswered', 'The host’s plugin service did not answer. The page asks again every few seconds; Retry inventory asks now.')}</p>
+    {detail ? <p>{t('plugins.hostSaid', 'The host said: {reason}', { reason: detail })}</p> : null}
+    <Button disabled={retrying} onClick={onRetry}>{t('plugins.retryInventory', 'Retry inventory')}</Button>
+  </InventoryNotice>;
 }
 
 const InventoryNotice = styled.div`

@@ -2230,7 +2230,13 @@ one of two scopes. The default is a per-user service (a launchd agent in the own
 by the owner through `service_registration.register_user` with no elevation; the node
 runs this itself through `service_autosetup.ServiceSetupRunner` behind
 `GET /v1/plugins/managed/service` and `POST /v1/plugins/managed/service/setup`, which
-the dashboard's Plugins page calls on first use. `skulk-plugin-service setup --system`
+the dashboard's Plugins page calls on first use. The same status route covers the
+minutes after a Skulk update: `ManagedServices` reports, from memory alone, whether
+it is still bringing the manager to the new build (copying a matching runtime,
+restarting the manager on it), and the route answers `setting_up` with
+`purpose: "update"` until the manager attaches on that build, or `failed` with the
+cause and next step, so the page shows an update in progress rather than an
+unavailable inventory. `skulk-plugin-service setup --system`
 instead registers a system LaunchDaemon or systemd service, for hosts that run
 unattended, through the standalone standard-library-only `service_registration.py`
 helper; only that helper runs elevated, and the manager still runs as the existing

@@ -3,7 +3,7 @@ import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { apiSlice } from '../../store/api';
 import { useAppDispatch } from '../../store/hooks';
-import { useGetPluginServiceQuery, useStartPluginServiceSetupMutation } from '../../store/endpoints/plugins';
+import { useGetPluginServiceQuery, useStartPluginServiceSetupMutation, type PluginServiceStatus } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
 import { Spinner } from '../common/Spinner';
 
@@ -22,9 +22,13 @@ export interface PluginServiceSetupProps {
  *
  * The first time the page opens on a host with owner access, the host sets up
  * its plugin manager by itself (a per-user service, no terminal and no
- * administrator password) and the page shows progress until it is ready. A
- * failure shows the host's reason with a retry; a paired browser is told the
- * setup happens from the host itself.
+ * administrator password) and the page shows progress until it is ready.
+ * After a Skulk update the host brings the plugin service to the new build
+ * by itself, and the page shows that the same way, on every tab, instead of
+ * an unavailable inventory. Either way polling continues and the page shows
+ * the plugins again once the service is ready. A failure shows the host's
+ * reason with a retry; a paired browser is told the setup happens from the
+ * host itself.
  */
 export function PluginServiceSetup({ direct, header, children }: PluginServiceSetupProps) {
   const { t } = useSkulkTranslation();
@@ -33,7 +37,7 @@ export function PluginServiceSetup({ direct, header, children }: PluginServiceSe
   const [startSetup, starting] = useStartPluginServiceSetupMutation();
   const startedAutomatically = useRef(false);
   const state = service.data?.state;
-  const wasReady = useRef(false);
+  const lastState = useRef<PluginServiceStatus['state'] | undefined>(undefined);
 
   useEffect(() => {
     // Set up once, on the first visit, only where the owner is present.
@@ -44,15 +48,18 @@ export function PluginServiceSetup({ direct, header, children }: PluginServiceSe
   }, [state, direct, startSetup]);
 
   useEffect(() => {
-    // The inventory answered "unavailable" until now; read it again once ready.
-    if (state === 'ready' && !wasReady.current) {
-      wasReady.current = true;
+    // Each time the service becomes ready (the first visit, or back from a
+    // setup or an update), reads made before it failed: read them again.
+    if (state === 'ready' && lastState.current !== 'ready') {
       dispatch(apiSlice.util.invalidateTags(['Plugins', 'PluginCatalog']));
     }
+    lastState.current = state;
   }, [state, dispatch]);
 
   // An older host without the status route still shows its plugins as before.
-  if (service.isError || state === 'ready') return <>{children}</>;
+  // A failed poll after an answer keeps that answer: a blip while the host
+  // updates its plugin service must not drop the page into its error states.
+  if ((service.isError && !service.data) || state === 'ready') return <>{children}</>;
   if (service.isLoading || !service.data) return <>{header}<Notice role="status"><Spinner size={16} /> {t('plugins.service.checking', 'Checking this host’s plugin service…')}</Notice></>;
 
   const retry = <Button type="button" disabled={starting.isLoading} onClick={() => void startSetup()}>{t('plugins.service.retry', 'Try again')}</Button>;
@@ -61,10 +68,15 @@ export function PluginServiceSetup({ direct, header, children }: PluginServiceSe
   // the request failed: offer the start again instead of spinning forever.
   const awaitingFirstStart = status.state === 'absent' && direct && !startedAutomatically.current;
   if (status.state === 'setting_up' || awaitingFirstStart) {
+    // An update keeps what is installed and takes a minute or two; it is not
+    // the one-time setup, so it is not described as one.
+    const updating = status.state === 'setting_up' && status.purpose === 'update';
     return <>{header}<Notice role="status" data-testid="plugin-service-setting-up">
       <h2><Spinner size={16} /> {t('plugins.service.settingUp', 'Setting up plugins on this host')}</h2>
-      <p>{t('plugins.service.settingUpDetail', 'This happens once and takes a few minutes. You can leave this page; setup continues on the host.')}</p>
-      {status.progress ? <p>{status.progress}</p> : null}
+      {updating ? null : <p>{t('plugins.service.settingUpDetail', 'This happens once and takes a few minutes. You can leave this page; setup continues on the host.')}</p>}
+      {status.progress ? <p>{status.progress}</p>
+        : updating ? <p>{t('plugins.service.updatingProgress', 'Skulk was updated. Updating the plugin service to match; plugins come back in a minute or two.')}</p> : null}
+      {updating ? <p>{t('plugins.service.updatingDetail', 'Installed plugins and their settings are kept. This page shows them again by itself when the plugin service is back.')}</p> : null}
     </Notice></>;
   }
   if (status.state === 'absent') {
@@ -86,7 +98,9 @@ export function PluginServiceSetup({ direct, header, children }: PluginServiceSe
     </Notice></>;
   }
   return <>{header}<Notice role="alert" data-testid="plugin-service-problem">
-    <h2>{status.state === 'failed' ? t('plugins.service.failed', 'Plugin setup did not finish') : t('plugins.service.unavailable', 'The plugin service is not answering')}</h2>
+    <h2>{status.state !== 'failed' ? t('plugins.service.unavailable', 'The plugin service is not answering')
+      : status.purpose === 'update' ? t('plugins.service.updateFailed', 'The plugin service was not updated')
+        : t('plugins.service.failed', 'Plugin setup did not finish')}</h2>
     {status.error ? <p>{status.error}</p> : null}
     {direct ? retry : <p>{t('plugins.service.retryOnHost', 'Retry from the host itself, or over Tailscale.')}</p>}
   </Notice></>;
