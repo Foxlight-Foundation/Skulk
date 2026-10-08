@@ -99,6 +99,32 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A capability with optional settings could not be turned on from the
+  dashboard: its settings panel said the settings were not supported and kept
+  **Enable** unavailable, so a capability installed from the store stayed off.
+  The settings form now handles optional values (an emptied one is saved as
+  empty), and turning a capability on or off no longer depends on the form at
+  all: it waits only for unsaved changes or a reload. When the host refuses to
+  turn one on, the dashboard shows the host's reason and runs the setup checks.
+- A capability that needs no settings now turns on by itself after it is
+  installed from **Browse**, once per install: reloading the page does not
+  turn it on again, and an update leaves a capability you turned off turned
+  off. One that needs settings or credentials is not turned on; its page opens
+  exactly the setting it needs.
+- The page after an install was redesigned. It now belongs to the installed
+  plugin under **Installed** instead of **Browse**: it reads **{title} is
+  installed** until the plugin runs and **{title} is ready** once it does,
+  offers one next step at a time (**Open settings**, **Turn on**, or
+  **Open**), and says that a plugin's screens open in a new tab and from its
+  node in the **Cluster** view. **Done** returns to the installed plugins.
+- A plugin's settings panel was redesigned: it is titled by the plugin's name
+  with its version and a status label, each setting shows a readable label
+  and its description as help, the actions sit in one row with one primary
+  action, and setup checks read as a checklist with plain names (such as
+  Storage and Status report) instead of raw check codes.
+- An installed capability's **Browse** card could name another platform's
+  build of the same release, such as "Linux, ARM64" on a Mac. It now names the
+  build for this host.
 - A capability install from **Plugins**, **Browse** that stops during its
   download or while its runtime is prepared can now be finished from the
   dashboard. The install page explains which step stopped and offers

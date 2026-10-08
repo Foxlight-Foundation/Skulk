@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { CatalogEntry, CatalogInstallation, CatalogListing, ManagedRuntime, RuntimeInstallation, RuntimeSourceStatus } from '../../store/endpoints/plugins';
 import {
-  catalogOffers, clearJourney, decodeInvitation, encodeInvitation, unfinishedInstalls, isConsentNeeded, isStartRefusal, journeyInProgress, markInterrupted, offerProgress,
+  autoTurnOnFor, nodesToTurnOn, catalogOffers, clearJourney, decodeInvitation, encodeInvitation, unfinishedInstalls, isConsentNeeded, isStartRefusal, journeyInProgress, markInterrupted, offerProgress,
   platformLabel, readJourneys, saveJourney, startCatalogInstall, startInstallRetry, trustRevision, type InstallJourney, type RetryStarters,
 } from './catalogJourney';
 
@@ -87,6 +87,47 @@ describe('catalogOffers', () => {
     expect(catalogOffers(listing([entry(51)]), [runtime(null)])).toMatchObject([{ state: 'available', installed: null }]);
     // An uninstalled record keeps nothing installed.
     expect(catalogOffers(listing([entry(50)]), [runtime(49, { uninstalled: true, enabled: false })])).toMatchObject([{ state: 'available', installed: null }]);
+  });
+
+  it('names an installed release by this host\'s listing when several platforms share its sequence', () => {
+    const linux = entry(50, { runtime_platform: 'linux-glibc-aarch64', platforms: ['linux'], matches_host: false, release_digest: 'f'.repeat(64) });
+    const [offer] = catalogOffers(listing([linux, entry(50)]), [runtime(50)]);
+    expect(offer).toMatchObject({ state: 'installed', entry: { sequence: 50, runtime_platform: 'macos-arm64' } });
+    expect(platformLabel(offer.entry)).toBe('macOS, Apple Silicon');
+    // Once a Skulk update moves the release out of range, the listing for this host's platform still names it.
+    const outOfRange = catalogOffers(listing([linux, entry(50, { matches_host: false }), entry(49)]), [runtime(50)])[0];
+    expect(outOfRange).toMatchObject({ state: 'installed', entry: { sequence: 50, runtime_platform: 'macos-arm64' } });
+  });
+});
+
+describe('turning nodes on after an install', () => {
+  it('turns on every node that reports off after a first install', () => {
+    const plan = autoTurnOnFor(true, null);
+    expect(plan).toEqual({ nodes: 'all', ran: false });
+    expect(nodesToTurnOn(plan, [{ nodeId: 'studio', status: 'disabled' }, { nodeId: 'worker', status: 'disabled' }])).toEqual(['studio', 'worker']);
+  });
+
+  it('leaves a node that needs settings, or reports anything else, for the setup page', () => {
+    const plan = autoTurnOnFor(true, null);
+    expect(nodesToTurnOn(plan, [{ nodeId: 'studio', status: 'configuration_invalid' }, { nodeId: 'worker', status: 'failed' }, { nodeId: 'other', status: 'ready' }])).toEqual([]);
+  });
+
+  it('after an update turns on only nodes that were on before it, so a node the owner turned off stays off', () => {
+    const plan = autoTurnOnFor(false, [{ nodeId: 'studio', status: 'ready' }, { nodeId: 'worker', status: 'disabled' }]);
+    expect(plan).toEqual({ nodes: ['studio'], ran: false });
+    expect(nodesToTurnOn(plan, [{ nodeId: 'studio', status: 'disabled' }, { nodeId: 'worker', status: 'disabled' }])).toEqual(['studio']);
+    // Nodes that could not be read before the update are never turned on.
+    expect(nodesToTurnOn(autoTurnOnFor(false, null), [{ nodeId: 'studio', status: 'disabled' }])).toEqual([]);
+  });
+
+  it('keeps the record of having tried in the saved journey, and drops a malformed one', () => {
+    const storage = memoryStorage();
+    const base: InstallJourney = { pluginId: 'managed.' + '2'.repeat(32), title: 'Example Studio', bundleId: 'example.studio', sequence: 51, publisher: 'example',
+      runtimeDigest: '9'.repeat(64), transferBytes: 1, installOperationId: '5'.repeat(32), activationOperationId: '6'.repeat(32), startedAt: 1 };
+    saveJourney({ ...base, autoTurnOn: { nodes: 'all', ran: true } }, storage);
+    expect(readJourneys(storage)).toEqual([{ ...base, autoTurnOn: { nodes: 'all', ran: true } }]);
+    storage.setItem('skulk-plugin-install-journeys', JSON.stringify([{ ...base, autoTurnOn: { nodes: 'some', ran: 'yes' } }]));
+    expect(readJourneys(storage)).toEqual([]);
   });
 });
 

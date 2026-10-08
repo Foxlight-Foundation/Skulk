@@ -9,6 +9,7 @@ import type { ManagedRuntime, NodeConfiguration, RuntimeInstallation } from '../
 import { darkTheme } from '../../theme/theme';
 import { dashboardUrlOn } from '../../utils/hostDashboard';
 import { saveJourney } from './catalogJourney';
+import { exampleStudioSettingsSchema } from './exampleStudioSettings.fixture';
 import { PluginsPage } from './PluginsPage';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
@@ -25,6 +26,7 @@ let clusterState: Record<string, unknown>;
 let installations: ManagedRuntime[];
 let installOperation: RuntimeInstallation | null;
 let recovers: { path: string; body: unknown }[];
+let refuseEnable: boolean;
 
 function makeStore() {
   return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) });
@@ -49,11 +51,25 @@ async function choose(value: string) {
     option.click();
   });
 }
-async function ready() {
+// Open the plugin's settings: its only node shows them at once.
+async function open() {
   await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('test.bundle')); });
   await click('Configure');
-  await click('Configure');
+  await act(async () => { await vi.waitFor(() => expect(host.querySelector('[role=dialog] form')).not.toBeNull()); });
+}
+async function ready() {
+  await open();
   await act(async () => { await vi.waitFor(() => expect(host.querySelector('[aria-haspopup="listbox"]')).not.toBeNull()); });
+}
+// React tracks an input's value itself, so a test sets it through the native setter.
+async function type(label: string, text: string) {
+  const target = [...host.querySelectorAll('[role=dialog] label')].find((item) => item.textContent === label) as HTMLLabelElement | undefined;
+  if (!target) throw new Error(`Missing field: ${label}`);
+  const element = host.querySelector<HTMLInputElement>(`[id="${target.htmlFor}"]`)!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(element, text);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  });
 }
 
 beforeEach(async () => {
@@ -67,6 +83,7 @@ beforeEach(async () => {
   installations = [];
   installOperation = null;
   recovers = [];
+  refuseEnable = false;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     // Cluster state names the other nodes; only plugin requests carry the dashboard header.
@@ -94,7 +111,11 @@ beforeEach(async () => {
     const mutation = await request.json() as Record<string, unknown>;
     mutations.push(mutation);
     if (mutation.expectedRevision !== configuration.revision) return response({}, 409);
-    if (mutation.operation !== 'validate') configuration = { ...configuration, revision: configuration.revision + 1, values: mutation.values as Record<string, unknown> ?? configuration.values };
+    if (mutation.operation === 'enable' && refuseEnable) return response({ detail: 'configuration refused; reload settings and validation' }, 409);
+    if (mutation.operation !== 'validate') {
+      configuration = { ...configuration, revision: configuration.revision + 1, values: mutation.values as Record<string, unknown> ?? configuration.values,
+        enabled: mutation.operation === 'enable' ? true : mutation.operation === 'disable' ? false : configuration.enabled };
+    }
     return response({ configuration, validated: true });
   });
   store = makeStore();
@@ -118,8 +139,15 @@ it('loads disabled-node settings on demand and fences writes by revision and sch
   await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('test.bundle')); });
   expect(reads).toBe(0);
   await ready();
+  // The node is named, versioned and marked off, never shown as a raw status word.
+  const dialog = host.querySelector('[role=dialog]')!;
+  expect(dialog.textContent).toContain('Version 1.0.0');
+  expect(dialog.textContent).toContain('Off');
+  expect(dialog.textContent).not.toContain('disabled');
   await choose('west');
-  expect(button('Enable').disabled).toBe(true);
+  // Unsaved edits hold the switch until they are saved or discarded.
+  expect(button('Turn on').disabled).toBe(true);
+  expect(dialog.textContent).toContain('Save or discard your changes before turning it on.');
   await click('Save settings');
   await act(async () => { await vi.waitFor(() => expect(configuration.values.region).toBe('west')); });
   expect(mutations).toEqual([{ operation: 'edit', values: { region: 'west' }, expectedRevision: 0, expectedSchemaDigest: 'a'.repeat(64) }]);
@@ -203,4 +231,40 @@ it('retries a stopped install from its Installed card on the same installation, 
   await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Installing Example Studio'), { timeout: 5000 }); });
   expect(window.location.search).toBe('?view=browse');
   expect(mutations).toEqual([]);
+});
+
+it('turns on a node whose settings the dashboard cannot render, sending no values', async () => {
+  configuration = { ...configuration, configurationSchema: { type: 'object', properties: { tags: { type: 'array', items: { type: 'string' } } } }, values: {} };
+  await open();
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('These settings cannot be edited here yet')); });
+  expect(host.textContent).not.toContain('not yet supported by the dashboard');
+  expect(button('Turn on').disabled).toBe(false);
+  await click('Turn on');
+  await act(async () => { await vi.waitFor(() => expect(mutations).toHaveLength(1)); });
+  expect(mutations[0]).toEqual({ operation: 'enable', expectedRevision: 0, expectedSchemaDigest: 'a'.repeat(64) });
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Turned on. It starts in a moment.')); });
+  expect(button('Turn off').disabled).toBe(false);
+});
+
+it('edits the optional settings a studio declares and saves an emptied one as null', async () => {
+  configuration = { ...configuration, configurationSchema: exampleStudioSettingsSchema, values: {} };
+  await open();
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Skulk API URL')); });
+  expect(host.textContent).toContain('Comfy URL');
+  expect(host.textContent).not.toContain('These settings cannot be edited here yet');
+  // A fresh node can be turned on as it is: its defaults apply.
+  expect(button('Turn on').disabled).toBe(false);
+  await type('Default model', 'example/video-model');
+  await type('Default model', '');
+  await click('Save settings');
+  await act(async () => { await vi.waitFor(() => expect(mutations).toHaveLength(1)); });
+  expect(mutations[0]).toEqual({ operation: 'edit', values: { default_model: null }, expectedRevision: 0, expectedSchemaDigest: 'a'.repeat(64) });
+});
+
+it('shows the host\'s reason when it refuses to turn a node on', async () => {
+  refuseEnable = true;
+  await ready();
+  await click('Turn on');
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('It was not turned on. The host said: configuration refused; reload settings and validation')); });
+  expect(button('Turn on').disabled).toBe(false);
 });

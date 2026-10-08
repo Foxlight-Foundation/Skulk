@@ -9,7 +9,7 @@ import { darkTheme } from '../../theme/theme';
 import { NodePreflightPanel } from './NodePreflightPanel';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
-vi.mock('../../i18n/tolgee', () => ({ useSkulkTranslation: () => ({ t: (_key: string, fallback: string) => fallback }) }));
+vi.mock('../../i18n/tolgee', () => ({ useSkulkTranslation: () => ({ t: (_key: string, fallback: string, params?: Record<string, unknown>) => fallback.replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? '')) }) }));
 let root: Root;
 let host: HTMLDivElement;
 let calls: string[];
@@ -27,25 +27,51 @@ beforeEach(async () => {
     return new Response(JSON.stringify(failure ? {} : { nodeId: 'node', revision: 4, observedAt: 1800000000, checks: [
       { code: 'runtime', passed: true, correctiveAction: null },
       { code: 'credentials', passed: false, correctiveAction: 'Supply the required credential.' },
+      { code: 'configuration', passed: true, correctiveAction: null },
+      { code: 'durable_storage', passed: true, correctiveAction: null },
+      { code: 'observation_current', passed: true, correctiveAction: null },
+      { code: 'placed_video_model', passed: true, correctiveAction: null },
     ] }), { status: failure ? 503 : 200, headers: { 'Content-Type': 'application/json' } });
   });
   store = makeStore();
   host = document.createElement('div'); document.body.appendChild(host); root = createRoot(host);
-  await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><NodePreflightPanel pluginId="plugin" nodeId="node" /></ThemeProvider></Provider>); });
+  await render(0);
 });
+async function render(runRequest: number) {
+  await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><NodePreflightPanel pluginId="plugin" nodeId="node" runRequest={runRequest} /></ThemeProvider></Provider>); });
+}
 afterEach(async () => { await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); }); host.remove(); vi.unstubAllGlobals(); });
 it('runs explicit read checks and renders corrective actions without enabling', async () => {
   expect(calls).toHaveLength(0);
   await check();
   await contains('Supply the required credential.');
-  expect(host.textContent).toContain('Checked settings revision 4');
-  expect(host.textContent).toContain('Enabling runs fresh checks');
+  expect(host.textContent).toContain('against settings revision 4');
+  expect(host.textContent).toContain('1 of 6 checks need attention.');
+  expect(host.textContent).toContain('Turning it on runs fresh checks');
+  expect(calls).toEqual(['GET']);
+});
+
+it('names each check in plain words, never by its raw code', async () => {
+  await check();
+  await contains('Supply the required credential.');
+  const titles = [...host.querySelectorAll('li strong')].map((item) => item.textContent);
+  expect(titles).toEqual(['Runtime', 'Credentials', 'Settings', 'Storage', 'Status report', 'Placed video model']);
+  expect(host.textContent).not.toContain('durable_storage');
+  expect(host.textContent).not.toContain('observation_current');
+  // The one failing check is marked as such, the rest as passed.
+  expect([...host.querySelectorAll('li')].map((item) => item.textContent?.includes('Needs attention'))).toEqual([false, true, false, false, false, false]);
+});
+
+it('runs the checks when its caller asks, as after a refused turn-on', async () => {
+  expect(calls).toHaveLength(0);
+  await render(1);
+  await contains('Supply the required credential.');
   expect(calls).toEqual(['GET']);
 });
 it('does not present an earlier report as current after a failed refresh', async () => {
   await check(); await contains('Supply the required credential.');
   failure = true;
   await check(); await contains('Setup checks are unavailable.');
-  expect(host.textContent).not.toContain('Checked settings revision');
+  expect(host.textContent).not.toContain('against settings revision');
   expect(calls).toEqual(['GET', 'GET']);
 });
