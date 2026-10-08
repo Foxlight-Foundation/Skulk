@@ -139,6 +139,20 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
         return null;
       }
     };
+    // The nodes on before an update, by each node's own configuration; a node
+    // whose configuration cannot be read counts as off. Null when the plugin
+    // does not answer.
+    const readNodesOn = async (): Promise<string[] | null> => {
+      const nodes = await readNodes();
+      if (!nodes) return null;
+      const on: string[] = [];
+      for (const node of nodes.filter((item) => item.configurable)) {
+        try {
+          if ((await readConfiguration({ pluginId, nodeId: node.nodeId }, false).unwrap()).enabled) on.push(node.nodeId);
+        } catch { /* unreadable: left as it is */ }
+      }
+      return on;
+    };
     // Once the release runs, turn on the nodes this journey may turn on that
     // report off: the install's consent covers it. It is recorded as tried
     // before anything is sent, so it happens once per journey and never again
@@ -217,16 +231,17 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
       if (!runtime) { clearJourney(pluginId); fail({ kind: 'code', step: 'activated', code: 'inventory' }); return; }
       const alreadyActive = runtime.enabled && runtime.selected_digest === current.runtimeDigest;
       // What an activation sent from here may turn on once it runs is decided
-      // from what is on before it, so an update leaves a node the owner turned
-      // off alone. It is read before the activation is claimed: claiming and
-      // recording the activation stay one step, as a remount relies on.
+      // from which nodes are turned on before it, so an update leaves a node
+      // the owner turned off alone. It is read before the activation is
+      // claimed: claiming and recording the activation stay one step, as a
+      // remount relies on.
       const firstInstall = runtime.selected_digest === null;
-      const nodesBefore = !alreadyActive && !firstInstall && (saved() ?? current).activationOperationId === null ? await readNodes() : null;
+      const nodesOnBefore = !alreadyActive && !firstInstall && (saved() ?? current).activationOperationId === null ? await readNodesOn() : null;
       if (signal.aborted) return;
       current = saved() ?? current;
       if (!alreadyActive && current.activationOperationId === null && !activationInFlight.has(pluginId)) {
         activationInFlight.add(pluginId);
-        current = { ...current, activationOperationId: randomHex32(), autoTurnOn: autoTurnOnFor(firstInstall, nodesBefore) };
+        current = { ...current, activationOperationId: randomHex32(), autoTurnOn: autoTurnOnFor(firstInstall, nodesOnBefore) };
         saveJourney(current);
         try {
           await activate({ pluginId, operationId: current.activationOperationId!, expectedRevision: runtime.selection_revision, runtimeDigest: current.runtimeDigest, rollback: false }).unwrap();

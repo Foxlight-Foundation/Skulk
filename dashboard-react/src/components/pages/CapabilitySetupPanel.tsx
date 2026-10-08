@@ -4,7 +4,7 @@ import { FiAlertCircle, FiCheckCircle, FiExternalLink, FiPower, FiXCircle } from
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useClusterState } from '../../hooks/useClusterState';
 import {
-  pluginRefusalDetail, pluginRequestRefused, useConfigurePluginNodeMutation, useGetPluginNodesQuery, useLazyGetNodeConfigurationQuery,
+  pluginRefusalDetail, pluginRequestRefused, useConfigurePluginNodeMutation, useGetPluginNodesQuery, useLazyGetNodeConfigurationQuery, useNodesEnabled,
 } from '../../store/endpoints/plugins';
 import { capabilityNodeKey, capabilityNodeTitle, type CapabilityNodeStatus, type CapabilityNodeSummary, type CapabilityNodeSurface } from '../../types/capabilityNodes';
 import { Button } from '../common/Button';
@@ -63,43 +63,51 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
   const [readConfiguration] = useLazyGetNodeConfigurationQuery();
   const [configure] = useConfigurePluginNodeMutation();
   const [turning, setTurning] = useState(false);
-  // Nodes turned on (here, or by the install that led here) that the host has
-  // not yet reported leaving `disabled`.
-  const [turnedOn, setTurnedOn] = useState<ReadonlySet<string>>(() => new Set((target.turnedOn ?? []).map((nodeId) => capabilityNodeKey({ pluginId: target.pluginId, nodeId }))));
   // A refused turn-on, here or by the install, with the host's reason.
   const [refusal, setRefusal] = useState<TurnOnRefusal | null>(target.turnOnRefusal ?? null);
   // A decided refusal runs the node's setup checks, which say what is missing.
   const [checkRequest, setCheckRequest] = useState(target.turnOnRefusal && target.turnOnRefusal.status !== null ? 1 : 0);
   const hosted = useMemo(() => hostedCapabilityNodes(capabilityNodes, target.pluginId), [capabilityNodes, target.pluginId]);
   const summaries = useMemo(() => hosted.map((item) => item.summary), [hosted]);
+  // Whether a node reported off is in fact on, from its own configuration: a
+  // report can lag a change, and only the configuration says what the owner chose.
+  const offReadings = useMemo(() => summaries.filter((summary) => summary.ownerAvailable && summary.status === 'disabled')
+    .map((summary) => ({ nodeId: summary.nodeId, observedAt: summary.observedAt })), [summaries]);
+  const enabled = useNodesEnabled(target.pluginId, offReadings);
+  // Nodes turned on (here, or by the install that led here), each with the
+  // report that was current then. Until the host's next report the page shows
+  // it turning on; after that, its status and configuration decide.
+  const [turnedOnAt, setTurnedOnAt] = useState<ReadonlyMap<string, string>>(() => new Map((target.turnedOn ?? []).map((nodeId) => [
+    capabilityNodeKey({ pluginId: target.pluginId, nodeId }), summaries.find((summary) => summary.nodeId === nodeId)?.observedAt ?? '',
+  ])));
   const withChecks = new Set(plugins.data?.find((plugin) => plugin.pluginId === target.pluginId)?.nodes.filter((node) => node.preflightAvailable).map((node) => node.nodeId) ?? []);
   // As in the topology, a loopback screen opens only from a browser on its own host.
   const surfaces = useMemo(() => openableSurfaces(hosted, localNodeId, window.location.hostname), [hosted, localNodeId]);
   const reachable = surfaces.filter((item) => item.reachable);
   const unreachable = surfaces.filter((item) => !item.reachable);
 
-  // Each new report from the host settles what this page remembers: a node
-  // turned on stops counting as such once it leaves `disabled` (so one the
-  // owner turns off again later reads as off), and a refusal is over once its
-  // node is no longer off. Adjusted while rendering, as React recommends for
-  // state that follows a changing input.
+  // A refusal is over once its node reports anything but off. Adjusted while
+  // rendering, as React recommends for state that follows a changing input.
   const [reported, setReported] = useState(summaries);
   if (reported !== summaries) {
     setReported(summaries);
-    const left = summaries.filter((summary) => summary.status !== 'disabled' && turnedOn.has(capabilityNodeKey(summary)));
-    if (left.length > 0) setTurnedOn(new Set([...turnedOn].filter((key) => !left.some((summary) => capabilityNodeKey(summary) === key))));
     if (refusal && summaries.some((summary) => summary.nodeId === refusal.nodeId && summary.status !== 'disabled')) setRefusal(null);
   }
 
+  // A node reported off is turning on when its configuration says it is on,
+  // or when it was turned on since the report this page still shows. Nothing
+  // else is remembered, so a node turned off later reads as off again.
+  const turningOn = (summary: CapabilityNodeSummary): boolean => summary.status === 'disabled'
+    && (enabled[summary.nodeId] === true || turnedOnAt.get(capabilityNodeKey(summary)) === summary.observedAt);
   // A status this dashboard does not know yet, or a silent plugin service, is shown as stopped.
   const itemState = (summary: CapabilityNodeSummary): ItemState => {
     if (!summary.ownerAvailable) return 'stopped';
-    if (summary.status === 'disabled' && turnedOn.has(capabilityNodeKey(summary))) return 'waiting';
+    if (turningOn(summary)) return 'waiting';
     return STATUS_STATE[summary.status] ?? 'stopped';
   };
   const detail = (summary: CapabilityNodeSummary): string => {
     if (!summary.ownerAvailable) return t('plugins.setup.ownerUnavailable', 'The plugin service on this host is not answering. It reports again once it is back.');
-    if (summary.status === 'disabled' && turnedOn.has(capabilityNodeKey(summary))) return t('plugins.setup.statusTurningOn', 'Turning on…');
+    if (turningOn(summary)) return t('plugins.setup.statusTurningOn', 'Turning on…');
     return {
       ready: t('plugins.setup.statusRunning', 'Running.'),
       installed: t('plugins.setup.statusStarting', 'Starting…'),
@@ -139,8 +147,9 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
     setRefusal(null);
     const outcome = await turnOnNodes({ readConfiguration: (address) => readConfiguration(address, false), configure }, target.pluginId,
       off.map((summary) => summary.nodeId), pluginRefusalDetail, pluginRequestRefused);
-    const keys = outcome.enabled.map((nodeId) => capabilityNodeKey({ pluginId: target.pluginId, nodeId }));
-    if (keys.length > 0) setTurnedOn((current) => new Set([...current, ...keys]));
+    // Each is shown turning on against the report that was current when it was sent.
+    const sent = off.filter((summary) => outcome.enabled.includes(summary.nodeId));
+    if (sent.length > 0) setTurnedOnAt((current) => new Map([...current, ...sent.map((summary) => [capabilityNodeKey(summary), summary.observedAt] as const)]));
     if (outcome.refusal) {
       setRefusal(outcome.refusal);
       // Its own checks say which setting, credential or prerequisite is missing.

@@ -1,4 +1,8 @@
+import { useEffect } from 'react';
+import { shallowEqual, useSelector } from 'react-redux';
 import { apiSlice } from '../api';
+import { useAppDispatch } from '../hooks';
+import type { RootState } from '../index';
 
 /** Whether this host's plugin manager is set up and answering (`GET /v1/plugins/managed/service`). */
 export interface PluginServiceStatus {
@@ -486,3 +490,28 @@ const pluginsApi = apiSlice.injectEndpoints({
 });
 
 export const { useGetPluginServiceQuery, useStartPluginServiceSetupMutation, useGetPluginCatalogQuery, useGetCatalogSourceQuery, useSelectBuiltinCatalogMutation, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useGetInstallOperationsQuery, useLazyGetRuntimeSourceStatusQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useLazyGetPluginNodesQuery, useGetNodeConfigurationQuery, useLazyGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+
+/** One node's latest reported reading: which configuration read it calls for. */
+export interface NodeReading { nodeId: string; observedAt: string }
+
+/**
+ * Whether each of these nodes is turned on, from its own configuration rather
+ * than its reported status. The configuration is read again whenever a node's
+ * reported reading changes, and a change made from this browser refetches it
+ * at once, so a node turned off elsewhere reads as off with its next report.
+ * A node not read yet maps to undefined.
+ */
+export function useNodesEnabled(pluginId: string, readings: readonly NodeReading[]): Record<string, boolean | undefined> {
+  const dispatch = useAppDispatch();
+  const key = readings.map((reading) => `${reading.nodeId}\u0000${reading.observedAt}`).join('\u0001');
+  useEffect(() => {
+    if (!key) return;
+    const subscriptions = key.split('\u0001').map((entry) => dispatch(pluginsApi.endpoints.getNodeConfiguration.initiate(
+      { pluginId, nodeId: entry.split('\u0000')[0] }, { forceRefetch: true },
+    )));
+    return () => { for (const subscription of subscriptions) subscription.unsubscribe(); };
+  }, [dispatch, pluginId, key]);
+  return useSelector((state: RootState) => Object.fromEntries(readings.map(({ nodeId }) => [
+    nodeId, pluginsApi.endpoints.getNodeConfiguration.select({ pluginId, nodeId })(state).data?.enabled,
+  ])), shallowEqual);
+}

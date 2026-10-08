@@ -109,8 +109,12 @@ This project records release notes here and mirrors public-facing notes in
 - A capability that needs no settings now turns on by itself after it is
   installed from **Browse**, once per install: reloading the page does not
   turn it on again, and an update leaves a capability you turned off turned
-  off. One that needs settings or credentials is not turned on; its page opens
-  exactly the setting it needs.
+  off, judged by whether you had turned it on rather than by its status, so
+  one that was off while it needed settings stays off. One that needs settings
+  or credentials is not turned on; its page opens exactly the setting it
+  needs. The page shows a capability as turning on only while its own
+  settings say it is on or until the host's next report, so one turned off
+  again from its settings reads as off with **Turn on** offered.
 - The page after an install was redesigned. It now belongs to the installed
   plugin under **Installed** instead of **Browse**: it reads **{title} is
   installed** until the plugin runs and **{title} is ready** once it does,
