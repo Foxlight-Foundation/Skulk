@@ -104,3 +104,48 @@ it('offers setup again when the host comes back without it instead of spinning',
   await act(async () => { setUp?.click(); });
   await act(async () => { await vi.waitFor(() => expect(posts).toBe(2)); });
 });
+
+const updateProgress = 'Skulk was updated. Updating the plugin service to match; plugins come back in a minute or two.';
+
+it('describes an update as one and shows the plugins by itself once it is back', async () => {
+  let answer = status('setting_up', { scope: 'user', purpose: 'update', progress: updateProgress });
+  serve(() => answer);
+  await render(true);
+  await act(async () => { await vi.waitFor(() => expect(host?.textContent).toContain(updateProgress)); });
+  expect(host?.textContent).toContain('Setting up plugins on this host');
+  expect(host?.textContent).toContain('Installed plugins and their settings are kept.');
+  expect(host?.textContent).not.toContain('This happens once');
+  expect(host?.textContent).not.toContain('plugin content');
+  expect(host?.querySelectorAll('button')).toHaveLength(0);
+
+  answer = status('ready', { scope: 'user' });
+  await act(async () => { await vi.waitFor(() => expect(host?.textContent).toContain('plugin content'), { timeout: 10_000 }); });
+  expect(posts).toBe(0);
+});
+
+it('keeps the update notice through a poll that fails', async () => {
+  let reads = 0;
+  serve(() => {
+    reads += 1;
+    return reads === 1 ? status('setting_up', { scope: 'user', purpose: 'update', progress: updateProgress }) : null;
+  });
+  await render(true);
+  await act(async () => { await vi.waitFor(() => expect(host?.textContent).toContain(updateProgress)); });
+  await act(async () => { await vi.waitFor(() => expect(reads).toBeGreaterThan(1), { timeout: 10_000 }); });
+  expect(host?.textContent).toContain(updateProgress);
+  expect(host?.textContent).not.toContain('plugin content');
+});
+
+it('names an update that did not finish and offers to try again', async () => {
+  serve((count) => count === 0
+    ? status('failed', { scope: 'user', purpose: 'update', error: 'Skulk was updated, but the plugin service has not come back on the new version. Try again to set the plugin service up for this version; installed plugins and their settings are kept.' })
+    : status('setting_up', { scope: 'user', purpose: 'update', progress: updateProgress }));
+  await render(true);
+  await act(async () => { await vi.waitFor(() => expect(host?.textContent).toContain('The plugin service was not updated')); });
+  expect(host?.textContent).toContain('has not come back on the new version');
+  expect(host?.textContent).not.toContain('Plugin setup did not finish');
+  const retry = [...(host?.querySelectorAll('button') ?? [])].find((button) => button.textContent === 'Try again');
+  await act(async () => { retry?.click(); });
+  await act(async () => { await vi.waitFor(() => expect(host?.textContent).toContain(updateProgress)); });
+  expect(posts).toBe(1);
+});

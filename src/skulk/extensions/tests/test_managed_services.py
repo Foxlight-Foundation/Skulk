@@ -703,6 +703,9 @@ async def test_a_refused_reload_removes_the_unselected_candidate_generation(
     assert isinstance(sent[-1], ReloadRuntimeRequest)
     assert not generation.exists()
     assert selected.exists()
+    update = services.runtime_update()
+    assert update is not None
+    assert (update.phase, update.failure) == ("failed", "refused")
 
 
 async def test_a_legacy_manager_under_another_interpreter_is_left_for_setup(
@@ -749,6 +752,9 @@ async def test_a_legacy_manager_under_another_interpreter_is_left_for_setup(
     await services.runtime_refresh
     assert signalled == []
     assert not (tmp_path / "core-runtimes").exists()
+    update = services.runtime_update()
+    assert update is not None
+    assert (update.phase, update.failure) == ("failed", "other_interpreter")
 
 
 @pytest.mark.parametrize(
@@ -793,6 +799,9 @@ async def test_a_staging_failure_ends_automatic_attempts_until_restart(
     assert services.runtime_refresh.done()
     assert attempts == [tmp_path]
     assert services.runtime_refresh_exhausted
+    update = services.runtime_update()
+    assert update is not None
+    assert (update.phase, update.failure) == ("failed", "staging_failed")
 
 
 def test_a_generation_staged_for_the_live_build_is_reused_not_restaged(
@@ -894,6 +903,7 @@ def test_superseded_runtimes_are_removed_only_under_the_installer_fence(
     from skulk.extensions.runtime_files import RuntimeLock
 
     root = _service_root_with_generations(tmp_path)
+
     def no_managers(_root: Path) -> set[str]:
         return set()
 
@@ -1363,3 +1373,107 @@ def test_a_legacy_manager_that_keeps_running_is_not_selected_over(
         reload_legacy_manager(tmp_path, snapshot)
     assert signalled == [os.getpid()]
     assert not (tmp_path / "core-runtime.json").exists()
+
+
+async def test_an_update_is_followed_through_its_attempts_then_reads_as_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Progress while attempts can still land; a kept failure once they cannot."""
+    from skulk.extensions import managed_services
+    from skulk.extensions.runtime_manager import ManagerBuildMismatchError
+    from skulk.extensions.service_snapshot import ServiceSnapshot
+
+    copied = asyncio.Event()
+
+    async def stage(root: Path) -> ServiceSnapshot:
+        await copied.wait()
+        return ServiceSnapshot(
+            generation="d" * 32,
+            manifest_sha256="e" * 64,
+            skulk_build_sha256="f" * 64,
+            copied_files=1,
+            copied_bytes=1,
+        )
+
+    async def request(root: Path, request: object) -> dict[str, JsonValue]:
+        if isinstance(request, InventoryRequest):
+            return {"result": {"installations": [], "reload_runtime": True}}
+        return {"result": {"generation": "d" * 32, "restarting": True}}
+
+    monkeypatch.setattr(managed_services, "stage_service_runtime", stage)
+    monkeypatch.setattr(managed_services, "manager_request", request)
+    monkeypatch.setattr(managed_services, "service_source_identity", lambda: "9" * 64)
+    services = ManagedServices(tmp_path / "connection.json")
+    services.connection = ServiceConnection(
+        manager_root=str(tmp_path), profile_id=PROFILE
+    )
+    assert services.runtime_update() is None
+    differs = ManagerBuildMismatchError("a" * 64, "f" * 64)
+    services._schedule_runtime_refresh(differs)  # pyright: ignore[reportPrivateUsage]
+    refresh = services.runtime_refresh
+    assert refresh is not None
+    started = services.update_started
+    assert started is not None
+    update = services.runtime_update()
+    assert update is not None and update.phase == "refreshing"
+
+    # An attempt begun inside the bound is followed even once it has passed.
+    services.update_started = started - managed_services._UPDATE_REPORT_SECONDS  # pyright: ignore[reportPrivateUsage]
+    assert services.runtime_refreshed is not None
+    services.runtime_refreshed = services.update_started + 1
+    update = services.runtime_update()
+    assert update is not None and update.phase == "refreshing"
+
+    copied.set()
+    await refresh
+    # The reload landed; the manager has its settle time to attach.
+    update = services.runtime_update()
+    assert update is not None and update.phase == "waiting"
+
+    ended = services.update_attempt_ended
+    assert ended is not None
+    services.update_attempt_ended = ended - managed_services._UPDATE_SETTLE_SECONDS  # pyright: ignore[reportPrivateUsage]
+    failed = services.runtime_update()
+    assert failed is not None
+    assert (failed.phase, failed.failure) == ("failed", "not_restarted")
+
+    # A background retry does not turn the kept failure back into progress.
+    copied.clear()
+    services.runtime_refreshed = None
+    services._schedule_runtime_refresh(differs)  # pyright: ignore[reportPrivateUsage]
+    retry = services.runtime_refresh
+    assert retry is not None and not retry.done()
+    assert services.runtime_update() == failed
+    copied.set()
+    await retry
+
+    # Attaching on this build closes the update.
+    services._update_finished()  # pyright: ignore[reportPrivateUsage]
+    assert services.runtime_update() is None
+
+
+async def test_the_first_status_read_waits_only_for_the_first_observation(
+    tmp_path: Path,
+) -> None:
+    """A manager still on the previous build must not read as ready at start."""
+    services = ManagedServices(tmp_path / "connection.json")
+    # Observation not running: nothing to wait for.
+    await asyncio.wait_for(services.first_observed(60), 1)
+
+    async def observing() -> None:
+        await asyncio.Event().wait()
+
+    poll = asyncio.create_task(observing())
+    services.task = poll
+    try:
+        waiting = asyncio.create_task(services.first_observed(60))
+        await asyncio.sleep(0.01)
+        assert not waiting.done()
+        services.first_observation.set()
+        await asyncio.wait_for(waiting, 1)
+        # A manager that never answers holds the read for the bound at most.
+        services.first_observation.clear()
+        await asyncio.wait_for(services.first_observed(0.05), 1)
+    finally:
+        poll.cancel()
+        await asyncio.gather(poll, return_exceptions=True)

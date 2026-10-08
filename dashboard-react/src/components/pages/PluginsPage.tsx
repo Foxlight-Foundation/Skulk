@@ -3,8 +3,8 @@ import { useState, useSyncExternalStore, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 import {
-  installOperationIds, pluginRefusalDetail, useGetInstallOperationsQuery, useGetManagedRuntimesQuery, useGetPluginNodesQuery, useGetNodeConfigurationQuery,
-  useConfigurePluginNodeMutation, type ConfigurableNode, type NodeConfiguration, type PluginNodes,
+  installOperationIds, pluginAccessRefused, pluginRefusalDetail, useGetInstallOperationsQuery, useGetManagedRuntimesQuery, useGetPluginNodesQuery, useGetNodeConfigurationQuery,
+  useGetPluginServiceQuery, useConfigurePluginNodeMutation, type ConfigurableNode, type NodeConfiguration, type PluginNodes,
 } from '../../store/endpoints/plugins';
 import { RightDrawer } from '../common/RightDrawer';
 import { PluginSummaryCard } from '../common/PluginSummaryCard';
@@ -268,6 +268,13 @@ function PluginInventory() {
   }
   counts.all += query.data?.filter(plugin => !runtimes.data?.installations.some(runtime => runtime.plugin_id === plugin.pluginId)).length ?? 0;
   const inventoryKnown = !!runtimes.data && !runtimes.error && !!query.data && !query.error;
+  // Shares the status the page gate polls: while the host sets up or updates
+  // its plugin service, the inventory reads fail by design and are not news.
+  const service = useGetPluginServiceQuery();
+  const inventoryLine = inventoryKnown ? t('plugins.inventorySummary', '{count} installed · {healthy} healthy.', { count: counts.all - counts.uninstalled, healthy: counts.healthy })
+    : service.data?.state === 'setting_up' ? (service.data.purpose === 'update' ? t('plugins.updatingService', 'Updating the plugin service…') : t('plugins.settingUpService', 'Setting up the plugin service…'))
+      : service.isLoading ? t('plugins.checkingService', 'Checking the plugin service…')
+        : runtimes.isLoading || query.isLoading ? t('plugins.loadingInventory', 'Loading inventory…') : t('plugins.inventoryUnknown', 'Inventory unavailable.');
   const chooseView = (next: PluginsView) => {
     setView(next);
     // The view is part of the address so Browse can be linked to directly.
@@ -275,8 +282,7 @@ function PluginInventory() {
   };
   const heading = (registrationAction?: ReactNode) => <PageHeading><div>    <h1>{t('plugins.title', 'Plugins')}</h1>
     <p>{t('plugins.introReference', 'Capability runtimes installed on this host.')} {' '}
-      {inventoryKnown ? t('plugins.inventorySummary', '{count} installed · {healthy} healthy.', { count: counts.all - counts.uninstalled, healthy: counts.healthy })
-        : runtimes.isLoading || query.isLoading ? t('plugins.loadingInventory', 'Loading inventory…') : t('plugins.inventoryUnknown', 'Inventory unavailable.')}
+      {inventoryLine}
     </p>
     <OtherHosts />
 </div><HeaderActions>
@@ -343,7 +349,9 @@ function PluginInventory() {
       renderDetails={nodeCards} />
     <Button type="button" variant="outline" size="sm" disabled={query.isFetching || runtimes.isFetching} onClick={() => { void query.refetch(); void runtimes.refetch(); }}>{t('plugins.refresh', 'Refresh')}</Button>
     {query.isLoading ? <p>{t('plugins.loading', 'Loading plugins…')}</p> : null}
-    {query.error ? <p role="alert">{t('plugins.accessRequired', 'Plugin management is unavailable. Open the host dashboard through localhost or Tailscale, or use a paired operator with plugin access.')}</p> : null}
+    {query.error ? <p role="alert">{pluginAccessRefused(query.error)
+      ? t('plugins.accessRequired', 'Plugin management is unavailable. Open the host dashboard through localhost or Tailscale, or use a paired operator with plugin access.')
+      : t('plugins.nodesUnavailable', 'Plugin nodes could not be read from this host just now. The page reads them again every few seconds.')}</p> : null}
 
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, marginTop: 20 }}>
     {query.data?.filter(plugin => filter === 'all' && !runtimes.data?.installations.some(runtime => runtime.plugin_id === plugin.pluginId)).map(plugin => <PluginSummaryCard key={plugin.pluginId} name={plugin.nodes.length === 1 ? plugin.nodes[0].bundleId : plugin.pluginId} pluginId={plugin.pluginId}

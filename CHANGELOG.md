@@ -99,6 +99,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- After a Skulk update, **Plugins** said plugins were unavailable, told you to
+  check your setup and plugin permissions, and then said the plugin service
+  was not answering, while Skulk was simply updating its plugin service to
+  match the new version. The page now says Skulk is updating the plugin
+  service, on both **Installed** and **Browse**, and shows your plugins again
+  by itself once it is done; installed plugins and their settings are kept.
+  If that update does not finish, the page says what happened and offers to
+  try again. The page now asks you to check your access only when the host
+  actually refused it. `GET /v1/plugins/managed/service` reports the update
+  as `setting_up` with a new `purpose` field (`setup` or `update`).
 - A capability with optional settings could not be turned on from the
   dashboard: its settings panel said the settings were not supported and kept
   **Enable** unavailable, so a capability installed from the store stayed off.
