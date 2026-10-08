@@ -1443,9 +1443,18 @@ async def test_an_update_is_followed_through_its_attempts_then_reads_as_failed(
     services._schedule_runtime_refresh(differs)  # pyright: ignore[reportPrivateUsage]
     retry = services.runtime_refresh
     assert retry is not None and not retry.done()
-    assert services.runtime_update() == failed
+    retrying = services.runtime_update()
+    assert retrying is not None
+    assert (retrying.phase, retrying.since, retrying.failure) == (
+        failed.phase,
+        failed.since,
+        failed.failure,
+    )
+    # The retry is live, so no setup may start under it.
+    assert retrying.refresh_running and not failed.refresh_running
     copied.set()
     await retry
+    assert services.runtime_update() == failed
 
     # Attaching on this build closes the update.
     services._update_finished()  # pyright: ignore[reportPrivateUsage]

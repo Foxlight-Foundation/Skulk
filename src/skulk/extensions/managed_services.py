@@ -161,6 +161,9 @@ class RuntimeUpdate:
     """Monotonic time this phase began; orders a failure against a later setup."""
     failure: RuntimeUpdateFailure | None = None
     """Why the update did not finish; set only when ``phase`` is ``failed``."""
+    refresh_running: bool = False
+    """Whether a refresh attempt is running now, a background retry under a
+    reported failure included; no setup may start under one."""
 
 
 def _selected(root: Path, generation: str) -> bool:
@@ -671,24 +674,33 @@ class ManagedServices:
         started = self.update_started
         if self.closed or started is None:
             return None
+        task = self.runtime_refresh
+        running = task is not None and not task.done()
         failure = self.update_failure
         if failure is not None:
-            return RuntimeUpdate("failed", self.update_failed_at, failure)
+            return RuntimeUpdate(
+                "failed", self.update_failed_at, failure, refresh_running=running
+            )
         bound = started + _UPDATE_REPORT_SECONDS
         attempt = self.runtime_refreshed
         # Only an attempt begun inside the bound is followed past it.
         followed = attempt is not None and attempt < bound
-        task = self.runtime_refresh
-        if attempt is not None and followed and task is not None and not task.done():
-            return RuntimeUpdate("refreshing", attempt)
+        if attempt is not None and followed and running:
+            return RuntimeUpdate("refreshing", attempt, refresh_running=True)
         ended = self.update_attempt_ended
         now = time.monotonic()
         if now < bound or (
             followed and ended is not None and now < ended + _UPDATE_SETTLE_SECONDS
         ):
-            return RuntimeUpdate("waiting", started if ended is None else ended)
+            return RuntimeUpdate(
+                "waiting",
+                started if ended is None else ended,
+                refresh_running=running,
+            )
         self._update_failed("not_restarted")
-        return RuntimeUpdate("failed", self.update_failed_at, "not_restarted")
+        return RuntimeUpdate(
+            "failed", self.update_failed_at, "not_restarted", refresh_running=running
+        )
 
     async def first_observed(self, seconds: float) -> None:
         """Wait, at most ``seconds``, for the first manager observation of this run.

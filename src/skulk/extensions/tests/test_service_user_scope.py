@@ -897,6 +897,70 @@ async def test_a_failed_update_names_its_next_step_until_a_setup_supersedes_it(
     assert (await runner.status(update)).state == "ready"
 
 
+async def test_no_setup_starts_under_a_background_retry_of_a_failed_update(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Try again must not contend with a refresh retry that is already running."""
+    layouts = _layouts(monkeypatch, tmp_path)
+    root = layouts["user"].root
+    _connect(monkeypatch, tmp_path, root)
+    setups: list[str | None] = []
+
+    async def setup(scope: str | None, _report: object) -> SetupOperation:
+        setups.append(scope)
+        return _operation()
+
+    async def silent(_root: Path) -> bool:
+        return False
+
+    def moved(_base: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", silent)
+    monkeypatch.setattr(service_autosetup, "registered_unit_names_base", moved)
+    services = ManagedServices(tmp_path / "unused-connection.json")
+    services.update_started = time.monotonic()
+    services._update_failed("refused")  # pyright: ignore[reportPrivateUsage]
+    retrying = asyncio.Event()
+
+    async def retry() -> None:
+        await retrying.wait()
+
+    services.runtime_refresh = asyncio.create_task(retry())
+    app = FastAPI()
+    app.include_router(
+        create_plugins_router(LoadedExtensions([], managed_services=services), None)
+    )
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 52000))
+    owner = {"X-Skulk-Dashboard": "pairing-v1", "Origin": "https://localhost"}
+    prefix = "/v1/plugins/managed/service"
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://localhost"
+        ) as client:
+            # Neither the owner's retry nor the silent-service repair starts.
+            pressed = await client.post(prefix + "/setup", headers=owner)
+            assert pressed.status_code == 200, pressed.text
+            assert pressed.json()["state"] == "failed"
+            assert pressed.json()["purpose"] == "update"
+            await asyncio.sleep(0)
+            assert setups == []
+
+            retrying.set()
+            await services.runtime_refresh
+            # With no attempt running, the owner's retry starts setup.
+            started = await client.post(prefix + "/setup", headers=owner)
+            assert started.json()["state"] == "setting_up"
+            for _ in range(100):
+                if setups:
+                    break
+                await asyncio.sleep(0.01)
+            assert setups == ["user"]
+    finally:
+        retrying.set()
+
+
 async def test_a_retry_that_fails_keeps_the_update_failed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

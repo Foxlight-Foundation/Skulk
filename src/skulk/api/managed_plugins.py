@@ -260,7 +260,7 @@ def create_managed_plugins_router(
         "/service/setup",
         response_model=PluginServiceStatus,
         summary="Set up this host's plugin service",
-        description="Direct localhost/Tailscale owner administration only. Starts a one-time setup of the plugin manager as a per-user service (a launchd agent on macOS, a systemd user unit on Linux) with the node's own lifetime: no terminal and no administrator password. It copies the node's environment into a verified manager runtime, so the first setup takes a few minutes. Returns the status at once; poll GET /v1/plugins/managed/service for progress. A running setup is not restarted, and no setup starts while the host is still bringing the plugin service to a new Skulk build; a host that already runs the manager as a system service is not changed and is told to repair it from a terminal.",
+        description="Direct localhost/Tailscale owner administration only. Starts a one-time setup of the plugin manager as a per-user service (a launchd agent on macOS, a systemd user unit on Linux) with the node's own lifetime: no terminal and no administrator password. It copies the node's environment into a verified manager runtime, so the first setup takes a few minutes. Returns the status at once; poll GET /v1/plugins/managed/service for progress. A running setup is not restarted, and no setup starts while a refresh attempt for a new Skulk build is copying a runtime or restarting the manager on it, a background retry included; a host that already runs the manager as a system service is not changed and is told to repair it from a terminal.",
     )
     async def service_setup_start(
         request: Request, response: Response
@@ -272,9 +272,10 @@ def create_managed_plugins_router(
         )
         response.headers["Cache-Control"] = "no-store"
         update = await runtime_update()
-        # A refresh attempt is staging or restarting the manager; a setup now
-        # would register the service under it.
-        if update is None or update.phase != "refreshing":
+        # A refresh attempt is staging or restarting the manager, possibly as
+        # a background retry under a reported failure; a setup now would
+        # contend with it and register the service under it.
+        if update is None or not update.refresh_running:
             setup_runner.start()
         return await setup_runner.status(update)
 

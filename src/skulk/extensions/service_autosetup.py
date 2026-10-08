@@ -350,8 +350,11 @@ class ServiceSetupRunner:
             if update.failure is None:
                 return self._updating(scope)
             return self._update_failed(scope, update.failure)
-        if scope == "user" and await self._repair_moved_interpreter(
-            Path(connection.manager_root)
+        # A repair under a running refresh attempt would contend with it.
+        if (
+            scope == "user"
+            and (update is None or not update.refresh_running)
+            and await self._repair_moved_interpreter(Path(connection.manager_root))
         ):
             return self._setting_up(update)
         if update is not None:
