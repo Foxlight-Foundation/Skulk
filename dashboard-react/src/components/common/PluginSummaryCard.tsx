@@ -27,6 +27,8 @@ export interface PluginSummaryCardProps {
   muted?: boolean;
   actions?: PluginCardAction[];
   primaryLabel?: string;
+  /** Emphasis of the primary button; a card asking the owner to act uses `primary`. */
+  primaryVariant?: 'outline' | 'primary';
   onOpen: () => void;
 }
 const Card = styled.article<{ $muted: boolean }>`
@@ -65,7 +67,7 @@ const MenuAction = styled.button<{ $danger?: boolean }>`
   &:disabled { opacity: .45; cursor: not-allowed; }
 `;
 /** Compact plugin card; every action retains its existing caller-owned operation guards. */
-export function PluginSummaryCard({ name, pluginId, description, health, tone, release, releaseNote, nodes, onOpen, actions, primaryLabel, muted = false }: PluginSummaryCardProps) {
+export function PluginSummaryCard({ name, pluginId, description, health, tone, release, releaseNote, nodes, onOpen, actions, primaryLabel, primaryVariant = 'outline', muted = false }: PluginSummaryCardProps) {
   const { t } = useSkulkTranslation();
   const menu = useRef<HTMLDetailsElement>(null);
   const [menuPlacement, setMenuPlacement] = useState({ above: false, availableHeight: 360 });
@@ -96,7 +98,7 @@ export function PluginSummaryCard({ name, pluginId, description, health, tone, r
       <Metadata>{pluginId && <span title={pluginId}>{pluginId.length > 30 ? `${pluginId.slice(0, 16)}…${pluginId.slice(-6)}` : pluginId}</span>}<span>{t('plugins.release', 'Release')} <b title={release}>{release}</b></span>{releaseNote && <span>{releaseNote}</span>}</Metadata>
     </div>
     <Nodes>{nodes.map((node, index) => <Chip key={`${node}-${index}`}>{node}</Chip>)}</Nodes>
-    <Actions><Primary variant="outline" size="sm" onClick={() => choose(onOpen)}>{primaryLabel ?? t('plugins.configure', 'Configure')}</Primary>
+    <Actions><Primary variant={primaryVariant} size="sm" onClick={() => choose(onOpen)}>{primaryLabel ?? t('plugins.configure', 'Configure')}</Primary>
     <Menu ref={menu} $above={menuPlacement.above} $availableHeight={menuPlacement.availableHeight} onToggle={positionMenu} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }} onKeyDown={event => { if (event.key === 'Escape' && menu.current?.open) { event.preventDefault(); event.stopPropagation(); menu.current.open = false; menu.current.querySelector('summary')?.focus(); } }}>
       <summary aria-label={t('plugins.more', 'More plugin actions')}><FiMoreHorizontal /></summary>
       <div>{items.map(item => <div key={item.id}>{item.separatorBefore && <hr />}<MenuAction type="button" $danger={item.danger} disabled={item.disabled} onClick={() => choose(item.onSelect)}>{item.label}</MenuAction></div>)}

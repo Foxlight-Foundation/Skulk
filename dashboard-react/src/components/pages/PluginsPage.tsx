@@ -2,7 +2,7 @@ import { derivePluginHealth, type PluginFilter } from './pluginHealth';
 import { useState, useSyncExternalStore, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
-import { useGetManagedRuntimesQuery, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation, type ConfigurableNode, type NodeConfiguration } from '../../store/endpoints/plugins';
+import { installOperationIds, useGetInstallOperationsQuery, useGetManagedRuntimesQuery, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation, type ConfigurableNode, type NodeConfiguration } from '../../store/endpoints/plugins';
 import { RightDrawer } from '../common/RightDrawer';
 import { PluginSummaryCard } from '../common/PluginSummaryCard';
 import { Button } from '../common/Button';
@@ -14,7 +14,8 @@ import { NodeSetupPanel } from './NodeSetupPanel';
 import { NodeSetupActionsPanel } from './NodeSetupActionsPanel';
 import { NodeProposalsPanel } from './NodeProposalsPanel';
 import { OperatorAccessPanel } from './OperatorAccessPanel';
-import { PluginCatalogBrowse } from './PluginCatalogBrowse';
+import { PluginCatalogBrowse, type BrowseRetryHandoff } from './PluginCatalogBrowse';
+import type { RetryRequest } from './catalogJourney';
 import { PluginServiceSetup } from './PluginServiceSetup';
 import { operatorSession } from '../../auth/operatorSession';
 import { FiExternalLink } from 'react-icons/fi';
@@ -155,10 +156,14 @@ function PluginInventory() {
   const [width, setWidth] = useState(640);
   const { t } = useSkulkTranslation();
   const query = useGetPluginNodesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true });
+  // Shared with the Installed list: a stopped install counts as needing attention.
+  const operationIds = installOperationIds(runtimes.data?.installations);
+  const installs = useGetInstallOperationsQuery(operationIds, { skip: operationIds.length === 0 });
+  const [retryHandoff, setRetryHandoff] = useState<BrowseRetryHandoff | null>(null);
   const counts: Record<PluginFilter, number> = { all: 0, healthy: 0, attention: 0, uninstalled: 0 };
   for (const runtime of runtimes.data?.installations ?? []) {
     counts.all += 1;
-    const category = derivePluginHealth(runtime, query.data?.find(plugin => plugin.pluginId === runtime.plugin_id), !!runtimes.error || !!query.error);
+    const category = derivePluginHealth(runtime, query.data?.find(plugin => plugin.pluginId === runtime.plugin_id), !!runtimes.error || !!query.error, runtime.operation_state, installs.data?.[runtime.plugin_id] ?? null);
     if (category === 'healthy' || category === 'attention' || category === 'uninstalled') counts[category] += 1;
   }
   counts.all += query.data?.filter(plugin => !runtimes.data?.installations.some(runtime => runtime.plugin_id === plugin.pluginId)).length ?? 0;
@@ -196,8 +201,11 @@ function PluginInventory() {
   };
   // Setup hands a plugin that needs its settings over to the Installed drawer.
   const manage = (pluginId: string) => { chooseView('installed'); setSelected(pluginId); };
+  // A stopped install is retried where installs are followed, so a retry
+  // from Installed opens Browse on that install's progress.
+  const retryInstall = (request: RetryRequest) => { setRetryHandoff({ id: Date.now(), request }); chooseView('browse'); };
   const direct = session.mode === 'direct';
-  if (view === 'browse') return <><PluginServiceSetup direct={direct} header={<>{heading()}{tabs}</>}>{heading()}{tabs}<BrowseArea><PluginCatalogBrowse onManage={manage} /></BrowseArea></PluginServiceSetup>{accessDrawer}</>;
+  if (view === 'browse') return <><PluginServiceSetup direct={direct} header={<>{heading()}{tabs}</>}>{heading()}{tabs}<BrowseArea><PluginCatalogBrowse onManage={manage} retry={retryHandoff} onRetryTaken={() => setRetryHandoff(null)} /></BrowseArea></PluginServiceSetup>{accessDrawer}</>;
   return <PluginServiceSetup direct={direct} header={<>{heading()}{tabs}{accessDrawer}</>}>
     <ManagedRuntimesPanel renderHeader={registrationAction => <>
       {heading(registrationAction)}
@@ -205,7 +213,7 @@ function PluginInventory() {
       <Filters aria-label={t('plugins.filters', 'Filter plugins')}>
         {([{ value: 'all', label: t('plugins.all', 'All') }, { value: 'healthy', label: t('plugins.healthy', 'Healthy') }, { value: 'attention', label: t('plugins.needsAttention', 'Needs attention') }, { value: 'uninstalled', label: t('plugins.uninstalled', 'Uninstalled') }] as const).map(option => <FilterButton key={option.value} type="button" $active={filter === option.value} aria-pressed={filter === option.value} disabled={!inventoryKnown} onClick={() => setFilter(option.value)}>{option.label}{inventoryKnown ? ` · ${counts[option.value]}` : ''}</FilterButton>)}
       </Filters>
-    </>} filter={filter} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.nodeId) ?? []}
+    </>} filter={filter} onRetryInstall={retryInstall} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.nodeId) ?? []}
       renderDetails={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => <NodeCard key={node.nodeId} pluginId={pluginId} node={node} />)} />
     <Button type="button" variant="ghost" size="sm" disabled={query.isFetching || runtimes.isFetching} onClick={() => { void query.refetch(); void runtimes.refetch(); }}>{t('plugins.refresh', 'Refresh')}</Button>
     {query.isLoading ? <p>{t('plugins.loading', 'Loading plugins…')}</p> : null}

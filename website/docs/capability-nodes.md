@@ -205,6 +205,16 @@ a system service and asks for your administrator password once (see
 4. The page follows the download, staging, and activation. You can leave it:
    when you return in the same browser, **Browse** picks the install up where it
    was and reads its progress back instead of starting it again.
+
+   If the download or the preparation of its runtime stops, the page says which
+   and offers **Retry**. The plugin's card under **Installed** reads **Install
+   needs a retry** and offers the same **Retry**, and its **Browse** card offers
+   **Resume install** rather than a second installation beside it. A retry
+   downloads the same signed release again and follows it through activation
+   to running. It carries the permissions you accepted when this browser started
+   the install; from another browser, the release's permissions are shown again
+   to accept first. A stopped first install you no longer want can be removed
+   from its card with **Remove this installation**.
 5. **Set it up** shows what each of the plugin's nodes reports. A node that
    needs you offers the plugin's own setup checks and **Open settings**, which
    opens its configuration and credentials under **Installed**. Its screens open

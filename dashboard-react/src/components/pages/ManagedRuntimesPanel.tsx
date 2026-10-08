@@ -1,14 +1,14 @@
 import { FiPlus } from 'react-icons/fi';
-import { derivePluginHealth, recordedServiceFailure, type PluginFilter } from './pluginHealth';
+import { derivePluginHealth, installNeedsRetry, recordedServiceFailure, type PluginFilter } from './pluginHealth';
 import type { PluginNodes } from '../../store/endpoints/plugins';
 import { useState, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
-  useGetManagedRuntimesQuery, useGetManagedOperationQuery,
+  installOperationIds, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useGetInstallOperationsQuery,
   useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation,
   useRegisterManagedRuntimeMutation, usePurgeManagedRuntimeMutation,
-  type ManagedRuntime,
+  type ManagedRuntime, type RuntimeInstallation,
 } from '../../store/endpoints/plugins';
 import { RightDrawer } from '../common/RightDrawer';
 import { PluginSummaryCard } from '../common/PluginSummaryCard';
@@ -16,6 +16,7 @@ import { Button } from '../common/Button';
 import { RuntimeReleasePanel } from './RuntimeReleasePanel';
 import { RuntimeSourceForm } from './RuntimeSourceForm';
 import { randomHex32 } from '../../utils/randomIds';
+import { clearJourney, readJourneys, type RetryRequest } from './catalogJourney';
 
 const RuntimeCard = styled.article`
   margin: 0; padding: 24px; border: 1px solid ${({ theme }) => theme.colors.border};
@@ -32,7 +33,13 @@ const RuntimeIdentity = styled.p`font-family: ${({ theme }) => theme.fonts.mono}
 const Actions = styled.div`display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;`;
 
 /** Read server-retained operation references; reconnect never submits another mutation. */
-function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, filter }: { nodeEvidence?: PluginNodes; filter: PluginFilter; runtime: ManagedRuntime; unavailable: boolean; nodes: string[]; details?: ReactNode }) {
+function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, filter, installOperation = null, onRetryInstall }: {
+  nodeEvidence?: PluginNodes; filter: PluginFilter; runtime: ManagedRuntime; unavailable: boolean; nodes: string[]; details?: ReactNode;
+  /** The installation's retained install, when it was read. */
+  installOperation?: RuntimeInstallation | null;
+  /** Retry a stopped install through to running; without it the card opens the manual release controls. */
+  onRetryInstall?: (request: RetryRequest) => void;
+}) {
   const { t } = useSkulkTranslation();
   const [expanded, setExpanded] = useState(false);
   const [width, setWidth] = useState(640);
@@ -81,6 +88,8 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     setPurgeNotice('');
     try {
       await purge(runtime.plugin_id).unwrap();
+      // Nothing is left to retry, so the consent this browser kept for it goes too.
+      clearJourney(runtime.plugin_id);
     } catch {
       setPurgeNotice(t('plugins.purgeRefused', 'Removal was refused. The plugin must be uninstalled, with no operation or release work under way.'));
     } finally {
@@ -111,7 +120,29 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   const bundleNames = [...new Set(nodeEvidence?.nodes.map(node => node.bundleId) ?? [])];
   // The signed title names the plugin even when nothing runs to report it.
   const release = runtime.release ?? null;
-  const name = release?.title ?? (bundleNames.length === 1 ? bundleNames[0] : null) ?? release?.bundle_id ?? runtime.plugin_id;
+  // A first install that stopped has no selected release yet, so its retained
+  // install names it: the catalog title this browser saw when it was
+  // installed, else the signed bundle id. Never only the raw installation id.
+  const retryNeeded = installNeedsRetry(runtime, installOperation);
+  const installing = installOperation?.review ?? null;
+  const bundleId = release?.bundle_id ?? installing?.bundle_id ?? null;
+  const catalogTitle = bundleId ? readJourneys().find((journey) => journey.pluginId === runtime.plugin_id && journey.bundleId === bundleId)?.title ?? null : null;
+  const name = release?.title ?? catalogTitle ?? (bundleNames.length === 1 ? bundleNames[0] : null) ?? release?.bundle_id ?? installing?.bundle_id ?? runtime.plugin_id;
+  const retryInstall = () => {
+    if (!retryNeeded) return;
+    if (!onRetryInstall) { setReleaseOpen(true); setExpanded(true); return; }
+    const review = installOperation.review;
+    onRetryInstall({ pluginId: runtime.plugin_id, title: name, publisher: review.publisher, sequence: review.sequence, transferBytes: review.artifact_bytes, updating: runtime.selected_digest !== null });
+  };
+  // A first install that stopped never selected a release, so the host
+  // removes it outright, as it does an uninstalled one: the way to drop a
+  // stray installation instead of retrying it.
+  const neverInstalled = retryNeeded && runtime.selected_digest === null && !runtime.enabled;
+  const removable = !!runtime.uninstalled || neverInstalled;
+  const retryReason = retryNeeded ? ({
+    download_failed: t('plugins.retryDownloadFailed', 'Installing release {sequence} stopped while it downloaded. Retry downloads it again and finishes the install.', { sequence: installOperation.review.sequence }),
+    installation_failed: t('plugins.retryPrepareFailed', 'Release {sequence} downloaded, but preparing its runtime failed. Retry prepares it again and finishes the install.', { sequence: installOperation.review.sequence }),
+  } as Record<string, string>)[installOperation.error_code ?? ''] ?? t('plugins.retryInterrupted', 'Installing release {sequence} was interrupted before it finished. Retry picks it up and finishes the install.', { sequence: installOperation.review.sequence }) : null;
   const failure = runtime.uninstalled || !runtime.enabled ? null : recordedServiceFailure(runtime);
   const failureReason = failure === null ? null : ({
     verification_failed: t('plugins.failureVerification', 'This release was built for a different Skulk build, platform or dependency set, so it cannot run here. Install a release built for this host.'),
@@ -119,14 +150,14 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     ownership_busy: t('plugins.failureOwnershipBusy', 'Another process is using this plugin. Wait a moment, then refresh.'),
     service_failed: t('plugins.failureService', 'The plugin service could not start.'),
   } as Record<string, string>)[failure] ?? t('plugins.failureOther', 'The plugin stopped with {code}.', { code: failure });
-  const releaseNote = runtime.uninstalled ? t('plugins.cleanupRetained', 'Cleanup state retained') : failure !== null ? t('plugins.notRunning', 'Not running') : runtime.stale || unavailable ? t('plugins.releaseStatusUnavailable', 'Release status unavailable')
+  const releaseNote = retryNeeded && !release ? t('plugins.notInstalledYet', 'Not installed yet') : runtime.uninstalled ? t('plugins.cleanupRetained', 'Cleanup state retained') : failure !== null ? t('plugins.notRunning', 'Not running') : runtime.stale || unavailable ? t('plugins.releaseStatusUnavailable', 'Release status unavailable')
     : runtime.service?.active_digest && runtime.service.active_digest === runtime.selected_digest ? t('plugins.releaseActive', 'Active')
     : runtime.service?.active_digest ? t('plugins.differentActiveRelease', 'Different release active')
     : t('plugins.noActiveRelease', 'None active');
   const openDetails = () => setExpanded(true);
   const openRelease = () => { setReleaseOpen(true); setExpanded(true); };
-  const category = derivePluginHealth(runtime, nodeEvidence, unavailable || !!operation.error, state);
-  const health = {
+  const category = derivePluginHealth(runtime, nodeEvidence, unavailable || !!operation.error, state, installOperation);
+  const health = retryNeeded && !unavailable ? t('plugins.installNeedsRetry', 'Install needs a retry') : {
     healthy: t('plugins.healthy', 'Healthy'), attention: t('plugins.needsAttention', 'Needs attention'),
     uninstalled: t('plugins.uninstalled', 'Uninstalled'), unknown: t('plugins.healthUnknown', 'Status unavailable'),
     updating: t('plugins.updating', 'Updating'), disabled: t('plugins.disabled', 'Disabled'),
@@ -134,16 +165,22 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
   return <>
     <div hidden={filter !== 'all' && filter !== category}>
     <PluginSummaryCard name={name} pluginId={runtime.plugin_id}
-      description={failureReason ?? (nodeEvidence?.nodes.length ? t('plugins.nodeCount', 'Installed capability nodes: {count}', { count: nodeEvidence.nodes.length }) : undefined)}
+      description={retryReason ?? failureReason ?? (nodeEvidence?.nodes.length ? t('plugins.nodeCount', 'Installed capability nodes: {count}', { count: nodeEvidence.nodes.length }) : undefined)}
       health={health} tone={category === 'healthy' ? 'healthy' : category === 'attention' ? 'live' : category === 'updating' ? 'live' : 'neutral'}
-      release={release ? t('plugins.releaseIdentity', '{version} ({sequence}) from {publisher}', { version: release.bundle_version, sequence: release.sequence, publisher: release.publisher }) : runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')} releaseNote={releaseNote} nodes={nodes}
-      muted={runtime.uninstalled} onOpen={openDetails} actions={[
+      release={release ? t('plugins.releaseIdentity', '{version} ({sequence}) from {publisher}', { version: release.bundle_version, sequence: release.sequence, publisher: release.publisher })
+        : retryNeeded ? t('plugins.releaseIdentity', '{version} ({sequence}) from {publisher}', { version: installOperation.review.version, sequence: installOperation.review.sequence, publisher: installOperation.review.publisher })
+        : runtime.selected_digest?.slice(0, 12) ?? t('plugins.noRelease', 'None selected')} releaseNote={releaseNote} nodes={nodes}
+      muted={runtime.uninstalled}
+      // A stopped install's one next step is its retry, so the card leads with it.
+      onOpen={retryNeeded ? retryInstall : openDetails} primaryLabel={retryNeeded ? t('plugins.retryInstall', 'Retry') : undefined} primaryVariant={retryNeeded ? 'primary' : 'outline'}
+      actions={[
+        ...(retryNeeded ? [{ id: 'retry', label: t('plugins.retryInstallMenu', 'Retry install'), disabled: unavailable, onSelect: retryInstall }] : []),
         { id: 'configure', label: t('plugins.configureSettings', 'Configure settings'), onSelect: openDetails },
         { id: 'release', label: t('plugins.installReleaseMenu', 'Install a release…'), onSelect: openRelease },
         { id: 'refresh', label: t('plugins.refreshOperation', 'Refresh operation status'), disabled: !operationId || operation.isFetching || busy, onSelect: () => { void operation.refetch(); } },
         { id: 'disable', label: t('plugins.disableRuntime', 'Disable runtime'), separatorBefore: true, disabled: disableBlocked, onSelect: () => { setExpanded(true); void withdrawRuntime('disable'); } },
         { id: 'uninstall', label: t('plugins.uninstallMenu', 'Uninstall plugin…'), danger: true, disabled: uninstallBlocked, onSelect: () => { setExpanded(true); void withdrawRuntime('uninstall'); } },
-        { id: 'purge', label: t('plugins.purgeMenu', 'Remove uninstalled plugin…'), danger: true, disabled: !runtime.uninstalled || pending || busy || unavailable, onSelect: () => { setRemovalArmed(true); setExpanded(true); } },
+        { id: 'purge', label: neverInstalled ? t('plugins.removeStoppedMenu', 'Remove this installation…') : t('plugins.purgeMenu', 'Remove uninstalled plugin…'), danger: true, disabled: !removable || pending || busy || unavailable, onSelect: () => { setRemovalArmed(true); setExpanded(true); } },
       ]} />
     </div>
     <RightDrawer open={expanded} onClose={closeDrawer} title={name} ariaLabel={t('plugins.runtimeDetails', 'Runtime details')}
@@ -157,6 +194,8 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     {runtime.stale || unavailable ? <p role="status">{t('plugins.runtimeStale', 'Service health is stale or unavailable.')}</p> : null}
     {runtime.error_code ? <p role="status">{t('plugins.runtimeNeedsAttention', 'The local service needs attention.')}</p> : null}
     {operationId ? <p role="status">{t('plugins.runtimeOperation', 'Local operation')}: {stateLabel}</p> : null}
+    {retryReason ? <p role="status">{retryReason}</p> : null}
+    {retryNeeded ? <Button type="button" variant="primary" disabled={unavailable} onClick={retryInstall}>{t('plugins.retryInstallMenu', 'Retry install')}</Button> : null}
     {operation.error ? <p role="status">{t('plugins.runtimeReadFailed', 'Operation status could not be read. The original request has not been resubmitted.')}</p> : null}
     <Actions>
       <Button type="button" disabled={disableBlocked} onClick={() => void withdrawRuntime('disable')}>{t('plugins.disableRuntime', 'Disable runtime')}</Button>
@@ -166,8 +205,10 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
     </Actions>
     {withdrawable ? <p>{t('plugins.withdrawInterruptedRuntime', 'Disable or uninstall withdraws this pending local change without running its release. Installation history and cleanup records are retained.')}</p> : null}
     <p>{t('plugins.runtimeCleanup', 'Disable and uninstall stop future capability work. Cleanup supervision, credentials, records and recovery artifacts are retained. Uninstall is not a data purge. Select or activate a verified release to reinstall, or remove the uninstalled plugin to purge what it retained.')}</p>
-    {runtime.uninstalled && removalArmed ? <p role="status">{t('plugins.purgeWarning', 'Removing deletes everything this uninstalled plugin retained: records, staged releases, credentials and cleanup state. It cannot be reinstalled from this installation afterwards.')}</p> : null}
-    {runtime.uninstalled ? <Button type="button" disabled={pending || busy || unavailable} onClick={() => { if (removalArmed) { void purgeRuntime(); } else { setRemovalArmed(true); } }}>{removalArmed ? t('plugins.purgeConfirm', 'Remove now') : t('plugins.purgeRuntime', 'Remove uninstalled plugin')}</Button> : null}
+    {removable && removalArmed ? <p role="status">{neverInstalled
+      ? t('plugins.removeStoppedWarning', 'Removing deletes this installation and everything its stopped install kept: the download, records and source settings. Nothing was ever activated. Install it again from Browse if you want it later.')
+      : t('plugins.purgeWarning', 'Removing deletes everything this uninstalled plugin retained: records, staged releases, credentials and cleanup state. It cannot be reinstalled from this installation afterwards.')}</p> : null}
+    {removable ? <Button type="button" disabled={pending || busy || unavailable} onClick={() => { if (removalArmed) { void purgeRuntime(); } else { setRemovalArmed(true); } }}>{removalArmed ? t('plugins.purgeConfirm', 'Remove now') : neverInstalled ? t('plugins.removeStopped', 'Remove this installation') : t('plugins.purgeRuntime', 'Remove uninstalled plugin')}</Button> : null}
     {purgeNotice ? <p role="status">{purgeNotice}</p> : null}
     {notice && state !== 'complete' ? <p role="status">{notice}</p> : null}
     <Button type="button" onClick={() => setReleaseOpen(!releaseOpen)}>{releaseOpen ? t('plugins.closeReleaseInstallation', 'Close release installation') : t('plugins.openReleaseInstallation', 'Install a release')}</Button>
@@ -177,7 +218,9 @@ function RuntimeControls({ runtime, unavailable, nodes, details, nodeEvidence, f
 }
 
 /** Observe independently supervised runtimes even when no plugin child is available. */
-export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, nodeEvidence, renderHeader, filter = 'all' }: {
+export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, nodeEvidence, renderHeader, filter = 'all', onRetryInstall }: {
+  /** Retry a stopped install through to running, as Browse does for a catalog install. */
+  onRetryInstall?: (request: RetryRequest) => void;
   /** Page composition may place the existing registration action in its header. */
   renderHeader?: (registrationAction: ReactNode) => ReactNode;
   /** Fresh node evidence for derived card health. */
@@ -191,6 +234,10 @@ export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, node
 } = {}) {
   const { t } = useSkulkTranslation();
   const query = useGetManagedRuntimesQuery(undefined, { pollingInterval: 5000, skipPollingIfUnfocused: true });
+  // The inventory does not say whether an install stopped; each installation's
+  // retained install does, read at the same cadence.
+  const operationIds = installOperationIds(query.data?.installations);
+  const installs = useGetInstallOperationsQuery(operationIds, { skip: operationIds.length === 0, pollingInterval: 5000, skipPollingIfUnfocused: true });
   const [register, registering] = useRegisterManagedRuntimeMutation();
   const [setupId, setSetupId] = useState<string | null>(null);
   const [registrationUncertain, setRegistrationUncertain] = useState(false);
@@ -213,7 +260,8 @@ export function ManagedRuntimesPanel({ nodeNames = () => [], renderDetails, node
     {query.isLoading ? <p>{t('plugins.loadingRuntimes', 'Loading local services…')}</p> : null}
     {query.error ? <InventoryNotice role="status"><h2>{t('plugins.inventoryUnavailable', 'Plugin inventory unavailable')}</h2><p>{t('plugins.managerUnavailable', 'Local runtime management is unavailable. Check local service setup and your plugin permissions.')}</p><Button disabled={query.isFetching} onClick={() => void query.refetch()}>{t('plugins.retryInventory', 'Retry inventory')}</Button></InventoryNotice> : null}
     {!query.error && query.data?.installations.length === 0 ? <p>{t('plugins.noManagedRuntimes', 'No managed runtimes are installed.')}</p> : null}
-    {query.data?.installations.map((runtime) => <RuntimeControls key={runtime.plugin_id} runtime={runtime} filter={filter} nodeEvidence={nodeEvidence?.(runtime.plugin_id)} unavailable={!!query.error} nodes={nodeNames(runtime.plugin_id)} details={renderDetails?.(runtime.plugin_id)} />)}
+    {query.data?.installations.map((runtime) => <RuntimeControls key={runtime.plugin_id} runtime={runtime} filter={filter} nodeEvidence={nodeEvidence?.(runtime.plugin_id)} unavailable={!!query.error} nodes={nodeNames(runtime.plugin_id)} details={renderDetails?.(runtime.plugin_id)}
+      installOperation={installs.data?.[runtime.plugin_id] ?? null} onRetryInstall={onRetryInstall} />)}
   </section>;
 }
 

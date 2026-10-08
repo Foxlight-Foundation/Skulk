@@ -94,6 +94,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A capability install from **Plugins**, **Browse** that stops during its
+  download or while its runtime is prepared can now be finished from the
+  dashboard. The install page explains which step stopped and offers
+  **Retry**. Under **Installed**, the installation is named by its catalog
+  title or bundle id instead of its raw `managed.` id and reads **Install needs
+  a retry** with the same **Retry** on its card. **Browse** offers **Resume
+  install** for it instead of binding a second installation and leaving the
+  stopped one behind. A retry uses the host's existing install recovery and
+  then activates the release, so it ends installed and running rather than
+  staged. Activation still needs the permissions accepted for that exact
+  release: the retry carries the consent this browser recorded when the
+  install began, and from any other browser the release's permissions are
+  shown again for acceptance first. A stopped first install that was never
+  activated can also be removed from its card.
 - Capabilities install on Linux hosts whose Python was installed under
   Ubuntu's default umask. The plugin environment copied group-writable
   activation scripts from that Python, the installed-file seal refused them,

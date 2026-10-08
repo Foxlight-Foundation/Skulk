@@ -23,6 +23,7 @@ let root: Root;
 let host: HTMLDivElement;
 let store: ReturnType<typeof makeStore>;
 let installRead: () => Response;
+let retries: number;
 
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -31,6 +32,7 @@ async function contains(text: string) { await act(async () => { await vi.waitFor
 beforeEach(() => {
   localStorage.removeItem('skulk-plugin-install-journeys');
   saveJourney(journey);
+  retries = 0;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     const path = new URL(request.url).pathname;
@@ -54,7 +56,7 @@ async function render() {
   await act(async () => {
     root.render(<Provider store={store}><ThemeProvider theme={darkTheme}>
       <CatalogInstallProgress title="Example Studio" publisher="example" sequence={51} transferBytes={12_000_000} updating={false}
-        journey={journey} refusal={null} onDone={() => undefined} onBack={() => undefined} pollMs={1} />
+        journey={journey} refusal={null} onDone={() => undefined} onBack={() => undefined} onRetry={() => { retries += 1; }} pollMs={1} />
     </ThemeProvider></Provider>);
   });
 }
@@ -78,4 +80,29 @@ it('forgets the install when the host answers without its installation', async (
   await render();
   await contains('The installation is not in the host’s inventory.');
   expect(readJourneys()).toEqual([]);
+});
+
+it('says a stopped install can be retried from here or from Installed, and keeps the consent for that retry', async () => {
+  installRead = () => json({ operation: { request: { operation_id: journey.installOperationId, runtime_digest: journey.runtimeDigest, expected_source_revision: 7 }, review: {}, state: 'recovery_required', downloaded_bytes: 12_000_000, error_code: 'installation_failed' } });
+  await render();
+  await contains('The download finished, but preparing its runtime failed. Choose Retry to prepare the same release again and finish installing it. Its card under Installed offers the same Retry.');
+  // The record stays, marked stopped: it is the consent a retry of this release carries.
+  expect(readJourneys()).toEqual([{ ...journey, interrupted: true }]);
+  const retry = [...host.querySelectorAll('button')].find((item) => item.textContent === 'Retry');
+  expect(retry).toBeDefined();
+  await act(async () => { retry!.click(); });
+  expect(retries).toBe(1);
+});
+
+it('names a stopped download as a download, not a failed preparation', async () => {
+  installRead = () => json({ operation: { request: { operation_id: journey.installOperationId, runtime_digest: journey.runtimeDigest, expected_source_revision: 7 }, review: {}, state: 'recovery_required', downloaded_bytes: 0, error_code: 'download_failed' } });
+  await render();
+  await contains('The download stopped before it finished. Choose Retry to download the same release again and finish installing it.');
+});
+
+it('offers no retry for an install that did not stop', async () => {
+  installRead = () => json({ operation: null });
+  await render();
+  await contains('The host never confirmed the download.');
+  expect([...host.querySelectorAll('button')].some((item) => item.textContent === 'Retry')).toBe(false);
 });

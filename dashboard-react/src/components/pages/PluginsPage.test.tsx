@@ -5,9 +5,10 @@ import { Provider } from 'react-redux';
 import { ThemeProvider } from 'styled-components';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { apiSlice } from '../../store/api';
-import type { NodeConfiguration } from '../../store/endpoints/plugins';
+import type { ManagedRuntime, NodeConfiguration, RuntimeInstallation } from '../../store/endpoints/plugins';
 import { darkTheme } from '../../theme/theme';
 import { dashboardUrlOn } from '../../utils/hostDashboard';
+import { saveJourney } from './catalogJourney';
 import { PluginsPage } from './PluginsPage';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
@@ -21,6 +22,9 @@ let reads: number;
 let mutations: Record<string, unknown>[];
 let store: ReturnType<typeof makeStore>;
 let clusterState: Record<string, unknown>;
+let installations: ManagedRuntime[];
+let installOperation: RuntimeInstallation | null;
+let recovers: { path: string; body: unknown }[];
 
 function makeStore() {
   return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) });
@@ -60,6 +64,9 @@ beforeEach(async () => {
   reads = 0;
   mutations = [];
   clusterState = {};
+  installations = [];
+  installOperation = null;
+  recovers = [];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     // Cluster state names the other nodes; only plugin requests carry the dashboard header.
@@ -69,7 +76,14 @@ beforeEach(async () => {
     if (path === '/node/identity') return response({ nodeId: 'host-node', friendlyName: 'host' });
     expect(request.headers.get('X-Skulk-Dashboard')).toBe('pairing-v1');
     if (path === '/v1/plugins/managed/service') return response({ state: 'ready', scope: 'user', progress: null, error: null });
-    if (new URL(request.url).pathname === '/v1/plugins/managed') return response({ installations: [] });
+    if (new URL(request.url).pathname === '/v1/plugins/managed') return response({ installations });
+    if (path.endsWith('/recover')) {
+      recovers.push({ path, body: await request.json() });
+      installOperation = { ...installOperation!, attempt: 1, state: 'downloading', downloaded_bytes: 0, error_code: null };
+      return response({ ...installOperation, state: 'accepted' });
+    }
+    if (path.endsWith('/install')) return response({ operation: installOperation });
+    if (/\/installations\/[^/]+\/source$/.test(path)) return response({ revision: 4, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1 });
     if (new URL(request.url).pathname === '/v1/plugins') return response([{ pluginId: 'bridge', available: true, nodes: [
       { nodeId: 'node-1', bundleId: 'test.bundle', version: '1.0.0', status: 'disabled', configurable: true },
     ] }]);
@@ -97,6 +111,7 @@ afterEach(async () => {
   host.remove();
   vi.unstubAllGlobals();
   history.replaceState(null, '', '/');
+  localStorage.removeItem('skulk-plugin-install-journeys');
 });
 
 it('loads disabled-node settings on demand and fences writes by revision and schema', async () => {
@@ -164,4 +179,28 @@ it('links to the other nodes\' Plugins pages at their tailnet addresses', async 
   // A node without a Tailscale address is named, not linked.
   expect(row.textContent).toContain('lan');
   expect(row.textContent).not.toContain('host');
+});
+
+it('retries a stopped install from its Installed card on the same installation, following it in Browse', async () => {
+  const pluginId = 'managed.' + '7'.repeat(32);
+  installations = [{ plugin_id: pluginId, release: null, selected_digest: null, selection_revision: 0, enabled: false, stale: true, error_code: null, operation_id: null, operation_state: null, service: null }];
+  installOperation = {
+    attempt: 0, request: { operation_id: '5'.repeat(32), runtime_digest: '9'.repeat(64), expected_source_revision: 3 },
+    review: { runtime_digest: '9'.repeat(64), source_revision: 3, publisher: 'example', bundle_id: 'example.studio', version: '0.1.0', sequence: 51, platform: 'macos-arm64', python_requires: '>=3.13', skulk_build_sha256: 'b'.repeat(64), permissions: [], artifact_bytes: 12_000_000, expires_at: 1_900_000_000 },
+    state: 'recovery_required', downloaded_bytes: 0, error_code: 'download_failed',
+  };
+  saveJourney({ pluginId, title: 'Example Studio', bundleId: 'example.studio', sequence: 51, publisher: 'example', runtimeDigest: '9'.repeat(64),
+    transferBytes: 12_000_000, installOperationId: '5'.repeat(32), activationOperationId: null, startedAt: 1, interrupted: true });
+  await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
+  root = createRoot(host);
+  await renderPage();
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Install needs a retry'), { timeout: 5000 }); });
+  // A stopped install counts as needing attention.
+  expect(host.textContent).toContain('Needs attention · 1');
+  await click('Retry');
+  await act(async () => { await vi.waitFor(() => expect(recovers).toHaveLength(1), { timeout: 5000 }); });
+  expect(recovers[0]).toEqual({ path: `/v1/plugins/managed/installations/${pluginId}/install/${'5'.repeat(32)}/recover`, body: { expected_source_revision: 4 } });
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Installing Example Studio'), { timeout: 5000 }); });
+  expect(window.location.search).toBe('?view=browse');
+  expect(mutations).toEqual([]);
 });
