@@ -96,11 +96,13 @@ interface tells the truth while it is working.
    for an action such as stopping an instance: the proposal must change
    nothing until you approve it, and the approved action must then take
    effect.
-10. **Plugins.** Set up the plugin service as the install guide describes,
-    connect a publisher's catalog under **Plugins → Browse**, review a
-    release, and install it with its consent screen. Finish its setup, then
-    open its screen from its satellite in the Cluster view. Every refusal must
-    say what to do next.
+10. **Plugins.** On each install path under test, open **Plugins** and follow
+    only the install guide: the plugin service must set itself up with no
+    terminal and no administrator password, and **Browse** must list the
+    Foxlight capability store with nothing to configure. Review a release,
+    install it with its consent screen, finish its setup, then open its screen
+    from its satellite in the Cluster view. Every refusal must say what to do
+    next.
 11. **Operator app and relay onboarding.** Begin with a fresh cluster that has
     no relay enrollment, provisioning material, or paired devices, and the
     intended distributed app build. Follow only user-facing instructions to

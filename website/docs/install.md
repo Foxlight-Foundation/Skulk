@@ -69,7 +69,10 @@ silently replaces itself.
 If you use Homebrew, update with `brew upgrade --cask
 Foxlight-Foundation/skulk/skulk`. To remove a DMG installation, quit Skulk and
 move **Skulk** from Applications to the Trash. Homebrew users can instead run
-`brew uninstall --cask skulk`.
+`brew uninstall --cask skulk`, which also removes the plugin service. If you
+removed a DMG installation that had plugins set up, turn off Skulk's plugin
+service under **System Settings → General → Login Items & Extensions → Allow in
+the Background**.
 
 ## Ubuntu and Debian
 
@@ -214,17 +217,24 @@ covers launch environments and service configuration.
 
 ## Add capabilities (optional)
 
-Capabilities such as Skulk Video Studio are separately installed plugins.
-Before a host installs its first plugin, its plugin-management service is set
-up once. On a [source install](#source-and-development-installs), opening
-**Plugins** in the dashboard on that host does it: Skulk registers the service
-for your user (Apple Silicon macOS, or Linux with systemd), with no terminal and
-no administrator password, and shows its progress. From a terminal,
-`uv run skulk-plugin-service setup` does the same and
-`uv run skulk-plugin-service status` shows when it is ready. Packaged installs
-(the Mac app and the Linux packages) do not support plugins yet. Then follow
-[Capabilities and Plugins](capability-nodes.md) to obtain, install and configure
-a plugin.
+Capabilities such as Skulk Video Studio are separately installed plugins. They
+install from the dashboard on every kind of install: the Mac app, Homebrew, the
+Linux packages, and the source installer. Open the dashboard on the host that
+will run the plugin and choose **Plugins**:
+
+1. The first time, Skulk sets up that host's plugin service for your user and
+   shows its progress. It needs no terminal and no administrator password, and
+   takes a few minutes. On Linux it needs systemd.
+2. **Browse** lists the Foxlight capability store at
+   [skulkapps.foxlight.ai](https://skulkapps.foxlight.ai/). Skulk verifies the
+   store's signatures by itself, and each card says whether a release fits this
+   host.
+3. Choose **Review and install**, check what the plugin may do (its
+   permissions, its screens, and whether any action can spend money), and
+   install it with one consent.
+
+[Capabilities and Plugins](capability-nodes.md) covers setup inside a plugin,
+private catalogs, updates, and removal. Plugins need Skulk 2.0.1 or later.
 
 ## First-run troubleshooting
 
