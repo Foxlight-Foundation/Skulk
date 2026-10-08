@@ -109,8 +109,8 @@ H3 before a render can start:
   Store**. Each is about 49 GB to download, and the first placement on a node
   also installs the video engine, which the placement preview mentions. Place it before installing the
   Studio; if the Studio was installed first and its setup check reports that
-  no video model is placed, disable and re-enable it in **Plugins** once the
-  model is ready.
+  no video model is placed, open its settings in **Plugins**, select
+  **Turn off**, then **Turn on** once the model is ready.
 - **Licence terms.** MiniMax H3 open-weight use is territorially scoped by its
   licence. The model card shows the notice before download.
 - **Optional:** a ready chat model for **Refine with guides**.
@@ -204,7 +204,11 @@ a system service and asks for your administrator password once (see
    permissions, then select **Install** or **Update**.
 4. The page follows the download, staging, and activation. You can leave it:
    when you return in the same browser, **Browse** picks the install up where it
-   was and reads its progress back instead of starting it again.
+   was and reads its progress back instead of starting it again. Once it runs,
+   a plugin that needs no settings turns on by itself as part of the install you
+   accepted, and the page shows **Turning it on** as its last step. This happens
+   once per install: reloading the page does not turn it on again, and an
+   update leaves a node you turned off turned off.
 
    If the download or the preparation of its runtime stops, the page says which
    and offers **Retry**. The plugin's card under **Installed** reads **Install
@@ -217,10 +221,23 @@ a system service and asks for your administrator password once (see
    the install; from another browser, the release's permissions are shown again
    to accept first. A stopped first install you no longer want can be removed
    from its card with **Remove this installation**.
-5. **Set it up** shows what each of the plugin's nodes reports. A node that
-   needs you offers the plugin's own setup checks and **Open settings**, which
-   opens its configuration and credentials under **Installed**. Its screens open
-   from here once it reports ready.
+5. The install then continues on the plugin's own page under **Installed**,
+   which shows what each of its nodes reports and offers one next step:
+   - **Open settings** when a node needs settings or credentials. It opens that
+     node's settings, with the plugin's own setup checks beside them.
+   - **Turn on** when a node is only turned off, for example after you turned
+     it off, or when the host refused to turn it on after the install. Turning
+     it on runs the plugin's setup checks again; if the host refuses, the page
+     shows its reason and runs the setup checks so you can see what is missing.
+   - **Open**, followed by the screen's name, once it reports ready. Screens
+     open in a new tab; nothing of the plugin is shown inside the dashboard.
+     You can also open them from the plugin's node in the **Cluster** view.
+
+   **Done** returns to the list of installed plugins. An installed plugin's
+   **Browse** card says what it needs: **Open**, followed by the screen's
+   name, opens a running plugin in a new tab; **Set up** opens this page when a
+   node is turned off, needs settings or stopped; **Manage** opens it
+   otherwise, such as while the plugin starts.
 
 An update replaces the release on the same installation; its settings and saved
 work stay.
@@ -235,7 +252,16 @@ work stay.
    staged release.
 4. Configure the capability, supply credentials through the separate credential
    controls, complete its setup actions, and select **Check setup**.
-5. Correct any reported issues and enable the capability once checks pass.
+5. Correct any reported issues and select **Turn on** in its settings once
+   checks pass.
+
+A node's settings show its title, version and status, then its settings form,
+its setup checks, credentials and setup actions. The form renders each setting
+the plugin declares, with the plugin's description as help, and an optional
+setting left empty is saved as empty (`null`). **Turn on** and **Turn off** send
+no settings, so they work even for settings the dashboard cannot render; they
+wait only for unsaved changes to be saved or discarded, and for a reload when
+another operator changed the node.
 
 Installation, activation, configuration, readiness, and enablement are different
 states. An installed plugin can expose setup controls without advertising a ready

@@ -91,6 +91,12 @@ beforeEach(async () => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     const path = new URL(request.url).pathname;
     const strayPath = stray ? `/v1/plugins/managed/installations/${stray.plugin_id}` : null;
+    // Each installation's node already runs, so nothing is left to turn on.
+    if (path === '/v1/plugins') {
+      return json([...(freshHost ? [] : [installed]), ...(stray ? [stray] : [])].map((runtime) => ({
+        pluginId: runtime.plugin_id, available: true, nodes: [{ nodeId: 'studio', bundleId: entry.bundle_id, version: '0.1.0', status: 'ready', configurable: true }],
+      })));
+    }
     if (strayPath && path.startsWith(strayPath + '/')) {
       const rest = path.slice(strayPath.length);
       if (request.method === 'POST') {
@@ -165,9 +171,10 @@ afterEach(async () => {
 async function render(retry: BrowseRetryHandoff | null = null, onRetryTaken?: () => void) {
   await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><PluginCatalogBrowse retry={retry} onRetryTaken={onRetryTaken} /></ThemeProvider></Provider>); });
 }
+// A finished install continues on the installed plugin's own page.
 async function running() {
-  await act(async () => { await vi.waitFor(() => expect(button('Set it up')).not.toBeNull(), { timeout: 8000 }); });
-  await contains('Example Studio is installed and running.');
+  await act(async () => { await vi.waitFor(() => expect(host.querySelector('#capability-setup-title')).not.toBeNull(), { timeout: 8000 }); });
+  await contains('Example Studio is installed');
 }
 
 it('updates an installed capability from its catalog listing after one consent', async () => {
@@ -183,7 +190,7 @@ it('updates an installed capability from its catalog listing after one consent',
   expect(button('Update')?.disabled).toBe(false);
   await click('Update');
   await contains('Updating Example Studio');
-  await act(async () => { await vi.waitFor(() => expect(button('Set it up')).not.toBeNull(), { timeout: 8000 }); });
+  await running();
   expect(posts.map((post) => post.path)).toEqual([
     '/v1/plugins/managed/catalog/install',
     `/v1/plugins/managed/installations/${pluginId}/install`,
@@ -280,7 +287,7 @@ it('continues a new installation whose binding reply was lost instead of registe
   await act(async () => { (host.querySelector('#catalog-consent') as HTMLInputElement).click(); });
   await click('Install');
   await contains('The host did not confirm this release, so it may already be bound.');
-  await click('Back to Browse');
+  await click('Close');
   await contains('Review and install');
   await click('Review and install');
   await act(async () => { (host.querySelector('#catalog-consent') as HTMLInputElement).click(); });
@@ -299,7 +306,7 @@ it('returns to an install in progress instead of offering the release again', as
   await render();
   // Opening Browse picks the install up where it was.
   await contains('Installing Example Studio');
-  await click('Back to Browse');
+  await click('Close');
   await contains('Show progress');
   expect(host.textContent).toContain('Installing');
   expect(button('Review and install')).toBeNull();
@@ -387,7 +394,7 @@ it('starts a retry handed over from Installed once', async () => {
   expect(taken).toBe(1);
   expect(posts.filter((post) => post.path.endsWith('/recover'))).toHaveLength(1);
   // The title this browser saved at consent names it, not the bundle id the card passed.
-  expect(host.textContent).toContain('Installing Example Studio');
+  expect(host.querySelector('#capability-setup-title')?.textContent).toBe('Example Studio is installed');
 });
 
 it('pauses new installs while an installation that names no bundle could not be read', async () => {
@@ -417,7 +424,7 @@ it('keeps a retry of an older release on its card while it runs, though the cata
   await contains('Installing release 51 stopped before it finished.');
   await click('Resume install');
   await act(async () => { await vi.waitFor(() => expect(posts.filter((post) => post.path.endsWith('/recover'))).toHaveLength(1), { timeout: 5000 }); });
-  await click('Back to Browse');
+  await click('Close');
   // The retry is still the bundle's only installation: release 52 is not offered beside it.
   await contains('Show progress');
   expect(button('Review and install')).toBeNull();

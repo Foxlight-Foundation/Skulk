@@ -84,7 +84,13 @@ export function catalogOffers(listing: CatalogListing, runtimes: ManagedRuntime[
       if (fitting && fitting.sequence > installedSequence) state = 'update';
       else {
         state = 'installed';
-        entry = newestFirst.find((candidate) => candidate.sequence === installedSequence) ?? entry;
+        // Several platforms share one sequence, so the card names this
+        // host's listing of the installed release, as a retry's card does:
+        // the one that fits, else the one built for the platform another
+        // fitting listing names (a Skulk update may have moved it out of range).
+        entry = newestFirst.find((candidate) => candidate.sequence === installedSequence && candidate.matches_host)
+          ?? newestFirst.find((candidate) => candidate.sequence === installedSequence && fitting !== null && candidate.runtime_platform === fitting.runtime_platform)
+          ?? newestFirst.find((candidate) => candidate.sequence === installedSequence) ?? entry;
       }
     } else {
       state = fitting ? 'available' : 'unfit';
@@ -269,6 +275,49 @@ export interface InstallJourney {
    * release carries to activation.
    */
   interrupted?: boolean;
+  /**
+   * Which of the plugin's nodes this journey turns on by itself once the
+   * release runs, recorded with the activation this browser sends: every node
+   * that reports off after a first install, or after an update only the nodes
+   * that were on before it, so a node the owner turned off stays off. `ran` is
+   * saved before any node is turned on, so a reload never does it twice.
+   * Absent when this browser did not drive the activation: nothing is turned on.
+   */
+  autoTurnOn?: AutoTurnOn;
+}
+
+/** The nodes an install turns on by itself, and whether it already tried. */
+export interface AutoTurnOn {
+  nodes: 'all' | string[];
+  ran: boolean;
+}
+
+function isAutoTurnOn(value: unknown): value is AutoTurnOn {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.ran === 'boolean'
+    && (record.nodes === 'all' || (Array.isArray(record.nodes) && record.nodes.every((node) => typeof node === 'string')));
+}
+
+/**
+ * The nodes an activation this browser is about to send may turn on once the
+ * release runs. A first install (no release selected yet) turns on every node
+ * that reports off; an update only the nodes that were on before it, read
+ * from the plugin's current nodes (none when they could not be read).
+ */
+export function autoTurnOnFor(firstInstall: boolean, nodesBefore: { nodeId: string; status: string }[] | null): AutoTurnOn {
+  if (firstInstall) return { nodes: 'all', ran: false };
+  return { nodes: (nodesBefore ?? []).filter((node) => node.status !== 'disabled').map((node) => node.nodeId), ran: false };
+}
+
+/**
+ * The nodes to turn on now that the release runs: those this journey may turn
+ * on that report off while their plugin service answers. A node that needs
+ * settings or credentials (`configuration_invalid`), or reports anything
+ * else, is left for the setup page.
+ */
+export function nodesToTurnOn(autoTurnOn: AutoTurnOn, nodes: { nodeId: string; status: string }[]): string[] {
+  return nodes.filter((node) => node.status === 'disabled' && (autoTurnOn.nodes === 'all' || autoTurnOn.nodes.includes(node.nodeId))).map((node) => node.nodeId);
 }
 
 const JOURNEY_KEY = 'skulk-plugin-install-journeys';
@@ -282,7 +331,8 @@ function isJourney(value: unknown): value is InstallJourney {
     && (journey.runtimeDigest === null || typeof journey.runtimeDigest === 'string')
     && typeof journey.transferBytes === 'number' && typeof journey.installOperationId === 'string'
     && (journey.activationOperationId === null || typeof journey.activationOperationId === 'string')
-    && typeof journey.startedAt === 'number' && (journey.interrupted === undefined || typeof journey.interrupted === 'boolean');
+    && typeof journey.startedAt === 'number' && (journey.interrupted === undefined || typeof journey.interrupted === 'boolean')
+    && (journey.autoTurnOn === undefined || isAutoTurnOn(journey.autoTurnOn));
 }
 
 /** A journey whose binding the host confirmed, so there is an operation to follow. */
@@ -524,12 +574,15 @@ export async function startInstallRetry(
   const review = operation.review;
   const consented = readJourneys().find((item) => item.pluginId === pluginId && item.runtimeDigest === review.runtime_digest) ?? null;
   if (!consented && reviewedDigest !== review.runtime_digest) return { pluginId, review, stopped: operation.state === 'recovery_required' };
+  // An activation already sent for this very install is read back, never sent
+  // again, and keeps what it recorded about turning nodes on.
+  const sentActivation = operation.state !== 'recovery_required' && consented?.installOperationId === operation.request.operation_id ? consented : null;
   const journey: BoundJourney = {
     pluginId, title: consented?.title ?? request.title, bundleId: review.bundle_id, sequence: review.sequence, publisher: review.publisher,
     runtimeDigest: review.runtime_digest, transferBytes: review.artifact_bytes || (consented?.transferBytes ?? 0),
     installOperationId: operation.request.operation_id,
-    // An activation already sent for this very install is read back, never sent again.
-    activationOperationId: operation.state !== 'recovery_required' && consented?.installOperationId === operation.request.operation_id ? consented.activationOperationId : null,
+    activationOperationId: sentActivation?.activationOperationId ?? null,
+    ...(sentActivation?.activationOperationId && sentActivation.autoTurnOn ? { autoTurnOn: sentActivation.autoTurnOn } : {}),
     // A retry follows the same operation again, so its start time must tell
     // it from the attempt that stopped.
     startedAt: Math.max(Date.now(), (consented?.startedAt ?? 0) + 1),
