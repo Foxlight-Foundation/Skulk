@@ -178,6 +178,17 @@ export interface RuntimeInstallation {
 /** Address an operation already retained by the installed manager. */
 export interface ManagedOperationAddress { pluginId: string; operationId: string }
 
+/**
+ * The retained install of each installation that answered, by plugin id: null
+ * when it has none. An installation whose read failed is absent.
+ */
+export type InstallOperations = Record<string, RuntimeInstallation | null>;
+
+/** The installations whose retained install is worth reading: every one not uninstalled. */
+export function installOperationIds(runtimes: ManagedRuntime[] | undefined): string[] {
+  return (runtimes ?? []).filter((runtime) => !runtime.uninstalled).map((runtime) => runtime.plugin_id);
+}
+
 /** Source readiness only; no stored credential values or local paths. */
 export interface RuntimeSourceStatus {
   revision: number;
@@ -377,6 +388,20 @@ const pluginsApi = apiSlice.injectEndpoints({
       query: (pluginId) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, headers, cache: 'no-store' }),
       providesTags: ['Plugins'],
     }),
+    getInstallOperations: build.query<InstallOperations, string[]>({
+      // The inventory does not carry install progress, so each installation's
+      // retained install is read on its own route. A read that fails leaves
+      // that installation out: unknown, never assumed to need anything.
+      async queryFn(pluginIds, _api, _extraOptions, baseQuery) {
+        const reads = await Promise.all(pluginIds.map((pluginId) => baseQuery({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, headers, cache: 'no-store' })));
+        const operations: InstallOperations = {};
+        reads.forEach((read, index) => {
+          if (!read.error) operations[pluginIds[index]] = (read.data as { operation?: RuntimeInstallation | null } | undefined)?.operation ?? null;
+        });
+        return { data: operations };
+      },
+      providesTags: ['Plugins'],
+    }),
     installRuntimeRelease: build.mutation<RuntimeInstallation, { pluginId: string; request: RuntimeInstallation['request'] }>({
       query: ({ pluginId, request }) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, method: 'POST', headers, body: request }),
       invalidatesTags: ['Plugins'],
@@ -460,4 +485,4 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useGetPluginServiceQuery, useStartPluginServiceSetupMutation, useGetPluginCatalogQuery, useGetCatalogSourceQuery, useSelectBuiltinCatalogMutation, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useGetPluginServiceQuery, useStartPluginServiceSetupMutation, useGetPluginCatalogQuery, useGetCatalogSourceQuery, useSelectBuiltinCatalogMutation, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useGetInstallOperationsQuery, useLazyGetRuntimeSourceStatusQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;

@@ -10,7 +10,7 @@ import {
   useLazyGetRuntimeInstallationQuery, type ManagedOperation, type ManagedRuntime, type RuntimeInstallation,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
-import { clearJourney, formatMegabytes, isBound, readJourneys, saveJourney, type BoundJourney, type InstallStartRefusal } from './catalogJourney';
+import { clearJourney, formatMegabytes, isBound, markInterrupted, readJourneys, saveJourney, type BoundJourney, type InstallStartRefusal } from './catalogJourney';
 
 /** What the setup checklist needs once the release is running. */
 export interface SetupTarget { pluginId: string; title: string }
@@ -28,6 +28,12 @@ export interface CatalogInstallProgressProps {
   refusal: InstallStartRefusal | null;
   onDone: (target: SetupTarget) => void;
   onBack: () => void;
+  /**
+   * Retry an install the host reports stopped, with the consent this
+   * browser saved for its release. Offered only when the install stopped or a
+   * retry could not start.
+   */
+  onRetry?: () => void;
   /** Interval between status reads, in milliseconds; tests shorten it. */
   pollMs?: number;
 }
@@ -36,7 +42,8 @@ type StepState = 'waiting' | 'active' | 'done' | 'failed';
 interface Steps { verified: StepState; downloaded: StepState; prepared: StepState; activated: StepState }
 type Failure =
   | { kind: 'detail'; step: keyof Steps; detail: string }
-  | { kind: 'code'; step: keyof Steps; code: 'recovery' | 'download-unconfirmed' | 'inventory' | 'activation-unconfirmed' | 'start-slow' | 'unreadable' }
+  | { kind: 'stopped'; step: 'downloaded' | 'prepared'; cause: 'download' | 'prepare' | 'interrupted' }
+  | { kind: 'code'; step: keyof Steps; code: 'download-unconfirmed' | 'inventory' | 'activation-unconfirmed' | 'start-slow' | 'unreadable' }
   | { kind: 'code-with-value'; step: keyof Steps; code: 'activation-failed' | 'activation-refused' | 'start-failed'; value: string };
 
 const POLL_MS = 2000;
@@ -63,7 +70,7 @@ function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
  * most once, recording its identity before sending; a lost response or a
  * page opened again reads that operation back and never sends it twice.
  */
-export function CatalogInstallProgress({ title, publisher, sequence, transferBytes, updating, journey, refusal, onDone, onBack, pollMs = POLL_MS }: CatalogInstallProgressProps) {
+export function CatalogInstallProgress({ title, publisher, sequence, transferBytes, updating, journey, refusal, onDone, onBack, onRetry, pollMs = POLL_MS }: CatalogInstallProgressProps) {
   const { t } = useSkulkTranslation();
   const [activate] = useActivateRuntimeReleaseMutation();
   const [readInstall] = useLazyGetRuntimeInstallationQuery();
@@ -73,10 +80,14 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
   const [downloaded, setDownloaded] = useState(0);
   const [failure, setFailure] = useState<Failure | null>(null);
   const [target, setTarget] = useState<SetupTarget | null>(null);
-  const journeyKey = journey ? `${journey.pluginId}/${journey.installOperationId}` : null;
+  // A retry follows the same install operation again, so the start time
+  // tells one attempt from the next.
+  const journeyKey = journey ? `${journey.pluginId}/${journey.installOperationId}/${journey.startedAt}` : null;
 
   useEffect(() => {
     if (!refusal) return;
+    // A retry that could not start reads like a refused download: its
+    // release was verified when it was first installed.
     setSteps((current) => refusal.stage === 'bind' ? { ...current, verified: 'failed' } : { ...current, verified: 'done', downloaded: 'failed' });
   }, [refusal]);
 
@@ -109,7 +120,15 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
           if (operation && operation.request.operation_id === current.installOperationId) {
             setDownloaded(operation.downloaded_bytes);
             if (operation.state === 'staged') break;
-            if (operation.state === 'recovery_required') { clearJourney(pluginId); fail({ kind: 'code', step: 'downloaded', code: 'recovery' }); return; }
+            if (operation.state === 'recovery_required') {
+              // The host never repeats a stopped install by itself. The journey
+              // stays as the consent a retry of this release carries.
+              markInterrupted(pluginId);
+              const prepared = operation.error_code === 'installation_failed';
+              if (prepared) mark({ downloaded: 'done' });
+              fail({ kind: 'stopped', step: prepared ? 'prepared' : 'downloaded', cause: prepared ? 'prepare' : operation.error_code === 'download_failed' ? 'download' : 'interrupted' });
+              return;
+            }
             if (operation.state === 'staging') mark({ downloaded: 'done', prepared: 'active' });
           } else if (answered && ++unconfirmed >= CONFIRM_ATTEMPTS) {
             clearJourney(pluginId); fail({ kind: 'code', step: 'downloaded', code: 'download-unconfirmed' }); return;
@@ -201,6 +220,13 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
 
   const failureText = (value: Failure): string => {
     if (value.kind === 'detail') return value.detail;
+    if (value.kind === 'stopped') {
+      return {
+        download: t('plugins.catalog.stoppedDownload', 'The download stopped before it finished. Choose Retry to download the same release again and finish installing it. Its card under Installed offers the same Retry.'),
+        prepare: t('plugins.catalog.stoppedPrepare', 'The download finished, but preparing its runtime failed. Choose Retry to prepare the same release again and finish installing it. Its card under Installed offers the same Retry.'),
+        interrupted: t('plugins.catalog.stoppedInterrupted', 'The install was interrupted before it finished. Choose Retry to pick up the same release and finish installing it. Its card under Installed offers the same Retry.'),
+      }[value.cause];
+    }
     if (value.kind === 'code-with-value') {
       if (value.code === 'activation-refused') return t('plugins.catalog.activationRefused', 'The host refused the activation (HTTP {status}). The release stays downloaded; activate it from Installed.', { status: value.value });
       return value.code === 'activation-failed'
@@ -208,7 +234,6 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
         : t('plugins.catalog.startFailed', 'It was activated but did not start ({code}). Open Installed for the reason.', { code: value.value });
     }
     return {
-      recovery: t('plugins.catalog.downloadRecovery', 'The download stopped and needs recovery. Open Installed to retry it; nothing is repeated automatically.'),
       'download-unconfirmed': t('plugins.catalog.downloadUnconfirmed', 'The host never confirmed the download. Nothing was repeated. Review the release again to start over.'),
       inventory: t('plugins.catalog.inventoryUnavailable', 'The installation is not in the host’s inventory. Open Installed to check it.'),
       'activation-unconfirmed': t('plugins.catalog.activationUnconfirmed', 'The host never confirmed the activation. Nothing was repeated. Open Installed to check it.'),
@@ -216,14 +241,23 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
       unreadable: t('plugins.catalog.statusUnreadable', 'This page lost contact with the host and stopped following. The install may still be running there: come back to Browse to pick it up.'),
     }[value.code];
   };
+  const retryRefusalText = (value: InstallStartRefusal): string => value.code ? {
+    'nothing-to-retry': t('plugins.catalog.retryNothing', 'The host has no stopped install for this plugin, so nothing was retried. Open Installed to see where it stands.'),
+    'source-unavailable': t('plugins.catalog.retrySourceUnavailable', 'This plugin’s release source or its credential is not ready on the host, so nothing was retried. Restore it from the plugin’s details under Installed, then retry.'),
+    unreadable: t('plugins.catalog.retryUnreadable', 'The host could not be read, so nothing was retried. Check the connection, then retry.'),
+  }[value.code] : t('plugins.catalog.retryRefused', 'The host did not accept the retry. Nothing was repeated.');
   const refusalText = refusal?.unconfirmed ? t('plugins.catalog.bindUnconfirmed', 'The host did not confirm this release, so it may already be bound. Review and install it again to continue: the same installation is used, so nothing is duplicated.')
-    : refusal ? (refusal.detail ?? (refusal.stage === 'bind'
+    : refusal ? (refusal.detail ?? (refusal.stage === 'retry' ? retryRefusalText(refusal) : refusal.stage === 'bind'
     ? t('plugins.catalog.bindRefused', 'The host did not accept this release. Nothing was installed. Read the catalog again and retry.')
     : t('plugins.catalog.downloadRefused', 'The host refused the download. Nothing was installed.'))
     + (refusal.status !== undefined && !refusal.detail ? ` (HTTP ${refusal.status})` : '')) : null;
+  // A stopped install, or a retry that could not start, can be retried again
+  // from here with the consent already given; an install the host does not
+  // have cannot.
+  const retryable = !!onRetry && (failure?.kind === 'stopped' || (refusal?.stage === 'retry' && refusal.code !== 'nothing-to-retry'));
   const message = refusalText ?? (failure ? failureText(failure) : null);
   const rows: { key: keyof Steps; label: string; detail: string }[] = [
-    { key: 'verified', label: t('plugins.catalog.stepVerified', 'Signature and compatibility verified'), detail: `${publisher} · ${t('plugins.catalog.release', 'release {sequence}', { sequence })}` },
+    { key: 'verified', label: t('plugins.catalog.stepVerified', 'Signature and compatibility verified'), detail: publisher ? `${publisher} · ${t('plugins.catalog.release', 'release {sequence}', { sequence })}` : '' },
     { key: 'downloaded', label: t('plugins.catalog.stepDownloaded', 'Downloaded'), detail: steps.downloaded === 'done' ? formatMegabytes(transferBytes) : `${formatMegabytes(downloaded)} / ${formatMegabytes(transferBytes)}` },
     { key: 'prepared', label: t('plugins.catalog.stepPrepared', 'Runtime prepared'), detail: t('plugins.catalog.isolated', 'isolated environment') },
     { key: 'activated', label: t('plugins.catalog.stepActivated', 'Activated'), detail: steps.activated === 'done' ? t('plugins.catalog.running', 'running') : t('plugins.catalog.starting', 'starting') },
@@ -241,6 +275,7 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
     {message ? <FailureBox role="alert">{message}</FailureBox> : null}
     <Actions>
       {target ? <Button variant="primary" onClick={() => onDone(target)}>{t('plugins.catalog.setItUp', 'Set it up')}</Button> : null}
+      {retryable ? <Button variant="primary" onClick={onRetry}>{t('plugins.catalog.retryInstall', 'Retry')}</Button> : null}
       <Button variant="ghost" onClick={onBack}>{t('plugins.catalog.backToBrowse', 'Back to Browse')}</Button>
     </Actions>
   </Panel>;

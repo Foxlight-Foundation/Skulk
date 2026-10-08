@@ -5,12 +5,15 @@ import { Provider } from 'react-redux';
 import { ThemeProvider } from 'styled-components';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { apiSlice } from '../../store/api';
-import type { ManagedOperation, ManagedRuntime } from '../../store/endpoints/plugins';
+import type { ManagedOperation, ManagedRuntime, RuntimeInstallation } from '../../store/endpoints/plugins';
 import { darkTheme } from '../../theme/theme';
+import { saveJourney, type RetryRequest } from './catalogJourney';
 import { ManagedRuntimesPanel } from './ManagedRuntimesPanel';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
-vi.mock('../../i18n/tolgee', () => ({ useSkulkTranslation: () => ({ t: (_key: string, fallback: string) => fallback }) }));
+vi.mock('../../i18n/tolgee', () => ({
+  useSkulkTranslation: () => ({ t: (_key: string, fallback: string, params?: Record<string, unknown>) => fallback.replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? '')) }),
+}));
 
 let root: Root;
 let host: HTMLDivElement;
@@ -22,6 +25,8 @@ let operationReads: string[];
 let store: ReturnType<typeof makeStore>;
 let purged: boolean;
 let refusePurge: boolean;
+let installOperation: RuntimeInstallation | null;
+let retried: RetryRequest[];
 
 function makeStore() {
   return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) });
@@ -31,7 +36,7 @@ function response(body: unknown, status = 200) {
 }
 async function mount() {
   root = createRoot(host);
-  await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ManagedRuntimesPanel /></ThemeProvider></Provider>); });
+  await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ManagedRuntimesPanel onRetryInstall={(request) => { retried.push(request); }} /></ThemeProvider></Provider>); });
   await contains('Configure');
   await click('Configure');
 }
@@ -55,6 +60,9 @@ beforeEach(async () => {
   operationReads = [];
   purged = false;
   refusePurge = false;
+  installOperation = null;
+  retried = [];
+  localStorage.removeItem('skulk-plugin-install-journeys');
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     const path = new URL(request.url).pathname;
@@ -76,11 +84,13 @@ beforeEach(async () => {
     }
     if (request.method === 'DELETE') {
       deletes.push(path);
-      if (!runtime.uninstalled || refusePurge) return response({ detail: 'refused' }, 409);
+      // The host removes an uninstalled installation, or one that never selected a release.
+      if ((!runtime.uninstalled && runtime.selected_digest !== null) || refusePurge) return response({ detail: 'refused' }, 409);
       purged = true;
       return response({ plugin_id: runtime.plugin_id, purged: true });
     }
     if (path === '/v1/plugins/managed') return response({ installations: purged ? [] : [runtime] });
+    if (path.endsWith('/install')) return response({ operation: installOperation });
     operationReads.push(path);
     return operation ? response(operation) : response({}, 404);
   });
@@ -93,6 +103,7 @@ afterEach(async () => {
   await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
   host.remove();
   vi.unstubAllGlobals();
+  localStorage.removeItem('skulk-plugin-install-journeys');
 });
 
 it('recovers a server-retained operation reference after reconnect without another submission', async () => {
@@ -260,4 +271,70 @@ it('routes menu withdrawals through the existing operation fence and refuses dup
   expect(action.disabled).toBe(true);
   await act(async () => action.click());
   expect(posts).toHaveLength(1);
+});
+
+const strayId = 'managed.9598f7f0' + '0'.repeat(24);
+function strayInstall(): void {
+  runtime = { plugin_id: strayId, release: null, selected_digest: null, selection_revision: 0, enabled: false, stale: true, error_code: null, operation_id: null, operation_state: null, service: null };
+  installOperation = {
+    attempt: 0, request: { operation_id: '5'.repeat(32), runtime_digest: 'f'.repeat(64), expected_source_revision: 3 },
+    review: { runtime_digest: 'f'.repeat(64), source_revision: 3, publisher: 'foxlight', bundle_id: 'foxlight.video-studio', version: '0.1.0', sequence: 49, platform: 'linux-glibc-x86_64', python_requires: '>=3.13', skulk_build_sha256: 'b'.repeat(64), permissions: [], artifact_bytes: 900_000_000, expires_at: 1_900_000_000 },
+    state: 'recovery_required', downloaded_bytes: 900_000_000, error_code: 'installation_failed',
+  };
+}
+function headings() { return [...host.querySelectorAll('h2')].map((heading) => heading.textContent); }
+
+it('names a stopped first install by its catalog title and offers its retry on the card', async () => {
+  strayInstall();
+  saveJourney({ pluginId: strayId, title: 'Skulk Video Studio', bundleId: 'foxlight.video-studio', sequence: 49, publisher: 'foxlight', runtimeDigest: 'f'.repeat(64),
+    transferBytes: 900_000_000, installOperationId: '5'.repeat(32), activationOperationId: null, startedAt: 1, interrupted: true });
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Install needs a retry');
+  expect(headings()).toContain('Skulk Video Studio');
+  expect(headings()).not.toContain(strayId);
+  await contains('Release 49 downloaded, but preparing its runtime failed. Retry prepares it again and finishes the install.');
+  await contains('0.1.0 (49) from foxlight');
+  await contains('Not installed yet');
+  expect(host.textContent).not.toContain('Release status unavailable');
+  await click('Retry');
+  expect(retried).toEqual([{ pluginId: strayId, title: 'Skulk Video Studio', publisher: 'foxlight', sequence: 49, transferBytes: 900_000_000, updating: false }]);
+  // A retry is a choice the owner makes: nothing was sent to the host from here.
+  expect(posts).toEqual([]);
+});
+
+it('names a stopped first install by its bundle id when this browser never saw its catalog title', async () => {
+  strayInstall();
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Install needs a retry');
+  expect(headings()).toContain('foxlight.video-studio');
+  expect(headings()).not.toContain(strayId);
+  // The same retry is in the details drawer and its menu.
+  await act(async () => { host.querySelector('details')!.open = true; });
+  await click('Retry install');
+  expect(retried).toHaveLength(1);
+});
+
+it('offers no retry once the stopped release is staged', async () => {
+  strayInstall();
+  installOperation = { ...installOperation!, state: 'staged', error_code: null };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('foxlight.video-studio');
+  expect(host.textContent).not.toContain('Install needs a retry');
+  expect([...host.querySelectorAll('button')].some((item) => item.textContent === 'Retry')).toBe(false);
+});
+
+it('removes a stray stopped install that never selected a release, after the same explicit confirmation', async () => {
+  strayInstall();
+  saveJourney({ pluginId: strayId, title: 'Skulk Video Studio', bundleId: 'foxlight.video-studio', sequence: 49, publisher: 'foxlight', runtimeDigest: 'f'.repeat(64),
+    transferBytes: 900_000_000, installOperationId: '5'.repeat(32), activationOperationId: null, startedAt: 1, interrupted: true });
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Install needs a retry');
+  await act(async () => { host.querySelector('details')!.open = true; });
+  await click('Remove this installation…');
+  await contains('Removing deletes this installation and everything its stopped install kept');
+  expect(deletes).toHaveLength(0);
+  await click('Remove now');
+  await act(async () => { await vi.waitFor(() => expect(deletes).toEqual([`/v1/plugins/managed/installations/${strayId}`])); });
+  // Nothing is left to retry, so this browser's consent record goes once the host confirms.
+  await act(async () => { await vi.waitFor(() => expect(localStorage.getItem('skulk-plugin-install-journeys')).toBe('[]')); });
 });
