@@ -1059,7 +1059,8 @@ exactly as its current trust lists them. A host that cannot reach the store, or 
 last verified until that trust expires. A private catalog
 (`POST /v1/plugins/managed/catalog/source`) replaces the store, and
 `POST /v1/plugins/managed/catalog/source/builtin` switches back. A build that
-does not ship the store's root has no built-in store. A publisher lists the
+does not ship the store's root has no built-in store; Skulk ships root version
+1, signed by two offline hardware root keys. A publisher lists the
 releases it signed (identity, sequence, platforms, size and digests, the signed
 permissions, capability ids, surfaces, durable operations and steward risk
 classes, and where each signed release record is served); the host verifies the

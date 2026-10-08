@@ -986,8 +986,9 @@ owner-only `POST /v1/plugins/managed/catalog/install`,
 discovery trust and the served record must be the one listed; staging and
 activation stay separate consents. The default source is the built-in
 capability store (`extensions/capability_store.py`): a TUF root shipped as
-package data (`capability_store_root.json`, absent until the root exists, in
-which case the store is inactive) anchors one signed target, the store's
+package data (`capability_store_root.json`: root version 1, two YubiKey root
+keys at threshold one, a targets key separate from the snapshot/timestamp key;
+a build without it has no built-in store) anchors one signed target, the store's
 publisher trust, which `HostCatalog` seeds on a host with no source and renews
 on every read while on the store (newer revision only, applied as published
 with no revocation merge, hash-bound last verified copy offline). Revocations

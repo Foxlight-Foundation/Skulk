@@ -518,16 +518,25 @@ async def test_a_build_without_the_store_root_behaves_as_before(
     assert not (tmp_path / "store").exists()
 
 
-def test_the_shipped_store_root_is_absent_or_a_self_signed_root(
+def test_the_shipped_store_root_is_signed_by_every_root_key(
     tmp_path: Path,
 ) -> None:
-    """Until the root ceremony the store is inactive; after it, the root verifies."""
+    """The shipped root verifies, and its online keys are split as publication requires.
+
+    Both hardware root keys sign it, so either can sign the next version. The
+    targets key, which decides what hosts trust, is not the key the unattended
+    renewal holds for snapshot and timestamp.
+    """
     client = StoreTrustClient(tmp_path, embedded_root=EMBEDDED_CAPABILITY_STORE_ROOT)
-    if not EMBEDDED_CAPABILITY_STORE_ROOT.exists():
-        assert not client.available
-        return
     root = Metadata[Root].from_bytes(EMBEDDED_CAPABILITY_STORE_ROOT.read_bytes())
     root.signed.verify_delegate("root", root.signed_bytes, root.signatures)
+    for keyid in root.signed.roles["root"].keyids:
+        root.signed.keys[keyid].verify_signature(
+            root.signatures[keyid], root.signed_bytes
+        )
+    roles = root.signed.roles
+    assert set(roles["targets"].keyids).isdisjoint(roles["timestamp"].keyids)
+    assert roles["snapshot"].keyids == roles["timestamp"].keyids
     assert client.available
 
 
@@ -573,7 +582,9 @@ def test_the_manager_snapshot_stages_package_data_beside_its_module(
     assert EMBEDDED_CAPABILITY_STORE_ROOT.parent.name == "extensions"
 
 
-def _private_trust(key: Ed25519PrivateKey, revision: int, **extra: object) -> RuntimeTrust:
+def _private_trust(
+    key: Ed25519PrivateKey, revision: int, **extra: object
+) -> RuntimeTrust:
     """A private catalog's discovery trust naming ``key`` for the fixture publisher."""
     return RuntimeTrust.model_validate(
         {
@@ -762,9 +773,7 @@ async def test_a_slow_store_falls_back_to_its_retained_trust(
             ),
         )
     )
-    monkeypatch.setattr(
-        "skulk.extensions.runtime_catalog._STORE_TRUST_SECONDS", 0.2
-    )
+    monkeypatch.setattr("skulk.extensions.runtime_catalog._STORE_TRUST_SECONDS", 0.2)
     store.repository.fetcher.delay = 0.4
     status = await store.catalog.use_builtin_store(2)
     assert status.builtin_store and status.trust_revision == 1
@@ -848,7 +857,10 @@ async def test_a_private_catalogs_revocations_survive_a_round_trip_through_the_s
         )
     )
     trust = store.catalog.trust()
-    assert (trust.revoked_publishers, trust.revoked_artifacts) == (("gone",), ("4" * 64,))
+    assert (trust.revoked_publishers, trust.revoked_artifacts) == (
+        ("gone",),
+        ("4" * 64,),
+    )
     # Another private address starts with none of them.
     await store.catalog.configure(
         CatalogSourceUpdate(
@@ -872,9 +884,9 @@ async def test_a_private_catalogs_revocations_survive_a_round_trip_through_the_s
     plain = _Store(tmp_path / "plain")
     plain.publish(1)
     await plain.catalog.fetch()
-    assert b'"revocations"' not in (
-        plain.catalog.root / "catalog-state.json"
-    ).read_bytes()
+    assert (
+        b'"revocations"' not in (plain.catalog.root / "catalog-state.json").read_bytes()
+    )
 
 
 async def test_the_host_assigns_the_next_revision_of_an_address(tmp_path: Path) -> None:
@@ -910,7 +922,9 @@ async def test_the_host_assigns_the_next_revision_of_an_address(tmp_path: Path) 
     assert (
         await _configure_refused(
             store.catalog,
-            CatalogSourceUpdate(expected_revision=4, trust=_private_trust(private_key, 1)),
+            CatalogSourceUpdate(
+                expected_revision=4, trust=_private_trust(private_key, 1)
+            ),
         )
         == "catalog_trust_update_refused"
     )

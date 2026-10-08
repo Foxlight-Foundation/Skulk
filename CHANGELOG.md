@@ -28,8 +28,9 @@ This project records release notes here and mirrors public-facing notes in
   replaces the store as the host's source, and **Use the Foxlight store** (or
   `POST /v1/plugins/managed/catalog/source/builtin`) switches back.
   `GET /v1/plugins/managed/catalog/source` reports `builtin_store` and
-  `builtin_store_available`. A build that does not ship the store's root has
-  no built-in store, and Browse behaves as before.
+  `builtin_store_available`. Skulk now ships the store's root, so Browse lists
+  the Foxlight store at skulkapps.foxlight.ai with nothing to configure; a
+  build without that root has no built-in store.
 - A capability installed from the built-in store follows the store's trust
   while it runs. Skulk renews that trust for it every hour and after each
   catalog read, so the capability keeps running past the expiry its trust had

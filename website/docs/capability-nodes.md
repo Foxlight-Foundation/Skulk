@@ -140,17 +140,14 @@ publishers you trust.
 
 ## Get a compatible plugin
 
-**A public plugin store is coming soon.** For now, obtain plugins directly from
-their publishers.
+Plugins come from the Foxlight capability store at
+[skulkapps.foxlight.ai](https://skulkapps.foxlight.ai/). Open **Plugins**, then
+**Browse**: it lists the store with nothing to set up, shows which releases fit
+this host, and installs one after you review its permissions. Check a plugin's
+supported platforms, permissions, required services, costs, and cleanup before
+installing.
 
-Obtain the release and owner instructions from its publisher. Check supported
-platforms, exact runtime compatibility, permissions, required services, costs,
-and cleanup procedures before installing. A matching version label alone is not
-proof of compatible bytes or dependencies.
-
-When your Skulk build includes the built-in capability store, **Plugins**, then
-**Browse** lists it with nothing to set up: Skulk verifies and renews the store's
-publisher trust by itself. A publisher can also give you a private catalog: an
+Skulk verifies and renews the store's publisher trust by itself. A publisher can also give you a private catalog: an
 address and the publisher trust to verify it, often as a single invitation
 code. Add it under **Browse** with **Add a private catalog**; it replaces the
 store as the host's catalog until you select **Use the Foxlight store**. Browse
