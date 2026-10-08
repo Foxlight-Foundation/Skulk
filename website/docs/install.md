@@ -125,6 +125,19 @@ To uninstall the app and runtime:
 sudo apt remove skulk skulk-desktop skulk-runtime
 ```
 
+If you set up plugins, also remove the plugin service. It runs under your own
+account rather than as part of the packages, so removing them leaves it
+running until you log out:
+
+```bash
+systemctl --user disable --now foundation.foxlight.skulk.plugins.service
+rm -f ~/.config/systemd/user/foundation.foxlight.skulk.plugins.service
+systemctl --user daemon-reload
+```
+
+Its runtime and installed plugins stay in `~/.local/state/skulk/plugin-service`;
+delete that folder to remove them too.
+
 ### Headless Ubuntu or Debian
 
 On a machine with no graphical session, install only the runtime after adding
