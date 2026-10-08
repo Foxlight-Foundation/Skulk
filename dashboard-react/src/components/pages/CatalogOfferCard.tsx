@@ -17,10 +17,12 @@ export interface CatalogOfferCardProps {
   onResume?: () => void;
   /** Retry the stopped install of this bundle, when the offer is a retry. */
   onRetry?: () => void;
+  /** Hold a new install while an installation's install status is unknown: it may be a stopped install of this bundle. */
+  installPaused?: boolean;
 }
 
 /** One bundle a catalog offers, with the facts a newcomer decides on at a glance. */
-export function CatalogOfferCard({ offer, onReview, onSetUp, progress = null, onResume, onRetry }: CatalogOfferCardProps) {
+export function CatalogOfferCard({ offer, onReview, onSetUp, progress = null, onResume, onRetry, installPaused = false }: CatalogOfferCardProps) {
   const { t } = useSkulkTranslation();
   const { entry, installed, state } = offer;
   const title = displayTitle(entry);
@@ -37,7 +39,7 @@ export function CatalogOfferCard({ offer, onReview, onSetUp, progress = null, on
   }[state];
   const opens = entry.surfaces.length > 0 ? t('plugins.catalog.opens', 'Opens {surfaces}.', { surfaces: entry.surfaces.join(', ') }) : null;
   const primary = busy ? <Button variant="primary" size="sm" onClick={onResume}>{t('plugins.catalog.showProgress', 'Show progress')}</Button> : {
-    available: <Button variant="primary" size="sm" onClick={onReview}>{t('plugins.catalog.reviewInstall', 'Review and install')}</Button>,
+    available: <Button variant="primary" size="sm" disabled={installPaused} onClick={onReview}>{t('plugins.catalog.reviewInstall', 'Review and install')}</Button>,
     update: <Button variant="primary" size="sm" onClick={onReview}>{t('plugins.catalog.reviewUpdate', 'Review update')}</Button>,
     installed: <Button variant="outline" size="sm" onClick={onSetUp}>{t('plugins.catalog.setUp', 'Set up')}</Button>,
     unfit: null,

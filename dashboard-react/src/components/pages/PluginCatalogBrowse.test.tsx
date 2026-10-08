@@ -34,6 +34,7 @@ let assignsRevisions: boolean;
 let stray: ManagedRuntime | null;
 let strayOperation: RuntimeInstallation | null;
 let stopFreshInstall: boolean;
+let failStrayRead: boolean;
 
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -73,6 +74,7 @@ beforeEach(async () => {
   stray = null;
   strayOperation = null;
   stopFreshInstall = false;
+  failStrayRead = false;
   localStorage.removeItem('skulk-plugin-install-journeys');
   installed = {
     plugin_id: pluginId, release: { bundle_id: 'example.studio', title: 'Example Studio', bundle_version: '0.1.0', publisher: 'example', sequence: 50 },
@@ -99,7 +101,7 @@ beforeEach(async () => {
         }
         return json({ detail: 'unexpected' }, 404);
       }
-      if (rest === '/install') return json({ operation: strayOperation });
+      if (rest === '/install') return failStrayRead ? json({ detail: 'unavailable' }, 503) : json({ operation: strayOperation });
       if (rest === '/source') return json({ revision: 8, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1 });
       if (rest.startsWith('/operations/')) return json({ request: { operation_id: activationOperationId, action: 'activate' }, state: 'complete', error_code: null });
       return json({ detail: 'not found' }, 404);
@@ -379,4 +381,20 @@ it('starts a retry handed over from Installed once', async () => {
   expect(posts.filter((post) => post.path.endsWith('/recover'))).toHaveLength(1);
   // The title this browser saved at consent names it, not the bundle id the card passed.
   expect(host.textContent).toContain('Installing Example Studio');
+});
+
+it('pauses new installs while an installation that names no bundle could not be read', async () => {
+  freshHost = true;
+  stray = registered(strayId);
+  strayOperation = stoppedAt('5'.repeat(32));
+  failStrayRead = true;
+  await render();
+  await contains('could not be read, so new installs are paused');
+  // Without its install, the stopped one looks like nothing: a new install would sit beside it.
+  expect(button('Review and install')?.disabled).toBe(true);
+  failStrayRead = false;
+  await click('Try again');
+  await contains('Resume install');
+  expect(host.textContent).not.toContain('new installs are paused');
+  expect(posts).toEqual([]);
 });

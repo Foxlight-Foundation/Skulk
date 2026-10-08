@@ -912,6 +912,7 @@
   "plugins.catalog.installedLead": "{title} is installed and running.",
   "plugins.catalog.installingPill": "Installing",
   "plugins.catalog.installingTitle": "Installing {title}",
+  "plugins.catalog.installsUnread": "The install status of {count} installation(s) on this host could not be read, so new installs are paused: one of them may be a stopped install of the same plugin, which a new install would duplicate.",
   "plugins.catalog.inventoryUnavailable": "The installation is not in the host’s inventory. Open Installed to check it.",
   "plugins.catalog.invitationCode": "Invitation code",
   "plugins.catalog.invitationInvalid": "This is not an invitation code this dashboard can read, or it has expired.",

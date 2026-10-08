@@ -77,7 +77,9 @@ export function PluginCatalogBrowse({ onManage, retry, onRetryTaken }: PluginCat
   const catalog = useGetPluginCatalogQuery(undefined, { skip: !configured || view.kind === 'connect' });
   const runtimes = useGetManagedRuntimesQuery();
   const operationIds = installOperationIds(runtimes.data?.installations);
-  const installs = useGetInstallOperationsQuery(operationIds, { skip: operationIds.length === 0 });
+  // Read fresh whenever Browse opens: a cached read from Installed can be
+  // older than an install that has since stopped.
+  const installs = useGetInstallOperationsQuery(operationIds, { skip: operationIds.length === 0, refetchOnMountOrArgChange: true });
   const [bind] = useInstallFromCatalogMutation();
   const [install] = useInstallRuntimeReleaseMutation();
   const [readInstall] = useLazyGetRuntimeInstallationQuery();
@@ -86,10 +88,18 @@ export function PluginCatalogBrowse({ onManage, retry, onRetryTaken }: PluginCat
   const offers = useMemo(() => catalog.data
     ? catalogOffers(catalog.data, runtimes.data?.installations ?? [], interruptedInstalls(runtimes.data?.installations ?? [], installs.data))
     : [], [catalog.data, runtimes.data, installs.data]);
-  // Offers wait for the installations and their installs: an offer made
-  // before a stopped install is known would register a second installation.
-  const installsKnown = operationIds.length === 0 || installs.data !== undefined || !!installs.error;
+  // Offers wait for the installations and a fresh read of their installs: an
+  // offer made before a stopped install is known would register a second
+  // installation beside it.
+  const installsKnown = operationIds.length === 0 || (installs.data !== undefined && !installs.isFetching);
   const inventoryKnown = (runtimes.data !== undefined || !!runtimes.error) && installsKnown;
+  // A read that failed leaves its installation out. One that never selected a
+  // release names no bundle until its install is read, so while any such read
+  // is missing, a new install might duplicate a stopped one: fresh installs
+  // pause until it is read.
+  const unreadInstalls = installs.data && installsKnown
+    ? (runtimes.data?.installations ?? []).filter((runtime) => operationIds.includes(runtime.plugin_id) && !(runtime.plugin_id in installs.data!) && !runtime.release).length
+    : 0;
 
   // One consent starts one install, even if the button is clicked twice.
   const starting = useRef(false);
@@ -206,11 +216,15 @@ export function PluginCatalogBrowse({ onManage, retry, onRetryTaken }: PluginCat
       <Button variant="outline" size="sm" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>{t('plugins.catalog.retry', 'Try again')}</Button>
     </Notice> : null}
     {catalog.data && !inventoryKnown ? <Centered><Spinner size={22} /></Centered> : null}
+    {catalog.data && inventoryKnown && unreadInstalls > 0 ? <Notice role="alert">
+      {t('plugins.catalog.installsUnread', 'The install status of {count} installation(s) on this host could not be read, so new installs are paused: one of them may be a stopped install of the same plugin, which a new install would duplicate.', { count: unreadInstalls })}
+      <Button variant="outline" size="sm" disabled={installs.isFetching} onClick={() => void installs.refetch()}>{t('plugins.catalog.retry', 'Try again')}</Button>
+    </Notice> : null}
     {catalog.data && inventoryKnown && offers.length === 0 ? <p>{t('plugins.catalog.empty', 'This catalog lists nothing yet.')}</p> : null}
     <Offers>{catalog.data && inventoryKnown ? offers.map((offer) => {
       const progress = journeyInProgress(offer.entry.bundle_id, offer.entry.sequence, journeys);
       const stopped = offer.retry;
-      return <CatalogOfferCard key={offer.entry.bundle_id} offer={offer} progress={progress}
+      return <CatalogOfferCard key={offer.entry.bundle_id} offer={offer} progress={progress} installPaused={unreadInstalls > 0}
         onResume={() => progress && resume(progress, offer.state === 'update')}
         onRetry={() => {
           if (!stopped) return;
