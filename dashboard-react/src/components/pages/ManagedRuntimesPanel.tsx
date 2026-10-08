@@ -231,8 +231,8 @@ function RuntimeControls({ runtime, installations, unavailable, nodes, details, 
   // The release shown: the selected one, else the one a stopped first install was installing.
   const shownRelease = release ? { version: release.bundle_version, publisher: release.publisher, sequence: release.sequence }
     : installing ? { version: installing.version, publisher: installing.publisher, sequence: installing.sequence } : null;
+  // Only where it came from: a publisher's release number is an identifier, kept under Details.
   const metaLine = [
-    ...(shownRelease ? [t('plugins.runtime.sequence', 'Sequence {sequence}', { sequence: shownRelease.sequence })] : []),
     ...(source.currentData?.follows_store ? [t('plugins.runtime.fromStore', 'From the Foxlight capability store')]
       : source.currentData?.configured ? [t('plugins.runtime.fromPrivate', 'From a private source')] : []),
   ];
@@ -322,6 +322,10 @@ function RuntimeControls({ runtime, installations, unavailable, nodes, details, 
         </DetailsToggle>
         {detailsOpen ? <div id={`${runtime.plugin_id}-details`} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Facts>
+            {shownRelease ? <>
+              <dt>{t('plugins.runtime.releaseNumber', 'Release number')}</dt>
+              <dd><FactValue><code>{shownRelease.sequence}</code></FactValue></dd>
+            </> : null}
             <dt>{t('plugins.runtime.installation', 'Installation')}</dt>
             <dd><Fingerprint value={runtime.plugin_id} label={t('plugins.runtime.installation', 'Installation')} full /></dd>
             <dt>{t('plugins.selectedRelease', 'Selected release')}</dt>

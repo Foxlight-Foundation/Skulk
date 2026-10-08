@@ -149,8 +149,8 @@ Failed, Updating or Uninstalled. Its actions sit in one row:
   kept after a second confirmation; after that it can be installed fresh from
   **Browse**.
 
-**Details** holds the installation id, the selected and active release
-fingerprints, the last local operation with **Refresh status**, and **Choose
+**Details** holds the release number, the installation id, the selected and
+active release fingerprints, the last local operation with **Refresh status**, and **Choose
 another release**, which inspects, stages and activates a release from the
 plugin's source.
 

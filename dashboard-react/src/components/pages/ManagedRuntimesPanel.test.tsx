@@ -400,9 +400,15 @@ it('labels the runtime by its state, under its release and where it came from', 
   for (const [overrides, label] of cases) {
     runtime = { ...runtime, enabled: true, uninstalled: false, operation_id: null, operation_state: null, service: { state: 'running', active_digest: 'a'.repeat(64), observed_at: 1 }, release: releaseOne, ...overrides };
     await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
-    await act(async () => { await vi.waitFor(() => expect(runtimeHeader()).toBe(`Release 1.0.0 from fixtureSequence 1 · From the Foxlight capability store${label}`)); });
+    await act(async () => { await vi.waitFor(() => expect(runtimeHeader()).toBe(`Release 1.0.0 from fixtureFrom the Foxlight capability store${label}`)); });
   }
-  await contains('Sequence 1 · From the Foxlight capability store');
+  // The release number is an identifier: it waits under Details, not in the header.
+  expect(runtimeHeader()).not.toContain('Sequence');
+  await click('Details');
+  const facts = host.querySelector('[role=dialog] dl')!;
+  const numberLabel = [...facts.querySelectorAll('dt')].find((item) => item.textContent === 'Release number')!;
+  expect(numberLabel.nextElementSibling?.textContent).toBe('1');
+  await click('Details');
   // The raw installation id and fingerprints wait under Details.
   expect(host.querySelector('[role=dialog] article')?.textContent).not.toContain('managed.fixture');
 });

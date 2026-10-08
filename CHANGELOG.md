@@ -133,10 +133,10 @@ This project records release notes here and mirrors public-facing notes in
   **Update to** a newer release built for this host (reviewed under
   **Browse**), **Stop plugin** or **Start plugin** (named apart from the
   capability nodes' **Turn on** and **Turn off**), and **Uninstall**. The
-  installation id, release fingerprints, the last local operation with
-  **Refresh status**, **Choose another release** (formerly **Install a
-  release**) and a plain explanation of what Stop and Uninstall keep sit under
-  a closed **Details**. An uninstalled plugin leads with **Reinstall** and
+  release number, installation id, release fingerprints, the last local
+  operation with **Refresh status**, **Choose another release** (formerly
+  **Install a release**) and a plain explanation of what Stop and Uninstall
+  keep sit under a closed **Details**. An uninstalled plugin leads with **Reinstall** and
   **Remove everything**.
 - An installed capability's **Browse** card could name another platform's
   build of the same release, such as "Linux, ARM64" on a Mac. It now names the
