@@ -157,8 +157,11 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
           try { await sleep(pollMs, signal); } catch { return null; }
         }
       }
+      // Another tab following the same journey may have tried meanwhile.
+      const fresh = saved();
+      if (!fresh?.autoTurnOn || fresh.autoTurnOn.ran) { setTurnOnStep(null); return null; }
       const chosen = nodes ? nodesToTurnOn(plan, nodes) : [];
-      saveJourney({ ...latest, autoTurnOn: { ...plan, ran: true } });
+      saveJourney({ ...fresh, autoTurnOn: { ...fresh.autoTurnOn, ran: true } });
       if (chosen.length === 0) { if (!signal.aborted) setTurnOnStep(null); return null; }
       const outcome = await turnOnNodes({ readConfiguration: (address) => readConfiguration(address, false), configure }, pluginId, chosen, pluginRefusalDetail, pluginRequestRefused);
       if (!signal.aborted) setTurnOnStep(outcome.refusal ? 'failed' : 'done');
@@ -213,15 +216,17 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
       // The host answered without this installation, so nothing is left to follow.
       if (!runtime) { clearJourney(pluginId); fail({ kind: 'code', step: 'activated', code: 'inventory' }); return; }
       const alreadyActive = runtime.enabled && runtime.selected_digest === current.runtimeDigest;
+      // What an activation sent from here may turn on once it runs is decided
+      // from what is on before it, so an update leaves a node the owner turned
+      // off alone. It is read before the activation is claimed: claiming and
+      // recording the activation stay one step, as a remount relies on.
+      const firstInstall = runtime.selected_digest === null;
+      const nodesBefore = !alreadyActive && !firstInstall && (saved() ?? current).activationOperationId === null ? await readNodes() : null;
+      if (signal.aborted) return;
       current = saved() ?? current;
       if (!alreadyActive && current.activationOperationId === null && !activationInFlight.has(pluginId)) {
         activationInFlight.add(pluginId);
-        // What this activation may turn on once it runs is decided now, from
-        // what is on before it: an update leaves a node the owner turned off alone.
-        const firstInstall = runtime.selected_digest === null;
-        const nodesBefore = firstInstall ? null : await readNodes();
-        if (signal.aborted) { activationInFlight.delete(pluginId); return; }
-        current = { ...(saved() ?? current), activationOperationId: randomHex32(), autoTurnOn: autoTurnOnFor(firstInstall, nodesBefore) };
+        current = { ...current, activationOperationId: randomHex32(), autoTurnOn: autoTurnOnFor(firstInstall, nodesBefore) };
         saveJourney(current);
         try {
           await activate({ pluginId, operationId: current.activationOperationId!, expectedRevision: runtime.selection_revision, runtimeDigest: current.runtimeDigest, rollback: false }).unwrap();
