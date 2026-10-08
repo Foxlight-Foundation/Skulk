@@ -91,6 +91,11 @@ This project records release notes here and mirrors public-facing notes in
   in its toast (`POST /place_instance` returns the notice as `engine_install`);
   and the instance reads "Installing video engine (about 7 GB)..." while the
   install runs.
+- Skulk's dependencies now resolve to stable releases only. The lock had
+  carried two release candidates (kiwisolver 1.4.10rc0 and packaging 26.0rc1)
+  because the project allowed prereleases everywhere; it now uses kiwisolver
+  1.5.1 and packaging 26.3, and a prerelease can enter only when a requirement
+  names one explicitly or a package has no stable release.
 
 ### Fixed
 
