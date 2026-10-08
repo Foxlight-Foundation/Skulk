@@ -3,6 +3,7 @@
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -10,7 +11,10 @@ from pathlib import Path
 import pytest
 
 from skulk.extensions.runtime_files import private_directory, write_private
-from skulk.extensions.runtime_install import RuntimeInstaller
+from skulk.extensions.runtime_install import (
+    RuntimeInstaller,
+    _without_shared_write,  # pyright: ignore[reportPrivateUsage]
+)
 from skulk.extensions.runtime_integrity import (
     adopt_current_interpreter,
     seal_runtime,
@@ -304,3 +308,52 @@ async def test_relinked_runtime_starts_on_a_moved_standalone_interpreter(
         timeout=60,
     )
     assert started.stdout.split() == ["7", str(moved)]
+
+
+def test_a_new_runtime_loses_group_and_other_write(tmp_path: Path) -> None:
+    """Shared write bits copied from a base Python's templates are removed."""
+    runtime = tmp_path / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    script = runtime / "bin" / "activate"
+    script.write_text("# activate\n")
+    script.chmod(0o664)
+    (runtime / "bin").chmod(0o775)
+    (runtime / "bin" / "python").symlink_to("/usr/bin/false")
+
+    _without_shared_write(runtime)
+
+    assert stat.S_IMODE(script.stat().st_mode) == 0o644
+    assert stat.S_IMODE((runtime / "bin").stat().st_mode) == 0o755
+    assert (runtime / "bin" / "python").is_symlink()
+
+
+@pytest.mark.slow
+async def test_a_base_python_with_group_writable_templates_still_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ubuntu's 0002 umask leaves uv's venv templates group-writable.
+
+    venv copies those modes onto every runtime's activation scripts, which the
+    seal refuses; staging must clear them first.
+    """
+    prefix = Path(sys.base_prefix).resolve()
+    if not (prefix / "bin" / _MINOR).is_file() or "Python.framework" in str(prefix):
+        pytest.skip("needs a relocatable standalone CPython")
+    base = tmp_path / "python"
+    shutil.copytree(prefix, base, symlinks=True)
+    templates = base / "lib" / _MINOR / "venv" / "scripts"
+    for template in templates.rglob("*"):
+        if template.is_file():
+            template.chmod(0o664)
+    monkeypatch.setattr(sys, "executable", str(base / "bin" / _MINOR))
+    source = tmp_path / "source"
+    metadata, trust, host = artifacts(source)
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    installer = RuntimeInstaller(tmp_path / "installation")
+    write_private(
+        installer.root / "publisher-trust.json", trust.model_dump_json().encode()
+    )
+
+    operation = await installer.stage(metadata, source)
+
+    assert operation.state == "staged"

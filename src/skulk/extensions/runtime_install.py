@@ -44,6 +44,25 @@ print(json.dumps({name(d):d.version for d in importlib.metadata.distributions()
 if name(d) != 'pip'},sort_keys=True))
 """
 
+
+def _without_shared_write(directory: Path) -> None:
+    """Remove group and other write permission from a freshly built runtime.
+
+    venv copies its activation scripts' modes from the base Python's
+    templates, ignoring the manager's private umask. A uv-managed Python
+    installed under Ubuntu's default 0002 umask ships those templates
+    group-writable, and the installed-runtime seal refuses any member another
+    user could change, so every install on such a host failed. Links are left
+    alone: the seal accepts only venv's interpreter aliases and lib64.
+    """
+    for root, directories, files in os.walk(directory):
+        for name in (*directories, *files):
+            path = Path(root) / name
+            info = path.lstat()
+            if not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022:
+                path.chmod(stat.S_IMODE(info.st_mode) & ~0o022)
+
+
 _OPERATION_ROW: TypeAdapter[tuple[str, str] | None] = TypeAdapter(
     tuple[str, str] | None
 )
@@ -483,6 +502,9 @@ class RuntimeInstaller:
                         generation,
                         lock,
                         120,
+                    )
+                    await asyncio.to_thread(
+                        _without_shared_write, generation / "runtime"
                     )
                 python = str(generation / "runtime" / "bin" / "python")
                 await _execute(

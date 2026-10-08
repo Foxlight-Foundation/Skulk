@@ -94,6 +94,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Capabilities install on Linux hosts whose Python was installed under
+  Ubuntu's default umask. The plugin environment copied group-writable
+  activation scripts from that Python, the installed-file seal refused them,
+  and every install stopped after its download with "needs recovery". New
+  plugin environments now drop group and other write permission before they
+  are sealed.
 - On the Mac app, the background plugin service is listed as Skulk in System
   Settings, Login Items, instead of as `python3.13`.
 - Installed capabilities keep working after the Skulk app is updated or moved.
