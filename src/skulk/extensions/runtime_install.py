@@ -55,12 +55,15 @@ def _without_shared_write(directory: Path) -> None:
     user could change, so every install on such a host failed. Links are left
     alone: the seal accepts only venv's interpreter aliases and lib64.
     """
+    # os.walk yields only descendants; the root is created under the caller's
+    # umask too, and a terminal install on Ubuntu leaves it group-writable.
+    paths = [directory]
     for root, directories, files in os.walk(directory):
-        for name in (*directories, *files):
-            path = Path(root) / name
-            info = path.lstat()
-            if not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022:
-                path.chmod(stat.S_IMODE(info.st_mode) & ~0o022)
+        paths.extend(Path(root) / name for name in (*directories, *files))
+    for path in paths:
+        info = path.lstat()
+        if not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022:
+            path.chmod(stat.S_IMODE(info.st_mode) & ~0o022)
 
 
 _OPERATION_ROW: TypeAdapter[tuple[str, str] | None] = TypeAdapter(

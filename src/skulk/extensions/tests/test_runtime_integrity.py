@@ -318,10 +318,12 @@ def test_a_new_runtime_loses_group_and_other_write(tmp_path: Path) -> None:
     script.write_text("# activate\n")
     script.chmod(0o664)
     (runtime / "bin").chmod(0o775)
+    runtime.chmod(0o775)
     (runtime / "bin" / "python").symlink_to("/usr/bin/false")
 
     _without_shared_write(runtime)
 
+    assert stat.S_IMODE(runtime.stat().st_mode) == 0o755
     assert stat.S_IMODE(script.stat().st_mode) == 0o644
     assert stat.S_IMODE((runtime / "bin").stat().st_mode) == 0o755
     assert (runtime / "bin" / "python").is_symlink()
