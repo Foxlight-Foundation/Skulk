@@ -208,7 +208,8 @@ a system service and asks for your administrator password once (see
    a plugin that needs no settings turns on by itself as part of the install you
    accepted, and the page shows **Turning it on** as its last step. This happens
    once per install: reloading the page does not turn it on again, and an
-   update leaves a node you turned off turned off.
+   update turns back on only the nodes you had turned on before it, so a node
+   you turned off stays off, even one that also needed settings.
 
    If the download or the preparation of its runtime stops, the page says which
    and offers **Retry**. The plugin's card under **Installed** reads **Install

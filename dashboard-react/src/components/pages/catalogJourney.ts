@@ -302,12 +302,14 @@ function isAutoTurnOn(value: unknown): value is AutoTurnOn {
 /**
  * The nodes an activation this browser is about to send may turn on once the
  * release runs. A first install (no release selected yet) turns on every node
- * that reports off; an update only the nodes that were on before it, read
- * from the plugin's current nodes (none when they could not be read).
+ * that reports off. An update turns on only the nodes that were on before it,
+ * as each node's own configuration said (`enabled`), never as its status
+ * said: a node can report needing settings while the owner has it turned off.
+ * None when they could not be read.
  */
-export function autoTurnOnFor(firstInstall: boolean, nodesBefore: { nodeId: string; status: string }[] | null): AutoTurnOn {
+export function autoTurnOnFor(firstInstall: boolean, nodesOnBefore: readonly string[] | null): AutoTurnOn {
   if (firstInstall) return { nodes: 'all', ran: false };
-  return { nodes: (nodesBefore ?? []).filter((node) => node.status !== 'disabled').map((node) => node.nodeId), ran: false };
+  return { nodes: [...(nodesOnBefore ?? [])], ran: false };
 }
 
 /**

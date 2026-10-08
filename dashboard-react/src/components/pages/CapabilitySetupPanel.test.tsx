@@ -5,6 +5,7 @@ import { Provider } from 'react-redux';
 import { ThemeProvider } from 'styled-components';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { apiSlice } from '../../store/api';
+import { clusterApi } from '../../store/endpoints/cluster';
 import { uiSliceReducer } from '../../store/slices/uiSlice';
 import { darkTheme } from '../../theme/theme';
 import type { CapabilityNodeSummary } from '../../types/capabilityNodes';
@@ -25,6 +26,12 @@ let hostNode: string;
 let preflightAvailable: boolean;
 let enableStatus: number;
 let posts: { path: string; body: Record<string, unknown> }[];
+// The node's own configuration, which a status report can lag.
+let configEnabled: boolean;
+// What the host reports once the node is turned on; a test can make it race ahead.
+let afterEnable: () => void;
+// How long the reply to turning it on takes after the host has acted.
+let enableReplyMs: number;
 
 function makeStore() {
   return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer, ui: uiSliceReducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) });
@@ -45,16 +52,21 @@ beforeEach(async () => {
   hostNode = 'host-node';
   preflightAvailable = true;
   enableStatus = 200;
+  configEnabled = false;
+  afterEnable = () => { summaries = [summary({ status: 'starting', surfaces: [] })]; };
+  enableReplyMs = 0;
   posts = [];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     const path = new URL(request.url).pathname;
     if (path === `/v1/plugins/${pluginId}/nodes/studio/configuration`) {
-      if (request.method === 'GET') return json({ nodeId: 'studio', revision: 2, schemaDigest: 'a'.repeat(64), configurationSchema: { type: 'object', properties: { tags: { type: 'array' } } }, values: {}, enabled: false });
+      if (request.method === 'GET') return json({ nodeId: 'studio', revision: 2, schemaDigest: 'a'.repeat(64), configurationSchema: { type: 'object', properties: { tags: { type: 'array' } } }, values: {}, enabled: configEnabled });
       const body = await request.json() as Record<string, unknown>;
       posts.push({ path, body });
       if (enableStatus !== 200) return json({ detail: 'configuration refused; reload settings and validation' }, enableStatus);
-      summaries = [summary({ status: 'starting', surfaces: [] })];
+      configEnabled = true;
+      afterEnable();
+      if (enableReplyMs > 0) await new Promise((resolve) => setTimeout(resolve, enableReplyMs));
       return json({ configuration: { nodeId: 'studio', revision: 3, schemaDigest: 'a'.repeat(64), configurationSchema: {}, values: {}, enabled: true }, validated: true });
     }
     if (path === '/node_id') return json('host-node');
@@ -80,10 +92,10 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function render(onManage?: (pluginId: string, nodeId?: string) => void, onDone: () => void = () => undefined, spendsMoney?: boolean) {
+async function render(onManage?: (pluginId: string, nodeId?: string) => void, onDone: () => void = () => undefined, spendsMoney?: boolean, turnedOn?: string[]) {
   await act(async () => {
     root.render(<Provider store={store}><ThemeProvider theme={darkTheme}>
-      <CapabilitySetupPanel target={{ pluginId, title: 'Example Studio', spendsMoney }} onManage={onManage} onDone={onDone} />
+      <CapabilitySetupPanel target={{ pluginId, title: 'Example Studio', spendsMoney, turnedOn }} onManage={onManage} onDone={onDone} />
     </ThemeProvider></Provider>);
   });
 }
@@ -193,4 +205,52 @@ it('keeps a loopback screen closed to a browser on another machine', async () =>
   expect(host.querySelector('a[href]')).toBeNull();
   expect(button('Open Example Studio')?.disabled).toBe(true);
   await contains('Example Studio opens only from a browser running on the host that runs it.');
+});
+
+// The owner turning it off from its settings, as the next report and its configuration show.
+function turnedOffElsewhere(observedAt: string) {
+  configEnabled = false;
+  summaries = [summary({ status: 'disabled', surfaces: [], observedAt })];
+}
+async function offerTurnOn() {
+  await contains('Turned off.');
+  await act(async () => { await vi.waitFor(() => expect(button('Turn on')).not.toBeNull(), { timeout: 5000 }); });
+  expect(host.textContent).not.toContain('Turning on…');
+}
+
+it('shows a node turned on and then off from its settings in one visit as off, with Turn on, even when the report raced ahead', async () => {
+  summaries = [summary({ status: 'disabled', surfaces: [], observedAt: '2026-10-08T12:00:00Z' })];
+  // The host reports it running before the reply to turning it on arrives.
+  afterEnable = () => { summaries = [summary({ observedAt: '2026-10-08T12:00:05Z' })]; };
+  enableReplyMs = 2500;
+  await render(() => undefined);
+  await act(async () => { await vi.waitFor(() => expect(button('Turn on')).not.toBeNull(), { timeout: 5000 }); });
+  await act(async () => { button('Turn on')!.click(); });
+  await contains('Example Studio is ready');
+  // The reply arrives after that report, then the owner turns it off.
+  await act(async () => { await vi.waitFor(() => expect(posts).toHaveLength(1)); await new Promise((resolve) => setTimeout(resolve, 3000)); });
+  turnedOffElsewhere('2026-10-08T12:01:00Z');
+  await offerTurnOn();
+});
+
+it('does not keep showing a node the install turned on as turning on once a later report says it is off', async () => {
+  // The page opens on a node the install turned on, already reported running
+  // in the cluster state this browser holds.
+  summaries = [summary({ observedAt: '2026-10-08T12:00:05Z' })];
+  configEnabled = true;
+  await act(async () => { await store.dispatch(clusterApi.endpoints.getRawState.initiate(undefined, { subscribe: false })); });
+  await render(() => undefined, () => undefined, undefined, ['studio']);
+  await contains('Example Studio is ready');
+  turnedOffElsewhere('2026-10-08T12:01:00Z');
+  await offerTurnOn();
+});
+
+it('shows a node whose report lags its configuration as turning on, until its configuration says it is off', async () => {
+  summaries = [summary({ status: 'disabled', surfaces: [], observedAt: '2026-10-08T12:00:00Z' })];
+  configEnabled = true;
+  await render(() => undefined);
+  await contains('Turning on…');
+  expect(button('Turn on')).toBeNull();
+  turnedOffElsewhere('2026-10-08T12:00:30Z');
+  await offerTurnOn();
 });

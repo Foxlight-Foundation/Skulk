@@ -40,6 +40,8 @@ let refuseEnable: string | null;
 let listed: CatalogEntry[];
 let posts: { path: string; body: Record<string, unknown> }[];
 let preflightReads: number;
+// What the node reports once the new release runs.
+let afterActivation: () => void;
 
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -74,6 +76,7 @@ beforeEach(() => {
   listed = [linuxEntry, macEntry];
   posts = [];
   preflightReads = 0;
+  afterActivation = () => undefined;
   localStorage.removeItem('skulk-plugin-install-journeys');
   let activationId = '';
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -98,6 +101,7 @@ beforeEach(() => {
       if (path.endsWith('/operations')) {
         activationId = String(body.operation_id);
         runtime = running(newDigest, 51);
+        afterActivation();
         return json({ request: body, state: 'accepted', error_code: null });
       }
       if (path.endsWith('/nodes/studio/configuration')) {
@@ -308,4 +312,31 @@ it('closes an install\'s progress back to the capability list with a bordered Cl
   await click('Close');
   await contains('Browse capabilities');
   expect(setupTitle()).toBeNull();
+});
+
+it('leaves a node off across an update when it was off while it needed settings', async () => {
+  // Before the update the node is turned off and reports that it needs settings.
+  runtime = running(oldDigest, 50);
+  nodeStatus = 'configuration_invalid';
+  nodeEnabled = false;
+  // The new release no longer needs those settings, so the node reports only that it is off.
+  afterActivation = () => { nodeStatus = 'disabled'; };
+  await renderAt('/plugins?view=browse');
+  await install('Review update', 'Update');
+  await setupTitleIs('Example Studio is installed');
+  await contains('It is turned off. Turn it on to start it.');
+  expect(posts.some((post) => post.path.endsWith('/operations'))).toBe(true);
+  expect(enables()).toEqual([]);
+});
+
+it('turns a node back on after an update when it was on before it', async () => {
+  runtime = running(oldDigest, 50);
+  nodeStatus = 'ready';
+  nodeEnabled = true;
+  // The new release starts with the node off.
+  afterActivation = () => { nodeStatus = 'disabled'; nodeEnabled = false; };
+  await renderAt('/plugins?view=browse');
+  await install('Review update', 'Update');
+  await setupTitleIs('Example Studio is ready');
+  expect(enables().map((post) => post.body)).toEqual([{ operation: 'enable', expectedRevision: 0, expectedSchemaDigest: schemaDigest }]);
 });

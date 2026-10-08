@@ -113,7 +113,8 @@ describe('turning nodes on after an install', () => {
   });
 
   it('after an update turns on only nodes that were on before it, so a node the owner turned off stays off', () => {
-    const plan = autoTurnOnFor(false, [{ nodeId: 'studio', status: 'ready' }, { nodeId: 'worker', status: 'disabled' }]);
+    // Which nodes were on comes from their configuration, read before the update.
+    const plan = autoTurnOnFor(false, ['studio']);
     expect(plan).toEqual({ nodes: ['studio'], ran: false });
     expect(nodesToTurnOn(plan, [{ nodeId: 'studio', status: 'disabled' }, { nodeId: 'worker', status: 'disabled' }])).toEqual(['studio']);
     // Nodes that could not be read before the update are never turned on.
