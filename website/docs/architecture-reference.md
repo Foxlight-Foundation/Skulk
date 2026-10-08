@@ -1683,7 +1683,7 @@ Configuration, credentials, receipts and runtime generations remain available;
 independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.
 An explicit purge (`InstallationRequest(action="purge")`, `DELETE
 /v1/plugins/managed/installations/{plugin_id}`, `skulk-plugin-service purge-plugin`,
-the card's "Remove uninstalled plugin") is the end of that retention: an
+the card's "Remove uninstalled plugin…" or the drawer's "Remove everything") is the end of that retention: an
 installation that is uninstalled, or that never selected a release, leaves the
 inventory and its directory goes; a live installation or one with work under way
 is refused unchanged. The dashboard classes an uninstalled installation as
