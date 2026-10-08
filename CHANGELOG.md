@@ -101,7 +101,8 @@ This project records release notes here and mirrors public-facing notes in
   title or bundle id instead of its raw `managed.` id and reads **Install needs
   a retry** with the same **Retry** on its card. **Browse** offers **Resume
   install** for it instead of binding a second installation and leaving the
-  stopped one behind. A retry uses the host's existing install recovery and
+  stopped one behind, and a first install still under way on the host shows
+  its progress there rather than being offered again. A retry uses the host's existing install recovery and
   then activates the release, so it ends installed and running rather than
   staged. Activation still needs the permissions accepted for that exact
   release: the retry carries the consent this browser recorded when the

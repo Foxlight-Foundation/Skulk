@@ -209,7 +209,9 @@ a system service and asks for your administrator password once (see
    If the download or the preparation of its runtime stops, the page says which
    and offers **Retry**. The plugin's card under **Installed** reads **Install
    needs a retry** and offers the same **Retry**, and its **Browse** card offers
-   **Resume install** rather than a second installation beside it. A retry
+   **Resume install** rather than a second installation beside it. A first
+   install still under way on the host, even one started from another browser,
+   shows **Show progress** on its card instead of being offered again. A retry
    downloads the same signed release again and follows it through activation
    to running. It carries the permissions you accepted when this browser started
    the install; from another browser, the release's permissions are shown again

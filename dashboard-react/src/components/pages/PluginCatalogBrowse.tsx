@@ -15,7 +15,7 @@ import { CatalogInstallProgress, type SetupTarget } from './CatalogInstallProgre
 import { CatalogOfferCard } from './CatalogOfferCard';
 import { CatalogRetryReviewPanel, CatalogReviewPanel } from './CatalogReviewPanel';
 import {
-  catalogOffers, displayTitle, interruptedInstalls, isConsentNeeded, isFollowed, isStartRefusal, journeyInProgress, readJourneys, startCatalogInstall,
+  catalogOffers, displayTitle, isConsentNeeded, isFollowed, isStartRefusal, offerProgress, readJourneys, startCatalogInstall, unfinishedInstalls,
   startInstallRetry, type BoundJourney, type CatalogOffer, type InstallStartRefusal, type RetryRequest,
 } from './catalogJourney';
 
@@ -23,7 +23,7 @@ type BrowseView =
   | { kind: 'list' }
   | { kind: 'connect' }
   | { kind: 'review'; offer: CatalogOffer; listing: CatalogListing }
-  | { kind: 'retry-review'; request: RetryRequest; review: RuntimeRelease }
+  | { kind: 'retry-review'; request: RetryRequest; review: RuntimeRelease; stopped: boolean }
   | {
     kind: 'install'; title: string; publisher: string; sequence: number; transferBytes: number; updating: boolean; journey: BoundJourney | null; refusal: InstallStartRefusal | null;
     /** The stopped install a retry from this view would retry again. */
@@ -86,7 +86,7 @@ export function PluginCatalogBrowse({ onManage, retry, onRetryTaken }: PluginCat
   const [readSource] = useLazyGetRuntimeSourceStatusQuery();
   const [recover] = useRecoverRuntimeInstallationMutation();
   const offers = useMemo(() => catalog.data
-    ? catalogOffers(catalog.data, runtimes.data?.installations ?? [], interruptedInstalls(runtimes.data?.installations ?? [], installs.data))
+    ? catalogOffers(catalog.data, runtimes.data?.installations ?? [], unfinishedInstalls(runtimes.data?.installations ?? [], installs.data))
     : [], [catalog.data, runtimes.data, installs.data]);
   // Offers wait for the installations and a fresh read of their installs: an
   // offer made before a stopped install is known would register a second
@@ -110,7 +110,8 @@ export function PluginCatalogBrowse({ onManage, retry, onRetryTaken }: PluginCat
     setView({ ...base, journey: null, refusal: null });
     const outcome = await startCatalogInstall({ bind, install }, offer, listing, pluginRefusalDetail, randomHex32, pluginRequestRefused);
     starting.current = false;
-    setView(isStartRefusal(outcome) ? { ...base, journey: null, refusal: outcome } : { ...base, transferBytes: outcome.transferBytes, journey: outcome, refusal: null });
+    // A journey already under way may install another release of the bundle; the page names the one it follows.
+    setView(isStartRefusal(outcome) ? { ...base, journey: null, refusal: outcome } : { ...base, publisher: outcome.publisher, sequence: outcome.sequence, transferBytes: outcome.transferBytes, journey: outcome, refusal: null });
   };
   // A retry follows the same progress a fresh install does, through
   // activation, once this browser holds consent to the release it retries.
@@ -123,7 +124,7 @@ export function PluginCatalogBrowse({ onManage, retry, onRetryTaken }: PluginCat
       readInstall: (pluginId) => readInstall(pluginId, false), readSource: (pluginId) => readSource(pluginId, false), recover,
     }, request, reviewedDigest, pluginRefusalDetail, pluginRequestRefused);
     starting.current = false;
-    if (isConsentNeeded(outcome)) setView({ kind: 'retry-review', request, review: outcome.review });
+    if (isConsentNeeded(outcome)) setView({ kind: 'retry-review', request, review: outcome.review, stopped: outcome.stopped });
     else if (isStartRefusal(outcome)) setView({ ...base, journey: null, refusal: outcome });
     else setView({ ...base, title: outcome.title, publisher: outcome.publisher, sequence: outcome.sequence, transferBytes: outcome.transferBytes, journey: outcome, refusal: null });
   };
@@ -177,7 +178,7 @@ export function PluginCatalogBrowse({ onManage, retry, onRetryTaken }: PluginCat
       onRetry={retryOf ? () => void beginRetry(retryOf) : undefined} />;
   }
   if (view.kind === 'retry-review') {
-    return <CatalogRetryReviewPanel title={view.request.title} updating={view.request.updating} review={view.review} onCancel={toList}
+    return <CatalogRetryReviewPanel title={view.request.title} updating={view.request.updating} stopped={view.stopped} review={view.review} onCancel={toList}
       onRetry={() => void beginRetry(view.request, view.review.runtime_digest)} />;
   }
   if (view.kind === 'setup') return <CapabilitySetupPanel target={view.target} onManage={onManage} onBack={toList} />;
@@ -222,15 +223,15 @@ export function PluginCatalogBrowse({ onManage, retry, onRetryTaken }: PluginCat
     </Notice> : null}
     {catalog.data && inventoryKnown && offers.length === 0 ? <p>{t('plugins.catalog.empty', 'This catalog lists nothing yet.')}</p> : null}
     <Offers>{catalog.data && inventoryKnown ? offers.map((offer) => {
-      const progress = journeyInProgress(offer.entry.bundle_id, offer.entry.sequence, journeys);
-      const stopped = offer.retry;
+      const progress = offerProgress(offer, journeys);
+      const unfinished = offer.retry;
       return <CatalogOfferCard key={offer.entry.bundle_id} offer={offer} progress={progress} installPaused={unreadInstalls > 0}
         onResume={() => progress && resume(progress, offer.state === 'update')}
         onRetry={() => {
-          if (!stopped) return;
+          if (!unfinished) return;
           void beginRetry({
-            pluginId: stopped.pluginId, title: displayTitle(offer.entry), publisher: stopped.review.publisher, sequence: stopped.review.sequence,
-            transferBytes: stopped.review.artifact_bytes, updating: stopped.updating,
+            pluginId: unfinished.pluginId, title: displayTitle(offer.entry), publisher: unfinished.review.publisher, sequence: unfinished.review.sequence,
+            transferBytes: unfinished.review.artifact_bytes, updating: unfinished.updating,
           });
         }}
         onReview={() => setView({ kind: 'review', offer, listing: catalog.data! })}

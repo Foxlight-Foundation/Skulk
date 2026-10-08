@@ -78,6 +78,8 @@ export function CatalogReviewPanel({ offer, onInstall, onCancel }: CatalogReview
 export interface CatalogRetryReviewPanelProps {
   title: string;
   updating: boolean;
+  /** Whether the install stopped; otherwise it is under way or staged elsewhere and is followed to running. */
+  stopped?: boolean;
   /** The signed release the host retries, from its retained install. */
   review: RuntimeRelease;
   /** Retry with consent to exactly this release; only called after consent. */
@@ -92,12 +94,15 @@ export interface CatalogRetryReviewPanelProps {
  * accepted, such as a retry from another browser: finishing the retry
  * activates the release, which accepts them.
  */
-export function CatalogRetryReviewPanel({ title, updating, review, onRetry, onCancel }: CatalogRetryReviewPanelProps) {
+export function CatalogRetryReviewPanel({ title, updating, stopped = true, review, onRetry, onCancel }: CatalogRetryReviewPanelProps) {
   const { t } = useSkulkTranslation();
   const [accepted, setAccepted] = useState(false);
   return <Panel aria-labelledby="catalog-retry-title">
-    <h2 id="catalog-retry-title">{updating ? t('plugins.catalog.retryUpdateTitle', 'Retry the update to {title}', { title }) : t('plugins.catalog.retryTitle', 'Retry installing {title}', { title })}</h2>
-    <Lead>{t('plugins.catalog.retryLead', 'Installing this release stopped before it finished. A retry downloads the same signed release again and then starts it, which accepts its permissions. This browser has no record that you accepted them, so review them first.')}</Lead>
+    <h2 id="catalog-retry-title">{!stopped ? t('plugins.catalog.followTitle', 'Finish installing {title}', { title })
+      : updating ? t('plugins.catalog.retryUpdateTitle', 'Retry the update to {title}', { title }) : t('plugins.catalog.retryTitle', 'Retry installing {title}', { title })}</h2>
+    <Lead>{stopped
+      ? t('plugins.catalog.retryLead', 'Installing this release stopped before it finished. A retry downloads the same signed release again and then starts it, which accepts its permissions. This browser has no record that you accepted them, so review them first.')
+      : t('plugins.catalog.followLead', 'This release is already being installed on this host. Finishing it here starts it once it is ready, which accepts its permissions. This browser has no record that you accepted them, so review them first.')}</Lead>
     <Facts>
       <dt>{t('plugins.catalog.publisher', 'Publisher')}</dt><dd>{review.publisher}</dd>
       <dt>{t('plugins.catalog.versionLabel', 'Version')}</dt><dd>{t('plugins.catalog.versionValue', '{version}, release {sequence}', { version: review.version, sequence: review.sequence })}</dd>
@@ -114,7 +119,7 @@ export function CatalogRetryReviewPanel({ title, updating, review, onRetry, onCa
     </Consent>
     <Actions>
       <Button variant="ghost" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button>
-      <Button variant="primary" disabled={!accepted} onClick={onRetry}>{t('plugins.catalog.retryAccepted', 'Retry install')}</Button>
+      <Button variant="primary" disabled={!accepted} onClick={onRetry}>{stopped ? t('plugins.catalog.retryAccepted', 'Retry install') : t('plugins.catalog.followAccepted', 'Finish install')}</Button>
     </Actions>
   </Panel>;
 }

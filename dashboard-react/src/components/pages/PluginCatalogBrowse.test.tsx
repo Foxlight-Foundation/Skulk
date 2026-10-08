@@ -35,6 +35,8 @@ let stray: ManagedRuntime | null;
 let strayOperation: RuntimeInstallation | null;
 let stopFreshInstall: boolean;
 let failStrayRead: boolean;
+let recoverStaysRunning: boolean;
+let listed: CatalogEntry[];
 
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -75,6 +77,8 @@ beforeEach(async () => {
   strayOperation = null;
   stopFreshInstall = false;
   failStrayRead = false;
+  recoverStaysRunning = false;
+  listed = [entry];
   localStorage.removeItem('skulk-plugin-install-journeys');
   installed = {
     plugin_id: pluginId, release: { bundle_id: 'example.studio', title: 'Example Studio', bundle_version: '0.1.0', publisher: 'example', sequence: 50 },
@@ -93,7 +97,10 @@ beforeEach(async () => {
         const body = await request.json() as Record<string, unknown>;
         posts.push({ path, body });
         if (rest === '/install') { strayOperation = stoppedAt(String(body.operation_id)); return json({ ...strayOperation, state: 'accepted' }); }
-        if (rest.endsWith('/recover') && strayOperation) { strayOperation = { ...strayOperation, attempt: 1, state: 'staged', error_code: null }; return json({ ...strayOperation, state: 'accepted' }); }
+        if (rest.endsWith('/recover') && strayOperation) {
+          strayOperation = { ...strayOperation, attempt: 1, state: recoverStaysRunning ? 'downloading' : 'staged', downloaded_bytes: recoverStaysRunning ? 0 : 12_000_000, error_code: null };
+          return json({ ...strayOperation, state: 'accepted' });
+        }
         if (rest === '/operations') {
           activationOperationId = String(body.operation_id);
           stray = { ...stray!, enabled: true, selected_digest: newDigest, selection_revision: 1, release: { bundle_id: entry.bundle_id, title: 'Example Studio', bundle_version: '0.1.0', publisher: 'example', sequence: 51 }, service: { state: 'running', active_digest: newDigest, observed_at: 2 } };
@@ -137,7 +144,7 @@ beforeEach(async () => {
     if (path === '/v1/plugins/managed/catalog/source') {
       return json({ revision: configured ? 1 : 0, configured, credential_reference: null, credential_ready: configured, trust_revision: configured ? 1 : null, builtin_store: onStore, builtin_store_available: storeAvailable, ...(assignsRevisions ? { assigns_trust_revisions: true } : {}) });
     }
-    if (path === '/v1/plugins/managed/catalog') return json({ publisher: 'example', revision: 34, created_at: 1_790_000_000, expires_at: 1_800_000_000, catalog_sha256: 'c'.repeat(64), entries: [entry] });
+    if (path === '/v1/plugins/managed/catalog') return json({ publisher: 'example', revision: 34, created_at: 1_790_000_000, expires_at: 1_800_000_000, catalog_sha256: 'c'.repeat(64), entries: listed });
     if (path === '/v1/plugins/managed') return json({ installations: [...(freshHost ? [] : [installed]), ...(stray ? [stray] : [])] });
     if (path.endsWith('/install')) return json({ operation: installOperationId ? { request: { operation_id: installOperationId, runtime_digest: newDigest, expected_source_revision: 7 }, review, state: 'staged', downloaded_bytes: 12_000_000, error_code: null } : null });
     if (path.includes('/operations/')) return json({ request: { operation_id: activationOperationId, action: 'activate' }, state: 'complete', error_code: null });
@@ -397,4 +404,43 @@ it('pauses new installs while an installation that names no bundle could not be 
   await contains('Resume install');
   expect(host.textContent).not.toContain('new installs are paused');
   expect(posts).toEqual([]);
+});
+
+it('keeps a retry of an older release on its card while it runs, though the catalog lists a newer one', async () => {
+  freshHost = true;
+  stray = registered(strayId);
+  strayOperation = stoppedAt('5'.repeat(32));
+  recoverStaysRunning = true;
+  listed = [entry, { ...entry, sequence: 52, release_digest: '1'.repeat(64) }];
+  saveJourney(consent);
+  await render();
+  await contains('Installing release 51 stopped before it finished.');
+  await click('Resume install');
+  await act(async () => { await vi.waitFor(() => expect(posts.filter((post) => post.path.endsWith('/recover'))).toHaveLength(1), { timeout: 5000 }); });
+  await click('Back to Browse');
+  // The retry is still the bundle's only installation: release 52 is not offered beside it.
+  await contains('Show progress');
+  expect(button('Review and install')).toBeNull();
+  await click('Show progress');
+  await contains('Installing Example Studio');
+  expect(posts.filter((post) => post.path === '/v1/plugins/managed/catalog/install')).toEqual([]);
+});
+
+it('follows a first install under way from another browser instead of installing beside it, after review', async () => {
+  freshHost = true;
+  stray = registered(strayId);
+  strayOperation = { ...stoppedAt('5'.repeat(32)), state: 'staged', error_code: null };
+  await render();
+  await contains('Release 51 is being installed on this host.');
+  expect(button('Review and install')).toBeNull();
+  await click('Show progress');
+  await contains('Finish installing Example Studio');
+  await contains('This release is already being installed on this host.');
+  expect(posts).toEqual([]);
+  await act(async () => { (host.querySelector('#catalog-retry-consent') as HTMLInputElement).click(); });
+  await click('Finish install');
+  await running();
+  // Nothing is recovered or bound: the staged release is activated with the accepted permissions.
+  expect(posts.map((post) => post.path)).toEqual([`/v1/plugins/managed/installations/${strayId}/operations`]);
+  expect(posts[0].body).toMatchObject({ runtime_digest: newDigest, accept_permissions: true });
 });

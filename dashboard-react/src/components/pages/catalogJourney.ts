@@ -7,12 +7,18 @@ import { installNeedsRetry } from './pluginHealth';
 /** What a catalog card offers this host for one bundle. */
 export type CatalogOfferState = 'available' | 'installed' | 'update' | 'unfit' | 'retry';
 
-/** An installation whose install stopped and waits for a retry, with the signed release the host retries. */
-export interface InterruptedInstall {
+/**
+ * An installation of a bundle whose install has not finished, with the signed
+ * release it installs: one that stopped and waits for a retry, or a first
+ * install still under way or staged.
+ */
+export interface UnfinishedInstall {
   pluginId: string;
   review: RuntimeRelease;
-  /** Whether a release was already selected, so finishing the retry updates it. */
+  /** Whether a release was already selected, so finishing it updates that release. */
   updating: boolean;
+  /** Whether the host reports it stopped (`recovery_required`); otherwise it is under way or staged. */
+  stopped: boolean;
 }
 
 /** One bundle in a catalog: the release to offer and the installation it would replace. */
@@ -22,16 +28,26 @@ export interface CatalogOffer {
   /** A current (not uninstalled) installation of the same bundle, if any. */
   installed: ManagedRuntime | null;
   state: CatalogOfferState;
-  /** The installation of this bundle whose install stopped, when the offer is to retry it. */
-  retry?: InterruptedInstall | null;
+  /** The installation of this bundle whose install has not finished, when the offer is to finish it. */
+  retry?: UnfinishedInstall | null;
 }
 
-/** The installations whose retained install stopped and waits for the owner's retry. */
-export function interruptedInstalls(runtimes: ManagedRuntime[], operations: InstallOperations | undefined): InterruptedInstall[] {
-  const found: InterruptedInstall[] = [];
+/**
+ * The installations whose install has not finished: any whose install
+ * stopped and waits for the owner's retry, and any first install (no release
+ * selected yet) still under way or staged. A first install names its bundle
+ * only through its install, so Browse would otherwise offer that bundle again
+ * and register a second installation beside it.
+ */
+export function unfinishedInstalls(runtimes: ManagedRuntime[], operations: InstallOperations | undefined): UnfinishedInstall[] {
+  const found: UnfinishedInstall[] = [];
   for (const runtime of runtimes) {
     const operation = operations?.[runtime.plugin_id];
-    if (installNeedsRetry(runtime, operation)) found.push({ pluginId: runtime.plugin_id, review: operation.review, updating: runtime.selected_digest !== null });
+    if (!operation) continue;
+    const stopped = installNeedsRetry(runtime, operation);
+    if (stopped || (!runtime.uninstalled && runtime.selected_digest === null)) {
+      found.push({ pluginId: runtime.plugin_id, review: operation.review, updating: runtime.selected_digest !== null, stopped });
+    }
   }
   return found;
 }
@@ -49,7 +65,7 @@ export function interruptedInstalls(runtimes: ManagedRuntime[], operations: Inst
  * one's own stopped install comes first; a stopped first install counts while
  * nothing else of the bundle is installed.
  */
-export function catalogOffers(listing: CatalogListing, runtimes: ManagedRuntime[], interrupted: InterruptedInstall[] = []): CatalogOffer[] {
+export function catalogOffers(listing: CatalogListing, runtimes: ManagedRuntime[], unfinished: UnfinishedInstall[] = []): CatalogOffer[] {
   const bundles = new Map<string, CatalogEntry[]>();
   for (const entry of listing.entries) {
     bundles.set(entry.bundle_id, [...(bundles.get(entry.bundle_id) ?? []), entry]);
@@ -74,11 +90,16 @@ export function catalogOffers(listing: CatalogListing, runtimes: ManagedRuntime[
       state = fitting ? 'available' : 'unfit';
     }
     const retry = installed
-      ? interrupted.find((item) => item.pluginId === installed.plugin_id) ?? null
-      : interrupted.find((item) => item.review.bundle_id === bundleId) ?? null;
+      ? unfinished.find((item) => item.stopped && item.pluginId === installed.plugin_id) ?? null
+      : unfinished.find((item) => item.review.bundle_id === bundleId) ?? null;
     if (retry) {
       state = 'retry';
-      entry = newestFirst.find((candidate) => candidate.sequence === retry.review.sequence) ?? entry;
+      // The card names the release the host installs: that sequence's listing
+      // for this host, since several platforms can share a sequence.
+      const sequence = retry.review.sequence;
+      entry = newestFirst.find((candidate) => candidate.sequence === sequence && candidate.matches_host)
+        ?? newestFirst.find((candidate) => candidate.sequence === sequence && candidate.runtime_platform === retry.review.platform)
+        ?? entry;
     }
     offers.push({ entry, installed, state, retry });
   }
@@ -282,6 +303,19 @@ export function journeyInProgress(bundleId: string, sequence: number, journeys: 
   return journeys.find((item): item is BoundJourney => isFollowed(item) && item.bundleId === bundleId && item.sequence === sequence) ?? null;
 }
 
+/**
+ * The journey an offer's card follows: one installing its release or, while
+ * nothing of the bundle is installed, any install of the bundle this browser
+ * follows. A first install of an older release, such as a retry, is still the
+ * bundle's only installation; offering a newer release beside it would
+ * register a second one. With an installation, only an install on it counts.
+ */
+export function offerProgress(offer: Pick<CatalogOffer, 'entry' | 'installed'>, journeys: InstallJourney[] = readJourneys()): BoundJourney | null {
+  return journeyInProgress(offer.entry.bundle_id, offer.entry.sequence, journeys)
+    ?? journeys.find((item): item is BoundJourney => isFollowed(item) && item.bundleId === offer.entry.bundle_id
+      && (offer.installed === null || item.pluginId === offer.installed.plugin_id)) ?? null;
+}
+
 /** Installs this browser started and has not finished watching. Storage may be unavailable. */
 export function readJourneys(storage: Pick<Storage, 'getItem'> | null = safeStorage()): InstallJourney[] {
   if (!storage) return [];
@@ -367,7 +401,7 @@ export async function startCatalogInstall(
 ): Promise<BoundJourney | InstallStartRefusal> {
   // A release this browser is already installing, in this tab or another, is
   // followed rather than started again.
-  const inProgress = journeyInProgress(offer.entry.bundle_id, offer.entry.sequence);
+  const inProgress = offerProgress(offer);
   if (inProgress) return inProgress;
   const saved = readJourneys();
   const unconfirmed = saved.find((item) => item.bundleId === offer.entry.bundle_id && !isBound(item));
@@ -441,7 +475,12 @@ export interface RetryStarters {
 }
 
 /** A retry this browser holds no consent for: the signed release to review before anything is sent. */
-export interface RetryConsentNeeded { pluginId: string; review: RuntimeRelease }
+export interface RetryConsentNeeded {
+  pluginId: string;
+  review: RuntimeRelease;
+  /** Whether the install stopped; otherwise it is under way or staged and is only followed. */
+  stopped: boolean;
+}
 
 /** Whether a retry result asks for the release to be reviewed first. */
 export function isConsentNeeded(value: BoundJourney | InstallStartRefusal | RetryConsentNeeded): value is RetryConsentNeeded {
@@ -484,7 +523,7 @@ export async function startInstallRetry(
   if (!operation) return { stage: 'retry', detail: null, code: 'nothing-to-retry' };
   const review = operation.review;
   const consented = readJourneys().find((item) => item.pluginId === pluginId && item.runtimeDigest === review.runtime_digest) ?? null;
-  if (!consented && reviewedDigest !== review.runtime_digest) return { pluginId, review };
+  if (!consented && reviewedDigest !== review.runtime_digest) return { pluginId, review, stopped: operation.state === 'recovery_required' };
   const journey: BoundJourney = {
     pluginId, title: consented?.title ?? request.title, bundleId: review.bundle_id, sequence: review.sequence, publisher: review.publisher,
     runtimeDigest: review.runtime_digest, transferBytes: review.artifact_bytes || (consented?.transferBytes ?? 0),

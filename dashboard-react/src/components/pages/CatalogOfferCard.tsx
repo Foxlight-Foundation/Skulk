@@ -35,7 +35,9 @@ export function CatalogOfferCard({ offer, onReview, onSetUp, progress = null, on
     update: <StatusPill tone="live">{t('plugins.catalog.updateAvailable', 'Update available')}</StatusPill>,
     installed: <StatusPill tone="healthy">{t('plugins.catalog.installed', 'Installed')}</StatusPill>,
     unfit: <StatusPill tone="neutral">{t('plugins.catalog.notForHost', 'Not built for this host')}</StatusPill>,
-    retry: <StatusPill tone="live">{t('plugins.catalog.needsRetry', 'Install needs a retry')}</StatusPill>,
+    retry: offer.retry?.stopped === false
+      ? <StatusPill tone="live">{t('plugins.catalog.installingPill', 'Installing')}</StatusPill>
+      : <StatusPill tone="live">{t('plugins.catalog.needsRetry', 'Install needs a retry')}</StatusPill>,
   }[state];
   const opens = entry.surfaces.length > 0 ? t('plugins.catalog.opens', 'Opens {surfaces}.', { surfaces: entry.surfaces.join(', ') }) : null;
   const primary = busy ? <Button variant="primary" size="sm" onClick={onResume}>{t('plugins.catalog.showProgress', 'Show progress')}</Button> : {
@@ -45,7 +47,7 @@ export function CatalogOfferCard({ offer, onReview, onSetUp, progress = null, on
     unfit: null,
     // Another install would register a second installation beside the
     // stopped one, so the stopped one is resumed instead.
-    retry: <Button variant="primary" size="sm" onClick={onRetry}>{t('plugins.catalog.resumeInstall', 'Resume install')}</Button>,
+    retry: <Button variant="primary" size="sm" onClick={onRetry}>{offer.retry?.stopped === false ? t('plugins.catalog.showProgress', 'Show progress') : t('plugins.catalog.resumeInstall', 'Resume install')}</Button>,
   }[state];
   return <Card>
     <Mark aria-hidden="true">{monogram(title)}</Mark>
@@ -53,7 +55,9 @@ export function CatalogOfferCard({ offer, onReview, onSetUp, progress = null, on
       <Row><h2>{title}</h2>{fit}{canSpendMoney(entry) ? <StatusPill tone="neutral">{t('plugins.catalog.canSpend', 'Can spend money, with approval')}</StatusPill> : <StatusPill tone="neutral">{t('plugins.catalog.noSpending', 'Cannot spend money')}</StatusPill>}</Row>
       {opens ? <Description>{opens}</Description> : null}
       {state === 'update' && installedSequence !== null ? <Description>{t('plugins.catalog.updateFrom', 'Release {installed} is installed; release {offered} is built for this host.', { installed: installedSequence, offered: entry.sequence })}</Description> : null}
-      {state === 'retry' && offer.retry ? <Description>{t('plugins.catalog.retryHelp', 'Installing release {sequence} stopped before it finished. Resume it to finish on the same installation; nothing is installed beside it.', { sequence: offer.retry.review.sequence })}</Description> : null}
+      {state === 'retry' && offer.retry ? <Description>{offer.retry.stopped
+        ? t('plugins.catalog.retryHelp', 'Installing release {sequence} stopped before it finished. Resume it to finish on the same installation; nothing is installed beside it.', { sequence: offer.retry.review.sequence })
+        : t('plugins.catalog.underWayHelp', 'Release {sequence} is being installed on this host. Follow it to finish on the same installation; nothing is installed beside it.', { sequence: offer.retry.review.sequence })}</Description> : null}
       {state === 'unfit' ? <Description>{t('plugins.catalog.unfitHelp', 'Every listed release was built for a different Skulk build or platform. Its publisher has to build one for this host.')}</Description> : null}
       <Metadata>
         <span>{t('plugins.catalog.by', 'by {publisher}', { publisher: entry.publisher })}</span>
