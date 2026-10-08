@@ -324,6 +324,16 @@ class ServiceSetupRunner:
             and self._finished_at >= update.since
         ):
             # A setup that ended after the update failed is the newer answer.
+            if self._error is not None:
+                # It failed too, so the update is still not done: the
+                # previous build's manager answering must not read as ready.
+                return PluginServiceStatus(
+                    state="failed",
+                    scope=scope,
+                    progress=None,
+                    error=self._error,
+                    purpose="update",
+                )
             update = None
         if update is not None and update.phase == "refreshing":
             return self._updating(scope)

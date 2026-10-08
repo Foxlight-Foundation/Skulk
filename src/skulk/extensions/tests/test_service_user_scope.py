@@ -897,6 +897,31 @@ async def test_a_failed_update_names_its_next_step_until_a_setup_supersedes_it(
     assert (await runner.status(update)).state == "ready"
 
 
+async def test_a_retry_that_fails_keeps_the_update_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The previous build's manager answering is not readiness after a failed retry."""
+    layouts = _layouts(monkeypatch, tmp_path)
+    _connect(monkeypatch, tmp_path, layouts["user"].root)
+
+    async def setup(_scope: str | None, _report: object) -> SetupOperation:
+        raise ValueError("the volume needs 2.1 GB free for the plugin runtime copy")
+
+    async def answers(_root: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    monkeypatch.setattr(service_autosetup, "_manager_answers", answers)
+    runner = ServiceSetupRunner()
+    update = RuntimeUpdate("failed", time.monotonic(), "staging_failed")
+
+    runner.start()
+    await _settle(runner)
+    retried = await runner.status(update)
+    assert (retried.state, retried.purpose) == ("failed", "update")
+    assert retried.error == "the volume needs 2.1 GB free for the plugin runtime copy"
+
+
 async def test_a_moved_interpreter_reads_as_an_update_not_a_first_setup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
