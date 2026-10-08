@@ -14,6 +14,7 @@ import { ManagedRuntimesPanel } from './ManagedRuntimesPanel';
 import { PluginConfigurationFields } from './PluginConfigurationFields';
 import { humanizeKey, supportedConfigurationSchema } from './pluginSettingsSchema';
 import { CapabilitySetupPanel } from './CapabilitySetupPanel';
+import { ActionRow, CardHeader, Meta, Muted, Notice, PluginCard, Section, SectionHead } from './pluginCardStyles';
 import type { SetupTarget } from './CatalogInstallProgress';
 import { NodeCredentialsPanel } from './NodeCredentialsPanel';
 import { NodePreflightPanel } from './NodePreflightPanel';
@@ -21,7 +22,7 @@ import { NodeSetupPanel } from './NodeSetupPanel';
 import { NodeSetupActionsPanel } from './NodeSetupActionsPanel';
 import { NodeProposalsPanel } from './NodeProposalsPanel';
 import { OperatorAccessPanel } from './OperatorAccessPanel';
-import { PluginCatalogBrowse, type BrowseRetryHandoff } from './PluginCatalogBrowse';
+import { PluginCatalogBrowse, type BrowseRetryHandoff, type BrowseReviewHandoff } from './PluginCatalogBrowse';
 import type { RetryRequest } from './catalogJourney';
 import { PluginServiceSetup } from './PluginServiceSetup';
 import { operatorSession } from '../../auth/operatorSession';
@@ -200,7 +201,7 @@ function NodeCard({ pluginId, node, title, defaultExpanded = false, collapsible 
   const [checkRequest, setCheckRequest] = useState(0);
   const query = useGetNodeConfigurationQuery({ pluginId, nodeId: node.nodeId }, { skip: !expanded || !node.configurable });
   const status = nodeStatus(node.status, t);
-  return <Card aria-label={title}>
+  return <PluginCard aria-label={title}>
     <CardHeader>
       <div>
         <h3>{title}</h3>
@@ -234,7 +235,7 @@ function NodeCard({ pluginId, node, title, defaultExpanded = false, collapsible 
     {node.setupActionsAvailable ? <Section><NodeSetupActionsPanel pluginId={pluginId} nodeId={node.nodeId} /></Section> : null}
     {node.setupAvailable ? <Section><NodeSetupPanel pluginId={pluginId} nodeId={node.nodeId} /></Section> : null}
     {node.proposalsAvailable ? <Section><NodeProposalsPanel pluginId={pluginId} nodeId={node.nodeId} actionsAvailable={node.proposalActionsAvailable === true} /></Section> : null}
-  </Card>;
+  </PluginCard>;
 }
 
 /** Render configuration declared by installed plugins, without provider-specific UI. */
@@ -257,6 +258,8 @@ function PluginInventory() {
   const operationIds = installOperationIds(runtimes.data?.installations);
   const installs = useGetInstallOperationsQuery(operationIds, { skip: operationIds.length === 0 });
   const [retryHandoff, setRetryHandoff] = useState<BrowseRetryHandoff | null>(null);
+  // An update chosen in an installed plugin's drawer is reviewed in Browse.
+  const [reviewHandoff, setReviewHandoff] = useState<BrowseReviewHandoff | null>(null);
   const counts: Record<PluginFilter, number> = { all: 0, healthy: 0, attention: 0, uninstalled: 0 };
   for (const runtime of runtimes.data?.installations ?? []) {
     counts.all += 1;
@@ -281,7 +284,8 @@ function PluginInventory() {
         {registrationAction}
       </HeaderActions></PageHeading>;
   // A tab opens its own list, leaving any setup page.
-  const openTab = (next: PluginsView) => { setSetup(null); chooseView(next); };
+  const openTab = (next: PluginsView) => { setSetup(null); setReviewHandoff(null); chooseView(next); };
+  const reviewUpdate = (bundleId: string) => { setReviewHandoff({ id: Date.now(), bundleId }); chooseView('browse'); };
   const tabs = <Tabs role="tablist" aria-label={t('plugins.views', 'Plugin views')}>
     <Tab role="tab" type="button" aria-selected={view === 'installed'} $active={view === 'installed'} onClick={() => openTab('installed')}>{t('plugins.tabInstalled', 'Installed')}</Tab>
     <Tab role="tab" type="button" aria-selected={view === 'browse'} $active={view === 'browse'} onClick={() => openTab('browse')}>{t('plugins.tabBrowse', 'Browse')}</Tab>
@@ -324,7 +328,7 @@ function PluginInventory() {
   // from Installed opens Browse on that install's progress.
   const retryInstall = (request: RetryRequest) => { setRetryHandoff({ id: Date.now(), request }); chooseView('browse'); };
   const direct = session.mode === 'direct';
-  if (view === 'browse') return <><PluginServiceSetup direct={direct} header={<>{heading()}{tabs}</>}>{heading()}{tabs}<BrowseArea><PluginCatalogBrowse onManage={manage} onSetUp={openSetup} retry={retryHandoff} onRetryTaken={() => setRetryHandoff(null)} /></BrowseArea></PluginServiceSetup>{accessDrawer}</>;
+  if (view === 'browse') return <><PluginServiceSetup direct={direct} header={<>{heading()}{tabs}</>}>{heading()}{tabs}<BrowseArea><PluginCatalogBrowse onManage={manage} onSetUp={openSetup} retry={retryHandoff} onRetryTaken={() => setRetryHandoff(null)} review={reviewHandoff} /></BrowseArea></PluginServiceSetup>{accessDrawer}</>;
   if (setup) return <><PluginServiceSetup direct={direct} header={<>{heading()}{tabs}</>}>{heading()}{tabs}<BrowseArea>
     <CapabilitySetupPanel key={setup.pluginId} target={setup} onManage={manage} onDone={() => setSetup(null)} />
   </BrowseArea>{detailsDrawer}</PluginServiceSetup>{accessDrawer}</>;
@@ -335,7 +339,7 @@ function PluginInventory() {
       <Filters aria-label={t('plugins.filters', 'Filter plugins')}>
         {([{ value: 'all', label: t('plugins.all', 'All') }, { value: 'healthy', label: t('plugins.healthy', 'Healthy') }, { value: 'attention', label: t('plugins.needsAttention', 'Needs attention') }, { value: 'uninstalled', label: t('plugins.uninstalled', 'Uninstalled') }] as const).map(option => <FilterButton key={option.value} type="button" $active={filter === option.value} aria-pressed={filter === option.value} disabled={!inventoryKnown} onClick={() => setFilter(option.value)}>{option.label}{inventoryKnown ? ` · ${counts[option.value]}` : ''}</FilterButton>)}
       </Filters>
-    </>} filter={filter} onRetryInstall={retryInstall} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.nodeId) ?? []}
+    </>} filter={filter} onRetryInstall={retryInstall} onUpdate={reviewUpdate} nodeEvidence={pluginId => query.error ? undefined : query.data?.find(plugin => plugin.pluginId === pluginId)} nodeNames={pluginId => query.data?.find(plugin => plugin.pluginId === pluginId)?.nodes.map(node => node.nodeId) ?? []}
       renderDetails={nodeCards} />
     <Button type="button" variant="outline" size="sm" disabled={query.isFetching || runtimes.isFetching} onClick={() => { void query.refetch(); void runtimes.refetch(); }}>{t('plugins.refresh', 'Refresh')}</Button>
     {query.isLoading ? <p>{t('plugins.loading', 'Loading plugins…')}</p> : null}
@@ -393,29 +397,4 @@ const AccessButton = styled(Button)`border: 1px solid ${({ theme }) => theme.col
 const AccessDot = styled.span<{ $direct: boolean }>`width: 7px; height: 7px; border-radius: 50%; background: ${({ theme, $direct }) => $direct ? theme.colors.healthy : theme.colors.textMuted};`;
 
 const DrawerBody = styled.div`padding: 20px 24px 32px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; @media (max-width: 600px) { padding: 16px; }`;
-const Card = styled.article`
-  display: flex; flex-direction: column; min-width: 0; border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.lg}; background: ${({ theme }) => theme.colors.surface}; overflow-wrap: anywhere;
-`;
-const CardHeader = styled.header`
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 16px;
-  h3 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.01em; color: ${({ theme }) => theme.colors.text}; }
-`;
-const Meta = styled.p`
-  margin: 4px 0 0; font-size: 12.5px; color: ${({ theme }) => theme.colors.metadataText};
-  code { font: 12px ${({ theme }) => theme.fonts.mono}; }
-`;
-const Section = styled.section`
-  display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; border-top: 1px solid ${({ theme }) => theme.colors.border}; min-width: 0;
-  h4 { margin: 0; font: 600 11px ${({ theme }) => theme.fonts.mono}; letter-spacing: .14em; text-transform: uppercase; color: ${({ theme }) => theme.colors.subtleText}; }
-`;
-const SectionHead = styled.div`display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;`;
 const Editor = styled.form`display: flex; flex-direction: column; gap: 16px; min-width: 0;`;
-const ActionRow = styled.div`display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 4px;`;
-const Muted = styled.p`margin: 0; font-size: 13px; line-height: 1.5; color: ${({ theme }) => theme.colors.textSecondary};`;
-const Notice = styled.p<{ $problem?: boolean }>`
-  margin: 0; padding: 10px 12px; border-radius: ${({ theme }) => theme.radii.md}; font-size: 13px; line-height: 1.5;
-  border: 1px solid ${({ theme, $problem }) => $problem ? theme.colors.borderDanger : theme.colors.border};
-  background: ${({ theme, $problem }) => $problem ? theme.colors.errorBg : theme.colors.surfaceSunken};
-  color: ${({ theme }) => theme.colors.text};
-`;

@@ -340,3 +340,18 @@ it('turns a node back on after an update when it was on before it', async () => 
   await setupTitleIs('Example Studio is ready');
   expect(enables().map((post) => post.body)).toEqual([{ operation: 'enable', expectedRevision: 0, expectedSchemaDigest: schemaDigest }]);
 });
+
+it('reviews the update an installed plugin\'s drawer offers in Browse', async () => {
+  runtime = running(oldDigest, 50);
+  nodeStatus = 'ready';
+  nodeEnabled = true;
+  await renderAt('/plugins');
+  await act(async () => { await vi.waitFor(() => expect(button('Configure')).not.toBeNull(), { timeout: 10_000 }); });
+  await click('Configure');
+  await act(async () => { await vi.waitFor(() => expect(button('Update to 0.1.0')).not.toBeNull(), { timeout: 10_000 }); });
+  await contains('Release 0.1.0 from example');
+  await click('Update to 0.1.0');
+  await contains('Review the update to Example Studio');
+  expect([...host.querySelectorAll('[role=tab]')].find((tab) => tab.textContent === 'Browse')?.getAttribute('aria-selected')).toBe('true');
+  expect(posts).toEqual([]);
+});

@@ -200,6 +200,8 @@ export interface RuntimeSourceStatus {
   credential_reference: string | null;
   credential_ready: boolean;
   trust_revision: number | null;
+  /** Whether the publisher trust follows the built-in capability store; absent on hosts that predate it. */
+  follows_store?: boolean;
 }
 
 /**
@@ -410,10 +412,14 @@ const pluginsApi = apiSlice.injectEndpoints({
       query: ({ pluginId, request }) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, method: 'POST', headers, body: request }),
       invalidatesTags: ['Plugins'],
     }),
-    activateRuntimeRelease: build.mutation<ManagedOperation, { pluginId: string; operationId: string; expectedRevision: number; runtimeDigest: string; rollback: boolean; action?: 'activate' | 'select' }>({
-      query: ({ pluginId, operationId, expectedRevision, runtimeDigest, rollback, action = 'activate' }) => ({
+    activateRuntimeRelease: build.mutation<ManagedOperation, {
+      pluginId: string; operationId: string; expectedRevision: number; runtimeDigest: string; rollback: boolean; action?: 'activate' | 'select';
+      /** Whether the owner accepted this release's permissions; starting the release already selected needs no new acceptance. */
+      acceptPermissions?: boolean;
+    }>({
+      query: ({ pluginId, operationId, expectedRevision, runtimeDigest, rollback, action = 'activate', acceptPermissions = true }) => ({
         url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/operations`, method: 'POST', headers,
-        body: { operation_id: operationId, action, expected_revision: expectedRevision, runtime_digest: runtimeDigest, rollback, accept_permissions: true },
+        body: { operation_id: operationId, action, expected_revision: expectedRevision, runtime_digest: runtimeDigest, rollback, accept_permissions: acceptPermissions },
       }),
       invalidatesTags: ['Plugins'],
     }),

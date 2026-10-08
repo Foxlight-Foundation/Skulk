@@ -184,7 +184,7 @@ it.each(['Download and install', 'Select with owner stopped', 'Activate release'
   });
   root = createRoot(host);
   await act(async () => root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ManagedRuntimesPanel /></ThemeProvider></Provider>));
-  await contains('Configure'); await click('Configure'); await click('Install a release');
+  await contains('Configure'); await click('Configure'); await click('Details'); await click('Choose another release');
   await click('Inspect configured release'); await contains('example.plugin 1.2.3');
   if (action !== 'Download and install') await act(async () => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
   await click(action);
@@ -218,7 +218,7 @@ it('releases a confirmed activation fence while the drawer is closed before late
   });
   root = createRoot(host);
   await act(async () => root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ManagedRuntimesPanel /></ThemeProvider></Provider>));
-  await contains('Configure'); await click('Configure'); await click('Install a release');
+  await contains('Configure'); await click('Configure'); await click('Details'); await click('Choose another release');
   await contains('example.plugin 1.2.3');
   await act(async () => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
   await click('Activate release');

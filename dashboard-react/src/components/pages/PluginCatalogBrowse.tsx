@@ -45,6 +45,9 @@ function resumedView(): BrowseView {
 /** A retry asked for from another view, such as a card under Installed; `id` tells one click from the next. */
 export interface BrowseRetryHandoff { id: number; request: RetryRequest }
 
+/** An update asked for from another view, such as an installed plugin's drawer: review the newer release of this bundle. */
+export interface BrowseReviewHandoff { id: number; bundleId: string }
+
 /** Props for the Browse view of the Plugins page. */
 export interface PluginCatalogBrowseProps {
   /** Open an installed plugin's settings under Installed, on one node's settings when a node is named. */
@@ -59,6 +62,11 @@ export interface PluginCatalogBrowseProps {
   retry?: BrowseRetryHandoff | null;
   /** Called when Browse takes the handed-off retry, so it is not started again. */
   onRetryTaken?: () => void;
+  /**
+   * An update to open for review once the catalog is read. Browse opens it at
+   * most once per `id`; the page drops the handoff when the owner changes tab.
+   */
+  review?: BrowseReviewHandoff | null;
 }
 
 function retryOfJourney(journey: BoundJourney, updating: boolean): RetryRequest {
@@ -73,7 +81,7 @@ function retryOfJourney(journey: BoundJourney, updating: boolean): RetryRequest 
  * unfinished is picked up where it stopped, and an install the host reports
  * stopped is resumed on its own installation rather than installed again.
  */
-export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken }: PluginCatalogBrowseProps = {}) {
+export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, review }: PluginCatalogBrowseProps = {}) {
   const { t } = useSkulkTranslation();
   const [view, setView] = useState<BrowseView>(resumedView);
   const source = useGetCatalogSourceQuery();
@@ -103,6 +111,15 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken }: 
   // installation beside it.
   const installsKnown = operationIds.length === 0 || (installs.data !== undefined && !installs.isFetching);
   const inventoryKnown = (runtimes.data !== undefined || !!runtimes.error) && installsKnown;
+  // An update asked for elsewhere opens its review once the offers are known,
+  // and only while the bundle is still offered as an update. Adjusted while
+  // rendering, as React recommends for state that follows a changing input.
+  const [takenReview, setTakenReview] = useState<number | null>(null);
+  if (review && takenReview !== review.id && catalog.data && inventoryKnown && view.kind === 'list') {
+    setTakenReview(review.id);
+    const offer = offers.find((item) => item.entry.bundle_id === review.bundleId && item.state === 'update');
+    if (offer) setView({ kind: 'review', offer, listing: catalog.data });
+  }
   // A read that failed leaves its installation out. One that never selected a
   // release names no bundle until its install is read, so while any such read
   // is missing, a new install might duplicate a stopped one: fresh installs

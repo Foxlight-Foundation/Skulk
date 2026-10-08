@@ -126,6 +126,18 @@ This project records release notes here and mirrors public-facing notes in
   and its description as help, the actions sit in one row with one primary
   action, and setup checks read as a checklist with plain names (such as
   Storage and Status report) instead of raw check codes.
+- The top of an installed plugin's drawer was redesigned. Instead of a
+  "Runtime overview" of raw ids and fingerprints, it opens with the release
+  and who published it, where it came from, and one status (Running, Stopped,
+  Starting, Failed, Updating or Uninstalled), then one row of actions:
+  **Update to** a newer release built for this host (reviewed under
+  **Browse**), **Stop plugin** or **Start plugin** (named apart from the
+  capability nodes' **Turn on** and **Turn off**), and **Uninstall**. The
+  installation id, release fingerprints, the last local operation with
+  **Refresh status**, **Choose another release** (formerly **Install a
+  release**) and a plain explanation of what Stop and Uninstall keep sit under
+  a closed **Details**. An uninstalled plugin leads with **Reinstall** and
+  **Remove everything**.
 - An installed capability's **Browse** card could name another platform's
   build of the same release, such as "Linux, ARM64" on a Mac. It now names the
   build for this host. The card also says what the capability needs instead of

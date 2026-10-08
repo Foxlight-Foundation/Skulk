@@ -4376,7 +4376,7 @@ failed installation after checking current source readiness; reconnect only read
 the retained operation. Release activation still requires separate permission
 acceptance, and paid-capacity approval remains a separate plugin operation.
 
-The dashboard's **Install a release** controls inspect the configured release,
+The dashboard's **Choose another release** controls (under **Details** in a plugin's drawer) inspect the configured release,
 show its version/permissions and size, stage exact bytes, and require a separate
 permission acceptance and activation action. Installation progress is restored
 from the server after reconnect. Source/trust entry is available through terminal,
@@ -4762,8 +4762,9 @@ accepted for withdrawal. For example, send this JSON to `skulk-plugin-service ma
 
 Use `operation` with the same plugin and operation identifiers to read completion;
 retrying the original request returns its retained result. Browser reconnects also
-read that result without submitting another operation. In **Plugins → Managed
-runtimes**, **Uninstall plugin** invokes this same operation.
+read that result without submitting another operation. In **Plugins**, a plugin's
+**Uninstall** (in its drawer, or **Uninstall plugin…** in its card menu) invokes
+this same operation, and **Stop plugin** submits `disable`.
 
 Uninstall stops the plugin owner and withdraws future capabilities and acquisition.
 It retains the installation registration, verified runtime generations, configuration,

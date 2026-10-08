@@ -134,6 +134,26 @@ Tailscale. So an owner on any tailnet machine can manage every node's plugins:
 A node that reports no Tailscale address is named without a link; open its
 dashboard on the node itself.
 
+An installed plugin's drawer opens with its release ("Release 0.1.0 from
+example"), where it came from, and a status: Running, Stopped, Starting,
+Failed, Updating or Uninstalled. Its actions sit in one row:
+
+- **Update to**, followed by the version, when a newer release built for this
+  host is listed. It opens that release's review under **Browse**.
+- **Stop plugin** stops all of its capabilities until **Start plugin** runs the
+  same release again. Its settings and data stay. (Each capability node below
+  has its own **Turn on** and **Turn off**.)
+- **Uninstall** stops it and withdraws its capabilities, keeping its settings,
+  credentials and records. An uninstalled plugin offers **Reinstall**, which
+  starts the release it kept, and **Remove everything**, which deletes what it
+  kept after a second confirmation; after that it can be installed fresh from
+  **Browse**.
+
+**Details** holds the installation id, the selected and active release
+fingerprints, the last local operation with **Refresh status**, and **Choose
+another release**, which inspects, stages and activates a release from the
+plugin's source.
+
 Process separation helps lifecycle management; it is not a sandbox against
 malicious code running as the same operating-system user. Install bundles from
 publishers you trust.
@@ -329,7 +349,7 @@ delete is not proof of absence. Independent expiry cleanup retains its obligatio
 if the management host stops, but provider outages can delay observation or
 termination; the deadline is not a guaranteed billing cutoff.
 
-**Disable** and **Uninstall** withdraw future plugin work. Neither confirms that
+**Stop plugin** and **Uninstall** withdraw future plugin work. Neither confirms that
 an existing cloud resource is gone. RunPod Network Volumes are separate storage
 resources and are not removed by Pod cleanup. Use the supplier's recovery
 instructions before purging installation state or replacing an owner.
