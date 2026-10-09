@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-10-09
+
 ### Security
 
 - The data plane between nodes (generated output, uploaded images and audio,
@@ -16,11 +18,13 @@ This project records release notes here and mirrors public-facing notes in
   without it can neither join nor read the traffic. Clusters with different
   names (`SKULK_LIBP2P_NAMESPACE`) also scout for their data plane on different
   ports, so they normally never see each other, and in the rare case that two
-  names share a port the handshake still refuses the other cluster. On the default cluster name the shared key is public, as it always
-  has been for the control plane: traffic is encrypted against eavesdroppers,
-  but any Skulk node on the network can still join, so set a private cluster
-  name on every node to restrict membership. A blank cluster name counts as the
-  default and gets the same startup warning.
+  names share a port the handshake still refuses the other cluster. On the
+  default cluster name the shared key is public, as it always has been for the
+  control plane: traffic is encrypted against eavesdroppers, but any Skulk node
+  on the network can still join, so set a private cluster name on every node
+  to restrict membership. A blank cluster name is just as public and gets the
+  same startup warning; it derives its own key, so nodes with a blank name and
+  nodes with no name do not connect to each other.
 - Node diagnostics (`GET /v1/diagnostics/node` and the cluster view) no longer
   return the configured cluster name. They report `namespaceConfigured` and a
   `namespaceFingerprint` that confirms two nodes share a cluster without
