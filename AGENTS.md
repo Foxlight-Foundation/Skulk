@@ -114,6 +114,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   which replaces mlx-lm's preinstalled family parser and falls back to it for
   the upstream call form; ids are digest-normalized to Mistral's
   nine-alphanumeric template requirement at render time).
+  After load, each runner caps MLX's freed-buffer cache at a tenth of the
+  recommended working set, at least 512 MiB (`SKULK_MLX_CACHE_LIMIT_MIB`
+  overrides; 0 disables): left uncapped, generation filled it to about 9.5 GB
+  beside a 7.7 GB model on a 24 GB Mac.
 - **`mlx_audio`**: single-node speech backend vocabulary for upstream
   `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
   `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve
