@@ -720,6 +720,7 @@ def load_mlx_items(
         )
 
     set_wired_limit_for_model(get_weights_size(bound_instance.bound_shard))
+    limit_mlx_buffer_cache()
 
     mx.clear_cache()
 
@@ -1607,6 +1608,70 @@ def set_wired_limit_for_model(model_size: Memory):
     mx.set_wired_limit(max_rec_size.in_bytes)
     remember_wired_limit_bytes(max_rec_size.in_bytes)
     logger.info(f"Wired limit set to {max_rec_size}.")
+
+
+MLX_CACHE_LIMIT_ENV = "SKULK_MLX_CACHE_LIMIT_MIB"
+"""Operator override, in MiB, for MLX's freed-buffer cache (0 disables it)."""
+
+_DEFAULT_CACHE_FRACTION = 0.10
+_MINIMUM_DEFAULT_CACHE = Memory.from_mb(512)
+
+
+def mlx_buffer_cache_limit(max_recommended: Memory, override: str | None) -> Memory:
+    """Return how much freed buffer memory MLX may keep for reuse.
+
+    MLX keeps freed buffers for reuse and, unless told otherwise, lets that
+    cache grow to its memory limit, about one and a half times the device's
+    recommended working set. Skulk's generation allocates buffers of many
+    sizes, so a 12B model on a 24 GB Mac (7.7 GB active, 7.9 GB peak) was
+    measured holding 9.5 GB of cache after one 400-token generation: memory
+    no other app could use. The default keeps a tenth of the recommended
+    working set, never less than 512 MiB, which still covers the transient
+    buffers a decode step reuses.
+
+    Args:
+        max_recommended: The device's recommended working set size.
+        override: The ``SKULK_MLX_CACHE_LIMIT_MIB`` value, or ``None`` when unset.
+            A blank value counts as unset.
+
+    Returns:
+        The cache limit to apply.
+
+    Raises:
+        ValueError: If the override is not a non-negative whole number of MiB.
+    """
+    if override is not None and override.strip():
+        mebibytes = int(override.strip())
+        if mebibytes < 0:
+            raise ValueError(f"{MLX_CACHE_LIMIT_ENV} must not be negative")
+        return Memory.from_mb(mebibytes)
+    return max(_MINIMUM_DEFAULT_CACHE, max_recommended * _DEFAULT_CACHE_FRACTION)
+
+
+def limit_mlx_buffer_cache() -> None:
+    """Cap MLX's freed-buffer cache for this runner process.
+
+    Side effects:
+        Calls ``mx.set_cache_limit``. An invalid ``SKULK_MLX_CACHE_LIMIT_MIB``
+        is logged and the default applies, so a typo never stops a model
+        from loading.
+    """
+    if not mx.metal.is_available():
+        return
+    max_recommended = Memory.from_bytes(
+        int(mx.device_info()["max_recommended_working_set_size"])
+    )
+    override = os.environ.get(MLX_CACHE_LIMIT_ENV)
+    try:
+        limit = mlx_buffer_cache_limit(max_recommended, override)
+    except ValueError:
+        logger.warning(
+            f"Ignoring {MLX_CACHE_LIMIT_ENV}={override!r}: expected a whole "
+            "number of MiB, 0 or more; using the default cache limit."
+        )
+        limit = mlx_buffer_cache_limit(max_recommended, None)
+    mx.set_cache_limit(limit.in_bytes)
+    logger.info(f"MLX buffer cache limit set to {limit}.")
 
 
 def mlx_cleanup(
