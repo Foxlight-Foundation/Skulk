@@ -15,6 +15,7 @@ from typing import cast
 
 from skulk.shared.backends import EngineType, engine_of
 from skulk.shared.types.node_facts import EngineBinaryFact, NodeFacts
+from skulk.utils.git_checkout import read_checkout_head
 
 _ENGINE_DISTRIBUTIONS: dict[EngineType, tuple[str, str]] = {
     "mlx": ("mlx", "mlx"),
@@ -107,21 +108,12 @@ def _vllm_build(binary: EngineBinaryFact) -> str | None:
 
 @lru_cache(maxsize=8)
 def _git_head(checkout: str) -> str | None:
-    """Read one checkout's HEAD commit once per process."""
-    try:
-        completed = subprocess.run(  # noqa: S603 - operator-configured checkout
-            ["git", "-C", checkout, "rev-parse", "HEAD"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    head = completed.stdout.strip()
-    return head if len(head) == 40 else None
+    """Read one checkout's HEAD commit once per process, from its files.
+
+    Running git here would open the command line tools dialog on a Mac that
+    lacks them; the checkout's own files answer the same question.
+    """
+    return read_checkout_head(Path(checkout))
 
 
 _TORCH_VERSION_SENTINEL = "skulk-torch="

@@ -4,6 +4,7 @@ import sys
 import tomllib
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Self, cast
 
 import anyio
@@ -43,6 +44,7 @@ from skulk.shared.types.thunderbolt import (
 )
 from skulk.shared.version import get_skulk_version
 from skulk.utils.channels import Sender
+from skulk.utils.git_checkout import find_checkout_root, read_checkout_head
 from skulk.utils.pydantic_ext import TaggedModel
 from skulk.utils.task_group import TaskGroup
 
@@ -320,22 +322,34 @@ def _get_exo_version() -> str:
     return get_skulk_version()
 
 
-def _get_git_commit() -> str:
-    """Get the current git commit hash."""
-    import subprocess
+def _get_git_commit(package_dir: Path | None = None) -> str:
+    """Return the short commit of the checkout this Skulk runs from, or ``unknown``.
+
+    The commit is read from the checkout's own files, never by running git: on a
+    Mac without the command line tools, running ``git`` opens a dialog offering
+    to install them, and this runs on every start. The checkout is the one that
+    holds the running ``skulk`` package, not the working directory, so a node
+    started from inside an unrelated repository cannot report that repository's
+    commit. A packaged install has no checkout and reports ``unknown``.
+
+    Args:
+        package_dir: Where the ``skulk`` package lives; defaults to the running
+            one. Tests point it at a fixture checkout.
+
+    Returns:
+        The first eight hex digits of the commit, or ``unknown``.
+    """
+    import skulk
 
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return "unknown"
+        start = package_dir if package_dir is not None else Path(skulk.__file__).resolve().parent
+        checkout = find_checkout_root(start)
+        head = read_checkout_head(checkout) if checkout is not None else None
+    except (OSError, ValueError, RuntimeError):
+        # Reporting the build must never stop a node from starting: an
+        # unreadable ancestor directory or malformed metadata is "unknown".
+        head = None
+    return head[:8] if head is not None else "unknown"
 
 
 class NodeNetworkInterfaces(TaggedModel):
