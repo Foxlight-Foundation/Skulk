@@ -16,7 +16,10 @@ export interface DiagnosticsRuntime {
   configFileExists: boolean;
   skulkVersion: string;
   skulkCommit: string;
-  libp2pNamespace?: string | null;
+  /** Whether SKULK_LIBP2P_NAMESPACE is set; the value itself is never served. */
+  namespaceConfigured?: boolean;
+  /** Domain-separated fingerprint of the cluster namespace token; equal values mean a shared cluster key. */
+  namespaceFingerprint?: string | null;
   pythonUnbuffered: boolean;
   tracingEnabled: boolean;
   structuredLoggingConfigured: boolean;

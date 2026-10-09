@@ -44,7 +44,11 @@ class HostNetwork(FrozenModel):
         description="Transport the new peer must match for inference output."
     )
     data: tuple[TcpEndpoint, ...] = Field(
-        max_length=16, description="Live Zenoh TCP listeners; empty for gossipsub."
+        max_length=16,
+        description=(
+            "Live Zenoh listeners (mutual TLS over TCP, keyed by the cluster "
+            "namespace); empty for gossipsub."
+        ),
     )
 
     @model_validator(mode="after")
@@ -67,6 +71,8 @@ def tcp_endpoints(
 ) -> tuple[TcpEndpoint, ...]:
     """Project bound numeric TCP listeners, normalizing wildcard binds to loopback.
 
+    Zenoh locators may be ``tcp/`` or ``tls/``: the data plane's TLS links ride
+    an ordinary TCP socket, so either projects to the same host and port.
     Unsupported transports are ignored. Ambiguous, invalid and excessive results
     fail closed instead of producing an endpoint that requires a guessed port.
     """
@@ -78,7 +84,7 @@ def tcp_endpoints(
                 continue
             host, raw_port = parts[2], parts[4]
         else:
-            if not address.startswith("tcp/"):
+            if not address.startswith(("tcp/", "tls/")):
                 continue
             parsed = urlsplit("tcp://" + address[4:])
             if parsed.path or parsed.query or parsed.fragment or parsed.username:

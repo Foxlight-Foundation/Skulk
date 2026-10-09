@@ -334,8 +334,10 @@ def test_zenoh_isolated_node_is_error() -> None:
     isolated = health["node-a"]
     assert isolated.level == "error"
     reason = next(r for r in isolated.reasons if r.code == "zenoh_isolated")
-    assert "0 peer transports" in reason.message
+    assert "0 authenticated peer transports" in reason.message
     assert "SKULK_ZENOH_CONNECT" in reason.remediation
+    # The remediation names the TLS locator form the data plane now requires.
+    assert "tls/<peer-ip>:7447" in reason.remediation
     # The connected node is not flagged.
     assert all(r.code != "zenoh_isolated" for r in health["node-b"].reasons)
 

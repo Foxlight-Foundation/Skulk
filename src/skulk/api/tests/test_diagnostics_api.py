@@ -1,5 +1,6 @@
 """Tests for read-only node and cluster diagnostics endpoints."""
 
+import hashlib
 from datetime import datetime, timezone
 from typing import cast
 from uuid import uuid4
@@ -11,6 +12,8 @@ from fastapi.testclient import TestClient
 
 import skulk.api.main as api_main
 from skulk.api.main import API
+from skulk.extensions.host_network import namespace_fingerprint
+from skulk.main import _libp2p_namespace_token  # pyright: ignore[reportPrivateUsage]
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
@@ -62,7 +65,9 @@ def _json_mapping(value: object) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
-def _build_api(node_id: str = "local-node") -> API:
+def _build_api(
+    node_id: str = "local-node", namespace_fingerprint: str | None = None
+) -> API:
     """Create a minimal API instance for diagnostics endpoint testing."""
 
     command_sender, _ = channel[ForwarderCommand]()
@@ -78,6 +83,7 @@ def _build_api(node_id: str = "local-node") -> API:
         election_receiver=election_receiver,
         enable_event_log=False,
         mount_dashboard=False,
+        namespace_fingerprint=namespace_fingerprint,
     )
 
 
@@ -166,6 +172,49 @@ def test_telemetry_diagnostics_are_exposed_without_changing_node_bundle() -> Non
     assert telemetry_response.json()["networkQueueDepth"] == 1
     assert node_response.status_code == 200
     assert "telemetryPlane" not in node_response.json()
+
+
+def test_node_diagnostics_never_report_the_raw_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The namespace seeds the cluster key, so diagnostics carry a fingerprint.
+
+    ``GET /v1/diagnostics/node`` is unauthenticated on the trusted fabric. It
+    used to echo ``SKULK_LIBP2P_NAMESPACE`` verbatim, which let any reachable
+    client derive the cluster's control- and data-plane keys.
+    """
+    secret = "private-fabric-" + uuid4().hex
+    monkeypatch.setenv("SKULK_LIBP2P_NAMESPACE", secret)
+    token = _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": secret})
+    fingerprint = namespace_fingerprint(token)
+    api = _build_api("local-node", namespace_fingerprint=fingerprint)
+    client = TestClient(api.app)
+
+    response = client.get("/v1/diagnostics/node")
+
+    assert response.status_code == 200
+    assert secret not in response.text
+    runtime = _json_mapping(_json_object(response)["runtime"])
+    assert "libp2pNamespace" not in runtime
+    assert runtime["namespaceConfigured"] is True
+    assert runtime["namespaceFingerprint"] == fingerprint
+    # The fingerprint is neither the namespace nor anything routing uses.
+    assert runtime["namespaceFingerprint"] != hashlib.sha256(token.encode()).hexdigest()
+
+
+def test_node_diagnostics_report_default_namespace_without_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset namespace reports as not configured, still without a raw value."""
+    monkeypatch.delenv("SKULK_LIBP2P_NAMESPACE", raising=False)
+    fingerprint = namespace_fingerprint(_libp2p_namespace_token({}))
+    api = _build_api("local-node", namespace_fingerprint=fingerprint)
+    client = TestClient(api.app)
+
+    runtime = _json_mapping(_json_object(client.get("/v1/diagnostics/node"))["runtime"])
+
+    assert runtime["namespaceConfigured"] is False
+    assert runtime["namespaceFingerprint"] == fingerprint
 
 
 def test_node_diagnostics_warns_about_split_data_transports() -> None:

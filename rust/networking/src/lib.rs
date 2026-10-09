@@ -3,6 +3,7 @@
 //! this is here as a placeholder documentation
 //!
 //!
+mod data_plane_trust;
 pub mod discovery;
 pub mod swarm;
 pub mod zenoh_session;

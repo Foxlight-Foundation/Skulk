@@ -500,9 +500,23 @@ class NodeRuntimeDiagnostics(CamelCaseModel):
     )
     skulk_version: str = Field(description="Installed Skulk package version.")
     skulk_commit: str = Field(description="Git commit reported by node identity.")
-    libp2p_namespace: str | None = Field(
+    namespace_configured: bool = Field(
+        default=False,
+        description=(
+            "Whether SKULK_LIBP2P_NAMESPACE is set. The value itself is never "
+            "reported: it seeds the cluster key that authenticates the control "
+            "and data planes."
+        ),
+    )
+    namespace_fingerprint: str | None = Field(
         default=None,
-        description="Configured libp2p namespace environment value, if set.",
+        description=(
+            "Domain-separated SHA-256 fingerprint of the cluster namespace token "
+            "(network version plus namespace), the same value as the startup log "
+            "and the plugin host-network namespaceFingerprint. Equal values mean "
+            "two nodes share a cluster key; it is not the key, the routing "
+            "namespace, or the raw namespace. Null when not provided."
+        ),
     )
     python_unbuffered: bool = Field(
         description="Whether PYTHONUNBUFFERED is enabled for this process."

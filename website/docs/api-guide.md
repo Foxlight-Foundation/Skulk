@@ -3701,9 +3701,11 @@ flyout. Hosts with no capability nodes are absent from the map.
 The response carries a live `nodeResources` map as well. Each node entry includes
 its placement `backends`, declared `participation`, `apiAvailable` (whether the
 node process exposes the HTTP API), resolved `dataTransport` (`gossipsub` or
-`zenoh`), `zenohConnectedPeers` (the node's live Zenoh
-peer-transport count, sampled at each advertisement; `null` when the node runs
-gossipsub or while the count is not yet trustworthy after startup), and
+`zenoh`), `zenohConnectedPeers` (the number of cluster members the node holds
+an authenticated Zenoh transport to, sampled at each advertisement; a peer
+counts only when its links present the cluster's member certificate; `null`
+when the node runs gossipsub or while the count is not yet trustworthy after
+startup), and
 `capabilityConflicts`: loud
 observation-vs-declaration disagreements from backend derivation, each with a
 `code`, `message`, and `remediation`. Conflicts also surface as `nodeHealth`
@@ -3723,8 +3725,11 @@ the error-level `zenoh_isolated` reason: its control plane looks healthy but
 every remote model or provider stream through it will fail. The typical cause
 is a node that cannot reach peers via local multicast (for example one joined
 over a routed or overlay network); the remediation is an explicit
-`SKULK_ZENOH_CONNECT` peer endpoint plus a dialable `SKULK_ZENOH_LISTEN`
-address. The API includes fresh telemetry-only management nodes, local or
+`SKULK_ZENOH_CONNECT` peer endpoint (`tls/HOST:PORT`) plus a dialable
+`SKULK_ZENOH_LISTEN` address. Data-plane links are mutual TLS keyed by the
+cluster namespace, so a node with a different `SKULK_LIBP2P_NAMESPACE` or Skulk
+network version also reads as isolated, and multicast discovery needs the
+scouting UDP port that the node logs at startup. The API includes fresh telemetry-only management nodes, local or
 remote, even when replicated worker membership does not carry their entries.
 For mixed-version state that predates this field, a missing `apiAvailable`
 decodes conservatively as `true`; current `--no-api` workers advertise `false`
@@ -3810,7 +3815,13 @@ Behavior notes:
 - `GET /v1/diagnostics/node` returns the local node's runtime/config facts,
   resources, process tree, live runner-supervisor state, flight-recorder phase
   state, placement analysis, a bounded `doctor` array, and `dataPlane` plus
-  `provider` blocks. Each doctor entry contains `checkId`, `title`, `verdict`,
+  `provider` blocks. The `runtime` block never contains the cluster namespace:
+  the namespace seeds the cluster key that authenticates the control and data
+  planes. It reports `namespaceConfigured` (whether `SKULK_LIBP2P_NAMESPACE` is
+  set) and `namespaceFingerprint`, the same domain-separated SHA-256 digest of
+  the network-version and namespace token as the startup log and
+  `GET /v1/plugins/host-network`; equal fingerprints mean two nodes share a
+  cluster key. The former `libp2pNamespace` field is removed. Each doctor entry contains `checkId`, `title`, `verdict`,
   `detail`, `consequence`, `remediation`, and `fixAvailable` from the node-local
   doctor registry. The array is capped at 64 entries. The proxied
   `GET /v1/diagnostics/cluster/{node_id}` response carries the same complete
@@ -4676,7 +4687,7 @@ node, approve spending, or replay uncertain provider submissions.
 
 | Method and path | Parameters and behavior |
 | --- | --- |
-| `GET /v1/plugins/host-network` | No parameters. Requires `plugins:read` or direct owner authority, including the existing origin and transport checks. Returns the live local `nodeId`, public `networkVersion`, domain-separated `namespaceFingerprint`, numeric `control` TCP endpoints (`host`, `port`), `dataTransport` (`gossipsub` or `zenoh`) and Zenoh `data` endpoints (empty for gossipsub). Ports come from running native listeners, including OS-assigned ports. The fingerprint is SHA-256 of UTF-8 `skulk-host-attachment-v1` + NUL + the version/namespace token, distinct from the routing namespace; no raw namespace or credentials are returned. Responses are `Cache-Control: no-store`; unavailable or unsupported TCP listeners return 503, concurrency saturation 429. The read has a two-second deadline. This reports addresses local to the serving host, not endpoints guaranteed reachable remotely. A plugin may use its owned secure transport to connect matching peers; the route never dials, changes configuration, restarts the node, or approves acquisition. |
+| `GET /v1/plugins/host-network` | No parameters. Requires `plugins:read` or direct owner authority, including the existing origin and transport checks. Returns the live local `nodeId`, public `networkVersion`, domain-separated `namespaceFingerprint`, numeric `control` TCP endpoints (`host`, `port`), `dataTransport` (`gossipsub` or `zenoh`) and Zenoh `data` endpoints (empty for gossipsub; the numeric TCP socket under each mutual-TLS `tls/` listener, so a peer attaching through a tunnel must hold the same cluster key). Ports come from running native listeners, including OS-assigned ports. The fingerprint is SHA-256 of UTF-8 `skulk-host-attachment-v1` + NUL + the version/namespace token, distinct from the routing namespace; no raw namespace or credentials are returned. Responses are `Cache-Control: no-store`; unavailable or unsupported TCP listeners return 503, concurrency saturation 429. The read has a two-second deadline. This reports addresses local to the serving host, not endpoints guaranteed reachable remotely. A plugin may use its owned secure transport to connect matching peers; the route never dials, changes configuration, restarts the node, or approves acquisition. |
 | `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-actions` | Exact installation/node IDs. Returns `nodeId`, configuration `revision`/`schemaDigest`, `credentialRevision`/`credentialSchemaDigest`, up to eight installed `actions` and 32 retained `operations`. Each action has `actionId`, title, description, ordinary `parametersSchema`, `schemaDigest`, and `requiresApproval` (default false). Requires `plugins:read` or direct owner authority. Does not initialize state or perform setup. |
 | `POST /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations` | Body: `operationId` (32 lowercase hexadecimal characters), `actionId`, `values`, `expectedRevision`, `expectedSchemaDigest`, `expectedCredentialRevision`, `expectedCredentialSchemaDigest`, `expectedActionSchemaDigest`, `expectedRequiresApproval` (default false; must match the installed action). Encoded intent is bounded to 16 KiB. Requires `plugins:manage` and, for an action declaring `requiresApproval`, `plugins:approve`, or direct owner authority. The provider reserves exact intent durably before background work and returns promptly. |
 | `GET /v1/plugins/{plugin_id}/nodes/{node_id}/setup-operations/{operation_id}` | Exact retained operation ID. Returns last durable progress without waiting for setup completion. Requires `plugins:read` or direct owner authority. |

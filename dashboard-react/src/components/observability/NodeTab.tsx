@@ -577,7 +577,18 @@ export function NodeTab({ nodeId }: NodeTabProps) {
               <Row><Key>{t('observability.node.master', 'Master')}</Key><Value>{runtime.masterNodeId ? shortId(runtime.masterNodeId) : t('common.unknownLower', 'unknown')}</Value></Row>
               <Row><Key>{t('observability.node.commit', 'Commit')}</Key><Value>{runtime.skulkCommit}</Value></Row>
               <Row><Key>{t('observability.node.version', 'Version')}</Key><Value>{runtime.skulkVersion}</Value></Row>
-              <Row><Key>{t('observability.node.namespace', 'Namespace')}</Key><Value>{runtime.libp2pNamespace ?? t('observability.node.defaultNamespace', 'default')}</Value></Row>
+              {/* The namespace is the cluster's membership secret, so the node
+                  serves only whether one is set and a fingerprint operators
+                  can compare across nodes. */}
+              <Row>
+                <Key>{t('observability.node.namespace', 'Namespace')}</Key>
+                <Value>
+                  {runtime.namespaceConfigured
+                    ? t('observability.node.customNamespace', 'custom')
+                    : t('observability.node.defaultNamespace', 'default')}
+                  {runtime.namespaceFingerprint ? ` (${runtime.namespaceFingerprint.slice(0, 12)})` : ''}
+                </Value>
+              </Row>
               <Row><Key>{t('observability.node.cwd', 'CWD')}</Key><Value>{runtime.cwd}</Value></Row>
               <Row>
                 <Key>{t('observability.node.config', 'Config')}</Key>
