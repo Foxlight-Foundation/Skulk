@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A node now reports the commit it started from. It used to re-read its
+  checkout every time it refreshed its identity, so after a checkout moved, a
+  node that had not restarted yet claimed the new commit while still running
+  the old code, and the cluster could not warn about the mixed build
+  (`version_mismatch`).
 - After a model download fails, each replacement now avoids every node whose
   download already failed for that placement, not only the latest one, so
   recovery ends after at most one failure per node. A failure that happens on

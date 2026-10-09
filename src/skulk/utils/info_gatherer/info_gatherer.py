@@ -4,6 +4,7 @@ import sys
 import tomllib
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Self, cast
 
@@ -313,13 +314,28 @@ class StaticNodeInformation(TaggedModel):
             os_version=get_os_version(),
             os_build_version=await get_os_build_version(),
             skulk_version=_get_exo_version(),
-            skulk_commit=_get_git_commit(),
+            skulk_commit=_running_git_commit(),
         )
 
 
 def _get_exo_version() -> str:
     """Get the Skulk app version from shared package metadata."""
     return get_skulk_version()
+
+
+@cache
+def _running_git_commit() -> str:
+    """Return the commit this process started from, read once per process.
+
+    Static node information is re-gathered on a timer, and the checkout can
+    move underneath a running node (a deploy checks out a new commit and then
+    restarts each node in turn). Re-reading the checkout every time would make
+    a node that was never restarted advertise the new commit while it still
+    runs the old code, hiding exactly the mixed-build window that
+    ``version_mismatch`` exists to report. Python imports the package at
+    startup, so the first read is the code this process runs.
+    """
+    return _get_git_commit()
 
 
 def _get_git_commit(package_dir: Path | None = None) -> str:
