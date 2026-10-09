@@ -86,6 +86,21 @@ def test_unreadable_heads_yield_none(tmp_path: Path, head: str) -> None:
     assert read_checkout_head(tmp_path) is None
 
 
+def test_a_ref_with_an_embedded_nul_yields_none(tmp_path: Path) -> None:
+    _clone(tmp_path, head="ref: refs/heads/ma\x00in\n")
+    assert read_checkout_head(tmp_path) is None
+
+
+def test_node_identity_reports_unknown_when_the_checkout_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreadable(_: Path) -> Path | None:
+        raise PermissionError("an ancestor directory is not readable")
+
+    monkeypatch.setattr(info_gatherer, "find_checkout_root", unreadable)
+    assert info_gatherer._get_git_commit(tmp_path) == "unknown"  # pyright: ignore[reportPrivateUsage]
+
+
 def test_a_directory_that_is_not_a_checkout_yields_none(tmp_path: Path) -> None:
     assert read_checkout_head(tmp_path) is None
     (tmp_path / ".git").write_text("not a gitdir pointer\n")

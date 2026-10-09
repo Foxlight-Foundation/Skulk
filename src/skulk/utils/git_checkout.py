@@ -114,7 +114,8 @@ def _read_text(path: Path) -> str | None:
     try:
         with path.open("rb") as handle:
             data = handle.read(_MAX_FILE_BYTES + 1)
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a path built from a malformed ref (an embedded NUL).
         return None
     if len(data) > _MAX_FILE_BYTES:
         return None

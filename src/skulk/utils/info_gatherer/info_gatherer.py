@@ -341,9 +341,14 @@ def _get_git_commit(package_dir: Path | None = None) -> str:
     """
     import skulk
 
-    start = package_dir if package_dir is not None else Path(skulk.__file__).resolve().parent
-    checkout = find_checkout_root(start)
-    head = read_checkout_head(checkout) if checkout is not None else None
+    try:
+        start = package_dir if package_dir is not None else Path(skulk.__file__).resolve().parent
+        checkout = find_checkout_root(start)
+        head = read_checkout_head(checkout) if checkout is not None else None
+    except (OSError, ValueError, RuntimeError):
+        # Reporting the build must never stop a node from starting: an
+        # unreadable ancestor directory or malformed metadata is "unknown".
+        head = None
     return head[:8] if head is not None else "unknown"
 
 
