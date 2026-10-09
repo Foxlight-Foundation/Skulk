@@ -124,7 +124,9 @@ private-LAN or CGNAT fabric IPv4 address (or loopback when offline or
 public-only) and uses local multicast scouting to discover other zero-config
 nodes. Supplying `SKULK_ZENOH_CONNECT` switches to explicit peer endpoints for
 routed or Tailscale deployments; `SKULK_ZENOH_LISTEN` overrides the selected
-local listener and is required to bind a public address. Set
+local listener and is required to bind a public address. Both take `tls/HOST:PORT`
+endpoints with an IPv4 address or a DNS name; an IPv6 address literal is refused at
+startup, because the data plane's TLS links cannot dial one. Set
 `SKULK_ZENOH_DATA_PLANE=0` only to force the legacy gossip fallback.
 
 **Every node in a cluster must use the same data-plane transport.** Skulk does not

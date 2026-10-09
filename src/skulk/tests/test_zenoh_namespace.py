@@ -138,9 +138,8 @@ def test_resolve_zenoh_listen_rewrites_legacy_plaintext_override() -> None:
     assert _resolve_zenoh_listen("tcp/192.168.0.115:7447") == (
         "tls/192.168.0.115:7447"
     )
-    assert _resolve_zenoh_listen("  tcp/[::1]:7447#iface=en0  ") == (
-        "tls/[::1]:7447#iface=en0"
-    )
+    with pytest.raises(ValueError, match="IPv6 address"):
+        _resolve_zenoh_listen("  tcp/[::1]:7447#iface=en0  ")
 
 
 def test_normalize_zenoh_endpoint_reports_rewrites() -> None:
@@ -159,6 +158,12 @@ def test_normalize_zenoh_endpoint_reports_rewrites() -> None:
 )
 def test_normalize_zenoh_endpoint_refuses_other_protocols(endpoint: str) -> None:
     with pytest.raises(ValueError, match="tls/HOST:PORT"):
+        _normalize_zenoh_endpoint(endpoint)
+
+
+@pytest.mark.parametrize("endpoint", ["tls/[::1]:7447", "tcp/[fd7a:115c::1]:7447", "tls/[::]:7447#iface=en0"])
+def test_normalize_zenoh_endpoint_refuses_ipv6_literals(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="IPv4 address or a DNS name"):
         _normalize_zenoh_endpoint(endpoint)
 
 

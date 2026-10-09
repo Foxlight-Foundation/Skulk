@@ -359,20 +359,30 @@ def _normalize_zenoh_endpoint(endpoint: str) -> tuple[str, bool]:
 
     Raises:
         ValueError: The endpoint names a protocol other than ``tls/`` or
-            ``tcp/``.
+            ``tcp/``, or an IPv6 address literal.
     """
     if endpoint.startswith(_ZENOH_DATA_PLANE_PROTOCOL):
-        return endpoint, False
-    if endpoint.startswith(_ZENOH_LEGACY_PLAINTEXT_PROTOCOL):
-        return (
-            _ZENOH_DATA_PLANE_PROTOCOL
-            + endpoint.removeprefix(_ZENOH_LEGACY_PLAINTEXT_PROTOCOL),
-            True,
+        normalized, rewritten = endpoint, False
+    elif endpoint.startswith(_ZENOH_LEGACY_PLAINTEXT_PROTOCOL):
+        normalized = _ZENOH_DATA_PLANE_PROTOCOL + endpoint.removeprefix(
+            _ZENOH_LEGACY_PLAINTEXT_PROTOCOL
         )
-    raise ValueError(
-        f"Zenoh endpoint {endpoint!r} must use tls/HOST:PORT: the data plane "
-        "accepts only mutual TLS links (tcp/ endpoints are rewritten to tls/)."
-    )
+        rewritten = True
+    else:
+        raise ValueError(
+            f"Zenoh endpoint {endpoint!r} must use tls/HOST:PORT: the data plane "
+            "accepts only mutual TLS links (tcp/ endpoints are rewritten to tls/)."
+        )
+    # A TLS dial names its server, and the TLS library refuses an IPv6 address
+    # literal as a server name, so such a link never forms. Refuse it here, where
+    # the operator can read why, instead of starting a node whose data plane
+    # silently has no peers.
+    if normalized.removeprefix(_ZENOH_DATA_PLANE_PROTOCOL).startswith("["):
+        raise ValueError(
+            f"Zenoh endpoint {endpoint!r} uses an IPv6 address: the data plane's "
+            "TLS links cannot dial one. Use an IPv4 address or a DNS name."
+        )
+    return normalized, rewritten
 
 
 def _resolve_zenoh_listen(env_value: str) -> str:
