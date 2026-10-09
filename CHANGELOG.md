@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-09
+
 ### Added
 
 - Skulk can now read a built-in capability store with nothing to paste or
