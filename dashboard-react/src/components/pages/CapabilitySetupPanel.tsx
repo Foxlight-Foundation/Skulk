@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import styled from 'styled-components';
-import { FiAlertCircle, FiCheckCircle, FiExternalLink, FiPower, FiXCircle } from 'react-icons/fi';
+import { FiAlertCircle, FiCheckCircle, FiClock, FiExternalLink, FiPower, FiXCircle } from 'react-icons/fi';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useClusterState } from '../../hooks/useClusterState';
 import {
@@ -185,7 +185,7 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
         const state = states[index];
         return <Item key={capabilityNodeKey(summary)}>
           <Mark aria-hidden="true" $state={state}>{{
-            done: <FiCheckCircle />, waiting: <Spinner size={16} />, off: <FiPower />, settings: <FiAlertCircle />, stopped: <FiXCircle />,
+            done: <FiCheckCircle />, waiting: <Spinner size={16} />, off: <FiPower />, settings: <FiAlertCircle />, stopped: <FiXCircle />, unavailable: <FiClock />,
           }[state]}</Mark>
           <div><h3>{rowTitle(summary)}</h3><p>{detail(summary)}</p></div>
           <StatusPill tone={STATE_TONE[state]}>{stateLabel(state)}</StatusPill>
@@ -209,7 +209,9 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
       </OpenLink>) : null}
       {next === 'settings' && off.length > 0 ? <Button variant="outline" loading={turning} onClick={() => void turnOn()}>{t('plugins.setup.turnOn', 'Turn on')}</Button> : null}
       {ready ? unreachable.map(({ surface }) => <Button key={surface.url} variant="outline" disabled>{openLabel(surface)}</Button>) : null}
-      {onManage && next !== 'settings' ? (refusal && decided
+      {/* Settings cannot be read while the plugin service is silent, and it is not
+          a settings problem, so nothing here sends the operator there. */}
+      {onManage && next !== 'settings' && !states.includes('unavailable') ? (refusal && decided
         ? <Button variant="outline" onClick={() => onManage(target.pluginId, refusal.nodeId)}>{t('plugins.setup.openSettings', 'Open settings')}</Button>
         : <Button variant="outline" onClick={() => onManage(target.pluginId)}>{t('plugins.setup.settings', 'Settings')}</Button>) : null}
       <Button variant="outline" onClick={onDone}>{t('plugins.setup.done', 'Done')}</Button>
@@ -251,7 +253,7 @@ const Item = styled.li`
 `;
 const Mark = styled.span<{ $state: ItemState }>`
   display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; font-size: 20px;
-  color: ${({ theme, $state }) => ({ done: theme.colors.healthy, waiting: theme.colors.textMuted, off: theme.colors.textMuted, settings: theme.colors.liveText, stopped: theme.colors.error })[$state]};
+  color: ${({ theme, $state }) => ({ done: theme.colors.healthy, waiting: theme.colors.textMuted, off: theme.colors.textMuted, settings: theme.colors.liveText, stopped: theme.colors.error, unavailable: theme.colors.liveText })[$state]};
 `;
 const Problem = styled.p`
   margin: 0; padding: 12px 14px; border-radius: ${({ theme }) => theme.radii.lg}; font-size: 13.5px; line-height: 1.5;

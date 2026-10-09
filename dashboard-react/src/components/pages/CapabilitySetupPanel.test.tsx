@@ -133,6 +133,7 @@ it('says a plugin service that is not answering is not a settings problem', asyn
   expect(host.textContent).not.toContain('Needs settings');
   expect(host.textContent).not.toContain('It needs its settings before it can run.');
   expect(button('Open settings')).toBeNull();
+  expect(button('Settings')).toBeNull();
   expect(button('Turn on')).toBeNull();
 });
 
