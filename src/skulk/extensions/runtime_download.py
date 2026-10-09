@@ -31,7 +31,7 @@ from skulk.extensions.runtime_artifacts import (
 )
 from skulk.extensions.runtime_attachment import ProfileIdentifier
 from skulk.extensions.runtime_files import (
-    RuntimeLock,
+    acquire_runtime_lock,
     private_directory,
     read_private,
     remove_private,
@@ -56,6 +56,10 @@ class _LegacyStoreBinding(BaseModel):
 
 
 _TRANSITION_FILE: Final = "trust-transition.json"
+# How long a source or trust change waits for the installer fence. An owner's
+# start verification hashes the whole installed runtime while holding it, which
+# takes seconds on a loaded machine; the manager's own request timeout is 30.
+_SOURCE_FENCE_WAIT_SECONDS: Final = 10.0
 """Journal of a source record and trust being installed together."""
 
 
@@ -426,15 +430,7 @@ class RuntimeDownloads:
         journal = self.root / _TRANSITION_FILE
         if not (journal.exists() or journal.is_symlink()):
             return
-        deadline = time.monotonic() + 5.0
-        while True:
-            try:
-                lock = RuntimeLock(self.installer.installer)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise
-                await asyncio.sleep(0.05)
+        lock = await acquire_runtime_lock(self.installer.installer, wait_seconds=5.0)
         try:
             self._complete_transition()
         finally:
@@ -557,7 +553,14 @@ class RuntimeDownloads:
         async with self.guard:
             if self.closed or (self.work is not None and not self.work.done()):
                 raise ValueError("installation is busy or closed")
-            lock = RuntimeLock(self.installer.installer)
+            # Nothing is written before the fence is held, so wait out a
+            # running owner's verification (it holds the fence right after an
+            # activation and at each periodic check) instead of refusing a
+            # source or trust change, or a re-run of an install, that lands
+            # in that window.
+            lock = await acquire_runtime_lock(
+                self.installer.installer, wait_seconds=_SOURCE_FENCE_WAIT_SECONDS
+            )
             try:
                 try:
                     previous = self.source()
@@ -710,15 +713,9 @@ class RuntimeDownloads:
                 raise ValueError("installation is busy or closed")
             # The running owner's periodic verification holds this fence for
             # moments at a time; wait that out rather than skip a renewal.
-            deadline = time.monotonic() + wait_seconds
-            while True:
-                try:
-                    lock = RuntimeLock(self.installer.installer)
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        raise
-                    await asyncio.sleep(0.05)
+            lock = await acquire_runtime_lock(
+                self.installer.installer, wait_seconds=wait_seconds
+            )
             try:
                 try:
                     source = self.source()
