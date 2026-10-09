@@ -55,3 +55,41 @@ export async function turnOnNodes(
   }
   return { enabled, refusal: null };
 }
+
+/**
+ * Start one node again that is on but stopped: send "enable" against a fresh read.
+ *
+ * A node stops at "needs settings" when a check fails while it starts, and it
+ * stays stopped after the cause goes away (a check that failed while Skulk was
+ * updating, for one) even though its checks pass when run again. The plugin
+ * restarts a node on every settings change, including enabling one that is
+ * already on, and runs its setup checks first, so this is the restart. It is
+ * fenced like turning on, sends no settings, and returns the host's refusal
+ * when a check still fails. A node the fresh read finds turned off is left
+ * off: turning it on is the owner's choice, made with Turn on, and the
+ * enable here adopts the latest revision, so the fence alone would not
+ * protect a newer decision to turn it off.
+ */
+export async function startNodeAgain(
+  requests: TurnOnRequests,
+  address: NodeAddress,
+  refusalDetail: (error: unknown) => string | null,
+  refusedStatus: (error: unknown) => number | null,
+): Promise<StartAgainOutcome> {
+  try {
+    const current = await requests.readConfiguration(address).unwrap();
+    if (!current.enabled) return { kind: 'off' };
+    await requests.configure({
+      ...address, operation: 'enable', expectedRevision: current.revision, expectedSchemaDigest: current.schemaDigest,
+    }).unwrap();
+    return { kind: 'started' };
+  } catch (error) {
+    return { kind: 'refused', refusal: { nodeId: address.nodeId, detail: refusalDetail(error), status: refusedStatus(error) } };
+  }
+}
+
+/** What starting a node again did: started it, found it turned off and left it, or the host refused. */
+export type StartAgainOutcome =
+  | { kind: 'started' }
+  | { kind: 'off' }
+  | { kind: 'refused'; refusal: TurnOnRefusal };
