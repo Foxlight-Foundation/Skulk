@@ -245,7 +245,7 @@ optima:
 - Gemma assistant cards use **depth 2**
 - Qwen sidecar cards use **depth 1**
 
-For example, `gemma-4-12B-it-4bit` on a single M4 24GB decodes about 19 tok/s
+For example, `gemma-4-12B-it-4bit` on a single M4 24GB decodes 17 to 19 tok/s
 at depth 1, 20.7 at depth 2, and 18.9 at depth 3, while `Qwen3.5-9B-MLX-4bit`
 drops from 28.5 tok/s at depth 1 to 16.8 at depth 2.
 
