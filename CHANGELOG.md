@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- After a model download fails, each replacement now avoids every node whose
+  download already failed for that placement, not only the latest one, so
+  recovery ends after at most one failure per node. A failure that happens on
+  every node (offline, an access error, a missing revision) used to keep
+  re-placing the model under new instance ids until someone deleted it; it now
+  stops with the placement torn down and the failure recorded.
 - Speculative decoding on Gemma 4 models on a Mac is much faster:
   `gemma-4-12B-it-4bit` with its assistant on an M4 Mac mini went from about
   13 to about 20 tokens per second, in line with mlx-vlm running the same

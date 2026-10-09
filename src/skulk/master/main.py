@@ -1049,6 +1049,18 @@ class Master:
         # id makes recovery fire once per wedged instance. Grows only by wedged
         # ids (rare); never reused since InstanceIds are unique.
         self._download_failure_recovered: set[InstanceId] = set()
+        # Nodes whose download already failed for a repair lineage, keyed by
+        # the replacement instance that recovery minted. Recovery stamps only
+        # the caller's original exclusions on a replacement (#667: a transient
+        # failure must not become permanent placement intent), so without this
+        # each hop forgets the earlier failures: A fails, B is chosen, B fails,
+        # A is eligible again, and a failure that repeats everywhere (offline,
+        # auth, a missing revision) re-places forever under new ids. Excluding
+        # the accumulated set from each hop's search bounds a lineage to one
+        # attempt per node; placement then runs out of nodes and recovery
+        # stops at the teardown. Master-local like the sets above: a new
+        # master starts fresh lineages, which is still bounded.
+        self._download_failure_lineage: dict[InstanceId, frozenset[NodeId]] = {}
         # Steward invariant pacing: at most one placement attempt per minute,
         # so an unplaceable steward (no eligible node yet) logs and retries
         # calmly instead of hammering the planner every 10s tick.
@@ -3662,7 +3674,10 @@ class Master:
         and re-place the model at the same width excluding the failed node(s),
         reusing the #290 placement machinery. If no healthy node set can host the
         width, placement raises and we stop at the teardown, which bounds
-        recovery to the available nodes instead of looping.
+        recovery to the available nodes instead of looping. Each hop also
+        excludes every node that already failed earlier in the same repair
+        lineage (see ``_download_failure_lineage``), so the bound holds when
+        the failure repeats on every node.
         """
         wedged = instances_wedged_by_download_failure(self.state)
         for instance_id, (failed_nodes, cause) in wedged.items():
@@ -3672,6 +3687,10 @@ class Master:
             if instance is None:
                 continue
             self._download_failure_recovered.add(instance_id)
+            lineage_failed = (
+                self._download_failure_lineage.pop(instance_id, frozenset())
+                | failed_nodes
+            )
             failed_list = sorted(str(node_id) for node_id in failed_nodes)
             logger.error(
                 f"Instance {instance_id} wedged: a rank's download failed on "
@@ -3690,7 +3709,7 @@ class Master:
             final_placement = after_delete
             try:
                 replace_command = replacement_command_for_download_failed_instance(
-                    instance, failed_nodes
+                    instance, lineage_failed
                 )
                 repair_memory, repair_vram = self._reserved_placement_inputs(
                     self._telemetry_view.node_memory,
@@ -3715,9 +3734,13 @@ class Master:
                     approved_remote_code_identities=self._model_trust_approvals,
                     served_context_default=self._served_context_default(),
                 )
+                self._download_failure_lineage[
+                    InstanceId(str(replace_command.command_id))
+                ] = lineage_failed
                 logger.warning(
                     f"Re-placing {replace_command.model_card.model_id} excluding "
-                    f"{failed_list} after a download failure"
+                    f"{sorted(str(node_id) for node_id in lineage_failed)} after "
+                    "a download failure"
                 )
             except (PlacementError, PlacementInfoPendingError) as err:
                 final_placement = after_delete
