@@ -36,7 +36,10 @@ from skulk.connectivity.tailscale import query_tailscale_status
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.impl_shard_downloader import skulk_shard_downloader
 from skulk.extensions import load_extensions
-from skulk.extensions.host_network import namespace_fingerprint
+from skulk.extensions.host_network import (
+    namespace_fingerprint,
+    private_namespace_configured,
+)
 from skulk.master.main import Master
 from skulk.operator.pairing import OperatorPairingService
 from skulk.routing.event_router import EventRouter
@@ -780,7 +783,12 @@ class Node:
         _zenoh_listen_endpoints: list[str] | None = None
         _zenoh_namespace: str | None = None
         _zenoh_listen = ""
-        _ns_override_set = _LIBP2P_NAMESPACE_ENV_VAR in os.environ
+        # A blank override still changes the derived key, but it is as public
+        # as the default, so it gets the default's warning.
+        _ns_override_set = private_namespace_configured(os.environ)
+        _ns_blank_override = (
+            _LIBP2P_NAMESPACE_ENV_VAR in os.environ and not _ns_override_set
+        )
         _ns_fingerprint = namespace_fingerprint(_libp2p_namespace_token(os.environ))
         if _zenoh_on:
             _zenoh_connect, _zenoh_connect_rewritten = _resolve_zenoh_connect(
@@ -842,7 +850,7 @@ class Node:
                 f"Zenoh DATA plane ENABLED on {_zenoh_listen}: mutual TLS keyed "
                 f"by the cluster namespace (fingerprint {_ns_fingerprint}; "
                 f"{_LIBP2P_NAMESPACE_ENV_VAR} "
-                f"{'set' if _ns_override_set else 'unset, using default'}); "
+                f"{'set' if _ns_override_set else ('blank, which is as public as the default' if _ns_blank_override else 'unset, using default')}); "
                 f"discovery via {_discovery}."
             )
             if _ns_override_set:

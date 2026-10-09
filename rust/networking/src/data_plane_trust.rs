@@ -8,8 +8,10 @@
 //! namespace change re-keys both:
 //!
 //! - **Discovery scope.** The multicast scouting port is a domain-separated
-//!   hash of the key, so clusters with different keys scout on different ports
-//!   of the shared `224.0.0.224` group and never discover each other.
+//!   hash of the key, so clusters with different keys normally scout on
+//!   different ports of the shared `224.0.0.224` group. It is a hash into about
+//!   7,000 ports, so two keys occasionally share one; the authority below, not
+//!   the port, is what keeps a foreign cluster out.
 //! - **Authority.** Every node independently derives the same Ed25519
 //!   certificate authority. Each process then issues itself an ephemeral member
 //!   certificate signed by it. Zenoh's TLS link verifies the peer chain in both

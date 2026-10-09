@@ -3817,8 +3817,9 @@ Behavior notes:
   state, placement analysis, a bounded `doctor` array, and `dataPlane` plus
   `provider` blocks. The `runtime` block never contains the cluster namespace:
   the namespace seeds the cluster key that authenticates the control and data
-  planes. It reports `namespaceConfigured` (whether `SKULK_LIBP2P_NAMESPACE` is
-  set) and `namespaceFingerprint`, the same domain-separated SHA-256 digest of
+  planes. It reports `namespaceConfigured` (whether `SKULK_LIBP2P_NAMESPACE`
+  holds a non-blank value; a blank value is as public as the default and reports
+  false) and `namespaceFingerprint`, the same domain-separated SHA-256 digest of
   the network-version and namespace token as the startup log and
   `GET /v1/plugins/host-network`; equal fingerprints mean two nodes share a
   cluster key. The former `libp2pNamespace` field is removed. Each doctor entry contains `checkId`, `title`, `verdict`,

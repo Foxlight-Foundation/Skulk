@@ -1,7 +1,7 @@
 """Read-only local transport facts for provider-owned secure attachment."""
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from ipaddress import ip_address
 from typing import Literal, Self
 from urllib.parse import urlsplit
@@ -57,6 +57,24 @@ class HostNetwork(FrozenModel):
         if bool(self.data) != (self.data_transport == "zenoh"):
             raise ValueError("data listener and transport differ")
         return self
+
+
+def private_namespace_configured(environ: Mapping[str, str]) -> bool:
+    """Return whether the cluster runs on an operator-chosen, non-public namespace.
+
+    The presence of ``SKULK_LIBP2P_NAMESPACE`` changes the derived cluster key
+    even when it is empty (the node mirrors the control plane's key exactly),
+    but an empty or blank value is as public as the default: any Skulk node can
+    derive the same key and join. Only a non-blank value is private, so only it
+    may silence the default-namespace warning or report a configured namespace.
+
+    Args:
+        environ: The process environment to read.
+
+    Returns:
+        True when the namespace variable holds a non-blank value.
+    """
+    return bool(environ.get("SKULK_LIBP2P_NAMESPACE", "").strip())
 
 
 def namespace_fingerprint(token: str) -> str:

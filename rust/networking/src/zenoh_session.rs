@@ -173,8 +173,9 @@ fn session_config(
         },
     )?;
     if config.multicast_scouting {
-        // Cluster-scoped discovery: clusters with different keys scout on
-        // different ports of the shared group and never meet.
+        // Cluster-scoped discovery: clusters with different keys normally
+        // scout on different ports of the shared group. A rare port collision
+        // only lets scout packets through; mutual TLS still refuses the peer.
         set(
             &mut zconfig,
             "scouting/multicast/address",
