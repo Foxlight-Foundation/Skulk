@@ -123,6 +123,19 @@ it('reads a plugin that reports ready and opens its screen in a new tab', async 
   expect(onDone).toHaveBeenCalledTimes(1);
 });
 
+it('says a plugin service that is not answering is not a settings problem', async () => {
+  // The restart after a Skulk update: the last report may even say it needs setup.
+  summaries = [summary({ ownerAvailable: false, status: 'configuration_invalid', surfaces: [] })];
+  await render(vi.fn());
+  await contains('Its plugin service is not answering. After a Skulk update that takes a few minutes; this page updates by itself.');
+  await contains('The plugin service on this host is not answering. It reports again once it is back.');
+  await contains('Not answering');
+  expect(host.textContent).not.toContain('Needs settings');
+  expect(host.textContent).not.toContain('It needs its settings before it can run.');
+  expect(button('Open settings')).toBeNull();
+  expect(button('Turn on')).toBeNull();
+});
+
 it('says what a plugin waiting for setup needs, with its own checks and the one setting to open', async () => {
   summaries = [summary({ status: 'configuration_invalid', surfaces: [] })];
   const onManage = vi.fn();

@@ -28,7 +28,9 @@ export interface CapabilitySetupPanelProps {
 }
 
 /** What one node's status asks of the operator. */
-type ItemState = 'done' | 'waiting' | 'off' | 'settings' | 'stopped';
+// unavailable: the plugin service is not answering (restarting after an update, or
+// down). Not a settings problem, so it never leads to the settings.
+type ItemState = 'done' | 'waiting' | 'off' | 'settings' | 'stopped' | 'unavailable';
 
 // The plugin service decides readiness: it only reports `ready` after the
 // node's settings, credentials and setup checks admitted a start and the
@@ -44,7 +46,7 @@ const STATUS_STATE: Record<CapabilityNodeStatus, ItemState> = {
   failed: 'stopped',
 };
 
-const STATE_TONE: Record<ItemState, StatusTone> = { done: 'healthy', waiting: 'live', off: 'neutral', settings: 'live', stopped: 'danger' };
+const STATE_TONE: Record<ItemState, StatusTone> = { done: 'healthy', waiting: 'live', off: 'neutral', settings: 'live', stopped: 'danger', unavailable: 'live' };
 
 /**
  * The page an installed plugin opens on until it runs: what each of its
@@ -101,7 +103,7 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
     && (enabled[summary.nodeId] === true || turnedOnAt.get(capabilityNodeKey(summary)) === summary.observedAt);
   // A status this dashboard does not know yet, or a silent plugin service, is shown as stopped.
   const itemState = (summary: CapabilityNodeSummary): ItemState => {
-    if (!summary.ownerAvailable) return 'stopped';
+    if (!summary.ownerAvailable) return 'unavailable';
     if (turningOn(summary)) return 'waiting';
     return STATUS_STATE[summary.status] ?? 'stopped';
   };
@@ -124,6 +126,7 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
     off: t('plugins.setup.pillOff', 'Off'),
     settings: t('plugins.setup.pillNeedsSettings', 'Needs settings'),
     stopped: t('plugins.setup.pillStopped', 'Stopped'),
+    unavailable: t('plugins.setup.pillNotAnswering', 'Not answering'),
   })[state];
   const states = summaries.map(itemState);
   // A plugin's only node usually shares its name; saying it twice reads as noise.
@@ -162,7 +165,8 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
     : summaries.length === 0 ? t('plugins.setup.waitingLead', 'Waiting for it to report…')
       : next === 'settings' ? t('plugins.setup.settingsLead', 'It needs its settings before it can run.')
         : next === 'turn-on' ? t('plugins.setup.offLead', 'It is turned off. Turn it on to start it.')
-          : t('plugins.setup.startingLead', 'It is starting. This page updates by itself.');
+          : states.includes('unavailable') ? t('plugins.setup.unavailableLead', 'Its plugin service is not answering. After a Skulk update that takes a few minutes; this page updates by itself.')
+            : t('plugins.setup.startingLead', 'It is starting. This page updates by itself.');
   const openLabel = (surface: CapabilityNodeSurface) => t('plugins.setup.open', 'Open {surface}', { surface: surface.title });
   // Checks are shown when something needs more than turning on.
   const checked = summaries.filter((summary, index) => withChecks.has(summary.nodeId)
