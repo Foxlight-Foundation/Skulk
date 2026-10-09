@@ -16,6 +16,7 @@ let calls: string[];
 let failure: boolean;
 let allPass: boolean;
 let refuseEnable: boolean;
+let nodeEnabled: boolean;
 let mutations: unknown[];
 let store: ReturnType<typeof makeStore>;
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
@@ -26,13 +27,14 @@ beforeEach(async () => {
   failure = false;
   allPass = false;
   refuseEnable = false;
+  nodeEnabled = true;
   mutations = [];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     calls.push(request.method);
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
     if (new URL(request.url).pathname.endsWith('/configuration')) {
-      const configuration = { nodeId: 'node', revision: 7, schemaDigest: 'd'.repeat(64), enabled: true, values: {}, configurationSchema: { type: 'object', properties: {} } };
+      const configuration = { nodeId: 'node', revision: 7, schemaDigest: 'd'.repeat(64), enabled: nodeEnabled, values: {}, configurationSchema: { type: 'object', properties: {} } };
       if (request.method === 'GET') return json(configuration);
       mutations.push(await request.json());
       return refuseEnable ? json({ detail: 'node preflight failed' }, 409) : json({ configuration: { ...configuration, revision: 8 }, validated: true });
@@ -122,5 +124,17 @@ it('shows the host\'s reason when it still does not start', async () => {
   await contains('All 6 checks passed.');
   await act(async () => { button('Start it again')!.click(); });
   await contains('It did not start. The host said: node preflight failed');
+});
+
+it('leaves a node that is turned off by the time it is started again off', async () => {
+  // Another operator turned it off after this page saw it stopped.
+  allPass = true;
+  nodeEnabled = false;
+  await render(0, true);
+  await check();
+  await contains('All 6 checks passed.');
+  await act(async () => { button('Start it again')!.click(); });
+  await contains('It is turned off now, so it was left off. Turn it on from its settings to start it.');
+  expect(mutations).toEqual([]);
 });
 

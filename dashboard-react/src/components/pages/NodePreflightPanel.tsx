@@ -41,13 +41,18 @@ export function NodePreflightPanel({ pluginId, nodeId, runRequest = 0, offerStar
   const startAgain = async () => {
     setStarting(true);
     setStartOutcome(null);
-    const refusal = await startNodeAgain({ readConfiguration: (address) => readConfiguration(address, false), configure },
+    const outcome = await startNodeAgain({ readConfiguration: (address) => readConfiguration(address, false), configure },
       { pluginId, nodeId }, pluginRefusalDetail, pluginRequestRefused);
     setStarting(false);
-    setStartOutcome(refusal === null
-      ? { text: t('plugins.startAgainStarted', 'Starting it again. Its status updates here in a moment.'), problem: false }
-      : { text: refusal.detail ? t('plugins.startAgainRefusedReason', 'It did not start. The host said: {reason}', { reason: refusal.detail })
+    if (outcome.kind === 'started') {
+      setStartOutcome({ text: t('plugins.startAgainStarted', 'Starting it again. Its status updates here in a moment.'), problem: false });
+    } else if (outcome.kind === 'off') {
+      setStartOutcome({ text: t('plugins.startAgainTurnedOff', 'It is turned off now, so it was left off. Turn it on from its settings to start it.'), problem: false });
+    } else {
+      const { detail } = outcome.refusal;
+      setStartOutcome({ text: detail ? t('plugins.startAgainRefusedReason', 'It did not start. The host said: {reason}', { reason: detail })
         : t('plugins.startAgainRefused', 'It did not start. Run the checks again to see what is missing.'), problem: true });
+    }
   };
   const report = query.currentData;
   useEffect(() => {

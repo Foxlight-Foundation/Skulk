@@ -65,21 +65,31 @@ export async function turnOnNodes(
  * restarts a node on every settings change, including enabling one that is
  * already on, and runs its setup checks first, so this is the restart. It is
  * fenced like turning on, sends no settings, and returns the host's refusal
- * when a check still fails.
+ * when a check still fails. A node the fresh read finds turned off is left
+ * off: turning it on is the owner's choice, made with Turn on, and the
+ * enable here adopts the latest revision, so the fence alone would not
+ * protect a newer decision to turn it off.
  */
 export async function startNodeAgain(
   requests: TurnOnRequests,
   address: NodeAddress,
   refusalDetail: (error: unknown) => string | null,
   refusedStatus: (error: unknown) => number | null,
-): Promise<TurnOnRefusal | null> {
+): Promise<StartAgainOutcome> {
   try {
     const current = await requests.readConfiguration(address).unwrap();
+    if (!current.enabled) return { kind: 'off' };
     await requests.configure({
       ...address, operation: 'enable', expectedRevision: current.revision, expectedSchemaDigest: current.schemaDigest,
     }).unwrap();
-    return null;
+    return { kind: 'started' };
   } catch (error) {
-    return { nodeId: address.nodeId, detail: refusalDetail(error), status: refusedStatus(error) };
+    return { kind: 'refused', refusal: { nodeId: address.nodeId, detail: refusalDetail(error), status: refusedStatus(error) } };
   }
 }
+
+/** What starting a node again did: started it, found it turned off and left it, or the host refused. */
+export type StartAgainOutcome =
+  | { kind: 'started' }
+  | { kind: 'off' }
+  | { kind: 'refused'; refusal: TurnOnRefusal };

@@ -1352,6 +1352,7 @@
   "plugins.startAgainRefused": "It did not start. Run the checks again to see what is missing.",
   "plugins.startAgainRefusedReason": "It did not start. The host said: {reason}",
   "plugins.startAgainStarted": "Starting it again. Its status updates here in a moment.",
+  "plugins.startAgainTurnedOff": "It is turned off now, so it was left off. Turn it on from its settings to start it.",
   "plugins.startSetup": "Start setup",
   "plugins.tabBrowse": "Browse",
   "plugins.tabInstalled": "Installed",
