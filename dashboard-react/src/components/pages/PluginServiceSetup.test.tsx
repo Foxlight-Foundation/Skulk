@@ -100,8 +100,12 @@ it('offers setup again when the host comes back without it instead of spinning',
   await act(async () => { await vi.waitFor(() => expect(posts).toBe(1)); });
   await act(async () => { await vi.waitFor(() => expect(host?.textContent).toContain('Set up plugins')); });
   expect(host?.textContent).not.toContain('Setting up plugins on this host');
-  const setUp = [...(host?.querySelectorAll('button') ?? [])].find((button) => button.textContent === 'Set up plugins');
-  await act(async () => { setUp?.click(); });
+  // The button shows while the first start is still in flight and stays
+  // disabled until it finishes; clicking before then does nothing, so wait
+  // for it to be enabled, as a person would.
+  const setUp = () => [...(host?.querySelectorAll('button') ?? [])].find((button) => button.textContent === 'Set up plugins');
+  await act(async () => { await vi.waitFor(() => expect(setUp()?.disabled).toBe(false)); });
+  await act(async () => { setUp()?.click(); });
   await act(async () => { await vi.waitFor(() => expect(posts).toBe(2)); });
 });
 

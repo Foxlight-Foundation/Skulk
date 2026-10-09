@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from skulk.operator.identity import OperatorIdentityRepository
 from skulk.utils import git_checkout
 from skulk.utils.git_checkout import find_checkout_root, read_checkout_head
 from skulk.utils.info_gatherer import info_gatherer
@@ -128,6 +129,48 @@ def test_node_identity_reads_the_commit_without_starting_a_process(
     monkeypatch.setattr(subprocess, "run", refuse)
     monkeypatch.setattr(subprocess, "Popen", refuse)
     assert info_gatherer._get_git_commit(package) == COMMIT[:8]  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_node_identity_keeps_the_commit_the_process_started_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deploy moves the checkout, then restarts nodes one at a time.
+
+    Until a node restarts it still runs the old code, so its periodically
+    re-gathered identity must keep the commit it started from.
+    """
+    git = _clone(tmp_path)
+    branch = git / "refs" / "heads" / "main"
+    branch.write_text(COMMIT + "\n")
+    package = tmp_path / "src" / "skulk"
+    package.mkdir(parents=True)
+    read_commit = info_gatherer._get_git_commit  # pyright: ignore[reportPrivateUsage]
+
+    async def model_and_chip() -> tuple[str, str]:
+        return ("Mac mini", "Apple M4")
+
+    async def os_build_version() -> str:
+        return "24G0"
+
+    monkeypatch.setattr(info_gatherer, "_get_git_commit", lambda: read_commit(package))
+    monkeypatch.setattr(info_gatherer, "get_model_and_chip", model_and_chip)
+    monkeypatch.setattr(info_gatherer, "get_os_version", lambda: "15.6")
+    monkeypatch.setattr(info_gatherer, "get_os_build_version", os_build_version)
+    monkeypatch.setattr(
+        info_gatherer,
+        "OperatorIdentityRepository",
+        lambda: OperatorIdentityRepository(root=tmp_path / "operator"),
+    )
+    info_gatherer._running_git_commit.cache_clear()  # pyright: ignore[reportPrivateUsage]
+    try:
+        at_start = await info_gatherer.StaticNodeInformation.gather()
+        branch.write_text(OTHER + "\n")
+        after_checkout_moved = await info_gatherer.StaticNodeInformation.gather()
+    finally:
+        info_gatherer._running_git_commit.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+    assert at_start.skulk_commit == COMMIT[:8]
+    assert after_checkout_moved.skulk_commit == COMMIT[:8]
 
 
 def test_node_identity_without_a_checkout_reports_unknown(tmp_path: Path) -> None:
