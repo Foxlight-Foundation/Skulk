@@ -279,6 +279,137 @@ def rollback_speculative_positions(cache: KVCacheType, num_tokens: int) -> None:
             cast(_TrimmableCache, entry).trim(num_tokens)
 
 
+class _BufferedRotatingCache(Protocol):
+    """The members of mlx-vlm's ``BufferedRotatingKVCache`` read on restore."""
+
+    keys: mx.array | None
+    values: mx.array | None
+    offset: int
+    max_size: int
+    keep: int
+    _idx: int
+
+
+class _PlainRotatingCache(Protocol):
+    """The members of a plain ``RotatingKVCache`` written on restore."""
+
+    keys: mx.array | None
+    values: mx.array | None
+    offset: int
+    _idx: int
+
+
+# Set on each converted entry: the plain class it was, for the restore.
+_PLAIN_ROTATING_TYPE = "_skulk_plain_rotating_type"
+
+
+def _buffered_rotating_cache_class() -> "Callable[..., object] | None":
+    """mlx-vlm's ``BufferedRotatingKVCache.from_cache``, or ``None`` without mlx-vlm."""
+    try:
+        from mlx_vlm.models.cache import BufferedRotatingKVCache
+    except ModuleNotFoundError as error:
+        if error.name is None or not error.name.startswith("mlx_vlm"):
+            raise
+        # Linux ships MLX without mlx-vlm; there the loop keeps plain caches.
+        return None
+    # Typed through object: the upstream method expects mlx-vlm's own rotating
+    # class, and the conversion also receives mlx-lm's identical one.
+    upstream: object = BufferedRotatingKVCache.from_cache
+    return cast("Callable[..., object]", upstream)
+
+
+def buffer_rotating_caches_for_speculation(
+    cache: KVCacheType, tokens_per_round: int
+) -> bool:
+    """Give plain sliding-window entries room for a speculative loop's writes.
+
+    A speculative verify writes several positions at once, and a plain
+    ``RotatingKVCache`` appends a multi-position write by concatenating: each
+    round allocates a buffer one round larger than the last until the window
+    fills, and every freed buffer is then too small to reuse. MLX keeps them
+    all, so a 400-token response from a 12B Gemma 4 left about 9.5 GB of
+    freed buffers behind. mlx-vlm's ``BufferedRotatingKVCache``, which its
+    own MTP loop converts to the same way, writes into preallocated slack
+    instead, and trims positionally. Each converted entry records the class
+    it was so :func:`restore_plain_rotating_caches` can put it back.
+
+    Args:
+        cache: The prompt cache the loop is about to run on. Only a list can
+            have its entries replaced; anything else is left as it is.
+        tokens_per_round: Positions one verify writes (bonus plus drafts),
+            which sizes the slack as mlx-vlm does.
+
+    Returns:
+        Whether any entry was converted.
+    """
+    if not isinstance(cache, list):
+        return False
+    from_cache = _buffered_rotating_cache_class()
+    if from_cache is None:
+        return False
+    buffer_size = max(32, min(128, tokens_per_round * 8))
+    converted = False
+    for index, entry in enumerate(cache):
+        if not _is_plain_rotating_cache(entry) or int(getattr(entry, "keep", 0)) != 0:
+            continue
+        buffered = from_cache(entry, buffer_size=buffer_size)
+        setattr(buffered, _PLAIN_ROTATING_TYPE, type(entry))
+        cache[index] = buffered
+        converted = True
+    return converted
+
+
+def plain_rotating_cache(entry: object) -> object:
+    """Return a plain sliding-window cache holding a converted entry's window.
+
+    The window is copied into a buffer of its own size, so nothing keeps the
+    converted entry's preallocated buffer alive. Entries that were never
+    converted are returned unchanged.
+    """
+    original = cast("type | None", getattr(entry, _PLAIN_ROTATING_TYPE, None))
+    if original is None:
+        return entry
+    buffered = cast(_BufferedRotatingCache, entry)
+    plain_object = cast(object, original(max_size=buffered.max_size, keep=buffered.keep))
+    plain = cast(_PlainRotatingCache, plain_object)
+    keys, values = buffered.keys, buffered.values
+    if keys is not None and values is not None:
+        # The buffered window is in temporal order up to _idx, which is the
+        # layout a plain cache holds after a multi-position write.
+        plain.keys = mx.contiguous(keys[..., : buffered._idx, :])  # pyright: ignore[reportPrivateUsage] - upstream attr
+        plain.values = mx.contiguous(values[..., : buffered._idx, :])  # pyright: ignore[reportPrivateUsage] - upstream attr
+        mx.eval(plain.keys, plain.values)
+        plain._idx = buffered._idx  # pyright: ignore[reportPrivateUsage] - upstream attr
+    plain.offset = buffered.offset
+    return plain_object
+
+
+def restore_plain_rotating_caches(cache: KVCacheType) -> None:
+    """Put back the plain sliding-window entries a speculative loop converted.
+
+    Later requests, the prefix cache and every other caller see the plain
+    caches they always have; only the loop runs on the buffered ones.
+    """
+    if not isinstance(cache, list):
+        return
+    for index, entry in enumerate(cache):
+        restored = plain_rotating_cache(entry)
+        if restored is not entry:
+            cache[index] = restored
+
+
+def _copy_for_prefix_cache(cache: KVCacheType) -> list[object]:
+    """Deep-copy a cache for the prefix cache, storing any converted entry plain.
+
+    The consumer stores the cache when it sees the final token, while the
+    speculative loop that converted it is still suspended, so a buffered
+    entry can arrive here. Stored plain, it costs its window rather than its
+    preallocated slack, and it keeps the plain cache's trimming rules: a
+    buffered entry reports itself trimmable even past its window.
+    """
+    return [plain_rotating_cache(entry) for entry in deepcopy(list(cache))]
+
+
 def snapshot_ssm_states(cache: KVCacheType) -> CacheSnapshot:
     states: list[
         ArraysCache
@@ -349,7 +480,7 @@ class KVPrefixCache:
         """Add a new cache entry. Evicts LRU entries if memory is high."""
         self._evict_if_needed()
         self.prompts.append(prompt_tokens)
-        self.caches.append(deepcopy(cache))
+        self.caches.append(_copy_for_prefix_cache(cache))
         self._snapshots.append(ssm_snapshots)
         self._media_regions.append(media_regions or [])
         self._access_counter += 1
@@ -374,7 +505,7 @@ class KVPrefixCache:
             merged.extend(snapshots)
 
         self.prompts[index] = prompt_tokens
-        self.caches[index] = deepcopy(cache)
+        self.caches[index] = _copy_for_prefix_cache(cache)
         self._snapshots[index] = merged or None
         self._media_regions[index] = media_regions or []
         self._access_counter += 1

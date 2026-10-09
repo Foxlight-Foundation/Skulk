@@ -64,6 +64,14 @@ This project records release notes here and mirrors public-facing notes in
   check, the running capability verifies its installed files while holding the
   installation's lock, and the source change refused instead of waiting. It now
   waits up to ten seconds for that check to finish.
+- Speculative decoding on Gemma 4 and other sliding-window models no longer
+  leaves gigabytes of freed GPU memory behind. Every speculative round rebuilt
+  each sliding-window cache one round larger, so a 400-token response from
+  `gemma-4-12B-it-4bit` on a 24 GB Mac left about 9.5 GB of buffers MLX could
+  not reuse. The runner now uses mlx-vlm's buffered sliding-window cache while
+  it speculates, which leaves about 0.5 GB and decodes 2 to 5 percent faster
+  (20.4 instead of 20.0 tokens per second at 400 tokens, 19 instead of 18 at
+  1,400).
 
 ## [2.0.2] - 2026-10-09
 
