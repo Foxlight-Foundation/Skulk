@@ -171,6 +171,11 @@ Protocol: production API, greedy decoding, 200-token completions, median of
 | Qwen3.5-27B-4bit dense, 2-node pipeline | 2× M4 16GB | 6.3 | 10.5 | **+67%** |
 | Qwen3.5-9B-MLX-4bit, 2-node tensor-parallel | 2× M4 16GB | 16.7 | 21.8 | **+31%** |
 
+A single-node Gemma 4 measurement on the same hardware: `gemma-4-12B-it-4bit`
+with its assistant decodes 19.6 to 20.0 tok/s through the production API
+(400-token greedy completions, depth 2), within 5% of mlx-vlm 0.6.17 running
+the same model and assistant at the same depth (20.9 tok/s).
+
 These ratios hold up under longer generations and sampling. At 1000 tokens
 the 12B 2-node pipeline still measures +60% (8.3 → 13.3) and Qwen 9B single
 still +28% (21.4 → 27.4); at temperature 0.7 the 12B pipeline is +54% and
@@ -240,6 +245,10 @@ optima:
 - Gemma assistant cards use **depth 2**
 - Qwen sidecar cards use **depth 1**
 
+For example, `gemma-4-12B-it-4bit` on a single M4 24GB decodes about 19 tok/s
+at depth 1, 20.7 at depth 2, and 18.9 at depth 3, while `Qwen3.5-9B-MLX-4bit`
+drops from 28.5 tok/s at depth 1 to 16.8 at depth 2.
+
 You *can* override depth with a custom model card, but the defaults are not
 guesses: they are the measured best for each model. Deeper is not better.
 On this hardware, verifying up to 2 candidates per step is effectively free,
@@ -267,9 +276,19 @@ hardware.
   on the wire when the failure lands) rather than a clean error document.
   Treat an unparseable non-streaming body as a failure and retry, or use
   streaming requests, which surface first-class error events.
-- **Greedy MTP output on some Qwen models is semantically greedy but not
-  byte-identical** to the same model decoding without speculation. This
-  affects Qwen models built on a recurrent/state-space attention design,
-  whose running state makes single-step and speculative decode take slightly
-  different but equally valid greedy paths. The text is a valid greedy
-  generation; it may differ token-for-token from the non-MTP path.
+- **Greedy speculative output is semantically greedy, not always
+  byte-identical** to the same model decoding without speculation. Every
+  emitted token is the target model's own top choice, but the verifier scores
+  several positions in one forward pass and writes the cache several
+  positions at a time, so its floating-point rounding differs slightly from
+  one-token decode. The two outputs match until a position where the top two
+  candidates are within that rounding of each other. On
+  `gemma-4-12B-it-4bit`, the first such position in a 400-token reply had its
+  two candidates one bfloat16 step (0.125 nats) apart, and scoring the plain
+  output's own prefix again from a fresh prompt pass picked the speculative
+  output's token there. mlx-vlm's reference speculative decoder departs from
+  its own plain decode in the same way. Qwen models built on a
+  recurrent/state-space attention design add a second source: rejected
+  drafts restore and replay their running state, which takes a slightly
+  different but equally valid greedy path. Either way the text is a valid
+  greedy generation; it may differ token-for-token from the non-MTP path.

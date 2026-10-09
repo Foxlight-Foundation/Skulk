@@ -173,6 +173,26 @@ class TestGemma4AssistantDrafter:
             ({"sliding_attention", "full_attention"}, 5, 4)
         ]
 
+    def test_chain_feeds_each_step_its_predecessors_argmax_on_device(self) -> None:
+        """Chained steps embed the previous row's argmax as a device array,
+        so the chain and the loop's verify forward run as one submission
+        instead of reading every intermediate token back to the host."""
+        drafter, assistant, _ = self._drafter()
+        embedded: list[mx.array] = []
+
+        def recording_embed(toks: mx.array) -> mx.array:
+            embedded.append(toks)
+            return mx.ones((1, 1, HIDDEN))
+
+        assistant._input_embed = recording_embed
+        rows = drafter.draft(mx.zeros(HIDDEN), next_token=7, depth=3)
+        assert rows.shape == (3, VOCAB)
+        assert all(isinstance(tokens, mx.array) for tokens in embedded)
+        assert all(tokens.shape == (1, 1) for tokens in embedded)
+        # The fake drafts token == step number, so steps 2 and 3 must embed
+        # the argmax of rows 1 and 2.
+        assert [int(tokens.reshape(-1)[0].item()) for tokens in embedded] == [7, 1, 2]
+
     def test_observe_is_noop(self) -> None:
         drafter, _, _ = self._drafter()
         drafter.observe(mx.zeros((3, HIDDEN)), mx.array([1, 2, 3]))  # must not raise

@@ -62,7 +62,9 @@ from skulk.worker.engines.mlx.cache import (
     has_recurrent_state_caches,
     is_non_kv_cache_entry,
     make_kv_cache,
+    rollback_speculative_positions,
     snapshot_ssm_states,
+    supports_positional_rollback,
     trim_cache,
 )
 from skulk.worker.engines.mlx.constants import (
@@ -1313,6 +1315,34 @@ def _make_prenorm_trunk_fn(trunk: object) -> Callable[..., mx.array] | None:
     return trunk_fn
 
 
+def _with_final_logit_softcap(
+    head_fn: Callable[..., mx.array], language_model: object
+) -> Callable[..., mx.array]:
+    """Apply the family's final logit soft-capping after *head_fn*, if any.
+
+    Gemma-family language models squash their output logits with
+    ``tanh(x / cap) * cap`` inside their own ``__call__``; the bare head
+    this module borrows (``embed_tokens.as_linear``) skips that step. The
+    verifier must score drafts with exactly the logits plain decode samples
+    from: without the cap, sampled acceptance would target a sharper
+    distribution than the model's, and greedy rows could differ from plain
+    decode wherever the capped logits round to a tie.
+    """
+    cap_value: object = getattr(language_model, "final_logit_softcapping", None)
+    if isinstance(cap_value, bool) or not isinstance(cap_value, (int, float)):
+        return head_fn
+    if cap_value <= 0:
+        return head_fn
+    cap = float(cap_value)
+
+    def capped_head_fn(hidden: mx.array) -> mx.array:
+        # Same operation order as the families' logit_softcap helpers, so
+        # the verifier's logits match the plain decode path bit for bit.
+        return mx.tanh(head_fn(hidden) / cap) * cap
+
+    return capped_head_fn
+
+
 def _get_trunk_and_head(
     model: Model,
 ) -> tuple[Callable[..., mx.array], Callable[..., mx.array]] | None:
@@ -1337,7 +1367,9 @@ def _get_trunk_and_head(
                     as_linear if as_linear is not None and callable(as_linear) else None
                 )
             if head is not None:
-                head_fn = cast(Callable[..., mx.array], head)
+                head_fn = _with_final_logit_softcap(
+                    cast(Callable[..., mx.array], head), lm
+                )
                 norm: object | None = getattr(trunk, "norm", None)
                 prenorm_trunk_fn = _make_prenorm_trunk_fn(trunk)
                 if prenorm_trunk_fn is not None and norm is not None and callable(norm):
@@ -1352,8 +1384,9 @@ def _get_trunk_and_head(
                 # the gemma4 assistant it is exactly the convention the
                 # drafter consumes.
                 logger.info(
-                    "MTP: using post-norm trunk hiddens (pre-norm wrapper "
-                    "unavailable for this trunk shape)"
+                    "MTP: drafting from post-norm trunk hiddens (the "
+                    "convention Gemma 4 assistants consume; the pre-norm "
+                    "wrapper serves Qwen-shaped trunks only)"
                 )
                 return (cast(Callable[..., mx.array], trunk), head_fn)
     # DeepSeek-style: trunk = model.model, head = model.lm_head
@@ -1560,25 +1593,39 @@ def _stream_generate_with_mtp(
     # does not represent the sampled trajectory beyond the first draft.
     depth = max(depth, 1) if sampling.is_greedy else 1
 
-    # Model-native speculative rollback (gemma4): no snapshots, no replay.
+    # Hybrid models (e.g. Qwen3.5 GDN) carry recurrent SSM state that cannot
+    # be trimmed positionally, and trim_cache without a snapshot ZEROES it.
+    # Skulk's trunk/head verify path returns hidden states directly, not the
+    # family-specific GDN snapshots required by native Qwen3.5 rollback, so
+    # recurrent caches keep Skulk's pre-verify snapshot.
+    mtp_has_recurrent_state = has_recurrent_state_caches(prompt_cache)
+    # Attention-only caches (Gemma 4's full + sliding-window layers) drop the
+    # rejected verify positions by trimming: no snapshot, no replay. This is
+    # loop-owned rather than a model hook because the mlx-lm Gemma 4 loader
+    # exposes no rollback_speculative_cache; relying on the hook sent those
+    # targets down the snapshot path, which deep-copies every sliding-window
+    # buffer each round and, because the assistant drafter reads the target
+    # cache, pays a full extra target forward on every rejected round
+    # (measured 13.4 vs 20.9 tok/s upstream on gemma-4-12B, M4).
+    positional_rollback = not mtp_has_recurrent_state and supports_positional_rollback(
+        prompt_cache
+    )
+    # Model-native speculative rollback remains the fallback for
+    # non-recurrent caches of types the positional rollback does not know.
     _lm: object | None = getattr(model, "language_model", None)
     native_rollback_candidate = cast(
         "Callable[..., None] | None",
         getattr(_lm, "rollback_speculative_cache", None) if _lm is not None else None,
     )
-    # Hybrid models (e.g. Qwen3.5 GDN) carry recurrent SSM state that cannot
-    # be trimmed positionally — and trim_cache without a snapshot ZEROES it.
-    # Skulk's trunk/head verify path returns hidden states directly, not the
-    # family-specific GDN snapshots required by native Qwen3.5 rollback. Use
-    # Skulk's pre-verify snapshot only for recurrent caches. Rotating KV caches
-    # (Gemma 4) have a valid native positional rollback and must keep it to
-    # avoid copying their sliding-window buffers every speculative round.
-    mtp_has_recurrent_state = has_recurrent_state_caches(prompt_cache)
     native_rollback = (
-        None if mtp_has_recurrent_state else native_rollback_candidate
+        None
+        if mtp_has_recurrent_state or positional_rollback
+        else native_rollback_candidate
     )
     needs_pre_verify_snapshot = (
-        has_non_kv_caches(prompt_cache) and not callable(native_rollback)
+        has_non_kv_caches(prompt_cache)
+        and not positional_rollback
+        and not callable(native_rollback)
     )
 
     # Deferred replay (snapshot path only): committed tokens whose cache
@@ -1782,6 +1829,13 @@ def _stream_generate_with_mtp(
 
         # ---- DRAFT from (hidden, bonus) ----
         draft_probs: mx.array | None = None
+        # Local drafts stay lazy: the drafter's chain, the verify forward
+        # that consumes it, and the verifier's choices then run as ONE
+        # device submission with one host sync per round. Reading the
+        # drafts back before verifying (and between chained draft steps)
+        # used to idle the GPU several times a round.
+        local_drafts: mx.array | None = None
+        draft_toks: list[int] = []
         if draft_group is not None:
             # Distributed drafts (#201 Track 2b): only the drafting rank
             # holds a drafter; the exchange lands identical tokens (and the
@@ -1815,7 +1869,7 @@ def _stream_generate_with_mtp(
                         )
                         draft_probs = warp_to_probs(chain_lp[0], sampling)
                         chain_sampled = sampler(chain_lp)  # (1,)
-                    mx.eval(chain_sampled)
+                    local_drafts = chain_sampled.astype(mx.int32)
             except Exception as draft_error:  # noqa: BLE001 — best-effort
                 if fail_loud_on_drafter_error:
                     # Multi-rank placements: a rank-local fallback to plain
@@ -1832,25 +1886,22 @@ def _stream_generate_with_mtp(
                 speculation_disabled = True
                 continue
 
-            draft_toks = [int(t) for t in cast("list[int]", chain_sampled.tolist())]
-        # Truncate after the first EOS draft (keep the EOS itself: the
-        # verifier may legitimately accept it and end the stream).
-        for eos_index, candidate in enumerate(draft_toks):
-            if candidate in eos_token_ids:
-                draft_toks = draft_toks[: eos_index + 1]
-                break
-
         # ---- VERIFY: [pending..., bonus, d0..dK-1] — the round's only ----
         # ---- target forward. Deferred-replay tokens ride at the front; ----
         # ---- their rows are discarded (they were scored last round).   ----
-        chain_len = len(draft_toks)
         replay_len = len(pending_replay)
         pre_verify_snapshot = (
-            snapshot_ssm_states(prompt_cache)
-            if needs_pre_verify_snapshot
-            else None
+            snapshot_ssm_states(prompt_cache) if needs_pre_verify_snapshot else None
         )
-        verify_input = mx.array([*pending_replay, bonus, *draft_toks])
+        committed_input = mx.array([*pending_replay, bonus], dtype=mx.int32)
+        verify_input = mx.concatenate(
+            [
+                committed_input,
+                local_drafts
+                if local_drafts is not None
+                else mx.array(draft_toks, dtype=mx.int32),
+            ]
+        )
         with mx.stream(generation_stream):
             full_h = trunk_fn(verify_input[None], cache=prompt_cache)  # (1,R+K+1,H)
             quantize_cache_fn(prompt_cache)
@@ -1858,9 +1909,43 @@ def _stream_generate_with_mtp(
             v_logits = head_fn(v_h)  # (1, K+1, V)
             v_lp = v_logits[0].astype(mx.float32)
             v_lp = v_lp - mx.logsumexp(v_lp, axis=-1, keepdims=True)
+            # The verifier's choice for every row: argmax tokens under greedy,
+            # the effective distribution of the first row under sampling. Only
+            # the deciding rank builds it; receivers never sample (#254).
+            verify_choice: mx.array | None = None
+            if drafter is not None:
+                verify_choice = (
+                    sampler(v_lp)
+                    if sampling.is_greedy
+                    else warp_to_probs(v_lp[0], sampling)
+                )
+
+        if local_drafts is not None:
+            assert verify_choice is not None
+            # The round's single host sync: drafts + verify + choices.
+            mx.eval(
+                local_drafts,
+                v_h,
+                verify_choice,
+                *([draft_probs] if draft_probs is not None else []),
+            )
+            draft_toks = [int(t) for t in cast("list[int]", local_drafts.tolist())]
+
+        # Every draft rode the verify forward, so this many positions follow
+        # the bonus in the target cache whatever the decision.
+        drafted_len = len(draft_toks)
+        # Drafts after the first EOS can never be accepted (keep the EOS
+        # itself: the verifier may legitimately accept it and end the
+        # stream); verifying them anyway costs nothing on memory-bound
+        # decode and keeps the drafts off the host until the round's sync.
+        chain_len = drafted_len
+        for eos_index, candidate in enumerate(draft_toks):
+            if candidate in eos_token_ids:
+                chain_len = eos_index + 1
+                break
 
         def _decide_locally(
-            v_lp: mx.array,
+            verify_choice: mx.array,
             v_h: mx.array,
             chain_len: int,
             draft_toks: list[int],
@@ -1873,11 +1958,10 @@ def _stream_generate_with_mtp(
             ranks must never compare logits or draw RNG, because their
             per-rank head_fn recompute diverges on heterogeneous chips.
             """
+            mx.eval(v_h, verify_choice)
             if sampling.is_greedy:
-                verify_sampled = sampler(v_lp)  # (K+1,)
-                mx.eval(v_h, verify_sampled)
                 target_ints = [
-                    int(t) for t in cast("list[int]", verify_sampled.tolist())
+                    int(t) for t in cast("list[int]", verify_choice.tolist())
                 ]
                 prefix = 0
                 while prefix < chain_len and draft_toks[prefix] == target_ints[prefix]:
@@ -1887,15 +1971,14 @@ def _stream_generate_with_mtp(
                 # processors active the row is re-sampled through them below.)
                 return prefix, (target_ints[prefix] if not logits_processors else None)
             assert draft_probs is not None and chain_len == 1
-            verify_probs = warp_to_probs(v_lp[0], sampling)
-            mx.eval(v_h, verify_probs)
-            if ratio_accept(draft_toks[0], draft_probs, verify_probs):
+            if ratio_accept(draft_toks[0], draft_probs, verify_choice):
                 return 1, None  # sampled from row 1 below
-            return 0, residual_sample(draft_probs, verify_probs)
+            return 0, residual_sample(draft_probs, verify_choice)
 
         if draft_group is None:
+            assert verify_choice is not None
             prefix_len, raw_bonus_next = _decide_locally(
-                v_lp, v_h, chain_len, draft_toks, draft_probs
+                verify_choice, v_h, chain_len, draft_toks, draft_probs
             )
         else:
             # Decider decides; everyone receives. The decider resolves the
@@ -1906,8 +1989,9 @@ def _stream_generate_with_mtp(
             # the emits) reads the identical logprob row.
             assert not logits_processors
             if drafter is not None:
+                assert verify_choice is not None
                 prefix_len, raw_bonus_next = _decide_locally(
-                    v_lp, v_h, chain_len, draft_toks, draft_probs
+                    verify_choice, v_h, chain_len, draft_toks, draft_probs
                 )
                 if raw_bonus_next is None:
                     raw_bonus_next, _ = _sample_row(v_lp[prefix_len])
@@ -1939,19 +2023,23 @@ def _stream_generate_with_mtp(
                 f"({accepted / attempted_drafts:.0%})"
             )
 
-        full_accept = prefix_len == chain_len
+        full_accept = prefix_len == drafted_len
 
         # ---- cache reconciliation BEFORE emitting (emits may break out) ----
         # Verify forwarded R+K+1 positions: [pending, bonus, drafts].
         # Committed: pending + bonus + accepted prefix; the next bonus is
         # NOT forwarded (next round's verify carries it).
         if not full_accept:
-            rejected = chain_len - prefix_len
-            if callable(native_rollback):
+            rejected = drafted_len - prefix_len
+            if positional_rollback:
+                # Attention-only caches: drop the rejected tail in place.
+                # Pending replay never accrues here (snapshot path only).
+                rollback_speculative_positions(prompt_cache, rejected)
+            elif callable(native_rollback):
                 # Native rollback never coexists with deferred replay
                 # (pending accrues on the snapshot path only).
                 with mx.stream(generation_stream):
-                    native_rollback(prompt_cache, None, prefix_len, chain_len + 1)
+                    native_rollback(prompt_cache, None, prefix_len, drafted_len + 1)
             elif pre_verify_snapshot is not None:
                 # Hybrid model: SSM state cannot be trimmed positionally, so
                 # restore the pre-verify snapshot and DEFER the committed
@@ -1959,7 +2047,7 @@ def _stream_generate_with_mtp(
                 # replay forward now (a reject used to cost a full extra
                 # trunk pass; riding along in the next verify is free).
                 trim_cache(
-                    prompt_cache, replay_len + chain_len + 1, pre_verify_snapshot
+                    prompt_cache, replay_len + drafted_len + 1, pre_verify_snapshot
                 )
                 pending_replay = [*pending_replay, bonus, *draft_toks[:prefix_len]]
                 if (

@@ -29,6 +29,22 @@ This project records release notes here and mirrors public-facing notes in
   discovery now uses a UDP port derived from the cluster name, logged at
   startup; a host firewall that allowed UDP 7446 must allow that port instead.
 
+### Fixed
+
+- Speculative decoding on Gemma 4 models on a Mac is much faster:
+  `gemma-4-12B-it-4bit` with its assistant on an M4 Mac mini went from about
+  13 to about 20 tokens per second, in line with mlx-vlm running the same
+  model and assistant. The Gemma 4 model Skulk loads has no rollback of its
+  own, so every round that rejected a draft copied every sliding-window cache
+  and then ran the model once more to catch the cache up. Skulk now removes
+  rejected positions from those caches directly. Drafting a round and checking
+  it now also run as a single GPU submission instead of waiting on the host
+  between steps.
+- Sampled requests (temperature above 0) to Gemma 4 models with an assistant
+  now check drafts against the logits the model really samples from. The
+  check skipped Gemma's final logit soft-capping, so it compared drafts with
+  a sharper distribution than the model's own.
+
 ## [2.0.1] - 2026-10-09
 
 ### Added

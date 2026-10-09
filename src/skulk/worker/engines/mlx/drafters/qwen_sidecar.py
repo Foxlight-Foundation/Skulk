@@ -175,10 +175,10 @@ class QwenSidecarDrafter:
         """
         rows: list[mx.array] = []
         step_hidden = hidden
-        step_token = next_token
+        step_token = mx.array([next_token])
         chained = 0
         for step in range(max(depth, 1)):
-            x = self._project(step_hidden[None], mx.array([step_token]))
+            x = self._project(step_hidden[None], step_token)
             mask = _attention_mask(x, self._cache)
             out = self._block(x, mask=mask, cache=self._cache)
             if step > 0:
@@ -188,8 +188,10 @@ class QwenSidecarDrafter:
             rows.append(row)
             if step + 1 < max(depth, 1):
                 # Greedy-select the draft to feed the next chain step (MTP is
-                # greedy-only; the loop's sampler is argmax at temp=0).
-                step_token = int(mx.argmax(row).item())
+                # greedy-only; the loop's sampler is argmax at temp=0). The
+                # token stays on the device so the chain and the loop's
+                # verify forward run as one submission.
+                step_token = mx.argmax(row)[None]
                 step_hidden = out[0, -1, :]
         if chained:
             self._cache.trim(chained)
