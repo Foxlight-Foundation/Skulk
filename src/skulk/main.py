@@ -332,8 +332,9 @@ def _is_trusted_fabric_ipv4(address: str) -> bool:
 
     Automatic Zenoh listeners may use conventional private LAN or CGNAT
     overlay addresses. Public addresses require an explicit operator-supplied
-    listener: links are mutual TLS, but on the default namespace the cluster
-    key is public, so any Skulk node that can reach the listener may join.
+    listener: links are mutual TLS, but without a private namespace the
+    cluster key is public, so any Skulk node that can reach the listener may
+    join.
     """
     try:
         ip = ipaddress.IPv4Address(address)
@@ -856,11 +857,13 @@ class Node:
             if _ns_override_set:
                 logger.info(_zenoh_summary)
             else:
-                # The default namespace's key is public by design, exactly as on
-                # the libp2p control plane: links are encrypted against passive
-                # observers, but any Skulk node that can reach this one may join.
+                # An unset or blank namespace derives a public key by design,
+                # exactly as on the libp2p control plane: links are encrypted
+                # against passive observers, but any Skulk node that can reach
+                # this one may join. A blank value is not "the default" (it
+                # derives its own key), so the warning names both cases.
                 logger.warning(
-                    f"{_zenoh_summary} With the default namespace any Skulk "
+                    f"{_zenoh_summary} Without a private namespace any Skulk "
                     f"node on this network can join the cluster; set "
                     f"{_LIBP2P_NAMESPACE_ENV_VAR} to a private value on every "
                     f"node to restrict membership."

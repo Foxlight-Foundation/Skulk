@@ -155,9 +155,9 @@ version and `SKULK_LIBP2P_NAMESPACE`):
   eavesdropper sees only ciphertext. Endpoints are written `tls/HOST:PORT`;
   older `tcp/` endpoints are accepted and used as `tls/`.
 
-This is only as strong as the namespace. With the default namespace the key is
-public, exactly as it is for the control plane: traffic is encrypted, but any
-Skulk node that can reach the network may join. Set the same private
+This is only as strong as the namespace. With the default namespace, or a blank
+one, the key is public, exactly as it is for the control plane: traffic is
+encrypted, but any Skulk node that can reach the network may join. Set the same private
 `SKULK_LIBP2P_NAMESPACE` on every node to restrict membership, and keep the
 trusted-fabric model above for anything the cluster's key does not cover.
 
