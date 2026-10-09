@@ -44,9 +44,14 @@ export function openableSurfaces(hosted: HostedCapabilityNode[], localNodeId: st
   return [...unique.values()];
 }
 
-/** Whether a node needs the owner before it can run: turned off, waiting for settings, stopped, or its plugin service silent. */
+/**
+ * Whether a node needs the owner before it can run: turned off, waiting for
+ * settings, or stopped. A node whose plugin service is not answering does not:
+ * that is the service restarting (after every Skulk update, for one) or down,
+ * nothing a setup step fixes, and its last status is stale until it answers.
+ */
 export function needsOwner(summary: CapabilityNodeSummary): boolean {
-  return !summary.ownerAvailable || summary.status === 'disabled' || summary.status === 'configuration_invalid' || summary.status === 'failed';
+  return summary.ownerAvailable && (summary.status === 'disabled' || summary.status === 'configuration_invalid' || summary.status === 'failed');
 }
 
 /**
@@ -57,7 +62,8 @@ export function needsOwner(summary: CapabilityNodeSummary): boolean {
  */
 export function installedCardAction(hosted: HostedCapabilityNode[], localNodeId: string | null, dashboardHostname: string): InstalledCardAction {
   if (hosted.some(({ summary }) => needsOwner(summary))) return { kind: 'set-up' };
-  const ready = hosted.length > 0 && hosted.every(({ summary }) => summary.status === 'ready');
+  // A screen opens only while its plugin service answers; a silent one may be restarting.
+  const ready = hosted.length > 0 && hosted.every(({ summary }) => summary.status === 'ready' && summary.ownerAvailable);
   const surface = ready ? openableSurfaces(hosted, localNodeId, dashboardHostname).find((item) => item.reachable)?.surface : undefined;
   return surface ? { kind: 'open', surface } : { kind: 'manage' };
 }

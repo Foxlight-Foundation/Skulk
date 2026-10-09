@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A capability whose plugin service is not answering, as for a few minutes
+  after every Skulk update while the service restarts, no longer reads as
+  needing setup. Its Browse card offered **Set up** and its setup page said it
+  needed its settings and offered **Open settings**, although nothing was wrong
+  with them. It now shows **Not answering** and says the page updates once the
+  service is back; its screen is not offered until then.
 - Turning a capability on or off from the Plugins page no longer flashes "This
   node changed elsewhere" or briefly disables the switch. The page took the
   host's answer at once while its settings read still showed the older

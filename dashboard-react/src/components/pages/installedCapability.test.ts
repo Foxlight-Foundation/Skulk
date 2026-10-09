@@ -19,13 +19,19 @@ describe('installedCardAction', () => {
     expect(action([node()])).toEqual({ kind: 'open', surface: screen });
   });
 
-  it('sets up a plugin a node of which is off, needs settings, stopped or not answering', () => {
+  it('sets up a plugin a node of which is off, needs settings or stopped', () => {
     expect(action([node({ status: 'disabled', surfaces: [] })])).toEqual({ kind: 'set-up' });
     expect(action([node({ status: 'configuration_invalid', surfaces: [] })])).toEqual({ kind: 'set-up' });
     expect(action([node({ status: 'failed', surfaces: [] })])).toEqual({ kind: 'set-up' });
-    expect(action([node({ ownerAvailable: false })])).toEqual({ kind: 'set-up' });
     // Another node that needs the owner wins over one that runs.
     expect(action([node(), node({ nodeId: 'worker', status: 'disabled', surfaces: [] })])).toEqual({ kind: 'set-up' });
+  });
+
+  it('manages a plugin whose service is not answering, whatever it last reported', () => {
+    // After every Skulk update the plugin service restarts; no setup step is
+    // needed, and the last status is stale until it answers again.
+    expect(action([node({ ownerAvailable: false })])).toEqual({ kind: 'manage' });
+    expect(action([node({ ownerAvailable: false, status: 'configuration_invalid', surfaces: [] })])).toEqual({ kind: 'manage' });
   });
 
   it('manages a plugin that is starting, not reported yet, or has no screen this browser can open', () => {
