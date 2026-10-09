@@ -207,6 +207,28 @@ This project records release notes here and mirrors public-facing notes in
   retrying, now as a download failure that says a file the model needs is
   missing and that downloading the model again is the remedy.
 
+### Security
+
+- The data plane between nodes (generated output, uploaded images and audio,
+  generated media, and traces) is now encrypted and authenticated with the
+  cluster's shared key, the same key that already protects the control plane.
+  Every data-plane link is mutual TLS 1.3 rooted in that key, so a device
+  without it can neither join nor read the traffic. Clusters with different
+  names (`SKULK_LIBP2P_NAMESPACE`) also no longer discover each other's data
+  plane. On the default cluster name the shared key is public, as it always
+  has been for the control plane: traffic is encrypted against eavesdroppers,
+  but any Skulk node on the network can still join, so set a private cluster
+  name on every node to restrict membership.
+- Node diagnostics (`GET /v1/diagnostics/node` and the cluster view) no longer
+  return the configured cluster name. They report `namespaceConfigured` and a
+  `namespaceFingerprint` that confirms two nodes share a cluster without
+  revealing its name.
+- This is a network protocol change (network version v0.0.3): upgrade every
+  node of a cluster together. `tcp/` endpoints in `SKULK_ZENOH_LISTEN` and
+  `SKULK_ZENOH_CONNECT` keep working and are used as `tls/`. Data-plane
+  discovery now uses a UDP port derived from the cluster name, logged at
+  startup; a host firewall that allowed UDP 7446 must allow that port instead.
+
 ## [2.0.0] - 2026-10-06
 
 ### Changed

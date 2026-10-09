@@ -138,12 +138,24 @@ bridge the transports or make mixed operation safe. Configure any legacy
 gossipsub override consistently across the whole fleet, restart it, and confirm
 that `nodeResources` reports one transport.
 
-Zenoh sessions are kept isolated per cluster: each cluster prefixes its keys with
-a segment derived from its libp2p network namespace (`SKULK_LIBP2P_NAMESPACE`), so
-two separate Skulk clusters on the same network do not receive each other's
-output. That isolation is a partition between clusters, not a secret:
-confidentiality on an untrusted network is the job of the fabric (Tailscale, or a
-firewall), which is why the trusted-fabric model above matters.
+Zenoh sessions are scoped to and authenticated by the cluster, using the same
+shared key that already protects the control plane (derived from the network
+version and `SKULK_LIBP2P_NAMESPACE`):
+
+- **Discovery.** Multicast scouting uses a UDP port derived from the key, so two
+  clusters with different namespaces on the same network never discover each
+  other's data plane. The port is logged at startup; allow it in host firewalls.
+- **Encryption and authentication.** Every data-plane link is TLS 1.3 with
+  mutual authentication, chained to a certificate authority each node derives
+  from the key. A device without the key cannot join, read, or inject, and an
+  eavesdropper sees only ciphertext. Endpoints are written `tls/HOST:PORT`;
+  older `tcp/` endpoints are accepted and used as `tls/`.
+
+This is only as strong as the namespace. With the default namespace the key is
+public, exactly as it is for the control plane: traffic is encrypted, but any
+Skulk node that can reach the network may join. Set the same private
+`SKULK_LIBP2P_NAMESPACE` on every node to restrict membership, and keep the
+trusted-fabric model above for anything the cluster's key does not cover.
 
 ## How speculative decoding rides the planes
 

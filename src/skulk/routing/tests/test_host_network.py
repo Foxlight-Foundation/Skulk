@@ -17,7 +17,8 @@ async def test_native_listener_snapshot_reports_reachable_assigned_ports(
     monkeypatch.setenv("SKULK_LIBP2P_NAMESPACE", uuid4().hex)
     identity = Keypair.generate()
     network = NetworkingHandle(identity, [], 0)
-    data = ZenohHandle(["tcp/127.0.0.1:0"]) if zenoh else None
+    # The data plane listens only on mutual-TLS locators.
+    data = ZenohHandle(["tls/127.0.0.1:0"]) if zenoh else None
     router = Router(handle=network, zenoh=data, node_id=identity.to_node_id())
 
     async def receive() -> None:
@@ -33,6 +34,8 @@ async def test_native_listener_snapshot_reports_reachable_assigned_ports(
             before = await router.host_network("v0.0.2", "test-token")
             assert before.node_id == identity.to_node_id()
             assert before.data_transport == ("zenoh" if zenoh else "gossipsub")
+            # The TLS listener still projects to its numeric TCP socket.
+            assert bool(before.data) == zenoh
             for endpoint in (*before.control, *before.data):
                 _, writer = await asyncio.open_connection(endpoint.host, endpoint.port)
                 writer.close()

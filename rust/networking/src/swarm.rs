@@ -1,5 +1,8 @@
 use std::pin::Pin;
 
+pub(crate) use crate::swarm::transport::data_plane_trust;
+#[cfg(test)]
+pub(crate) use crate::swarm::transport::preshared_key_for;
 use crate::swarm::transport::tcp_transport;
 use crate::{alias, discovery};
 pub use behaviour::{Behaviour, BehaviourEvent};
@@ -19,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 /// shipped without a bump, and a fresh build against a stale fleet
 /// produced a fully-synced node that was invisible to membership because
 /// its telemetry protocol had no peers while events flowed fine.
-pub const NETWORK_VERSION: &[u8] = b"v0.0.2";
+pub const NETWORK_VERSION: &[u8] = b"v0.0.3";
 pub const OVERRIDE_VERSION_ENV_VAR: &str = "SKULK_LIBP2P_NAMESPACE";
 const ELECTION_TOPIC: &str = "election_messages";
 const ELECTION_PROTOCOL_PREFIX: &str = "/skulk/election/meshsub";
@@ -295,6 +298,7 @@ pub fn create_swarm(
 
 mod transport {
     use crate::alias;
+    use crate::data_plane_trust::DataPlaneTrust;
     use crate::swarm::{NETWORK_VERSION, OVERRIDE_VERSION_ENV_VAR};
     use futures_lite::{AsyncRead, AsyncWrite};
     use keccak_const::Sha3_256;
@@ -327,18 +331,34 @@ mod transport {
         // Python token mirror exactly: a pair of nodes disagreeing there
         // would share a pnet key while splitting Zenoh namespaces (the #312
         // silent-DATA-drop shape; second review round).
+        preshared_key_for(env::var(OVERRIDE_VERSION_ENV_VAR).ok().as_deref())
+    });
+
+    /// The pre-shared key for an optional namespace (the derivation behind
+    /// [`PNET_PRESHARED_KEY`], factored out so tests can derive the keys of
+    /// distinct clusters inside one process).
+    pub(crate) fn preshared_key_for(namespace: Option<&str>) -> [u8; 32] {
         let builder = Sha3_256::new()
             .update(b"skulk_discovery_network")
             .update(NETWORK_VERSION);
 
-        if let Ok(var) = env::var(OVERRIDE_VERSION_ENV_VAR) {
-            let bytes = var.into_bytes();
-            builder.update(b"\0").update(&bytes)
+        if let Some(namespace) = namespace {
+            builder.update(b"\0").update(namespace.as_bytes())
         } else {
             builder
         }
         .finalize()
-    });
+    }
+
+    /// Derive this process's Zenoh data-plane trust from the cluster key.
+    ///
+    /// The data plane must be gated by the same secret as this control plane,
+    /// so its discovery scope and mutual-TLS authority derive one-way from
+    /// [`PNET_PRESHARED_KEY`] (see `data_plane_trust.rs`). The key itself never
+    /// leaves this module.
+    pub(crate) fn data_plane_trust() -> alias::AnyResult<DataPlaneTrust> {
+        DataPlaneTrust::derive(&PNET_PRESHARED_KEY)
+    }
 
     /// Make the Swarm run on a private network, as to not clash with public libp2p nodes and
     /// also different-versioned instances of this same network.

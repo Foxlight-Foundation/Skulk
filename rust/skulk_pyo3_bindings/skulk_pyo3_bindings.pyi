@@ -111,6 +111,13 @@ class ZenohHandle:
     an alternate transport backend.
     """
     def __new__(cls, listen_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, connect_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, namespace: typing.Optional[builtins.str] = None, multicast_scouting: builtins.bool = False) -> ZenohHandle: ...
+    def scouting_address(self) -> typing.Optional[builtins.str]:
+        r"""
+        Multicast scouting address (`224.0.0.224:<port>`), or None when off.
+
+        The port derives from the cluster key, so each cluster scouts on its
+        own port; operators open it (UDP) in host firewalls. Not secret.
+        """
     async def listen_addresses(self) -> builtins.list[builtins.str]:
         r"""
         Return actual bound data-plane locators without changing connectivity.
@@ -125,12 +132,13 @@ class ZenohHandle:
         """
     async def zenoh_connected_peer_count(self) -> builtins.int:
         r"""
-        Count the Zenoh peers this session currently holds a live transport to.
+        Count the cluster members this session holds an authenticated transport to.
 
         Zero while cluster peers advertise Zenoh means this node's data plane
         is isolated (its remote streams will fail) even though the libp2p
         control plane is healthy; Python advertises the count so cluster
-        health can say so instead of streams dying silently.
+        health can say so instead of streams dying silently. Links whose peer
+        does not present the cluster's member certificate never count.
         """
     async def recv(self) -> ZenohMessage: ...
 

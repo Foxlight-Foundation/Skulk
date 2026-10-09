@@ -41,3 +41,17 @@ log = { workspace = true }
 # networking
 libp2p = { workspace = true, features = ["full"] }
 pin-project = "1.1.10"
+
+# data-plane trust: the Zenoh mutual-TLS authority is derived from the libp2p
+# pre-shared key (src/data_plane_trust.rs). All of these already ship in the
+# dependency graph through libp2p and zenoh's TLS link.
+base64 = "0.22"
+hkdf = "0.12"
+rcgen = "0.14"
+sha2 = "0.10"
+zeroize = "1.8"
+
+[dev-dependencies]
+# Certificate-chain verification in the trust derivation tests, with the same
+# provider zenoh's TLS link uses.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

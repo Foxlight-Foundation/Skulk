@@ -270,17 +270,20 @@ def _zenoh_isolated_reason(
     return NodeHealthReason(
         code="zenoh_isolated",
         message=(
-            "This node's Zenoh data plane has 0 peer transports while "
-            f"{other_zenoh_nodes} other live node(s) advertise Zenoh. Remote "
-            "model and provider streams to and from this node will fail even "
-            "though cluster membership looks healthy."
+            "This node's Zenoh data plane has 0 authenticated peer transports "
+            f"while {other_zenoh_nodes} other live node(s) advertise Zenoh. "
+            "Remote model and provider streams to and from this node will fail "
+            "even though cluster membership looks healthy."
         ),
         remediation=(
             "If the node cannot reach peers via local multicast (for example "
             "it joined over a routed or overlay network), set "
             "SKULK_ZENOH_CONNECT to a reachable peer's Zenoh endpoint "
-            "(tcp/<peer-ip>:7447) and ensure SKULK_ZENOH_LISTEN binds an "
-            "address peers can dial, then restart skulk on the node."
+            "(tls/<peer-ip>:7447) and ensure SKULK_ZENOH_LISTEN binds an "
+            "address peers can dial, then restart skulk on the node. Every "
+            "node must share the same SKULK_LIBP2P_NAMESPACE and Skulk "
+            "version, and host firewalls must pass the scouting UDP port "
+            "logged at startup."
         ),
     )
 
