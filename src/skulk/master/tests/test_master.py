@@ -981,6 +981,136 @@ async def test_refuse_instance_placement_replaces_wider_once() -> None:
         tg.cancel_scope.cancel()
 
 
+async def test_refusal_keeps_a_download_failure_lineage_out_of_its_search() -> None:
+    """A memory refusal of a download-failure replacement keeps the chain's bound.
+
+    The refused instance replaced one whose download failed on the third node.
+    Its refusal re-place must not land on that node again, and the lineage
+    moves to the refusal's replacement so a later download failure there
+    still remembers it. Without that, a chain alternating refusals and
+    download failures could cycle forever.
+    """
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    node_ids = [node_id, NodeId(), NodeId()]
+    topology = Topology()
+    for nid in node_ids:
+        topology.add_node(nid)
+    port = 1
+    for source in node_ids:
+        for sink in node_ids:
+            if source != sink:
+                topology.add_connection(
+                    Connection(
+                        source=source, sink=sink, edge=create_socket_connection(port)
+                    )
+                )
+                port += 1
+    node_memory = {
+        nid: create_node_memory(Memory.from_gb(40).in_bytes) for nid in node_ids
+    }
+    node_network = {nid: create_node_network() for nid in node_ids}
+    card = ModelCard(
+        model_id=ModelId("refuse-lineage-model"),
+        storage_size=Memory.from_gb(6),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    placed = place_instance(
+        PlaceInstance(
+            model_card=card,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=2,
+        ),
+        topology,
+        {},
+        node_memory,
+        node_network,
+    )
+    instance = next(iter(placed.values()))
+    instance_id = instance.instance_id
+    refuser, survivor = list(instance.shard_assignments.node_to_runner)
+    (failed_earlier,) = set(node_ids) - {refuser, survivor}
+
+    telemetry = TelemetryView()
+    for nid, mem in node_memory.items():
+        telemetry.node_memory[nid] = mem
+    ge_sender, global_event_receiver = channel[GlobalForwarderEvent]()
+    command_sender, co_receiver = channel[ForwarderCommand]()
+    local_event_sender, le_receiver = channel[LocalForwarderEvent]()
+    state_sync_sender, state_sync_receiver = channel[StateSyncMessage]()
+    fcds, _fcdr = channel[ForwarderDownloadCommand]()
+    ev_send, ev_recv = channel[Event]()
+
+    async def mock_event_router() -> None:
+        idx = 0
+        sid = SystemId()
+        with ev_recv as master_events:
+            async for event in master_events:
+                await local_event_sender.send(
+                    LocalForwarderEvent(
+                        origin=sid, origin_idx=idx, session=session_id, event=event
+                    )
+                )
+                idx += 1
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=ev_send,
+        global_event_sender=ge_sender,
+        local_event_receiver=le_receiver,
+        command_receiver=co_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=fcds,
+        initial_state=State(
+            topology=topology,
+            instances={instance_id: instance},
+            node_network=node_network,
+        ),
+        telemetry_view=telemetry,
+    )
+    master._download_failure_lineage[instance_id] = frozenset({failed_earlier})  # pyright: ignore[reportPrivateUsage]
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(master.run)
+        tg.start_soon(mock_event_router)
+        with anyio.fail_after(5):
+            while instance_id not in master.state.instances:
+                await anyio.sleep(0.005)
+
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("Worker"),
+                command=RefuseInstancePlacement(
+                    instance_id=instance_id,
+                    node_id=refuser,
+                    reason="not enough GPU-wireable memory",
+                ),
+            )
+        )
+        with anyio.fail_after(5):
+            while instance_id in master.state.instances or not master.state.instances:
+                await anyio.sleep(0.005)
+
+        (replacement,) = master.state.instances.values()
+        # The wider width needs the earlier failed node, so the fallback
+        # (anywhere but the refuser) places it on the one node left.
+        assert set(replacement.shard_assignments.node_to_runner) == {survivor}
+        assert master._download_failure_lineage == {  # pyright: ignore[reportPrivateUsage]
+            replacement.instance_id: frozenset({failed_earlier})
+        }
+
+        global_event_receiver.collect()
+        tg.cancel_scope.cancel()
+
+
 async def test_fallback_refusal_is_terminal_two_hop_flow() -> None:
     """The full #290 heterogeneous recovery flow terminates after two hops.
 

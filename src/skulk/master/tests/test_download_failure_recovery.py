@@ -11,7 +11,10 @@ from collections.abc import Mapping
 
 import pytest
 
-from skulk.master.main import instances_wedged_by_download_failure
+from skulk.master.main import (
+    instances_wedged_by_download_failure,
+    retire_download_failure_lineages,
+)
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
@@ -441,3 +444,58 @@ def test_stale_donor_download_failure_does_not_wedge_rpc_instance() -> None:
     )
     failed_nodes, _cause = instances_wedged_by_download_failure(state)[iid]
     assert failed_nodes == frozenset({driver_node})
+
+
+def test_a_lineage_waits_for_its_replacement_to_appear() -> None:
+    """A replacement not yet in state is a pending creation, not a deletion."""
+    pending = InstanceId()
+    lineages = {pending: frozenset({NodeId("a")})}
+
+    kept, present = retire_download_failure_lineages(lineages, set(), State())
+
+    assert kept == lineages
+    assert present == set()
+
+
+def test_a_lineage_in_progress_is_kept_and_marked_present() -> None:
+    instance, runner_a, runner_b = _two_node_instance(
+        InstanceId(), NodeId("b"), NodeId("c")
+    )
+    lineages = {instance.instance_id: frozenset({NodeId("a")})}
+    state = _state(
+        instance, {runner_a: RunnerConnected(), runner_b: RunnerConnected()}, {}
+    )
+
+    kept, present = retire_download_failure_lineages(lineages, set(), state)
+
+    assert kept == lineages
+    assert present == {instance.instance_id}
+
+
+def test_a_lineage_retires_once_its_replacement_is_ready() -> None:
+    """Recovery worked: a later failure of the same instance starts afresh."""
+    instance, runner_a, runner_b = _two_node_instance(
+        InstanceId(), NodeId("b"), NodeId("c")
+    )
+    state = _state(instance, {runner_a: RunnerReady(), runner_b: RunnerReady()}, {})
+
+    kept, present = retire_download_failure_lineages(
+        {instance.instance_id: frozenset({NodeId("a")})},
+        {instance.instance_id},
+        state,
+    )
+
+    assert kept == {}
+    assert present == set()
+
+
+def test_a_lineage_retires_once_its_replacement_is_deleted() -> None:
+    gone = InstanceId()
+
+    kept, present = retire_download_failure_lineages(
+        {gone: frozenset({NodeId("a")})}, {gone}, State()
+    )
+
+    assert kept == {}
+    assert present == set()
+
