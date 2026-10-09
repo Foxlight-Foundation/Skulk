@@ -7,30 +7,6 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
-### Security
-
-- The data plane between nodes (generated output, uploaded images and audio,
-  generated media, and traces) is now encrypted and authenticated with the
-  cluster's shared key, the same key that already protects the control plane.
-  Every data-plane link is mutual TLS 1.3 rooted in that key, so a device
-  without it can neither join nor read the traffic. Clusters with different
-  names (`SKULK_LIBP2P_NAMESPACE`) also scout for their data plane on different
-  ports, so they normally never see each other, and in the rare case that two
-  names share a port the handshake still refuses the other cluster. On the default cluster name the shared key is public, as it always
-  has been for the control plane: traffic is encrypted against eavesdroppers,
-  but any Skulk node on the network can still join, so set a private cluster
-  name on every node to restrict membership. A blank cluster name counts as the
-  default and gets the same startup warning.
-- Node diagnostics (`GET /v1/diagnostics/node` and the cluster view) no longer
-  return the configured cluster name. They report `namespaceConfigured` and a
-  `namespaceFingerprint` that confirms two nodes share a cluster without
-  revealing its name.
-- This is a network protocol change (network version v0.0.3): upgrade every
-  node of a cluster together. `tcp/` endpoints in `SKULK_ZENOH_LISTEN` and
-  `SKULK_ZENOH_CONNECT` keep working and are used as `tls/`. Data-plane
-  discovery now uses a UDP port derived from the cluster name, logged at
-  startup; a host firewall that allowed UDP 7446 must allow that port instead.
-
 ### Fixed
 
 - Speculative decoding on Gemma 4 models on a Mac is much faster:
@@ -46,6 +22,34 @@ This project records release notes here and mirrors public-facing notes in
   now check drafts against the logits the model really samples from. The
   check skipped Gemma's final logit soft-capping, so it compared drafts with
   a sharper distribution than the model's own.
+
+## [2.0.2] - 2026-10-09
+
+### Security
+
+- The data plane between nodes (generated output, uploaded images and audio,
+  generated media, and traces) is now encrypted and authenticated with the
+  cluster's shared key, the same key that already protects the control plane.
+  Every data-plane link is mutual TLS 1.3 rooted in that key, so a device
+  without it can neither join nor read the traffic. Clusters with different
+  names (`SKULK_LIBP2P_NAMESPACE`) also scout for their data plane on different
+  ports, so they normally never see each other, and in the rare case that two
+  names share a port the handshake still refuses the other cluster. On the
+  default cluster name the shared key is public, as it always has been for the
+  control plane: traffic is encrypted against eavesdroppers, but any Skulk node
+  on the network can still join, so set a private cluster name on every node
+  to restrict membership. A blank cluster name is just as public and gets the
+  same startup warning; it derives its own key, so nodes with a blank name and
+  nodes with no name do not connect to each other.
+- Node diagnostics (`GET /v1/diagnostics/node` and the cluster view) no longer
+  return the configured cluster name. They report `namespaceConfigured` and a
+  `namespaceFingerprint` that confirms two nodes share a cluster without
+  revealing its name.
+- This is a network protocol change (network version v0.0.3): upgrade every
+  node of a cluster together. `tcp/` endpoints in `SKULK_ZENOH_LISTEN` and
+  `SKULK_ZENOH_CONNECT` keep working and are used as `tls/`. Data-plane
+  discovery now uses a UDP port derived from the cluster name, logged at
+  startup; a host firewall that allowed UDP 7446 must allow that port instead.
 
 ## [2.0.1] - 2026-10-09
 
