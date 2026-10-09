@@ -99,6 +99,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- On a Mac without Apple's command line developer tools, which is any new
+  Mac, starting Skulk no longer opens a dialog offering to install them. Skulk
+  ran `git` on every start to report which build it is; it now reads the
+  commit from the checkout's own files, and a packaged install, which has no
+  checkout, reports its build as unknown exactly as before.
+
 - After a Skulk update, **Plugins** said plugins were unavailable, told you to
   check your setup and plugin permissions, and then said the plugin service
   was not answering, while Skulk was simply updating its plugin service to
