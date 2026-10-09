@@ -803,6 +803,60 @@ class TestStreamGenerateWithMTP:
         # ...and drafting was attempted exactly once, then disabled.
         assert exploding.draft_attempts == 1
 
+    def test_drafter_scheduling_failure_disables_speculation_not_generation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Local drafts are lazy, so their buffers are allocated when the
+        chain is submitted. A failure there (device out of memory) must
+        still land inside the drafter fallback, before the verify forward
+        touches the target cache, and decode must continue plain."""
+        from skulk.worker.engines.mlx.generator.generate import (
+            _stream_generate_with_mtp,
+        )
+
+        model, tokenizer, drafter, trunk_fn, head_fn, cache = _build_fake_stream_env(
+            main_token_ids=[5, 6, 7, 8, 0],
+            draft_token_id=5,
+        )
+        submissions: list[int] = []
+        real_async_eval = mx.async_eval
+
+        def failing_first_submission(*arrays: mx.array) -> None:
+            submissions.append(len(arrays))
+            if len(submissions) == 1:
+                raise RuntimeError("[metal::malloc] Attempting to allocate")
+            real_async_eval(*arrays)
+
+        monkeypatch.setattr(mx, "async_eval", failing_first_submission)
+        trunk_calls: list[int] = []
+
+        def counting_trunk(tokens: mx.array, cache: object = None) -> mx.array:
+            trunk_calls.append(int(tokens.shape[1]))
+            return trunk_fn(tokens, cache=cache)
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=counting_trunk,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=4,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+            )
+        )
+        assert [output.token for output in outputs] == [5, 6, 7, 8]
+        assert drafter.draft_calls == [5]  # one attempt, then plain decode
+        # Prefill and first bonus, then one-token plain steps: the failed
+        # round never ran a verify forward against the target cache.
+        assert trunk_calls == [2, 1, 1, 1, 1]
+
     def test_reject_path_does_not_crash(self) -> None:
         outputs, _drafter, _cache = self._run(
             main_token_ids=[5, 3, 0],

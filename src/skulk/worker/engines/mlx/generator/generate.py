@@ -1870,6 +1870,16 @@ def _stream_generate_with_mtp(
                         draft_probs = warp_to_probs(chain_lp[0], sampling)
                         chain_sampled = sampler(chain_lp)  # (1,)
                     local_drafts = chain_sampled.astype(mx.int32)
+                    # Submit the chain without waiting for it. Scheduling it
+                    # allocates its buffers, so an allocation failure in the
+                    # drafter still raises here, inside this fallback and
+                    # before the verify forward writes the target cache; the
+                    # device meanwhile runs the chain while the host builds
+                    # the verify forward.
+                    mx.async_eval(
+                        local_drafts,
+                        *([draft_probs] if draft_probs is not None else []),
+                    )
             except Exception as draft_error:  # noqa: BLE001 — best-effort
                 if fail_loud_on_drafter_error:
                     # Multi-rank placements: a rank-local fallback to plain
