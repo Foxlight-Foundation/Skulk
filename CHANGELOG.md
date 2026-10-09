@@ -13,6 +13,14 @@ This project records release notes here and mirrors public-facing notes in
   node changed elsewhere" or briefly disables the switch. The page took the
   host's answer at once while its settings read still showed the older
   revision, and counted that as someone else's change.
+- Skulk on a Mac no longer keeps gigabytes of freed GPU memory to itself. MLX
+  keeps freed buffers for reuse and Skulk set no limit on them, so on a 24 GB
+  Mac a 12B model held about 9.5 GB of such buffers after a single response,
+  on top of the 7.7 GB the model needs, and other apps were pushed into swap.
+  Each runner now caps that cache at a tenth of the Mac's recommended GPU
+  working set (about 1.8 GB on a 24 GB Mac), with the same generation speed.
+  `SKULK_MLX_CACHE_LIMIT_MIB` overrides the cap on a node.
+- Sizes in Skulk's logs name their unit once ("17.76 GiB", not "17.76 GiB GiB").
 - A node now reports the commit it started from. It used to re-read its
   checkout every time it refreshed its identity, so after a checkout moved, a
   node that had not restarted yet claimed the new commit while still running

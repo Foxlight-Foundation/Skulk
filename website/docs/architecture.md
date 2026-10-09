@@ -1663,6 +1663,10 @@ See [KV cache backends](kv-cache-backends.md) for the supported choices and thei
 
 The choice affects memory footprint and decode throughput. See [KV Cache Backends](kv-cache-backends) for the operator-facing trade-offs.
 
+### Runner memory on a Mac
+
+After loading a model, an MLX runner raises the Metal wired limit to the device's recommended working set and caps MLX's freed-buffer cache. MLX keeps freed buffers for reuse and, left alone, lets that cache grow to its memory limit, about one and a half times the recommended working set. Generation allocates buffers of many sizes, so on a 24 GB Mac a 12B model with 7.7 GB active was measured holding 9.5 GB of cache after one 400-token response: memory every other app on the machine had to do without. The cap keeps a tenth of the recommended working set (at least 512 MiB, about 1.8 GiB on that Mac), which measured the same decode speed and time to first token while returning about 7 GiB. `SKULK_MLX_CACHE_LIMIT_MIB` overrides it per node; 0 disables the cache.
+
 ### Per-model runtime knobs
 
 The model card's `runtime` section carries Skulk-specific behavior overrides, the most operationally significant being `metal_fast_synch`. Gemma 4 cards explicitly disable Metal FAST_SYNCH because it deadlocks the GPU command queue under multimodal pipeline-parallel load. Cards that declare any speculative-decoding mechanism (`mtp_heads`, `mtp_sidecar_repo`, or `assistant_model_repo`) also default FAST_SYNCH off: the flag collapses the speculative loop's per-round small-eval pattern by ~46x while leaving vanilla decode unaffected. All other models use the cluster default. Operator overrides (`--fast-synch` / `--no-fast-synch`) and explicit card pins beat both defaults.
