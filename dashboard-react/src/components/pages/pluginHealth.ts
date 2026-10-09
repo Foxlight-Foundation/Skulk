@@ -1,13 +1,19 @@
-import type { ManagedRuntime, PluginNodes, ManagedOperation } from '../../store/endpoints/plugins';
+import type { ManagedRuntime, PluginNodes, ManagedOperation, RuntimeInstallation } from '../../store/endpoints/plugins';
 
 /** Evidence-derived summary; unknown observations must never imply health. */
 export type PluginHealth = 'healthy' | 'attention' | 'uninstalled' | 'unknown' | 'updating' | 'disabled';
 /** Card filtering is presentation-only and must not unmount operation owners. */
 export type PluginFilter = 'all' | 'healthy' | 'attention' | 'uninstalled';
 
-/** Combine current runtime, operation and node observations conservatively. */
-export function derivePluginHealth(runtime: ManagedRuntime, nodes: PluginNodes | undefined, unavailable: boolean, operationState: ManagedOperation['state'] | null = runtime.operation_state): PluginHealth {
+/**
+ * Combine current runtime, operation and node observations conservatively.
+ *
+ * An install that stopped before its release was selected needs the owner's
+ * retry whatever else is observed, so it always reads as needing attention.
+ */
+export function derivePluginHealth(runtime: ManagedRuntime, nodes: PluginNodes | undefined, unavailable: boolean, operationState: ManagedOperation['state'] | null = runtime.operation_state, installOperation: RuntimeInstallation | null = null): PluginHealth {
   if (unavailable) return 'unknown';
+  if (installNeedsRetry(runtime, installOperation)) return 'attention';
   // A recorded failure stays evidence as its observation ages: a release that
   // failed verification does not start again until something changes.
   const failed = recordedServiceFailure(runtime) !== null;
@@ -28,4 +34,16 @@ export function derivePluginHealth(runtime: ManagedRuntime, nodes: PluginNodes |
 /** The failure class a stopped plugin process recorded, or null when none was recorded. */
 export function recordedServiceFailure(runtime: ManagedRuntime): string | null {
   return runtime.service?.state === 'failed' && runtime.service.error_code ? runtime.service.error_code : null;
+}
+
+/**
+ * Whether an installation's retained install stopped and waits for the
+ * owner's retry: the host reports it `recovery_required`, never repeats it by
+ * itself, and refuses to bind the installation to another release until it is
+ * retried. An install of the release already selected has nothing left to do,
+ * and an uninstalled installation is reinstalled from Browse instead.
+ */
+export function installNeedsRetry(runtime: ManagedRuntime, installOperation: RuntimeInstallation | null | undefined): installOperation is RuntimeInstallation {
+  return !!installOperation && installOperation.state === 'recovery_required' && !runtime.uninstalled
+    && installOperation.review.runtime_digest !== runtime.selected_digest;
 }

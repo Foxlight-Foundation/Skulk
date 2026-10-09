@@ -238,6 +238,7 @@ from skulk.api.types import (
     OpenUrlToolRequest,
     OpenUrlToolResponse,
     PlaceInstanceParams,
+    PlacementEngineInstall,
     PlacementPreview,
     PlacementPreviewResponse,
     PurgeStagingRequest,
@@ -348,6 +349,7 @@ from skulk.master.image_store import ImageStore
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    PlacementNoCapableMachineError,
     require_instance_model_card_identity,
     require_instance_model_code_approval,
     served_context_window,
@@ -376,13 +378,15 @@ from skulk.shared.backends import (
     AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
+    ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
+    EngineType,
     audio_cpp_cuda_hardware_matches,
+    engine_install_notice,
     engine_of,
 )
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
-    SKULK_ENABLE_IMAGE_MODELS,
     SKULK_EVENT_LOG_DIR,
     SKULK_IMAGE_CACHE_DIR,
     SKULK_IMAGE_TRANSPORT_DEBUG,
@@ -420,6 +424,7 @@ from skulk.shared.models.model_cards import (
     VideoMode,
     add_to_card_cache,
     authorized_model_card_digest,
+    card_visible_in_catalog,
     custom_card_mutation_applied,
     delete_custom_card,
     get_all_model_cards,
@@ -663,6 +668,9 @@ from skulk.store.installed_cards import (
     InstalledCardRecord,
     read_installed_card,
     verify_installed_card,
+)
+from skulk.store.installed_cards import (
+    store_installed_records as validate_store_installed_records,
 )
 from skulk.store.model_store import read_reconciliation_tombstones
 from skulk.store.peer_exports import ArtifactExportManager
@@ -4028,7 +4036,9 @@ class API:
             detail="audio.cpp could not be prepared on an eligible node: " + "; ".join(errors),
         )
 
-    async def place_instance(self, payload: PlaceInstanceParams):
+    async def place_instance(
+        self, payload: PlaceInstanceParams
+    ) -> CreateInstanceResponse:
         card = await self._load_authorized_model_card(payload.model_id)
         prepared = await self._prepare_music_engine_for_mount(
             card, set(payload.excluded_nodes)
@@ -4072,7 +4082,7 @@ class API:
         deadline = time.monotonic() + _PLACEMENT_INFO_WAIT_SECONDS
         while True:
             try:
-                get_instance_placements(
+                planned = get_instance_placements(
                     copy.deepcopy(command),
                     topology=self.state.topology,
                     current_instances=self.state.instances,
@@ -4121,11 +4131,21 @@ class API:
 
         await self._send(command)
 
+        instance_id = InstanceId(str(command.command_id))
+        # The master places the command itself; this node's dry run is the same
+        # algorithm over the same replicated state, so it is what a quick launch
+        # without a preview can show about an engine install.
+        planned_instance = planned.get(instance_id)
         return CreateInstanceResponse(
             message="Command received.",
             command_id=command.command_id,
-            instance_id=InstanceId(str(command.command_id)),
+            instance_id=instance_id,
             model_card=command.model_card,
+            engine_install=(
+                None
+                if planned_instance is None
+                else self._engine_install_for_instance(planned_instance)
+            ),
         )
 
     async def create_instance(
@@ -4472,7 +4492,14 @@ class API:
                                 if isinstance(exc, PlacementError)
                                 else "no_valid_placement"
                             ),
-                            compatibility_detail=support_gap_detail,
+                            # The dashboard shows the compatibility detail
+                            # beneath the model, so missing hardware is named
+                            # there rather than only coloring the card.
+                            compatibility_detail=(
+                                str(exc)
+                                if isinstance(exc, PlacementNoCapableMachineError)
+                                else support_gap_detail
+                            ),
                         )
                     )
                 seen.add((model_card.model_id, sharding, instance_meta, 0))
@@ -4661,10 +4688,51 @@ class API:
                         "card_digest": authorized_model_card_digest(model_card)
                         if preview.instance is not None
                         else None,
+                        "engine_install": self._engine_install_for_instance(
+                            preview.instance
+                        )
+                        if preview.instance is not None
+                        else None,
                     }
                 )
                 for preview in previews
             ]
+        )
+
+    def _engine_install_for_instance(
+        self, instance: Instance
+    ) -> PlacementEngineInstall | None:
+        """The on-demand engine this placement installs before loading, if any.
+
+        A shard whose stamped backend its node advertises but has not installed
+        waits for that engine to install beside the model download, so the
+        preview says so before the operator places it.
+        """
+        node_resources = self._telemetry_view.node_resources
+        installing: dict[EngineType, list[str]] = {}
+        assignments = instance.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard.get(runner_id)
+            resources = node_resources.get(node_id)
+            backend = shard.resolved_backend if shard is not None else None
+            if (
+                resources is None
+                or backend is None
+                or backend not in resources.on_demand_backends
+            ):
+                continue
+            engine = engine_of(backend)
+            if engine is not None:
+                installing.setdefault(engine, []).append(str(node_id))
+        if not installing:
+            return None
+        engine, node_ids = next(iter(installing.items()))
+        size = ON_DEMAND_ENGINE_DOWNLOAD_BYTES.get(engine, 0)
+        return PlacementEngineInstall(
+            engine=engine,
+            node_ids=node_ids,
+            approximate_download_bytes=size,
+            detail=engine_install_notice(engine, size),
         )
 
     def get_instance(self, instance_id: InstanceId) -> Instance:
@@ -10066,54 +10134,10 @@ class API:
     ) -> dict[ModelId, InstalledCardRecord]:
         """Validate central-store base records for the cluster model projection.
 
-        Companion entries do not represent independently launchable model-list
-        aliases. Malformed or internally mismatched records are ignored rather
-        than allowing store-index corruption to manufacture installed state.
-
-        Args:
-            entries: Raw entries returned by the authoritative store server.
-
-        Returns:
-            Valid base installed-card records keyed by their exact model alias.
+        See :func:`skulk.store.installed_cards.store_installed_records`.
         """
 
-        records: dict[ModelId, InstalledCardRecord] = {}
-        for entry in entries:
-            model_id_raw = entry.get("model_id")
-            installed_raw = entry.get("installed_card")
-            if not isinstance(model_id_raw, str) or not isinstance(installed_raw, dict):
-                continue
-            try:
-                model_id = ModelId(model_id_raw)
-                record = InstalledCardRecord.model_validate(
-                    installed_raw,
-                    strict=False,
-                )
-            except (ValidationError, ValueError):
-                logger.warning(
-                    "Ignoring malformed installed-card record from the model store "
-                    "for alias {}",
-                    model_id_raw,
-                )
-                continue
-            if (
-                record.artifact_role != "base"
-                or record.artifact_model_id != model_id_raw
-                or record.model_card.model_id != model_id
-            ):
-                logger.warning(
-                    "Ignoring mismatched installed-card record from the model store "
-                    "for alias {}",
-                    model_id_raw,
-                )
-                continue
-            if record.model_card.qualification_only:
-                # Qualification keeps exact bytes in the central store, but the
-                # temporary unsigned card is not installed catalog truth.  It
-                # must not override a later signed card sharing the same alias.
-                continue
-            records[model_id] = record
-        return records
+        return validate_store_installed_records(entries)
 
     async def _cached_store_installed_records(
         self,
@@ -10167,12 +10191,9 @@ class API:
 
     @staticmethod
     def _model_list_card_visible(card: ModelCard) -> bool:
-        """Apply the catalog's existing image-model visibility policy."""
+        """Apply the catalog's image and video visibility switches."""
 
-        return SKULK_ENABLE_IMAGE_MODELS or not any(
-            task in {ModelTask.TextToImage, ModelTask.ImageToImage}
-            for task in card.tasks
-        )
+        return card_visible_in_catalog(card)
 
     async def _model_catalog(
         self,

@@ -101,17 +101,16 @@ The Studio renders through Skulk, so the cluster must be able to serve MiniMax
 H3 before a render can start:
 
 - **A render node.** A Linux node with an NVIDIA GPU (CUDA) or an AMD Strix
-  Halo (ROCm), with about 64 GB of GPU memory. Skulk provisions the ComfyUI
-  engine that serves H3 on these nodes; `uv run skulk doctor` reports its
-  state. Apple Silicon nodes cannot render H3.
-- **Video models turned on.** Add `SKULK_ENABLE_VIDEO_MODELS=true` to
-  `~/.skulk/skulk.env` on each node and restart Skulk. Video model cards stay
-  hidden until then.
+  Halo (ROCm), with about 64 GB of GPU memory. The node installs the ComfyUI
+  engine that serves H3 (about 7 GB) the first time a video model is placed on
+  it; `uv run skulk doctor` reports its state and `uv run skulk doctor --fix`
+  installs it ahead of time. Apple Silicon nodes cannot render H3.
 - **A placed model.** Place a MiniMax H3 card (FL2VA or Ref2VA) from **Model
-  Store**. Each is about 49 GB to download. Place it before installing the
+  Store**. Each is about 49 GB to download, and the first placement on a node
+  also installs the video engine, which the placement preview mentions. Place it before installing the
   Studio; if the Studio was installed first and its setup check reports that
-  no video model is placed, disable and re-enable it in **Plugins** once the
-  model is ready.
+  no video model is placed, open its settings in **Plugins**, select
+  **Turn off**, then **Turn on** once the model is ready.
 - **Licence terms.** MiniMax H3 open-weight use is territorially scoped by its
   licence. The model card shows the notice before download.
 - **Optional:** a ready chat model for **Refine with guides**.
@@ -135,24 +134,47 @@ Tailscale. So an owner on any tailnet machine can manage every node's plugins:
 A node that reports no Tailscale address is named without a link; open its
 dashboard on the node itself.
 
+An installed plugin's drawer opens with its release ("Release 0.1.0 from
+example"), where it came from, and a status: Running, Stopped, Starting,
+Failed, Updating or Uninstalled. Its actions sit in one row:
+
+- **Update to**, followed by the version, when a newer release built for this
+  host is listed. It opens that release's review under **Browse**.
+- **Stop plugin** stops all of its capabilities until **Start plugin** runs the
+  same release again. Its settings and data stay. (Each capability node below
+  has its own **Turn on** and **Turn off**.)
+- **Uninstall** stops it and withdraws its capabilities, keeping its settings,
+  credentials and records. An uninstalled plugin offers **Reinstall**, which
+  starts the release it kept, and **Remove everything**, which deletes what it
+  kept after a second confirmation; after that it can be installed fresh from
+  **Browse**.
+
+**Details** holds the release number, the installation id, the selected and
+active release fingerprints, the last local operation with **Refresh status**, and **Choose
+another release**, which inspects, stages and activates a release from the
+plugin's source.
+
 Process separation helps lifecycle management; it is not a sandbox against
 malicious code running as the same operating-system user. Install bundles from
 publishers you trust.
 
 ## Get a compatible plugin
 
-**A public plugin store is coming soon.** For now, obtain plugins directly from
-their publishers.
+Plugins come from the Foxlight capability store at
+[skulkapps.foxlight.ai](https://skulkapps.foxlight.ai/). Open **Plugins**, then
+**Browse**: it lists the store with nothing to set up, shows which releases fit
+this host, and installs one after you review its permissions. Check a plugin's
+supported platforms, permissions, required services, costs, and cleanup before
+installing.
 
-Obtain the release and owner instructions from its publisher. Check supported
-platforms, exact runtime compatibility, permissions, required services, costs,
-and cleanup procedures before installing. A matching version label alone is not
-proof of compatible bytes or dependencies.
-
-A publisher can also give you a signed catalog: an address and the publisher
-trust to verify it, often as a single invitation code. Connect it under
-**Plugins**, then **Browse**, which lists its plugins and says which releases fit
-this host (see [From a catalog](#from-a-catalog)). From a terminal,
+Skulk verifies and renews the store's publisher trust by itself. A publisher can also give you a private catalog: an
+address and the publisher trust to verify it, often as a single invitation
+code. Add it under **Browse** with **Add a private catalog**; it replaces the
+store as the host's catalog until you select **Use the Foxlight store**. Browse
+lists the catalog's plugins and says which releases fit this host (see
+[From a catalog](#from-a-catalog)). A plugin installed from the store keeps
+running as Skulk renews the store's trust for it; if the store revokes its
+publisher or release, it stops. From a terminal,
 `skulk-plugin-service catalog` lists the releases that match this host, and
 `skulk-plugin-service install-plugin --from-catalog BUNDLE_ID` installs one
 through the same consent steps as a single release (prefix both with
@@ -170,21 +192,27 @@ Open **Plugins** on the host that will manage the installation. Initial service
 setup and publisher trust require owner access; a paired browser cannot grant
 itself that authority.
 
-First, set up the host's plugin-management service once. On a source install,
-run `uv run skulk-plugin-service setup` from the Skulk directory as the user who
-runs Skulk (see [Install](install.md#add-capabilities-optional)). It asks for
-your administrator password to register the service (Apple Silicon macOS, or
-Linux with systemd). Until it is ready, **Plugins** reports that local runtime
-management is unavailable; `uv run skulk-plugin-service status` shows its
-progress.
+The first time **Plugins** opens on a host, Skulk sets up that host's
+plugin-management service: a per-user service (Apple Silicon macOS, or Linux
+with systemd) that runs under your account alongside Skulk. It needs no terminal and
+no administrator password; the first setup copies Skulk's environment into a
+verified manager runtime and takes a few minutes, and **Plugins** shows its
+progress. From a terminal, `uv run skulk-plugin-service setup` runs the same
+setup and `uv run skulk-plugin-service status` shows its state. A host that runs
+unattended can use `skulk-plugin-service setup --system` instead, which registers
+a system service and asks for your administrator password once (see
+[Install](install.md#add-capabilities-optional)).
 
 ### From a catalog
 
-1. Open **Plugins**, then **Browse**. If the host has no catalog yet, paste the
+1. Open **Plugins**, then **Browse**. A host on the built-in store lists it
+   right away. To use a private catalog instead, select **Add a private
+   catalog** (on a build without the store, the form opens directly), paste the
    invitation code from the publisher (it starts with `skulk-catalog:`), or
    enter the catalog address, publisher name and publisher key, then select
    **Connect**. The code carries no authority of its own: every release is still
-   verified against the publisher key before anything installs.
+   verified against the publisher key before anything installs. **Use the
+   Foxlight store** returns the host to the built-in store.
 2. Each card is one plugin. **Review and install** opens its review. An installed
    plugin with a newer release that fits this host offers **Review update**
    instead, including one that stopped fitting after a Skulk update. A card that
@@ -196,11 +224,41 @@ progress.
    permissions, then select **Install** or **Update**.
 4. The page follows the download, staging, and activation. You can leave it:
    when you return in the same browser, **Browse** picks the install up where it
-   was and reads its progress back instead of starting it again.
-5. **Set it up** shows what each of the plugin's nodes reports. A node that
-   needs you offers the plugin's own setup checks and **Open settings**, which
-   opens its configuration and credentials under **Installed**. Its screens open
-   from here once it reports ready.
+   was and reads its progress back instead of starting it again. Once it runs,
+   a plugin that needs no settings turns on by itself as part of the install you
+   accepted, and the page shows **Turning it on** as its last step. This happens
+   once per install: reloading the page does not turn it on again, and an
+   update turns back on only the nodes you had turned on before it, so a node
+   you turned off stays off, even one that also needed settings.
+
+   If the download or the preparation of its runtime stops, the page says which
+   and offers **Retry**. The plugin's card under **Installed** reads **Install
+   needs a retry** and offers the same **Retry**, and its **Browse** card offers
+   **Resume install** rather than a second installation beside it. A first
+   install still under way on the host, even one started from another browser,
+   shows **Show progress** on its card instead of being offered again. A retry
+   downloads the same signed release again and follows it through activation
+   to running. It carries the permissions you accepted when this browser started
+   the install; from another browser, the release's permissions are shown again
+   to accept first. A stopped first install you no longer want can be removed
+   from its card with **Remove this installation**.
+5. The install then continues on the plugin's own page under **Installed**,
+   which shows what each of its nodes reports and offers one next step:
+   - **Open settings** when a node needs settings or credentials. It opens that
+     node's settings, with the plugin's own setup checks beside them.
+   - **Turn on** when a node is only turned off, for example after you turned
+     it off, or when the host refused to turn it on after the install. Turning
+     it on runs the plugin's setup checks again; if the host refuses, the page
+     shows its reason and runs the setup checks so you can see what is missing.
+   - **Open**, followed by the screen's name, once it reports ready. Screens
+     open in a new tab; nothing of the plugin is shown inside the dashboard.
+     You can also open them from the plugin's node in the **Cluster** view.
+
+   **Done** returns to the list of installed plugins. An installed plugin's
+   **Browse** card says what it needs: **Open**, followed by the screen's
+   name, opens a running plugin in a new tab; **Set up** opens this page when a
+   node is turned off, needs settings or stopped; **Manage** opens it
+   otherwise, such as while the plugin starts.
 
 An update replaces the release on the same installation; its settings and saved
 work stay.
@@ -215,7 +273,16 @@ work stay.
    staged release.
 4. Configure the capability, supply credentials through the separate credential
    controls, complete its setup actions, and select **Check setup**.
-5. Correct any reported issues and enable the capability once checks pass.
+5. Correct any reported issues and select **Turn on** in its settings once
+   checks pass.
+
+A node's settings show its title, version and status, then its settings form,
+its setup checks, credentials and setup actions. The form renders each setting
+the plugin declares, with the plugin's description as help, and an optional
+setting left empty is saved as empty (`null`). **Turn on** and **Turn off** send
+no settings, so they work even for settings the dashboard cannot render; they
+wait only for unsaved changes to be saved or discarded, and for a reload when
+another operator changed the node.
 
 Installation, activation, configuration, readiness, and enablement are different
 states. An installed plugin can expose setup controls without advertising a ready
@@ -282,7 +349,7 @@ delete is not proof of absence. Independent expiry cleanup retains its obligatio
 if the management host stops, but provider outages can delay observation or
 termination; the deadline is not a guaranteed billing cutoff.
 
-**Disable** and **Uninstall** withdraw future plugin work. Neither confirms that
+**Stop plugin** and **Uninstall** withdraw future plugin work. Neither confirms that
 an existing cloud resource is gone. RunPod Network Volumes are separate storage
 resources and are not removed by Pod cleanup. Use the supplier's recovery
 instructions before purging installation state or replacing an owner.

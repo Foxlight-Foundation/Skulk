@@ -7,6 +7,206 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-09
+
+### Added
+
+- Skulk can now read a built-in capability store with nothing to paste or
+  configure. **Plugins**, **Browse** lists it on a host that has no catalog of
+  its own. Skulk verifies which publishers the store trusts through the
+  store's TUF repository, anchored in a root shipped inside Skulk, and renews
+  that trust by itself on each catalog read: a newer trust revision is
+  applied, an older one never, and the store's revocations apply exactly as
+  its current trust lists them. Each catalog address keeps its own trust
+  history and its own revocations: a private catalog's first trust is accepted
+  whatever the store's revision, returning to a private catalog still refuses
+  a trust older than the one the host accepted there before and keeps the
+  revocations that catalog's trust held, and revocations never move between
+  the store and a private catalog or between two catalogs. The dashboard asks
+  the host to number a new private trust, so re-adding a catalog is never
+  refused as a rollback. A host that cannot reach the store, or runs offline, keeps using the
+  trust it last verified until that trust expires; a tampered or expired trust
+  is refused. A private catalog still works: **Add a private catalog**
+  replaces the store as the host's source, and **Use the Foxlight store** (or
+  `POST /v1/plugins/managed/catalog/source/builtin`) switches back.
+  `GET /v1/plugins/managed/catalog/source` reports `builtin_store` and
+  `builtin_store_available`. Skulk now ships the store's root, so Browse lists
+  the Foxlight store at skulkapps.foxlight.ai with nothing to configure; a
+  build without that root has no built-in store.
+- A capability installed from the built-in store follows the store's trust
+  while it runs. Skulk renews that trust for it every hour and after each
+  catalog read, so the capability keeps running past the expiry its trust had
+  when it was installed, and a store revocation of its publisher or release
+  stops it. Offline, it keeps running on the trust it holds until that
+  expires. A renewal that cannot verify the store's trust, or finds the
+  capability busy, is retried within five minutes, and an install from a
+  listing read earlier is checked against the newest trust Skulk has
+  verified. Which capabilities follow the store, and the store trust each one
+  last took, are recorded with its source and changed together with its trust
+  in one step, so an interrupted change never leaves a capability half moved,
+  and a capability never takes back an older store trust than the one it
+  holds. Capabilities installed from a private catalog, or whose source the
+  owner configured directly, keep the trust they were given.
+
+### Changed
+
+- Plugins no longer need a terminal or an administrator password to set up. The
+  first time **Plugins** opens on a host, Skulk registers its plugin service for
+  your user (a launchd agent on macOS, a systemd user unit on Linux) and shows
+  its progress; it runs under your account alongside Skulk. `skulk-plugin-service
+  setup` does the same from a terminal, and `skulk-plugin-service setup
+  --system` still registers a system service, for hosts that run unattended.
+  Hosts that already run the system service keep it. New routes:
+  `GET /v1/plugins/managed/service` and `POST /v1/plugins/managed/service/setup`.
+- Updating Skulk no longer breaks installed capabilities. A capability
+  release declares the Skulk versions it runs on, and Skulk accepts it on any
+  version in that range; it used to require the exact Skulk build the release
+  was built against, so every update, even a patch, refused every installed
+  capability until its publisher rebuilt it. The build is still recorded, for
+  provenance. Plugin catalogs move to protocol 2, whose listings carry each
+  release's Skulk version range, so the catalog shows a release as fitting by
+  the host's version; protocol 1 catalogs are still read and keep their
+  exact-build rule.
+- Image models (FLUX.1 and Qwen-Image) now appear in the model catalog by
+  default, so the packaged Mac and Linux apps, which have no launch
+  environment to opt in through, can use them. `SKULK_ENABLE_IMAGE_MODELS=false`
+  hides them on a node; the switch also accepts `0`, `no` and `off`.
+- When no machine in a cluster has the hardware a model needs, placement and
+  the dashboard now say so in plain words (for example "it needs an Apple
+  Silicon Mac") instead of listing engine tags.
+- Video models (MiniMax H3) now appear in the model catalog by default too;
+  `SKULK_ENABLE_VIDEO_MODELS=false` hides them on a node. The video engine
+  (about 7 GB) is no longer installed when a node starts: a Linux node with an
+  NVIDIA GPU or an AMD Strix Halo GPU installs it the first time a video model
+  is placed there, while the model downloads. The placement preview and the
+  dashboard say beforehand that the engine will be installed with the model
+  and that placement will take longer, the instance shows "Installing video
+  engine..." meanwhile, and an install that fails (no internet, too little
+  disk space, a GPU the engine cannot use) fails the placement with the step
+  that failed. `skulk doctor --fix` installs the engine ahead of time, and a
+  cluster without a machine that can run video models is told which machine
+  it needs. The Linux packages now carry `uv`, which the install uses; the
+  node also needs `git`.
+- The video engine notice is harder to miss. In the placement dialog it is a
+  warning callout with an icon instead of a line of small print; a quick
+  launch from the Model Store, which skips the dialog, now says the same thing
+  in its toast (`POST /place_instance` returns the notice as `engine_install`);
+  and the instance reads "Installing video engine (about 7 GB)..." while the
+  install runs.
+- Skulk's dependencies now resolve to stable releases only. The lock had
+  carried two release candidates (kiwisolver 1.4.10rc0 and packaging 26.0rc1)
+  because the project allowed prereleases everywhere; it now uses kiwisolver
+  1.5.1 and packaging 26.3, and a prerelease can enter only when a requirement
+  names one explicitly or a package has no stable release.
+
+### Fixed
+
+- On a Mac without Apple's command line developer tools, which is any new
+  Mac, starting Skulk no longer opens a dialog offering to install them. Skulk
+  ran `git` on every start to report which build it is; it now reads the
+  commit from the checkout's own files, and a packaged install, which has no
+  checkout, reports its build as unknown exactly as before.
+
+- After a Skulk update, **Plugins** said plugins were unavailable, told you to
+  check your setup and plugin permissions, and then said the plugin service
+  was not answering, while Skulk was simply updating its plugin service to
+  match the new version. The page now says Skulk is updating the plugin
+  service, on both **Installed** and **Browse**, and shows your plugins again
+  by itself once it is done; installed plugins and their settings are kept.
+  If that update does not finish, the page says what happened and offers to
+  try again. The page now asks you to check your access only when the host
+  actually refused it. `GET /v1/plugins/managed/service` reports the update
+  as `setting_up` with a new `purpose` field (`setup` or `update`).
+- A capability with optional settings could not be turned on from the
+  dashboard: its settings panel said the settings were not supported and kept
+  **Enable** unavailable, so a capability installed from the store stayed off.
+  The settings form now handles optional values (an emptied one is saved as
+  empty), and turning a capability on or off no longer depends on the form at
+  all: it waits only for unsaved changes or a reload. When the host refuses to
+  turn one on, the dashboard shows the host's reason and runs the setup checks.
+- A capability that needs no settings now turns on by itself after it is
+  installed from **Browse**, once per install: reloading the page does not
+  turn it on again, and an update leaves a capability you turned off turned
+  off, judged by whether you had turned it on rather than by its status, so
+  one that was off while it needed settings stays off. One that needs settings
+  or credentials is not turned on; its page opens exactly the setting it
+  needs. The page shows a capability as turning on only while its own
+  settings say it is on or until the host's next report, so one turned off
+  again from its settings reads as off with **Turn on** offered.
+- The page after an install was redesigned. It now belongs to the installed
+  plugin under **Installed** instead of **Browse**: it reads **{title} is
+  installed** until the plugin runs and **{title} is ready** once it does,
+  offers one next step at a time (**Open settings**, **Turn on**, or
+  **Open**), and says that a plugin's screens open in a new tab and from its
+  node in the **Cluster** view. **Done** returns to the installed plugins.
+- A plugin's settings panel was redesigned: it is titled by the plugin's name
+  with its version and a status label, each setting shows a readable label
+  and its description as help, the actions sit in one row with one primary
+  action, and setup checks read as a checklist with plain names (such as
+  Storage and Status report) instead of raw check codes.
+- The top of an installed plugin's drawer was redesigned. Instead of a
+  "Runtime overview" of raw ids and fingerprints, it opens with the release
+  and who published it, where it came from, and one status (Running, Stopped,
+  Starting, Failed, Updating or Uninstalled), then one row of actions:
+  **Update to** a newer release built for this host (reviewed under
+  **Browse**), **Stop plugin** or **Start plugin** (named apart from the
+  capability nodes' **Turn on** and **Turn off**), and **Uninstall**. The
+  release number, installation id, release fingerprints, the last local
+  operation with **Refresh status**, **Choose another release** (formerly
+  **Install a release**) and a plain explanation of what Stop and Uninstall
+  keep sit under a closed **Details**. An uninstalled plugin leads with **Reinstall** and
+  **Remove everything**.
+- An installed capability's **Browse** card could name another platform's
+  build of the same release, such as "Linux, ARM64" on a Mac. It now names the
+  build for this host. The card also says what the capability needs instead of
+  always **Set up**: **Open** with the screen's name (in a new tab) once it
+  runs, **Set up** when it is off, needs settings or stopped, and **Manage**
+  otherwise. The install page closes with a bordered **Close**, and the
+  Plugins page no longer uses borderless buttons.
+- A capability install from **Plugins**, **Browse** that stops during its
+  download or while its runtime is prepared can now be finished from the
+  dashboard. The install page explains which step stopped and offers
+  **Retry**. Under **Installed**, the installation is named by its catalog
+  title or bundle id instead of its raw `managed.` id and reads **Install needs
+  a retry** with the same **Retry** on its card. **Browse** offers **Resume
+  install** for it instead of binding a second installation and leaving the
+  stopped one behind, and a first install still under way on the host shows
+  its progress there rather than being offered again. A retry uses the host's existing install recovery and
+  then activates the release, so it ends installed and running rather than
+  staged. Activation still needs the permissions accepted for that exact
+  release: the retry carries the consent this browser recorded when the
+  install began, and from any other browser the release's permissions are
+  shown again for acceptance first. A stopped first install that was never
+  activated can also be removed from its card.
+- Capabilities install on Linux hosts whose Python was installed under
+  Ubuntu's default umask. The plugin environment copied group-writable
+  activation scripts from that Python, the installed-file seal refused them,
+  and every install stopped after its download with "needs recovery". New
+  plugin environments now drop group and other write permission before they
+  are sealed.
+- On the Mac app, the background plugin service is listed as Skulk in System
+  Settings, Login Items, instead of as `python3.13`.
+- Installed capabilities keep working after the Skulk app is updated or moved.
+  Each capability's environment records the Python interpreter it was built
+  with, and an app update replaces that interpreter (a move changes its path),
+  so every installed capability used to refuse to start until it was removed
+  and installed again. Skulk now re-points the environment at the current
+  interpreter when the Python minor version is the same and every other
+  installed file still matches what was installed. A capability built for a
+  different Python minor version still needs reinstalling.
+- Updating a model in the model store no longer leaves placements on the old
+  card. A node that had staged the previous version kept treating it as the
+  installed one, so placements from that node carried the old card and every
+  node that had to fetch the model was refused by the store ("store host
+  cannot verify the requested registry card"). Nodes now follow the version the
+  store holds once it holds the current signed card.
+- The bundled Node.js that builds the dashboard on install is now the stable
+  24.19.0 LTS release instead of a 25.2.1 release candidate.
+- A model whose files turn out to be incomplete when it loads is no longer
+  reported as refused by model trust policy. The instance still fails without
+  retrying, now as a download failure that says a file the model needs is
+  missing and that downloading the model again is the remedy.
+
 ## [2.0.0] - 2026-10-06
 
 ### Changed
@@ -611,8 +811,10 @@ This project records release notes here and mirrors public-facing notes in
   keyed by pin and wheel-set digest so a wheel change reprovisions),
   provisioned on Linux NVIDIA and AMD nodes that enable video models or by
   `skulk doctor --fix`, advertised as `comfy-cuda` or `comfy-rocm` (the
-  ROCm lane launches ComfyUI with `--bf16-vae --disable-mmap
-  --cache-none`), with `SKULK_COMFY_BIN` and
+  ROCm lane launches ComfyUI with `--bf16-vae` and `--cache-ram` keeping 40%
+  of host RAM free so models stay resident between renders, adding
+  `--disable-mmap` only for a weight file above 64 GiB), with
+  `SKULK_COMFY_BIN` and
   `SKULK_COMFY_ROOT` for hand-built installs. The ComfyUI runner drives that install headless:
   it exposes the staged H3 artifact through an `extra_model_paths.yaml`,
   binds each request onto ComfyUI's own MiniMax H3 node graph (text, first

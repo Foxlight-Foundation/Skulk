@@ -59,9 +59,16 @@ def _log_derivation(facts: NodeFacts, derivation: BackendDerivation) -> None:
         )
         or "none"
     )
+    # An engine that installs on demand is a normal state, not a warning: it
+    # rides the summary line rather than a derivation note.
+    on_demand = (
+        f" installs on first use={sorted(derivation.on_demand_backends)}"
+        if derivation.on_demand_backends
+        else ""
+    )
     logger.info(
         f"node facts: platform={facts.platform} gpus=[{gpu_summary}] "
-        f"backends={sorted(derivation.backends)}"
+        f"backends={sorted(derivation.installed_backends)}{on_demand}"
     )
     for note in derivation.notes:
         logger.warning(f"backend derivation: {note}")
@@ -73,12 +80,32 @@ def _log_derivation(facts: NodeFacts, derivation: BackendDerivation) -> None:
         )
 
 
+def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
+    """Record which engines this host may install when a model needs them.
+
+    Eligibility reads the host itself (git and uv present, offline mode, the
+    video switch), so it joins the process snapshot here rather than in the
+    probe, which tests drive with an injected environment.
+    """
+    from skulk.provisioning.comfy import comfy_on_demand_variants
+    from skulk.shared.constants import offline_mode
+
+    variants = tuple(
+        variant
+        for variant in comfy_on_demand_variants(facts, offline=offline_mode())
+        if variant == "cuda" or variant == "rocm"
+    )
+    if not variants:
+        return facts
+    return facts.model_copy(update={"comfy_on_demand_variants": variants})
+
+
 def current_node_facts() -> NodeFacts:
     """Return the process-wide facts snapshot, gathering it on first use."""
     global _facts, _derivation
     with _lock:
         if _facts is None:
-            _facts = gather_node_facts()
+            _facts = _with_install_eligibility(gather_node_facts())
             _derivation = derive_node_backends(_facts)
             _log_derivation(_facts, _derivation)
         return _facts
@@ -100,7 +127,7 @@ def refresh_node_facts() -> NodeFacts:
     """
     global _facts, _derivation
     with _lock:
-        _facts = gather_node_facts()
+        _facts = _with_install_eligibility(gather_node_facts())
         _derivation = derive_node_backends(_facts)
         _log_derivation(_facts, _derivation)
         return _facts

@@ -1,4 +1,27 @@
+import { useEffect } from 'react';
+import { shallowEqual, useSelector } from 'react-redux';
 import { apiSlice } from '../api';
+import { useAppDispatch } from '../hooks';
+import type { RootState } from '../index';
+
+/** Whether this host's plugin manager is set up and answering (`GET /v1/plugins/managed/service`). */
+export interface PluginServiceStatus {
+  /** absent: never set up; setting_up; ready; unavailable: set up but not answering; failed; unsupported. */
+  state: 'absent' | 'setting_up' | 'ready' | 'unavailable' | 'failed' | 'unsupported';
+  /** `user` (a per-user service) or `system`, once set up. */
+  scope: 'user' | 'system' | null;
+  /** The current step while setup runs. */
+  progress: string | null;
+  /** Why the last setup failed or the host is unsupported. */
+  error: string | null;
+  /**
+   * While `setting_up`, and when `failed`: `setup` (the first setup, or one the
+   * owner started) or `update` (bringing the plugin service in line with a
+   * Skulk that was updated or moved; installed plugins are kept). Null, or
+   * absent from an older host, otherwise.
+   */
+  purpose?: 'setup' | 'update' | null;
+}
 
 /** Stable installed node identity, independent of its capabilities and transport. */
 export interface ConfigurableNode {
@@ -166,6 +189,17 @@ export interface RuntimeInstallation {
 /** Address an operation already retained by the installed manager. */
 export interface ManagedOperationAddress { pluginId: string; operationId: string }
 
+/**
+ * The retained install of each installation that answered, by plugin id: null
+ * when it has none. An installation whose read failed is absent.
+ */
+export type InstallOperations = Record<string, RuntimeInstallation | null>;
+
+/** The installations whose retained install is worth reading: every one not uninstalled. */
+export function installOperationIds(runtimes: ManagedRuntime[] | undefined): string[] {
+  return (runtimes ?? []).filter((runtime) => !runtime.uninstalled).map((runtime) => runtime.plugin_id);
+}
+
 /** Source readiness only; no stored credential values or local paths. */
 export interface RuntimeSourceStatus {
   revision: number;
@@ -173,6 +207,22 @@ export interface RuntimeSourceStatus {
   credential_reference: string | null;
   credential_ready: boolean;
   trust_revision: number | null;
+  /** Whether the publisher trust follows the built-in capability store; absent on hosts that predate it. */
+  follows_store?: boolean;
+}
+
+/**
+ * The host's catalog source readiness. The built-in capability store reads as
+ * configured from the start; its `trust_revision` stays null until the first
+ * catalog read verifies the store's trust.
+ */
+export interface CatalogSourceStatus extends RuntimeSourceStatus {
+  /** Whether the source is the built-in capability store rather than a private catalog. */
+  builtin_store?: boolean;
+  /** Whether this Skulk build includes the built-in store, so the host can switch to it. */
+  builtin_store_available?: boolean;
+  /** Whether the host assigns the next trust revision on request; absent on hosts that predate it. */
+  assigns_trust_revisions?: boolean;
 }
 
 /** One release a signed catalog lists: the consent facts, never an address or credential. */
@@ -191,7 +241,10 @@ export interface CatalogEntry {
   /** The artifact plus every wheel the runtime needs: what a download costs. */
   transfer_bytes: number;
   platforms: string[];
+  /** Skulk build the publisher qualified the release against; provenance only. */
   skulk_build_sha256: string;
+  /** Skulk versions the release runs on; null for an older listing tied to one build. */
+  skulk_requires: string | null;
   permissions: string[];
   /** Capability ids it serves, such as `images.edit@1.0.0`. */
   descriptors: string[];
@@ -202,7 +255,7 @@ export interface CatalogEntry {
   /** Steward risk classes; `billable` means an action can spend money. */
   steward_risks: string[];
   expires_at: number;
-  /** Whether this release was built for this host's exact Skulk build and platform. */
+  /** Whether this release fits this host: platform, and this host's Skulk version in its range. */
   matches_host: boolean;
 }
 
@@ -243,6 +296,8 @@ export interface CatalogSourceUpdate {
   trust?: { revision: number; expires_at: number; publishers: Record<string, string> };
   token?: string;
   clear_token?: boolean;
+  /** Have the host give the trust the next revision of that catalog address's own history. */
+  assign_trust_revision?: boolean;
 }
 
 /**
@@ -274,6 +329,18 @@ export function pluginRequestRefused(error: unknown): number | null {
   if (!error || typeof error !== 'object' || !('status' in error)) return null;
   const status = (error as { status?: unknown }).status;
   return typeof status === 'number' && status >= 400 && status < 500 ? status : null;
+}
+
+/**
+ * Whether a failed plugin read was refused for lack of access (401 or 403).
+ *
+ * Only then is the viewer asked to check how they reached the host or their
+ * plugin access. Any other failure means the host's plugin service did not
+ * answer, which no change of access fixes.
+ */
+export function pluginAccessRefused(error: unknown): boolean {
+  const status = pluginRequestRefused(error);
+  return status === 401 || status === 403;
 }
 
 const headers = { 'X-Skulk-Dashboard': 'pairing-v1' };
@@ -346,14 +413,32 @@ const pluginsApi = apiSlice.injectEndpoints({
       query: (pluginId) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, headers, cache: 'no-store' }),
       providesTags: ['Plugins'],
     }),
+    getInstallOperations: build.query<InstallOperations, string[]>({
+      // The inventory does not carry install progress, so each installation's
+      // retained install is read on its own route. A read that fails leaves
+      // that installation out: unknown, never assumed to need anything.
+      async queryFn(pluginIds, _api, _extraOptions, baseQuery) {
+        const reads = await Promise.all(pluginIds.map((pluginId) => baseQuery({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, headers, cache: 'no-store' })));
+        const operations: InstallOperations = {};
+        reads.forEach((read, index) => {
+          if (!read.error) operations[pluginIds[index]] = (read.data as { operation?: RuntimeInstallation | null } | undefined)?.operation ?? null;
+        });
+        return { data: operations };
+      },
+      providesTags: ['Plugins'],
+    }),
     installRuntimeRelease: build.mutation<RuntimeInstallation, { pluginId: string; request: RuntimeInstallation['request'] }>({
       query: ({ pluginId, request }) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/install`, method: 'POST', headers, body: request }),
       invalidatesTags: ['Plugins'],
     }),
-    activateRuntimeRelease: build.mutation<ManagedOperation, { pluginId: string; operationId: string; expectedRevision: number; runtimeDigest: string; rollback: boolean; action?: 'activate' | 'select' }>({
-      query: ({ pluginId, operationId, expectedRevision, runtimeDigest, rollback, action = 'activate' }) => ({
+    activateRuntimeRelease: build.mutation<ManagedOperation, {
+      pluginId: string; operationId: string; expectedRevision: number; runtimeDigest: string; rollback: boolean; action?: 'activate' | 'select';
+      /** Whether the owner accepted this release's permissions; starting the release already selected needs no new acceptance. */
+      acceptPermissions?: boolean;
+    }>({
+      query: ({ pluginId, operationId, expectedRevision, runtimeDigest, rollback, action = 'activate', acceptPermissions = true }) => ({
         url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/operations`, method: 'POST', headers,
-        body: { operation_id: operationId, action, expected_revision: expectedRevision, runtime_digest: runtimeDigest, rollback, accept_permissions: true },
+        body: { operation_id: operationId, action, expected_revision: expectedRevision, runtime_digest: runtimeDigest, rollback, accept_permissions: acceptPermissions },
       }),
       invalidatesTags: ['Plugins'],
     }),
@@ -389,13 +474,26 @@ const pluginsApi = apiSlice.injectEndpoints({
       providesTags: ['PluginCatalog'],
       keepUnusedDataFor: 0,
     }),
-    getCatalogSource: build.query<RuntimeSourceStatus, void>({
+    getCatalogSource: build.query<CatalogSourceStatus, void>({
       query: () => ({ url: '/v1/plugins/managed/catalog/source', headers, cache: 'no-store' }),
       providesTags: ['PluginCatalog'],
+    }),
+    // Owner-only. Carries no credential, so it can be an ordinary mutation.
+    selectBuiltinCatalog: build.mutation<CatalogSourceStatus, { expected_revision: number }>({
+      query: (body) => ({ url: '/v1/plugins/managed/catalog/source/builtin', method: 'POST', headers, body }),
+      invalidatesTags: ['PluginCatalog'],
     }),
     installFromCatalog: build.mutation<CatalogInstallation, CatalogInstallRequest>({
       query: (body) => ({ url: '/v1/plugins/managed/catalog/install', method: 'POST', headers, body }),
       invalidatesTags: ['Plugins'],
+    }),
+    getPluginService: build.query<PluginServiceStatus, void>({
+      query: () => ({ url: '/v1/plugins/managed/service', headers, cache: 'no-store' }),
+      providesTags: ['PluginService'],
+    }),
+    startPluginServiceSetup: build.mutation<PluginServiceStatus, void>({
+      query: () => ({ url: '/v1/plugins/managed/service/setup', method: 'POST', headers }),
+      invalidatesTags: ['PluginService'],
     }),
     getPluginNodes: build.query<PluginNodes[], void>({
       query: () => ({ url: '/v1/plugins', headers, cache: 'no-store' }),
@@ -416,4 +514,29 @@ const pluginsApi = apiSlice.injectEndpoints({
   }),
 });
 
-export const { useGetPluginCatalogQuery, useGetCatalogSourceQuery, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+export const { useGetPluginServiceQuery, useStartPluginServiceSetupMutation, useGetPluginCatalogQuery, useGetCatalogSourceQuery, useSelectBuiltinCatalogMutation, useInstallFromCatalogMutation, useLazyGetManagedOperationQuery, useLazyGetRuntimeInstallationQuery, useLazyGetManagedRuntimesQuery, useGetNodeProposalsQuery, useGetNodeProposalReviewQuery, useApproveNodeProposalMutation, useGetNodeProposalOperationQuery, useResumeNodeProposalMutation, useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, useLazyGetNodeSetupQuery, useLazyGetNodePreflightQuery, useGetNodeCredentialsQuery, useRegisterManagedRuntimeMutation, useGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useLazyGetRuntimeReleaseQuery, useGetRuntimeInstallationQuery, useGetInstallOperationsQuery, useLazyGetRuntimeSourceStatusQuery, useInstallRuntimeReleaseMutation, useActivateRuntimeReleaseMutation, useGetManagedRuntimesQuery, useGetManagedOperationQuery, useWithdrawManagedRuntimeMutation, useRecoverManagedOperationMutation, usePurgeManagedRuntimeMutation, useGetPluginNodesQuery, useLazyGetPluginNodesQuery, useGetNodeConfigurationQuery, useLazyGetNodeConfigurationQuery, useConfigurePluginNodeMutation } = pluginsApi;
+
+/** One node's latest reported reading: which configuration read it calls for. */
+export interface NodeReading { nodeId: string; observedAt: string }
+
+/**
+ * Whether each of these nodes is turned on, from its own configuration rather
+ * than its reported status. The configuration is read again whenever a node's
+ * reported reading changes, and a change made from this browser refetches it
+ * at once, so a node turned off elsewhere reads as off with its next report.
+ * A node not read yet maps to undefined.
+ */
+export function useNodesEnabled(pluginId: string, readings: readonly NodeReading[]): Record<string, boolean | undefined> {
+  const dispatch = useAppDispatch();
+  const key = readings.map((reading) => `${reading.nodeId}\u0000${reading.observedAt}`).join('\u0001');
+  useEffect(() => {
+    if (!key) return;
+    const subscriptions = key.split('\u0001').map((entry) => dispatch(pluginsApi.endpoints.getNodeConfiguration.initiate(
+      { pluginId, nodeId: entry.split('\u0000')[0] }, { forceRefetch: true },
+    )));
+    return () => { for (const subscription of subscriptions) subscription.unsubscribe(); };
+  }, [dispatch, pluginId, key]);
+  return useSelector((state: RootState) => Object.fromEntries(readings.map(({ nodeId }) => [
+    nodeId, pluginsApi.endpoints.getNodeConfiguration.select({ pluginId, nodeId })(state).data?.enabled,
+  ])), shallowEqual);
+}

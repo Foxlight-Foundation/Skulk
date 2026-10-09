@@ -13,6 +13,7 @@ import os
 import platform
 import plistlib
 import pwd
+import re
 import stat
 import subprocess
 import sys
@@ -32,6 +33,53 @@ pair of names, so the manager service could not register on any host the
 runtime could not, and for the same reason."""
 
 _LEGACY_PLATFORMS: dict[str, str] = {"ubuntu-24.04-x86_64": "linux-glibc-x86_64"}
+
+# A reverse-DNS bundle identifier as Info.plist carries it; nothing else may
+# reach the launchd definition from the app bundle.
+_BUNDLE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,254}")
+
+
+def associated_bundle(python: Path) -> str | None:
+    """The identifier of the Mac app that ships ``python``, if it lives in one.
+
+    macOS lists a login item by its program, so the plugin service would show as
+    a bare interpreter name. launchd's ``AssociatedBundleIdentifiers`` lets it
+    name the app instead when both are signed by the same team.
+
+    Args:
+        python: The absolute interpreter path the service will run.
+
+    Returns:
+        The enclosing ``.app`` bundle's ``CFBundleIdentifier``, or None for an
+        interpreter outside an app bundle or a bundle without a valid one.
+    """
+    for parent in python.parents:
+        if parent.suffix != ".app":
+            continue
+        try:
+            info = cast(
+                object,
+                plistlib.loads((parent / "Contents" / "Info.plist").read_bytes()),
+            )
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            return None
+        if not isinstance(info, dict):
+            return None
+        identifier = cast(dict[str, object], info).get("CFBundleIdentifier")
+        if isinstance(identifier, str) and _BUNDLE_IDENTIFIER.fullmatch(identifier):
+            return identifier
+        return None
+    return None
+
+
+ServiceScope = Literal["system", "user"]
+"""Where the manager service is registered.
+
+``user`` is a launchd agent or systemd user unit with the same lifetime as the
+Skulk node itself; it needs no elevation, so the node can set it up on its
+own. ``system`` is a LaunchDaemon or systemd system service that also runs
+without a login session; registering it needs one explicit local elevation.
+"""
 
 
 def _is_macos(family: str) -> bool:
@@ -74,6 +122,11 @@ class ServiceLayout:
     group_id: int
     username: str
     groupname: str
+    scope: ServiceScope = "system"
+    user_state: Path | None = None
+    """The owner's state directory that holds a user-scope root; unused for system."""
+    user_units: Path | None = None
+    """The owner's launchd agent or systemd user-unit directory; unused for system."""
 
     def __post_init__(self) -> None:
         if not 0 < self.user_id < 2147483648 or not 0 <= self.group_id < 2147483648:
@@ -83,10 +136,20 @@ class ServiceLayout:
             for name in (self.username, self.groupname)
         ):
             raise ValueError("invalid OS account identity")
+        if self.scope == "user" and (
+            self.user_state is None
+            or self.user_units is None
+            or not self.user_state.is_absolute()
+            or not self.user_units.is_absolute()
+        ):
+            raise ValueError("a user-scope service needs absolute owner directories")
 
     @property
     def root(self) -> Path:
         """Return a stable service-owned leaf outside Git and login-session storage."""
+        if self.scope == "user":
+            assert self.user_state is not None
+            return self.user_state / "plugin-service"
         parent = (
             Path("/Library/Application Support/SkulkPluginServices")
             if _is_macos(self.platform)
@@ -96,18 +159,33 @@ class ServiceLayout:
 
     @property
     def label(self) -> str:
-        """Return the reserved per-owner system service name."""
+        """Return the reserved service name: per owner for system, fixed per user."""
+        if self.scope == "user":
+            return "foundation.foxlight.skulk.plugins"
         return f"foundation.foxlight.skulk.plugins.u{self.user_id}"
 
     @property
     def unit(self) -> Path:
-        """Return the fixed system registration file, never a login-agent location."""
+        """Return the fixed registration file for this scope."""
+        suffix = ".plist" if _is_macos(self.platform) else ".service"
+        if self.scope == "user":
+            assert self.user_units is not None
+            return self.user_units / (self.label + suffix)
         if _is_macos(self.platform):
-            return Path("/Library/LaunchDaemons") / (self.label + ".plist")
-        return Path("/etc/systemd/system") / (self.label + ".service")
+            return Path("/Library/LaunchDaemons") / (self.label + suffix)
+        return Path("/etc/systemd/system") / (self.label + suffix)
 
     def definition(self, python: Path) -> bytes:
-        """Render an exact nonroot OS definition with a fixed verified bootstrap."""
+        """Render an exact nonroot OS definition with a fixed verified bootstrap.
+
+        On macOS an interpreter inside an app bundle also names that bundle, so
+        Login Items shows the app rather than the interpreter.
+        """
+        return self._render(
+            python, associated_bundle(python) if _is_macos(self.platform) else None
+        )
+
+    def _render(self, python: Path, bundle: str | None) -> bytes:
         if not python.is_absolute() or any(ord(c) < 32 for c in str(python)):
             raise ValueError("invalid base interpreter path")
         arguments = [
@@ -120,11 +198,20 @@ class ServiceLayout:
             str(self.root),
         ]
         if _is_macos(self.platform):
+            # A launchd agent already runs as its owner and may not name one.
+            account = (
+                {}
+                if self.scope == "user"
+                else {"UserName": self.username, "GroupName": self.groupname}
+            )
+            association: dict[str, object] = (
+                {"AssociatedBundleIdentifiers": [bundle]} if bundle is not None else {}
+            )
             return plistlib.dumps(
                 {
                     "Label": self.label,
-                    "UserName": self.username,
-                    "GroupName": self.groupname,
+                    **account,
+                    **association,
                     "ProgramArguments": arguments,
                     "WorkingDirectory": str(self.root),
                     "RunAtLoad": True,
@@ -139,6 +226,20 @@ class ServiceLayout:
                 sort_keys=True,
             )
         command = " ".join(_systemd_argument(value) for value in arguments)
+        if self.scope == "user":
+            # A user unit runs as its owner under the user manager, which has
+            # no local-fs ordering of its own and starts with the user's
+            # session (or at boot when lingering is enabled, like Skulk's own
+            # user unit).
+            return (
+                f"# skulk-plugin-service-v1 {json.dumps(str(python))}\n"
+                "[Unit]\nDescription=Skulk managed plugin service\n"
+                "StartLimitIntervalSec=0\n\n[Service]\nType=exec\n"
+                f"WorkingDirectory={self.root}\nExecStart={command}\n"
+                "Restart=always\nRestartSec=10\nTimeoutStopSec=180\nKillMode=mixed\n"
+                "UMask=0077\nNoNewPrivileges=true\nLimitCORE=0\n"
+                "StandardOutput=null\nStandardError=journal\n\n[Install]\nWantedBy=default.target\n"
+            ).encode()
         return (
             f"# skulk-plugin-service-v1 {json.dumps(str(python))}\n"
             "[Unit]\nDescription=Skulk managed plugin service\nAfter=local-fs.target\n"
@@ -168,7 +269,24 @@ class ServiceLayout:
             ):
                 raise ValueError("invalid existing service arguments")
             python = arguments[0]
+            # The bundle that named the existing agent may have moved or gone,
+            # so compare against the association it was written with.
+            existing: object = cast(dict[str, object], payload).get(
+                "AssociatedBundleIdentifiers"
+            )
+            if existing is None:
+                bundle = None
+            elif (
+                isinstance(existing, list)
+                and len(cast(list[object], existing)) == 1
+                and isinstance(cast(list[object], existing)[0], str)
+                and _BUNDLE_IDENTIFIER.fullmatch(cast(list[str], existing)[0])
+            ):
+                bundle = cast(list[str], existing)[0]
+            else:
+                raise ValueError("invalid existing service association")
         else:
+            bundle = None
             lines = content.decode().splitlines()
             if not lines:
                 raise ValueError("existing service definition is empty")
@@ -180,8 +298,8 @@ class ServiceLayout:
             if not isinstance(value, str):
                 raise ValueError("invalid existing interpreter identity")
             python = value
-        expected = self.definition(Path(python))
-        if not _is_macos(self.platform):
+        expected = self._render(Path(python), bundle)
+        if not _is_macos(self.platform) and self.scope == "system":
             # Permit repair of only the exact prior generated unit. systemd
             # rejects its quoted WorkingDirectory before starting any process.
             previous = expected.replace(
@@ -206,15 +324,44 @@ def _systemd_argument(value: str) -> str:
     )
 
 
-def local_layout(user_id: int) -> ServiceLayout:
-    """Resolve a local nonroot account using the OS database, not caller-supplied names."""
+def _xdg_directory(variable: str, fallback: Path) -> Path:
+    """An XDG base directory: the environment's when absolute, else the default."""
+    value = os.environ.get(variable, "")
+    return Path(value) if value and Path(value).is_absolute() else fallback
+
+
+def local_layout(user_id: int, scope: ServiceScope = "system") -> ServiceLayout:
+    """Resolve a local nonroot account using the OS database, not caller-supplied names.
+
+    A user-scope layout places the service root and its agent or unit in the
+    owner's own directories (the home directory from the account database,
+    with the XDG overrides systemd itself honors on Linux).
+    """
     account = pwd.getpwuid(user_id)
+    family = service_platform()
+    user_state: Path | None = None
+    user_units: Path | None = None
+    if scope == "user":
+        home = Path(account.pw_dir)
+        if _is_macos(family):
+            user_state = home / "Library" / "Application Support" / "Skulk"
+            user_units = home / "Library" / "LaunchAgents"
+        else:
+            user_state = (
+                _xdg_directory("XDG_STATE_HOME", home / ".local" / "state") / "skulk"
+            )
+            user_units = (
+                _xdg_directory("XDG_CONFIG_HOME", home / ".config") / "systemd" / "user"
+            )
     return ServiceLayout(
-        service_platform(),
+        family,
         user_id,
         account.pw_gid,
         account.pw_name,
         grp.getgrgid(account.pw_gid).gr_name,
+        scope,
+        user_state,
+        user_units,
     )
 
 
@@ -275,7 +422,27 @@ def _existing(layout: ServiceLayout) -> bytes | None:
         os.close(parent)
 
 
-def _execute(arguments: tuple[str, ...], allowed: tuple[int, ...] = (0,)) -> None:
+def _environment(scope: ServiceScope = "system") -> dict[str, str]:
+    """A fixed command environment; the user manager needs its session bus."""
+    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    if scope == "user":
+        # systemctl --user reaches the owner's manager through the runtime
+        # directory; it is the standard per-UID path when the caller (a
+        # service, say) was started without it.
+        environment["XDG_RUNTIME_DIR"] = os.environ.get(
+            "XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"
+        )
+        bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+        if bus:
+            environment["DBUS_SESSION_BUS_ADDRESS"] = bus
+    return environment
+
+
+def _execute(
+    arguments: tuple[str, ...],
+    allowed: tuple[int, ...] = (0,),
+    scope: ServiceScope = "system",
+) -> None:
     result = subprocess.run(
         arguments,
         stdin=subprocess.DEVNULL,
@@ -283,19 +450,22 @@ def _execute(arguments: tuple[str, ...], allowed: tuple[int, ...] = (0,)) -> Non
         stderr=subprocess.DEVNULL,
         timeout=195,
         check=False,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        env=_environment(scope),
     )
     if result.returncode not in allowed:
         raise ValueError("OS service operation failed; inspect system service status")
 
 
-def _stop_systemd(unit: str) -> None:
+def _stop_systemd(unit: str, scope: ServiceScope = "system") -> None:
     # A rejected generated unit reports "not loaded" (5), even though it has no
     # process to stop. Independently confirm quiescence before any replacement.
-    _execute(("/usr/bin/systemctl", "stop", unit), (0, 5))
+    manager = (
+        ("/usr/bin/systemctl", "--user") if scope == "user" else ("/usr/bin/systemctl",)
+    )
+    _execute((*manager, "stop", unit), (0, 5), scope)
     result = subprocess.run(
         (
-            "/usr/bin/systemctl",
+            *manager,
             "show",
             unit,
             "--property=ActiveState",
@@ -305,7 +475,7 @@ def _stop_systemd(unit: str) -> None:
         capture_output=True,
         timeout=30,
         check=False,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        env=_environment(scope),
     )
     if result.returncode != 0 or set(result.stdout.splitlines()) not in (
         {b"ActiveState=inactive", b"MainPID=0"},
@@ -389,6 +559,94 @@ def register(
     else:
         _execute(("/usr/bin/systemctl", "daemon-reload"))
         _execute(("/usr/bin/systemctl", "enable", "--now", layout.unit.name))
+
+
+def _owned(info: os.stat_result, user_id: int) -> bool:
+    return info.st_uid == user_id and not info.st_mode & 0o022
+
+
+def _existing_user(layout: ServiceLayout) -> bytes | None:
+    """Read and verify an existing user-scope definition, if any."""
+    try:
+        descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or not _owned(info, layout.user_id):
+            raise ValueError("user service definition is not owner protected")
+        content = source.read(65537)
+    layout.verify_existing(content)
+    return content
+
+
+def register_user(
+    layout: ServiceLayout, action: Literal["prepare", "stop", "install"]
+) -> None:
+    """Perform one fixed user-scope setup action as the owner, with no elevation.
+
+    The same three actions as :func:`register`, against the owner's own
+    directories and service manager: a launchd agent in the owner's GUI domain
+    (the domain Skulk's own agent uses) or a systemd user unit.
+    """
+    if layout.scope != "user":
+        raise ValueError("system services register through the elevated helper")
+    if os.geteuid() == 0 or os.getuid() != layout.user_id:
+        raise ValueError("a user service registers as its owner, not as root")
+    if action == "prepare":
+        layout.root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with contextlib.suppress(FileExistsError):
+            layout.root.mkdir(mode=0o700)
+        info = layout.root.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != layout.user_id
+            or info.st_mode & 0o077
+        ):
+            raise ValueError("existing service state ownership differs")
+        return
+    existing = _existing_user(layout)
+    domain = f"gui/{layout.user_id}"
+    if action == "stop":
+        if existing is None:
+            return
+        if _is_macos(layout.platform):
+            _execute(
+                ("/bin/launchctl", "bootout", f"{domain}/{layout.label}"),
+                (0, 3, 113),
+                "user",
+            )
+        else:
+            _stop_systemd(layout.unit.name, "user")
+        return
+    definition = layout.definition(Path(sys.executable).resolve(strict=True))
+    layout.unit.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    temporary = layout.unit.with_name("." + layout.unit.name + "." + uuid4().hex)
+    try:
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644
+        )
+        with os.fdopen(descriptor, "wb") as target:
+            os.fchmod(target.fileno(), 0o644)
+            target.write(definition)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, layout.unit)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+    if _is_macos(layout.platform):
+        _execute(("/bin/launchctl", "enable", f"{domain}/{layout.label}"), scope="user")
+        # Setup stops the old agent before activating a new copied runtime.
+        _execute(
+            ("/bin/launchctl", "bootstrap", domain, str(layout.unit)), scope="user"
+        )
+    else:
+        _execute(("/usr/bin/systemctl", "--user", "daemon-reload"), scope="user")
+        _execute(
+            ("/usr/bin/systemctl", "--user", "enable", "--now", layout.unit.name),
+            scope="user",
+        )
 
 
 def main() -> None:

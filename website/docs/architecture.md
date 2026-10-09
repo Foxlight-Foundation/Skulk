@@ -774,9 +774,10 @@ revision, the same rule as MTP sidecars and vision weights. A card may also
 carry a `[license]` section with operator-facing facts, including a
 `display_name` that user interfaces must show prominently when the license
 requires attribution; Skulk surfaces it and never enforces it. Video cards
-stay out of the catalog until `SKULK_ENABLE_VIDEO_MODELS=true`, mirroring the
-image gate, so a fleet without a video engine does not advertise models it
-cannot serve. The registry's MiniMax H3 cards pin every file of the ComfyUI
+are listed by default, as image cards are, because the packaged apps have no
+launch environment to opt in through; `SKULK_ENABLE_VIDEO_MODELS=false` hides
+them on a node. A cluster with no machine that can run the video engine is
+told so in plain words when it places one. The registry's MiniMax H3 cards pin every file of the ComfyUI
 repack by size and content identity. The test engine's card ships beside the
 engine in `worker/runner/test_video/`: it names no artifact, so the registry can
 never supply it.
@@ -815,10 +816,39 @@ on demand, verified before use, and installed under the engines directory
 keyed by pin, variant, and the wheel set's digest (a wheel change without
 a pin change reprovisions rather than reusing an environment built on
 other torch builds), built in a staging directory and renamed into place so
-a half-finished install is never adopted. Two gates beyond the llama-server
-ones apply: the node must have video models enabled, since the wheel set is
-several gigabytes and most nodes never render video, and a variant is
-offered only where a wheel set is recorded for the machine. Two lanes are
+a half-finished install is never adopted.
+
+Unlike llama-server, the video engine is never fetched at startup: its wheel
+set is about 7 GB and most nodes never render video. Startup only wires an
+install already on disk. A node that could install it (full participation,
+video models enabled, online, no `SKULK_COMFY_BIN`/`SKULK_COMFY_ROOT` override
+or autoprovision opt-out, git and uv available, and a wheel set recorded for
+its machine and GPU; on AMD, only the Strix Halo GPU the ROCm wheels are built
+for) advertises the `comfy` tags before installing anything:
+`NodeResources.backends` includes them and `NodeResources.on_demand_backends`
+names them. Placement treats such a node as capable, preferring a node whose
+engine is already installed when nothing more important separates two
+candidates, and the placement preview carries an `engine_install` notice so the
+dashboard tells the operator, before the first placement, that the engine will
+be installed with the model and placement will take longer; `POST
+/place_instance` returns the same notice from its dry run, so a launch without a
+preview is told too. When the instance
+lands, the worker plans an `InstallEngine` task beside the model download,
+holds `LoadModel` until it finishes, then re-derives its facts and publishes
+fresh resources. Instances waiting for the same engine share one install. A
+worker that shuts down mid-install, including the replacement that follows a
+master change, ends the installer's commands and returns at once instead of
+waiting out the download; the next worker plans the install again. The
+install checks free disk space, provisions each eligible variant, and must see
+the GPU from the new environment; an install that fails that check is removed,
+because startup wires any complete install without checking it again. A failure
+gives every waiting instance up with the `engine_install_failed` code and a
+message naming the step that failed, and the next placement tries again. The
+runner process starts before the install finishes, so it looks the managed
+install up on disk rather than trusting its inherited environment; a runner that
+finds no engine fails with the `engine-not-installed` marker and is not
+relaunched. `skulk doctor --fix` installs the engine ahead of time through the
+same path. Two lanes are
 recorded: cu130 wheels from the PyTorch index for NVIDIA nodes (aarch64
 and x86_64), and for x86_64 AMD nodes AMD's own stable ROCm 10.0.0 channel,
 where torch is a host wheel plus a gfx1151 device package on top of the
@@ -1903,7 +1933,15 @@ SHA-256 manifest. Startup resolves installed generations before registry
 access, so air-gapped nodes keep serving complete local artifacts indefinitely.
 Registry changes are update information: the active installed generation does
 not switch until the replacement generation has transferred, verified, and
-published atomically.
+published atomically. In a cluster with a model store, that commit happens at
+the store, which is the cluster's installed truth. Each node reads the store's
+registry on every inventory pass and remembers which signed generation it holds
+per alias; once the store holds the current signed card, a node's own staged
+copy of an older generation (left from before an update) is a stale cache and no
+longer keeps the old card active. Without that, a node holding the old copy
+would place with a card the store can no longer verify, and every node that
+must fetch would be refused. A store that cannot be read leaves the last answer
+in place, and a store that still holds the old generation changes nothing.
 
 Legacy association requires an existing complete artifact, not merely a trusted
 card with a matching directory name. Every successful artifact-removal path
@@ -2093,7 +2131,12 @@ only the fsynced completion marker publishes a staged generation. Staging never
 switches the active owner or changes cleanup state.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can
-execute startup code; runtime commands disable bytecode writes.
+execute startup code; runtime commands disable bytecode writes. The interpreter
+is the one member that may change under a sealed generation: when an application
+update or move leaves the sealed base behind, `adopt_current_interpreter`
+re-points the interpreter links and `pyvenv.cfg` at the running interpreter of
+the same Python minor version and reseals, but only after every other member
+matches the seal exactly.
 `runtime_selection.py` adds revision-fenced stopped-owner activation and rollback.
 It revalidates the staged runtime under installer ownership, acquires the existing
 supervisor lock, journals intent and atomically publishes one desired selection.
@@ -2181,10 +2224,23 @@ address, which covers new registrations and repairs an interrupted one.
 older owner or manager must keep starting; owners that speak plugin protocol 3
 hand the address to their children as `Startup.serve_host`.
 `service_setup.py` now owns the resumable local setup command. It stages a verified
-runtime as the owner, generates the profile connection, and invokes the standalone
-standard-library-only `service_registration.py` helper for fixed system definitions.
-Only that local helper runs elevated; LaunchDaemons/systemd run the manager as the
-existing nonroot account from durable system storage. Retained setup phase is
+runtime as the owner, generates the profile connection, and registers the manager in
+one of two scopes. The default is a per-user service (a launchd agent in the owner's
+`gui/<uid>` domain, or a systemd user unit) with the node's own lifetime, registered
+by the owner through `service_registration.register_user` with no elevation; the node
+runs this itself through `service_autosetup.ServiceSetupRunner` behind
+`GET /v1/plugins/managed/service` and `POST /v1/plugins/managed/service/setup`, which
+the dashboard's Plugins page calls on first use. The same status route covers the
+minutes after a Skulk update: `ManagedServices` reports, from memory alone, whether
+it is still bringing the manager to the new build (copying a matching runtime,
+restarting the manager on it), and the route answers `setting_up` with
+`purpose: "update"` until the manager attaches on that build, or `failed` with the
+cause and next step, so the page shows an update in progress rather than an
+unavailable inventory. `skulk-plugin-service setup --system`
+instead registers a system LaunchDaemon or systemd service, for hosts that run
+unattended, through the standalone standard-library-only `service_registration.py`
+helper; only that helper runs elevated, and the manager still runs as the existing
+nonroot account. Setup keeps whichever scope a configuration is already connected to. Retained setup phase is
 separate from current runtime integrity and manager availability. HTTP lifecycle and dynamic installation registration use this manager; setup progress, runtime integrity and live management availability remain separate observations.
 
 `terminal_install.py` composes the manager's existing operations for the interactive
@@ -2194,7 +2250,7 @@ separates trust, download and owner-execution consent. Resume observes existing
 operations; interrupted downloads require explicit recovery. It never changes node
 configuration or approves spending, and introduces no HTTP or privileged operation.
 
-A host can also read a signed capability catalog for discovery. The owner configures one catalog address with its own discovery trust (a publisher-trust record separate from any installation's) and an optional write-only credential; the manager fetches the document with the same no-redirect, identity-encoding policy as a release feed, verifies its signature and windows, and returns a review of the listed releases (what each can do and spend, and whether it matches this host) without any address or credential. The catalog is discovery and consent only: reading it selects, stages and installs nothing. Installing from a listing binds an installation's release source to the listed feed under the discovery trust (the listing must be the one the host last accepted, must fit the host, and the catalog credential is presented only to a feed at the catalog's own origin), then requires the record served there to be the record listed; staging and activation remain their own consents on the ordinary path, where the release record itself is verified against installation trust, and an existing installation keeps its bundle and never goes back through a listing.
+A host can also read a signed capability catalog for discovery. It reads one source at a time: the built-in capability store, or a private catalog. The built-in store needs no configuration. Skulk ships the store's TUF root as package data beside `extensions/capability_store.py` (so the plugin manager's staged copy of Skulk carries it), and the store's TUF repository signs one target, the publisher trust the store vouches for: publishers and their Ed25519 release keys, revocations, a revision and an expiry. A host with no source and no discovery trust uses the store: its first catalog read verifies that target from the embedded root, replaying any root rotation it has already verified, and records the trust in the same catalog state document an owner's configuration uses, so every trust floor and catalog revision floor applies unchanged. Each later read while the store is the source refreshes the TUF metadata first and applies a newer trust revision, never an older one, exactly as the store published it (TUF and the client's revision floor already keep that document from moving backward, so no held revocation is merged in, and none carries across a switch between the store and a private catalog in either direction); a hash-bound copy of the last verified trust is kept under the manager root and serves when the store cannot be reached or the node runs offline (the node passes its offline mode with each request, because the manager runs with a fixed environment), until that trust's own expiry. A tampered target, an expired trust, an older revision or a different document at the held revision is refused and the held trust stays. TUF anchors and renews trust only: the catalog and every release keep their own publisher signatures, floors and expiry. Skulk ships the store's root (version 1, two offline hardware root keys); a build without it has no built-in store and behaves as before. Alternatively the owner configures a private catalog address with its own discovery trust (a publisher-trust record separate from any installation's) and an optional write-only credential, which replaces the store as the source (the store's own address is reserved, and the owner can switch back to the store at any time). Each catalog address keeps its own discovery trust history, as it keeps its own catalog revision history: switching sources never lowers another address's trust floor, a private trust is compared only with that address's earlier trust, and returning to a private catalog still refuses a trust older than the one accepted there and keeps the revocations that catalog's trust held, which never move to the store or another address. The dashboard asks the host to number a new private trust one above that address's floor, so re-adding a catalog is never refused as a rollback; the manager fetches the document with the same no-redirect, identity-encoding policy as a release feed, verifies its signature and windows, and returns a review of the listed releases (what each can do and spend, and whether it matches this host) without any address or credential. The catalog is discovery and consent only: reading it selects, stages and installs nothing. Installing from a listing binds an installation's release source to the listed feed under the discovery trust (the listing must be the one the host last accepted, must fit the host, and the catalog credential is presented only to a feed at the catalog's own origin), then requires the record served there to be the record listed. A listing bound from the built-in store marks the installation as following the store, in its durable source record (`follows_store` in `release-source.json`, with the store trust revision it last took; a marker file from an earlier build is carried into the record when the record is read). The record and the trust change as one journaled step, completed on the next read if interrupted and always before the installation's owner starts, with release operations and the owner's start refused while a journal cannot be completed, so a change of trust authority is never half applied; a follower never takes a store trust older than the one it recorded, so a catalog read racing a renewal cannot roll it back. Its trust becomes the store's as published, rebased onto the installation's own trust revision history (the installer's trust floor requires that revision to rise), and the node's hourly `refresh_store_trust` request, and every store catalog read, bring it up to the store's current verified trust without changing its source revision. Every such renewal also moves the built-in catalog's discovery trust when the catalog reads the store, and an install from a listing reviewed earlier is checked against the newest verified store trust. Followers share one deadline for their installation fences; busy ones, and a renewal that finds no verified store trust for its followers, make the node retry within five minutes, including busy followers any catalog read reports (the manager flags them in its inventory, so a terminal read counts too), and a renewal already in flight when such a notice arrives keeps that five-minute retry. The running owner re-verifies its generation every 30 seconds against that file, so a renewal keeps it running past the earlier expiry and a store revocation stops it; offline, the held trust serves until it expires. An installation bound from a private catalog, or whose owner configures its source directly, stops following and keeps today's behavior; staging and activation remain their own consents on the ordinary path, where the release record itself is verified against installation trust, and an existing installation keeps its bundle and never goes back through a listing.
 
 Extension startup and serving share one event loop. The API starts hooks only
 once its runtime begins and invokes optional asynchronous shutdown hooks before
@@ -2423,7 +2479,7 @@ Configuration, credentials, receipts and runtime generations remain available;
 independent cleanup continues. A verified `select` or `activate` reinstalls explicitly.
 An explicit purge (`InstallationRequest(action="purge")`, `DELETE
 /v1/plugins/managed/installations/{plugin_id}`, `skulk-plugin-service purge-plugin`,
-the card's "Remove uninstalled plugin") is the end of that retention: an
+the card's "Remove uninstalled plugin…" or the drawer's "Remove everything") is the end of that retention: an
 installation that is uninstalled, or that never selected a release, leaves the
 inventory and its directory goes; a live installation or one with work under way
 is refused unchanged. The dashboard classes an uninstalled installation as

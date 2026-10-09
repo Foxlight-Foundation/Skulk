@@ -3,7 +3,8 @@ import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useGetNodeSetupActionsQuery, useStartNodeSetupMutation, useResumeNodeSetupMutation, type NodeAddress, type SetupAction, type SetupActions } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
-import { PluginConfigurationFields, supportedConfigurationSchema } from './PluginConfigurationFields';
+import { PluginConfigurationFields } from './PluginConfigurationFields';
+import { supportedConfigurationSchema } from './pluginSettingsSchema';
 import { randomHex32 } from '../../utils/randomIds';
 
 const Panel = styled.section`overflow-wrap: anywhere; margin-top: 12px;`;

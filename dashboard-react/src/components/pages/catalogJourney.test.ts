@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { CatalogEntry, CatalogInstallation, CatalogListing, ManagedRuntime, RuntimeInstallation } from '../../store/endpoints/plugins';
+import type { CatalogEntry, CatalogInstallation, CatalogListing, ManagedRuntime, RuntimeInstallation, RuntimeSourceStatus } from '../../store/endpoints/plugins';
 import {
-  catalogOffers, clearJourney, decodeInvitation, encodeInvitation, isStartRefusal, journeyInProgress,
-  platformLabel, readJourneys, saveJourney, startCatalogInstall, type InstallJourney,
+  autoTurnOnFor, nodesToTurnOn, catalogOffers, clearJourney, decodeInvitation, encodeInvitation, unfinishedInstalls, isConsentNeeded, isStartRefusal, journeyInProgress, markInterrupted, offerProgress,
+  platformLabel, readJourneys, saveJourney, startCatalogInstall, startInstallRetry, trustRevision, type InstallJourney, type RetryStarters,
 } from './catalogJourney';
 
 function entry(sequence: number, overrides: Partial<CatalogEntry> = {}): CatalogEntry {
   return {
     bundle_id: 'example.studio', bundle_version: '0.1.0', title: 'Example Studio', publisher: 'example', sequence,
     release_digest: 'd'.repeat(64), runtime_platform: 'macos-arm64', artifact_sha256: 'a'.repeat(64), artifact_bytes: 4096,
-    transfer_bytes: 12_086_479, platforms: ['darwin'], skulk_build_sha256: 'b'.repeat(64), permissions: ['Use models on the fabric through the host API'],
+    transfer_bytes: 12_086_479, platforms: ['darwin'], skulk_build_sha256: 'b'.repeat(64), skulk_requires: '>=2.0.0,<3', permissions: ['Use models on the fabric through the host API'],
     descriptors: ['studio.plan@1.0.0', 'studio.render@1.0.0'], surfaces: ['Example Studio'], operations: true,
     steward_risks: ['observation'], expires_at: 1_900_000_000, matches_host: true, ...overrides,
   };
@@ -22,6 +22,13 @@ function runtime(sequence: number | null, overrides: Partial<ManagedRuntime> = {
     plugin_id: 'managed.' + '2'.repeat(32), release: sequence === null ? null : { bundle_id: 'example.studio', title: 'Example Studio', bundle_version: '0.1.0', publisher: 'example', sequence },
     selected_digest: 'e'.repeat(64), selection_revision: 3, enabled: true, stale: false, error_code: null, operation_id: null, operation_state: null,
     service: { state: 'running', active_digest: 'e'.repeat(64), observed_at: 1 }, ...overrides,
+  };
+}
+function stopped(sequence: number, overrides: Partial<RuntimeInstallation> = {}): RuntimeInstallation {
+  return {
+    attempt: 0, request: { operation_id: '5'.repeat(32), runtime_digest: '9'.repeat(64), expected_source_revision: 7 },
+    review: { runtime_digest: '9'.repeat(64), source_revision: 7, publisher: 'example', bundle_id: 'example.studio', version: '0.1.0', sequence, platform: 'macos-arm64', python_requires: '>=3.13', skulk_build_sha256: 'b'.repeat(64), permissions: ['Use models on the fabric through the host API'], artifact_bytes: 12_000_000, expires_at: 1_900_000_000 },
+    state: 'recovery_required', downloaded_bytes: 12_000_000, error_code: 'installation_failed', ...overrides,
   };
 }
 function memoryStorage(): Storage {
@@ -41,12 +48,87 @@ describe('catalogOffers', () => {
     expect(offer).toMatchObject({ state: 'update', entry: { sequence: 50 }, installed: { plugin_id: broken.plugin_id } });
   });
 
+  it('offers to retry an installation of the bundle whose install stopped instead of installing it again', () => {
+    const fresh = runtime(null, { plugin_id: 'managed.' + '7'.repeat(32), selected_digest: null, enabled: false, service: null });
+    const interrupted = unfinishedInstalls([fresh], { [fresh.plugin_id]: stopped(51) });
+    expect(interrupted).toEqual([{ pluginId: fresh.plugin_id, review: expect.objectContaining({ bundle_id: 'example.studio', sequence: 51 }), updating: false, stopped: true }]);
+    // The release it retries is shown while the catalog still lists it, as built for this host.
+    expect(catalogOffers(listing([entry(51), entry(52)]), [fresh], interrupted)).toMatchObject([{ state: 'retry', entry: { sequence: 51 }, installed: null, retry: { pluginId: fresh.plugin_id } }]);
+    const linux = entry(51, { runtime_platform: 'linux-glibc-x86_64', matches_host: false, transfer_bytes: 1 });
+    expect(catalogOffers(listing([linux, entry(51)]), [fresh], interrupted)).toMatchObject([{ state: 'retry', entry: { runtime_platform: 'macos-arm64' } }]);
+    // An installed one's own stopped update is retried too: the host refuses another release there until then.
+    const installed = runtime(50);
+    const update = unfinishedInstalls([installed], { [installed.plugin_id]: stopped(51) });
+    expect(update).toMatchObject([{ updating: true }]);
+    expect(catalogOffers(listing([entry(51)]), [installed], update)).toMatchObject([{ state: 'retry', installed: { plugin_id: installed.plugin_id }, retry: { pluginId: installed.plugin_id } }]);
+    // A stray stopped install never takes over a bundle that is installed elsewhere.
+    expect(catalogOffers(listing([entry(50)]), [installed, fresh], interrupted)).toMatchObject([{ state: 'installed', retry: null }]);
+  });
+
+  it('counts a stopped install, and a first install still under way, but nothing selected or uninstalled', () => {
+    const fresh = runtime(null, { selected_digest: null, enabled: false, service: null });
+    // A first install under way names its bundle only through its install, so it counts, not stopped.
+    expect(unfinishedInstalls([fresh], { [fresh.plugin_id]: stopped(51, { state: 'downloading', error_code: null }) })).toMatchObject([{ stopped: false }]);
+    expect(catalogOffers(listing([entry(51), entry(52)]), [fresh], unfinishedInstalls([fresh], { [fresh.plugin_id]: stopped(51, { state: 'staged', error_code: null }) })))
+      .toMatchObject([{ state: 'retry', entry: { sequence: 51 }, retry: { stopped: false } }]);
+    // An installed one's update under way binds the same installation, so it is an ordinary offer.
+    const installed = runtime(50);
+    expect(unfinishedInstalls([installed], { [installed.plugin_id]: stopped(51, { state: 'downloading', error_code: null }) })).toEqual([]);
+    expect(unfinishedInstalls([{ ...fresh, uninstalled: true }], { [fresh.plugin_id]: stopped(51) })).toEqual([]);
+    expect(unfinishedInstalls([{ ...fresh, selected_digest: '9'.repeat(64) }], { [fresh.plugin_id]: stopped(51) })).toEqual([]);
+    // An install that could not be read is unknown, never assumed stopped.
+    expect(unfinishedInstalls([fresh], {})).toEqual([]);
+    expect(unfinishedInstalls([fresh], undefined)).toEqual([]);
+  });
+
   it('shows an up-to-date installation as installed, and matches only by the selected release', () => {
     expect(catalogOffers(listing([entry(50)]), [runtime(50)])).toMatchObject([{ state: 'installed' }]);
     // An installation with no readable release names no bundle, so it is not this one.
     expect(catalogOffers(listing([entry(51)]), [runtime(null)])).toMatchObject([{ state: 'available', installed: null }]);
     // An uninstalled record keeps nothing installed.
     expect(catalogOffers(listing([entry(50)]), [runtime(49, { uninstalled: true, enabled: false })])).toMatchObject([{ state: 'available', installed: null }]);
+  });
+
+  it('names an installed release by this host\'s listing when several platforms share its sequence', () => {
+    const linux = entry(50, { runtime_platform: 'linux-glibc-aarch64', platforms: ['linux'], matches_host: false, release_digest: 'f'.repeat(64) });
+    const [offer] = catalogOffers(listing([linux, entry(50)]), [runtime(50)]);
+    expect(offer).toMatchObject({ state: 'installed', entry: { sequence: 50, runtime_platform: 'macos-arm64' } });
+    expect(platformLabel(offer.entry)).toBe('macOS, Apple Silicon');
+    // Once a Skulk update moves the release out of range, the listing for this host's platform still names it.
+    const outOfRange = catalogOffers(listing([linux, entry(50, { matches_host: false }), entry(49)]), [runtime(50)])[0];
+    expect(outOfRange).toMatchObject({ state: 'installed', entry: { sequence: 50, runtime_platform: 'macos-arm64' } });
+  });
+});
+
+describe('turning nodes on after an install', () => {
+  it('turns on every node that reports off after a first install', () => {
+    const plan = autoTurnOnFor(true, null);
+    expect(plan).toEqual({ nodes: 'all', ran: false });
+    expect(nodesToTurnOn(plan, [{ nodeId: 'studio', status: 'disabled' }, { nodeId: 'worker', status: 'disabled' }])).toEqual(['studio', 'worker']);
+  });
+
+  it('leaves a node that needs settings, or reports anything else, for the setup page', () => {
+    const plan = autoTurnOnFor(true, null);
+    expect(nodesToTurnOn(plan, [{ nodeId: 'studio', status: 'configuration_invalid' }, { nodeId: 'worker', status: 'failed' }, { nodeId: 'other', status: 'ready' }])).toEqual([]);
+  });
+
+  it('after an update turns on only nodes that were on before it, so a node the owner turned off stays off', () => {
+    // Which nodes were on comes from their configuration, read before the update.
+    const plan = autoTurnOnFor(false, ['studio']);
+    expect(plan).toEqual({ nodes: ['studio'], ran: false });
+    expect(nodesToTurnOn(plan, [{ nodeId: 'studio', status: 'disabled' }, { nodeId: 'worker', status: 'disabled' }])).toEqual(['studio']);
+    // Nodes that could not be read before the update are never turned on.
+    expect(nodesToTurnOn(autoTurnOnFor(false, null), [{ nodeId: 'studio', status: 'disabled' }])).toEqual([]);
+  });
+
+  it('keeps the record of having tried in the saved journey, and drops a malformed one', () => {
+    const storage = memoryStorage();
+    const base: InstallJourney = { pluginId: 'managed.' + '2'.repeat(32), title: 'Example Studio', bundleId: 'example.studio', sequence: 51, publisher: 'example',
+      runtimeDigest: '9'.repeat(64), transferBytes: 1, installOperationId: '5'.repeat(32), activationOperationId: '6'.repeat(32), startedAt: 1 };
+    saveJourney({ ...base, autoTurnOn: { nodes: 'all', ran: true } }, storage);
+    expect(readJourneys(storage)).toEqual([{ ...base, autoTurnOn: { nodes: 'all', ran: true } }]);
+    storage.setItem('skulk-plugin-install-journeys', JSON.stringify([{ ...base, autoTurnOn: { nodes: 'some', ran: 'yes' } }]));
+    expect(readJourneys(storage)).toEqual([]);
   });
 });
 
@@ -163,7 +245,122 @@ describe('startCatalogInstall', () => {
   });
 });
 
+describe('startInstallRetry', () => {
+  const pluginId = 'managed.' + '7'.repeat(32);
+  const resolved = <T,>(value: T) => ({ unwrap: () => Promise.resolve(value) });
+  const rejected = (error: unknown) => ({ unwrap: () => Promise.reject(error) });
+  const statusOf = (error: unknown) => { const status = (error as { status?: unknown }).status; return typeof status === 'number' && status < 500 ? status : null; };
+  const ready: RuntimeSourceStatus = { revision: 8, configured: true, credential_reference: null, credential_ready: true, trust_revision: 1 };
+  const consent: InstallJourney = {
+    pluginId, title: 'Example Studio', bundleId: 'example.studio', sequence: 51, publisher: 'example', runtimeDigest: '9'.repeat(64),
+    transferBytes: 12_086_479, installOperationId: '5'.repeat(32), activationOperationId: null, startedAt: 1, interrupted: true,
+  };
+  let calls: string[];
+  let recovered: unknown[];
+  const starters = (operation: RuntimeInstallation | null, overrides: Partial<RetryStarters> = {}): RetryStarters => ({
+    readInstall: (id) => { calls.push(`read ${id}`); return resolved({ operation }); },
+    readSource: (id) => { calls.push(`source ${id}`); return resolved(ready); },
+    recover: (args) => { calls.push('recover'); recovered.push(args); expect(readJourneys().find((item) => item.pluginId === pluginId)?.interrupted).toBeUndefined(); return resolved({ ...operation!, state: 'accepted' }); },
+    ...overrides,
+  });
+  beforeEach(() => { globalThis.localStorage.removeItem('skulk-plugin-install-journeys'); calls = []; recovered = []; });
+
+  it('retries the stopped install under the consent this browser saved, and follows it to activation', async () => {
+    saveJourney(consent);
+    // The host stops following a stopped install, so the record is not an install in progress.
+    expect(journeyInProgress('example.studio', 51)).toBeNull();
+    const outcome = await startInstallRetry(starters(stopped(51)), { pluginId, title: 'example.studio' }, null, () => null, statusOf);
+    expect(calls).toEqual([`read ${pluginId}`, `source ${pluginId}`, 'recover']);
+    expect(recovered).toEqual([{ pluginId, operationId: '5'.repeat(32), expectedSourceRevision: 8 }]);
+    expect(outcome).toMatchObject({ pluginId, title: 'Example Studio', runtimeDigest: '9'.repeat(64), installOperationId: '5'.repeat(32), activationOperationId: null });
+    expect(readJourneys()).toMatchObject([{ pluginId, runtimeDigest: '9'.repeat(64) }]);
+    expect(readJourneys()[0].interrupted).toBeUndefined();
+    expect(journeyInProgress('example.studio', 51)).toMatchObject({ pluginId });
+  });
+
+  it('asks for the release to be reviewed when this browser holds no consent to it, and sends nothing', async () => {
+    // Consent to a different release of the same installation does not carry.
+    saveJourney({ ...consent, runtimeDigest: '8'.repeat(64) });
+    const outcome = await startInstallRetry(starters(stopped(51)), { pluginId, title: 'example.studio' }, null, () => null, statusOf);
+    expect(isConsentNeeded(outcome)).toBe(true);
+    expect(outcome).toMatchObject({ pluginId, stopped: true, review: { runtime_digest: '9'.repeat(64), permissions: ['Use models on the fabric through the host API'] } });
+    expect(calls).toEqual([`read ${pluginId}`]);
+    expect(readJourneys()).toMatchObject([{ runtimeDigest: '8'.repeat(64) }]);
+    // A review of another release is not consent to this one.
+    const other = await startInstallRetry(starters(stopped(51)), { pluginId, title: 'example.studio' }, '8'.repeat(64), () => null, statusOf);
+    expect(isConsentNeeded(other)).toBe(true);
+    expect(recovered).toEqual([]);
+  });
+
+  it('keeps consent given on review, so a refused retry can be tried again without asking', async () => {
+    const refusal = { status: 409, data: { detail: 'installation recovery history requires local maintenance' } };
+    const refused = await startInstallRetry(starters(stopped(51), { recover: () => { calls.push('recover'); return rejected(refusal); } }),
+      { pluginId, title: 'Example Studio' }, '9'.repeat(64), (error) => (error as typeof refusal).data.detail, statusOf);
+    expect(refused).toEqual({ stage: 'retry', detail: 'installation recovery history requires local maintenance', status: 409 });
+    expect(readJourneys()).toMatchObject([{ pluginId, title: 'Example Studio', runtimeDigest: '9'.repeat(64), interrupted: true }]);
+    calls = [];
+    const again = await startInstallRetry(starters(stopped(51)), { pluginId, title: 'Example Studio' }, null, () => null, statusOf);
+    expect(isStartRefusal(again) || isConsentNeeded(again)).toBe(false);
+    expect(calls).toEqual([`read ${pluginId}`, `source ${pluginId}`, 'recover']);
+  });
+
+  it('sends nothing when the source is not ready or the host has nothing to retry, and reads back a lost reply', async () => {
+    saveJourney(consent);
+    const unready = await startInstallRetry(starters(stopped(51), { readSource: () => resolved({ ...ready, credential_ready: false }) }), { pluginId, title: 'x' }, null, () => null, statusOf);
+    expect(unready).toEqual({ stage: 'retry', detail: null, code: 'source-unavailable' });
+    expect(await startInstallRetry(starters(null), { pluginId, title: 'x' }, null, () => null, statusOf)).toEqual({ stage: 'retry', detail: null, code: 'nothing-to-retry' });
+    expect(await startInstallRetry(starters(stopped(51), { readInstall: () => rejected(new TypeError('network')) }), { pluginId, title: 'x' }, null, () => null, statusOf))
+      .toEqual({ stage: 'retry', detail: null, code: 'unreadable' });
+    expect(recovered).toEqual([]);
+    expect(readJourneys()[0].interrupted).toBe(true);
+    // A reply that never arrives may have landed: the journey is followed and read back, not sent again.
+    const lost = await startInstallRetry(starters(stopped(51), { recover: () => { calls.push('recover'); return rejected(new TypeError('network')); } }), { pluginId, title: 'x' }, null, () => null, statusOf);
+    expect(isStartRefusal(lost)).toBe(false);
+    expect(readJourneys()[0].interrupted).toBeUndefined();
+  });
+
+  it('follows an install that is already running again instead of retrying it', async () => {
+    saveJourney(consent);
+    const outcome = await startInstallRetry(starters(stopped(51, { state: 'downloading', error_code: null })), { pluginId, title: 'x' }, null, () => null, statusOf);
+    expect(calls).toEqual([`read ${pluginId}`]);
+    expect(outcome).toMatchObject({ pluginId, installOperationId: '5'.repeat(32) });
+  });
+
+  it('binds a review of the bundle to the stopped installation rather than registering another', async () => {
+    saveJourney(consent);
+    const binds: (string | undefined)[] = [];
+    await startCatalogInstall({ bind: (request) => { binds.push(request.plugin_id); return rejected({ status: 409, data: {} }); }, install: () => resolved({} as RuntimeInstallation) },
+      catalogOffers(listing([entry(52)]), [])[0], listing([entry(52)]), () => null, () => 'f'.repeat(32), statusOf);
+    expect(binds).toEqual([pluginId]);
+  });
+});
+
+describe('offerProgress', () => {
+  const journey: InstallJourney = { pluginId: 'managed.a', title: 'Example Studio', bundleId: 'example.studio', sequence: 51, publisher: 'example', runtimeDigest: 'd', transferBytes: 1, installOperationId: 'o', activationOperationId: null, startedAt: 1 };
+  it('keeps a first install of an older release attached to its bundle\'s card', () => {
+    const offer = catalogOffers(listing([entry(51), entry(52)]), [])[0];
+    expect(offer.entry.sequence).toBe(52);
+    expect(offerProgress(offer, [journey])).toEqual(journey);
+    // A stopped one is not followed, and an installation's card follows only installs on it.
+    expect(offerProgress(offer, [{ ...journey, interrupted: true }])).toBeNull();
+    const installed = catalogOffers(listing([entry(52)]), [runtime(50)])[0];
+    expect(offerProgress(installed, [journey])).toBeNull();
+    expect(offerProgress(installed, [{ ...journey, pluginId: installed.installed!.plugin_id }])).toMatchObject({ sequence: 51 });
+  });
+});
+
 describe('journeys', () => {
+  it('marks a stopped install interrupted and keeps it as consent', () => {
+    const storage = memoryStorage();
+    const journey: InstallJourney = { pluginId: 'managed.a', title: 'A', bundleId: 'a', sequence: 1, publisher: 'p', runtimeDigest: 'd', transferBytes: 1, installOperationId: 'o', activationOperationId: null, startedAt: 1 };
+    saveJourney(journey, storage);
+    markInterrupted('managed.a', storage);
+    expect(readJourneys(storage)).toEqual([{ ...journey, interrupted: true }]);
+    expect(journeyInProgress('a', 1, readJourneys(storage))).toBeNull();
+    markInterrupted('managed.missing', storage);
+    expect(readJourneys(storage)).toHaveLength(1);
+  });
+
   it('keeps journeys per installation and ignores malformed storage', () => {
     const storage = memoryStorage();
     const journey: InstallJourney = { pluginId: 'managed.a', title: 'A', bundleId: 'a', sequence: 1, publisher: 'p', runtimeDigest: 'd', transferBytes: 1, installOperationId: 'o', activationOperationId: null, startedAt: 1 };
@@ -174,5 +371,14 @@ describe('journeys', () => {
     expect(readJourneys(storage)).toEqual([]);
     storage.setItem('skulk-plugin-install-journeys', '{broken');
     expect(readJourneys(storage)).toEqual([]);
+  });
+});
+
+describe('trustRevision', () => {
+  it('stays above the current revision and every revision an earlier panel created', () => {
+    expect(trustRevision(null, 1_800_000_000)).toBe(1_800_000_000);
+    expect(trustRevision(7, 1_800_000_000)).toBe(1_800_000_000);
+    expect(trustRevision(1_800_000_000, 1_800_000_000)).toBe(1_800_000_001);
+    expect(trustRevision(1_800_000_005, 1_800_000_000)).toBe(1_800_000_006);
   });
 });

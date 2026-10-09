@@ -18,6 +18,8 @@ from skulk.master.placement_utils import (
 )
 from skulk.shared.backends import (
     EngineType,
+    backend_hardware_present,
+    describe_backend_hardware,
     engine_of,
     engine_supports_multi_node,
     platform_compatible_backends,
@@ -492,6 +494,27 @@ def _cycle_download_score(
     )
 
 
+def _cycle_engine_ready_score(
+    cycle: Cycle,
+    node_resources: Mapping[NodeId, NodeResources],
+    compatible_backends: frozenset[str],
+) -> int:
+    """Prefer a cycle whose nodes already have the model's engine installed.
+
+    A node that installs an engine on demand can serve the model, but its
+    first placement waits for a multi-gigabyte install, so a node with the
+    engine ready wins when nothing more important separates them. Nodes
+    without a resources entry are not counted against the cycle.
+    """
+    return int(
+        all(
+            bool((resources.backends - resources.on_demand_backends) & compatible_backends)
+            for node_id in cycle
+            if (resources := node_resources.get(node_id)) is not None
+        )
+    )
+
+
 def _cycle_backend_preference_score(
     cycle: Cycle,
     node_resources: Mapping[NodeId, NodeResources],
@@ -688,6 +711,16 @@ class PlacementInfoPendingError(PlacementError):
     """
 
     code: ClassVar[PlacementFailureCode] = "placement_info_pending"
+
+
+class PlacementNoCapableMachineError(PlacementError):
+    """No machine in the cluster has the hardware this model's engines need.
+
+    Distinct from a memory or topology shortfall: more capacity of the kind the
+    cluster already has cannot help, so the message names the missing hardware
+    instead of engine tags. The placement preview also returns it as the card's
+    compatibility detail, which the dashboard shows beneath the model.
+    """
 
 
 class PlacementModelCodeApprovalError(PlacementError):
@@ -902,14 +935,29 @@ def place_instance(
     pending_matrix_nodes: set[NodeId] = set()
     ineligible_nodes: set[NodeId] = set()
     compatible_backend_summary: set[str] = set()
+    # Nodes advertising one of the model's engines whatever their role.
+    backend_capable_nodes: set[NodeId] = set()
+    # Nodes whose engines alone cannot show the hardware is absent: one that
+    # has not reported yet, one that does not participate (management nodes
+    # advertise no engines at all), or one whose hardware classes show the
+    # machine the model needs. Any of them keeps the detailed message.
+    unjudged_nodes: set[NodeId] = set()
     for node_id in topology.list_nodes():
         resources = resolved_node_resources.get(node_id)
         if resources is None:
+            unjudged_nodes.add(node_id)
             if matrix_only:
                 pending_matrix_nodes.add(node_id)
             continue
         compatible_backends = _card_platform_backends(command.model_card, resources)
         compatible_backend_summary.update(compatible_backends)
+        if resources.backends & compatible_backends:
+            backend_capable_nodes.add(node_id)
+        if resources.participation != "full" or backend_hardware_present(
+            command.model_card.placement.compatible_backends,
+            resources.hardware_classes,
+        ):
+            unjudged_nodes.add(node_id)
         if resources.participation != "full" or not (
             resources.backends & compatible_backends
         ):
@@ -926,6 +974,20 @@ def place_instance(
                 raise PlacementInfoPendingError(
                     "Exact engine-build and hardware info has not been gossiped "
                     "for a matrix-only model. Retry shortly."
+                )
+            # Name the hardware only when every node has reported and none
+            # could be the machine the model needs.
+            required_hardware = (
+                describe_backend_hardware(
+                    command.model_card.placement.compatible_backends
+                )
+                if not backend_capable_nodes and not unjudged_nodes
+                else None
+            )
+            if required_hardware is not None:
+                raise PlacementNoCapableMachineError(
+                    "No machine in this cluster can run this model: it needs "
+                    f"{required_hardware}."
                 )
             raise PlacementError(
                 f"All cycles of at least {command.min_nodes} node(s) touch a "
@@ -1263,7 +1325,8 @@ def place_instance(
     # compatible_backends has already hard-filtered, so this only ranks). This
     # dominates the download/memory tie-breakers because serving a model on its
     # faster backend is the whole point of the preference; among cycles with the
-    # same preference rank, download locality then free memory still decide.
+    # same preference rank, download locality, then an engine that is already
+    # installed (rather than installed on demand), then free memory decide.
     backend_preference = command.model_card.placement.backend_preference
     selected_cycle = max(
         candidate_cycles,
@@ -1273,6 +1336,11 @@ def place_instance(
             ),
             _cycle_download_score(
                 cycle, command.model_card.model_id, resolved_download_status
+            ),
+            _cycle_engine_ready_score(
+                cycle,
+                resolved_node_resources,
+                command.model_card.placement.compatible_backends,
             ),
             sum(
                 (node_memory[node_id].ram_available for node_id in cycle),

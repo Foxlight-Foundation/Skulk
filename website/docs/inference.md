@@ -77,7 +77,8 @@ task, verifies it, and waits for their acknowledgements before generation. Input
 bytes do not enter replicated cluster state or the event log.
 
 Image synthesis and editing use a separate model task and dedicated endpoints.
-Enable their catalog on the relevant nodes with `SKULK_ENABLE_IMAGE_MODELS=true`.
+Image models appear in the catalog by default and run on Apple Silicon Macs; an
+operator can hide them on a node with `SKULK_ENABLE_IMAGE_MODELS=false`.
 Generation takes JSON; editing takes multipart image upload. Responses can contain
 inline base64 bytes or a URL to content stored on the accepting API node. Optional
 SSE partial images expose progress. Use the same origin for stored-image reads,
@@ -85,9 +86,14 @@ and save outputs you need to retain.
 
 ## Video jobs
 
-Enable video models on the relevant nodes with `SKULK_ENABLE_VIDEO_MODELS=true`.
-Skulk can provision a pinned ComfyUI runtime on supported NVIDIA and AMD lanes;
-operator-managed installations can provide `SKULK_COMFY_BIN` and `SKULK_COMFY_ROOT`.
+Video models appear in the catalog by default and render on Linux nodes with an
+NVIDIA GPU or an AMD Strix Halo GPU; an operator can hide them on a node with
+`SKULK_ENABLE_VIDEO_MODELS=false`. Such a node installs the video engine (a pinned
+ComfyUI runtime, about 7 GB) the first time a video model is placed on it, while
+the model downloads, so that first placement takes longer; the placement preview
+and the dashboard say so before you place it. `skulk doctor --fix` installs the
+engine ahead of time, and operator-managed installations can provide
+`SKULK_COMFY_BIN` and `SKULK_COMFY_ROOT` instead.
 The model card defines supported modes: text-to-video (`t2va`), first/last-frame
 conditioning (`fl2va`), or reference images, clips and audio (`ref2va`). It also
 defines durations, frame grids, canvas limits, output audio and available adapters.

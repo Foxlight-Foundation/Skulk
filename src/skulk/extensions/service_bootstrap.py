@@ -186,6 +186,46 @@ def verified_runtime(root: Path) -> Path:
     return runtime
 
 
+def selected_base_matches(root: Path, base: Path) -> bool:
+    """Whether the selected runtime was sealed to ``base`` as it is now.
+
+    A cheap part of :func:`verified_runtime`: it reads the selection and its
+    manifest and hashes only the interpreter, which is what an app update
+    replaces in place (same path, new bytes), leaving a registered service
+    that can no longer start.
+
+    Args:
+        root: The service root holding ``core-runtime.json``.
+        base: The interpreter the current Skulk runs on.
+
+    Returns:
+        False when the selection is missing, unreadable, or sealed to another
+        interpreter path or other interpreter bytes.
+    """
+    try:
+        pointer = document(private_read(root / "core-runtime.json", 4096))
+        name = pointer.get("generation")
+        digest = pointer.get("manifest_sha256")
+        if (
+            not isinstance(name, str)
+            or not _GENERATION.fullmatch(name)
+            or not isinstance(digest, str)
+            or not _DIGEST.fullmatch(digest)
+        ):
+            return False
+        raw = private_read(
+            root / "core-runtimes" / name / "snapshot.json", _MAXIMUM_MANIFEST
+        )
+        if hashlib.sha256(raw).hexdigest() != digest:
+            return False
+        metadata = document(raw)
+        return metadata.get("base_python") == str(base) and metadata.get(
+            "base_sha256"
+        ) == digest_file(base)
+    except (OSError, ValueError):
+        return False
+
+
 def main() -> None:
     """Verify and replace this process with the fixed manager command, without a shell."""
     parser = argparse.ArgumentParser(description=__doc__)

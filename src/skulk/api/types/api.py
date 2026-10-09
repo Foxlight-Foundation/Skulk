@@ -2112,6 +2112,19 @@ class CreateInstanceParams(BaseModel):
     instance: Instance
 
 
+class PlacementEngineInstall(BaseModel):
+    """An engine a placement installs on its node before the model can load."""
+
+    engine: str = Field(description="Engine that installs on demand, such as comfy.")
+    node_ids: list[str] = Field(
+        description="Nodes in this placement that install the engine first."
+    )
+    approximate_download_bytes: int = Field(
+        ge=0, description="Approximate download the install adds on each node."
+    )
+    detail: str = Field(description="Operator-readable notice about the install.")
+
+
 class PlacementPreview(BaseModel):
     card_digest: str | None = Field(
         default=None,
@@ -2191,6 +2204,14 @@ class PlacementPreview(BaseModel):
         default=None,
         description="Operator-readable model, artifact, engine/build, or platform gap.",
     )
+    engine_install: PlacementEngineInstall | None = Field(
+        default=None,
+        description=(
+            "Set when a node in this placement has not installed the model's "
+            "engine yet (the video engine installs on demand); the placement "
+            "installs it beside the model download and takes longer."
+        ),
+    )
     alternative: bool = Field(
         default=False,
         description=(
@@ -2234,6 +2255,15 @@ class CreateInstanceResponse(BaseModel):
         description="Exact placement identity created by the accepted command."
     )
     model_card: ModelCard
+    engine_install: PlacementEngineInstall | None = Field(
+        default=None,
+        description=(
+            "Set when the accepted placement first installs an on-demand engine "
+            "(the video engine) on a node, so loading takes longer than usual. "
+            "The same notice a placement preview carries; computed from this "
+            "node's dry run of the placement."
+        ),
+    )
 
 
 class DeleteInstanceResponse(BaseModel):

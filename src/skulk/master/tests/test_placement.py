@@ -6,6 +6,7 @@ from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
     PlacementModelCardIdentityError,
+    PlacementNoCapableMachineError,
     add_instance_to_placements,
     fallback_command_for_refused_instance,
     get_transition_events,
@@ -1671,6 +1672,166 @@ def test_backend_incompatible_node_is_excluded() -> None:
     assert len(placements) == 1
     instance = next(iter(placements.values()))
     assert set(instance.shard_assignments.node_to_runner.keys()) == {node_b}
+
+
+def test_mac_only_model_without_a_mac_names_the_missing_hardware() -> None:
+    """Every node reported and none advertises MLX, so placement names the
+    machine the model needs instead of listing engine tags."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(
+        PlacementNoCapableMachineError,
+        match="No machine in this cluster can run this model: it needs an Apple Silicon Mac",
+    ):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(backends=frozenset({"llama_server-cuda"})),
+                node_b: NodeResources(backends=frozenset({"llama_server-vulkan"})),
+            },
+        )
+
+
+def _video_engine_card() -> ModelCard:
+    card = _small_model_card()
+    return card.model_copy(
+        update={
+            "placement": card.placement.model_copy(
+                update={"compatible_backends": frozenset({"comfy"})}
+            )
+        }
+    )
+
+
+def test_video_model_on_a_mac_only_cluster_names_the_missing_hardware() -> None:
+    """Video models are listed by default, so a Mac-only cluster is told which
+    machine runs one instead of reading engine tags."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    mac = NodeResources(
+        backends=frozenset({"mlx", "mlx-metal"}),
+        hardware_classes=frozenset({"platform:darwin"}),
+    )
+
+    with pytest.raises(
+        PlacementNoCapableMachineError,
+        match="it needs a Linux machine with an NVIDIA GPU or an AMD Strix Halo GPU",
+    ):
+        place_instance(
+            place_instance_command(_video_engine_card()),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={node_a: mac, node_b: mac},
+        )
+
+
+def test_gpu_node_without_the_video_engine_keeps_the_detailed_message() -> None:
+    """An NVIDIA node that cannot install the video engine right now (offline,
+    say) owns the hardware, so the planner does not claim the cluster lacks it."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+
+    with pytest.raises(PlacementError) as raised:
+        place_instance(
+            place_instance_command(_video_engine_card()),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(
+                    backends=frozenset({"mlx"}),
+                    hardware_classes=frozenset({"platform:darwin"}),
+                ),
+                node_b: NodeResources(
+                    backends=frozenset({"llama_server-cuda"}),
+                    hardware_classes=frozenset({"platform:linux", "nvidia"}),
+                ),
+            },
+        )
+    assert not isinstance(raised.value, PlacementNoCapableMachineError)
+
+
+def test_management_only_mac_keeps_the_detailed_message() -> None:
+    """Management nodes advertise no engines, so a management-only Mac must not
+    be reported as a missing Mac."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(PlacementError) as raised:
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(
+                    participation="management",
+                    backends=frozenset(),
+                    hardware_classes=frozenset({"platform:darwin"}),
+                ),
+                node_b: NodeResources(
+                    backends=frozenset({"llama_server-cuda"}),
+                    hardware_classes=frozenset({"platform:linux", "nvidia"}),
+                ),
+            },
+        )
+    assert not isinstance(raised.value, PlacementNoCapableMachineError)
+
+
+def test_mac_without_mlx_keeps_the_detailed_message() -> None:
+    """A Mac whose MLX engine failed to load owns the hardware, so the planner
+    does not claim the cluster lacks one."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(PlacementError) as raised:
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(
+                    backends=frozenset({"llama_cpp-metal"}),
+                    hardware_classes=frozenset({"platform:darwin"}),
+                ),
+                node_b: NodeResources(
+                    backends=frozenset({"llama_server-cuda"}),
+                    hardware_classes=frozenset({"platform:linux", "nvidia"}),
+                ),
+            },
+        )
+    assert not isinstance(raised.value, PlacementNoCapableMachineError)
+
+
+def test_missing_hardware_is_not_claimed_before_every_node_reports() -> None:
+    """A node that has not reported its engines may be the Mac, so a failed
+    two-node placement keeps the detailed message."""
+    topology, node_a, _node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card()).model_copy(
+        update={"min_nodes": 2}
+    )
+
+    with pytest.raises(PlacementError) as raised:
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(backends=frozenset({"llama_server-cuda"})),
+            },
+        )
+    assert not isinstance(raised.value, PlacementNoCapableMachineError)
 
 
 def test_signed_engine_support_adds_backend_without_card_replacement(

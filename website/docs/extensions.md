@@ -796,11 +796,18 @@ See the [owner action HTTP contract](api-guide.md#plugin-owner-proposal-actions)
 
 Skulk's `extensions/runtime_artifacts.py` verifies the v2 signed runtime envelope
 without importing a plugin SDK. Generic claims bind the publisher, exact bundle
-and wheel bytes, supported platform/Python version, qualified Skulk build, state
-schema and permission summary. Plugin-specific manifest policy stays opaque but
-is covered by the signature. Trust comes from owner-provisioned protected local
-storage, not the release. Revoked or expired artifacts and incompatible hosts
-are refused. Compatibility across releases is a window, not a pin: the release
+and wheel bytes, supported platform/Python version, the Skulk version range the
+manifest declares, state schema and permission summary. The release also records
+the Skulk build its publisher qualified it against, for provenance only: a
+release runs on any Skulk whose version is in its range, so updating Skulk never
+breaks the capabilities already installed, the way an operating system update
+leaves installed applications running. Catalog listings (catalog protocol 2) carry
+the same range, so the catalog marks a release as fitting by this host's version;
+a protocol 1 listing, which predates the range, fits only the exact build it was
+published for. Plugin-specific manifest policy stays
+opaque but is covered by the signature. Trust comes from owner-provisioned
+protected local storage, not the release. Revoked or expired artifacts and
+incompatible hosts are refused. Compatibility across releases is a window, not a pin: the release
 record and the isolated runtime envelope each carry a protocol number, and the
 host accepts the current protocol and, once there is one, the previous, so a
 capability published against the previous protocol keeps installing for one
@@ -922,6 +929,17 @@ installation evidence, not publisher metadata or a sandbox against the service
 user. A missing or mismatched seal requires explicit recovery; the installer does
 not bless existing changed files by creating a replacement seal.
 
+The one exception is the base interpreter itself. An application update replaces
+the bundled interpreter and moving the application changes its path, so when a
+generation fails verification the installer checks whether the sealed interpreter
+differs from the interpreter running it. When it does, every other sealed member
+still matches exactly, `pyvenv.cfg` is the sealed bytes, and the environment
+targets the same Python minor version, the installer re-points the interpreter
+links and the interpreter values in `pyvenv.cfg` at the running interpreter
+(the same base a fresh installation would record) and reseals. A private
+journal lets an interrupted adoption finish on the next start. Any other
+difference, or a different Python minor version, is refused as before.
+
 Staging does not change active selection, logical plugin identities, configuration,
 credentials or cleanup obligations. Installer output is bounded and stored only
 as protected host-local evidence. These are local installation primitives; the
@@ -978,10 +996,19 @@ The installed Skulk package includes its declarative model resources. Setup does
 not require a Git checkout or a `SKULK_RESOURCES_DIR` override. If resources are
 missing, reinstall the complete qualified package before retrying setup.
 
-The `skulk-plugin-service setup` command prepares a verified independent
-manager runtime and registers a fixed nonroot system service on Apple Silicon
-macOS or Linux with systemd. Run it as the existing Skulk owner; only its fixed registration helper requests local elevation.
-It generates service storage and a local profile connection without configuration
+Setup prepares a verified independent manager runtime and registers it as a
+per-user service (a launchd agent on Apple Silicon macOS, a systemd user unit on
+Linux) with the same lifetime as the Skulk node, so it needs no elevation. The
+node runs it the first time capabilities are used
+(`POST /v1/plugins/managed/service/setup`, which the dashboard's Plugins page
+calls), and `skulk-plugin-service setup` runs the same setup from a terminal as
+the existing Skulk owner. `skulk-plugin-service setup --system` registers a
+system service instead, for hosts that run unattended; only its fixed
+registration helper requests local elevation. When the interpreter lives inside
+the Mac app, the launchd definition names the app's bundle identifier
+(`AssociatedBundleIdentifiers`), so Login Items lists Skulk rather than the
+interpreter.
+Setup generates service storage and a local profile connection without configuration
 file editing. `skulk-plugin-service status` separates retained setup progress from
 current management availability and registered-runtime integrity.
 If registration succeeds but readiness is still pending, setup reports
@@ -990,7 +1017,7 @@ both runtime integrity and management availability, repeat setup from the same
 verified runtime to complete that operation without elevation or restarting
 the healthy service.
 
-See the [local setup contract](api-guide.md#local-system-service-setup) for supported
+See the [local setup contract](api-guide.md#local-plugin-service-setup) for supported
 paths, interruption recovery, privileges and current qualification boundaries.
 This installs no private SDK into Skulk, provisions no provider credentials, and
 grants no spending approval. Existing independent cleanup supervision is untouched.
@@ -1022,7 +1049,18 @@ preflight commands before enabling capability work. This command adds no provide
 policy or spending authority to core.
 
 
-The host can also read a signed catalog for discovery. A publisher lists the
+The host can also read a signed catalog for discovery. Its source is the
+built-in capability store, which needs no configuration, or a private catalog
+the owner configures in its place. Skulk verifies which publishers the built-in
+store trusts through the store's TUF repository, from a root shipped inside
+Skulk, and renews that trust by itself on each catalog read: a newer trust
+revision is applied, an older one never, and the store's revocations apply
+exactly as its current trust lists them. A host that cannot reach the store, or runs offline, uses the trust it
+last verified until that trust expires. A private catalog
+(`POST /v1/plugins/managed/catalog/source`) replaces the store, and
+`POST /v1/plugins/managed/catalog/source/builtin` switches back. A build that
+does not ship the store's root has no built-in store; Skulk ships root version
+1, signed by two offline hardware root keys. A publisher lists the
 releases it signed (identity, sequence, platforms, size and digests, the signed
 permissions, capability ids, surfaces, durable operations and steward risk
 classes, and where each signed release record is served); the host verifies the
@@ -1040,6 +1078,18 @@ there to be the record the listing names; staging and activation then follow
 the ordinary path, where the release record itself is verified against
 installation trust. An existing installation keeps its bundle and never goes
 back through a listing.
+
+An installation bound from the built-in store follows the store's trust while
+it runs. Its publisher trust is the store's (publishers, expiry and
+revocations, as published), and the node asks the plugin manager to renew it
+every hour and after each store catalog read; the manager raises the
+installation's own trust revision without touching its source. The owner's
+periodic verification then reads the renewed trust, so a renewal keeps the
+capability running past its earlier expiry, and a store revocation of its
+publisher or release stops it. Offline, or when the store cannot be reached,
+the installation keeps running on the trust it holds until that expires. An
+installation bound from a private catalog, or whose source its owner
+configured directly, keeps the trust it was given, as before.
 
 ## Public node setup exports
 

@@ -14,6 +14,8 @@ import pytest
 import skulk.facts
 from skulk.facts.derive import BackendDerivation
 from skulk.shared.backends import (
+    backend_hardware_present,
+    describe_backend_hardware,
     engine_of,
     engine_supports_multi_node,
     make_backend_tag,
@@ -49,6 +51,65 @@ def test_make_backend_tag_is_compound() -> None:
 )
 def test_engine_of(tag: str, expected: str | None) -> None:
     assert engine_of(tag) == expected
+
+
+@pytest.mark.parametrize(
+    ("backends", "expected"),
+    [
+        (frozenset({"mlx"}), "an Apple Silicon Mac"),
+        (frozenset({"mlx", "mlx-metal"}), "an Apple Silicon Mac"),
+        # mlx-audio advertises only when its package imports, so a Mac may
+        # lack it; a speech card never claims a hardware requirement.
+        (frozenset({"mlx_audio"}), None),
+        (frozenset({"mlx", "mlx_audio"}), None),
+        # vLLM and llama.cpp depend on installed software as well as hardware,
+        # so a card that can use them never claims a hardware requirement.
+        (frozenset({"mlx", "llama_server-cuda"}), None),
+        (frozenset({"vllm-cuda"}), None),
+        # The video engine installs on demand wherever its wheel sets apply.
+        (
+            frozenset({"comfy", "comfy-cuda", "comfy-rocm"}),
+            "a Linux machine with an NVIDIA GPU or an AMD Strix Halo GPU",
+        ),
+        (frozenset({"bogus"}), None),
+        (frozenset[str](), None),
+    ],
+)
+def test_describe_backend_hardware(
+    backends: frozenset[str], expected: str | None
+) -> None:
+    assert describe_backend_hardware(backends) == expected
+
+
+def test_backend_hardware_present_recognizes_a_mac_without_mlx() -> None:
+    assert backend_hardware_present(frozenset({"mlx"}), frozenset({"platform:darwin"}))
+    assert not backend_hardware_present(
+        frozenset({"mlx"}), frozenset({"platform:linux", "nvidia"})
+    )
+    assert not backend_hardware_present(
+        frozenset({"llama_server-cuda"}), frozenset({"platform:darwin"})
+    )
+
+
+def test_video_engine_hardware_matches_the_rocm_wheel_set() -> None:
+    from skulk.provisioning.manifest import COMFY_ROCM_PCI_DEVICE_IDS
+    from skulk.shared.backends import _ENGINE_HARDWARE
+
+    amd_classes = {
+        hardware_class
+        for hardware_class in _ENGINE_HARDWARE["comfy"][1]
+        if hardware_class.startswith("amd:")
+    }
+    assert amd_classes == {
+        f"amd:pci-{device.replace(':', '-')}" for device in COMFY_ROCM_PCI_DEVICE_IDS
+    }
+    assert backend_hardware_present(
+        frozenset({"comfy-cuda"}), frozenset({"platform:linux", "nvidia"})
+    )
+    # Another AMD GPU cannot run the recorded ROCm wheels.
+    assert not backend_hardware_present(
+        frozenset({"comfy"}), frozenset({"platform:linux", "amd", "amd:pci-1002-744c"})
+    )
 
 
 def test_probe_includes_mlx_on_darwin() -> None:

@@ -10,7 +10,7 @@
 
 [![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
 [![Install Skulk](https://img.shields.io/badge/docs-install_skulk-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/install/)
-[![Release Notes](https://img.shields.io/badge/release_notes-v2.0.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.0/)
+[![Release Notes](https://img.shields.io/badge/release_notes-v2.0.1-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.1/)
 [![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
 
   <br>
@@ -55,7 +55,7 @@ desktop control for starting the node, opening the dashboard, and viewing logs.
 
 **Apple Silicon macOS 15 or newer:**
 
-[Download the signed and notarized Skulk 2.0.0 DMG](https://releases.foxlight.ai/desktop/macos/2.0.0/1/Skulk-2.0.0-1-macOS-arm64.dmg), or install with Homebrew:
+[Download the signed and notarized Skulk 2.0.1 DMG](https://releases.foxlight.ai/desktop/macos/2.0.1/7/Skulk-2.0.1-7-macOS-arm64.dmg), or install with Homebrew:
 
 ```bash
 brew install --cask Foxlight-Foundation/skulk/skulk
@@ -607,7 +607,8 @@ uv run skulk --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 | `SKULK_MODELS_PATH` | Extra colon-separated search paths for local or shared models | None |
 | `SKULK_MODELS_DIR` | Primary downloaded-model directory | platform-specific |
 | `SKULK_OFFLINE` | Use only local or pre-staged models | `false` |
-| `SKULK_ENABLE_IMAGE_MODELS` | Enable image model cards and image workflows | `false` |
+| `SKULK_ENABLE_IMAGE_MODELS` | Show image model cards and image workflows; set to `false` to hide them | `true` |
+| `SKULK_ENABLE_VIDEO_MODELS` | Show video model cards; set to `false` to hide them. A Linux node with an NVIDIA GPU or an AMD Strix Halo GPU installs the video engine the first time a video model is placed on it | `true` |
 | `SKULK_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
 | `SKULK_FAST_SYNCH` | Control MLX fast synch behavior | Auto |
 | `SKULK_TRACING_ENABLED` | Developer boot override for tracing. Prefer the dashboard traces toggle or `PUT /v1/tracing` for normal use. Legacy `SKULK_TRACING_ENABLED` is still accepted. | `false` |
@@ -634,7 +635,7 @@ Examples:
 
 ```bash
 SKULK_OFFLINE=true uv run skulk
-SKULK_ENABLE_IMAGE_MODELS=true uv run skulk
+SKULK_ENABLE_IMAGE_MODELS=false uv run skulk
 SKULK_KV_CACHE_BACKEND=optiq SKULK_OPTIQ_BITS=4 SKULK_OPTIQ_FP16_LAYERS=4 uv run skulk
 ```
 
@@ -711,7 +712,7 @@ Highlights:
 - [Thunderbolt clustering](https://foxlight-foundation.github.io/Skulk/thunderbolt-clustering) and [RDMA on macOS](https://foxlight-foundation.github.io/Skulk/build-and-runtime)
 - [Speculative decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding)
 - [API guide](https://foxlight-foundation.github.io/Skulk/api-guide) and [architecture](https://foxlight-foundation.github.io/Skulk/architecture)
-- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.0/)
+- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.1/)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing

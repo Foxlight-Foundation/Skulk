@@ -3,6 +3,7 @@ import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { Button } from '../common/Button';
 import { SectionLabel, Surface } from '../common/Surfaces';
+import type { RuntimeRelease } from '../../store/endpoints/plugins';
 import { canSpendMoney, capabilityName, displayTitle, formatMegabytes, platformLabel, type CatalogOffer } from './catalogJourney';
 
 /** Props for reviewing one catalog release before consenting to it. */
@@ -67,8 +68,58 @@ export function CatalogReviewPanel({ offer, onInstall, onCancel }: CatalogReview
       <label htmlFor="catalog-consent">{t('plugins.catalog.accept', 'I accept these permissions for this release.')}</label>
     </Consent>
     <Actions>
-      <Button variant="ghost" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button>
+      <Button variant="outline" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button>
       <Button variant="primary" disabled={!accepted} onClick={onInstall}>{updating ? t('plugins.catalog.update', 'Update') : t('plugins.catalog.install', 'Install')}</Button>
+    </Actions>
+  </Panel>;
+}
+
+/** Props for reviewing a stopped install's release again before retrying it. */
+export interface CatalogRetryReviewPanelProps {
+  title: string;
+  updating: boolean;
+  /** Whether the install stopped; otherwise it is under way or staged elsewhere and is followed to running. */
+  stopped?: boolean;
+  /** The signed release the host retries, from its retained install. */
+  review: RuntimeRelease;
+  /** Retry with consent to exactly this release; only called after consent. */
+  onRetry: () => void;
+  onCancel: () => void;
+}
+
+/**
+ * The signed release a stopped install retries, with one consent.
+ *
+ * Shown when this browser holds no record that its permissions were
+ * accepted, such as a retry from another browser: finishing the retry
+ * activates the release, which accepts them.
+ */
+export function CatalogRetryReviewPanel({ title, updating, stopped = true, review, onRetry, onCancel }: CatalogRetryReviewPanelProps) {
+  const { t } = useSkulkTranslation();
+  const [accepted, setAccepted] = useState(false);
+  return <Panel aria-labelledby="catalog-retry-title">
+    <h2 id="catalog-retry-title">{!stopped ? t('plugins.catalog.followTitle', 'Finish installing {title}', { title })
+      : updating ? t('plugins.catalog.retryUpdateTitle', 'Retry the update to {title}', { title }) : t('plugins.catalog.retryTitle', 'Retry installing {title}', { title })}</h2>
+    <Lead>{stopped
+      ? t('plugins.catalog.retryLead', 'Installing this release stopped before it finished. A retry downloads the same signed release again and then starts it, which accepts its permissions. This browser has no record that you accepted them, so review them first.')
+      : t('plugins.catalog.followLead', 'This release is already being installed on this host. Finishing it here starts it once it is ready, which accepts its permissions. This browser has no record that you accepted them, so review them first.')}</Lead>
+    <Facts>
+      <dt>{t('plugins.catalog.publisher', 'Publisher')}</dt><dd>{review.publisher}</dd>
+      <dt>{t('plugins.catalog.versionLabel', 'Version')}</dt><dd>{t('plugins.catalog.versionValue', '{version}, release {sequence}', { version: review.version, sequence: review.sequence })}</dd>
+      <dt>{t('plugins.catalog.download', 'Download')}</dt><dd>{formatMegabytes(review.artifact_bytes)}</dd>
+      <dt>{t('plugins.catalog.validUntil', 'Release valid until')}</dt><dd>{new Date(review.expires_at * 1000).toLocaleDateString()}</dd>
+    </Facts>
+    <Section>
+      <SectionLabel>{t('plugins.catalog.allowedTo', 'What it will be allowed to do')}</SectionLabel>
+      <ul>{review.permissions.map((permission) => <li key={permission}>{permission}</li>)}</ul>
+    </Section>
+    <Consent>
+      <input id="catalog-retry-consent" type="checkbox" checked={accepted} onChange={(event) => setAccepted(event.target.checked)} />
+      <label htmlFor="catalog-retry-consent">{t('plugins.catalog.accept', 'I accept these permissions for this release.')}</label>
+    </Consent>
+    <Actions>
+      <Button variant="outline" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button>
+      <Button variant="primary" disabled={!accepted} onClick={onRetry}>{stopped ? t('plugins.catalog.retryAccepted', 'Retry install') : t('plugins.catalog.followAccepted', 'Finish install')}</Button>
     </Actions>
   </Panel>;
 }

@@ -1,9 +1,11 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { useClusterState } from '../../hooks/useClusterState';
 import {
-  pluginRefusalDetail, pluginRequestRefused, useGetCatalogSourceQuery, useGetManagedRuntimesQuery, useGetPluginCatalogQuery,
-  useInstallFromCatalogMutation, useInstallRuntimeReleaseMutation, type CatalogListing,
+  installOperationIds, pluginRefusalDetail, pluginRequestRefused, useGetCatalogSourceQuery, useGetInstallOperationsQuery, useGetManagedRuntimesQuery,
+  useGetPluginCatalogQuery, useInstallFromCatalogMutation, useInstallRuntimeReleaseMutation, useLazyGetRuntimeInstallationQuery,
+  useLazyGetRuntimeSourceStatusQuery, useRecoverRuntimeInstallationMutation, useSelectBuiltinCatalogMutation, type CatalogListing, type RuntimeRelease,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
 import { Button } from '../common/Button';
@@ -12,49 +14,119 @@ import { CapabilitySetupPanel } from './CapabilitySetupPanel';
 import { CatalogConnectPanel } from './CatalogConnectPanel';
 import { CatalogInstallProgress, type SetupTarget } from './CatalogInstallProgress';
 import { CatalogOfferCard } from './CatalogOfferCard';
-import { CatalogReviewPanel } from './CatalogReviewPanel';
+import { CatalogRetryReviewPanel, CatalogReviewPanel } from './CatalogReviewPanel';
 import {
-  catalogOffers, displayTitle, isBound, isStartRefusal, journeyInProgress, readJourneys, startCatalogInstall,
-  type BoundJourney, type CatalogOffer, type InstallStartRefusal,
+  canSpendMoney, catalogOffers, displayTitle, isConsentNeeded, isFollowed, isStartRefusal, offerProgress, readJourneys, startCatalogInstall, unfinishedInstalls,
+  startInstallRetry, type BoundJourney, type CatalogOffer, type InstallStartRefusal, type RetryRequest,
 } from './catalogJourney';
+import { hostedCapabilityNodes, installedCardAction } from './installedCapability';
 
 type BrowseView =
   | { kind: 'list' }
   | { kind: 'connect' }
   | { kind: 'review'; offer: CatalogOffer; listing: CatalogListing }
-  | { kind: 'install'; title: string; publisher: string; sequence: number; transferBytes: number; updating: boolean; journey: BoundJourney | null; refusal: InstallStartRefusal | null }
+  | { kind: 'retry-review'; request: RetryRequest; review: RuntimeRelease; stopped: boolean }
+  | {
+    kind: 'install'; title: string; publisher: string; sequence: number; transferBytes: number; updating: boolean; journey: BoundJourney | null; refusal: InstallStartRefusal | null;
+    /** The stopped install a retry from this view would retry again. */
+    retryOf?: RetryRequest;
+  }
   | { kind: 'setup'; target: SetupTarget };
 
 // Only a confirmed binding has an operation to follow; an unconfirmed one is
-// continued by installing the same bundle again.
+// continued by installing the same bundle again, and a stopped one by its retry.
 function resumedView(): BrowseView {
-  const journey = readJourneys().find(isBound);
+  const journey = readJourneys().find(isFollowed);
   return journey
     ? { kind: 'install', title: journey.title, publisher: journey.publisher, sequence: journey.sequence, transferBytes: journey.transferBytes, updating: false, journey, refusal: null }
     : { kind: 'list' };
 }
 
+/** A retry asked for from another view, such as a card under Installed; `id` tells one click from the next. */
+export interface BrowseRetryHandoff { id: number; request: RetryRequest }
+
+/** An update asked for from another view, such as an installed plugin's drawer: review the newer release of this bundle. */
+export interface BrowseReviewHandoff { id: number; bundleId: string }
+
 /** Props for the Browse view of the Plugins page. */
 export interface PluginCatalogBrowseProps {
-  /** Open an installed plugin's settings under Installed. */
-  onManage?: (pluginId: string) => void;
+  /** Open an installed plugin's settings under Installed, on one node's settings when a node is named. */
+  onManage?: (pluginId: string, nodeId?: string) => void;
+  /**
+   * Hand an installed plugin's setup to the page: once installed, the plugin
+   * is set up under Installed rather than in Browse. Without it, Browse shows
+   * the setup page itself and returns to its list when it is done.
+   */
+  onSetUp?: (target: SetupTarget) => void;
+  /** A retry to start as Browse opens; it is taken once, then `onRetryTaken` is called. */
+  retry?: BrowseRetryHandoff | null;
+  /** Called when Browse takes the handed-off retry, so it is not started again. */
+  onRetryTaken?: () => void;
+  /**
+   * An update to open for review once the catalog is read. Browse opens it at
+   * most once per `id`; the page drops the handoff when the owner changes tab.
+   */
+  review?: BrowseReviewHandoff | null;
+}
+
+function retryOfJourney(journey: BoundJourney, updating: boolean): RetryRequest {
+  return { pluginId: journey.pluginId, title: journey.title, publisher: journey.publisher, sequence: journey.sequence, transferBytes: journey.transferBytes, updating };
 }
 
 /**
- * Browse the host's signed catalog: connect one, review a release, install
- * or update it, and see what it still needs. An install this browser left
- * unfinished is picked up where it stopped.
+ * Browse the host's signed catalog: review a release, install or update it,
+ * and see what it still needs. A host on the built-in Foxlight store lists it
+ * with nothing to paste; a private catalog is added behind its own control,
+ * and a host on one can return to the store. An install this browser left
+ * unfinished is picked up where it stopped, and an install the host reports
+ * stopped is resumed on its own installation rather than installed again.
  */
-export function PluginCatalogBrowse({ onManage }: PluginCatalogBrowseProps = {}) {
+export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, review }: PluginCatalogBrowseProps = {}) {
   const { t } = useSkulkTranslation();
   const [view, setView] = useState<BrowseView>(resumedView);
   const source = useGetCatalogSourceQuery();
   const configured = !!source.data?.configured;
+  const onStore = !!source.data?.builtin_store;
+  const storeAvailable = !!source.data?.builtin_store_available;
+  const [selectStore, storeSwitch] = useSelectBuiltinCatalogMutation();
+  const [storeNotice, setStoreNotice] = useState('');
   const catalog = useGetPluginCatalogQuery(undefined, { skip: !configured || view.kind === 'connect' });
   const runtimes = useGetManagedRuntimesQuery();
+  const operationIds = installOperationIds(runtimes.data?.installations);
+  // Read fresh whenever Browse opens: a cached read from Installed can be
+  // older than an install that has since stopped.
+  const installs = useGetInstallOperationsQuery(operationIds, { skip: operationIds.length === 0, refetchOnMountOrArgChange: true });
   const [bind] = useInstallFromCatalogMutation();
   const [install] = useInstallRuntimeReleaseMutation();
-  const offers = useMemo(() => catalog.data ? catalogOffers(catalog.data, runtimes.data?.installations ?? []) : [], [catalog.data, runtimes.data]);
+  const [readInstall] = useLazyGetRuntimeInstallationQuery();
+  const [readSource] = useLazyGetRuntimeSourceStatusQuery();
+  const [recover] = useRecoverRuntimeInstallationMutation();
+  // What an installed plugin's nodes report now decides what its card offers.
+  const { capabilityNodes, localNodeId } = useClusterState();
+  const offers = useMemo(() => catalog.data
+    ? catalogOffers(catalog.data, runtimes.data?.installations ?? [], unfinishedInstalls(runtimes.data?.installations ?? [], installs.data))
+    : [], [catalog.data, runtimes.data, installs.data]);
+  // Offers wait for the installations and a fresh read of their installs: an
+  // offer made before a stopped install is known would register a second
+  // installation beside it.
+  const installsKnown = operationIds.length === 0 || (installs.data !== undefined && !installs.isFetching);
+  const inventoryKnown = (runtimes.data !== undefined || !!runtimes.error) && installsKnown;
+  // An update asked for elsewhere opens its review once the offers are known,
+  // and only while the bundle is still offered as an update. Adjusted while
+  // rendering, as React recommends for state that follows a changing input.
+  const [takenReview, setTakenReview] = useState<number | null>(null);
+  if (review && takenReview !== review.id && catalog.data && inventoryKnown && view.kind === 'list') {
+    setTakenReview(review.id);
+    const offer = offers.find((item) => item.entry.bundle_id === review.bundleId && item.state === 'update');
+    if (offer) setView({ kind: 'review', offer, listing: catalog.data });
+  }
+  // A read that failed leaves its installation out. One that never selected a
+  // release names no bundle until its install is read, so while any such read
+  // is missing, a new install might duplicate a stopped one: fresh installs
+  // pause until it is read.
+  const unreadInstalls = installs.data && installsKnown
+    ? (runtimes.data?.installations ?? []).filter((runtime) => operationIds.includes(runtime.plugin_id) && !(runtime.plugin_id in installs.data!) && !runtime.release).length
+    : 0;
 
   // One consent starts one install, even if the button is clicked twice.
   const starting = useRef(false);
@@ -65,26 +137,88 @@ export function PluginCatalogBrowse({ onManage }: PluginCatalogBrowseProps = {})
     setView({ ...base, journey: null, refusal: null });
     const outcome = await startCatalogInstall({ bind, install }, offer, listing, pluginRefusalDetail, randomHex32, pluginRequestRefused);
     starting.current = false;
-    setView(isStartRefusal(outcome) ? { ...base, journey: null, refusal: outcome } : { ...base, transferBytes: outcome.transferBytes, journey: outcome, refusal: null });
+    // A journey already under way may install another release of the bundle; the page names the one it follows.
+    setView(isStartRefusal(outcome) ? { ...base, journey: null, refusal: outcome } : { ...base, publisher: outcome.publisher, sequence: outcome.sequence, transferBytes: outcome.transferBytes, journey: outcome, refusal: null });
   };
+  // A retry follows the same progress a fresh install does, through
+  // activation, once this browser holds consent to the release it retries.
+  const beginRetry = async (request: RetryRequest, reviewedDigest: string | null = null) => {
+    if (starting.current) return;
+    starting.current = true;
+    const base = { kind: 'install' as const, title: request.title, publisher: request.publisher, sequence: request.sequence, transferBytes: request.transferBytes, updating: request.updating, retryOf: request };
+    setView({ ...base, journey: null, refusal: null });
+    const outcome = await startInstallRetry({
+      readInstall: (pluginId) => readInstall(pluginId, false), readSource: (pluginId) => readSource(pluginId, false), recover,
+    }, request, reviewedDigest, pluginRefusalDetail, pluginRequestRefused);
+    starting.current = false;
+    if (isConsentNeeded(outcome)) setView({ kind: 'retry-review', request, review: outcome.review, stopped: outcome.stopped });
+    else if (isStartRefusal(outcome)) setView({ ...base, journey: null, refusal: outcome });
+    else setView({ ...base, title: outcome.title, publisher: outcome.publisher, sequence: outcome.sequence, transferBytes: outcome.transferBytes, journey: outcome, refusal: null });
+  };
+  // A retry handed over from Installed starts once per click, even if this
+  // view mounts again before the handoff is cleared.
+  const takenRetry = useRef<number | null>(null);
+  useEffect(() => {
+    if (!retry || takenRetry.current === retry.id) return;
+    takenRetry.current = retry.id;
+    onRetryTaken?.();
+    void beginRetry(retry.request);
+    // beginRetry reads current state through refs and stable RTK triggers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retry]);
   const toList = () => {
     setView({ kind: 'list' });
     // A query that has not started yet (Browse opened on a resumed install)
     // has nothing to refetch; it starts when the list needs it.
     if (!catalog.isUninitialized) void catalog.refetch();
     if (!runtimes.isUninitialized) void runtimes.refetch();
+    if (!installs.isUninitialized) void installs.refetch();
+  };
+  // Opening the panel reads the source again: the store's first catalog read
+  // records it, so the revision this page loaded with may be behind.
+  const openConnect = () => {
+    setStoreNotice('');
+    setView({ kind: 'connect' });
+    void source.refetch();
+  };
+  const switchToStore = async () => {
+    if (!source.data || storeSwitch.isLoading) return;
+    setStoreNotice('');
+    try {
+      await selectStore({ expected_revision: source.data.revision }).unwrap();
+    } catch (error) {
+      setStoreNotice(pluginRefusalDetail(error) ?? t('plugins.catalog.useStoreFailed', 'The host did not switch to the Foxlight store. Try again.'));
+    }
   };
   const resume = (journey: BoundJourney, updating: boolean) => setView({
     kind: 'install', title: journey.title, publisher: journey.publisher, sequence: journey.sequence, transferBytes: journey.transferBytes, updating, journey, refusal: null,
   });
   // Read when the list renders: leaving an install's progress returns here.
   const journeys = view.kind === 'list' ? readJourneys() : [];
+  // Whether the release can spend money, from the listing of that release,
+  // so the setup page claims nothing it was not told.
+  const spendsMoney = (bundleId: string | undefined, sequence: number): boolean | undefined => {
+    const listed = bundleId === undefined ? undefined : catalog.data?.entries.find((candidate) => candidate.bundle_id === bundleId && candidate.sequence === sequence);
+    return listed ? canSpendMoney(listed) : undefined;
+  };
+  const setUp = (target: SetupTarget) => {
+    if (onSetUp) onSetUp(target); else setView({ kind: 'setup', target });
+  };
 
   if (view.kind === 'install') {
-    return <CatalogInstallProgress title={view.title} publisher={view.publisher} sequence={view.sequence} transferBytes={view.transferBytes}
-      updating={view.updating} journey={view.journey} refusal={view.refusal} onDone={(target) => setView({ kind: 'setup', target })} onBack={toList} />;
+    const retryOf = view.journey ? retryOfJourney(view.journey, view.updating) : view.retryOf;
+    // Each attempt is its own progress: a retry follows the same operation again.
+    return <CatalogInstallProgress key={view.journey ? `${view.journey.pluginId}/${view.journey.startedAt}` : view.refusal ? 'refused' : 'starting'}
+      title={view.title} publisher={view.publisher} sequence={view.sequence} transferBytes={view.transferBytes}
+      updating={view.updating} journey={view.journey} refusal={view.refusal} onBack={toList}
+      onDone={(target) => setUp({ ...target, spendsMoney: spendsMoney(view.journey?.bundleId, view.journey?.sequence ?? view.sequence) })}
+      onRetry={retryOf ? () => void beginRetry(retryOf) : undefined} />;
   }
-  if (view.kind === 'setup') return <CapabilitySetupPanel target={view.target} onManage={onManage} onBack={toList} />;
+  if (view.kind === 'retry-review') {
+    return <CatalogRetryReviewPanel title={view.request.title} updating={view.request.updating} stopped={view.stopped} review={view.review} onCancel={toList}
+      onRetry={() => void beginRetry(view.request, view.review.runtime_digest)} />;
+  }
+  if (view.kind === 'setup') return <CapabilitySetupPanel target={view.target} onManage={onManage} onDone={toList} />;
   if (view.kind === 'review') {
     return <CatalogReviewPanel offer={view.offer} onCancel={toList} onInstall={() => void beginInstall(view.offer, view.listing)} />;
   }
@@ -92,29 +226,54 @@ export function PluginCatalogBrowse({ onManage }: PluginCatalogBrowseProps = {})
   if (source.error) return <Notice role="alert">{pluginRefusalDetail(source.error) ?? t('plugins.catalog.sourceUnavailable', 'The catalog settings of this host could not be read.')}</Notice>;
   if (!source.data) return null;
   if (!configured || view.kind === 'connect') {
-    return <CatalogConnectPanel status={source.data} onConnected={() => { setView({ kind: 'list' }); void source.refetch(); }}
+    return <CatalogConnectPanel status={source.data} replacesStore={onStore} onConnected={() => { setView({ kind: 'list' }); void source.refetch(); }}
       onCancel={configured ? () => setView({ kind: 'list' }) : undefined} />;
   }
+  const updated = catalog.data ? new Date(catalog.data.created_at * 1000).toLocaleDateString() : '';
   return <section aria-labelledby="catalog-browse-title">
     <Heading>
       <div>
         <h2 id="catalog-browse-title">{t('plugins.catalog.browseTitle', 'Browse capabilities')}</h2>
-        {catalog.data ? <p>{t('plugins.catalog.browseLead', 'From the {publisher} catalog. Signature verified; listing updated {date}.', { publisher: catalog.data.publisher, date: new Date(catalog.data.created_at * 1000).toLocaleDateString() })}</p> : null}
+        {catalog.data ? <p>{onStore
+          ? t('plugins.catalog.storeLead', 'From the Foxlight capability store. Signatures verified; listing updated {date}.', { date: updated })
+          : t('plugins.catalog.browseLead', 'From the {publisher} catalog. Signature verified; listing updated {date}.', { publisher: catalog.data.publisher, date: updated })}</p> : null}
       </div>
-      <Button variant="ghost" size="sm" onClick={() => setView({ kind: 'connect' })}>{t('plugins.catalog.changeCatalog', 'Change catalog')}</Button>
+      <SourceActions>
+        {onStore
+          ? <Button variant="outline" size="sm" onClick={openConnect}>{t('plugins.catalog.addPrivate', 'Add a private catalog')}</Button>
+          : <>
+            {storeAvailable ? <Button variant="outline" size="sm" disabled={storeSwitch.isLoading} onClick={() => void switchToStore()}>{t('plugins.catalog.useStore', 'Use the Foxlight store')}</Button> : null}
+            <Button variant="outline" size="sm" onClick={openConnect}>{t('plugins.catalog.changeCatalog', 'Change catalog')}</Button>
+          </>}
+      </SourceActions>
     </Heading>
+    {storeNotice ? <Notice role="alert">{storeNotice}</Notice> : null}
     {catalog.isFetching && !catalog.data ? <Centered><Spinner size={22} /><span>{t('plugins.catalog.reading', 'Reading and verifying the catalog…')}</span></Centered> : null}
     {catalog.error ? <Notice role="alert">
       {pluginRefusalDetail(catalog.error) ?? t('plugins.catalog.readFailed', 'The catalog could not be read.')}
       <Button variant="outline" size="sm" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>{t('plugins.catalog.retry', 'Try again')}</Button>
     </Notice> : null}
-    {catalog.data && offers.length === 0 ? <p>{t('plugins.catalog.empty', 'This catalog lists nothing yet.')}</p> : null}
-    <Offers>{catalog.data ? offers.map((offer) => {
-      const progress = journeyInProgress(offer.entry.bundle_id, offer.entry.sequence, journeys);
-      return <CatalogOfferCard key={offer.entry.bundle_id} offer={offer} progress={progress}
+    {catalog.data && !inventoryKnown ? <Centered><Spinner size={22} /></Centered> : null}
+    {catalog.data && inventoryKnown && unreadInstalls > 0 ? <Notice role="alert">
+      {t('plugins.catalog.installsUnread', 'The install status of {count} installation(s) on this host could not be read, so new installs are paused: one of them may be a stopped install of the same plugin, which a new install would duplicate.', { count: unreadInstalls })}
+      <Button variant="outline" size="sm" disabled={installs.isFetching} onClick={() => void installs.refetch()}>{t('plugins.catalog.retry', 'Try again')}</Button>
+    </Notice> : null}
+    {catalog.data && inventoryKnown && offers.length === 0 ? <p>{t('plugins.catalog.empty', 'This catalog lists nothing yet.')}</p> : null}
+    <Offers>{catalog.data && inventoryKnown ? offers.map((offer) => {
+      const progress = offerProgress(offer, journeys);
+      const unfinished = offer.retry;
+      return <CatalogOfferCard key={offer.entry.bundle_id} offer={offer} progress={progress} installPaused={unreadInstalls > 0}
         onResume={() => progress && resume(progress, offer.state === 'update')}
+        onRetry={() => {
+          if (!unfinished) return;
+          void beginRetry({
+            pluginId: unfinished.pluginId, title: displayTitle(offer.entry), publisher: unfinished.review.publisher, sequence: unfinished.review.sequence,
+            transferBytes: unfinished.review.artifact_bytes, updating: unfinished.updating,
+          });
+        }}
         onReview={() => setView({ kind: 'review', offer, listing: catalog.data! })}
-        onSetUp={() => offer.installed && setView({ kind: 'setup', target: { pluginId: offer.installed.plugin_id, title: displayTitle(offer.entry) } })} />;
+        installedAction={offer.installed ? installedCardAction(hostedCapabilityNodes(capabilityNodes, offer.installed.plugin_id), localNodeId, window.location.hostname) : undefined}
+        onSetUp={() => offer.installed && setUp({ pluginId: offer.installed.plugin_id, title: displayTitle(offer.entry), spendsMoney: canSpendMoney(offer.entry) })} />;
     }) : null}</Offers>
   </section>;
 }
@@ -124,6 +283,7 @@ const Heading = styled.div`
   h2 { font-size: 22px; margin: 0; letter-spacing: -.01em; color: ${({ theme }) => theme.colors.text}; }
   p { margin: 6px 0 0; font-size: 14px; color: ${({ theme }) => theme.colors.textSecondary}; }
 `;
+const SourceActions = styled.div`display: flex; flex-wrap: wrap; gap: 8px;`;
 const Offers = styled.div`display: flex; flex-direction: column; gap: 12px;`;
 const Centered = styled.div`display: flex; align-items: center; gap: 12px; padding: 24px 4px; color: ${({ theme }) => theme.colors.textSecondary}; font-size: 14px;`;
 const Notice = styled.div`

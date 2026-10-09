@@ -6,6 +6,11 @@ the facts an operator needs before any transfer: what the capability can do
 and what it can spend. Reading the catalog selects nothing and installs
 nothing; installing still goes through the verified release path, where the
 release record itself is authenticated against installation trust.
+
+The host reads one source: a private catalog its owner configured, or the
+built-in capability store when this build ships the store's trust root. The
+store's discovery trust is not pasted by anyone; it is verified and renewed
+through TUF (``capability_store``) and recorded like an owner's.
 """
 
 import asyncio
@@ -21,6 +26,7 @@ from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 import httpx
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -34,6 +40,10 @@ from pydantic import (
     model_validator,
 )
 
+from skulk.extensions.capability_store import (
+    StoreTrustClient,
+    StoreTrustUnavailableError,
+)
 from skulk.extensions.runtime_artifacts import (
     Digest,
     Identifier,
@@ -51,9 +61,12 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 
-ACCEPTED_CATALOG_PROTOCOLS: tuple[int, ...] = (1,)
-"""Catalog record protocols this host reads: the current and, once there is
-one, the previous."""
+ACCEPTED_CATALOG_PROTOCOLS: tuple[int, ...] = (1, 2)
+"""Catalog record protocols this host reads: the current and the previous.
+
+Protocol 2 listings carry the Skulk version range of the release they name,
+so a host judges fit by its version. Protocol 1 listings predate that and
+were published for one exact Skulk build, so they keep that rule."""
 
 _OBJECT: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
@@ -73,6 +86,9 @@ CatalogRefusal = Literal[
     "catalog_rollback_refused",
     "catalog_superseded",
     "catalog_busy",
+    "catalog_store_unavailable",
+    "catalog_store_trust_unavailable",
+    "catalog_source_reserved",
 ]
 """Why a catalog read, source change or install was refused, as the operator acts on it."""
 
@@ -106,8 +122,8 @@ _REFUSAL_SENTENCES: Final[dict[CatalogRefusal, str]] = {
         "source and discovery trust, then read the catalog again."
     ),
     "catalog_setup_incomplete": (
-        "The first catalog setup needs both the catalog address and the "
-        "discovery trust."
+        "Setting up a catalog, or moving from the built-in store to a private "
+        "catalog, needs both the catalog address and the discovery trust."
     ),
     "catalog_source_conflict": (
         "The catalog source changed since its revision was read. Read the "
@@ -165,6 +181,19 @@ _REFUSAL_SENTENCES: Final[dict[CatalogRefusal, str]] = {
     "catalog_busy": (
         "Another catalog read, install or source change is in progress on "
         "this host. Try again when it finishes."
+    ),
+    "catalog_store_unavailable": (
+        "This build of Skulk does not include the built-in capability store. "
+        "Configure a private catalog instead."
+    ),
+    "catalog_store_trust_unavailable": (
+        "This host could not verify the built-in capability store's trust and "
+        "holds no verified copy that is still current. Check that it can "
+        "reach the store, then read the catalog again."
+    ),
+    "catalog_source_reserved": (
+        "That address is the built-in capability store. Use the built-in "
+        "store instead of configuring it as a private catalog."
     ),
 }
 
@@ -270,6 +299,7 @@ class _CatalogEntryClaims(_Contract):
         min_length=1, max_length=2
     )
     skulk_build_sha256: Digest
+    skulk_requires: str | None = Field(default=None, max_length=128)
     permissions: tuple[_Text, ...] = Field(min_length=1, max_length=16)
     descriptors: tuple[Annotated[str, Field(max_length=200)], ...] = Field(
         min_length=1, max_length=8
@@ -286,6 +316,11 @@ class _CatalogEntryClaims(_Contract):
     @model_validator(mode="after")
     def served_from_a_directory(self) -> Self:
         """A feed is an explicit HTTPS directory, like a configured release source."""
+        if self.skulk_requires is not None:
+            try:
+                SpecifierSet(self.skulk_requires)
+            except InvalidSpecifier:
+                raise ValueError("catalog entry Skulk range is not a version range") from None
         if self.transfer_bytes < self.artifact_size:
             raise ValueError("catalog entry transfer size cannot be below its artifact")
         parsed = urlsplit(self.feed_url)
@@ -316,6 +351,15 @@ class _CatalogClaims(_Contract):
         """The listing is the signer's own and names a bundle sequence once."""
         if not self.created_at < self.expires_at:
             raise ValueError("catalog expiry must follow creation")
+        # A protocol 2 listing always states its Skulk range; protocol 1 never
+        # did, so a range in one would be a document no protocol describes.
+        if any(
+            (entry.skulk_requires is None) == (self.protocol >= 2)
+            for entry in self.entries
+        ):
+            raise ValueError(
+                "catalog protocol 2 entries state their Skulk range; protocol 1 entries do not"
+            )
         seen: set[tuple[str, int, str | None]] = set()
         for entry in self.entries:
             if entry.publisher != self.publisher:
@@ -364,7 +408,15 @@ class CatalogEntryReview(BaseModel):
         "runtime-bearing release, every wheel it lists."
     )
     platforms: tuple[str, ...] = Field(description="Operating systems supported.")
-    skulk_build_sha256: str = Field(description="Skulk build the release binds to.")
+    skulk_build_sha256: str = Field(
+        description="Skulk build the publisher qualified the release against; "
+        "recorded for provenance, not required to match this host."
+    )
+    skulk_requires: str | None = Field(
+        default=None,
+        description="Skulk versions the release runs on (catalog protocol 2); "
+        "null for a protocol 1 listing, which fits one exact Skulk build.",
+    )
     permissions: tuple[str, ...] = Field(description="Signed permission summaries.")
     descriptors: tuple[str, ...] = Field(description="Qualified capability ids.")
     surfaces: tuple[str, ...] = Field(description="Titles of declared surfaces.")
@@ -374,7 +426,9 @@ class CatalogEntryReview(BaseModel):
     )
     expires_at: int = Field(description="Release expiry as a Unix timestamp.")
     matches_host: bool = Field(
-        description="Whether this host's Skulk build and platform match the release."
+        description="Whether the release fits this host: its platforms, and "
+        "this host's Skulk version inside its range (for a protocol 1 listing, "
+        "this host's exact Skulk build)."
     )
 
 
@@ -444,7 +498,9 @@ class VerifiedCatalog:
                 return entry
         return None
 
-    def review(self, *, skulk_build_sha256: str, platform: str) -> CatalogReview:
+    def review(
+        self, *, skulk_version: str, skulk_build_sha256: str, platform: str
+    ) -> CatalogReview:
         """Project the catalog for operators, naming what fits this host."""
         return CatalogReview(
             publisher=self.claims.publisher,
@@ -454,7 +510,10 @@ class VerifiedCatalog:
             catalog_sha256=self.sha256,
             entries=tuple(
                 self.entry_review(
-                    entry, skulk_build_sha256=skulk_build_sha256, platform=platform
+                    entry,
+                    skulk_version=skulk_version,
+                    skulk_build_sha256=skulk_build_sha256,
+                    platform=platform,
                 )
                 for entry in self.entries
             ),
@@ -462,9 +521,20 @@ class VerifiedCatalog:
 
     @staticmethod
     def entry_review(
-        entry: _CatalogEntryClaims, *, skulk_build_sha256: str, platform: str
+        entry: _CatalogEntryClaims,
+        *,
+        skulk_version: str,
+        skulk_build_sha256: str,
+        platform: str,
     ) -> CatalogEntryReview:
-        """One listing as consent facts, with whether it fits this host."""
+        """One listing as consent facts, with whether it fits this host.
+
+        A listing states the Skulk versions its release runs on, so it fits
+        any host whose version is in that range whatever build it runs, and a
+        Skulk update never hides what the host can still install. A protocol 1
+        listing has no range: it was published for one exact Skulk build and
+        keeps that rule.
+        """
         expected_os = (
             "darwin" if platform.startswith("macos") else platform.split("-")[0]
         )
@@ -487,8 +557,13 @@ class VerifiedCatalog:
             operations=entry.operations,
             steward_risks=entry.steward_risks,
             expires_at=entry.expires_at,
-            matches_host=entry.skulk_build_sha256 == skulk_build_sha256
-            and expected_os in entry.platforms
+            skulk_requires=entry.skulk_requires,
+            matches_host=expected_os in entry.platforms
+            and (
+                skulk_version in SpecifierSet(entry.skulk_requires)
+                if entry.skulk_requires is not None
+                else entry.skulk_build_sha256 == skulk_build_sha256
+            )
             and (
                 entry.runtime_platform is None
                 or platform_matches(entry.runtime_platform, platform)
@@ -622,7 +697,7 @@ class CatalogSourceUpdate(BaseModel):
     )
     trust: Annotated[RuntimeTrust, BeforeValidator(_catalog_trust)] | None = Field(
         default=None,
-        description="Publishers trusted for discovery; omission retains trust. Existing revocations cannot be removed here.",
+        description="Publishers trusted for discovery; omission retains trust. Revocations this host holds for the target catalog address carry into it and cannot be removed here.",
     )
     token: SecretStr | None = Field(
         default=None, description="Write-only catalog bearer; omission retains it."
@@ -630,10 +705,19 @@ class CatalogSourceUpdate(BaseModel):
     clear_token: bool = Field(
         default=False, description="Explicitly read the catalog anonymously."
     )
+    assign_trust_revision: bool = Field(
+        default=False,
+        description="Have the host give ``trust`` the next revision of the target "
+        "address's own trust history, in place of the revision supplied. The "
+        "dashboard sets this, so re-adding a catalog is never refused as a "
+        "rollback whatever revision it last held; requires ``trust``.",
+    )
 
     @model_validator(mode="after")
     def valid_source(self) -> Self:
         """Validate the address and credential shape before touching local files."""
+        if self.assign_trust_revision and self.trust is None:
+            raise ValueError("assigning a trust revision requires the trust")
         CatalogSource(
             revision=self.expected_revision + 1,
             base_url=self.base_url
@@ -663,7 +747,11 @@ class CatalogSourceStatus(BaseModel):
     revision: int = Field(
         ge=0, description="Current catalog source revision, zero if unconfigured."
     )
-    configured: bool = Field(description="Whether a catalog source is configured.")
+    configured: bool = Field(
+        description="Whether a catalog source is configured. The built-in "
+        "capability store counts as configured from the start, before its "
+        "first read has verified its trust."
+    )
     credential_reference: ProfileIdentifier | None = Field(
         default=None, description="Opaque catalog credential reference."
     )
@@ -671,7 +759,34 @@ class CatalogSourceStatus(BaseModel):
         description="Whether the credential is readable, or the source is anonymous."
     )
     trust_revision: int | None = Field(
-        default=None, description="Configured discovery trust revision."
+        default=None,
+        description="Configured discovery trust revision; null for the built-in "
+        "store until its first read.",
+    )
+    builtin_store: bool = Field(
+        default=False,
+        description="Whether the source is the built-in capability store, whose "
+        "discovery trust Skulk verifies and renews itself.",
+    )
+    builtin_store_available: bool = Field(
+        default=False,
+        description="Whether this Skulk build includes the built-in capability "
+        "store, so the host can switch to it.",
+    )
+    assigns_trust_revisions: bool = Field(
+        default=True,
+        description="Whether this host accepts ``assign_trust_revision`` on a "
+        "source update. Absent from hosts that predate it, which need the "
+        "revision chosen by the caller.",
+    )
+
+
+class BuiltinCatalogSelection(BaseModel):
+    """Owner request to read capabilities from the built-in store again."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    expected_revision: int = Field(
+        ge=0, description="Current catalog source revision, zero before setup."
     )
 
 
@@ -682,17 +797,65 @@ class AcceptedFloor(_Contract):
     sha256: Digest
 
 
+class RetainedRevocations(_Contract):
+    """The revocations a private catalog's trust held when the host left its address."""
+
+    revoked_publishers: tuple[Identifier, ...] = Field(
+        default=(), max_length=16, description="Publishers revoked for that catalog."
+    )
+    revoked_artifacts: tuple[Digest, ...] = Field(
+        default=(), max_length=128, description="Artifacts revoked for that catalog."
+    )
+
+
 class _CatalogState(_Contract):
-    """Everything host-scoped about the catalog, replaced as one document."""
+    """Everything host-scoped about the catalog, replaced as one document.
+
+    ``trust_floor`` is the current source's trust floor, written with its
+    trust. ``floors`` holds every address's history: catalog revision floors
+    keyed by address, document and publisher, and discovery trust floors
+    keyed by ``_trust_floor_key`` per address. ``revocations`` keeps, per
+    private catalog address the host has left, the revocations its trust
+    held, so a later trust for that address carries them again; it is
+    written only when not empty, so most state documents keep the shape
+    earlier builds read.
+    """
 
     source: CatalogSource | None = None
     trust: RuntimeTrust | None = None
     trust_floor: AcceptedFloor | None = None
     floors: dict[str, AcceptedFloor] = Field(default_factory=dict)
+    revocations: dict[str, RetainedRevocations] = Field(default_factory=dict)
 
 
 def _trust_digest(trust: RuntimeTrust) -> str:
     return hashlib.sha256(canonical_json(trust.model_dump(mode="json"))).hexdigest()
+
+
+def _carry_revocations(
+    trust: RuntimeTrust, *, publishers: set[str], artifacts: set[str]
+) -> RuntimeTrust:
+    """``trust`` with the given revocations added to its own.
+
+    Only within one private catalog address's history: an owner's trust
+    update never silently restores a publisher or artifact revoked for that
+    catalog before it, including across a detour through the store. The
+    built-in store's trust is never merged: it applies as the store published
+    it, and no revocation moves between addresses, since a publisher name
+    means nothing across sources.
+
+    Raises:
+        ValueError: The combined revocations exceed the trust's bounds.
+    """
+    return RuntimeTrust.model_validate(
+        {
+            **trust.model_dump(),
+            "revoked_publishers": tuple(
+                sorted(publishers | set(trust.revoked_publishers))
+            ),
+            "revoked_artifacts": tuple(sorted(artifacts | set(trust.revoked_artifacts))),
+        }
+    )
 
 
 def bounded_floors(
@@ -705,7 +868,10 @@ def bounded_floors(
     the explicit maintenance path, while existing histories keep recording.
     """
     del prefix  # every history is kept; the address no longer orders eviction
-    if len(floors) > bound:
+    # Discovery trust floors share the map but are bounded on their own, so
+    # they never take room from catalog revision histories.
+    trust = sum(1 for name in floors if name.startswith(_TRUST_FLOOR_PREFIX))
+    if trust > bound or len(floors) - trust > bound:
         raise ValueError("catalog history requires local maintenance")
     return dict(floors)
 
@@ -714,20 +880,305 @@ def _floor_key(source: CatalogSource, publisher: str) -> str:
     return "\n".join((source.base_url, source.document_filename, publisher))
 
 
+_TRUST_FLOOR_PREFIX: Final = "trust\n"
+"""Key prefix of discovery trust floors inside the ``floors`` map.
+
+Catalog revision floors are keyed by address, document and publisher, and an
+address is an HTTPS URL, so no catalog floor key can start with this. Keeping
+trust floors in the same map leaves the state document's shape unchanged:
+builds that predate per-source trust floors still read it, and simply never
+look these entries up."""
+
+
+def _trust_floor_key(base_url: str, document_filename: str) -> str:
+    """The floor key of one catalog address's discovery trust history."""
+    return _TRUST_FLOOR_PREFIX + "\n".join((base_url, document_filename))
+
+
+def _source_trust_floor(
+    state: "_CatalogState", base_url: str, document_filename: str
+) -> AcceptedFloor | None:
+    """The newest discovery trust this host accepted for one catalog address.
+
+    Each address keeps its own trust history, as each keeps its own catalog
+    revision history. A state written before per-source trust floors held
+    only the current source's floor, in ``trust_floor``; it counts for the
+    current address.
+    """
+    floor = state.floors.get(_trust_floor_key(base_url, document_filename))
+    current = state.source
+    if (
+        current is not None
+        and (current.base_url, current.document_filename)
+        == (base_url, document_filename)
+        and state.trust_floor is not None
+        and (floor is None or state.trust_floor.revision > floor.revision)
+    ):
+        return state.trust_floor
+    return floor
+
+
+def _below_floor(trust: RuntimeTrust, floor: AcceptedFloor | None) -> bool:
+    """Whether ``trust`` is older than ``floor``, or another document at its revision."""
+    return floor is not None and (
+        trust.revision < floor.revision
+        or (trust.revision == floor.revision and _trust_digest(trust) != floor.sha256)
+    )
+
+
+def _with_trust(
+    state: "_CatalogState",
+    source: CatalogSource,
+    trust: RuntimeTrust,
+    *,
+    keep_revocations: bool,
+) -> "_CatalogState":
+    """``state`` reading ``source`` under ``trust``, with each address's trust floor kept.
+
+    ``trust_floor`` moves with the current trust, as it always has. The
+    per-address floors only rise: the address being left keeps its floor
+    (recorded here when a state from before per-source floors held it only in
+    ``trust_floor``), so returning there meets its own history again, and a
+    switch never overwrites another address's floor.
+
+    With ``keep_revocations`` (the address being left is a private catalog),
+    that catalog's revocations are kept for its address, for a later trust
+    there to carry. The store's never are: its trust applies as published.
+    The address arrived at drops its kept set, which its new trust carries.
+    """
+    accepted = AcceptedFloor(revision=trust.revision, sha256=_trust_digest(trust))
+    key = _trust_floor_key(source.base_url, source.document_filename)
+    revocations = dict(state.revocations)
+    if state.source is not None and state.trust is not None and keep_revocations:
+        left = _trust_floor_key(state.source.base_url, state.source.document_filename)
+        held = state.trust
+        if left != key and (held.revoked_publishers or held.revoked_artifacts):
+            revocations[left] = RetainedRevocations(
+                revoked_publishers=held.revoked_publishers,
+                revoked_artifacts=held.revoked_artifacts,
+            )
+    revocations.pop(key, None)
+    if len(revocations) > 32:
+        raise ValueError("catalog history requires local maintenance")
+    floors = dict(state.floors)
+    if state.source is not None and state.trust_floor is not None:
+        left = _trust_floor_key(state.source.base_url, state.source.document_filename)
+        kept = floors.get(left)
+        if kept is None or state.trust_floor.revision > kept.revision:
+            floors[left] = state.trust_floor
+    floor = floors.get(key)
+    if floor is None or accepted.revision >= floor.revision:
+        floors[key] = accepted
+    return state.model_copy(
+        update={
+            "source": source,
+            "trust": trust,
+            "trust_floor": accepted,
+            "floors": bounded_floors(floors, key, ""),
+            "revocations": revocations,
+        }
+    )
+
+
+_STORE_TRUST_SECONDS: Final = 8
+"""Budget for verifying the built-in store's trust before a catalog read.
+
+It sits inside the same request deadline as the catalog download, so the two
+together stay under the manager's and the API's thirty seconds."""
+
+
 @final
 class HostCatalog:
-    """The one host-scoped catalog source, read on request and never automatically."""
+    """The one host-scoped catalog source, read on request and never automatically.
+
+    The source is either a private catalog the owner configured, with the
+    discovery trust the owner supplied, or the built-in capability store when
+    this build ships its trust root. A host with neither a source nor trust
+    uses the built-in store: its first read verifies the store's publisher
+    trust through TUF and records it in the same state document as an owner's
+    configuration, so every floor and rollback check applies unchanged. While
+    the source is the built-in store, each read renews that trust first and
+    applies a newer revision, never an older one, exactly as published.
+    """
 
     def __init__(
-        self, root: Path, *, transport: httpx.AsyncBaseTransport | None = None
+        self,
+        root: Path,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        store: StoreTrustClient | None = None,
     ) -> None:
-        """Open host-scoped catalog state without network access."""
+        """Open host-scoped catalog state without network access.
+
+        Args:
+            root: The manager root that holds catalog state.
+            transport: HTTP transport for catalog reads, injectable for tests.
+            store: The built-in capability store's trust client, or ``None``
+                for a host without a built-in store.
+        """
         self.root = root
         self.directory = root / "catalog"
         private_directory(self.directory)
         self.transport = transport
+        self.store = store
         self.guard = asyncio.Lock()
         self.closed = False
+
+    def _store_ready(self) -> bool:
+        """Whether this build ships the built-in store's root."""
+        return self.store is not None and self.store.available
+
+    def _is_store(self, source: CatalogSource | None) -> bool:
+        """Whether ``source`` is the built-in store's catalog address.
+
+        The store is identified by its address, which ``configure`` reserves
+        while the store is available, so no private catalog can share it. A
+        build without the store's root treats that address like any other.
+        """
+        return (
+            self.store is not None
+            and self.store.available
+            and source is not None
+            and source.base_url == self.store.catalog_url
+            and source.document_filename == self.store.catalog_document
+        )
+
+    def _uses_store(self, state: "_CatalogState") -> bool:
+        """Whether reads come from the built-in store, seeded or not yet."""
+        if state.source is None:
+            return state.trust is None and self._store_ready()
+        return self._is_store(state.source)
+
+    async def _store_trust(
+        self, *, offline: bool, now: int | None = None
+    ) -> RuntimeTrust | None:
+        """The store's verified trust in force, or ``None`` when there is none.
+
+        Verification runs in a thread (python-tuf is synchronous) under its
+        own budget. A refresh that outlives the budget keeps running and
+        retains what it verifies; this call falls back to the store's last
+        verified copy, read without the network or the refresh fence.
+        """
+        store = self.store
+        if store is None:
+            return None
+        try:
+            async with asyncio.timeout(_STORE_TRUST_SECONDS):
+                return await asyncio.to_thread(store.load, offline=offline, now=now)
+        except StoreTrustUnavailableError:
+            return None
+        except TimeoutError:
+            try:
+                return store.last_known_good(now=now)
+            except StoreTrustUnavailableError:
+                return None
+
+    def on_builtin_store(self) -> bool:
+        """Whether the host's catalog source is the built-in store, seeded or not yet."""
+        return self._uses_store(self._state())
+
+    async def builtin_store_trust(self, *, offline: bool) -> RuntimeTrust | None:
+        """The built-in store's verified trust in force, whatever the current source.
+
+        Installations bound from the store follow this trust even after the
+        host's catalog moves to a private one: their publishers are the
+        store's. Network access and expiry follow ``StoreTrustClient.load``.
+
+        Args:
+            offline: Use only the store's last verified trust.
+
+        Returns:
+            The trust, or ``None`` when this build has no store or no
+            verified trust is in force.
+        """
+        if not self._store_ready():
+            return None
+        return await self._store_trust(offline=offline)
+
+    async def apply_store_trust(self, trust: RuntimeTrust) -> bool:
+        """Record verified store trust as the built-in source's discovery trust.
+
+        Keeps the catalog in step with each verified renewal made outside a
+        catalog read, so an install from a retained listing is checked
+        against the trust the store's followers hold. Applies only while the
+        source is the built-in store and only a strictly newer revision, as a
+        read would. A catalog operation in progress already renews the trust
+        itself, so this then changes nothing.
+
+        Args:
+            trust: The store's verified trust, still in force.
+
+        Returns:
+            Whether the catalog's discovery trust changed.
+        """
+        if self.closed or self.guard.locked():
+            return False
+        async with self.guard:
+            state = self._state()
+            if (
+                state.source is None
+                or not self._is_store(state.source)
+                or state.trust is None
+                or trust.revision <= state.trust.revision
+                or time.time() >= trust.expires_at
+            ):
+                return False
+            # The same helper as a read: the store address's own trust floor
+            # rises with the trust, so a later switch away and back meets it.
+            self._save(_with_trust(state, state.source, trust, keep_revocations=False))
+            return True
+
+    def _store_source(self, revision: int) -> CatalogSource:
+        """The built-in store's catalog address at ``revision``, read anonymously."""
+        assert self.store is not None
+        return CatalogSource(
+            revision=revision,
+            base_url=self.store.catalog_url,
+            document_filename=self.store.catalog_document,
+        )
+
+    async def _renewed_store_state(
+        self, state: "_CatalogState", *, offline: bool, now: int
+    ) -> "_CatalogState":
+        """Seed or renew the built-in store's trust in the state document.
+
+        First use records the store's address and verified trust together.
+        Later reads apply a renewed trust only when its revision is strictly
+        newer, whether or not the held trust has expired: an older or
+        altered trust never replaces the one the host accepted, even when
+        the store client's own retained copy was lost. The
+        renewed trust applies exactly as the store published it, its
+        revocations included: TUF and the store client's floor already keep
+        that document from moving backward, so nothing is merged in. With no
+        verified trust available, a current held trust keeps serving; an
+        expired or absent one is refused by name.
+        """
+        renewed = await self._store_trust(offline=offline, now=now)
+        held = state.trust
+        if state.source is None:
+            if renewed is None:
+                raise CatalogRefusedError(
+                    "catalog_store_trust_unavailable", "store trust unavailable"
+                )
+            source, trust = self._store_source(1), renewed
+            if _below_floor(
+                trust,
+                _source_trust_floor(state, source.base_url, source.document_filename),
+            ):
+                raise CatalogRefusedError(
+                    "catalog_store_trust_unavailable", "store trust below its floor"
+                )
+        elif renewed is not None and (held is None or renewed.revision > held.revision):
+            source, trust = state.source, renewed
+        elif held is None or now >= held.expires_at:
+            raise CatalogRefusedError(
+                "catalog_store_trust_unavailable", "store trust expired"
+            )
+        else:
+            return state
+        updated = _with_trust(state, source, trust, keep_revocations=False)
+        self._save(updated)
+        return updated
 
     def _state(self) -> "_CatalogState":
         """Read the one host-scoped catalog state document.
@@ -768,9 +1219,15 @@ class HostCatalog:
 
     def _save(self, state: "_CatalogState") -> None:
         # One document, replaced atomically: no ordering between the source,
-        # the trust, its floor and the revision floors can be observed.
+        # the trust, its floor and the revision floors can be observed. Kept
+        # revocations are written only when there are any, so a host that
+        # never left a private catalog with revocations keeps a document
+        # earlier builds still read.
         write_private(
-            self.root / "catalog-state.json", state.model_dump_json().encode()
+            self.root / "catalog-state.json",
+            state.model_dump_json(
+                exclude=None if state.revocations else {"revocations"}
+            ).encode(),
         )
 
     def source(self) -> CatalogSource:
@@ -788,15 +1245,24 @@ class HostCatalog:
         return state.trust
 
     def source_status(self) -> CatalogSourceStatus:
-        """Read readiness without network I/O or disclosing the credential."""
+        """Read readiness without network I/O or disclosing the credential.
+
+        A host that uses the built-in store reports it as configured even
+        before the first read verifies the store's trust: there is nothing
+        for the owner to supply, and that read seeds it.
+        """
         state = self._state()
+        available = self._store_ready()
         trust_revision = state.trust.revision if state.trust is not None else None
         if state.source is None:
+            unseeded = self._uses_store(state)
             return CatalogSourceStatus(
                 revision=0,
-                configured=False,
-                credential_ready=False,
+                configured=unseeded,
+                credential_ready=unseeded,
                 trust_revision=trust_revision,
+                builtin_store=unseeded,
+                builtin_store_available=available,
             )
         ready = state.source.credential_reference is None
         if state.source.credential_reference is not None:
@@ -811,6 +1277,8 @@ class HostCatalog:
             credential_reference=state.source.credential_reference,
             credential_ready=ready,
             trust_revision=trust_revision,
+            builtin_store=self._is_store(state.source),
+            builtin_store_available=available,
         )
 
     async def configure(self, update: CatalogSourceUpdate) -> CatalogSourceStatus:
@@ -849,52 +1317,82 @@ class HostCatalog:
                         "catalog_setup_incomplete",
                         "initial catalog setup requires directory and discovery trust",
                     )
-                floor = state.trust_floor
-                if next_trust.expires_at <= time.time() or (
-                    trust is not None
-                    and (
-                        next_trust.revision < trust.revision
-                        or (
-                            next_trust.revision == trust.revision
-                            and next_trust != trust
-                        )
-                    )
+                if self._is_store(previous) and (
+                    update.base_url is None or update.trust is None
                 ):
+                    # The store's address and its renewed trust are the
+                    # store's own: a private catalog is a first setup, with
+                    # its own address and the publishers its owner trusts.
+                    raise CatalogRefusedError(
+                        "catalog_setup_incomplete",
+                        "a private catalog requires its directory and discovery trust",
+                    )
+                if (
+                    self.store is not None
+                    and self._store_ready()
+                    and base_url == self.store.catalog_url
+                ):
+                    raise CatalogRefusedError(
+                        "catalog_source_reserved",
+                        "the built-in store's address is not a private catalog",
+                    )
+                # Each catalog address keeps its own trust history: a trust is
+                # compared only with the floor its own address left behind,
+                # never with another address's revisions or the store's.
+                floor = _source_trust_floor(state, base_url, filename)
+                if update.assign_trust_revision:
+                    # The host, not the caller's clock, picks the next revision
+                    # of this address's history.
+                    next_trust = next_trust.model_copy(
+                        update={
+                            "revision": (floor.revision if floor is not None else 0)
+                            + 1
+                        }
+                    )
+                if next_trust.expires_at <= time.time():
                     raise CatalogRefusedError(
                         "catalog_trust_update_refused",
                         "discovery trust revision conflict or expiry",
                     )
-                if floor is not None and (
-                    next_trust.revision < floor.revision
-                    or (
-                        next_trust.revision == floor.revision
-                        and _trust_digest(next_trust) != floor.sha256
-                    )
-                ):
+                if _below_floor(next_trust, floor):
                     raise CatalogRefusedError(
                         "catalog_trust_update_refused",
-                        "discovery trust rollback refused",
+                        "discovery trust revision conflict or rollback refused",
                     )
-                if trust is not None and next_trust.revision > trust.revision:
-                    # A trust update never silently restores a publisher or
-                    # artifact the owner previously revoked.
-                    next_trust = RuntimeTrust.model_validate(
-                        {
-                            **next_trust.model_dump(),
-                            "revoked_publishers": tuple(
-                                sorted(
-                                    set(trust.revoked_publishers)
-                                    | set(next_trust.revoked_publishers)
-                                )
-                            ),
-                            "revoked_artifacts": tuple(
-                                sorted(
-                                    set(trust.revoked_artifacts)
-                                    | set(next_trust.revoked_artifacts)
-                                )
-                            ),
-                        }
-                    )
+                # Revocations belong to the address that set them: an update at
+                # the same private address keeps the held trust's, a return to
+                # an address keeps those it held when the host left it, and
+                # nothing moves between addresses or out of the store.
+                carried_publishers: set[str] = set()
+                carried_artifacts: set[str] = set()
+                if (
+                    trust is not None
+                    and previous is not None
+                    and not self._is_store(previous)
+                    and (previous.base_url, previous.document_filename)
+                    == (base_url, filename)
+                ):
+                    carried_publishers |= set(trust.revoked_publishers)
+                    carried_artifacts |= set(trust.revoked_artifacts)
+                kept = state.revocations.get(_trust_floor_key(base_url, filename))
+                if kept is not None:
+                    carried_publishers |= set(kept.revoked_publishers)
+                    carried_artifacts |= set(kept.revoked_artifacts)
+                if not (
+                    carried_publishers <= set(next_trust.revoked_publishers)
+                    and carried_artifacts <= set(next_trust.revoked_artifacts)
+                ):
+                    try:
+                        next_trust = _carry_revocations(
+                            next_trust,
+                            publishers=carried_publishers,
+                            artifacts=carried_artifacts,
+                        )
+                    except ValueError:
+                        raise CatalogRefusedError(
+                            "catalog_trust_update_refused",
+                            "carried revocations exceed the trust bounds",
+                        ) from None
                 reference = previous.credential_reference if previous else None
                 if update.clear_token:
                     reference = None
@@ -921,19 +1419,92 @@ class HostCatalog:
                     document_filename=filename,
                     credential_reference=reference,
                 )
-                # Revision floors are keyed by address and publisher and kept
+                # Revision and trust floors are keyed by address and kept
                 # across moves: another address starts its own history, and
-                # returning to an old one meets its old floor again.
+                # returning to an old one meets its old floors again.
                 self._save(
-                    state.model_copy(
-                        update={
-                            "source": source,
-                            "trust": next_trust,
-                            "trust_floor": AcceptedFloor(
-                                revision=next_trust.revision,
-                                sha256=_trust_digest(next_trust),
-                            ),
-                        }
+                    _with_trust(
+                        state,
+                        source,
+                        next_trust,
+                        keep_revocations=not self._is_store(previous),
+                    )
+                )
+                return self.source_status()
+            finally:
+                lock.close()
+
+    async def use_builtin_store(
+        self, expected_revision: int, *, offline: bool = False
+    ) -> CatalogSourceStatus:
+        """Make the built-in capability store the source again, under the host fence.
+
+        The private catalog's address is replaced by the store's, read
+        anonymously, and the discovery trust by the store's verified trust as
+        the store published it: the private trust's revocations stay with
+        the private catalog. The private trust's revision history does not
+        bind the store's either: the store's own history is its retained TUF
+        trust, which never moves backward. Revision and trust floors stay
+        keyed by address: the store meets its own earlier floors again, and
+        the private catalog's trust floor is kept for a later return there.
+        Nothing is fetched from the catalog.
+
+        Args:
+            expected_revision: The source revision the owner reviewed.
+            offline: Use only the store's retained trust, without network.
+
+        Returns:
+            Source readiness after the change.
+
+        Raises:
+            CatalogRefusedError: The build has no store, the revision is
+                stale, another catalog operation is running, or no verified
+                store trust is in force.
+        """
+        if self.guard.locked():
+            raise CatalogRefusedError("catalog_busy", "catalog source is busy")
+        async with self.guard:
+            if self.closed:
+                raise ValueError("catalog closed")
+            if not self._store_ready():
+                raise CatalogRefusedError(
+                    "catalog_store_unavailable", "this build has no built-in store"
+                )
+            lock = RuntimeLock(self.root, "catalog.lock")
+            try:
+                state = self._state()
+                previous = state.source
+                if (previous.revision if previous else 0) != expected_revision:
+                    raise CatalogRefusedError(
+                        "catalog_source_conflict", "catalog source revision conflict"
+                    )
+                if self._uses_store(state):
+                    # Already the store, seeded or not: nothing to change.
+                    return self.source_status()
+                renewed = await self._store_trust(offline=offline)
+                if renewed is None:
+                    raise CatalogRefusedError(
+                        "catalog_store_trust_unavailable", "store trust unavailable"
+                    )
+                source = self._store_source(expected_revision + 1)
+                # The store's own floor, not the private catalog's, binds it;
+                # the private catalog's floor stays for a later return there.
+                if _below_floor(
+                    renewed,
+                    _source_trust_floor(
+                        state, source.base_url, source.document_filename
+                    ),
+                ):
+                    raise CatalogRefusedError(
+                        "catalog_store_trust_unavailable",
+                        "store trust older than this host accepted",
+                    )
+                self._save(
+                    _with_trust(
+                        state,
+                        source,
+                        renewed,
+                        keep_revocations=not self._is_store(previous),
                     )
                 )
                 return self.source_status()
@@ -973,14 +1544,27 @@ class HostCatalog:
             headers=headers,
         )
 
-    async def fetch(self, *, now: int | None = None) -> VerifiedCatalog:
-        """Fetch and verify the catalog; retain the verified document by digest."""
+    async def fetch(
+        self, *, now: int | None = None, offline: bool = False
+    ) -> VerifiedCatalog:
+        """Fetch and verify the catalog; retain the verified document by digest.
+
+        When the source is the built-in store, its trust is seeded or renewed
+        first (see ``_renewed_store_state``); ``offline`` keeps that step off
+        the network. The catalog read itself is the operator's request and
+        always reaches the catalog address.
+        """
         if self.guard.locked():
             raise CatalogRefusedError("catalog_busy", "catalog source is busy")
         async with self.guard:
             if self.closed:
                 raise ValueError("catalog closed")
             state = self._state()
+            current_time = now if now is not None else int(time.time())
+            if self._uses_store(state):
+                state = await self._renewed_store_state(
+                    state, offline=offline, now=current_time
+                )
             if state.source is None or state.trust is None:
                 raise CatalogRefusedError(
                     "catalog_unconfigured", "catalog source unconfigured"
@@ -1017,9 +1601,7 @@ class HostCatalog:
                 raise CatalogRefusedError(
                     "catalog_unreachable", "catalog unavailable"
                 ) from None
-            verified = verify_catalog(
-                bytes(raw), trust, now=now if now is not None else int(time.time())
-            )
+            verified = verify_catalog(bytes(raw), trust, now=current_time)
             current = self._state()
             if current.source != source:
                 # A source change landed during the read: the same remedy as a
@@ -1063,7 +1645,12 @@ class HostCatalog:
         A catalog that updates regularly would otherwise fill its retention
         and stop; superseded documents are evidence with a short life.
         """
-        accepted = {floor.sha256 for floor in floors.values()}
+        # Trust floors share the map but name trust documents, not catalogs.
+        accepted = {
+            floor.sha256
+            for key, floor in floors.items()
+            if not key.startswith(_TRUST_FLOOR_PREFIX)
+        }
         retained = sorted(
             (path for path in islice(self.directory.iterdir(), 256)),
             key=lambda path: path.stat().st_mtime,

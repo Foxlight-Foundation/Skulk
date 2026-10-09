@@ -23,9 +23,9 @@ Choose the path that matches the machine:
 
 ## macOS
 
-Download the pinned Skulk 2.0.0 signed and notarized app directly:
+Download the pinned Skulk 2.0.1 signed and notarized app directly:
 
-**[Download Skulk 2.0.0 for Apple Silicon (.dmg)](https://releases.foxlight.ai/desktop/macos/2.0.0/1/Skulk-2.0.0-1-macOS-arm64.dmg)**
+**[Download Skulk 2.0.1 for Apple Silicon (.dmg)](https://releases.foxlight.ai/desktop/macos/2.0.1/7/Skulk-2.0.1-7-macOS-arm64.dmg)**
 
 Open the DMG, drag **Skulk** to **Applications**, eject the DMG, and open Skulk
 from Applications. macOS verifies the Developer ID signature and stapled
@@ -69,7 +69,10 @@ silently replaces itself.
 If you use Homebrew, update with `brew upgrade --cask
 Foxlight-Foundation/skulk/skulk`. To remove a DMG installation, quit Skulk and
 move **Skulk** from Applications to the Trash. Homebrew users can instead run
-`brew uninstall --cask skulk`.
+`brew uninstall --cask skulk`, which also removes the plugin service. If you
+removed a DMG installation that had plugins set up, turn off Skulk's plugin
+service under **System Settings → General → Login Items & Extensions → Allow in
+the Background**.
 
 ## Ubuntu and Debian
 
@@ -121,6 +124,19 @@ To uninstall the app and runtime:
 ```bash
 sudo apt remove skulk skulk-desktop skulk-runtime
 ```
+
+If you set up plugins, also remove the plugin service. It runs under your own
+account rather than as part of the packages, so removing them leaves it
+running until you log out:
+
+```bash
+systemctl --user disable --now foundation.foxlight.skulk.plugins.service
+rm -f ~/.config/systemd/user/foundation.foxlight.skulk.plugins.service
+systemctl --user daemon-reload
+```
+
+Its runtime and installed plugins stay in `~/.local/state/skulk/plugin-service`;
+delete that folder to remove them too.
 
 ### Headless Ubuntu or Debian
 
@@ -214,20 +230,24 @@ covers launch environments and service configuration.
 
 ## Add capabilities (optional)
 
-Capabilities such as Skulk Video Studio are separately installed plugins.
-Packaged installs include plugin support from Skulk 2.0.0. Before a host installs its first plugin, its
-plugin-management service is set up once. On a
-[source install](#source-and-development-installs), run this from the Skulk
-directory as the user who runs Skulk:
+Capabilities such as Skulk Video Studio are separately installed plugins. They
+install from the dashboard on every kind of install: the Mac app, Homebrew, the
+Linux packages, and the source installer. Open the dashboard on the host that
+will run the plugin and choose **Plugins**:
 
-```bash
-uv run skulk-plugin-service setup
-```
+1. The first time, Skulk sets up that host's plugin service for your user and
+   shows its progress. It needs no terminal and no administrator password, and
+   takes a few minutes. On Linux it needs systemd.
+2. **Browse** lists the Foxlight capability store at
+   [skulkapps.foxlight.ai](https://skulkapps.foxlight.ai/). Skulk verifies the
+   store's signatures by itself, and each card says whether a release fits this
+   host.
+3. Choose **Review and install**, check what the plugin may do (its
+   permissions, its screens, and whether any action can spend money), and
+   install it with one consent.
 
-It asks for your administrator password to register the service (Apple Silicon
-macOS, or Linux with systemd). `uv run skulk-plugin-service status`
-shows when it is ready. Then follow [Capabilities and Plugins](capability-nodes.md)
-to obtain, install and configure a plugin.
+[Capabilities and Plugins](capability-nodes.md) covers setup inside a plugin,
+private catalogs, updates, and removal. Plugins need Skulk 2.0.1 or later.
 
 ## First-run troubleshooting
 

@@ -43,13 +43,13 @@ import { PluginsPage } from './components/pages/PluginsPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
-import type { InstanceStatus, NodeRunnerState } from './components/cluster/RunningInstanceCard';
+import { deriveInstanceStatus, runnerNodeState } from './utils/instanceStatus';
 import { chatActions } from './store/slices/chatSlice';
 import { operatorSession } from './auth/operatorSession';
 import { apiSlice } from './store/api';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
-import { useSkulkTranslation, type SkulkTranslate } from './i18n/tolgee';
+import { useSkulkTranslation } from './i18n/tolgee';
 import { modelSupportsTextChat } from './types/models';
 import { parseBackendTag } from './utils/servingEngine';
 
@@ -144,79 +144,6 @@ interface StoreDownload {
   status: string;
 }
 
-/* ── Runner status → InstanceStatus mapping ───────────── */
-
-/** Collapse a single runner's tagged status into the per-node category the
- *  instance card renders. The runner lifecycle is idle -> connecting ->
- *  connected -> loading -> loaded -> warming up -> ready; everything that is not
- *  a terminal ready/failed/stopping state reads as "loading", except the initial
- *  RunnerIdle which reads as "pending" (spawned, not yet driven). */
-function runnerNodeState(runner: Record<string, unknown> | undefined): NodeRunnerState {
-  if (!runner) return 'pending';
-  const key = Object.keys(runner)[0];
-  if (key === 'RunnerReady' || key === 'RunnerRunning') return 'ready';
-  if (key === 'RunnerFailed') return 'failed';
-  if (key === 'RunnerShuttingDown' || key === 'RunnerShutdown') return 'stopping';
-  if (key === 'RunnerIdle') return 'pending';
-  return 'loading';
-}
-
-function deriveInstanceStatus(
-  runnerIds: string[],
-  runners: Record<string, Record<string, unknown>>,
-  t: SkulkTranslate,
-): { status: InstanceStatus; message?: string; progress?: number } {
-  if (runnerIds.length === 0) {
-    return {
-      status: 'loading',
-      message: t('app.instanceStatus.waitingForRunners', 'Waiting for runners...'),
-    };
-  }
-
-  const statuses = runnerIds.map((rid) => runners[rid]);
-
-  // If any runner has failed, the instance is failed
-  const failed = statuses.find((s) => s && 'RunnerFailed' in s);
-  if (failed) {
-    const inner = failed.RunnerFailed as Record<string, unknown> | undefined;
-    return { status: 'failed', message: inner?.errorMessage as string | undefined };
-  }
-
-  // If any runner is shutting down
-  if (statuses.some((s) => s && ('RunnerShuttingDown' in s || 'RunnerShutdown' in s))) {
-    return { status: 'shutting_down' };
-  }
-
-  // If all runners are ready or running
-  const allReady = statuses.every((s) => s && ('RunnerReady' in s || 'RunnerRunning' in s));
-  if (allReady) {
-    const anyRunning = statuses.some((s) => s && 'RunnerRunning' in s);
-    return { status: anyRunning ? 'running' : 'ready' };
-  }
-
-  // If any runner is warming up
-  if (statuses.some((s) => s && 'RunnerWarmingUp' in s)) {
-    return { status: 'warming_up' };
-  }
-
-  // Loading — try to extract progress from RunnerLoading
-  const loading = statuses.find((s) => s && 'RunnerLoading' in s);
-  if (loading) {
-    const inner = loading.RunnerLoading as Record<string, unknown> | undefined;
-    const loaded = inner?.layersLoaded as number | undefined;
-    const total = inner?.totalLayers as number | undefined;
-    const progress = loaded != null && total != null && total > 0
-      ? Math.round((loaded / total) * 100)
-      : undefined;
-    const message = loaded != null && total != null
-      ? t('app.instanceStatus.downloadingLayers', 'Downloading layers {loaded}/{total}...', { loaded, total })
-      : t('app.instanceStatus.loadingModel', 'Loading model...');
-    return { status: 'loading', message, progress };
-  }
-
-  // Connecting or idle
-  return { status: 'loading', message: t('app.instanceStatus.connecting', 'Connecting...') };
-}
 
 export function App() {
   const { t } = useSkulkTranslation();
@@ -234,6 +161,7 @@ export function App() {
     capabilityNodes,
     nodeResources,
     thunderboltBridgeCycles,
+    engineInstallBytesByInstance,
   } = useClusterState();
   const realtimeTranscriptionAvailable = Boolean(
     localNodeId && nodeCapabilities[localNodeId]?.includes('stt.realtime'),
@@ -619,7 +547,12 @@ export function App() {
       }
 
       // Derive status from runners
-      const derived = deriveInstanceStatus(runnerIds, runners, t);
+      const derived = deriveInstanceStatus(
+        runnerIds,
+        runners,
+        t,
+        engineInstallBytesByInstance.get(instanceId) ?? null,
+      );
 
       // Per-node status for EVERY node the instance is placed on (all ranks of a
       // pipeline / tensor placement), sorted for a stable, readable order, each
@@ -648,7 +581,7 @@ export function App() {
       });
     }
     return cards;
-  }, [visibleInstances, runners, topology, t]);
+  }, [visibleInstances, runners, topology, t, engineInstallBytesByInstance]);
 
   const hasInstances = instanceCards.length > 0;
 

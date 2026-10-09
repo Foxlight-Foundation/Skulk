@@ -1,6 +1,6 @@
 [project]
 name = "skulk"
-version = "2.0.0"
+version = "2.0.1"
 description = "Skulk: distributed AI inference across heterogeneous clusters (Apple Silicon MLX, AMD Vulkan, and NVIDIA CUDA nodes)"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -81,10 +81,15 @@ dependencies = [
   # a tiny pure-Python NVML binding, inert without an NVIDIA driver, so
   # non-NVIDIA Linux nodes pay only a few kilobytes.
   "nvidia-ml-py>=12.535.108; sys_platform == 'linux'",
+  # HARD dependency on Linux: the video engine installs on demand into its own
+  # environment, built with uv. A packaged runtime has no uv on PATH, so the
+  # binary ships inside Skulk's environment and is found through
+  # uv.find_uv_bin.
+  "uv>=0.8; sys_platform == 'linux'",
   # HARD dependency of the normal installer on macOS and Linux. A fresh Skulk
   # node includes the dashboard without relying on a separately installed
   # Node.js toolchain; --headless is the explicit API-only opt-out.
-  "nodejs-wheel-binaries==25.2.1rc0; sys_platform == 'darwin' or sys_platform == 'linux'",
+  "nodejs-wheel-binaries==24.19.0; sys_platform == 'darwin' or sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -206,7 +211,6 @@ root = "src"
 # supported platforms for this project
 [tool.uv]
 required-version = ">=0.8.6"
-prerelease = "allow"
 environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
 extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
 

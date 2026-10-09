@@ -551,11 +551,21 @@ A model card's `placement.compatible_backends` selects which engine serves it
   channel publishes no digests, so they are recorded by downloading each
   artifact once).
   Provisioned under `SKULK_ENGINES_DIR/comfy/<pin>/<variant>-<wheel-set
-  digest>` (a wheel-set change reprovisions, never reuses) at node
-  startup only when `SKULK_ENABLE_VIDEO_MODELS=true` (the wheel set is
-  gigabytes), or by `skulk doctor --fix`; `SKULK_COMFY_BIN` (the
-  environment's python) plus `SKULK_COMFY_ROOT` (the checkout) point at a
-  hand-built install instead. The runner spawns ComfyUI headless (loopback
+  digest>` (a wheel-set change reprovisions, never reuses) ON DEMAND, never
+  at startup (startup only wires an install already on disk): video cards
+  are listed by default (`SKULK_ENABLE_VIDEO_MODELS=false` hides them), an
+  eligible node (Linux NVIDIA, or AMD only on the gfx1151 Strix Halo PCI id
+  the ROCm wheels target; online; git and uv found, uv via the Linux `uv`
+  PyPI dependency in packaged runtimes) advertises the comfy tags in
+  `NodeResources.on_demand_backends` as well as `backends`, the placement
+  preview's `engine_install` warns that the ~7 GB engine installs with the
+  model, and the worker's `InstallEngine` task installs it beside the model
+  download (one shared job per engine; `LoadModel` waits; the new interpreter
+  must see the GPU or the install is removed; failure gives each waiter up
+  with `engine_install_failed`). Placement prefers an installed engine among
+  equals. `skulk doctor --fix` installs through the same path;
+  `SKULK_COMFY_BIN` (the environment's python) plus `SKULK_COMFY_ROOT` (the
+  checkout) point at a hand-built install instead. The runner spawns ComfyUI headless (loopback
   port, custom and API nodes disabled, Skulk-owned input/output/temp/user
   directories, an `extra_model_paths.yaml` exposing the staged artifact),
   binds the card and request onto ComfyUI's own MiniMax H3 node graph
@@ -974,7 +984,37 @@ an installation to a listing with consent (`install_from_catalog`, the
 owner-only `POST /v1/plugins/managed/catalog/install`,
 `install-plugin --from-catalog`): the listed feed becomes the source under the
 discovery trust and the served record must be the one listed; staging and
-activation stay separate consents.
+activation stay separate consents. The default source is the built-in
+capability store (`extensions/capability_store.py`): a TUF root shipped as
+package data (`capability_store_root.json`: root version 1, two YubiKey root
+keys at threshold one, a targets key separate from the snapshot/timestamp key;
+a build without it has no built-in store) anchors one signed target, the store's
+publisher trust, which `HostCatalog` seeds on a host with no source and renews
+on every read while on the store (newer revision only, applied as published
+with no revocation merge, hash-bound last verified copy offline). Revocations
+stay with the catalog address that set them (kept per address in the state's
+`revocations` map when the host leaves it, carried into any later trust for
+that address, never into the store's or another address's). Discovery trust
+floors are kept per catalog address (inside the state's `floors` map under a
+`trust\n` key prefix, bounded separately from catalog floors), so a switch to
+the store never lowers a private catalog's floor and a private trust is
+compared only with that address's own history; the dashboard has the host
+assign the next revision (`assign_trust_revision`). Installations bound from
+the store (`follows_store` and the store revision taken, `store_trust`, in
+their `release-source.json`; source and trust change as one journaled step,
+`trust-transition.json`, completed on the next read; a legacy
+`store-binding.json` marker is migrated into it on read) follow its trust
+while running, never taking an older store revision than the one recorded: the node's hourly
+`refresh_store_trust` (and store catalog reads) rewrite their
+`publisher-trust.json` at the next installation trust revision via
+`RuntimeDownloads.follow_trust` under one shared deadline, without touching
+the source revision, and keep the built-in catalog's trust in step; no
+verified trust for followers is a refusal, and busy followers (flagged in the
+manager inventory as `store_trust_retry`, whoever's read deferred them) are
+retried within five minutes. Private-catalog installations are unchanged. A private catalog replaces it;
+`use_builtin_catalog` / `POST /v1/plugins/managed/catalog/source/builtin`
+switches back. The node passes its offline mode per request because the
+manager runs with a fixed environment.
 
 Optional `StewardToolProvider` offers bounded `extension_*` read and inert-proposal
 tools through `extensions/steward.py`. The steward binds each model step to the
@@ -1004,7 +1044,7 @@ card-content digest from the same effective catalog/installed precedence as
 place resources; controllers must repeat identity and live compatibility checks.
 
 Skulk now treats model capability handling as two layers:
-- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `video`, `license`, `tooling`, and `runtime` sections for refined model support. The `video` section declares audio-video generation truth (modes `t2va`/`fl2va`/`ref2va`, each implying one of `TextToVideo`/`ImageToVideo`/`ReferenceToVideo`; duration, fps and frame grid; canvas; audio output; reference limits; pinned lora/model_patch/embedding/graph_template companions, plus externally hosted `preprocessor` weights with a `role` and `license`, fetched with the card and read through `ModelCard.external_video_companions()`) and names no engine; video cards are hidden until `SKULK_ENABLE_VIDEO_MODELS=true`, like the image gate
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `video`, `license`, `tooling`, and `runtime` sections for refined model support. The `video` section declares audio-video generation truth (modes `t2va`/`fl2va`/`ref2va`, each implying one of `TextToVideo`/`ImageToVideo`/`ReferenceToVideo`; duration, fps and frame grid; canvas; audio output; reference limits; pinned lora/model_patch/embedding/graph_template companions, plus externally hosted `preprocessor` weights with a `role` and `license`, fetched with the card and read through `ModelCard.external_video_companions()`) and names no engine; video cards are listed by default and `SKULK_ENABLE_VIDEO_MODELS=false` hides them, like the image switch
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
@@ -1017,7 +1057,12 @@ owner, verification state, and SHA-256 file manifest. Sidecars are durable
 installed truth; the central `registry.json` is a rebuildable index. Installed
 generations load before registry access and remain usable in `SKULK_OFFLINE=true`
 while complete. A registry replacement is reported as an update and becomes
-active only after its new generation commits atomically.
+active only after its new generation commits atomically. With a model store,
+the store's generation is the cluster's installed truth: every node reads the
+store registry on each inventory pass (`record_store_installed_identities`), and
+once the store holds the current signed card, a node's staged copy of an older
+generation no longer keeps the old card active (placement would otherwise carry
+a card the store refuses).
 
 Signed registry-v2 cards may carry an exact `artifact_bundle` with a
 repository-relative loader root, immutable required-file metadata, download
@@ -1511,8 +1556,12 @@ support; controllers must obtain fresh previews and recheck live target support
 before submission and throughout readiness.
 
 
-Managed-plugin system setup is `skulk-plugin-service setup`, implemented by
-`extensions/service_setup.py`. Run it as the existing nonroot owner. It journals
+Managed-plugin setup is `skulk-plugin-service setup`, implemented by
+`extensions/service_setup.py`; the node also runs it itself on first use through
+`POST /v1/plugins/managed/service/setup` (`extensions/service_autosetup.py`). The
+default scope is a per-user launchd agent or systemd user unit registered by the
+owner with no elevation (`service_registration.register_user`); `setup --system`
+registers a system service through the sudo helper. Run it as the existing nonroot owner. It journals
 setup stages, preserves generated profile identity and copies exact qualified
 runtime dependencies without modifying Skulk's environment. Its fixed local sudo
 entrypoint `service_registration.py` must remain standard-library-only and execute

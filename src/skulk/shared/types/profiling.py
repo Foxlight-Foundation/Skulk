@@ -323,6 +323,13 @@ class NodeResources(CamelCaseModel):
     """
 
     backends: frozenset[str] = frozenset({"mlx"})
+    on_demand_backends: frozenset[str] = Field(
+        default_factory=frozenset,
+        description=(
+            "Subset of backends whose engine is not installed yet; the node "
+            "installs it the first time a model placed there needs it."
+        ),
+    )
     architecture: str | None = Field(
         default=None,
         description="Observed host CPU architecture for exact engine package selection.",
@@ -359,7 +366,7 @@ class NodeResources(CamelCaseModel):
     engine binary override), with its remediation. Cluster health maps these
     one-to-one onto ``nodeHealth`` reasons so the dashboard shows them."""
 
-    @field_validator("backends", mode="before")
+    @field_validator("backends", "on_demand_backends", mode="before")
     @classmethod
     def _coerce_backends(cls, v: object) -> object:
         # Strict mode rejects a list where a frozenset is declared, but the
@@ -388,7 +395,7 @@ class NodeResources(CamelCaseModel):
             return tuple(cast("Iterable[object]", v))
         return v
 
-    @field_serializer("backends")
+    @field_serializer("backends", "on_demand_backends")
     def _serialize_backends(self, value: frozenset[str]) -> list[str]:
         # Emit a sorted list in both json and python dump modes so JSON wire
         # encoding and TOML serialization (tomlkit cannot encode a frozenset)
@@ -439,8 +446,9 @@ class NodeResources(CamelCaseModel):
             # through blocking subprocesses; the first call pays them in full
             # and a hung interpreter pays its whole timeout. Run it off the
             # worker loop so heartbeats and event application keep moving.
+            # Only installed engines have a build to report.
             engine_builds = await to_thread.run_sync(
-                engine_build_inventory, derivation.backends, facts
+                engine_build_inventory, derivation.installed_backends, facts
             )
         except ValueError as error:
             from loguru import logger
@@ -453,6 +461,7 @@ class NodeResources(CamelCaseModel):
         )
         return cls(
             backends=derivation.backends,
+            on_demand_backends=derivation.on_demand_backends,
             architecture=platform.machine().lower(),
             engine_builds=engine_builds,
             llama_server_settings=(

@@ -37,6 +37,7 @@ from skulk.extensions.runtime_manager import (
     CatalogInstallRequest,
     CatalogRegistration,
     CatalogRequest,
+    CatalogStoreRequest,
     InstallationRequest,
     InstalledRelease,
     InstallRecoveryRequest,
@@ -47,6 +48,7 @@ from skulk.extensions.runtime_manager import (
     ReleaseRequest,
     ReloadRuntimeRequest,
     SourceRegistration,
+    StoreTrustRequest,
     SubmitRequest,
     manager_request,
 )
@@ -64,8 +66,18 @@ from skulk.extensions.service_snapshot import (
     stage_service_runtime,
 )
 from skulk.extensions.types import ExtensionContext
+from skulk.shared.constants import offline_mode
 
 _WINDOW = TypeAdapter(list[int])
+
+_STORE_TRUST_SECONDS: Final = 3600.0
+"""How often installations bound to the built-in store have its trust renewed.
+
+Hourly keeps a store revocation, such as a compromised publisher key, from
+waiting long, and keeps renewals far ahead of any trust expiry."""
+
+_STORE_TRUST_RETRY_SECONDS: Final = 300.0
+"""How soon a renewal the manager could not complete is tried again."""
 
 
 def protocol_refusal(result: dict[str, JsonValue]) -> ProtocolUnsupportedError | None:
@@ -97,6 +109,61 @@ _MANAGER_START_SECONDS = 90.0
 
 # How long a manager that answered nothing gets to show the selection it made.
 _SELECTION_WAIT_SECONDS = 120.0
+
+_RUNTIME_REFRESH_RETRY_SECONDS: Final = 300.0
+"""How long after one automatic manager refresh attempt began the next may begin."""
+
+_UPDATE_REPORT_SECONDS: Final = 2 * _RUNTIME_REFRESH_RETRY_SECONDS
+"""How long after a build mismatch is first seen an update reads as in progress.
+
+Two automatic attempts begin inside it. An attempt begun inside it is followed
+to its end and given ``_UPDATE_SETTLE_SECONDS`` more; later attempts keep
+running in the background but no longer extend it, so an update that never
+converges reads as a failure the owner can act on rather than as progress for
+ever."""
+
+_UPDATE_SETTLE_SECONDS: Final = 2 * _MANAGER_START_SECONDS
+"""How long after a refresh attempt ends the manager has to attach on the new build.
+
+A successful reload returns before the manager restarts, and the keep-alive
+and bootstrap verification take up to ``_MANAGER_START_SECONDS``; twice that
+covers a slow restart without calling it a failure."""
+
+RuntimeUpdateFailure = Literal[
+    "staging_failed", "refused", "other_interpreter", "not_restarted"
+]
+"""Why bringing the plugin manager to this host's Skulk build did not finish.
+
+``staging_failed``: this host's environment could not be copied for the
+manager (no further automatic attempt until Skulk restarts);
+``refused``: the manager refused the matching runtime;
+``other_interpreter``: the registered service starts another interpreter, which
+only setup registers again; ``not_restarted``: the manager has not attached on
+this build within ``_UPDATE_REPORT_SECONDS``."""
+
+
+@final
+@dataclass(frozen=True)
+class RuntimeUpdate:
+    """Where bringing the plugin manager to this host's Skulk build stands.
+
+    A Skulk update leaves the manager on the previous build until a matching
+    runtime is staged and the manager restarts on it. The service status
+    reports that window as setup in progress rather than as a broken
+    inventory. Built from memory alone, so reading it never waits on the copy.
+    """
+
+    phase: Literal["refreshing", "waiting", "failed"]
+    """``refreshing``: a refresh attempt is staging or reloading;
+    ``waiting``: no attempt is running and the manager has not attached on
+    this build yet; ``failed``: see ``failure``."""
+    since: float
+    """Monotonic time this phase began; orders a failure against a later setup."""
+    failure: RuntimeUpdateFailure | None = None
+    """Why the update did not finish; set only when ``phase`` is ``failed``."""
+    refresh_running: bool = False
+    """Whether a refresh attempt is running now, a background retry under a
+    reported failure included; no setup may start under one."""
 
 
 def _selected(root: Path, generation: str) -> bool:
@@ -430,12 +497,19 @@ class ManagedInventory(BaseModel):
         default=False,
         description="Whether this manager can select a staged runtime and restart on request.",
     )
+    store_trust_retry: bool = Field(
+        default=False,
+        description="Whether installations following the built-in capability "
+        "store were busy when its trust was last followed, so the host renews "
+        "it again within minutes.",
+    )
 
 
 type ManagementRequest = (
     InventoryRequest
     | CatalogRequest
     | CatalogRegistration
+    | CatalogStoreRequest
     | CatalogInstallRequest
     | InstallationRequest
     | SubmitRequest
@@ -492,6 +566,28 @@ class ManagedServices:
         self.runtimes_pruned_for: str | None = None
         # Monotonic time before which a failed or partial prune is not retried.
         self.runtime_prune_retry_at = 0.0
+        # The store's trust renewal for installations bound to it runs in the
+        # background on its own schedule; None until the first one is due.
+        self.store_trust: asyncio.Task[None] | None = None
+        self.store_trust_due: float | None = None
+        # One warning per run of failed renewals, not one every five minutes.
+        self.store_trust_failing = False
+        # Counts deferral notices; a renewal that started before one arrived
+        # must not push the retry it asked for back out to an hour.
+        self.store_trust_deferrals = 0
+        # The manager's retry flag as last read, so only its rise is a notice.
+        self.store_trust_retry_seen = False
+        # A build mismatch opens an update that the next attachment on this
+        # build closes. The service status reads it, so the minutes a Skulk
+        # update spends staging and restarting the manager read as setup in
+        # progress instead of a broken inventory. Monotonic times throughout.
+        self.update_started: float | None = None
+        self.update_attempt_ended: float | None = None
+        self.update_failure: RuntimeUpdateFailure | None = None
+        self.update_failed_at = 0.0
+        # Set once the first inventory refresh has an outcome: until then a
+        # manager still on the previous build answers like a ready one.
+        self.first_observation = asyncio.Event()
         self.guard = asyncio.Lock()
         self.closed = False
 
@@ -530,13 +626,16 @@ class ManagedServices:
         await self.attachment.ensure()
 
     def _schedule_runtime_refresh(self, differs: ManagerBuildMismatchError) -> None:
+        if self.update_started is None:
+            self.update_started = time.monotonic()
         if self.runtime_refresh is not None and not self.runtime_refresh.done():
             return
         if self.runtime_refresh_exhausted:
             return
         if (
             self.runtime_refreshed is not None
-            and time.monotonic() - self.runtime_refreshed < 300
+            and time.monotonic() - self.runtime_refreshed
+            < _RUNTIME_REFRESH_RETRY_SECONDS
         ):
             return
         self.runtime_refreshed = time.monotonic()
@@ -563,6 +662,75 @@ class ManagedServices:
         if task is not None and not task.done():
             await asyncio.gather(task, return_exceptions=True)
 
+    def runtime_update(self) -> RuntimeUpdate | None:
+        """Report an update of the manager to this host's build; None when none is pending.
+
+        Reads memory only: the copy runs in its own task, so this never waits
+        on it. Once the update has run past its bound without the manager
+        attaching on this build, the failure is kept until it does, or until
+        a later setup supersedes it, so background retries do not make the
+        report alternate between progress and failure.
+        """
+        started = self.update_started
+        if self.closed or started is None:
+            return None
+        task = self.runtime_refresh
+        running = task is not None and not task.done()
+        failure = self.update_failure
+        if failure is not None:
+            return RuntimeUpdate(
+                "failed", self.update_failed_at, failure, refresh_running=running
+            )
+        bound = started + _UPDATE_REPORT_SECONDS
+        attempt = self.runtime_refreshed
+        # Only an attempt begun inside the bound is followed past it.
+        followed = attempt is not None and attempt < bound
+        if attempt is not None and followed and running:
+            return RuntimeUpdate("refreshing", attempt, refresh_running=True)
+        ended = self.update_attempt_ended
+        now = time.monotonic()
+        if now < bound or (
+            followed and ended is not None and now < ended + _UPDATE_SETTLE_SECONDS
+        ):
+            return RuntimeUpdate(
+                "waiting",
+                started if ended is None else ended,
+                refresh_running=running,
+            )
+        self._update_failed("not_restarted")
+        return RuntimeUpdate(
+            "failed", self.update_failed_at, "not_restarted", refresh_running=running
+        )
+
+    async def first_observed(self, seconds: float) -> None:
+        """Wait, at most ``seconds``, for the first manager observation of this run.
+
+        Until the first inventory refresh has an outcome, a manager still on
+        the previous Skulk build answers like a ready one, so a status read
+        right after Skulk starts waits for that outcome instead of reporting
+        it ready. Returns at once when observation is not running or has
+        already observed once. The wait involves no staging: a refresh only
+        schedules its copy.
+        """
+        if self.closed or self.task is None or self.task.done():
+            return
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(seconds):
+                await self.first_observation.wait()
+
+    def _update_failed(self, failure: RuntimeUpdateFailure) -> None:
+        """Record why the open update did not finish; nothing once it has closed."""
+        if self.update_started is None:
+            return
+        self.update_failure = failure
+        self.update_failed_at = time.monotonic()
+
+    def _update_finished(self) -> None:
+        """Close the update: the manager attached on this host's build."""
+        self.update_started = None
+        self.update_attempt_ended = None
+        self.update_failure = None
+
     async def _refresh_manager_runtime(self, root: Path, live: str) -> None:
         """Stage the manager runtime from this host's build and ask for a reload.
 
@@ -572,6 +740,9 @@ class ManagedServices:
         """
         candidate: Path | None = None
         snapshot: ServiceSnapshot | None = None
+        # What an explicit refusal below means for the owner; the status
+        # route words it, and the log keeps the detail.
+        failure: RuntimeUpdateFailure = "refused"
         try:
             # The inventory answers without an attachment and names whether
             # the manager knows the reload request, so a manager from before
@@ -587,6 +758,7 @@ class ManagedServices:
                 # interpreter for the OS service to start; a service
                 # registered to invoke another one could not come back, and
                 # only an elevated setup re-registers it. Nothing is staged.
+                failure = "other_interpreter"
                 raise ValueError(
                     "the registered service invokes another interpreter; "
                     "rerun skulk-plugin-service setup"
@@ -601,6 +773,7 @@ class ManagedServices:
                     # Qualification past its deadline has populated the
                     # generation directory as surely as a failed copy has.
                     self.runtime_refresh_exhausted = True
+                    failure = "staging_failed"
                     raise ValueError(
                         "the manager runtime could not be staged from this "
                         "environment; no further attempt until the host restarts"
@@ -646,6 +819,8 @@ class ManagedServices:
                 f"plugin manager runtime refresh failed: {error}; "
                 "rerun skulk-plugin-service setup"
             )
+            # The service status surfaces this to the owner with the next step.
+            self._update_failed(failure)
         except ManagerNotRestartedError as error:
             # The selection is in place and kept. A service still verifying
             # the generation attaches on it later and the setup state follows
@@ -668,6 +843,9 @@ class ManagedServices:
                 "plugin manager runtime refresh is indeterminate: "
                 f"{type(error).__name__}; the staged generation is retained"
             )
+        finally:
+            # Starts the settle time the manager has to attach on this build.
+            self.update_attempt_ended = time.monotonic()
 
     async def _record_refresh(
         self,
@@ -780,6 +958,76 @@ class ManagedServices:
         if task is not None and not task.done():
             await asyncio.gather(task, return_exceptions=True)
 
+    def _schedule_store_trust(self, root: Path) -> None:
+        """Renew the built-in store's trust for installations bound to it.
+
+        The manager runs with a fixed environment, so the node drives the
+        renewal and states its own offline mode: offline, the manager uses
+        only the store's last verified trust. Runs in the background so a
+        slow store never holds the inventory refresh.
+        """
+        if self.store_trust is not None and not self.store_trust.done():
+            return
+        if self.store_trust_due is not None and time.monotonic() < self.store_trust_due:
+            return
+        self.store_trust_due = time.monotonic() + _STORE_TRUST_RETRY_SECONDS
+        self.store_trust = asyncio.create_task(self._refresh_store_trust(root))
+
+    async def _refresh_store_trust(self, root: Path) -> None:
+        """Ask the manager to renew store trust; a refusal is retried sooner."""
+        deferrals = self.store_trust_deferrals
+        try:
+            result = await manager_request(
+                root, StoreTrustRequest(offline=offline_mode())
+            )
+        except (OSError, ValueError, TimeoutError):
+            return
+        payload = result.get("result")
+        if set(result) != {"result"} or not isinstance(payload, dict):
+            # Includes the manager refusing because installations follow the
+            # store and no verified store trust is in force: those keep
+            # running on the trust they hold until it expires.
+            if not self.store_trust_failing:
+                logger.warning(
+                    "the plugin manager could not renew the built-in capability "
+                    "store's trust for its installations; retrying every five "
+                    "minutes"
+                )
+            self.store_trust_failing = True
+            return
+        self.store_trust_failing = False
+        # A busy installation is retried soon rather than in an hour, and so is
+        # one a catalog read deferred while this renewal was in flight.
+        if not payload.get("deferred") and self.store_trust_deferrals == deferrals:
+            self.store_trust_due = time.monotonic() + _STORE_TRUST_SECONDS
+            # Every follower was reached, which cleared the manager's flag; a
+            # flag seen again after this is a new deferral, even if no
+            # inventory read caught it cleared in between.
+            self.store_trust_retry_seen = False
+
+    def _retry_deferred_followers(self, payload: dict[str, JsonValue]) -> None:
+        """Bring the next renewal forward when a catalog read deferred followers.
+
+        A read renews the store's trust and follows it at once, but an
+        installation busy at that moment keeps its earlier trust; the node's
+        next renewal then runs within five minutes instead of up to an hour.
+        """
+        if payload.get("store_trust_deferred"):
+            self._note_store_trust_deferral()
+
+    def _note_store_trust_deferral(self) -> None:
+        """Bring the next renewal within five minutes, and keep it there."""
+        self.store_trust_deferrals += 1
+        soon = time.monotonic() + _STORE_TRUST_RETRY_SECONDS
+        if self.store_trust_due is None or self.store_trust_due > soon:
+            self.store_trust_due = soon
+
+    async def _settle_store_trust(self) -> None:
+        """Let a renewal in flight finish rather than abandon it mid-write."""
+        task, self.store_trust = self.store_trust, None
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+
     async def request(self, request: ManagementRequest) -> dict[str, JsonValue]:
         """Send one typed local management request; never accept an attachment override.
 
@@ -802,6 +1050,8 @@ class ManagedServices:
             if catalog_refused is not None:
                 raise catalog_refused
             raise ValueError("managed service request refused")
+        if isinstance(request, CatalogRequest) and request.action == "read_catalog":
+            self._retry_deferred_followers(payload)
         return payload
 
     async def refresh(self) -> ManagedInventory:
@@ -817,6 +1067,8 @@ class ManagedServices:
                     # restarts it and the next refresh attaches.
                     self._schedule_runtime_refresh(differs)
                     raise
+                # Attached on this host's build: any update has finished.
+                self._update_finished()
                 assert self.connection is not None and self.context is not None
                 assert self.attachment is not None
                 if self.attachment.build is not None:
@@ -834,6 +1086,10 @@ class ManagedServices:
                 inventory = ManagedInventory.model_validate_json(
                     json.dumps(result["result"])
                 )
+                if inventory.store_trust_retry and not self.store_trust_retry_seen:
+                    # Any deferral the manager saw, a terminal read's included.
+                    self._note_store_trust_deferral()
+                self.store_trust_retry_seen = inventory.store_trust_retry
                 identifiers = [item.plugin_id for item in inventory.installations]
                 if len(set(identifiers)) != len(identifiers):
                     raise ValueError("ambiguous managed installation inventory")
@@ -896,6 +1152,7 @@ class ManagedServices:
                         and item.service.state == "running"
                         and item.service.active_digest == item.selected_digest
                     )
+                self._schedule_store_trust(Path(self.connection.manager_root))
                 return inventory
             except (OSError, ValueError, TimeoutError):
                 # Keep unavailable installations visible for configuration, but
@@ -908,6 +1165,8 @@ class ManagedServices:
                     # either; an absent owner must warn again.
                     owner.manager_state = None
                 raise
+            finally:
+                self.first_observation.set()
 
     async def _poll(self) -> None:
         while True:
@@ -918,6 +1177,7 @@ class ManagedServices:
     async def _detach(self) -> None:
         await self._settle_runtime_refresh()
         await self._settle_runtime_prune()
+        await self._settle_store_trust()
         owners, self.owners = tuple(self.owners.values()), {}
         await asyncio.gather(*(owner.on_stop() for owner in owners))
         if self.attachment is not None:
@@ -936,5 +1196,6 @@ class ManagedServices:
             self.task = None
         await self._settle_runtime_refresh()
         await self._settle_runtime_prune()
+        await self._settle_store_trust()
         async with self.guard:
             await self._detach()

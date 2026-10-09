@@ -6,6 +6,7 @@ every other host that passes admission. The alternatives pass re-runs the
 planner per remaining host and surfaces the viable single-node options.
 """
 
+import json
 from datetime import datetime, timezone
 from typing import cast
 from unittest.mock import AsyncMock
@@ -30,6 +31,7 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.worker.instances import (
+    Instance,
     InstanceId,
     MlxRingInstance,
 )
@@ -459,6 +461,42 @@ async def test_previews_surface_per_host_alternatives(
     ]
 
 
+async def test_preview_names_missing_hardware_as_compatibility_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model no machine can run says which machine it needs beneath the card."""
+
+    api = _build_api()
+    client = TestClient(api.app)
+    api.state.topology.add_node(NodeId("linux-gpu"))
+    message = (
+        "No machine in this cluster can run this model: it needs an Apple "
+        "Silicon Mac."
+    )
+
+    async def _load(_model_id: object) -> ModelCard:
+        return _card()
+
+    def _no_capable_machine(
+        command: PlaceInstance,
+        **kwargs: object,
+    ) -> dict[InstanceId, MlxRingInstance]:
+        raise placement_module.PlacementNoCapableMachineError(message)
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    monkeypatch.setattr(api_main, "get_instance_placements", _no_capable_machine)
+
+    response = client.get("/instance/previews", params={"model_id": str(_MODEL_ID)})
+
+    assert response.status_code == 200
+    payload = cast("dict[str, object]", cast(object, response.json()))
+    previews = cast("list[dict[str, object]]", payload["previews"])
+    assert previews
+    assert all(preview["error"] == message for preview in previews)
+    assert all(preview["compatibility_detail"] == message for preview in previews)
+    assert all(preview["error_code"] == "no_valid_placement" for preview in previews)
+
+
 async def test_alternatives_skipped_when_caller_pins_nodes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -604,3 +642,104 @@ async def test_placement_apis_forward_unified_memory_classification(
         )
     assert seen_unified_nodes
     assert all(value == expected_unified_nodes for value in seen_unified_nodes)
+
+
+def test_preview_names_the_engine_a_placement_installs() -> None:
+    """A shard whose stamped backend installs on demand carries the notice."""
+    api = _build_api()
+    on_demand = NodeId("on-demand-node")
+    ready = NodeId("ready-node")
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=on_demand,
+            info=NodeResources(
+                backends=frozenset({"comfy", "comfy-cuda"}),
+                on_demand_backends=frozenset({"comfy", "comfy-cuda"}),
+            ),
+        )
+    )
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=ready, info=NodeResources(backends=frozenset({"comfy", "comfy-cuda"}))
+        )
+    )
+    engine_install = api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+        _single_node_instance(str(on_demand), resolved_backend="comfy-cuda")
+    )
+    assert engine_install is not None
+    assert engine_install.engine == "comfy"
+    assert engine_install.node_ids == [str(on_demand)]
+    assert engine_install.approximate_download_bytes == 7 * 1024**3
+    assert "will be installed with this model" in engine_install.detail
+
+    assert (
+        api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+            _single_node_instance(str(ready), resolved_backend="comfy-cuda")
+        )
+        is None
+    )
+    assert (
+        api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+            _single_node_instance(str(on_demand))
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("installs", [True, False])
+def test_quick_launch_returns_the_engine_install_notice(
+    monkeypatch: pytest.MonkeyPatch, installs: bool
+) -> None:
+    """A launch without a preview still tells the caller the engine installs first."""
+    api = _build_api()
+    node = NodeId("video-node")
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=node,
+            info=NodeResources(
+                backends=frozenset({"comfy", "comfy-cuda"}),
+                on_demand_backends=(
+                    frozenset({"comfy", "comfy-cuda"}) if installs else frozenset()
+                ),
+            ),
+        )
+    )
+    client = TestClient(api.app)
+
+    async def _load(_model_id: object) -> ModelCard:
+        return _card()
+
+    def _dry_run(command: PlaceInstance, **_: object) -> dict[InstanceId, Instance]:
+        planned = _single_node_instance(str(node), resolved_backend="comfy-cuda")
+        return {InstanceId(str(command.command_id)): planned}
+
+    async def _send(_command: object) -> None:
+        return None
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(_load))
+    monkeypatch.setattr(api_main, "get_instance_placements", _dry_run)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = client.post("/place_instance", json={"model_id": str(_MODEL_ID)})
+
+    assert response.status_code == 200, response.text
+    body = cast(dict[str, object], response.json())
+    if not installs:
+        assert body["engine_install"] is None
+        return
+    engine_install = cast(dict[str, object], body["engine_install"])
+    assert engine_install["engine"] == "comfy"
+    assert engine_install["node_ids"] == [str(node)]
+    assert engine_install["approximate_download_bytes"] == 7 * 1024**3
+    assert "will be installed with this model" in str(engine_install["detail"])
+
+
+def test_quick_launch_documents_its_response_in_openapi() -> None:
+    """Generated clients can discover the engine-install notice on quick launch."""
+    schema = cast(dict[str, dict[str, object]], _build_api().app.openapi())
+    path = cast(dict[str, dict[str, object]], schema["paths"]["/place_instance"])
+    responses = cast(dict[str, object], path["post"]["responses"])
+    assert '"#/components/schemas/CreateInstanceResponse"' in json.dumps(responses["200"])
+    schemas = cast(dict[str, object], schema["components"]["schemas"])
+    assert '"engine_install"' in json.dumps(schemas["CreateInstanceResponse"])
+

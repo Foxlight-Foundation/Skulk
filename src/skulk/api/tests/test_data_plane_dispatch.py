@@ -134,6 +134,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
         "remote-management-node": {
             "architecture": None,
             "backends": [],
+            "onDemandBackends": [],
             "engineBuilds": {},
             "llamaServerSettings": None,
             "hardwareClasses": [],
@@ -146,6 +147,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
         "worker-node": {
             "architecture": None,
             "backends": ["mlx"],
+            "onDemandBackends": [],
             "engineBuilds": {},
             "llamaServerSettings": None,
             "hardwareClasses": [],

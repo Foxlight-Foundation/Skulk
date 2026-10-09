@@ -1,15 +1,55 @@
-import type { CatalogEntry, CatalogInstallation, CatalogInstallRequest, CatalogListing, ManagedRuntime, RuntimeInstallation } from '../../store/endpoints/plugins';
+import type {
+  CatalogEntry, CatalogInstallation, CatalogInstallRequest, CatalogListing, InstallOperations, ManagedOperationAddress, ManagedRuntime,
+  RuntimeInstallation, RuntimeRelease, RuntimeSourceStatus,
+} from '../../store/endpoints/plugins';
+import { installNeedsRetry } from './pluginHealth';
 
 /** What a catalog card offers this host for one bundle. */
-export type CatalogOfferState = 'available' | 'installed' | 'update' | 'unfit';
+export type CatalogOfferState = 'available' | 'installed' | 'update' | 'unfit' | 'retry';
+
+/**
+ * An installation of a bundle whose install has not finished, with the signed
+ * release it installs: one that stopped and waits for a retry, or a first
+ * install still under way or staged.
+ */
+export interface UnfinishedInstall {
+  pluginId: string;
+  review: RuntimeRelease;
+  /** Whether a release was already selected, so finishing it updates that release. */
+  updating: boolean;
+  /** Whether the host reports it stopped (`recovery_required`); otherwise it is under way or staged. */
+  stopped: boolean;
+}
 
 /** One bundle in a catalog: the release to offer and the installation it would replace. */
 export interface CatalogOffer {
-  /** The newest listing built for this host, else the newest listing. */
+  /** The newest listing built for this host, else the newest listing; for a retry, the release it retries when still listed. */
   entry: CatalogEntry;
   /** A current (not uninstalled) installation of the same bundle, if any. */
   installed: ManagedRuntime | null;
   state: CatalogOfferState;
+  /** The installation of this bundle whose install has not finished, when the offer is to finish it. */
+  retry?: UnfinishedInstall | null;
+}
+
+/**
+ * The installations whose install has not finished: any whose install
+ * stopped and waits for the owner's retry, and any first install (no release
+ * selected yet) still under way or staged. A first install names its bundle
+ * only through its install, so Browse would otherwise offer that bundle again
+ * and register a second installation beside it.
+ */
+export function unfinishedInstalls(runtimes: ManagedRuntime[], operations: InstallOperations | undefined): UnfinishedInstall[] {
+  const found: UnfinishedInstall[] = [];
+  for (const runtime of runtimes) {
+    const operation = operations?.[runtime.plugin_id];
+    if (!operation) continue;
+    const stopped = installNeedsRetry(runtime, operation);
+    if (stopped || (!runtime.uninstalled && runtime.selected_digest === null)) {
+      found.push({ pluginId: runtime.plugin_id, review: operation.review, updating: runtime.selected_digest !== null, stopped });
+    }
+  }
+  return found;
 }
 
 /**
@@ -18,8 +58,14 @@ export interface CatalogOffer {
  * A bundle is offered at its newest release that fits this host. An installed
  * bundle with a newer fitting release is an update: that is also how an
  * installation broken by a Skulk update gets its matching release back.
+ *
+ * An installation of the bundle whose install stopped is offered for retry
+ * instead of another install: the host refuses to bind it to a release until
+ * it is retried, and a new installation would leave it behind. The installed
+ * one's own stopped install comes first; a stopped first install counts while
+ * nothing else of the bundle is installed.
  */
-export function catalogOffers(listing: CatalogListing, runtimes: ManagedRuntime[]): CatalogOffer[] {
+export function catalogOffers(listing: CatalogListing, runtimes: ManagedRuntime[], unfinished: UnfinishedInstall[] = []): CatalogOffer[] {
   const bundles = new Map<string, CatalogEntry[]>();
   for (const entry of listing.entries) {
     bundles.set(entry.bundle_id, [...(bundles.get(entry.bundle_id) ?? []), entry]);
@@ -38,12 +84,30 @@ export function catalogOffers(listing: CatalogListing, runtimes: ManagedRuntime[
       if (fitting && fitting.sequence > installedSequence) state = 'update';
       else {
         state = 'installed';
-        entry = newestFirst.find((candidate) => candidate.sequence === installedSequence) ?? entry;
+        // Several platforms share one sequence, so the card names this
+        // host's listing of the installed release, as a retry's card does:
+        // the one that fits, else the one built for the platform another
+        // fitting listing names (a Skulk update may have moved it out of range).
+        entry = newestFirst.find((candidate) => candidate.sequence === installedSequence && candidate.matches_host)
+          ?? newestFirst.find((candidate) => candidate.sequence === installedSequence && fitting !== null && candidate.runtime_platform === fitting.runtime_platform)
+          ?? newestFirst.find((candidate) => candidate.sequence === installedSequence) ?? entry;
       }
     } else {
       state = fitting ? 'available' : 'unfit';
     }
-    offers.push({ entry, installed, state });
+    const retry = installed
+      ? unfinished.find((item) => item.stopped && item.pluginId === installed.plugin_id) ?? null
+      : unfinished.find((item) => item.review.bundle_id === bundleId) ?? null;
+    if (retry) {
+      state = 'retry';
+      // The card names the release the host installs: that sequence's listing
+      // for this host, since several platforms can share a sequence.
+      const sequence = retry.review.sequence;
+      entry = newestFirst.find((candidate) => candidate.sequence === sequence && candidate.matches_host)
+        ?? newestFirst.find((candidate) => candidate.sequence === sequence && candidate.runtime_platform === retry.review.platform)
+        ?? entry;
+    }
+    offers.push({ entry, installed, state, retry });
   }
   return offers.sort((left, right) => displayTitle(left.entry).localeCompare(displayTitle(right.entry)));
 }
@@ -108,6 +172,21 @@ export interface CatalogInvitation {
   trustExpiresAt: number;
   /** Optional bearer for a catalog behind a credential; never displayed. */
   token?: string;
+}
+
+/**
+ * The revision for discovery trust the connect panel creates.
+ *
+ * The host keeps each catalog address's trust history and refuses a trust
+ * older than the one it accepted there, or a different one at the same
+ * revision. The current revision only describes the catalog in use now, so a
+ * returning catalog could sit at or above it. The panel's opening time, in
+ * seconds, is above any revision an earlier panel created and above the
+ * current one, so re-adding a catalog with a new code is never refused as a
+ * rollback.
+ */
+export function trustRevision(current: number | null, openedAtSeconds: number): number {
+  return Math.max((current ?? 0) + 1, openedAtSeconds);
 }
 
 /** Prefix of an invitation code, so a pasted code is recognizable. */
@@ -189,6 +268,58 @@ export interface InstallJourney {
   installOperationId: string;
   activationOperationId: string | null;
   startedAt: number;
+  /**
+   * Set when the host reported the install stopped (`recovery_required`).
+   * Nothing is followed then, but the record stays: it is this browser's
+   * consent to the release's permissions, which a retry of exactly that
+   * release carries to activation.
+   */
+  interrupted?: boolean;
+  /**
+   * Which of the plugin's nodes this journey turns on by itself once the
+   * release runs, recorded with the activation this browser sends: every node
+   * that reports off after a first install, or after an update only the nodes
+   * that were on before it, so a node the owner turned off stays off. `ran` is
+   * saved before any node is turned on, so a reload never does it twice.
+   * Absent when this browser did not drive the activation: nothing is turned on.
+   */
+  autoTurnOn?: AutoTurnOn;
+}
+
+/** The nodes an install turns on by itself, and whether it already tried. */
+export interface AutoTurnOn {
+  nodes: 'all' | string[];
+  ran: boolean;
+}
+
+function isAutoTurnOn(value: unknown): value is AutoTurnOn {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.ran === 'boolean'
+    && (record.nodes === 'all' || (Array.isArray(record.nodes) && record.nodes.every((node) => typeof node === 'string')));
+}
+
+/**
+ * The nodes an activation this browser is about to send may turn on once the
+ * release runs. A first install (no release selected yet) turns on every node
+ * that reports off. An update turns on only the nodes that were on before it,
+ * as each node's own configuration said (`enabled`), never as its status
+ * said: a node can report needing settings while the owner has it turned off.
+ * None when they could not be read.
+ */
+export function autoTurnOnFor(firstInstall: boolean, nodesOnBefore: readonly string[] | null): AutoTurnOn {
+  if (firstInstall) return { nodes: 'all', ran: false };
+  return { nodes: [...(nodesOnBefore ?? [])], ran: false };
+}
+
+/**
+ * The nodes to turn on now that the release runs: those this journey may turn
+ * on that report off while their plugin service answers. A node that needs
+ * settings or credentials (`configuration_invalid`), or reports anything
+ * else, is left for the setup page.
+ */
+export function nodesToTurnOn(autoTurnOn: AutoTurnOn, nodes: { nodeId: string; status: string }[]): string[] {
+  return nodes.filter((node) => node.status === 'disabled' && (autoTurnOn.nodes === 'all' || autoTurnOn.nodes.includes(node.nodeId))).map((node) => node.nodeId);
 }
 
 const JOURNEY_KEY = 'skulk-plugin-install-journeys';
@@ -202,7 +333,8 @@ function isJourney(value: unknown): value is InstallJourney {
     && (journey.runtimeDigest === null || typeof journey.runtimeDigest === 'string')
     && typeof journey.transferBytes === 'number' && typeof journey.installOperationId === 'string'
     && (journey.activationOperationId === null || typeof journey.activationOperationId === 'string')
-    && typeof journey.startedAt === 'number';
+    && typeof journey.startedAt === 'number' && (journey.interrupted === undefined || typeof journey.interrupted === 'boolean')
+    && (journey.autoTurnOn === undefined || isAutoTurnOn(journey.autoTurnOn));
 }
 
 /** A journey whose binding the host confirmed, so there is an operation to follow. */
@@ -213,9 +345,27 @@ export function isBound(journey: InstallJourney): journey is BoundJourney {
   return journey.runtimeDigest !== null;
 }
 
+/** Whether this browser follows a journey: its binding is confirmed and the host has not reported it stopped. */
+export function isFollowed(journey: InstallJourney): journey is BoundJourney {
+  return isBound(journey) && !journey.interrupted;
+}
+
 /** The confirmed journey installing this release of a bundle, if this browser still follows one. */
 export function journeyInProgress(bundleId: string, sequence: number, journeys: InstallJourney[] = readJourneys()): BoundJourney | null {
-  return journeys.find((item): item is BoundJourney => isBound(item) && item.bundleId === bundleId && item.sequence === sequence) ?? null;
+  return journeys.find((item): item is BoundJourney => isFollowed(item) && item.bundleId === bundleId && item.sequence === sequence) ?? null;
+}
+
+/**
+ * The journey an offer's card follows: one installing its release or, while
+ * nothing of the bundle is installed, any install of the bundle this browser
+ * follows. A first install of an older release, such as a retry, is still the
+ * bundle's only installation; offering a newer release beside it would
+ * register a second one. With an installation, only an install on it counts.
+ */
+export function offerProgress(offer: Pick<CatalogOffer, 'entry' | 'installed'>, journeys: InstallJourney[] = readJourneys()): BoundJourney | null {
+  return journeyInProgress(offer.entry.bundle_id, offer.entry.sequence, journeys)
+    ?? journeys.find((item): item is BoundJourney => isFollowed(item) && item.bundleId === offer.entry.bundle_id
+      && (offer.installed === null || item.pluginId === offer.installed.plugin_id)) ?? null;
 }
 
 /** Installs this browser started and has not finished watching. Storage may be unavailable. */
@@ -234,6 +384,15 @@ export function saveJourney(journey: InstallJourney, storage: Pick<Storage, 'get
   if (!storage) return;
   const others = readJourneys(storage).filter((item) => item.pluginId !== journey.pluginId);
   try { storage.setItem(JOURNEY_KEY, JSON.stringify([journey, ...others].slice(0, JOURNEY_LIMIT))); } catch { /* best effort */ }
+}
+
+/**
+ * Stop following one installation's journey because its install stopped,
+ * keeping the record of the consent it carries for a retry.
+ */
+export function markInterrupted(pluginId: string, storage: Pick<Storage, 'getItem' | 'setItem'> | null = safeStorage()): void {
+  const journey = readJourneys(storage).find((item) => item.pluginId === pluginId);
+  if (journey) saveJourney({ ...journey, interrupted: true }, storage);
 }
 
 /** Forget the journey for one installation once it is finished or abandoned. */
@@ -260,7 +419,18 @@ export interface InstallStarters {
  * it gave them. `unconfirmed` means no decided answer arrived for the binding;
  * its installation identity stays saved, so installing again continues it.
  */
-export interface InstallStartRefusal { stage: 'bind' | 'download'; detail: string | null; status?: number; unconfirmed?: boolean }
+export interface InstallStartRefusal {
+  stage: 'bind' | 'download' | 'retry';
+  detail: string | null;
+  status?: number;
+  unconfirmed?: boolean;
+  /**
+   * Why a retry stopped before anything was sent: the host reports no install
+   * for the installation, its release source or credential is not ready, or
+   * the host could not be read.
+   */
+  code?: 'nothing-to-retry' | 'source-unavailable' | 'unreadable';
+}
 
 /**
  * Bind the installation to the reviewed listing and ask the host to download
@@ -283,10 +453,15 @@ export async function startCatalogInstall(
 ): Promise<BoundJourney | InstallStartRefusal> {
   // A release this browser is already installing, in this tab or another, is
   // followed rather than started again.
-  const inProgress = journeyInProgress(offer.entry.bundle_id, offer.entry.sequence);
+  const inProgress = offerProgress(offer);
   if (inProgress) return inProgress;
-  const unconfirmed = readJourneys().find((item) => item.bundleId === offer.entry.bundle_id && !isBound(item));
-  const pluginId = offer.installed?.plugin_id ?? unconfirmed?.pluginId ?? `managed.${newOperationId()}`;
+  const saved = readJourneys();
+  const unconfirmed = saved.find((item) => item.bundleId === offer.entry.bundle_id && !isBound(item));
+  // A stopped install of the bundle keeps its installation: the host refuses
+  // another release there until it is retried and says so, which beats
+  // registering a new installation beside it.
+  const stopped = saved.find((item) => item.bundleId === offer.entry.bundle_id && item.interrupted);
+  const pluginId = offer.installed?.plugin_id ?? offer.retry?.pluginId ?? unconfirmed?.pluginId ?? stopped?.pluginId ?? `managed.${newOperationId()}`;
   const pending: InstallJourney = {
     pluginId, title: displayTitle(offer.entry), bundleId: offer.entry.bundle_id, sequence: offer.entry.sequence,
     publisher: offer.entry.publisher, runtimeDigest: null, transferBytes: offer.entry.transfer_bytes,
@@ -328,7 +503,105 @@ export async function startCatalogInstall(
   return journey;
 }
 
-/** Whether a start result is a refusal rather than a journey. */
-export function isStartRefusal(value: BoundJourney | InstallStartRefusal): value is InstallStartRefusal {
+/** Whether a start or retry result is a refusal rather than a journey. */
+export function isStartRefusal(value: BoundJourney | InstallStartRefusal | RetryConsentNeeded): value is InstallStartRefusal {
   return 'stage' in value;
+}
+
+/** A stopped install to retry, as the page offering the retry knows it. */
+export interface RetryRequest {
+  pluginId: string;
+  /** Catalog title when known, else the bundle id; a saved journey's title wins. */
+  title: string;
+  publisher: string;
+  sequence: number;
+  transferBytes: number;
+  updating: boolean;
+}
+
+/** The host requests a retry makes; injected so the flow is testable. */
+export interface RetryStarters {
+  readInstall: (pluginId: string) => Unwrappable<{ operation: RuntimeInstallation | null }>;
+  readSource: (pluginId: string) => Unwrappable<RuntimeSourceStatus>;
+  recover: (args: ManagedOperationAddress & { expectedSourceRevision: number }) => Unwrappable<RuntimeInstallation>;
+}
+
+/** A retry this browser holds no consent for: the signed release to review before anything is sent. */
+export interface RetryConsentNeeded {
+  pluginId: string;
+  review: RuntimeRelease;
+  /** Whether the install stopped; otherwise it is under way or staged and is only followed. */
+  stopped: boolean;
+}
+
+/** Whether a retry result asks for the release to be reviewed first. */
+export function isConsentNeeded(value: BoundJourney | InstallStartRefusal | RetryConsentNeeded): value is RetryConsentNeeded {
+  return 'review' in value;
+}
+
+/**
+ * Retry an installation's stopped install and return the journey that
+ * finishes it, the way a fresh catalog install finishes: staged, then
+ * activated, then running.
+ *
+ * Activation accepts the release's permissions, so a retry goes ahead only
+ * under consent to exactly the release the host retries: the journey this
+ * browser saved when the owner accepted it, or `reviewedDigest` when the owner
+ * has just reviewed it again. Without either nothing is sent, and the signed
+ * release comes back to be reviewed. Consent once given is saved before any
+ * request, so a refused or failed retry can be tried again without asking.
+ *
+ * Only a stopped install is sent to the host's recover route, under the
+ * release source's current revision; the host retries the original operation
+ * and never changes its release. An install already running again or staged
+ * is followed instead. A decided refusal (a 4xx) returns the host's reason; a
+ * lost reply keeps the journey, so its operation is read back and never sent
+ * twice.
+ */
+export async function startInstallRetry(
+  starters: RetryStarters,
+  request: Pick<RetryRequest, 'pluginId' | 'title'>,
+  reviewedDigest: string | null,
+  refusalDetail: (error: unknown) => string | null,
+  refusedStatus: (error: unknown) => number | null = () => null,
+): Promise<BoundJourney | InstallStartRefusal | RetryConsentNeeded> {
+  const { pluginId } = request;
+  const unreadable = (error: unknown): InstallStartRefusal => {
+    const status = refusedStatus(error);
+    return status === null ? { stage: 'retry', detail: null, code: 'unreadable' } : { stage: 'retry', detail: refusalDetail(error), status };
+  };
+  let operation: RuntimeInstallation | null;
+  try { operation = (await starters.readInstall(pluginId).unwrap()).operation; } catch (error) { return unreadable(error); }
+  if (!operation) return { stage: 'retry', detail: null, code: 'nothing-to-retry' };
+  const review = operation.review;
+  const consented = readJourneys().find((item) => item.pluginId === pluginId && item.runtimeDigest === review.runtime_digest) ?? null;
+  if (!consented && reviewedDigest !== review.runtime_digest) return { pluginId, review, stopped: operation.state === 'recovery_required' };
+  // An activation already sent for this very install is read back, never sent
+  // again, and keeps what it recorded about turning nodes on.
+  const sentActivation = operation.state !== 'recovery_required' && consented?.installOperationId === operation.request.operation_id ? consented : null;
+  const journey: BoundJourney = {
+    pluginId, title: consented?.title ?? request.title, bundleId: review.bundle_id, sequence: review.sequence, publisher: review.publisher,
+    runtimeDigest: review.runtime_digest, transferBytes: review.artifact_bytes || (consented?.transferBytes ?? 0),
+    installOperationId: operation.request.operation_id,
+    activationOperationId: sentActivation?.activationOperationId ?? null,
+    ...(sentActivation?.activationOperationId && sentActivation.autoTurnOn ? { autoTurnOn: sentActivation.autoTurnOn } : {}),
+    // A retry follows the same operation again, so its start time must tell
+    // it from the attempt that stopped.
+    startedAt: Math.max(Date.now(), (consented?.startedAt ?? 0) + 1),
+  };
+  if (operation.state !== 'recovery_required') { saveJourney(journey); return journey; }
+  saveJourney({ ...journey, interrupted: true });
+  let source: RuntimeSourceStatus;
+  try { source = await starters.readSource(pluginId).unwrap(); } catch (error) { return unreadable(error); }
+  if (!source.configured || !source.credential_ready) return { stage: 'retry', detail: null, code: 'source-unavailable' };
+  saveJourney(journey);
+  try {
+    await starters.recover({ pluginId, operationId: operation.request.operation_id, expectedSourceRevision: source.revision }).unwrap();
+  } catch (error) {
+    // Only a 4xx is decided; anything else may have landed, so the journey
+    // stays followed and the operation is read back.
+    const status = refusedStatus(error);
+    if (status !== null) { saveJourney({ ...journey, interrupted: true }); return { stage: 'retry', detail: refusalDetail(error), status }; }
+  }
+  return journey;
 }

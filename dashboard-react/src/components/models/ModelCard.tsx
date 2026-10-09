@@ -1,7 +1,9 @@
 import styled, { css, keyframes, useTheme } from 'styled-components';
 import type { NodeInfo } from '../../types/topology';
 import type { DownloadProgress, PlacementPreview } from '../../types/models';
+import { FiAlertTriangle } from 'react-icons/fi';
 import { formatBytes } from '../../utils/format';
+import { engineInstallNotice } from '../../utils/engineInstall';
 import { Button } from '../common/Button';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
@@ -170,6 +172,23 @@ function computePlacement(
 const pulseSlow = keyframes`
   0%, 100% { opacity: 0.8; }
   50%      { opacity: 1; }
+`;
+
+/** Warning callout for a placement that installs an on-demand engine first;
+ *  styled like the placement dialog's own callouts so it reads as a caution,
+ *  not as fine print. */
+const EngineInstallCallout = styled.div`
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border-radius: ${({ theme }) => theme.radii.sm};
+  background: ${({ theme }) => theme.colors.warningBg};
+  border: 1px solid ${({ theme }) => theme.colors.borderLive};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  line-height: 1.4;
+  color: ${({ theme }) => theme.colors.warningText};
 `;
 
 const Card = styled.div<{ $canFit: boolean }>`
@@ -449,6 +468,13 @@ export function ModelCard({
         <div style={{ color: theme.colors.textMuted, fontSize: 11, lineHeight: 1.4, marginBottom: 8 }}>
           {apiPreview.compatibility_detail}
         </div>
+      )}
+
+      {apiPreview?.engine_install && (
+        <EngineInstallCallout data-testid="engine-install-notice" role="note">
+          <FiAlertTriangle size={14} aria-hidden style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>{engineInstallNotice(t, apiPreview.engine_install)}</span>
+        </EngineInstallCallout>
       )}
 
       {/* Per-node download progress */}

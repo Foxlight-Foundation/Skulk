@@ -18,6 +18,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import JsonValue, SecretStr, TypeAdapter
 
+from skulk.extensions.capability_store import StoreTrustClient
 from skulk.extensions.runtime_artifacts import RuntimeTrust, canonical_json
 from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_catalog import (
@@ -35,6 +36,7 @@ from skulk.extensions.runtime_files import (
 from skulk.extensions.runtime_manager import (
     CatalogInstall,
     CatalogInstallRequest,
+    CatalogRead,
     CatalogRegistration,
     CatalogRequest,
     InstallationRequest,
@@ -225,7 +227,7 @@ class Journey:
     async def catalog_review(self) -> CatalogReview:
         """Read the catalog as the terminal does."""
         response = await self.request(CatalogRequest(action="read_catalog"))
-        return CatalogReview.model_validate_json(json.dumps(response["result"]))
+        return CatalogRead.model_validate_json(json.dumps(response["result"])).review
 
 
 @asynccontextmanager
@@ -286,8 +288,8 @@ async def journey(
     def downloads(root: Path) -> RuntimeDownloads:
         return RuntimeDownloads(root, transport=httpx.MockTransport(respond))
 
-    def catalog(root: Path) -> HostCatalog:
-        return HostCatalog(root, transport=httpx.MockTransport(respond))
+    def catalog(root: Path, *, store: StoreTrustClient | None = None) -> HostCatalog:
+        return HostCatalog(root, transport=httpx.MockTransport(respond), store=store)
 
     monkeypatch.setattr("skulk.extensions.runtime_manager.RuntimeDownloads", downloads)
     monkeypatch.setattr("skulk.extensions.runtime_manager.HostCatalog", catalog)

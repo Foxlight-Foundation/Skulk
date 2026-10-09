@@ -22,6 +22,7 @@ from skulk.extensions.managed_services import (
     ManagedInstallation,
     ManagedInventory,
     ManagedServices,
+    RuntimeUpdate,
 )
 from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
@@ -32,6 +33,7 @@ from skulk.extensions.runtime_attachment import (
     ProfileIdentifier,
 )
 from skulk.extensions.runtime_catalog import (
+    BuiltinCatalogSelection,
     CatalogRefusedError,
     CatalogReview,
     CatalogSourceStatus,
@@ -50,8 +52,10 @@ from skulk.extensions.runtime_manager import (
     CatalogInstall,
     CatalogInstallation,
     CatalogInstallRequest,
+    CatalogRead,
     CatalogRegistration,
     CatalogRequest,
+    CatalogStoreRequest,
     InstallationRequest,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -61,8 +65,21 @@ from skulk.extensions.runtime_manager import (
     SubmitRequest,
 )
 from skulk.extensions.runtime_selection import RuntimeSelection
+from skulk.extensions.service_autosetup import (
+    PluginServiceStatus,
+    ServiceSetupRunner,
+)
 from skulk.operator.pairing import OperatorPairingService
 from skulk.operator.plugin_scopes import PluginScope
+from skulk.shared.constants import offline_mode
+
+_FIRST_OBSERVATION_SECONDS = 15.0
+"""How long the first service status read after a start waits for the manager.
+
+Until the node's first manager observation, a manager still on the previous
+Skulk build answers like a ready one; the observation measures this host's
+build once (seconds on a large environment) and asks the manager to attach.
+Past this, the read answers from what it has."""
 
 
 class PurgedInstallation(BaseModel):
@@ -213,6 +230,55 @@ def create_managed_plugins_router(
         services = await authorized(request, response, "plugins:read")
         return await invoke(services.refresh)
 
+    setup_runner = ServiceSetupRunner()
+
+    async def runtime_update() -> RuntimeUpdate | None:
+        """Where bringing the manager to this host's Skulk build stands, if anywhere."""
+        services = extensions.managed_services
+        if services is None:
+            return None
+        await services.first_observed(_FIRST_OBSERVATION_SECONDS)
+        return services.runtime_update()
+
+    @router.get(
+        "/service",
+        response_model=PluginServiceStatus,
+        summary="Read this host's plugin service setup",
+        description="Whether this host's plugin manager is set up and answering: absent (never set up), setting_up (with the current step), ready, unavailable (set up but not answering), failed (with the reason), or unsupported (this host cannot run it). After a Skulk update, the minutes the host spends bringing the plugin service to the new build (copying a matching runtime, restarting the service on it, or registering it again) also read as setting_up, with purpose update and a progress sentence saying so; if that update fails, the status is failed with purpose update and an error naming the next step. Answers before any setup exists, and never waits on the runtime copy. Requires plugins:read or direct owner authority.",
+    )
+    async def service_setup_status(
+        request: Request, response: Response
+    ) -> PluginServiceStatus:
+        """Report setup state without requiring a connected manager."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return await setup_runner.status(await runtime_update())
+
+    @router.post(
+        "/service/setup",
+        response_model=PluginServiceStatus,
+        summary="Set up this host's plugin service",
+        description="Direct localhost/Tailscale owner administration only. Starts a one-time setup of the plugin manager as a per-user service (a launchd agent on macOS, a systemd user unit on Linux) with the node's own lifetime: no terminal and no administrator password. It copies the node's environment into a verified manager runtime, so the first setup takes a few minutes. Returns the status at once; poll GET /v1/plugins/managed/service for progress. A running setup is not restarted, and no setup starts while a refresh attempt for a new Skulk build is copying a runtime or restarting the manager on it, a background retry included; a host that already runs the manager as a system service is not changed and is told to repair it from a terminal.",
+    )
+    async def service_setup_start(
+        request: Request, response: Response
+    ) -> PluginServiceStatus:
+        """Start node-driven manager setup and report its state."""
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:manage", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        update = await runtime_update()
+        # A refresh attempt is staging or restarting the manager, possibly as
+        # a background retry under a reported failure; a setup now would
+        # contend with it and register the service under it.
+        if update is None or not update.refresh_running:
+            setup_runner.start()
+        return await setup_runner.status(update)
+
     @router.post(
         "/installations",
         response_model=ManagedInstallation,
@@ -348,15 +414,17 @@ def create_managed_plugins_router(
         "/catalog",
         response_model=CatalogReview,
         summary="Read the host's signed capability catalog",
-        description="Fetch the owner-configured signed catalog and verify it against the host's discovery trust before listing its releases: identity, sequence, platforms, size and digests, the signed permissions, capability ids, surfaces, durable operations and steward risk classes, and whether each release matches this host. Requires plugins:read. Returns no addresses or credentials; selects, stages and installs nothing. A refused read answers 409 with one sentence naming the cause and the next step, such as an unconfigured or unreachable catalog, the HTTP status the catalog server answered, an untrusted publisher or an expired catalog.",
+        description="Fetch the host's signed catalog, from the owner-configured private catalog or the built-in capability store, and verify it against the host's discovery trust before listing its releases: identity, sequence, platforms, size and digests, the signed permissions, capability ids, surfaces, durable operations and steward risk classes, and whether each release matches this host. When the source is the built-in store, its publisher trust is first verified and renewed through the store's TUF repository from the root this build ships (a newer revision is applied as published, never an older one; offline, the last verified copy is used). Requires plugins:read. Returns no addresses or credentials; selects, stages and installs nothing. A refused read answers 409 with one sentence naming the cause and the next step, such as an unconfigured or unreachable catalog, the HTTP status the catalog server answered, an untrusted publisher, an expired catalog, or built-in store trust that could not be verified.",
     )
     async def catalog(request: Request, response: Response) -> CatalogReview:
         """Read the one host-scoped catalog without touching any installation."""
         services = await authorized(request, response, "plugins:read")
 
         async def action() -> CatalogReview:
-            result = await services.request(CatalogRequest(action="read_catalog"))
-            return CatalogReview.model_validate_json(json.dumps(result))
+            result = await services.request(
+                CatalogRequest(action="read_catalog", offline=offline_mode())
+            )
+            return CatalogRead.from_reply(result).review
 
         return await invoke(action)
 
@@ -364,7 +432,7 @@ def create_managed_plugins_router(
         "/catalog/source",
         response_model=CatalogSourceStatus,
         summary="Read the host's catalog source readiness",
-        description="Report whether a catalog address and discovery trust are configured and whether the catalog credential is readable, without network I/O, addresses, paths or credential values. Requires plugins:read.",
+        description="Report whether a catalog address and discovery trust are configured and whether the catalog credential is readable, without network I/O, addresses, paths or credential values. builtin_store says whether the source is the built-in capability store (configured from the start; its trust_revision is null until the first read verifies it), and builtin_store_available whether this build includes that store. Requires plugins:read.",
     )
     async def catalog_source(
         request: Request, response: Response
@@ -382,7 +450,7 @@ def create_managed_plugins_router(
         "/catalog/source",
         response_model=CatalogSourceStatus,
         summary="Configure the host's catalog source",
-        description="Direct localhost/Tailscale owner administration only: set the HTTPS catalog directory, document basename and the publishers trusted for discovery at expected_revision, optionally provisioning a write-only bearer. Omitted fields retain configured values; initial setup requires the directory and trust. Existing revocations remain in force; moving the catalog requires supplying its credential again. Nothing is fetched or installed. A refused change answers 409 naming the cause, such as a stale expected_revision or an expired or older trust.",
+        description="Direct localhost/Tailscale owner administration only: set a private catalog's HTTPS directory, document basename and the publishers trusted for discovery at expected_revision, optionally provisioning a write-only bearer. This replaces the built-in capability store as the source. Omitted fields retain configured values; initial setup, and moving from the built-in store, require the directory and trust. The built-in store's own address is refused as a private catalog. A private catalog's existing revocations remain in force across its own trust updates; the built-in store's revocations do not carry to it. Moving the catalog requires supplying its credential again. Nothing is fetched or installed. A refused change answers 409 naming the cause, such as a stale expected_revision or an expired or older trust.",
     )
     async def configure_catalog(
         body: CatalogSourceUpdate, request: Request, response: Response
@@ -393,6 +461,27 @@ def create_managed_plugins_router(
 
         async def action() -> CatalogSourceStatus:
             result = await services.request(CatalogRegistration(request=body))
+            return CatalogSourceStatus.model_validate_json(json.dumps(result))
+
+        return await invoke(action)
+
+    @router.post(
+        "/catalog/source/builtin",
+        response_model=CatalogSourceStatus,
+        summary="Use the built-in capability store as the catalog source",
+        description="Direct localhost/Tailscale owner administration only. Body: expected_revision (the current catalog source revision). Replaces a private catalog with the built-in capability store: the source becomes the store's catalog address, read anonymously, and the discovery trust becomes the store's publisher trust, verified through its TUF repository from the root this build ships, exactly as the store published it; the private catalog's revocations do not carry over. A host already on the store is left unchanged. Nothing is fetched from the catalog or installed. A refused change answers 409 naming the cause: this build does not include the store, expected_revision is not the current revision, the store's trust could not be verified and no current verified copy is held, or another catalog operation is in progress.",
+    )
+    async def use_builtin_catalog(
+        body: BuiltinCatalogSelection, request: Request, response: Response
+    ) -> CatalogSourceStatus:
+        """Return the host to the built-in store through a fixed operation."""
+        await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+        services = await authorized(request, response, "plugins:manage")
+
+        async def action() -> CatalogSourceStatus:
+            result = await services.request(
+                CatalogStoreRequest(request=body, offline=offline_mode())
+            )
             return CatalogSourceStatus.model_validate_json(json.dumps(result))
 
         return await invoke(action)

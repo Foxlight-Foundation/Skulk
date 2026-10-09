@@ -69,6 +69,15 @@ class BackendDerivation(CamelCaseModel):
     """Informational derivation notes worth one warning-level log line each
     (e.g. an unverifiable declaration that was trusted)."""
 
+    on_demand_backends: frozenset[str] = frozenset()
+    """The subset of ``backends`` whose engine is not installed yet and is
+    installed the first time a model needs it (the video engine)."""
+
+    @property
+    def installed_backends(self) -> frozenset[str]:
+        """Advertised backends whose engine is installed now."""
+        return self.backends - self.on_demand_backends
+
 
 def _declared_tokens(raw: str | None) -> set[str]:
     """Split a comma-separated backends declaration into its raw tokens."""
@@ -662,6 +671,21 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         conflicts.extend(engine_conflicts)
         notes.extend(engine_notes)
 
+    # A node that can install the video engine advertises it before the
+    # install, so placement can choose it; the worker installs the engine the
+    # first time a video model lands here. A configured or wired install
+    # already derived its tags above and leaves no install eligibility.
+    on_demand: set[str] = set()
+    if (
+        facts.comfy_on_demand_variants
+        and facts.comfy_binary.state == "not_configured"
+        and facts.comfy_root is None
+    ):
+        on_demand = {"comfy"} | {
+            f"comfy-{variant}" for variant in facts.comfy_on_demand_variants
+        }
+        tags |= on_demand
+
     if any(gpu.detection_source == "nvidia_device_node" for gpu in facts.gpus):
         # The #612 class: hardware is visibly present but the node cannot read
         # its name or VRAM, so served-context sizing and hardware attribution
@@ -720,11 +744,19 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
     # A GPU node whose entire advertised set has no GPU compute tag is serving
     # everything on CPU: loud, unless an engine-specific conflict above already
     # named the cause (the served-engine #609 case emits its own).
+    # Only installed engines count: an engine that installs on demand must not
+    # hide a GPU node whose installed engines all run on CPU.
+    installed_tags = tags - on_demand
     has_gpu_tag = any(
-        tag.endswith(("-cuda", "-vulkan", "-rocm", "-metal")) for tag in tags
+        tag.endswith(("-cuda", "-vulkan", "-rocm", "-metal")) for tag in installed_tags
     )
     already_flagged = any(c.code == "gpu_serving_disabled" for c in conflicts)
-    if tags and facts.has_serving_gpu and not has_gpu_tag and not already_flagged:
+    if (
+        installed_tags
+        and facts.has_serving_gpu
+        and not has_gpu_tag
+        and not already_flagged
+    ):
         conflicts.append(
             CapabilityConflict(
                 code="gpu_serving_disabled",
@@ -745,4 +777,5 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         backends=frozenset(tags),
         conflicts=tuple(conflicts),
         notes=tuple(notes),
+        on_demand_backends=frozenset(on_demand),
     )

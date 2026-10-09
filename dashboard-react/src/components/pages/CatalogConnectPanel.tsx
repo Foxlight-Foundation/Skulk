@@ -6,27 +6,30 @@ import { apiSlice } from '../../store/api';
 import { useAppDispatch } from '../../store/hooks';
 import { Button } from '../common/Button';
 import { SectionLabel, Surface } from '../common/Surfaces';
-import { pluginRefusalDetail, type CatalogSourceUpdate, type RuntimeSourceStatus } from '../../store/endpoints/plugins';
-import { decodeInvitation, isCatalogAddress, type CatalogInvitation } from './catalogJourney';
+import { pluginRefusalDetail, type CatalogSourceStatus, type CatalogSourceUpdate } from '../../store/endpoints/plugins';
+import { decodeInvitation, isCatalogAddress, trustRevision, type CatalogInvitation } from './catalogJourney';
 
 /** Props for connecting this host to a capability catalog. */
 export interface CatalogConnectPanelProps {
   /** Current catalog source readiness; its revision fences the change. */
-  status: RuntimeSourceStatus;
+  status: CatalogSourceStatus;
   /** Called once the host has accepted the catalog source. */
   onConnected: () => void;
   /** Leave without changing anything; offered when a catalog is already configured. */
   onCancel?: () => void;
+  /** The host reads the built-in Foxlight store now; a private catalog would replace it. */
+  replacesStore?: boolean;
 }
 
 const DAY_SECONDS = 86_400;
+
 
 /**
  * Connect this host to a catalog from an invitation code, or from the same
  * facts entered by hand. Nothing installs here: the host only learns where to
  * look and which key signs the listings it will show.
  */
-export function CatalogConnectPanel({ status, onConnected, onCancel }: CatalogConnectPanelProps) {
+export function CatalogConnectPanel({ status, onConnected, onCancel, replacesStore = false }: CatalogConnectPanelProps) {
   const { t } = useSkulkTranslation();
   const dispatch = useAppDispatch();
   const [busy, setBusy] = useState(false);
@@ -56,7 +59,13 @@ export function CatalogConnectPanel({ status, onConnected, onCancel }: CatalogCo
     const update: CatalogSourceUpdate = {
       expected_revision: status.revision,
       base_url: chosen.baseUrl,
-      trust: { revision: (status.trust_revision ?? 0) + 1, expires_at: chosen.trustExpiresAt, publishers: { [chosen.publisher]: chosen.publicKey } },
+      // The host picks the next revision of that catalog's own history when it
+      // can; an older host gets one from the panel's clock instead.
+      ...(status.assigns_trust_revisions ? { assign_trust_revision: true } : {}),
+      trust: {
+        revision: status.assigns_trust_revisions ? 1 : trustRevision(status.trust_revision, openedAt),
+        expires_at: chosen.trustExpiresAt, publishers: { [chosen.publisher]: chosen.publicKey },
+      },
       ...(chosen.token ? { token: chosen.token } : {}),
     };
     let body = JSON.stringify(update);
@@ -84,8 +93,10 @@ export function CatalogConnectPanel({ status, onConnected, onCancel }: CatalogCo
     }
   };
   return <Panel aria-labelledby="catalog-connect-title">
-    <h2 id="catalog-connect-title">{t('plugins.catalog.connectTitle', 'Connect a capability catalog')}</h2>
-    <Lead>{t('plugins.catalog.connectLead', 'Paste the invitation code you were given. It names the catalog and the key its releases are signed with.')}</Lead>
+    <h2 id="catalog-connect-title">{replacesStore ? t('plugins.catalog.addPrivate', 'Add a private catalog') : t('plugins.catalog.connectTitle', 'Connect a capability catalog')}</h2>
+    <Lead>{replacesStore
+      ? t('plugins.catalog.privateLead', 'Paste the invitation code you were given. This host then reads that catalog instead of the Foxlight store; you can switch back at any time.')
+      : t('plugins.catalog.connectLead', 'Paste the invitation code you were given. It names the catalog and the key its releases are signed with.')}</Lead>
     {!manual ? <>
       <Label htmlFor="catalog-invitation">{t('plugins.catalog.invitationCode', 'Invitation code')}</Label>
       <CodeInput id="catalog-invitation" value={code} rows={3} spellCheck={false} autoComplete="off" autoCapitalize="off"
@@ -114,8 +125,8 @@ export function CatalogConnectPanel({ status, onConnected, onCancel }: CatalogCo
     {notice ? <Warning role="alert">{notice}</Warning> : null}
     <Actions>
       <Button variant="primary" disabled={!chosen || busy} onClick={() => void connect()}>{t('plugins.catalog.connect', 'Connect')}</Button>
-      {onCancel ? <Button variant="ghost" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button> : null}
-      <Button variant="ghost" onClick={() => { setManual(!manual); setNotice(''); }}>{manual ? t('plugins.catalog.useCode', 'Use an invitation code instead') : t('plugins.catalog.enterDetails', 'Enter the catalog details instead')}</Button>
+      {onCancel ? <Button variant="outline" onClick={onCancel}>{t('common.cancel', 'Cancel')}</Button> : null}
+      <Button variant="outline" onClick={() => { setManual(!manual); setNotice(''); }}>{manual ? t('plugins.catalog.useCode', 'Use an invitation code instead') : t('plugins.catalog.enterDetails', 'Enter the catalog details instead')}</Button>
     </Actions>
   </Panel>;
 }
