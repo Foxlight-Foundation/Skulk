@@ -27,6 +27,8 @@ let installations: ManagedRuntime[];
 let installOperation: RuntimeInstallation | null;
 let recovers: { path: string; body: unknown }[];
 let refuseEnable: boolean;
+// When set, configuration reads wait for it: the refetch after a change is still in flight.
+let heldReads: Promise<void> | null;
 
 function makeStore() {
   return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) });
@@ -84,6 +86,7 @@ beforeEach(async () => {
   installOperation = null;
   recovers = [];
   refuseEnable = false;
+  heldReads = null;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     // Cluster state names the other nodes; only plugin requests carry the dashboard header.
@@ -106,7 +109,9 @@ beforeEach(async () => {
     ] }]);
     if (request.method === 'GET') {
       reads += 1;
-      return failRead ? response({}, 503) : response(configuration);
+      const answer = configuration;
+      if (heldReads) await heldReads;
+      return failRead ? response({}, 503) : response(answer);
     }
     const mutation = await request.json() as Record<string, unknown>;
     mutations.push(mutation);
@@ -244,6 +249,25 @@ it('turns on a node whose settings the dashboard cannot render, sending no value
   expect(mutations[0]).toEqual({ operation: 'enable', expectedRevision: 0, expectedSchemaDigest: 'a'.repeat(64) });
   await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Turned on. It starts in a moment.')); });
   expect(button('Turn off').disabled).toBe(false);
+});
+
+it('does not mistake its own change for one made elsewhere while the refetch is in flight', async () => {
+  await ready();
+  let release = () => {};
+  heldReads = new Promise<void>((resolve) => { release = resolve; });
+  await click('Turn on');
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Turned on. It starts in a moment.')); });
+  expect(host.textContent).not.toContain('This node changed elsewhere');
+  expect(button('Turn off').disabled).toBe(false);
+  await act(async () => { release(); heldReads = null; });
+});
+
+it('still says a node changed elsewhere when a newer revision arrives', async () => {
+  await ready();
+  configuration = { ...configuration, revision: configuration.revision + 1 };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags([{ type: 'PluginConfiguration', id: 'bridge/node-1' }])); });
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('This node changed elsewhere. Reload first; your draft is kept.')); });
+  expect(button('Turn on').disabled).toBe(true);
 });
 
 it('edits the optional settings a studio declares and saves an emptied one as null', async () => {

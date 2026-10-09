@@ -9,6 +9,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Turning a capability on or off from the Plugins page no longer flashes "This
+  node changed elsewhere" or briefly disables the switch. The page took the
+  host's answer at once while its settings read still showed the older
+  revision, and counted that as someone else's change.
 - A node now reports the commit it started from. It used to re-read its
   checkout every time it refreshed its identity, so after a checkout moved, a
   node that had not restarted yet claimed the new commit while still running
