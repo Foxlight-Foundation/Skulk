@@ -23,9 +23,9 @@ Choose the path that matches the machine:
 
 ## macOS
 
-Download the pinned Skulk 2.0.1 signed and notarized app directly:
+Download the pinned Skulk 2.0.2 signed and notarized app directly:
 
-**[Download Skulk 2.0.1 for Apple Silicon (.dmg)](https://releases.foxlight.ai/desktop/macos/2.0.1/7/Skulk-2.0.1-7-macOS-arm64.dmg)**
+**[Download Skulk 2.0.2 for Apple Silicon (.dmg)](https://releases.foxlight.ai/desktop/macos/2.0.2/1/Skulk-2.0.2-1-macOS-arm64.dmg)**
 
 Open the DMG, drag **Skulk** to **Applications**, eject the DMG, and open Skulk
 from Applications. macOS verifies the Developer ID signature and stapled

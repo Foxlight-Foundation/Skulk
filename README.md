@@ -10,7 +10,7 @@
 
 [![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
 [![Install Skulk](https://img.shields.io/badge/docs-install_skulk-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/install/)
-[![Release Notes](https://img.shields.io/badge/release_notes-v2.0.1-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.1/)
+[![Release Notes](https://img.shields.io/badge/release_notes-v2.0.2-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.2/)
 [![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
 
   <br>
@@ -55,7 +55,7 @@ desktop control for starting the node, opening the dashboard, and viewing logs.
 
 **Apple Silicon macOS 15 or newer:**
 
-[Download the signed and notarized Skulk 2.0.1 DMG](https://releases.foxlight.ai/desktop/macos/2.0.1/7/Skulk-2.0.1-7-macOS-arm64.dmg), or install with Homebrew:
+[Download the signed and notarized Skulk 2.0.2 DMG](https://releases.foxlight.ai/desktop/macos/2.0.2/1/Skulk-2.0.2-1-macOS-arm64.dmg), or install with Homebrew:
 
 ```bash
 brew install --cask Foxlight-Foundation/skulk/skulk
@@ -712,7 +712,7 @@ Highlights:
 - [Thunderbolt clustering](https://foxlight-foundation.github.io/Skulk/thunderbolt-clustering) and [RDMA on macOS](https://foxlight-foundation.github.io/Skulk/build-and-runtime)
 - [Speculative decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding)
 - [API guide](https://foxlight-foundation.github.io/Skulk/api-guide) and [architecture](https://foxlight-foundation.github.io/Skulk/architecture)
-- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.1/)
+- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.2/)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing
