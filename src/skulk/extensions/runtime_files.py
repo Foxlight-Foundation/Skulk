@@ -1,11 +1,13 @@
 """Protected local files and exclusive ownership for managed plugin runtimes."""
 
+import asyncio
 import fcntl
 import functools
 import grp
 import os
 import pwd
 import stat
+import time
 from pathlib import Path
 from typing import final
 from uuid import uuid4
@@ -169,3 +171,41 @@ class RuntimeLock:
         if self.descriptor >= 0:
             os.close(self.descriptor)
             self.descriptor = -1
+
+
+async def acquire_runtime_lock(
+    root: Path,
+    *,
+    wait_seconds: float,
+    name: str = "installer.lock",
+    poll_seconds: float = 0.05,
+) -> RuntimeLock:
+    """Take a runtime fence, waiting a bounded time for a brief holder to finish.
+
+    A running owner holds the installer fence for moments at a time: while its
+    start verifies the installed runtime right after an activation, and again
+    at every periodic re-verification. Work that has written nothing yet waits
+    that out rather than refusing; a fence still held when the wait runs out
+    means real work, and the caller refuses as before.
+
+    Args:
+        root: The service-owned directory the fence protects.
+        wait_seconds: How long to keep trying before giving up.
+        name: The fixed lock name, as for :class:`RuntimeLock`.
+        poll_seconds: The pause between attempts.
+
+    Returns:
+        The held fence; the caller closes it.
+
+    Raises:
+        BlockingIOError: Another holder still had the fence when the wait ran
+            out.
+    """
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            return RuntimeLock(root, name)
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(poll_seconds)

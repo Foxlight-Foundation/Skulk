@@ -52,6 +52,12 @@ This project records release notes here and mirrors public-facing notes in
   now check drafts against the logits the model really samples from. The
   check skipped Gemma's final logit soft-capping, so it compared drafts with
   a sharper distribution than the model's own.
+- Re-running a capability install right after one finished, or changing a
+  capability's release source, could fail with a generic "manager request
+  incomplete" error. Right after an activation, and briefly at each periodic
+  check, the running capability verifies its installed files while holding the
+  installation's lock, and the source change refused instead of waiting. It now
+  waits up to ten seconds for that check to finish.
 
 ## [2.0.2] - 2026-10-09
 

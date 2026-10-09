@@ -29,6 +29,7 @@ from skulk.extensions.runtime_artifacts import (
 )
 from skulk.extensions.runtime_files import (
     RuntimeLock,
+    acquire_runtime_lock,
     private_directory,
     read_private,
     write_private,
@@ -340,15 +341,9 @@ class RuntimeInstaller:
         than refusing the read that follows one; past that it is the same
         refusal as before, since a long-held fence means real work.
         """
-        deadline = time.monotonic() + 2.0
-        while True:
-            try:
-                lock = RuntimeLock(self.installer)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise
-                await asyncio.sleep(0.1)
+        lock = await acquire_runtime_lock(
+            self.installer, wait_seconds=2.0, poll_seconds=0.1
+        )
         try:
             host = await asyncio.to_thread(measure_host)
             return self._verify(metadata, host)

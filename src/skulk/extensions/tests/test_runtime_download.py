@@ -14,7 +14,12 @@ from skulk.extensions.runtime_download import (
     RuntimeDownloads,
     SourceUpdate,
 )
-from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
+from skulk.extensions.runtime_files import (
+    RuntimeLock,
+    acquire_runtime_lock,
+    read_private,
+    write_private,
+)
 from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.extensions.tests.test_runtime_install import artifacts
 
@@ -338,6 +343,62 @@ async def test_source_rotation_preserves_old_credentials_and_fences_destination(
     with pytest.raises(ValueError, match="revision"):
         await downloads.configure(update)
     await downloads.close()
+
+
+async def test_a_source_change_waits_out_an_owner_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A change landing while the owner verifies its runtime waits, then applies.
+
+    Right after an activation the owner's start holds the installer fence while
+    it verifies the installed runtime, and it holds it again at each periodic
+    check. A source change, or the re-run of an install from the catalog, used
+    to refuse at once in that window with an error nobody could name.
+    """
+    downloads, _, _, _ = prepared(tmp_path, monkeypatch)
+    owner_verification = RuntimeLock(downloads.installer.installer)
+
+    async def finish_verification() -> None:
+        await asyncio.sleep(0.3)
+        owner_verification.close()
+
+    releasing = asyncio.create_task(finish_verification())
+    changed = await downloads.configure(
+        SourceUpdate(expected_revision=1, token=SecretStr("rotated-token"))
+    )
+    await releasing
+    assert changed.revision == 2 and changed.credential_ready
+    await downloads.close()
+
+
+async def test_a_source_change_still_refuses_a_fence_held_for_real_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloads, _, _, _ = prepared(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_download._SOURCE_FENCE_WAIT_SECONDS", 0.2
+    )
+    held = RuntimeLock(downloads.installer.installer)
+    try:
+        with pytest.raises(BlockingIOError):
+            await downloads.configure(
+                SourceUpdate(expected_revision=1, token=SecretStr("rotated-token"))
+            )
+        assert downloads.source().revision == 1
+    finally:
+        held.close()
+    await downloads.close()
+
+
+async def test_the_fence_helper_waits_only_as_long_as_asked(tmp_path: Path) -> None:
+    held = RuntimeLock(tmp_path)
+    try:
+        with pytest.raises(BlockingIOError):
+            await acquire_runtime_lock(tmp_path, wait_seconds=0.1)
+    finally:
+        held.close()
+    acquired = await acquire_runtime_lock(tmp_path, wait_seconds=0.1)
+    acquired.close()
 
 
 async def test_partial_source_setup_retains_trust_and_never_removes_revocations(
