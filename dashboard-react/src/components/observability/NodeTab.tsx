@@ -584,8 +584,8 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                 <Key>{t('observability.node.namespace', 'Namespace')}</Key>
                 <Value>
                   {runtime.namespaceConfigured
-                    ? t('observability.node.customNamespace', 'custom')
-                    : t('observability.node.defaultNamespace', 'default')}
+                    ? t('observability.node.privateNamespace', 'private')
+                    : t('observability.node.publicNamespace', 'public')}
                   {runtime.namespaceFingerprint ? ` (${runtime.namespaceFingerprint.slice(0, 12)})` : ''}
                 </Value>
               </Row>

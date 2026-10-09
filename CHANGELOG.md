@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- The startup warning and the dashboard's Node tab now describe a blank cluster
+  name correctly. The warning said "with the default namespace" even when the
+  name was set but blank, which is just as public but derives a different key;
+  it now says "without a private namespace". The Node tab shows the cluster
+  name as private or public instead of custom or default.
 - Speculative decoding on Gemma 4 models on a Mac is much faster:
   `gemma-4-12B-it-4bit` with its assistant on an M4 Mac mini went from about
   13 to about 20 tokens per second, in line with mlx-vlm running the same
