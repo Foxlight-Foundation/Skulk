@@ -4,7 +4,9 @@ Each process derives its cluster key from ``SKULK_LIBP2P_NAMESPACE`` exactly as
 a node does, so this exercises the shipped path end to end: the key-derived
 multicast scouting port, mutual TLS rooted in the key-derived authority, and
 the membership policy. Processes listen on loopback only and scout on ports
-derived from unique test namespaces, so they cannot meet any real cluster.
+derived from unique test namespaces. A port can collide with a real cluster's
+(about 1 in 7,000), but a collision only exchanges scout packets: mutual TLS
+refuses every link without the test's own key.
 
 Marked slow because it depends on the host delivering link-local multicast
 between local processes. Run it explicitly with

@@ -379,7 +379,8 @@ control plane. The libp2p private-network pre-shared key derives from
 `NETWORK_VERSION` plus `SKULK_LIBP2P_NAMESPACE`, and the Rust networking crate
 derives three data-plane values from it one way (`data_plane_trust.rs`). First,
 a multicast scouting port on the shared `224.0.0.224` group, so clusters with
-different namespaces never discover each other; the port is logged at startup
+different namespaces normally scout apart (a rare shared port only exchanges
+scout packets, which the TLS handshake then refuses); the port is logged at startup
 for host firewalls. Second, an Ed25519 certificate authority that every node
 derives identically; each process issues itself an ephemeral member
 certificate, and every link is TLS 1.3 with mutual authentication (`tls/` is

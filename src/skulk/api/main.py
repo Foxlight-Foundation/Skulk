@@ -343,7 +343,7 @@ from skulk.extensions import (
     snapshot_cluster,
     validate_against_schema,
 )
-from skulk.extensions.host_network import HostNetwork
+from skulk.extensions.host_network import HostNetwork, private_namespace_configured
 from skulk.extensions.steward import StewardToolBinding
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import (
@@ -14587,7 +14587,7 @@ class API:
             skulk_version=get_skulk_version(),
             skulk_commit=identity.skulk_commit if identity is not None else "Unknown",
             # Never the raw namespace: it is the cluster's membership secret.
-            namespace_configured="SKULK_LIBP2P_NAMESPACE" in os.environ,
+            namespace_configured=private_namespace_configured(os.environ),
             namespace_fingerprint=self._namespace_fingerprint,
             python_unbuffered=os.environ.get("PYTHONUNBUFFERED")
             in {"1", "true", "True"},

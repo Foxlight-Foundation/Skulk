@@ -145,8 +145,10 @@ shared key that already protects the control plane (derived from the network
 version and `SKULK_LIBP2P_NAMESPACE`):
 
 - **Discovery.** Multicast scouting uses a UDP port derived from the key, so two
-  clusters with different namespaces on the same network never discover each
-  other's data plane. The port is logged at startup; allow it in host firewalls.
+  clusters with different namespaces on the same network normally never see each
+  other's data plane. The port is one of about 7,000, so two namespaces can
+  occasionally share it; their scout packets then meet, but the TLS handshake
+  refuses the other cluster, so isolation never depends on the port. The port is logged at startup; allow it in host firewalls.
 - **Encryption and authentication.** Every data-plane link is TLS 1.3 with
   mutual authentication, chained to a certificate authority each node derives
   from the key. A device without the key cannot join, read, or inject, and an

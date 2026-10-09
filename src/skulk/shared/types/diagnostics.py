@@ -503,9 +503,10 @@ class NodeRuntimeDiagnostics(CamelCaseModel):
     namespace_configured: bool = Field(
         default=False,
         description=(
-            "Whether SKULK_LIBP2P_NAMESPACE is set. The value itself is never "
-            "reported: it seeds the cluster key that authenticates the control "
-            "and data planes."
+            "Whether SKULK_LIBP2P_NAMESPACE holds a non-blank, private value. "
+            "A blank value is as public as the default and reports false. The "
+            "value itself is never reported: it seeds the cluster key that "
+            "authenticates the control and data planes."
         ),
     )
     namespace_fingerprint: str | None = Field(
