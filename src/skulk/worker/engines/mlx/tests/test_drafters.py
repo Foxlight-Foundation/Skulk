@@ -419,6 +419,53 @@ class TestGetTrunkAndHead:
         result = _get_trunk_and_head(model)
         assert result is None
 
+    def test_head_applies_final_logit_softcapping(self) -> None:
+        """Gemma-family heads squash logits in the model's own __call__;
+        the borrowed tied head must do the same so the verifier scores
+        drafts with the logits plain decode samples from."""
+        from skulk.worker.engines.mlx.generator.generate import _get_trunk_and_head
+
+        class _Embed:
+            def as_linear(self, hidden: mx.array) -> mx.array:
+                return hidden * 100.0
+
+        class _Trunk:
+            embed_tokens = _Embed()
+            layers: list[object] = []
+
+            def __call__(self, tokens: mx.array, cache: object = None) -> mx.array:
+                return tokens.astype(mx.float32)
+
+        class _LanguageModel:
+            model = _Trunk()
+            final_logit_softcapping = 30.0
+
+        class _Model:
+            language_model = _LanguageModel()
+
+        result = _get_trunk_and_head(cast(object, _Model()))
+        assert result is not None
+        _trunk_fn, head_fn = result
+        hidden = mx.array([[[0.1, 0.5, 2.0]]])
+        expected = mx.tanh(hidden * 100.0 / 30.0) * 30.0
+        assert mx.allclose(head_fn(hidden), expected)
+
+    def test_head_without_softcapping_is_unchanged(self) -> None:
+        from skulk.worker.engines.mlx.generator.generate import _get_trunk_and_head
+
+        trunk = MagicMock()
+        lm_head = MagicMock()
+        lm = MagicMock()
+        lm.model = trunk
+        lm.lm_head = lm_head
+        lm.final_logit_softcapping = None
+        model = MagicMock()
+        model.language_model = lm
+
+        result = _get_trunk_and_head(model)
+        assert result is not None
+        assert result[1] is lm_head
+
 
 class TestPrenormTrunk:
     def test_trunk_fn_returns_prenorm_hiddens(self) -> None:
@@ -756,6 +803,60 @@ class TestStreamGenerateWithMTP:
         # ...and drafting was attempted exactly once, then disabled.
         assert exploding.draft_attempts == 1
 
+    def test_drafter_scheduling_failure_disables_speculation_not_generation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Local drafts are lazy, so their buffers are allocated when the
+        chain is submitted. A failure there (device out of memory) must
+        still land inside the drafter fallback, before the verify forward
+        touches the target cache, and decode must continue plain."""
+        from skulk.worker.engines.mlx.generator.generate import (
+            _stream_generate_with_mtp,
+        )
+
+        model, tokenizer, drafter, trunk_fn, head_fn, cache = _build_fake_stream_env(
+            main_token_ids=[5, 6, 7, 8, 0],
+            draft_token_id=5,
+        )
+        submissions: list[int] = []
+        real_async_eval = mx.async_eval
+
+        def failing_first_submission(*arrays: mx.array) -> None:
+            submissions.append(len(arrays))
+            if len(submissions) == 1:
+                raise RuntimeError("[metal::malloc] Attempting to allocate")
+            real_async_eval(*arrays)
+
+        monkeypatch.setattr(mx, "async_eval", failing_first_submission)
+        trunk_calls: list[int] = []
+
+        def counting_trunk(tokens: mx.array, cache: object = None) -> mx.array:
+            trunk_calls.append(int(tokens.shape[1]))
+            return trunk_fn(tokens, cache=cache)
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=counting_trunk,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=4,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+            )
+        )
+        assert [output.token for output in outputs] == [5, 6, 7, 8]
+        assert drafter.draft_calls == [5]  # one attempt, then plain decode
+        # Prefill and first bonus, then one-token plain steps: the failed
+        # round never ran a verify forward against the target cache.
+        assert trunk_calls == [2, 1, 1, 1, 1]
+
     def test_reject_path_does_not_crash(self) -> None:
         outputs, _drafter, _cache = self._run(
             main_token_ids=[5, 3, 0],
@@ -938,8 +1039,14 @@ class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
 
 
 class TestRejectPathSSMState:
-    def test_reject_keeps_native_rollback_for_rotating_cache(self) -> None:
-        """Gemma 4 rotating caches must retain their cheap native rollback."""
+    def test_reject_rolls_rotating_cache_back_positionally(self) -> None:
+        """Gemma 4 rotating caches roll back by trimming, never by snapshot.
+
+        The loop owns the rollback for attention-only caches: the mlx-lm
+        Gemma 4 loader has no rollback_speculative_cache, and falling back
+        to snapshots copied every sliding window and paid a replay forward
+        on each rejected round. A model hook, when present, stays unused.
+        """
         from mlx_lm.models.cache import KVCache, RotatingKVCache
 
         from skulk.worker.engines.mlx.generator.generate import (
@@ -987,7 +1094,10 @@ class TestRejectPathSSMState:
         )
 
         assert outputs
-        native_rollback.assert_called()
+        native_rollback.assert_not_called()
+        # Every round rejected its draft, so the rotating cache was trimmed
+        # (the fake trunk never writes, hence the offset drops below 8).
+        assert rotating_cache.offset < 8
 
     def test_reject_does_not_call_native_rollback_without_gdn_states(self) -> None:
         """Stateful Skulk verifies must use snapshots, not native GDN rollback.

@@ -217,10 +217,10 @@ class Gemma4AssistantDrafter:
 
         # (H,) post-norm target hidden -> (1, 1, backbone_hidden_size)
         h_prev = hidden[None, None, :]
-        token = next_token
+        token = mx.array([[next_token]])
         rows: list[mx.array] = []
         for _ in range(max(depth, 1)):
-            tok_embed = embed_fn(mx.array([[token]])) * embed_scale
+            tok_embed = embed_fn(token) * embed_scale
             inputs_embeds = mx.concatenate(
                 [tok_embed.astype(h_prev.dtype), h_prev], axis=-1
             )
@@ -228,8 +228,10 @@ class Gemma4AssistantDrafter:
             row = logits[0, -1].astype(mx.float32)
             rows.append(row)
             # Greedy-internal chain (matches the Qwen drafter and the loop's
-            # depth-1 rule under sampling).
-            token = int(mx.argmax(row).item())
+            # depth-1 rule under sampling). The token stays on the device:
+            # reading it back would idle the GPU between chained steps, and
+            # the loop evaluates the whole chain with its verify forward.
+            token = mx.argmax(row).reshape(1, 1)
         return mx.stack(rows)
 
 

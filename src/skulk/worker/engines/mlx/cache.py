@@ -190,6 +190,95 @@ def has_recurrent_state_caches(cache: KVCacheType) -> bool:
     return any(isinstance(entry, (ArraysCache, VlmArraysCache)) for entry in cache)
 
 
+class _TrimmableRotatingCache(Protocol):
+    """The rotating-cache surface positional speculative rollback touches.
+
+    mlx-lm and mlx-vlm ship separate but identical ``RotatingKVCache``
+    classes without type stubs; this pins the members the rollback reads
+    and writes so the rest stays strictly typed.
+    """
+
+    keys: mx.array | None
+    values: mx.array | None
+    _idx: int
+
+    def trim(self, n: int) -> int: ...
+
+
+class _TrimmableCache(Protocol):
+    """Positional KV caches (``KVCache``, ``QuantizedKVCache`` and kin)."""
+
+    def is_trimmable(self) -> bool: ...
+
+    def trim(self, n: int) -> int: ...
+
+
+def _is_plain_rotating_cache(entry: object) -> bool:
+    """Exactly the upstream sliding-window class, not a subclass.
+
+    Subclasses (mlx-vlm's buffered variant) keep preallocated slack and
+    their own trim semantics; they roll back through their ``trim`` alone.
+    """
+    return type(entry) in (RotatingKVCache, VlmRotatingKVCache)
+
+
+def supports_positional_rollback(cache: KVCacheType) -> bool:
+    """Whether rejected speculative positions can be dropped by trimming.
+
+    True when every entry is attention state whose newest positions can be
+    discarded positionally: plain and quantized KV caches, and rotating
+    sliding-window caches (see :func:`rollback_speculative_positions` for
+    why those qualify inside the speculative loop even after their window
+    wraps). Recurrent ``ArraysCache`` state cannot be trimmed, and unknown
+    entry types are never assumed safe, so callers keep their snapshot path
+    for both.
+    """
+    for entry in cache:
+        if _is_plain_rotating_cache(entry):
+            continue
+        if isinstance(entry, (ArraysCache, VlmArraysCache)):
+            return False
+        is_trimmable = getattr(entry, "is_trimmable", None)
+        if not callable(is_trimmable) or not callable(getattr(entry, "trim", None)):
+            return False
+        if not cast(_TrimmableCache, entry).is_trimmable():
+            return False
+    return True
+
+
+def rollback_speculative_positions(cache: KVCacheType, num_tokens: int) -> None:
+    """Drop the newest *num_tokens* positions from attention-only caches.
+
+    Precondition: the newest write to every rotating entry was a
+    multi-token forward (the speculative verify always feeds the bonus plus
+    at least one draft). A multi-token write leaves a rotating cache's
+    buffer in temporal order with its write index at the end, so the
+    rejected positions are exactly the buffer's tail. Trimming moves the
+    index back over them, and the tail is then sliced off so the buffer
+    stays temporally ordered with ``_idx`` at its end: the next multi-token
+    write keeps the full window, a later single-token write (plain-decode
+    fallback) treats the buffer as a correctly ordered ring, and drafters
+    reading ``state`` never see rejected keys. Without the slice, upstream
+    rotating caches would rotate the stale tail into the window on the next
+    single-token write once the window has wrapped.
+
+    Callers must check :func:`supports_positional_rollback` first.
+    """
+    if num_tokens <= 0:
+        return
+    for entry in cache:
+        if _is_plain_rotating_cache(entry):
+            rotating = cast(_TrimmableRotatingCache, entry)
+            rotating.trim(num_tokens)
+            keys = rotating.keys
+            values = rotating.values
+            if keys is not None and values is not None and rotating._idx < keys.shape[2]:  # pyright: ignore[reportPrivateUsage] - upstream attr
+                rotating.keys = keys[..., : rotating._idx, :]  # pyright: ignore[reportPrivateUsage] - upstream attr
+                rotating.values = values[..., : rotating._idx, :]  # pyright: ignore[reportPrivateUsage] - upstream attr
+        else:
+            cast(_TrimmableCache, entry).trim(num_tokens)
+
+
 def snapshot_ssm_states(cache: KVCacheType) -> CacheSnapshot:
     states: list[
         ArraysCache
