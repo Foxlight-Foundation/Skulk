@@ -7,6 +7,7 @@ response). The loop now runs on mlx-vlm's ``BufferedRotatingKVCache`` and puts
 the plain caches back when it ends.
 """
 
+import importlib.util
 from collections.abc import Callable, Generator
 from typing import Protocol, cast
 from unittest.mock import MagicMock
@@ -14,7 +15,6 @@ from unittest.mock import MagicMock
 import mlx.core as mx
 import pytest
 from mlx_lm.models.cache import KVCache, RotatingKVCache
-from mlx_vlm.models.cache import BufferedRotatingKVCache
 
 from skulk.worker.engines.mlx import cache as cache_module
 from skulk.worker.engines.mlx.cache import (
@@ -25,6 +25,15 @@ from skulk.worker.engines.mlx.cache import (
 from skulk.worker.engines.mlx.generator import generate as generate_module
 
 WINDOW = 8
+
+
+def buffered_class() -> type:
+    """mlx-vlm's buffered cache; skips the test where mlx-vlm is not installed (Linux)."""
+    if importlib.util.find_spec("mlx_vlm") is None:
+        pytest.skip("mlx-vlm is not installed on this platform")
+    from mlx_vlm.models.cache import BufferedRotatingKVCache
+
+    return BufferedRotatingKVCache
 
 
 class _WindowCache(Protocol):
@@ -67,15 +76,16 @@ def window(entry: object) -> list[int]:
 
 
 def test_a_converted_entry_writes_in_place_and_restores_the_same_window() -> None:
+    buffered_type = buffered_class()
     plain = RotatingKVCache(max_size=WINDOW)
     write(plain, 0, 3)
     caches: list[object] = [plain, KVCache()]
 
     assert buffer_rotating_caches_for_speculation(caches, tokens_per_round=3)
-    assert isinstance(caches[0], BufferedRotatingKVCache)
+    assert isinstance(caches[0], buffered_type)
     assert isinstance(caches[1], KVCache), "full-attention caches are left alone"
 
-    buffered = cast(_WindowCache, cast(object, caches[0]))
+    buffered = cast(_WindowCache, caches[0])
     committed = 3
     # Verify rounds of three positions with a varying rejected tail, and a
     # plain single-position write now and then, far past the window and the
@@ -119,6 +129,7 @@ def test_a_tuple_cache_is_left_as_it_is() -> None:
 
 def test_the_prefix_cache_stores_a_converted_entry_plain() -> None:
     """The consumer stores the cache while the loop is still suspended."""
+    buffered_type = buffered_class()
     plain = RotatingKVCache(max_size=WINDOW)
     write(plain, 0, 5)
     caches: list[object] = [plain]
@@ -132,7 +143,7 @@ def test_the_prefix_cache_stores_a_converted_entry_plain() -> None:
     assert type(stored) is RotatingKVCache
     assert window(stored) == list(range(7))
     # The live cache is untouched by the copy.
-    assert isinstance(caches[0], BufferedRotatingKVCache)
+    assert isinstance(caches[0], buffered_type)
 
 
 def _fake_rounds(seen: list[type]) -> Callable[..., Generator[int, None, None]]:
@@ -172,13 +183,14 @@ def _run_wrapper(caches: list[object], *, close_early: bool) -> None:
 def test_the_loop_runs_buffered_and_hands_back_plain_caches(
     monkeypatch: pytest.MonkeyPatch, close_early: bool
 ) -> None:
+    buffered_type = buffered_class()
     seen: list[type] = []
     monkeypatch.setattr(generate_module, "_stream_generate_with_mtp_rounds", _fake_rounds(seen))
     caches: list[object] = [RotatingKVCache(max_size=WINDOW), KVCache()]
 
     _run_wrapper(caches, close_early=close_early)
 
-    assert seen == [BufferedRotatingKVCache, KVCache]
+    assert seen == [buffered_type, KVCache]
     assert type(caches[0]) is RotatingKVCache
     assert isinstance(caches[1], KVCache)
 
