@@ -390,8 +390,9 @@ member certificate. Zenoh's TLS dialer also trusts the public Web PKI roots, so
 a default-deny access-control policy admits traffic only on links whose peer
 presents that name. A device without the key therefore cannot join, read, or
 inject, and a passive observer sees only ciphertext. The guarantee is only as
-strong as the namespace: with the default namespace the key is public, as it
-is for libp2p, so links are encrypted but any Skulk node can join. Neither the
+strong as the namespace: with the default namespace, or a blank one, the key
+is public, as it is for libp2p, so links are encrypted but any Skulk node can
+join. Neither the
 namespace nor anything derived from it is logged or served; logs and
 `GET /v1/diagnostics/node` report only a domain-separated fingerprint.
 
