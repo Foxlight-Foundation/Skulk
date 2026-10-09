@@ -9,6 +9,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Turning a capability on or off from the Plugins page no longer flashes "This
+  node changed elsewhere" or briefly disables the switch. The page took the
+  host's answer at once while its settings read still showed the older
+  revision, and counted that as someone else's change.
 - Skulk on a Mac no longer keeps gigabytes of freed GPU memory to itself. MLX
   keeps freed buffers for reuse and Skulk set no limit on them, so on a 24 GB
   Mac a 12B model held about 9.5 GB of such buffers after a single response,

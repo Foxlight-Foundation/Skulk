@@ -114,7 +114,12 @@ function NodeEditor({ pluginId, configuration, reload, onTurnOnRefused }: NodeEd
   const [reloading, setReloading] = useState(false);
   const [mutate, { isLoading }] = useConfigurePluginNodeMutation();
   const busy = isLoading || reloading;
-  const changedElsewhere = configuration.revision !== baseline.revision || configuration.schemaDigest !== baseline.schemaDigest;
+  // Only a newer revision is a change made elsewhere. After this page's own
+  // change it adopts the host's answer at once, while the read behind it still
+  // shows the older revision until the refetch lands; reading that window as a
+  // foreign change disabled the switch and flashed "changed elsewhere".
+  const changedElsewhere = configuration.revision > baseline.revision
+    || (configuration.revision === baseline.revision && configuration.schemaDigest !== baseline.schemaDigest);
   const dirty = JSON.stringify(values) !== JSON.stringify(baseline.values);
   const supported = supportedConfigurationSchema(baseline.configurationSchema);
   const switchBlocked = busy || changedElsewhere || dirty;
