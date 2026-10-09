@@ -74,9 +74,11 @@ Port `52416` is Skulk's default libp2p port. If you changed it with `--libp2p-po
 mDNS and Zenoh multicast discovery do not cross routed networks. Control-plane
 bootstrap alone does not establish the data path used for inference output and
 media. Configure `SKULK_ZENOH_LISTEN` with a reachable listener on each node and
-`SKULK_ZENOH_CONNECT` with the peers' explicit `tcp/HOST:PORT` endpoints. Use the
-actual listener ports rather than assuming they are the API or libp2p port. Allow
-those ports in your tailnet policy as well as the control port.
+`SKULK_ZENOH_CONNECT` with the peers' explicit `tls/HOST:PORT` endpoints (the data
+plane is mutual TLS keyed by the cluster namespace; older `tcp/` endpoints are
+accepted and used as `tls/`). Use the actual listener ports rather than assuming
+they are the API or libp2p port. Allow those TCP ports in your tailnet policy as
+well as the control port.
 
 All nodes must use the same data transport and `SKULK_LIBP2P_NAMESPACE`. After
 startup, check `/state` and data-plane diagnostics for transport mismatch or

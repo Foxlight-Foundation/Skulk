@@ -368,6 +368,8 @@ impl PyZenohHandle {
         multicast_scouting: bool,
     ) -> PyResult<Self> {
         let config = ZenohConfig {
+            // Only `tls/` endpoints are accepted: the session is mutual TLS
+            // rooted in the cluster key, so a plaintext endpoint fails loudly.
             listen_endpoints: listen_endpoints.unwrap_or_default(),
             connect_endpoints: connect_endpoints.unwrap_or_default(),
             multicast_scouting,
@@ -383,6 +385,14 @@ impl PyZenohHandle {
         Ok(Self {
             session: Arc::new(session),
         })
+    }
+
+    /// Multicast scouting address (`224.0.0.224:<port>`), or None when off.
+    ///
+    /// The port derives from the cluster key, so each cluster scouts on its
+    /// own port; operators open it (UDP) in host firewalls. Not secret.
+    fn scouting_address(&self) -> Option<String> {
+        self.session.scouting_address().map(ToOwned::to_owned)
     }
 
     /// Return actual bound data-plane locators without changing connectivity.
@@ -409,12 +419,13 @@ impl PyZenohHandle {
             .pyerr()
     }
 
-    /// Count the Zenoh peers this session currently holds a live transport to.
+    /// Count the cluster members this session holds an authenticated transport to.
     ///
     /// Zero while cluster peers advertise Zenoh means this node's data plane
     /// is isolated (its remote streams will fail) even though the libp2p
     /// control plane is healthy; Python advertises the count so cluster
-    /// health can say so instead of streams dying silently.
+    /// health can say so instead of streams dying silently. Links whose peer
+    /// does not present the cluster's member certificate never count.
     async fn zenoh_connected_peer_count(&self) -> PyResult<usize> {
         let session = Arc::clone(&self.session);
         Ok(session.connected_peer_count().allow_threads_py().await)

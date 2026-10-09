@@ -1,7 +1,7 @@
 """Read-only local transport facts for provider-owned secure attachment."""
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from ipaddress import ip_address
 from typing import Literal, Self
 from urllib.parse import urlsplit
@@ -44,7 +44,11 @@ class HostNetwork(FrozenModel):
         description="Transport the new peer must match for inference output."
     )
     data: tuple[TcpEndpoint, ...] = Field(
-        max_length=16, description="Live Zenoh TCP listeners; empty for gossipsub."
+        max_length=16,
+        description=(
+            "Live Zenoh listeners (mutual TLS over TCP, keyed by the cluster "
+            "namespace); empty for gossipsub."
+        ),
     )
 
     @model_validator(mode="after")
@@ -53,6 +57,24 @@ class HostNetwork(FrozenModel):
         if bool(self.data) != (self.data_transport == "zenoh"):
             raise ValueError("data listener and transport differ")
         return self
+
+
+def private_namespace_configured(environ: Mapping[str, str]) -> bool:
+    """Return whether the cluster runs on an operator-chosen, non-public namespace.
+
+    The presence of ``SKULK_LIBP2P_NAMESPACE`` changes the derived cluster key
+    even when it is empty (the node mirrors the control plane's key exactly),
+    but an empty or blank value is as public as the default: any Skulk node can
+    derive the same key and join. Only a non-blank value is private, so only it
+    may silence the default-namespace warning or report a configured namespace.
+
+    Args:
+        environ: The process environment to read.
+
+    Returns:
+        True when the namespace variable holds a non-blank value.
+    """
+    return bool(environ.get("SKULK_LIBP2P_NAMESPACE", "").strip())
 
 
 def namespace_fingerprint(token: str) -> str:
@@ -67,6 +89,8 @@ def tcp_endpoints(
 ) -> tuple[TcpEndpoint, ...]:
     """Project bound numeric TCP listeners, normalizing wildcard binds to loopback.
 
+    Zenoh locators may be ``tcp/`` or ``tls/``: the data plane's TLS links ride
+    an ordinary TCP socket, so either projects to the same host and port.
     Unsupported transports are ignored. Ambiguous, invalid and excessive results
     fail closed instead of producing an endpoint that requires a guessed port.
     """
@@ -78,7 +102,7 @@ def tcp_endpoints(
                 continue
             host, raw_port = parts[2], parts[4]
         else:
-            if not address.startswith("tcp/"):
+            if not address.startswith(("tcp/", "tls/")):
                 continue
             parsed = urlsplit("tcp://" + address[4:])
             if parsed.path or parsed.query or parsed.fragment or parsed.username:

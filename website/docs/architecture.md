@@ -346,9 +346,11 @@ treated as unknown during startup; a mismatch requires positive advertisements
 of both transports.
 
 Uniform transport advertisement is not the same as a formed mesh, so
-`NodeResources` also carries `zenohConnectedPeers`: the node's live Zenoh
-peer-transport count, sampled from the session that owns the data plane at
-each advertisement. A startup grace window advertises unknown (`null`) while
+`NodeResources` also carries `zenohConnectedPeers`: the number of cluster
+members the node holds an authenticated Zenoh transport to, sampled from the
+session that owns the data plane at each advertisement. Only peers whose links
+present the cluster's member certificate count, so a transport that access
+control quarantines can never mask isolation. A startup grace window advertises unknown (`null`) while
 mesh formation is still in flight; after it, a count of exactly 0 on a node
 whose fleet has other live Zenoh members raises the error-level
 `zenoh_isolated` health reason, and the node itself logs a recurring warning
@@ -371,6 +373,27 @@ endpoints; `SKULK_ZENOH_LISTEN` overrides the selected listener.
 `SKULK_ZENOH_DATA_PLANE=0` is the explicit legacy-gossipsub escape hatch. This
 keeps a fresh install on the same data-plane implementation as the regular E2E
 qualification fleet instead of silently testing and shipping different paths.
+
+The Zenoh session is a cluster boundary keyed by the same secret as the
+control plane. The libp2p private-network pre-shared key derives from
+`NETWORK_VERSION` plus `SKULK_LIBP2P_NAMESPACE`, and the Rust networking crate
+derives three data-plane values from it one way (`data_plane_trust.rs`). First,
+a multicast scouting port on the shared `224.0.0.224` group, so clusters with
+different namespaces normally scout apart (a rare shared port only exchanges
+scout packets, which the TLS handshake then refuses); the port is logged at startup
+for host firewalls. Second, an Ed25519 certificate authority that every node
+derives identically; each process issues itself an ephemeral member
+certificate, and every link is TLS 1.3 with mutual authentication (`tls/` is
+the only link protocol, and operator `tcp/` endpoints are rewritten to `tls/`).
+Third, a member name under the reserved `.invalid` domain carried by every
+member certificate. Zenoh's TLS dialer also trusts the public Web PKI roots, so
+a default-deny access-control policy admits traffic only on links whose peer
+presents that name. A device without the key therefore cannot join, read, or
+inject, and a passive observer sees only ciphertext. The guarantee is only as
+strong as the namespace: with the default namespace the key is public, as it
+is for libp2p, so links are encrypted but any Skulk node can join. Neither the
+namespace nor anything derived from it is logged or served; logs and
+`GET /v1/diagnostics/node` report only a domain-separated fingerprint.
 
 The llama.cpp runner loads GGUF models with Flash Attention on by default (the
 modern llama.cpp default; it fixes the slow padded-V-cache and full-size

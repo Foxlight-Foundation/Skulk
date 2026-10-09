@@ -2905,7 +2905,7 @@ wheels = [
 
 [[package]]
 name = "skulk"
-version = "2.0.1"
+version = "2.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -3064,7 +3064,7 @@ requires-dist = [
 
 [[package]]
 name = "skulk-pyo3-bindings"
-version = "0.2.5"
+version = "0.2.6"
 source = { editable = "rust/skulk_pyo3_bindings" }
 
 [package.dev-dependencies]

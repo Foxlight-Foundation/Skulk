@@ -3185,19 +3185,25 @@ name = "networking"
 version = "0.0.1"
 dependencies = [
  "async-stream",
+ "base64",
  "delegate",
  "either",
  "extend",
  "futures-lite",
  "futures-timer",
+ "hkdf",
  "keccak-const",
  "libp2p",
  "log",
  "pin-project",
+ "rcgen 0.14.8",
+ "rustls",
+ "sha2",
  "tokio",
  "tracing-subscriber",
  "util",
  "zenoh",
+ "zeroize",
 ]
 
 [[package]]

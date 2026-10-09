@@ -8,7 +8,9 @@ libp2p namespaces could read each other's `data`). We hash unconditionally
 "ns<sha256(victim)>" collide (P2). The namespace token mirrors exactly what
 libp2p isolates on (swarm.rs), so one libp2p cluster cannot split across two
 Zenoh namespaces (#312 review P2). The listener resolver keeps the zero-config
-default on one peer-reachable interface rather than exposing every interface.
+default on one peer-reachable interface rather than exposing every interface,
+and every endpoint is a ``tls/`` locator because the data plane accepts only
+mutual TLS keyed by the cluster namespace.
 """
 
 import hashlib
@@ -16,11 +18,13 @@ import hashlib
 import pytest
 
 import skulk.main as main
+from skulk.extensions.host_network import namespace_fingerprint
 from skulk.main import (
     _LIBP2P_NETWORK_VERSION,  # pyright: ignore[reportPrivateUsage]
     _derive_zenoh_namespace,  # pyright: ignore[reportPrivateUsage]
     _libp2p_namespace_token,  # pyright: ignore[reportPrivateUsage]
-    _namespace_fingerprint,  # pyright: ignore[reportPrivateUsage]
+    _normalize_zenoh_endpoint,  # pyright: ignore[reportPrivateUsage]
+    _resolve_zenoh_connect,  # pyright: ignore[reportPrivateUsage]
     _resolve_zenoh_enabled,  # pyright: ignore[reportPrivateUsage]
     _resolve_zenoh_listen,  # pyright: ignore[reportPrivateUsage]
 )
@@ -76,16 +80,20 @@ def test_libp2p_namespace_token_mirrors_swarm() -> None:
 
 
 def test_namespace_fingerprint_is_stable_and_non_routing() -> None:
-    # #312 review: with no TLS the namespace is the isolation value, so logging
-    # emits a fingerprint instead. It must be stable per namespace (operators
-    # compare nodes) but neither equal to the namespace nor a prefix of it (a
-    # peer must not be able to subscribe from what's logged).
-    ns = _derive_zenoh_namespace("foxlight-main")
-    fp = _namespace_fingerprint(ns)
-    assert fp == _namespace_fingerprint(ns)  # stable
-    assert fp != ns and fp not in ns  # not the namespace, not a prefix of it
+    # #312 review: the namespace token seeds the cluster key, so logs and
+    # diagnostics emit a fingerprint instead. It must be stable per token
+    # (operators compare nodes) but neither the routing namespace nor a prefix
+    # of it, and never contain the raw namespace.
+    token = _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": "foxlight-main"})
+    ns = _derive_zenoh_namespace(token)
+    fp = namespace_fingerprint(token)
+    assert fp == namespace_fingerprint(token)  # stable
+    assert fp not in ns and ns.removeprefix("ns") != fp
+    assert "foxlight-main" not in fp
     # Distinct namespaces yield distinct fingerprints.
-    assert fp != _namespace_fingerprint(_derive_zenoh_namespace("other"))
+    assert fp != namespace_fingerprint(
+        _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": "other"})
+    )
 
 
 def test_resolve_zenoh_enabled_defaults_on_for_fresh_install() -> None:
@@ -113,40 +121,90 @@ def test_resolve_zenoh_enabled_rejects_garbage() -> None:
 
 
 def test_resolve_zenoh_listen_returns_explicit_value() -> None:
+    assert _resolve_zenoh_listen("tls/192.168.0.115:7447") == (
+        "tls/192.168.0.115:7447"
+    )
+    assert _resolve_zenoh_listen("tls/203.0.113.8:7447") == (
+        "tls/203.0.113.8:7447"
+    )
+    assert _resolve_zenoh_listen("  tls/127.0.0.1:7447  ") == (
+        "tls/127.0.0.1:7447"
+    )
+
+
+def test_resolve_zenoh_listen_rewrites_legacy_plaintext_override() -> None:
+    # Existing env files written for the plaintext transport keep the same
+    # socket address; only the protocol moves to TLS.
     assert _resolve_zenoh_listen("tcp/192.168.0.115:7447") == (
-        "tcp/192.168.0.115:7447"
+        "tls/192.168.0.115:7447"
     )
-    assert _resolve_zenoh_listen("tcp/203.0.113.8:7447") == (
-        "tcp/203.0.113.8:7447"
+    with pytest.raises(ValueError, match="IPv6 address"):
+        _resolve_zenoh_listen("  tcp/[::1]:7447#iface=en0  ")
+
+
+def test_normalize_zenoh_endpoint_reports_rewrites() -> None:
+    assert _normalize_zenoh_endpoint("tls/10.0.0.1:7447") == (
+        "tls/10.0.0.1:7447",
+        False,
     )
-    assert _resolve_zenoh_listen("  tcp/127.0.0.1:7447  ") == (
-        "tcp/127.0.0.1:7447"
+    assert _normalize_zenoh_endpoint("tcp/10.0.0.1:7447") == (
+        "tls/10.0.0.1:7447",
+        True,
     )
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["udp/10.0.0.1:7447", "quic/10.0.0.1:7447", "10.0.0.1:7447", "ws/h:1"]
+)
+def test_normalize_zenoh_endpoint_refuses_other_protocols(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="tls/HOST:PORT"):
+        _normalize_zenoh_endpoint(endpoint)
+
+
+@pytest.mark.parametrize("endpoint", ["tls/[::1]:7447", "tcp/[fd7a:115c::1]:7447", "tls/[::]:7447#iface=en0"])
+def test_normalize_zenoh_endpoint_refuses_ipv6_literals(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="IPv4 address or a DNS name"):
+        _normalize_zenoh_endpoint(endpoint)
+
+
+def test_resolve_zenoh_connect_normalizes_every_entry() -> None:
+    assert _resolve_zenoh_connect("") == ([], False)
+    assert _resolve_zenoh_connect(" , ") == ([], False)
+    assert _resolve_zenoh_connect("tls/10.0.0.2:7447, tls/10.0.0.3:7447") == (
+        ["tls/10.0.0.2:7447", "tls/10.0.0.3:7447"],
+        False,
+    )
+    assert _resolve_zenoh_connect("tcp/10.0.0.2:7447,tls/10.0.0.3:7447") == (
+        ["tls/10.0.0.2:7447", "tls/10.0.0.3:7447"],
+        True,
+    )
+    with pytest.raises(ValueError, match="tls/HOST:PORT"):
+        _resolve_zenoh_connect("tls/10.0.0.2:7447,udp/10.0.0.3:7447")
 
 
 def test_resolve_zenoh_listen_uses_best_routable_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(main, "_routable_local_ipv4", lambda: "192.168.0.115")
-    assert _resolve_zenoh_listen("") == "tcp/192.168.0.115:7447"
+    assert _resolve_zenoh_listen("") == "tls/192.168.0.115:7447"
 
 
 def test_resolve_zenoh_listen_accepts_cgnat_fabric(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(main, "_routable_local_ipv4", lambda: "100.64.12.34")
-    assert _resolve_zenoh_listen("") == "tcp/100.64.12.34:7447"
+    assert _resolve_zenoh_listen("") == "tls/100.64.12.34:7447"
 
 
 def test_resolve_zenoh_listen_rejects_automatic_public_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(main, "_routable_local_ipv4", lambda: "203.0.113.8")
-    assert _resolve_zenoh_listen("") == "tcp/127.0.0.1:7447"
+    assert _resolve_zenoh_listen("") == "tls/127.0.0.1:7447"
 
 
 def test_resolve_zenoh_listen_uses_loopback_without_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(main, "_routable_local_ipv4", lambda: None)
-    assert _resolve_zenoh_listen("   ") == "tcp/127.0.0.1:7447"
+    assert _resolve_zenoh_listen("   ") == "tls/127.0.0.1:7447"

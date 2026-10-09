@@ -33,6 +33,41 @@ bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
 
+- **v0.0.3** (2026-10-08): the Zenoh data plane is scoped to and
+  authenticated by the cluster key. Everything derives one-way from the
+  pnet pre-shared key (`src/data_plane_trust.rs`):
+  - Multicast scouting keeps the `224.0.0.224` group but uses a port
+    derived from the key (20000 to 26999, never Zenoh's shared 7446), so
+    clusters with different keys normally scout apart. The port is a hash
+    into 7,000 values, so two keys can share one (about 1 in 7,000 pairs);
+    such clusters exchange scout packets but the mutual TLS handshake
+    refuses the foreign key, so the port is not the security boundary. Explicit
+    `SKULK_ZENOH_CONNECT` endpoints still turn multicast off.
+  - Every link is TLS 1.3 with mutual authentication: each node derives the
+    same Ed25519 certificate authority (HKDF-SHA256 over the key) and each
+    process issues itself an ephemeral member certificate. `tls/` is the
+    only link protocol the session opens or accepts (`tcp/` endpoints in
+    environment files are rewritten to `tls/` by Python), with one link per
+    peer.
+  - Zenoh's TLS dialer also trusts the public Web PKI roots, so member
+    certificates carry a key-derived common name under `.invalid` and a
+    default-deny access-control policy admits traffic only on links whose
+    peer presents it.
+  - `connected_peer_count()` counts only peers whose links present that
+    name.
+
+  The bump re-keys pnet and the Zenoh session together: upgraded nodes
+  refuse old nodes on libp2p, and on Zenoh they scout on a different port
+  and speak only TLS, so old and new meshes cannot exchange data. Upgrade a cluster as
+  a whole. On the default namespace the key is public, exactly as on libp2p,
+  so links are encrypted against passive observers but any Skulk node can
+  join. Bindings advance to 0.2.6.
+
+- **wire-neutral** (2026-10-09): comment wording in `src/data_plane_trust.rs`
+  and `src/zenoh_session.rs` now says the key-derived scouting port normally
+  separates clusters and that a rare port collision is refused by mutual TLS.
+  No code, protocol, key derivation or session configuration changes.
+
 - **wire-neutral** (2026-09-12): bound-listener queries read `swarm.listeners()`
   and `session.info().locators()` through the local PyO3 boundary. The new
   `ToSwarm::ListenAddresses` variant stays on an in-process channel; it is not

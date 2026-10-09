@@ -665,17 +665,31 @@ class Router:
         )
 
     async def zenoh_connected_peer_count(self) -> int | None:
-        """Count live Zenoh peer transports, or ``None`` when DATA rides gossipsub.
+        """Count authenticated Zenoh cluster peers, or ``None`` on gossipsub.
 
         Zero with cluster peers advertising Zenoh means this node's data plane
         is isolated (every remote stream will fail with transport errors) even
         though the libp2p control plane is healthy, e.g. a zero-config remote
         member that multicast scouting cannot reach. Callers advertise the
-        count so cluster health can name the condition.
+        count so cluster health can name the condition. Only peers presenting
+        this cluster's member certificate count, so a foreign transport cannot
+        mask isolation.
         """
         if self._zenoh is None:
             return None
         return await self._zenoh.zenoh_connected_peer_count()
+
+    def zenoh_scouting_address(self) -> str | None:
+        """Return the Zenoh multicast scouting address, or ``None``.
+
+        ``None`` when DATA rides gossipsub or explicit connect endpoints turned
+        multicast off. The port derives from the cluster key (each cluster
+        scouts on its own port of ``224.0.0.224``) and is not secret; it is
+        logged at startup so operators can allow it in host firewalls.
+        """
+        if self._zenoh is None:
+            return None
+        return self._zenoh.scouting_address()
 
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
         if topic.topic == VISION_MEDIA.topic:

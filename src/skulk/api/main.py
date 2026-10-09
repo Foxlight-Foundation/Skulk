@@ -343,7 +343,7 @@ from skulk.extensions import (
     snapshot_cluster,
     validate_against_schema,
 )
-from skulk.extensions.host_network import HostNetwork
+from skulk.extensions.host_network import HostNetwork, private_namespace_configured
 from skulk.extensions.steward import StewardToolBinding
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import (
@@ -1875,8 +1875,13 @@ class API:
         operator_pairing_service: OperatorPairingService | None = None,
         apply_custom_card_mutations_locally: bool = False,
         host_network_provider: Callable[[], Awaitable[HostNetwork]] | None = None,
+        # Domain-separated fingerprint of the cluster namespace token, computed
+        # by the node. Diagnostics report it instead of the raw namespace, which
+        # seeds the cluster key that authenticates both transports.
+        namespace_fingerprint: str | None = None,
     ) -> None:
         self.state = State()
+        self._namespace_fingerprint = namespace_fingerprint
         self._apply_custom_card_mutations_locally = apply_custom_card_mutations_locally
         self._operator_pairing_service = operator_pairing_service
         # Relay ingress is optional and follows the stored route at runtime, so
@@ -14581,9 +14586,9 @@ class API:
             config_file_exists=self._config_path.exists(),
             skulk_version=get_skulk_version(),
             skulk_commit=identity.skulk_commit if identity is not None else "Unknown",
-            libp2p_namespace=preferred_env_value(
-                "SKULK_LIBP2P_NAMESPACE",
-            ),
+            # Never the raw namespace: it is the cluster's membership secret.
+            namespace_configured=private_namespace_configured(os.environ),
+            namespace_fingerprint=self._namespace_fingerprint,
             python_unbuffered=os.environ.get("PYTHONUNBUFFERED")
             in {"1", "true", "True"},
             tracing_enabled=self.state.tracing_enabled,

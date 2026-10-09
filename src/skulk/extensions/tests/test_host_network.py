@@ -22,6 +22,18 @@ def test_bound_tcp_projection_deduplicates_and_preserves_actual_ports() -> None:
     assert [(item.host, item.port) for item in data] == [("::1", 49124)]
 
 
+def test_tls_data_listener_projects_to_its_tcp_socket() -> None:
+    # The Zenoh data plane listens on mutual-TLS locators over ordinary TCP.
+    data = tcp_endpoints(
+        ("tls/192.168.1.10:7447", "tls/0.0.0.0:7448", "udp/192.168.1.10:9"),
+        multiaddr=False,
+    )
+    assert [(item.host, item.port) for item in data] == [
+        ("127.0.0.1", 7448),
+        ("192.168.1.10", 7447),
+    ]
+
+
 @pytest.mark.parametrize(
     "address",
     [

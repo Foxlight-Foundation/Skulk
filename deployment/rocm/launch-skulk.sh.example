@@ -42,7 +42,7 @@ export SKULK_LLAMA_CPP_BACKENDS=vulkan
 #
 # DATA plane over Eclipse Zenoh (only if the whole cluster uses Zenoh):
 #   export SKULK_ZENOH_DATA_PLANE=1
-#   export SKULK_ZENOH_LISTEN=tcp/0.0.0.0:7447
-#   export SKULK_ZENOH_CONNECT=tcp/<peer1-ip>:7447,tcp/<peer2-ip>:7447
+#   export SKULK_ZENOH_LISTEN=tls/0.0.0.0:7447
+#   export SKULK_ZENOH_CONNECT=tls/<peer1-ip>:7447,tls/<peer2-ip>:7447
 
 exec uv run skulk -v

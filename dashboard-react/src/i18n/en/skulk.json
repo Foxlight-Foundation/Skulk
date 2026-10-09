@@ -633,6 +633,7 @@
   "observability.node.completedLower": "completed",
   "observability.node.config": "Config",
   "observability.node.currentLower": "current",
+  "observability.node.customNamespace": "custom",
   "observability.node.cwd": "CWD",
   "observability.node.dataPlane": "DATA Plane",
   "observability.node.dataTransport": "Transport",
