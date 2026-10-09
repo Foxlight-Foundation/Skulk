@@ -55,3 +55,31 @@ export async function turnOnNodes(
   }
   return { enabled, refusal: null };
 }
+
+/**
+ * Start one node again that is on but stopped: send "enable" against a fresh read.
+ *
+ * A node stops at "needs settings" when a check fails while it starts, and it
+ * stays stopped after the cause goes away (a check that failed while Skulk was
+ * updating, for one) even though its checks pass when run again. The plugin
+ * restarts a node on every settings change, including enabling one that is
+ * already on, and runs its setup checks first, so this is the restart. It is
+ * fenced like turning on, sends no settings, and returns the host's refusal
+ * when a check still fails.
+ */
+export async function startNodeAgain(
+  requests: TurnOnRequests,
+  address: NodeAddress,
+  refusalDetail: (error: unknown) => string | null,
+  refusedStatus: (error: unknown) => number | null,
+): Promise<TurnOnRefusal | null> {
+  try {
+    const current = await requests.readConfiguration(address).unwrap();
+    await requests.configure({
+      ...address, operation: 'enable', expectedRevision: current.revision, expectedSchemaDigest: current.schemaDigest,
+    }).unwrap();
+    return null;
+  } catch (error) {
+    return { nodeId: address.nodeId, detail: refusalDetail(error), status: refusedStatus(error) };
+  }
+}

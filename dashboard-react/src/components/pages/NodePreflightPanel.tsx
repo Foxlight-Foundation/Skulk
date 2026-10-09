@@ -1,10 +1,14 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import styled from 'styled-components';
 import { FiAlertCircle, FiCheckCircle } from 'react-icons/fi';
 import { useSkulkTranslation } from '../../i18n/tolgee';
-import { useLazyGetNodePreflightQuery, type NodeAddress } from '../../store/endpoints/plugins';
+import {
+  pluginRefusalDetail, pluginRequestRefused, useConfigurePluginNodeMutation, useLazyGetNodeConfigurationQuery,
+  useLazyGetNodePreflightQuery, type NodeAddress,
+} from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
 import { humanizeKey } from './pluginSettingsSchema';
+import { startNodeAgain } from './turnOnCapability';
 
 /** Props for one node's setup checks. */
 export interface NodePreflightPanelProps extends NodeAddress {
@@ -13,6 +17,12 @@ export interface NodePreflightPanelProps extends NodeAddress {
    * value, as a caller does after the host refuses to turn the node on.
    */
   runRequest?: number;
+  /**
+   * The node is on but stopped waiting for setup. When its checks then pass,
+   * offer to start it again: it stopped on a check that failed while it was
+   * starting and does not retry by itself.
+   */
+  offerStartAgain?: boolean;
 }
 
 /**
@@ -21,9 +31,24 @@ export interface NodePreflightPanelProps extends NodeAddress {
  * The plugin names each check by a stable code; the common ones read in
  * plain words, and any other code is shown as its words rather than raw.
  */
-export function NodePreflightPanel({ pluginId, nodeId, runRequest = 0 }: NodePreflightPanelProps) {
+export function NodePreflightPanel({ pluginId, nodeId, runRequest = 0, offerStartAgain = false }: NodePreflightPanelProps) {
   const { t } = useSkulkTranslation();
   const [run, query] = useLazyGetNodePreflightQuery();
+  const [readConfiguration] = useLazyGetNodeConfigurationQuery();
+  const [configure] = useConfigurePluginNodeMutation();
+  const [starting, setStarting] = useState(false);
+  const [startOutcome, setStartOutcome] = useState<{ text: string; problem: boolean } | null>(null);
+  const startAgain = async () => {
+    setStarting(true);
+    setStartOutcome(null);
+    const refusal = await startNodeAgain({ readConfiguration: (address) => readConfiguration(address, false), configure },
+      { pluginId, nodeId }, pluginRefusalDetail, pluginRequestRefused);
+    setStarting(false);
+    setStartOutcome(refusal === null
+      ? { text: t('plugins.startAgainStarted', 'Starting it again. Its status updates here in a moment.'), problem: false }
+      : { text: refusal.detail ? t('plugins.startAgainRefusedReason', 'It did not start. The host said: {reason}', { reason: refusal.detail })
+        : t('plugins.startAgainRefused', 'It did not start. Run the checks again to see what is missing.'), problem: true });
+  };
   const report = query.currentData;
   useEffect(() => {
     if (runRequest > 0) void run({ pluginId, nodeId });
@@ -60,11 +85,24 @@ export function NodePreflightPanel({ pluginId, nodeId, runRequest = 0 }: NodePre
         </div>
       </Check>)}</Checklist>
       <Meta as="p">{t('plugins.checksAreObservations', 'These are observations. Turning it on runs fresh checks and does not approve spending.')}</Meta>
+      {offerStartAgain && passed === report.checks.length ? <StartAgain>
+        <p>{t('plugins.startAgainDetail', 'Its checks pass now, but it stopped when a check failed while it was starting, for example while Skulk was updating, and it does not retry by itself. Starting it again runs the checks once more and starts it.')}</p>
+        <div><Button type="button" variant="solid" size="sm" disabled={starting} loading={starting} onClick={() => void startAgain()}>{t('plugins.startAgain', 'Start it again')}</Button></div>
+      </StartAgain> : null}
     </> : null}
+    {startOutcome ? <Outcome role={startOutcome.problem ? 'alert' : 'status'} $problem={startOutcome.problem}>{startOutcome.text}</Outcome> : null}
   </Panel>;
 }
 
 const Panel = styled.section`display: flex; flex-direction: column; gap: 12px; min-width: 0; overflow-wrap: anywhere;`;
+const StartAgain = styled.div`
+  display: flex; flex-direction: column; gap: 8px;
+  p { margin: 0; font-size: 13px; line-height: 1.5; color: ${({ theme }) => theme.colors.textSecondary}; }
+`;
+const Outcome = styled.p<{ $problem: boolean }>`
+  margin: 0; font-size: 13px; line-height: 1.5;
+  color: ${({ theme, $problem }) => $problem ? theme.colors.error : theme.colors.text};
+`;
 const Problem = styled.p`margin: 0; font-size: 13px; line-height: 1.5; color: ${({ theme }) => theme.colors.error};`;
 const Summary = styled.p`margin: 0; font-size: 13.5px; line-height: 1.5; color: ${({ theme }) => theme.colors.text};`;
 const Meta = styled.span`font-size: 12px; line-height: 1.5; margin: 0; color: ${({ theme }) => theme.colors.metadataText};`;

@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A capability that stopped at "needs settings" because a check failed while
+  it was starting, for example while Skulk was updating, can now be started
+  again from its setup checks. It stayed stopped even after its checks passed,
+  with no action on the page short of turning it off and on. Once its checks
+  pass, the checks panel offers **Start it again**, which reruns them and
+  starts it, or shows the host's reason if it still cannot start.
 - A capability whose plugin service is not answering, as for a few minutes
   after every Skulk update while the service restarts, no longer reads as
   needing setup. Its Browse card offered **Set up** and its setup page said it

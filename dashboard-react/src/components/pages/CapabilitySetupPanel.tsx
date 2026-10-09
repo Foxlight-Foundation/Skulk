@@ -225,7 +225,8 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
       <p>{t('plugins.setup.checksHelp', 'They check what it needs to run. Checking changes nothing.')}</p>
       {checked.map((summary) => <div key={capabilityNodeKey(summary)}>
         {checked.length > 1 ? <h4>{capabilityNodeTitle(summary)}</h4> : null}
-        <NodePreflightPanel pluginId={summary.pluginId} nodeId={summary.nodeId} runRequest={refusal?.nodeId === summary.nodeId ? checkRequest : 0} />
+        <NodePreflightPanel pluginId={summary.pluginId} nodeId={summary.nodeId} runRequest={refusal?.nodeId === summary.nodeId ? checkRequest : 0}
+          offerStartAgain={summary.ownerAvailable && summary.status === 'configuration_invalid'} />
       </div>)}
     </Checks> : null}
   </Panel>;

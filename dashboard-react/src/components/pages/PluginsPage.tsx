@@ -228,7 +228,7 @@ function NodeCard({ pluginId, node, title, defaultExpanded = false, collapsible 
     {node.preflightAvailable ? <Section>
       <h4>{t('plugins.setup.checksTitle', 'Setup checks')}</h4>
       <Muted>{t('plugins.checksHelp', 'Check what it needs to run. Checking changes nothing and does not turn it on.')}</Muted>
-      <NodePreflightPanel pluginId={pluginId} nodeId={node.nodeId} runRequest={checkRequest} />
+      <NodePreflightPanel pluginId={pluginId} nodeId={node.nodeId} runRequest={checkRequest} offerStartAgain={node.status === 'configuration_invalid'} />
     </Section> : null}
     {node.credentialsConfigurable ? <Section>
       <SectionHead>
