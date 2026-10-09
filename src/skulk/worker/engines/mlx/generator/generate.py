@@ -57,11 +57,13 @@ from skulk.worker.engines.mlx.auto_parallel import (
 from skulk.worker.engines.mlx.cache import (
     CacheSnapshot,
     KVPrefixCache,
+    buffer_rotating_caches_for_speculation,
     encode_prompt,
     has_non_kv_caches,
     has_recurrent_state_caches,
     is_non_kv_cache_entry,
     make_kv_cache,
+    restore_plain_rotating_caches,
     rollback_speculative_positions,
     snapshot_ssm_states,
     supports_positional_rollback,
@@ -1487,6 +1489,70 @@ def _exchange_drafts(
 
 
 def _stream_generate_with_mtp(
+    *,
+    model: Model,
+    tokenizer: TokenizerWrapper,
+    drafter: Drafter | None,
+    trunk_fn: Callable[..., mx.array],
+    head_fn: Callable[..., mx.array],
+    prompt: mx.array,
+    max_tokens: int,
+    sampler: Callable[[mx.array], mx.array],
+    logits_processors: list[Callable[[mx.array, mx.array], mx.array]],
+    prompt_cache: KVCacheType,
+    kv_group_size: int | None,
+    kv_bits: int | None,
+    depth: int = 1,
+    sampling: SamplingParams | None = None,
+    fail_loud_on_drafter_error: bool = False,
+    draft_group: "mx.distributed.Group | None" = None,
+    draft_group_reads_target_cache: bool = True,
+) -> Generator[MlxGenerationResponse, None, None]:
+    """Run the speculative decode loop with sliding-window caches it can write in place.
+
+    For the duration of the loop, plain sliding-window entries become
+    mlx-vlm's ``BufferedRotatingKVCache`` (see
+    :func:`~skulk.worker.engines.mlx.cache.buffer_rotating_caches_for_speculation`),
+    which is what kept MLX's freed-buffer cache from growing by gigabytes per
+    response on Gemma 4. They are put back as the plain caches they were when
+    the loop ends, finishes early or is cancelled. Only caches rolled back
+    positionally are converted: the snapshot path deep-copies sliding-window
+    entries every round, and buffered ones would copy their slack too. See
+    :func:`_stream_generate_with_mtp_rounds` for the loop itself.
+    """
+    speculating = drafter is not None or draft_group is not None
+    buffered = (
+        speculating
+        and not has_recurrent_state_caches(prompt_cache)
+        and supports_positional_rollback(prompt_cache)
+        and buffer_rotating_caches_for_speculation(prompt_cache, max(depth, 1) + 1)
+    )
+    try:
+        yield from _stream_generate_with_mtp_rounds(
+            model=model,
+            tokenizer=tokenizer,
+            drafter=drafter,
+            trunk_fn=trunk_fn,
+            head_fn=head_fn,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            logits_processors=logits_processors,
+            prompt_cache=prompt_cache,
+            kv_group_size=kv_group_size,
+            kv_bits=kv_bits,
+            depth=depth,
+            sampling=sampling,
+            fail_loud_on_drafter_error=fail_loud_on_drafter_error,
+            draft_group=draft_group,
+            draft_group_reads_target_cache=draft_group_reads_target_cache,
+        )
+    finally:
+        if buffered:
+            restore_plain_rotating_caches(prompt_cache)
+
+
+def _stream_generate_with_mtp_rounds(
     *,
     model: Model,
     tokenizer: TokenizerWrapper,

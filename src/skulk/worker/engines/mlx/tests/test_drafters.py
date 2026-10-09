@@ -1096,8 +1096,13 @@ class TestRejectPathSSMState:
         assert outputs
         native_rollback.assert_not_called()
         # Every round rejected its draft, so the rotating cache was trimmed
-        # (the fake trunk never writes, hence the offset drops below 8).
-        assert rotating_cache.offset < 8
+        # (the fake trunk never writes, hence the offset drops below 8). The
+        # loop runs on a buffered copy of the sliding-window entry and hands
+        # back a plain one in the same slot, so read the slot, not the
+        # original object.
+        restored = cache[0]
+        assert type(restored) is RotatingKVCache
+        assert restored.offset < 8
 
     def test_reject_does_not_call_native_rollback_without_gdn_states(self) -> None:
         """Stateful Skulk verifies must use snapshots, not native GDN rollback.

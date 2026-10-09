@@ -267,11 +267,11 @@ class TestLoopPositionalRollback:
     ) -> None:
         target = _CacheWritingTarget()
         full_cache = KVCache()
-        window_cache = RotatingKVCache(max_size=4)
+        caches: list[object] = [full_cache, RotatingKVCache(max_size=4)]
         prompt = [3, 9, 4]
         emitted, native_rollback = _run_loop(
             target,
-            [full_cache, window_cache],
+            caches,
             prompt=prompt,
             max_tokens=24,
             eos_ids=[],
@@ -298,7 +298,11 @@ class TestLoopPositionalRollback:
         assert cached == sequence[: len(cached)]
         assert len(cached) >= len(prompt) + len(emitted) - 1
         # The loop's last cache write was a verify or a rollback, both of
-        # which leave the rotating buffer in temporal order.
+        # which leave the rotating buffer in temporal order. The loop runs on
+        # a buffered copy of the sliding-window entry and hands back a plain
+        # one in the same slot.
+        window_cache = caches[1]
+        assert type(window_cache) is RotatingKVCache
         window = _flat(cast(mx.array, window_cache.state[0]))[-window_cache.max_size :]
         assert window == cached[-len(window) :]
 
