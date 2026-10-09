@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A node now reports the commit it started from. It used to re-read its
+  checkout every time it refreshed its identity, so after a checkout moved, a
+  node that had not restarted yet claimed the new commit while still running
+  the old code, and the cluster could not warn about the mixed build
+  (`version_mismatch`).
 - Speculative decoding on Gemma 4 models on a Mac is much faster:
   `gemma-4-12B-it-4bit` with its assistant on an M4 Mac mini went from about
   13 to about 20 tokens per second, in line with mlx-vlm running the same
