@@ -775,6 +775,47 @@ def instances_wedged_by_download_failure(
             wedged[instance_id] = (frozenset(failed_nodes), cause)
     return wedged
 
+
+def retire_download_failure_lineages(
+    lineages: Mapping[InstanceId, frozenset[NodeId]],
+    seen: AbstractSet[InstanceId],
+    state: State,
+) -> tuple[dict[InstanceId, frozenset[NodeId]], set[InstanceId]]:
+    """Drop download-failure repair lineages whose chain has ended.
+
+    A chain ends when its latest replacement becomes ready (recovery worked) or
+    when it was present in state and is now gone (an operator or another path
+    deleted it). Keeping either would carry exclusions into an unrelated later
+    failure of the same instance and grow for the master's lifetime. A
+    replacement not yet in state and never seen there is kept: the planning
+    pass emits its creation, which only appears once the event round-trips.
+
+    Args:
+        lineages: Accumulated failed nodes per replacement instance.
+        seen: Replacement instances already observed in state.
+        state: The master's current state.
+
+    Returns:
+        The lineages still in progress, and which of them are in state now.
+    """
+    kept: dict[InstanceId, frozenset[NodeId]] = {}
+    present: set[InstanceId] = set()
+    for instance_id, failed_nodes in lineages.items():
+        instance = state.instances.get(instance_id)
+        if instance is None:
+            if instance_id not in seen:
+                kept[instance_id] = failed_nodes
+            continue
+        runner_ids = list(instance.shard_assignments.runner_to_shard)
+        if runner_ids and all(
+            isinstance(state.runners.get(runner_id), (RunnerReady, RunnerRunning))
+            for runner_id in runner_ids
+        ):
+            continue
+        kept[instance_id] = failed_nodes
+        present.add(instance_id)
+    return kept, present
+
 def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
     """Rank viable text placements by readiness, ordinary role and active load.
 
@@ -1058,9 +1099,15 @@ class Master:
         # auth, a missing revision) re-places forever under new ids. Excluding
         # the accumulated set from each hop's search bounds a lineage to one
         # attempt per node; placement then runs out of nodes and recovery
-        # stops at the teardown. Master-local like the sets above: a new
-        # master starts fresh lineages, which is still bounded.
+        # stops at the teardown. A memory refusal of a replacement carries
+        # the lineage to the refusal's replacement, and a lineage retires once
+        # its replacement is ready or deleted. Master-local like the sets
+        # above: a new master starts fresh lineages, which is still bounded.
         self._download_failure_lineage: dict[InstanceId, frozenset[NodeId]] = {}
+        # Replacements from the lineage map already observed in state, so a
+        # later absence reads as a deletion rather than a pending creation
+        # (see retire_download_failure_lineages).
+        self._download_failure_lineage_seen: set[InstanceId] = set()
         # Steward invariant pacing: at most one placement attempt per minute,
         # so an unplaceable steward (no eligible node yet) logs and retries
         # calmly instead of hammering the planner every 10s tick.
@@ -3206,6 +3253,14 @@ class Master:
                                 replace_command = (
                                     replacement_command_for_refused_instance(refused)
                                 )
+                                # Nodes whose download of this model already
+                                # failed in a download-failure repair chain stay
+                                # out of the refusal's searches too, or the chain
+                                # could alternate refusal and download hops
+                                # forever (see _download_failure_lineage).
+                                lineage_failed = self._download_failure_lineage.pop(
+                                    command.instance_id, frozenset()
+                                )
                                 try:
                                     repair_memory, repair_vram = self._reserved_placement_inputs(
                                         self._telemetry_view.node_memory,
@@ -3220,7 +3275,8 @@ class Master:
                                         download_status=self._effective_downloads(),
                                         excluded_nodes=set(
                                             replace_command.excluded_nodes
-                                        ),
+                                        )
+                                        | lineage_failed,
                                         stamped_exclusions=set(refused.excluded_nodes),
                                         node_resources=self._telemetry_view.node_resources,
                                         node_vram=repair_vram,
@@ -3278,7 +3334,8 @@ class Master:
                                             repair_memory,
                                             self.state.node_network,
                                             download_status=self._effective_downloads(),
-                                            excluded_nodes=set(fallback.excluded_nodes),
+                                            excluded_nodes=set(fallback.excluded_nodes)
+                                            | lineage_failed,
                                             stamped_exclusions=set(
                                                 refused.excluded_nodes
                                             ),
@@ -3322,6 +3379,12 @@ class Master:
                                     instance_id not in after_delete
                                     for instance_id in final_placement
                                 )
+                                if lineage_failed:
+                                    for new_id in final_placement:
+                                        if new_id not in after_delete:
+                                            self._download_failure_lineage[new_id] = (
+                                                lineage_failed
+                                            )
                                 generated_events.append(
                                     instance_failure_event(
                                         refused,
@@ -3679,6 +3742,13 @@ class Master:
         lineage (see ``_download_failure_lineage``), so the bound holds when
         the failure repeats on every node.
         """
+        self._download_failure_lineage, self._download_failure_lineage_seen = (
+            retire_download_failure_lineages(
+                self._download_failure_lineage,
+                self._download_failure_lineage_seen,
+                self.state,
+            )
+        )
         wedged = instances_wedged_by_download_failure(self.state)
         for instance_id, (failed_nodes, cause) in wedged.items():
             if instance_id in self._download_failure_recovered:
