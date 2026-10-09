@@ -7,6 +7,10 @@ exactly that wedge from replicated state so the plan loop can fail and re-place
 the instance.
 """
 
+from collections.abc import Mapping
+
+import pytest
+
 from skulk.master.main import instances_wedged_by_download_failure
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
@@ -262,6 +266,134 @@ async def test_recovery_consumes_the_terminal_failure_record() -> None:
     assert failure.failure.error_code == "download_failed"
     assert "No space left on device" not in failure.failure.error_message
     assert "Inspect cluster logs" in failure.failure.error_message
+
+
+async def test_recovery_stops_when_the_failure_follows_the_model_to_every_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each repair hop excludes every node that already failed in its lineage.
+
+    Recovery stamps only the caller's own exclusions on a replacement (#667),
+    and it resets the failed node's download status, so each hop used to see
+    only the latest failure. A failure that repeats on every node (offline,
+    auth, a missing revision) then re-placed forever under new instance ids:
+    a fails, the replacement lands on b and c, b fails, and a is eligible
+    again. With the lineage carried, the second hop finds no two nodes left
+    and recovery stops at the teardown.
+    """
+    from anyio import WouldBlock
+
+    from skulk.master import main as master_main
+    from skulk.master.main import Master
+    from skulk.master.placement import PlacementError
+    from skulk.routing.router import get_node_id_keypair
+    from skulk.shared.types.commands import (
+        ForwarderCommand,
+        ForwarderDownloadCommand,
+        PlaceInstance,
+    )
+    from skulk.shared.types.common import SessionId
+    from skulk.shared.types.events import (
+        Event,
+        GlobalForwarderEvent,
+        InstanceCreated,
+        InstanceFailureRecorded,
+        LocalForwarderEvent,
+    )
+    from skulk.shared.types.state_sync import StateSyncMessage
+    from skulk.utils.channels import channel
+
+    node_a, node_b, node_c = NodeId("a"), NodeId("b"), NodeId("c")
+    searches: list[tuple[set[NodeId], set[NodeId]]] = []
+    placed: list[tuple[Instance, RunnerId, RunnerId]] = []
+
+    def place_on_two_healthy_nodes(
+        command: PlaceInstance,
+        topology: object,
+        current_instances: Mapping[InstanceId, Instance],
+        node_memory: object,
+        node_network: object,
+        *,
+        excluded_nodes: set[NodeId] | None = None,
+        stamped_exclusions: set[NodeId] | None = None,
+        **_: object,
+    ) -> dict[InstanceId, Instance]:
+        excluded = set(excluded_nodes or ())
+        searches.append((excluded, set(stamped_exclusions or ())))
+        healthy = sorted({node_a, node_b, node_c} - excluded)
+        if len(healthy) < command.min_nodes:
+            raise PlacementError("no two healthy nodes left")
+        replacement = _two_node_instance(
+            InstanceId(str(command.command_id)), healthy[0], healthy[1]
+        )
+        placed.append(replacement)
+        return {**current_instances, replacement[0].instance_id: replacement[0]}
+
+    monkeypatch.setattr(master_main, "place_instance", place_on_two_healthy_nodes)
+
+    master_node = NodeId(get_node_id_keypair().to_node_id())
+    session_id = SessionId(master_node_id=master_node, election_clock=0)
+    ge_sender, _ = channel[GlobalForwarderEvent]()
+    _, co_receiver = channel[ForwarderCommand]()
+    _, le_receiver = channel[LocalForwarderEvent]()
+    ss_sender, ss_receiver = channel[StateSyncMessage]()
+    fcds, _ = channel[ForwarderDownloadCommand]()
+    ev_send, ev_recv = channel[Event]()
+    master = Master(
+        master_node,
+        session_id,
+        event_sender=ev_send,
+        global_event_sender=ge_sender,
+        local_event_receiver=le_receiver,
+        command_receiver=co_receiver,
+        state_sync_receiver=ss_receiver,
+        state_sync_sender=ss_sender,
+        download_command_sender=fcds,
+    )
+
+    def drain() -> list[Event]:
+        emitted: list[Event] = []
+        while True:
+            try:
+                emitted.append(ev_recv.receive_nowait())
+            except WouldBlock:
+                return emitted
+
+    original, runner_a, runner_b = _two_node_instance(InstanceId(), node_a, node_b)
+    master.state = _state(
+        original,
+        {runner_a: RunnerConnected(), runner_b: RunnerConnected()},
+        {node_a: [_failed(node_a)], node_b: [_completed(node_b)]},
+    )
+    await master._recover_download_failed_instances()  # pyright: ignore[reportPrivateUsage]
+    first_hop = drain()
+
+    assert searches[0] == ({node_a}, set())
+    replacement, runner_b2, runner_c = placed[0]
+    assert set(replacement.shard_assignments.node_to_runner) == {node_b, node_c}
+    assert any(
+        isinstance(event, InstanceCreated)
+        and event.instance.instance_id == replacement.instance_id
+        for event in first_hop
+    )
+
+    # The replacement's download now fails on b. a's failure was consumed
+    # (reset to pending) by the first hop, so only the lineage remembers it.
+    master.state = _state(
+        replacement,
+        {runner_b2: RunnerConnected(), runner_c: RunnerConnected()},
+        {node_b: [_failed(node_b)], node_c: [_completed(node_c)]},
+    )
+    await master._recover_download_failed_instances()  # pyright: ignore[reportPrivateUsage]
+    second_hop = drain()
+
+    assert searches[1] == ({node_a, node_b}, set()), (
+        "the second hop must exclude the first hop's failed node too, while "
+        "stamping only the caller's original exclusions"
+    )
+    assert len(placed) == 1, "no third placement: recovery stops at the teardown"
+    assert not any(isinstance(event, InstanceCreated) for event in second_hop)
+    assert any(isinstance(event, InstanceFailureRecorded) for event in second_hop)
 
 
 def test_stale_donor_download_failure_does_not_wedge_rpc_instance() -> None:
