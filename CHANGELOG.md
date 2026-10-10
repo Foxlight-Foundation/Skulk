@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Security
 
+- Updated primp, the HTTP client behind web search, from 1.2.2 to 1.3.1.
+  1.2.2 was withdrawn by its maintainer: two web searches that were the first
+  in a process and started together could freeze the whole node, because the
+  stuck thread held Python's interpreter lock. 1.3.1 also stops credentials
+  being forwarded on HTTPS-to-HTTP redirects.
 - Nodes are no longer exposed to remote crashes through their peer-to-peer
   connections. Updated network libraries fix a gossipsub backoff overflow that
   let a peer crash a node, unbounded subscriptions, and panics or unbounded
