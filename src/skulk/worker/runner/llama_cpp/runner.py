@@ -73,6 +73,8 @@ from skulk.worker.runner.llm_inference.scaffolding_scrub import (
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_parsers import declared_tool_calls
 from skulk.worker.runner.llm_inference.tool_text_parser import (
+    GenericDialect,
+    generic_dialects_from_template,
     parse_tool_calls_with_remainder,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
@@ -433,6 +435,15 @@ class TemplateKwargFormatter:
         # The handler's own arguments (messages, tools, ...) must win over
         # the injected slot on any collision.
         return self._inner(**{**self.template_kwargs, **kwargs})
+
+
+def gguf_chat_template(model: object) -> str | None:
+    """The chat template a loaded GGUF carries, or None when it has none."""
+    metadata = getattr(model, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    template = cast("dict[str, Any]", metadata).get("tokenizer.chat_template")
+    return template if isinstance(template, str) else None
 
 
 def install_template_kwarg_formatter(model: Any) -> TemplateKwargFormatter | None:
@@ -825,6 +836,9 @@ class Runner(ServedConcurrentDispatch):
         # enable_thinking; carries per-request thinking control into the
         # template render (see TemplateKwargFormatter).
         self._thinking_formatter: TemplateKwargFormatter | None = None
+        # Which Generic-family tool dialects this model's template writes,
+        # read once from the GGUF at load; None when it names none of them.
+        self._generic_tool_dialects: frozenset[GenericDialect] | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         # Width 1: the in-process Llama object cannot generate concurrently.
         # The mixin still bounds admitted work and stamps admission concurrency.
@@ -994,6 +1008,9 @@ class Runner(ServedConcurrentDispatch):
                 verbose=False,
                 chat_handler=chat_handler,
             )
+        self._generic_tool_dialects = generic_dialects_from_template(
+            gguf_chat_template(self.model)
+        )
         if chat_handler is None:
             # Text path only: a vision chat handler owns its own rendering
             # and must not be swapped out from under the projector.
@@ -1536,10 +1553,13 @@ class Runner(ServedConcurrentDispatch):
             # Card truth scopes the recovery dialect (#897 review): a model's
             # resolved format decides how its output is read, so a foreign
             # dialect echoed in prose can never be minted as a call.
+            # Template truth scopes it further within the Generic family
+            # (#899): an echoed block in another Generic dialect is content.
             tool_calls, trailing_text = parse_tool_calls_with_remainder(
                 tool_source,
                 task.task_params.tools,
                 tool_call_format=resolved_format,
+                generic_dialects=self._generic_tool_dialects,
             )
             if tool_calls and trailing_text:
                 # The model kept writing after its call ("{...} Done."). That
