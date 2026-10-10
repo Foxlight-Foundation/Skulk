@@ -1,4 +1,4 @@
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, Unpack
@@ -25,7 +25,7 @@ class TaskGroup:
 
     def start_soon[*T](
         self,
-        func: Callable[[Unpack[T]], Awaitable[Any]],
+        func: Callable[[Unpack[T]], Coroutine[Any, Any, Any]],
         *args: Unpack[T],
         name: object = None,
     ) -> None:
@@ -35,7 +35,7 @@ class TaskGroup:
 
     def queue[*T](
         self,
-        func: Callable[[Unpack[T]], Awaitable[Any]],
+        func: Callable[[Unpack[T]], Coroutine[Any, Any, Any]],
         *args: Unpack[T],
         name: object = None,
     ) -> None:

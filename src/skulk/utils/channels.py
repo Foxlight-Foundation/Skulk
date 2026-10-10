@@ -12,6 +12,7 @@ from anyio import (
     ClosedResourceError,
     EndOfStream,
     WouldBlock,
+    create_memory_object_stream,
     to_thread,
 )
 from anyio.streams.memory import (
@@ -20,12 +21,22 @@ from anyio.streams.memory import (
 from anyio.streams.memory import (
     MemoryObjectSendStream as AnyioSender,
 )
-from anyio.streams.memory import (
-    MemoryObjectStreamState as AnyioState,
-)
 
 
 class Sender[T](AnyioSender[T]):
+    @classmethod
+    def adopt(cls, stream: AnyioSender[T]) -> "Sender[T]":
+        """Take over a public anyio send stream's shared buffer.
+
+        Builds on ``create_memory_object_stream`` rather than anyio's stream
+        state class, which anyio made private in 4.12. The new sender counts
+        itself open before the original handle closes, so the receivers never
+        see the stream end.
+        """
+        adopted = cls(_state=stream._state)
+        stream.close()
+        return adopted
+
     def clone(self) -> "Sender[T]":
         if self._closed:
             raise ClosedResourceError
@@ -39,6 +50,18 @@ class Sender[T](AnyioSender[T]):
 
 
 class Receiver[T](AnyioReceiver[T]):
+    @classmethod
+    def adopt(cls, stream: AnyioReceiver[T]) -> "Receiver[T]":
+        """Take over a public anyio receive stream's shared buffer.
+
+        The counterpart of :meth:`Sender.adopt`: the new receiver counts itself
+        open before the original handle closes, so senders never see the
+        stream closed.
+        """
+        adopted = cls(_state=stream._state)
+        stream.close()
+        return adopted
+
     def clone(self) -> "Receiver[T]":
         if self._closed:
             raise ClosedResourceError
@@ -338,8 +361,8 @@ class channel[T]:  # noqa: N801
     def __new__(cls, max_buffer_size: float = inf) -> tuple[Sender[T], Receiver[T]]:
         if max_buffer_size != inf and not isinstance(max_buffer_size, int):
             raise ValueError("max_buffer_size must be either an integer or math.inf")
-        state = AnyioState[T](max_buffer_size)
-        return Sender(_state=state), Receiver(_state=state)
+        send, receive = create_memory_object_stream[T](max_buffer_size)
+        return Sender[T].adopt(send), Receiver[T].adopt(receive)
 
 
 class mp_channel[T]:  # noqa: N801

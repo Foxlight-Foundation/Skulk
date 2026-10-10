@@ -20,6 +20,11 @@ This project records release notes here and mirrors public-facing notes in
   concerns certificate matching for internationalized host names, which the
   web-fetch tool can reach, and moving past it needs a change to Skulk's
   internal channels, which follows separately.
+- Updated anyio to 4.14.2, which fixes certificate matching for
+  internationalized host names on TLS connections, including those the
+  web-fetch tool opens to model-supplied URLs. Skulk's internal channels now
+  build on anyio's public memory streams instead of a state class anyio made
+  private in 4.12; channel behavior is unchanged.
 
 ### Fixed
 
