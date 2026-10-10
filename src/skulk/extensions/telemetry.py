@@ -29,8 +29,14 @@ from typing import final
 
 from pydantic import BaseModel, ConfigDict
 
+from skulk.shared.topology import Topology
+from skulk.shared.types.capability_nodes import (
+    CAPABILITY_NODES_STALE_AFTER_SECONDS,
+    CapabilityNodeSummary,
+)
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.telemetry import TelemetryView
+from skulk.shared.types.topology import SocketConnection
 
 # Identity subfields default to this sentinel in ``NodeIdentity`` before their
 # reading has actually arrived. The snapshot normalizes it to ``None`` so an
@@ -137,3 +143,88 @@ def snapshot_cluster(view: TelemetryView) -> tuple[ClusterNodeView, ...]:
         )
     snapshots.sort(key=lambda snapshot: (snapshot.friendly_name or "", snapshot.node_id))
     return tuple(snapshots)
+
+
+MAX_PEER_ADDRESSES = 8
+"""Upper bound on the reachable addresses one peer view lists."""
+
+
+@final
+class CapabilityPeerView(BaseModel):
+    """One peer host's published capability nodes, as this node sees them.
+
+    How an installed plugin finds the same plugin on other hosts of its
+    cluster, and reads the handshakes they address to this host. Only fresh
+    readings appear: a host whose last capability-node reading is older than
+    the staleness bound is absent, the same rule the dashboard applies.
+
+    Attributes:
+        node_id: The peer's node identity.
+        friendly_name: Human-facing node name, or ``None`` if identity
+            telemetry has not arrived.
+        addresses: Addresses this node currently reaches the peer at, from its
+            own probed topology edges (sorted, at most eight). Session-only
+            edges are left out: their address is the connection's observed
+            remote end, which for a NAT'd member is not a dialable listener.
+        capability_nodes: The summaries the peer last published.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    node_id: NodeId
+    friendly_name: str | None
+    addresses: tuple[str, ...]
+    capability_nodes: tuple[CapabilityNodeSummary, ...]
+
+
+def snapshot_capability_peers(
+    view: TelemetryView,
+    topology: Topology,
+    self_node: NodeId,
+    now: datetime,
+) -> tuple[CapabilityPeerView, ...]:
+    """Project fresh peer capability-node readings and reachable addresses.
+
+    Pure and side-effect free. This host itself is excluded; its own
+    summaries are what it publishes, not what it receives.
+
+    Args:
+        view: The node's live telemetry view.
+        topology: The node's current topology.
+        self_node: This node's identity.
+        now: The current time, compared with each reading's receipt time.
+
+    Returns:
+        One view per peer with a fresh reading, sorted by name then identity.
+    """
+    reachable: dict[NodeId, set[str]] = {}
+    for connection in topology.out_edges(self_node):
+        edge = connection.edge
+        if isinstance(edge, SocketConnection) and not edge.session:
+            reachable.setdefault(connection.sink, set()).add(
+                edge.sink_multiaddr.ip_address
+            )
+    peers: list[CapabilityPeerView] = []
+    for node_id, summaries in view.node_capability_nodes.items():
+        received = view.node_capability_nodes_received_at.get(node_id)
+        if (
+            node_id == self_node
+            or received is None
+            or (now - received).total_seconds() > CAPABILITY_NODES_STALE_AFTER_SECONDS
+        ):
+            continue
+        identity = view.node_identities.get(node_id)
+        peers.append(
+            CapabilityPeerView(
+                node_id=node_id,
+                friendly_name=_known(identity.friendly_name)
+                if identity is not None
+                else None,
+                addresses=tuple(sorted(reachable.get(node_id, set())))[
+                    :MAX_PEER_ADDRESSES
+                ],
+                capability_nodes=summaries,
+            )
+        )
+    peers.sort(key=lambda peer: (peer.friendly_name or "", peer.node_id))
+    return tuple(peers)

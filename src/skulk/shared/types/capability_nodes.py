@@ -49,6 +49,12 @@ for the flyout, not an inventory, and a larger integer is a malformed owner."""
 MAX_SURFACE_URL_LENGTH = 2048
 """Upper bound on a surface or link URL; longer values are refused."""
 
+MAX_CAPABILITY_NODE_HANDSHAKES = 2
+"""Upper bound on handshakes one capability node addresses to its peers."""
+
+MAX_HANDSHAKE_CONTENT_LENGTH = 2048
+"""Upper bound on one handshake's content, in characters."""
+
 _MAX_TEXT_LENGTH = 200
 
 _CREDENTIAL_NAME_SUFFIXES = (
@@ -296,6 +302,38 @@ class CapabilityNodeAction(FrozenModel):
         return self
 
 
+class CapabilityNodeHandshake(FrozenModel):
+    """A short public message a capability node addresses to one peer host.
+
+    Two installations of the same plugin on different hosts use it to hand
+    each other setup codes over the cluster's own authenticated gossip, so an
+    operator never copies them by hand. It is public by construction: every
+    node receives it and any dashboard may show it, so it carries identities
+    and public keys, never a credential. Hosts publish handshakes only on a
+    private fabric, where gossip membership proves the sender belongs to the
+    cluster; on the public default namespace any node could forge one.
+    """
+
+    recipient: str = Field(
+        pattern=r"^[A-Za-z0-9_-]{1,128}$",
+        description="Node identifier of the host the handshake is addressed to.",
+    )
+    kind: str = Field(
+        pattern=r"^[a-z][a-z0-9-]{0,63}$",
+        description="Plugin-defined message kind; opaque to Skulk.",
+    )
+    content: str = Field(
+        min_length=1,
+        max_length=MAX_HANDSHAKE_CONTENT_LENGTH,
+        pattern=r"^[\x20-\x7e]+$",
+        description="Plugin-defined public content in printable ASCII.",
+    )
+
+
+def _no_handshakes(value: tuple[CapabilityNodeHandshake, ...]) -> bool:
+    return not value
+
+
 class CapabilityNodeSummary(FrozenModel):
     """What a host says about one capability node it runs.
 
@@ -329,6 +367,14 @@ class CapabilityNodeSummary(FrozenModel):
     """Additional top-level actions the flyout offers."""
     operations_active: int = Field(default=0, ge=0, le=MAX_OPERATIONS_ACTIVE)
     """Durable operations currently running on the node."""
+    handshakes: tuple[CapabilityNodeHandshake, ...] = Field(
+        default=(),
+        max_length=MAX_CAPABILITY_NODE_HANDSHAKES,
+        # Absent unless a node is pairing, so a summary without one keeps the
+        # exact shape earlier hosts accept.
+        exclude_if=_no_handshakes,
+    )
+    """Public setup messages this node addresses to peer hosts."""
 
     @field_validator("plugin_id", "node_id")
     @classmethod
@@ -345,7 +391,7 @@ class CapabilityNodeSummary(FrozenModel):
     def _check_title(cls, value: str | None) -> str | None:
         return None if value is None else _validate_identifier(value)
 
-    @field_validator("surfaces", "actions", mode="before")
+    @field_validator("surfaces", "actions", "handshakes", mode="before")
     @classmethod
     def _coerce_sequences(cls, value: object) -> object:
         # The wire path decodes JSON arrays as lists, which strict mode rejects

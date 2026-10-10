@@ -2568,6 +2568,16 @@ mapped from the summary alone and never folds into the host's own health.
 `SKULK_TEST_CAPABILITY_NODE=<url>` makes a host publish one stand-in node with
 a single link surface so the topology layer can be exercised without a plugin.
 
+Two installations of one plugin on different hosts can also hand each other
+setup codes through these summaries. A summary may carry up to two bounded,
+public `handshakes` addressed to a peer host; `read_capability_peers()` shows
+a plugin the peers' summaries and the addresses this host reaches them at,
+and `private_fabric()` says whether gossip authenticates the sender. Hosts
+exchange handshakes with their managed owners only on a private namespace,
+because on the public default name any Skulk node can join the plane. The
+exchange is one extra owner control request, so an older owner or host simply
+leaves it out.
+
 ### Providers and capability calls
 
 An extension can also be a **provider**: a plugin that serves a capability of

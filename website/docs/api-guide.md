@@ -3689,8 +3689,11 @@ entry is a bounded, credential-free summary: `pluginId`, `nodeId`, `bundleId`,
 surface is `kind: "link"` with an absolute `url` and a `ready` flag), `actions`
 (at most eight `surface`, `link`, or `descriptor` entries; a descriptor action
 carries the `capabilityId` and a fixed `payload` for `POST /v1/capabilities/call`
-on that host), and `observedAt`, the local receipt time of the host's last
-reading. The summaries ride the telemetry plane; a host that stops publishing
+on that host), optional `handshakes` (at most two public setup messages the
+node addresses to a peer host, each with a `recipient` node id, a
+plugin-defined `kind` and printable `content` of at most 2,048 characters;
+present only while a node is pairing and only on a private fabric), and
+`observedAt`, the local receipt time of the host's last reading. The summaries ride the telemetry plane; a host that stops publishing
 ages out with its other readings, and a host whose last reading is older
 than ninety seconds (three republish intervals) is dropped from the map,
 which also covers a peer that missed the host's withdrawal reading. The

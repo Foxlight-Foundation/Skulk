@@ -79,7 +79,12 @@ from skulk.extensions.streams import (
     decode_capability_stream_frame,
     encode_capability_stream_frame,
 )
-from skulk.extensions.telemetry import ClusterNodeView, snapshot_cluster
+from skulk.extensions.telemetry import (
+    CapabilityPeerView,
+    ClusterNodeView,
+    snapshot_capability_peers,
+    snapshot_cluster,
+)
 from skulk.extensions.types import (
     AdvertiseCapability,
     BaseChatMiddleware,
@@ -97,6 +102,7 @@ from skulk.extensions.types import (
     EmbedTexts,
     ExtensionContext,
     PublishCapabilityNode,
+    ReadCapabilityPeers,
     ReadClusterTelemetry,
     SkulkExtension,
     StreamCapability,
@@ -173,6 +179,7 @@ __all__ = [
     "CapabilityStreamSession",
     "ChatMiddleware",
     "ChatResponseSummary",
+    "CapabilityPeerView",
     "ClusterNodeView",
     "DescribeNode",
     "EmbedTexts",
@@ -180,6 +187,7 @@ __all__ = [
     "InlineMediaAttachment",
     "LoadedExtensions",
     "MediaAttachment",
+    "ReadCapabilityPeers",
     "ReadClusterTelemetry",
     "REALTIME_STT_CAPABILITY_DESCRIPTOR",
     "STT_CAPABILITY_DESCRIPTOR",
@@ -201,6 +209,7 @@ __all__ = [
     "encode_capability_stream_frame",
     "load_extensions",
     "resolve_skulk_version",
+    "snapshot_capability_peers",
     "snapshot_cluster",
     "validate_against_schema",
 ]

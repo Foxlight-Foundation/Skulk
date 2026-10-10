@@ -7,7 +7,7 @@ import json
 import os
 import stat
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from itertools import islice
 from pathlib import Path
 from typing import Literal, Self, final
@@ -54,13 +54,18 @@ from skulk.extensions.steward import StewardTool
 from skulk.extensions.streams import CapabilityStreamFrame
 from skulk.extensions.types import ExtensionContext
 from skulk.shared.types.capability_nodes import (
+    MAX_CAPABILITY_NODE_HANDSHAKES,
     CapabilityNodeAction,
+    CapabilityNodeHandshake,
     CapabilityNodeStatus,
     CapabilityNodeSummary,
     CapabilityNodeSurface,
 )
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
+
+MAX_HANDSHAKE_PEERS = 8
+"""Peers one handshake request carries; keeps it within the owner's frame bound."""
 
 
 _SUMMARY_STATUS: dict[str, CapabilityNodeStatus] = {
@@ -79,14 +84,19 @@ _SUMMARY_STATUS: dict[str, CapabilityNodeStatus] = {
 
 
 def summaries_for(
-    plugin_id: str, nodes: "tuple[ManagedNode, ...]", owner_available: bool
+    plugin_id: str,
+    nodes: "tuple[ManagedNode, ...]",
+    owner_available: bool,
+    handshakes: Mapping[str, tuple[CapabilityNodeHandshake, ...]] | None = None,
 ) -> tuple[CapabilityNodeSummary, ...]:
     """Bounded, credential-free topology summaries for an owner's nodes.
 
     Only link surfaces the owner reported ready with a URL are carried; an
     unready surface has no endpoint to open, and proxied surfaces wait for
-    that contract. Each carried surface gets an open action.
+    that contract. Each carried surface gets an open action. ``handshakes``
+    are the public messages each node addresses to peer hosts.
     """
+    handshakes = handshakes or {}
     summaries: list[CapabilityNodeSummary] = []
     for node in nodes:
         surfaces: list[CapabilityNodeSurface] = []
@@ -127,6 +137,7 @@ def summaries_for(
                     owner_available=owner_available,
                     surfaces=tuple(surfaces),
                     actions=tuple(actions),
+                    handshakes=handshakes.get(node.node_id, ()),
                 )
             )
         except ValueError:
@@ -265,6 +276,17 @@ class _Description(_WireModel):
     nodes: tuple[ManagedNode, ...] = Field(max_length=16)
 
 
+class _HandshakeNode(_WireModel):
+    node_id: str
+    handshakes: tuple[CapabilityNodeHandshake, ...] = Field(
+        default=(), max_length=MAX_CAPABILITY_NODE_HANDSHAKES
+    )
+
+
+class _Handshakes(_WireModel):
+    nodes: tuple[_HandshakeNode, ...] = Field(max_length=16)
+
+
 class _Settings(_WireModel):
     revision: int = Field(ge=0)
     enabled: bool
@@ -351,6 +373,12 @@ class ManagedOwner:
         self.host_callbacks_available = False
         # The wire protocol the owner last stated; see ``_Description``.
         self.protocol = 1
+        # What each node addresses to peer hosts, as the owner last answered.
+        self.handshakes: dict[str, tuple[CapabilityNodeHandshake, ...]] = {}
+        # The control socket of an owner process that refused handshakes. An
+        # older owner records every refusal through a diagnostic subprocess,
+        # so it is asked once per process, not on every one-second refresh.
+        self.handshakes_refused: tuple[int, int] | None = None
         self.published: set[str] = set()
         self.stopping = False
         self.unavailable_reason: str | None = None
@@ -409,7 +437,10 @@ class ManagedOwner:
         self, message: dict[str, JsonValue], *, timeout: float = 30
     ) -> dict[str, JsonValue]:
         raw = json.dumps(message, allow_nan=False).encode() + b"\n"
-        if len(raw) > (65536 if message.get("operation") == "invoke" else 16384):
+        # Peers' handshakes may exceed an ordinary control frame; an owner that
+        # does not answer handshakes refuses the larger frame the same way.
+        large = message.get("operation") in ("invoke", "handshakes")
+        if len(raw) > (65536 if large else 16384):
             raise ValueError("managed request exceeds bound")
         socket = self._socket_path("control.sock")
         async with asyncio.timeout(timeout):
@@ -472,10 +503,12 @@ class ManagedOwner:
                 self.host_callbacks_available = snapshot.host_callbacks_available
                 self.observed = time.monotonic()
                 self.available = True
+                await self._exchange_handshakes()
                 self._publish_summaries()
             except (OSError, ValueError, TimeoutError) as error:
                 self.available = False
                 self.host_callbacks_available = False
+                self.handshakes = {}
                 self._publish_summaries()
                 # OSError text can carry paths and a validation error echoes
                 # the owner's payload; their class is enough. Every other
@@ -487,6 +520,96 @@ class ManagedOwner:
                     else f"{type(error).__name__}: {error}"
                 )
                 raise RuntimeError(f"managed owner unavailable ({reason})") from None
+
+    def _control_identity(self) -> tuple[int, int] | None:
+        """Identify the owner process by its control socket, which it recreates."""
+        try:
+            info = self._socket_path("control.sock").lstat()
+        except (OSError, ValueError):
+            return None
+        return (info.st_ino, info.st_mtime_ns)
+
+    def _handshake_request(self) -> dict[str, JsonValue]:
+        """Peers running this owner's bundles, with what they address to this host.
+
+        Only on a private fabric: there gossip membership authenticates the
+        sender, so a handshake can be trusted as coming from the named peer.
+        Other plugins' nodes are never shown to this owner. Peers carrying a
+        handshake for this host come first, and the request stays within the
+        owner's frame bound.
+        """
+        assert self.context is not None
+        private = self.context.private_fabric()
+        peers: list[JsonValue] = []
+        if private:
+            bundles = {node.bundle_id for node in self.nodes}
+            me = str(self.context.node_id)
+            candidates: list[tuple[bool, dict[str, JsonValue]]] = []
+            for peer in self.context.read_capability_peers():
+                nodes: list[JsonValue] = []
+                addressed = False
+                for summary in peer.capability_nodes:
+                    if summary.bundle_id not in bundles:
+                        continue
+                    inbound: list[JsonValue] = [
+                        {"kind": item.kind, "content": item.content}
+                        for item in summary.handshakes
+                        if item.recipient == me
+                    ]
+                    addressed = addressed or bool(inbound)
+                    nodes.append(
+                        {
+                            "bundle_id": summary.bundle_id,
+                            "node_id": summary.node_id,
+                            "status": summary.status,
+                            "handshakes": inbound,
+                        }
+                    )
+                if nodes:
+                    candidates.append(
+                        (
+                            addressed,
+                            {
+                                "node_id": str(peer.node_id),
+                                "friendly_name": peer.friendly_name,
+                                "addresses": list(peer.addresses),
+                                "nodes": nodes,
+                            },
+                        )
+                    )
+            candidates.sort(key=lambda item: not item[0])
+            peers = [entry for _, entry in candidates[:MAX_HANDSHAKE_PEERS]]
+        return {"operation": "handshakes", "private_fabric": private, "peers": peers}
+
+    async def _exchange_handshakes(self) -> None:
+        """Deliver peers' handshakes to the owner and keep what it addresses out.
+
+        An owner that predates handshakes refuses the operation; its nodes
+        then simply publish none, and that owner process is not asked again.
+        A malformed answer is treated the same way. A timeout or socket error
+        is retried on the next refresh. Handshakes are setup conveniences,
+        never a reason to mark an owner unavailable.
+        """
+        process = self._control_identity()
+        if process is not None and process == self.handshakes_refused:
+            self.handshakes = {}
+            return
+        try:
+            result = await self._request(self._handshake_request(), timeout=1)
+            answer = _Handshakes.model_validate_json(json.dumps(result))
+        except ValueError:
+            self.handshakes = {}
+            self.handshakes_refused = process
+            return
+        except (OSError, TimeoutError):
+            self.handshakes = {}
+            return
+        installed = {node.node_id for node in self.nodes}
+        self.handshakes = {
+            item.node_id: item.handshakes
+            for item in answer.nodes
+            if item.node_id in installed and item.handshakes
+        }
 
     def _publish_summaries(self) -> None:
         """Project the installed nodes onto the topology, withdrawing what left.
@@ -501,7 +624,13 @@ class ManagedOwner:
             return
         current: set[str] = set()
         try:
-            summaries = summaries_for(self.name, self.nodes, self.available)
+            summaries = summaries_for(
+                self.name,
+                self.nodes,
+                self.available,
+                # Gossip authenticates a handshake only on a private fabric.
+                self.handshakes if self.context.private_fabric() else {},
+            )
         except Exception:  # noqa: BLE001 - topology is a projection, never a health input
             summaries = ()
         for summary in summaries:

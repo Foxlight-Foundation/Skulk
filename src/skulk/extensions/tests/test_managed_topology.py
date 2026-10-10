@@ -174,7 +174,9 @@ async def test_an_owner_answering_only_describe_stays_admitted(tmp_path: Path) -
 
     owner._request = request  # type: ignore[method-assign]
     await owner.refresh()
-    assert asked == ["describe-extended", "describe"] and owner.available
+    # Such an owner answers no handshakes either; it stays admitted.
+    assert asked == ["describe-extended", "describe", "handshakes"]
+    assert owner.available and owner.handshakes == {}
 
 
 async def test_forwarded_calls_speak_the_protocol_the_owner_states(
