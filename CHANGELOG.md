@@ -23,6 +23,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A vision request whose tool definitions contain the model's own image
+  placeholder text now fails with an error naming the problem. That text would
+  have taken the place of the first image, so the model would have answered
+  about a picture it was never shown.
 - A model on the in-process llama.cpp engine that quotes another model's
   tool-call format before making its own call no longer has the quoted example
   run as a call. The engine now reads which tool-call format the model's own
