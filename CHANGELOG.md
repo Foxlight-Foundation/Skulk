@@ -9,6 +9,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A vision request whose tool definitions contain the model's own image
+  placeholder text now fails with an error naming the problem. That text would
+  have taken the place of the first image, so the model would have answered
+  about a picture it was never shown.
 - A vision model on the MLX engine now sees the tools a request offers along
   with its images. The image path rendered the prompt without them, so a model
   asked about a screenshot with a tool to call could not reliably call it.
