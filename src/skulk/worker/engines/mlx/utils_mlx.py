@@ -1321,6 +1321,52 @@ def _patch_lossy_chat_template(template: str) -> str | None:
     return patched if n > 0 else None
 
 
+def prepare_tool_template(
+    tokenizer: TokenizerWrapper,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Ready chat history and template arguments for a tokenizer-rendered prompt.
+
+    Shared by the text and vision prompt paths so a request renders its tools
+    the same way whichever path it takes. Tool-call history in ``messages`` is
+    normalized in place: JSON-string arguments become objects, which some
+    templates require (Gemma 4 raises on a string), and a Mistral template gets
+    the tool-call id form it validates. The returned keyword arguments carry
+    ``tools`` and, when a known lossy guard would drop nested tool schemas, a
+    patched ``chat_template``.
+
+    Args:
+        tokenizer: Tokenizer whose chat template renders the prompt.
+        messages: Chat messages about to be rendered; normalized in place.
+        tools: The request's tool definitions, or ``None``.
+
+    Returns:
+        Keyword arguments for ``tokenizer.apply_chat_template``.
+    """
+    for msg in messages:
+        _normalize_tool_calls(msg)
+    if "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or ""):
+        _normalize_mistral_tool_call_ids(messages)
+    template_kwargs: dict[str, Any] = {"tools": tools}
+    if tools:
+        original_template: str | None = getattr(tokenizer, "chat_template", None)
+        if isinstance(original_template, str):
+            patched_template = _patch_lossy_chat_template(original_template)
+            if patched_template is not None:
+                logger.info(
+                    "Patched lossy chat template (removed inner_type length guard)"
+                )
+                template_kwargs["chat_template"] = patched_template
+    return template_kwargs
+
+
+def warn_if_tool_schemas_lost(prompt: str, tools: list[dict[str, Any]] | None) -> None:
+    """Log when a rendered prompt is missing nested tool schema properties."""
+    if tools and _schemas_lost_in_prompt(prompt, tools):
+        logger.warning("Chat template lost nested tool schemas even after patching")
+
+
 def _log_rendered_prompt_shape(
     renderer: PromptRendererType,
     prompt: str,
@@ -1420,11 +1466,9 @@ def apply_chat_template(
         )
         return prompt
 
-    for msg in formatted_messages:
-        _normalize_tool_calls(msg)
-
-    if "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or ""):
-        _normalize_mistral_tool_call_ids(formatted_messages)
+    template_kwargs = prepare_tool_template(
+        tokenizer, formatted_messages, task_params.tools
+    )
 
     extra_kwargs: dict[str, Any] = {}
     if task_params.enable_thinking is not None:
@@ -1440,27 +1484,15 @@ def apply_chat_template(
         muse_glimmer_template_kwargs(capability_profile, task_params.reasoning_effort)
     )
 
-    patched_template: str | None = None
-    if task_params.tools:
-        original_template: str | None = getattr(tokenizer, "chat_template", None)
-        if isinstance(original_template, str):
-            patched_template = _patch_lossy_chat_template(original_template)
-            if patched_template is not None:
-                logger.info(
-                    "Patched lossy chat template (removed inner_type length guard)"
-                )
-
     prompt: str = tokenizer.apply_chat_template(
         formatted_messages,
         tokenize=False,
         add_generation_prompt=True,
-        tools=task_params.tools,
-        **({"chat_template": patched_template} if patched_template is not None else {}),
+        **template_kwargs,
         **extra_kwargs,
     )
 
-    if task_params.tools and _schemas_lost_in_prompt(prompt, task_params.tools):
-        logger.warning("Chat template lost nested tool schemas even after patching")
+    warn_if_tool_schemas_lost(prompt, task_params.tools)
 
     if partial_assistant_content:
         prompt += partial_assistant_content

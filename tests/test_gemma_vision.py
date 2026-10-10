@@ -437,10 +437,12 @@ class TestGemma4ReferencePromptRenderer:
             eoi_token_id=None,
             enable_thinking=None,
             reasoning_effort=None,
+            tools=None,
         ):
             captured["model_type"] = model_type
             captured["enable_thinking"] = enable_thinking
             captured["reasoning_effort"] = reasoning_effort
+            captured["tools"] = tools
             return vision_module._VisionPromptBuild(  # pyright: ignore[reportPrivateUsage]
                 prompt="<|image|>",
                 raw_prompt="<|image|>",
@@ -478,11 +480,14 @@ class TestGemma4ReferencePromptRenderer:
             model=SimpleNamespace(),  # type: ignore[arg-type]
             enable_thinking=False,
             reasoning_effort="none",
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
         )
 
         assert captured["model_type"] == "gemma4"
         assert captured["enable_thinking"] is False
         assert captured["reasoning_effort"] == "none"
+        # The native path hands the request's tools to the prompt builder (#938).
+        assert captured["tools"] == [{"type": "function", "function": {"name": "lookup"}}]
         assert result.prompt_tokens.shape == (1,)
 
 
