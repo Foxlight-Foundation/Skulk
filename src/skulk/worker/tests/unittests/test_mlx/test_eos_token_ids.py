@@ -47,3 +47,40 @@ def test_unknown_model_uses_tokenizer_config() -> None:
         get_eos_token_ids_for_model(ModelId("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"))
         is None
     )
+
+
+class _GemmaTokenizer:
+    """Just enough of a tokenizer for the stop-set helper."""
+
+    unk_token_id = 3
+
+    def __init__(self, vocabulary: dict[str, int], eos: list[int]) -> None:
+        self.vocabulary = vocabulary
+        self.eos_token_ids = eos
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        return self.vocabulary.get(token, self.unk_token_id)
+
+
+def test_gemma4_stops_on_its_tool_hand_off() -> None:
+    """Gemma 4 ends a tool-calling turn with <|tool_response>, not in content.
+
+    Google's generation_config lists it as a stop token (eos [1, 106, 50]);
+    without it the marker leaked into the reply after every tool call.
+    """
+    from typing import cast
+
+    from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+    from skulk.worker.engines.mlx.utils_mlx import stop_on_gemma4_tool_handoff
+
+    tokenizer = _GemmaTokenizer({"<|tool_response>": 50}, [1, 106])
+    stop_on_gemma4_tool_handoff(cast(TokenizerWrapper, cast(object, tokenizer)))
+    assert tokenizer.eos_token_ids == [1, 106, 50]
+    # Applying it again changes nothing.
+    stop_on_gemma4_tool_handoff(cast(TokenizerWrapper, cast(object, tokenizer)))
+    assert tokenizer.eos_token_ids == [1, 106, 50]
+    # A conversion without the token keeps its stop set.
+    plain = _GemmaTokenizer({}, [1, 106])
+    stop_on_gemma4_tool_handoff(cast(TokenizerWrapper, cast(object, plain)))
+    assert plain.eos_token_ids == [1, 106]

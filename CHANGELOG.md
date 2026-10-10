@@ -9,6 +9,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Gemma 4 models on the MLX engine no longer end every tool-calling reply with
+  a stray `<|tool_response>` in the text. That token is how Gemma 4 hands its
+  turn to the tool, and Google's own configuration stops on it; Skulk now does
+  too, so the reply carries only the tool call.
 - A vision model on the MLX engine now sees the tools a request offers along
   with its images. The image path rendered the prompt without them, so a model
   asked about a screenshot with a tool to call could not reliably call it.
