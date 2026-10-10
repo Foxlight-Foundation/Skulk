@@ -692,6 +692,16 @@ def _build_vision_prompt_with_debug(
         "Building vision prompt "
         f"(messages={len(chat_template_messages)}, images={len(n_tokens_per_image)})"
     )
+    if tools and image_token in json.dumps(tools, ensure_ascii=False):
+        # Expansion treats every occurrence of the image token as an image.
+        # Tool declarations render before the conversation, so this one would
+        # take the first image's features and shift every real image after
+        # it: the model would answer about a picture it was never shown.
+        raise VisionPreprocessingError(
+            "a tool definition contains this model's image placeholder text "
+            f"{image_token!r}, which the prompt cannot tell apart from an image; "
+            "remove it from the tool's name, description or values"
+        )
     uses_gemma4_reference_prompt = model_type == "gemma4" and not tools
     if uses_gemma4_reference_prompt:
         prompt = render_gemma4_prompt(
