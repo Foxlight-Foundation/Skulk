@@ -16,9 +16,10 @@ This project records release notes here and mirrors public-facing notes in
   libraries (aiohttp 3.14.4, urllib3 2.8.0, httpx2 and httpcore2 2.13.1,
   h2 4.4.1, idna 3.20) and cryptography 50.0.2, whose wheels bundle a patched
   OpenSSL, carry their fixes too, as do lxml, multidict, yarl and the
-  benchmark tooling's nltk. anyio stays at 4.11.0 for now: its fix concerns
-  TLS to internationalized host names, which Skulk does not use, and moving
-  past it needs a change to Skulk's internal channels first.
+  benchmark tooling's nltk. anyio stays at 4.11.0 in this change: its fix
+  concerns certificate matching for internationalized host names, which the
+  web-fetch tool can reach, and moving past it needs a change to Skulk's
+  internal channels, which follows separately.
 
 ### Fixed
 
