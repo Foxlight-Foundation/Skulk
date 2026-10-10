@@ -203,3 +203,40 @@ def test_prepare_vision_passes_the_requests_tools_to_the_processor() -> None:
     )
 
     assert seen == [TOOLS]
+
+
+def test_a_tool_carrying_the_image_placeholder_fails_the_request() -> None:
+    """Expansion would bind the first image's features to the tool text."""
+    import pytest
+
+    tools: list[dict[str, Any]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "describe",
+                "description": "Answers questions about an <|image|> attachment",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    recording = _RecordingTokenizer()
+    with pytest.raises(vision_module.VisionPreprocessingError, match="image placeholder"):
+        vision_module._build_vision_prompt_with_debug(  # pyright: ignore[reportPrivateUsage]
+            _tokenizer(recording),
+            [{"role": "user", "content": [{"type": "image"}]}],
+            [1],
+            "<|image|>",
+            model_type="qwen3_vl",
+            tools=tools,
+        )
+    assert recording.calls == []
+    # Without the token, the same tools render.
+    vision_module._build_vision_prompt_with_debug(  # pyright: ignore[reportPrivateUsage]
+        _tokenizer(recording),
+        [{"role": "user", "content": [{"type": "image"}]}],
+        [1],
+        "<image_soft_token>",
+        model_type="qwen3_vl",
+        tools=tools,
+    )
+    assert len(recording.calls) == 1

@@ -7,12 +7,30 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Security
+
+- Updated dependencies with published security fixes. The API's form and
+  multipart parsing (python-multipart 0.0.32, starlette 1.7.0) now enforces
+  the limits it was meant to and is protected against oversized or slow
+  requests from any client that can reach a node. Outbound HTTP and TLS
+  libraries (aiohttp 3.14.4, urllib3 2.8.0, httpx2 and httpcore2 2.13.1,
+  h2 4.4.1, idna 3.20) and cryptography 50.0.2, whose wheels bundle a patched
+  OpenSSL, carry their fixes too, as do lxml, multidict, yarl and the
+  benchmark tooling's nltk. anyio stays at 4.11.0 in this change: its fix
+  concerns certificate matching for internationalized host names, which the
+  web-fetch tool can reach, and moving past it needs a change to Skulk's
+  internal channels, which follows separately.
+
 ### Fixed
 
 - Gemma 4 models on the MLX engine no longer end every tool-calling reply with
   a stray `<|tool_response>` in the text. That token is how Gemma 4 hands its
   turn to the tool, and Google's own configuration stops on it; Skulk now does
   too, so the reply carries only the tool call.
+- A vision request whose tool definitions contain the model's own image
+  placeholder text now fails with an error naming the problem. That text would
+  have taken the place of the first image, so the model would have answered
+  about a picture it was never shown.
 - A model on the in-process llama.cpp engine that quotes another model's
   tool-call format before making its own call no longer has the quoted example
   run as a call. The engine now reads which tool-call format the model's own
