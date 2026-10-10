@@ -73,6 +73,7 @@ from skulk.worker.runner.llm_inference.scaffolding_scrub import (
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_parsers import declared_tool_calls
 from skulk.worker.runner.llm_inference.tool_text_parser import (
+    GenericDialect,
     generic_dialects_from_template,
     parse_tool_calls_with_remainder,
 )
@@ -837,7 +838,7 @@ class Runner(ServedConcurrentDispatch):
         self._thinking_formatter: TemplateKwargFormatter | None = None
         # Which Generic-family tool dialects this model's template writes,
         # read once from the GGUF at load; None when it names none of them.
-        self._generic_tool_dialects: frozenset[str] | None = None
+        self._generic_tool_dialects: frozenset[GenericDialect] | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         # Width 1: the in-process Llama object cannot generate concurrently.
         # The mixin still bounds admitted work and stamps admission concurrency.

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from skulk.api.types import ToolCallItem
 
@@ -565,20 +565,25 @@ def atem_calls(text: str) -> list[ToolCallItem]:
     return calls
 
 
-_GENERIC_DIALECT_MARKERS: tuple[tuple[str, str], ...] = (
+GenericDialect = Literal["generic", "python_tag", "mistral"]
+"""A marked text dialect within the Generic tool-call family."""
+
+_GENERIC_DIALECT_MARKERS: tuple[tuple[str, GenericDialect], ...] = (
     ("<tool_call>", "generic"),
     ("<|python_tag|>", "python_tag"),
     ("[TOOL_CALLS]", "mistral"),
 )
 """The marker each Generic-family text dialect writes, as its template spells it."""
 
-GENERIC_DIALECTS: frozenset[str] = frozenset(
+GENERIC_DIALECTS: frozenset[GenericDialect] = frozenset(
     kind for _, kind in _GENERIC_DIALECT_MARKERS
 )
 """The marked text dialects the Generic tool-call family covers."""
 
 
-def generic_dialects_from_template(template: str | None) -> frozenset[str] | None:
+def generic_dialects_from_template(
+    template: str | None,
+) -> frozenset[GenericDialect] | None:
     """The Generic-family dialects a model's chat template writes (#899).
 
     The Generic format covers genuinely different dialects (Hermes and Qwen
@@ -590,7 +595,7 @@ def generic_dialects_from_template(template: str | None) -> frozenset[str] | Non
     """
     if not template:
         return None
-    found = frozenset(
+    found: frozenset[GenericDialect] = frozenset(
         kind for marker, kind in _GENERIC_DIALECT_MARKERS if marker in template
     )
     return found or None
@@ -600,7 +605,7 @@ def parse_tool_calls_from_text(
     text: str,
     tools: list[dict[str, Any]] | None = None,
     tool_call_format: "ToolCallFormat | None" = None,
-    generic_dialects: frozenset[str] | None = None,
+    generic_dialects: frozenset[GenericDialect] | None = None,
 ) -> list[ToolCallItem] | None:
     """Recover tool calls a reasoning model emitted as text (llama.cpp engine).
 
@@ -623,7 +628,7 @@ def parse_tool_calls_with_remainder(
     text: str,
     tools: list[dict[str, Any]] | None = None,
     tool_call_format: "ToolCallFormat | None" = None,
-    generic_dialects: frozenset[str] | None = None,
+    generic_dialects: frozenset[GenericDialect] | None = None,
 ) -> tuple[list[ToolCallItem] | None, str]:
     """Recover tool calls a reasoning model emitted as text (llama.cpp engine).
 
