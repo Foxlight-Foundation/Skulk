@@ -23,6 +23,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Gemma 4 models on the MLX engine no longer end every tool-calling reply with
+  a stray `<|tool_response>` in the text. That token is how Gemma 4 hands its
+  turn to the tool, and Google's own configuration stops on it; Skulk now does
+  too, so the reply carries only the tool call.
 - A vision request whose tool definitions contain the model's own image
   placeholder text now fails with an error naming the problem. That text would
   have taken the place of the first image, so the model would have answered

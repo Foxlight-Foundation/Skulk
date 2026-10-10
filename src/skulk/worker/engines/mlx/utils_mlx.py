@@ -1106,6 +1106,7 @@ def load_tokenizer_for_model_id(
         else:
             tokenizer.eos_token_ids = [gemma_eos_id, gemma_end_of_turn_id]
 
+
     # Llama 3.1+ ends a tool-calling turn with <|eom_id|> ("end of message",
     # handing off to a tool) and a user-facing turn with <|eot_id|> ("end of
     # turn"). Only <|eot_id|> reaches us from tokenizer_config, because
@@ -1147,6 +1148,9 @@ def load_tokenizer_for_model_id(
         object.__setattr__(tokenizer, "_tool_call_start", "<|tool_call>")
         object.__setattr__(tokenizer, "_tool_call_end", "<tool_call|>")
         object.__setattr__(tokenizer, "_tool_parser", _parse_gemma4_tool_calls)
+        # Gated with the parser, on the resolved format rather than the id's
+        # spelling, so every model read as Gemma 4 also stops at its hand-off.
+        stop_on_gemma4_tool_handoff(tokenizer)
 
     if capability_profile.tool_call_format == ToolCallFormat.Generic and (
         "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or "")
@@ -1743,6 +1747,27 @@ def mx_barrier(group: Group | None):
             "mx_barrier", {"group_size": group.size()}, is_prefill=False
         ),
     )
+
+
+def stop_on_gemma4_tool_handoff(tokenizer: TokenizerWrapper) -> None:
+    """Make Gemma 4's tool hand-off token end generation.
+
+    Gemma 4 hands its turn to a tool with ``<|tool_response>``. Google's own
+    generation_config stops on it (``eos_token_id`` [1, 106, 50]) and the
+    tokenizer's response template closes content there, but only ``<eos>``
+    reaches us from the tokenizer, so without this the marker detokenizes into
+    visible content after every tool call. Looked up by vocabulary, as for
+    Llama's ``<|eom_id|>``, so a conversion without the token is untouched.
+
+    Args:
+        tokenizer: The loaded Gemma 4 tokenizer; its stop set gains the token.
+    """
+    tool_response_id = _token_id_or_none(tokenizer, "<|tool_response>")
+    if tool_response_id is None:
+        return
+    existing = list(tokenizer.eos_token_ids or [])
+    if tool_response_id not in existing:
+        tokenizer.eos_token_ids = existing + [tool_response_id]
 
 
 def _token_id_or_none(tokenizer: object, token: str) -> int | None:
