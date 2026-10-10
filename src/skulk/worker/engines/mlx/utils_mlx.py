@@ -1106,8 +1106,6 @@ def load_tokenizer_for_model_id(
         else:
             tokenizer.eos_token_ids = [gemma_eos_id, gemma_end_of_turn_id]
 
-    if "gemma-4" in model_id_lower:
-        stop_on_gemma4_tool_handoff(tokenizer)
 
     # Llama 3.1+ ends a tool-calling turn with <|eom_id|> ("end of message",
     # handing off to a tool) and a user-facing turn with <|eot_id|> ("end of
@@ -1150,6 +1148,9 @@ def load_tokenizer_for_model_id(
         object.__setattr__(tokenizer, "_tool_call_start", "<|tool_call>")
         object.__setattr__(tokenizer, "_tool_call_end", "<tool_call|>")
         object.__setattr__(tokenizer, "_tool_parser", _parse_gemma4_tool_calls)
+        # Gated with the parser, on the resolved format rather than the id's
+        # spelling, so every model read as Gemma 4 also stops at its hand-off.
+        stop_on_gemma4_tool_handoff(tokenizer)
 
     if capability_profile.tool_call_format == ToolCallFormat.Generic and (
         "[TOOL_CALLS]" in (getattr(tokenizer, "chat_template", None) or "")
