@@ -9,6 +9,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Security
 
+- Nodes are no longer exposed to remote crashes through their peer-to-peer
+  connections. Updated network libraries fix a gossipsub backoff overflow that
+  let a peer crash a node, unbounded subscriptions, and panics or unbounded
+  memory from malformed yamux, QUIC and TLS input (libp2p-gossipsub 0.49.5,
+  yamux 0.13.10, quinn-proto 0.11.15, libp2p-quic 0.13.1, rustls 0.23.45,
+  rustls-webpki 0.103.15). The network protocol is unchanged, so nodes on this
+  release still form a cluster with each other as before; the bindings rebuild
+  on upgrade.
 - Updated dependencies with published security fixes. The API's form and
   multipart parsing (python-multipart 0.0.32, starlette 1.7.0) now enforces
   the limits it was meant to and is protected against oversized or slow
@@ -23,6 +31,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Gemma 4 models on the MLX engine no longer end every tool-calling reply with
+  a stray `<|tool_response>` in the text. That token is how Gemma 4 hands its
+  turn to the tool, and Google's own configuration stops on it; Skulk now does
+  too, so the reply carries only the tool call.
 - A vision request whose tool definitions contain the model's own image
   placeholder text now fails with an error naming the problem. That text would
   have taken the place of the first image, so the model would have answered
