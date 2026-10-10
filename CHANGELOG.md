@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Security
 
+- Updated the dashboard's dependencies with published security fixes. Its
+  router (react-router 7.18.4) no longer lets a link or navigation target
+  written with a backslash or a leading `//` lead to another site. The build
+  and test tooling (Vite 8.0.16, Vitest 4.1.11, PostCSS, nanoid, ws and
+  others) closes file-read and code-execution issues in the development server
+  and the browser test runner.
 - Updated dependencies with published security fixes. The API's form and
   multipart parsing (python-multipart 0.0.32, starlette 1.7.0) now enforces
   the limits it was meant to and is protected against oversized or slow
