@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Security
 
+- Updated primp, the HTTP client behind web search, from 1.2.2 to 1.3.1.
+  1.2.2 was withdrawn by its maintainer: two web searches that were the first
+  in a process and started together could freeze the whole node, because the
+  stuck thread held Python's interpreter lock. 1.3.1 also stops credentials
+  being forwarded on HTTPS-to-HTTP redirects.
 - Updated dependencies with published security fixes. The API's form and
   multipart parsing (python-multipart 0.0.32, starlette 1.7.0) now enforces
   the limits it was meant to and is protected against oversized or slow
