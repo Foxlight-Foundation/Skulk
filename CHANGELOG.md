@@ -7,6 +7,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Two installations of the same plugin on different computers in one cluster
+  can now hand each other their setup codes, so a plugin that needs a second
+  computer, such as a cleanup or backup computer, can pair the two without
+  copying codes between them. A capability node's summary may carry up to two
+  short public messages addressed to another host, and plugins can read the
+  peers running the same plugin along with the addresses this computer reaches
+  them at. The exchange happens only on a cluster with its own private name:
+  on the default public name any Skulk node could join and send one.
+
 ### Fixed
 
 - A capability that stopped at "needs settings" because a check failed while

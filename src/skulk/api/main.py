@@ -340,6 +340,7 @@ from skulk.extensions import (
     call_failure,
     descriptor_revision,
     resolve_skulk_version,
+    snapshot_capability_peers,
     snapshot_cluster,
     validate_against_schema,
 )
@@ -1946,6 +1947,15 @@ class API:
             # same outbound view and the same gatherer poll.
             publish_capability_node=self._publish_capability_node,
             withdraw_capability_node=self._withdraw_capability_node,
+            # Peers' published nodes and handshakes, plus the addresses this
+            # node's own probes reach them at; read lazily like read_cluster.
+            read_capability_peers=lambda: snapshot_capability_peers(
+                self._telemetry_view,
+                self.state.topology,
+                node_id,
+                datetime.now(tz=timezone.utc),
+            ),
+            private_fabric=lambda: private_namespace_configured(os.environ),
             # Capability discovery, heavy half (fabric-citizenship Phase 2a):
             # full descriptors on demand, local or via a reachable peer API.
             describe_node=self._describe_node_capabilities,

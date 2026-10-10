@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from skulk.extensions.calls import CapabilityCall, CapabilityError, CapabilityResult
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.streams import CapabilityStreamFrame, CapabilityStreamSession
-from skulk.extensions.telemetry import ClusterNodeView
+from skulk.extensions.telemetry import CapabilityPeerView, ClusterNodeView
 from skulk.shared.types.capability_nodes import CapabilityNodeSummary
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.text_generation import TextGenerationTaskParams
@@ -92,6 +92,18 @@ class WithdrawCapability(Protocol):
     """
 
     def __call__(self, capability: str) -> None: ...
+
+
+class ReadCapabilityPeers(Protocol):
+    """Synchronous callable returning peer hosts' published capability nodes.
+
+    The read half of :class:`PublishCapabilityNode`: how a plugin finds the
+    same plugin on other hosts and reads the handshakes they address to this
+    host, together with the addresses this node reaches each peer at. An
+    in-memory snapshot of fresh telemetry, no network I/O.
+    """
+
+    def __call__(self) -> tuple[CapabilityPeerView, ...]: ...
 
 
 class PublishCapabilityNode(Protocol):
@@ -385,6 +397,13 @@ class ExtensionContext:
             provider node with a typed result (fabric-citizenship Phase 2b).
         stream_capability: Open a streaming capability whose active input and
             output directions travel on provider DATA (Phase 3).
+        read_capability_peers: The capability-node read surface: peer hosts'
+            published summaries, their handshakes, and the addresses this
+            node reaches them at.
+        private_fabric: Whether this cluster runs on an operator-chosen
+            namespace. Gossip authenticates a sender only then; on the public
+            default namespace any Skulk node can join, so hosts neither
+            publish nor deliver capability-node handshakes.
         steward_actions_allowed: Read intelligent-fabric mode and the global capability kill switch.
             Adapters must recheck before proposal or approved-action dispatch; this
             grants no operator approval. Hosts that omit it fail closed.
@@ -404,6 +423,10 @@ class ExtensionContext:
     # such a host simply publishes nothing for the topology layer.
     publish_capability_node: PublishCapabilityNode = lambda summary: None
     withdraw_capability_node: WithdrawCapabilityNode = lambda plugin_id, node_id: None
+    # Hosts that predate handshakes see no peers and no private fabric, so a
+    # plugin falls back to its manual setup there.
+    read_capability_peers: ReadCapabilityPeers = lambda: ()
+    private_fabric: Callable[[], bool] = lambda: False
 
 
 @final
