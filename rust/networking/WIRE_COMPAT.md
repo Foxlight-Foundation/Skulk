@@ -33,6 +33,24 @@ bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
 
+- **wire-neutral** (2026-10-10): the lockfile moves to security-fixed
+  patch releases. `libp2p-gossipsub` 0.49.2 to 0.49.5 ignores invalid and
+  bounds remote PRUNE backoff values, caps subscriptions at 2,000 topics per
+  peer and per request, and discards a GRAFT for a topic the peer never
+  subscribed to. `yamux` 0.13.8 to 0.13.10, `quinn-proto` 0.11.13 to
+  0.11.15, `libp2p-quic` 0.13.0 to 0.13.1, `rustls` 0.23.35 to 0.23.45 and
+  `rustls-webpki` 0.103.8 to 0.103.15 fix panics and unbounded memory on
+  malformed input. `libp2p-rendezvous`, `bytes`, `time`, `serde_with`,
+  `rand` and `keccak` move with them. Protocol ids, topics, framing,
+  behaviour composition, key derivation and session configuration are
+  unchanged; the new behavior differs only toward malformed or abusive
+  peers, and Skulk subscribes to far fewer than 2,000 topics, so
+  `NETWORK_VERSION` remains v0.0.3. Bindings advance to 0.2.7 so ordinary
+  upgrades rebuild them instead of keeping a cached wheel without the fixes.
+  Not covered: `hickory` 0.25 (via `libp2p-dns`) and `lz4_flex` 0.10 (via
+  `zenoh-transport`) need their parents upgraded, and `yamux` 0.12.1 is
+  compiled only for `libp2p-yamux`'s legacy mode, which Skulk does not use.
+
 - **v0.0.3** (2026-10-08): the Zenoh data plane is scoped to and
   authenticated by the cluster key. Everything derives one-way from the
   pnet pre-shared key (`src/data_plane_trust.rs`):

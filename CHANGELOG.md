@@ -9,6 +9,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Security
 
+- Nodes are no longer exposed to remote crashes through their peer-to-peer
+  connections. Updated network libraries fix a gossipsub backoff overflow that
+  let a peer crash a node, unbounded subscriptions, and panics or unbounded
+  memory from malformed yamux, QUIC and TLS input (libp2p-gossipsub 0.49.5,
+  yamux 0.13.10, quinn-proto 0.11.15, libp2p-quic 0.13.1, rustls 0.23.45,
+  rustls-webpki 0.103.15). The network protocol is unchanged, so nodes on this
+  release still form a cluster with each other as before; the bindings rebuild
+  on upgrade.
 - Updated dependencies with published security fixes. The API's form and
   multipart parsing (python-multipart 0.0.32, starlette 1.7.0) now enforces
   the limits it was meant to and is protected against oversized or slow
