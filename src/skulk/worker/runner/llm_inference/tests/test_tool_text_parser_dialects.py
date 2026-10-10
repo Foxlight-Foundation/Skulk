@@ -493,6 +493,73 @@ class TestGemma4Dialect:
             )
 
 
+class TestGenericSubDialectsFromTemplate:
+    """Template truth chooses within the Generic family (#899).
+
+    Generic covers several real dialects, which otherwise compete by marker
+    position. A Hermes model quoting a Mistral array before its real call must
+    not have the quoted array executed: its template writes ``<tool_call>``.
+    """
+
+    ECHO = (
+        'The docs show [TOOL_CALLS][{"name":"delete_all","arguments":{}}] as '
+        'an example. <tool_call>{"name":"echo","arguments":{}}</tool_call>'
+    )
+
+    def test_the_templates_markers_name_its_dialects(self) -> None:
+        from skulk.worker.runner.llm_inference.tool_text_parser import (
+            generic_dialects_from_template,
+        )
+
+        hermes = "{% for t in tools %}<tool_call>{{ t }}</tool_call>{% endfor %}"
+        assert generic_dialects_from_template(hermes) == frozenset({"generic"})
+        mistral = "{{ '[TOOL_CALLS]' + calls | tojson }}"
+        assert generic_dialects_from_template(mistral) == frozenset({"mistral"})
+        llama = "{{- '<|python_tag|>' + tool_call.name }}"
+        assert generic_dialects_from_template(llama) == frozenset({"python_tag"})
+        # Gemma 4's markers are not the Hermes block's.
+        gemma = "{{ '<|tool_call>call:' + name }}<tool_call|>"
+        assert generic_dialects_from_template(gemma) is None
+        assert generic_dialects_from_template(None) is None
+        assert generic_dialects_from_template("{{ messages }}") is None
+
+    def test_an_echoed_foreign_block_is_content(self) -> None:
+        from skulk.shared.models.model_cards import ToolCallFormat
+
+        # Without template truth the earlier echo still wins, as before.
+        calls = parse_tool_calls_from_text(
+            self.ECHO, tool_call_format=ToolCallFormat.Generic
+        )
+        assert calls is not None and [c.name for c in calls] == ["delete_all"]
+        calls = parse_tool_calls_from_text(
+            self.ECHO,
+            tool_call_format=ToolCallFormat.Generic,
+            generic_dialects=frozenset({"generic"}),
+        )
+        assert calls is not None and [c.name for c in calls] == ["echo"]
+
+    def test_a_template_writing_the_echoed_dialect_still_reads_it(self) -> None:
+        from skulk.shared.models.model_cards import ToolCallFormat
+
+        calls = parse_tool_calls_from_text(
+            self.ECHO,
+            tool_call_format=ToolCallFormat.Generic,
+            generic_dialects=frozenset({"mistral"}),
+        )
+        assert calls is not None and [c.name for c in calls] == ["delete_all"]
+
+    def test_the_unmarked_dialect_is_unaffected(self) -> None:
+        """A message opening with the call object is selected before markers."""
+        from skulk.shared.models.model_cards import ToolCallFormat
+
+        calls = parse_tool_calls_from_text(
+            '{"name":"echo","arguments":{}}',
+            tool_call_format=ToolCallFormat.Generic,
+            generic_dialects=frozenset({"python_tag"}),
+        )
+        assert calls is not None and calls[0].name == "echo"
+
+
 class TestSemicolonsInsideArguments:
     """Chained Llama calls must not be split inside a quoted argument.
 
