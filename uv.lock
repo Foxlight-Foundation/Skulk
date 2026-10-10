@@ -3088,9 +3088,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = ">=24.1.0" },
-    { name = "aiohttp", specifier = ">=3.14.3" },
+    { name = "aiohttp", specifier = ">=3.14.4" },
     { name = "anyio", specifier = "==4.11.0" },
-    { name = "cryptography", specifier = ">=50.0.0" },
+    { name = "cryptography", specifier = ">=50.0.2" },
     { name = "ddgs", specifier = ">=9.6.1" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "filelock", specifier = ">=3.18.0" },
@@ -3115,7 +3115,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=24.0" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pydantic", specifier = ">=2.12.0" },
-    { name = "python-multipart", specifier = ">=0.0.30" },
+    { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "qrcode", specifier = ">=8.2" },
     { name = "rustworkx", specifier = ">=0.17.1" },
@@ -3136,7 +3136,7 @@ provides-extras = ["llama-cpp"]
 [package.metadata.requires-dev]
 dev = [
     { name = "basedpyright", specifier = ">=1.29.0" },
-    { name = "httpx2", specifier = ">=2.12.0" },
+    { name = "httpx2", specifier = ">=2.13.1" },
     { name = "pyinstaller", specifier = ">=6.17.0" },
     { name = "pytest", specifier = ">=8.4.0" },
     { name = "pytest-asyncio", specifier = ">=1.0.0" },
