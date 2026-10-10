@@ -17,7 +17,7 @@ dependencies = [
   "loguru>=0.7.3",
   "packaging>=24.0",                                # extension version gating
   "skulk_pyo3_bindings",                            # rust bindings
-  "anyio==4.11.0",
+  "anyio==4.14.2",
   "mlx==0.32.2; sys_platform == 'darwin'",
   "mlx[cpu]==0.32.2; sys_platform == 'linux'",
   # mlx-lm and mflux are Foxlight forks installed as wheels from the Foxlight

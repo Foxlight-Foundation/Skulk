@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Security
 
+- Updated primp, the HTTP client behind web search, from 1.2.2 to 1.3.1.
+  1.2.2 was withdrawn by its maintainer: two web searches that were the first
+  in a process and started together could freeze the whole node, because the
+  stuck thread held Python's interpreter lock. 1.3.1 also stops credentials
+  being forwarded on HTTPS-to-HTTP redirects.
 - Updated the dashboard's dependencies with published security fixes. Its
   router (react-router 7.18.4) no longer lets a link or navigation target
   written with a backslash or a leading `//` lead to another site. The build
@@ -30,10 +35,12 @@ This project records release notes here and mirrors public-facing notes in
   libraries (aiohttp 3.14.4, urllib3 2.8.0, httpx2 and httpcore2 2.13.1,
   h2 4.4.1, idna 3.20) and cryptography 50.0.2, whose wheels bundle a patched
   OpenSSL, carry their fixes too, as do lxml, multidict, yarl and the
-  benchmark tooling's nltk. anyio stays at 4.11.0 in this change: its fix
-  concerns certificate matching for internationalized host names, which the
-  web-fetch tool can reach, and moving past it needs a change to Skulk's
-  internal channels, which follows separately.
+  benchmark tooling's nltk.
+- Updated anyio to 4.14.2, which fixes certificate matching for
+  internationalized host names on TLS connections, including those the
+  web-fetch tool opens to model-supplied URLs. Skulk's internal channels now
+  build on anyio's public memory streams instead of a state class anyio made
+  private in 4.12; channel behavior is unchanged.
 
 ### Fixed
 
