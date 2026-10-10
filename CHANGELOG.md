@@ -14,6 +14,12 @@ This project records release notes here and mirrors public-facing notes in
   run as a call. The engine now reads which tool-call format the model's own
   chat template writes and recognizes only that one in its output; a template
   that names none of them is read as before.
+- A vision model on the MLX engine now sees the tools a request offers along
+  with its images. The image path rendered the prompt without them, so a model
+  asked about a screenshot with a tool to call could not reliably call it.
+  Tools now reach the image prompt exactly as they reach a text prompt,
+  including the history fixes some templates need; Gemma 4 requests with tools
+  render through the model's own template, keeping each image's label.
 - A capability that stopped at "needs settings" because a check failed while
   it was starting, for example while Skulk was updating, can now be started
   again from its setup checks. It stayed stopped even after its checks passed,

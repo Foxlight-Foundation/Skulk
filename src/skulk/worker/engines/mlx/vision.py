@@ -16,6 +16,7 @@ avoid re-encoding identical images across turns.
 
 import base64
 import contextlib
+import copy
 import hashlib
 import importlib
 import inspect
@@ -69,7 +70,11 @@ from skulk.shared.types.tasks import TaskId
 from skulk.shared.types.text_generation import ReasoningEffort
 from skulk.worker.engines.mlx.cache import encode_prompt
 from skulk.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
-from skulk.worker.engines.mlx.utils_mlx import fix_unmatched_think_end_tokens
+from skulk.worker.engines.mlx.utils_mlx import (
+    fix_unmatched_think_end_tokens,
+    prepare_tool_template,
+    warn_if_tool_schemas_lost,
+)
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 
@@ -632,6 +637,32 @@ MUSE_GLIMMER_VISION_MODEL_TYPES: frozenset[str] = frozenset(
 _BLANK_LINE_FRAMED_IMAGE_MODEL_TYPES: frozenset[str] = frozenset({"gemma3n"})
 
 
+def _image_labels_as_text(messages: list[JsonDict]) -> list[JsonDict]:
+    """Carry Skulk's image labels as text, for templates that ignore the field.
+
+    Gemma 4's reference renderer writes each image's label before it; the
+    model's own template has no label field, so the label becomes a text part
+    in the same place.
+    """
+    result: list[JsonDict] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            result.append(message)
+            continue
+        parts: list[object] = []
+        for raw_part in cast(list[object], content):
+            part = _object_dict(raw_part)
+            label = str(part.get("label", "")).strip()
+            if part.get("type") == "image" and label:
+                parts.append({"type": "text", "text": f"{label}:"})
+                parts.append({key: value for key, value in part.items() if key != "label"})
+            else:
+                parts.append(raw_part)
+        result.append({**message, "content": parts})
+    return result
+
+
 def _build_vision_prompt_with_debug(
     tokenizer: TokenizerWrapper,
     chat_template_messages: list[JsonDict],
@@ -642,6 +673,7 @@ def _build_vision_prompt_with_debug(
     eoi_token_id: int | None = None,
     enable_thinking: bool | None = None,
     reasoning_effort: ReasoningEffort | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> _VisionPromptBuild:
     """Build the expanded prompt and retain the raw placeholder layout.
 
@@ -649,12 +681,18 @@ def _build_vision_prompt_with_debug(
     sequence is wrapped as ``BOI + (IMAGE × N) + EOI``. Families in
     ``_BLANK_LINE_FRAMED_IMAGE_MODEL_TYPES`` also get the blank line their
     own processor places on each side of that block, so the prompt matches
-    the format the model was trained on."""
+    the format the model was trained on.
+
+    ``tools`` reach the template exactly as on the text path, so a model
+    offered tools alongside an image sees their names and schemas. Gemma 4's
+    reference renderer has no tool grammar, so a Gemma 4 request with tools
+    renders through the model's own template, as text requests do; its image
+    labels become text before each image so they survive that template."""
     logger.info(
         "Building vision prompt "
         f"(messages={len(chat_template_messages)}, images={len(n_tokens_per_image)})"
     )
-    uses_gemma4_reference_prompt = model_type == "gemma4"
+    uses_gemma4_reference_prompt = model_type == "gemma4" and not tools
     if uses_gemma4_reference_prompt:
         prompt = render_gemma4_prompt(
             chat_template_messages,
@@ -675,12 +713,20 @@ def _build_vision_prompt_with_debug(
                 strength = muse_glimmer_reasoning_strength(reasoning_effort)
                 if strength is not None:
                     extra_kwargs["reasoning_strength"] = strength
+        # The caller's messages stay as they were; history normalization
+        # rewrites tool-call arguments in place.
+        messages = copy.deepcopy(chat_template_messages)
+        if model_type == "gemma4":
+            messages = _image_labels_as_text(messages)
+        template_kwargs = prepare_tool_template(tokenizer, messages, tools)
         prompt = tokenizer.apply_chat_template(
-            chat_template_messages,
+            messages,
             tokenize=False,
             add_generation_prompt=True,
+            **template_kwargs,
             **extra_kwargs,
         )
+        warn_if_tool_schemas_lost(prompt, tools)
     raw_prompt = prompt
     raw_placeholder_positions = _prompt_placeholder_positions(raw_prompt, image_token)
 
@@ -740,6 +786,7 @@ def build_vision_prompt(
     eoi_token_id: int | None = None,
     enable_thinking: bool | None = None,
     reasoning_effort: ReasoningEffort | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build a full prompt string with image placeholders expanded to features.
 
@@ -756,6 +803,7 @@ def build_vision_prompt(
             support it.
         reasoning_effort: Optional reasoning effort forwarded to templates that
             support it.
+        tools: The request's tool definitions, rendered by the template.
 
     Returns:
         The rendered prompt with each image placeholder expanded to match the
@@ -771,6 +819,7 @@ def build_vision_prompt(
         eoi_token_id=eoi_token_id,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
+        tools=tools,
     ).prompt
 
 
@@ -1703,6 +1752,7 @@ class VisionProcessor:
         task_id: TaskId | str | None = None,
         enable_thinking: bool | None = None,
         reasoning_effort: ReasoningEffort | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> VisionResult:
         """Convert images and chat messages into model-ready vision inputs.
 
@@ -1716,6 +1766,7 @@ class VisionProcessor:
                 renderer.
             reasoning_effort: Optional reasoning effort forwarded to the prompt
                 renderer.
+            tools: The request's tool definitions, rendered into the prompt.
 
         Returns:
             Vision preprocessing output containing prompt tokens, media regions,
@@ -1740,6 +1791,7 @@ class VisionProcessor:
                 task_id=task_id,
                 enable_thinking=enable_thinking,
                 reasoning_effort=reasoning_effort,
+                tools=tools,
             )
 
         cache_key = self._image_cache_key(images)
@@ -1775,6 +1827,7 @@ class VisionProcessor:
             eoi_token_id=self.vision_config.eoi_token_id,
             enable_thinking=enable_thinking,
             reasoning_effort=reasoning_effort,
+            tools=tools,
         )
         prompt = prompt_build.prompt
         record_runner_phase(
@@ -1872,6 +1925,7 @@ class VisionProcessor:
         task_id: TaskId | str | None = None,
         enable_thinking: bool | None = None,
         reasoning_effort: ReasoningEffort | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> VisionResult:
         """Process images for models with native vision support (e.g. Gemma 4).
 
@@ -1977,6 +2031,7 @@ class VisionProcessor:
             eoi_token_id=self.vision_config.eoi_token_id,
             enable_thinking=enable_thinking,
             reasoning_effort=reasoning_effort,
+            tools=tools,
         )
         prompt = prompt_build.prompt
         record_runner_phase(
@@ -2091,6 +2146,7 @@ def prepare_vision(
     task_id: TaskId | str | None = None,
     enable_thinking: bool | None = None,
     reasoning_effort: ReasoningEffort | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> VisionResult | None:
     """Encode images and build the vision-augmented prompt.
 
@@ -2106,6 +2162,8 @@ def prepare_vision(
             rendering.
         reasoning_effort: Optional reasoning effort forwarded to vision prompt
             rendering.
+        tools: The request's tool definitions, rendered into the vision prompt
+            the same way the text path renders them.
 
     Returns:
         ``None`` for requests without images, otherwise a ``VisionResult`` ready
@@ -2136,4 +2194,5 @@ def prepare_vision(
         task_id=task_id,
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
+        tools=tools,
     )
