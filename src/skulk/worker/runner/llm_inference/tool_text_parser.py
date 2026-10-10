@@ -565,10 +565,42 @@ def atem_calls(text: str) -> list[ToolCallItem]:
     return calls
 
 
+_GENERIC_DIALECT_MARKERS: tuple[tuple[str, str], ...] = (
+    ("<tool_call>", "generic"),
+    ("<|python_tag|>", "python_tag"),
+    ("[TOOL_CALLS]", "mistral"),
+)
+"""The marker each Generic-family text dialect writes, as its template spells it."""
+
+GENERIC_DIALECTS: frozenset[str] = frozenset(
+    kind for _, kind in _GENERIC_DIALECT_MARKERS
+)
+"""The marked text dialects the Generic tool-call family covers."""
+
+
+def generic_dialects_from_template(template: str | None) -> frozenset[str] | None:
+    """The Generic-family dialects a model's chat template writes (#899).
+
+    The Generic format covers genuinely different dialects (Hermes and Qwen
+    ``<tool_call>`` blocks, Llama's ``<|python_tag|>``, Mistral's
+    ``[TOOL_CALLS]`` arrays), and the template is the truth about which one a
+    model writes: it renders that marker for the model's own calls in history.
+    Returns the dialects whose marker the template contains, or ``None`` when it
+    contains none of them, which leaves recovery unrestricted as before.
+    """
+    if not template:
+        return None
+    found = frozenset(
+        kind for marker, kind in _GENERIC_DIALECT_MARKERS if marker in template
+    )
+    return found or None
+
+
 def parse_tool_calls_from_text(
     text: str,
     tools: list[dict[str, Any]] | None = None,
     tool_call_format: "ToolCallFormat | None" = None,
+    generic_dialects: frozenset[str] | None = None,
 ) -> list[ToolCallItem] | None:
     """Recover tool calls a reasoning model emitted as text (llama.cpp engine).
 
@@ -579,7 +611,10 @@ def parse_tool_calls_from_text(
     """
 
     calls, _ = parse_tool_calls_with_remainder(
-        text, tools, tool_call_format=tool_call_format
+        text,
+        tools,
+        tool_call_format=tool_call_format,
+        generic_dialects=generic_dialects,
     )
     return calls
 
@@ -588,6 +623,7 @@ def parse_tool_calls_with_remainder(
     text: str,
     tools: list[dict[str, Any]] | None = None,
     tool_call_format: "ToolCallFormat | None" = None,
+    generic_dialects: frozenset[str] | None = None,
 ) -> tuple[list[ToolCallItem] | None, str]:
     """Recover tool calls a reasoning model emitted as text (llama.cpp engine).
 
@@ -608,6 +644,12 @@ def parse_tool_calls_with_remainder(
     When ``tools`` is given, calls naming a tool the caller did not offer are
     dropped, because a model reaching for one of its own built-ins has not
     called anything the caller can run.
+
+    ``generic_dialects``, from :func:`generic_dialects_from_template`, scopes
+    the Generic family to the dialects the model's template writes, so a
+    complete foreign block echoed in prose before the real call (a Hermes
+    model quoting a Mistral array) is content rather than a call. ``None``
+    leaves every Generic dialect eligible.
 
     Returns the calls plus the visible text around the call markup for the
     dialects that know where their markup ends (the unmarked object and the
@@ -676,13 +718,14 @@ def parse_tool_calls_with_remainder(
     markers: list[tuple[int, str]] = []
     # Reaching the marker scan with a non-null format means Generic: the
     # specialized formats returned above. Generic families never write the
-    # gemma or harmony shapes, so those cannot be minted from echoed prose;
-    # distinguishing WITHIN the Generic family (a Hermes model echoing a
-    # Mistral array) needs template truth this seam does not have and is
-    # tracked as a follow-up.
+    # gemma or harmony shapes, so those cannot be minted from echoed prose.
+    # Within the family, the template's own markers say which dialect the
+    # model writes (#899); the others are echoed content.
     excluded_kinds = (
         {"gemma4", "harmony", "atem"} if tool_call_format is not None else set()
     )
+    if generic_dialects is not None:
+        excluded_kinds |= GENERIC_DIALECTS - generic_dialects
     for marker, kind in (
         # Harmony is selected by its outer channel carrier, not only by the
         # commentary header: a gpt-oss response begins with <|channel|>

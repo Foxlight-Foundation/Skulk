@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A model on the in-process llama.cpp engine that quotes another model's
+  tool-call format before making its own call no longer has the quoted example
+  run as a call. The engine now reads which tool-call format the model's own
+  chat template writes and recognizes only that one in its output; a template
+  that names none of them is read as before.
 - A capability that stopped at "needs settings" because a check failed while
   it was starting, for example while Skulk was updating, can now be started
   again from its setup checks. It stayed stopped even after its checks passed,

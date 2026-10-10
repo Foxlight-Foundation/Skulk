@@ -791,3 +791,16 @@ class TestReasoningParserFollowsTheToggle:
         emissions += parser.flush()
         assert ("chain of thought", True) in emissions
         assert ("The answer.", False) in emissions
+
+
+def test_the_gguf_chat_template_is_read_from_model_metadata() -> None:
+    """The runner scopes tool recovery by the template the GGUF carries (#899)."""
+    from types import SimpleNamespace
+
+    from skulk.worker.runner.llama_cpp.runner import gguf_chat_template
+
+    template = "{{ '<tool_call>' }}"
+    model = SimpleNamespace(metadata={"tokenizer.chat_template": template})
+    assert gguf_chat_template(model) == template
+    assert gguf_chat_template(SimpleNamespace(metadata={})) is None
+    assert gguf_chat_template(SimpleNamespace()) is None
