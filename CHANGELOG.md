@@ -14,6 +14,12 @@ This project records release notes here and mirrors public-facing notes in
   in a process and started together could freeze the whole node, because the
   stuck thread held Python's interpreter lock. 1.3.1 also stops credentials
   being forwarded on HTTPS-to-HTTP redirects.
+- Updated the dashboard's dependencies with published security fixes. Its
+  router (react-router 7.18.4) no longer lets a link or navigation target
+  written with a backslash or a leading `//` lead to another site. The build
+  and test tooling (Vite 8.0.16, Vitest 4.1.11, PostCSS, nanoid, ws and
+  others) closes file-read and code-execution issues in the development server
+  and the browser test runner.
 - Nodes are no longer exposed to remote crashes through their peer-to-peer
   connections. Updated network libraries fix a gossipsub backoff overflow that
   let a peer crash a node, unbounded subscriptions, and panics or unbounded
