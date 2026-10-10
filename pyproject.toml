@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
   "aiofiles>=24.1.0",
-  "aiohttp>=3.12.14",
+  "aiohttp>=3.14.4",
   "types-aiofiles>=24.1.0.20250708",
   "pydantic>=2.12.0",
   "fastapi>=0.116.1",
@@ -37,7 +37,7 @@ dependencies = [
   # mlx 0.32, unblocking the coordinated MLX stack bump (Tom, 2026-09-05:
   # fork rather than drop or wait). Same ownership doctrine as mlx-lm.
   "mflux==0.19.1.post1",
-  "python-multipart>=0.0.21",
+  "python-multipart>=0.0.32",
   "msgspec>=0.19.0",
   "zstandard>=0.23.0",
   "pyyaml>=6.0.2",
@@ -71,7 +71,7 @@ dependencies = [
   # Operator cluster identity and authority records use Ed25519 and AES-GCM.
   # This is a direct production dependency: secret storage must not rely on a
   # transitive dependency accidentally keeping cryptography installed.
-  "cryptography>=46.0.3",
+  "cryptography>=50.0.2",
   # Local operator pairing renders a terminal QR without requiring a browser.
   "qrcode>=8.2",
   "webrtcvad-wheels>=2.0.14,<3",
@@ -104,7 +104,7 @@ dev = [
   "basedpyright>=1.29.0",
   # starlette >= 1.0 deprecates httpx-backed TestClient; httpx2 is its
   # supported test transport. Production HTTP-client code stays on httpx.
-  "httpx2>=2.0",
+  "httpx2>=2.13.1",
   "pyinstaller>=6.17.0",
   "pytest>=8.4.0",
   "pytest-asyncio>=1.0.0",

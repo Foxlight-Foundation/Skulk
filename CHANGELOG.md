@@ -17,9 +17,24 @@ This project records release notes here and mirrors public-facing notes in
   rustls-webpki 0.103.15). The network protocol is unchanged, so nodes on this
   release still form a cluster with each other as before; the bindings rebuild
   on upgrade.
+- Updated dependencies with published security fixes. The API's form and
+  multipart parsing (python-multipart 0.0.32, starlette 1.7.0) now enforces
+  the limits it was meant to and is protected against oversized or slow
+  requests from any client that can reach a node. Outbound HTTP and TLS
+  libraries (aiohttp 3.14.4, urllib3 2.8.0, httpx2 and httpcore2 2.13.1,
+  h2 4.4.1, idna 3.20) and cryptography 50.0.2, whose wheels bundle a patched
+  OpenSSL, carry their fixes too, as do lxml, multidict, yarl and the
+  benchmark tooling's nltk. anyio stays at 4.11.0 in this change: its fix
+  concerns certificate matching for internationalized host names, which the
+  web-fetch tool can reach, and moving past it needs a change to Skulk's
+  internal channels, which follows separately.
 
 ### Fixed
 
+- A vision request whose tool definitions contain the model's own image
+  placeholder text now fails with an error naming the problem. That text would
+  have taken the place of the first image, so the model would have answered
+  about a picture it was never shown.
 - A model on the in-process llama.cpp engine that quotes another model's
   tool-call format before making its own call no longer has the quoted example
   run as a call. The engine now reads which tool-call format the model's own
