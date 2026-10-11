@@ -1,6 +1,11 @@
 import { StewardPrompt } from '../steward/StewardPrompt';
 import { StewardProposalCard } from '../steward/StewardProposalCard';
-import { decisionErrorDetail, visibleStewardProposals } from '../steward/proposalVisibility';
+import {
+  decisionErrorDetail,
+  loadDismissedProposalIds,
+  saveDismissedProposalIds,
+  visibleStewardProposals,
+} from '../steward/proposalVisibility';
 import { createContext, useContext, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useStore } from 'react-redux';
@@ -206,13 +211,17 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
   });
   const [decideProposal, { isLoading: isDecidingProposal }] =
     useDecideStewardProposalMutation();
-  const [dismissedProposalIds, setDismissedProposalIds] = useState<ReadonlySet<string>>(() => new Set());
+  // Dismissals persist in this browser so a dismissed card stays gone after a reload.
+  const [dismissedProposalIds, setDismissedProposalIds] = useState<ReadonlySet<string>>(loadDismissedProposalIds);
   // The last poll's time keeps render pure, and polling every few seconds
   // ages settled cards out of the window without a timer of their own.
   const visibleProposals = visibleStewardProposals(proposals, proposalsFetchedAt ?? 0, dismissedProposalIds);
   const dismissProposal = useCallback((proposalId: string) => {
-    setDismissedProposalIds((current) => new Set(current).add(proposalId));
-  }, []);
+    setDismissedProposalIds(saveDismissedProposalIds(
+      new Set(dismissedProposalIds).add(proposalId),
+      new Set(proposals.map((proposal) => proposal.proposal_id)),
+    ));
+  }, [dismissedProposalIds, proposals]);
 
   const handleProposalDecision = useCallback(async (proposalId: string, approved: boolean) => {
     try {

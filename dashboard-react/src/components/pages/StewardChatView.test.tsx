@@ -391,6 +391,18 @@ describe('StewardChatView', () => {
       () => !(container?.textContent?.includes('org/stale-model') ?? true),
       'dismissed proposal stayed on screen',
     );
+
+    // A reload mounts a fresh view; the dismissal is remembered in this browser.
+    await act(async () => root?.unmount());
+    container?.remove();
+    await renderPage();
+    await waitFor(
+      () => container?.querySelector('textarea') !== null,
+      'page never rendered after remount',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(container?.textContent).not.toContain('org/stale-model');
+    window.localStorage.removeItem('skulk-steward-dismissed-proposals');
   });
 });
 
