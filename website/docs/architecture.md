@@ -1275,6 +1275,16 @@ is processed per call and never retained.
 
 ## Intelligent fabric (internal steward role)
 
+Model selection and Steward can assess an exact model artifact against a requested
+text workload using `GET /models/assessment`. The assessment reuses the production
+placer, usable-memory budgets, current reservations and shared runtime/cache
+estimator. It reports local fit, external need, a known blocker or missing evidence
+with the reasons and assumptions. Estimates support planning without benchmarking
+every model; actual load readiness remains a separate observation. Hypothetical
+external configurations host the whole workload on isolated full-model hosts;
+they do not sum local and remote memory or assume unsupported sharding. This
+recommendation-only surface performs no provisioning or placement.
+
 Skulk can maintain a resident model, the steward, to
 answer operator questions about the cluster. For setup, examples and the approval workflow, see [Talk to Skulk](steward.md). The mode is configured by the
 `intelligent_fabric` section of the cluster configuration and is off by
@@ -1417,7 +1427,10 @@ The master publishes terminal expiry when a deadline passes. Each planning pass
 also rechecks every pending proposal with the approval checks
 (`master/steward_staleness.py`, pure functions shared with the approval path)
 and orders a terminal `stale` status as soon as the reviewed target changes,
-with an outcome naming the change. Approval refusals carry the same wording,
+with an outcome naming the change. A download cancellation is marked only on
+evidence (a newer attempt, or the reviewed attempt's own outcome), because a
+change of master clears live download telemetry until nodes report again;
+approval alone refuses an attempt it cannot see. Approval refusals carry the same wording,
 and the dashboard keeps a settled proposal on screen for ten minutes with its
 status and reason instead of dropping it.
 For five minutes from the separate dispatch timestamp, a promoted master reconciles the proposal's
@@ -2473,6 +2486,18 @@ the unary child slot. Dashboard reconnect only observes retained progress. Ordin
 forms cannot contain credential fields, and setup completion does not imply
 preflight, enablement or paid approval. Public setup-file reads remain separate.
 
+
+Installed capability discovery also reads selected staged metadata independently
+of a child: `GET /v1/plugins/managed/capabilities` reports bounded declarations
+alongside separate enablement, owner reachability and exact live readiness. A
+digest-bound single-capability read returns full operation schemas. These reads
+do not attach, repair setup, start children or call providers, and cover only the
+API host's local manager. Steward's optional `get_installed_capabilities` tool
+requires separately authorized `plugins:read` access and rechecks that caller on
+every invocation. Large schemas remain available through the authorized HTTP
+read instead of becoming truncated model input. A ready provisioner is distinct
+from allocated inference capacity; provider lifecycle and approval remain owned
+by their existing implementations.
 
 Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
 and either the archive's optional `__manage__.py` or the `manage` launcher a signed

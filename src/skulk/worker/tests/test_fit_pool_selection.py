@@ -123,6 +123,30 @@ def _shard(backend: str | None) -> PipelineShardMetadata:
     )
 
 
+def test_lazy_guard_honors_a_smaller_stamped_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 512-token MLX placement passes the footprint its master admitted."""
+    original = _shard("mlx")
+    card = original.model_card.model_copy(
+        update={"storage_size": Memory.from_gb(3.5), "gguf_file": None}
+    )
+    shard = original.model_copy(update={"model_card": card})
+
+    def wireable(_cls: type[MemoryUsage]) -> MemoryUsage:
+        return MemoryUsage.from_bytes(
+            ram_total=Memory.from_gb(8).in_bytes,
+            ram_available=Memory.from_gb(5).in_bytes,
+            swap_total=0, swap_available=0,
+        )
+
+    monkeypatch.setattr(MemoryUsage, "from_local_gpu_wireable", classmethod(wireable))
+    worker = object.__new__(Worker)
+    worker.node_id = NodeId("small-context-worker")
+    assert worker._local_shard_fit_error(shard, context_token_limit=512) is None  # pyright: ignore[reportPrivateUsage]
+    assert worker._local_shard_fit_error(shard, context_token_limit=8192) is not None  # pyright: ignore[reportPrivateUsage]
+
+
 @pytest.mark.parametrize(
     ("backend", "refused"),
     [

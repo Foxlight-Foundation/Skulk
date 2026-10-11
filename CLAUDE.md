@@ -627,6 +627,19 @@ A model card's `placement.compatible_backends` selects which engine serves it
   simulated per-step wall time. Never enable it on a production node.
 
 ### Intelligent fabric (steward)
+Read-only workload assessment uses `GET /models/assessment` and Steward's
+`assess_inference` tool. Shared contracts in `shared/models/inference_assessment.py`
+and `master/inference_assessment.py` reuse production placement, cache estimates,
+current reservations and isolated hypothetical external hosts. It needs no model
+benchmark and performs no provisioning. Estimated feasibility, loaded instances
+and successful requested-workload serving remain distinct. Observed llama-server
+slots share an aggregate context pool; other engines use serial replicas with
+explicit uncertainty. Memory/resource/GPU receipt clocks are separate from
+heartbeats. Model selection renders the same assessment, while the discovery
+Burst chip remains advisory. Requested context filters candidates before ranking.
+The shared `shard_admission_context_tokens` calculation keeps worker guards and
+system-RAM reservations within a smaller stamped MLX context window.
+
 Optional resident operator assistant, config-gated (`intelligent_fabric` in
 skulk.yaml, default off). Identity = `BaseInstance.system_role` flagged
 placement (additive schema field); the master's `_maintain_steward_placement`
@@ -1699,3 +1712,19 @@ Use the live-dashboard workflow in `CONTRIBUTING.md` and
 The capture script blocks non-read HTTP requests and records actual dashboard
 state. Inspect desktop and phone captures before committing; native operator-app
 screenshots come from the app separately.
+
+## Installed capability declaration discovery
+
+Selected staged releases optionally carry bounded registration summaries for
+capability purpose, version, operation digest, I/O mode and declared runtime and
+credential prerequisites. Missing/oversized registration keeps installation
+identity visible. The existing manager's read-only `installed_contract` request
+checks an exact id@version/revision against current selected metadata and returns
+one full descriptor (64 KiB bound). `ManagedServices.read_installed_metadata`
+uses only the protected configured connection, without attachment, setup repair,
+enablement or provider calls. `/v1/plugins/managed/capabilities` and the exact
+per-plugin contract route require existing `plugins:read` authority; inventory
+scope is the local API host, and installation, enablement, reachability and exact
+live readiness are distinct. Steward's optional installed-metadata reader is
+bound to the HTTP request and rechecks authority for each invocation. Provider
+approval/lifecycle and allocated compute remain separate from these declarations.

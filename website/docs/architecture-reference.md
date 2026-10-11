@@ -12,6 +12,23 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
+- **Inference assessment:** `master/inference_assessment.py:assess_inference`
+  performs read-only workload planning through `placement.py:place_instance`
+  and `shared/models/memory_estimate.py`. Contracts live in
+  `shared/models/inference_assessment.py`; `GET /models/assessment`, Steward's
+  `assess_inference` tool and the model-selection capacity panel share them.
+  Estimated feasibility and observed loaded state remain distinct. Cache sizing
+  uses published `ModelCard.attention_head_dim` where present, otherwise the
+  shared 128-element fallback; GGUF header geometry takes precedence. Concurrency
+  uses observed llama-server slots plus aggregate context, otherwise serial
+  replicas with explicit uncertainty. Candidate hosts never enter membership.
+  `TelemetryView` retains separate local memory/resource/GPU receipt timestamps;
+  heartbeats do not freshen capacity. Requested context filters candidates before
+  ranking. `memory_estimate.py:shard_admission_context_tokens` also caps lazy-cache
+  worker guards and system-RAM reservations at smaller stamped serving windows.
+  External results are full-model host specifications, not offers or
+  execution authority. No provisioning occurs.
+
 - **GGUF cache admission:** `shared/models/gguf_memory.py` resolves Qwen3.5 scalar
   header geometry into fixed FP32 recurrent state and per-token FP16 attention
   widths. `ModelCard.gguf_cache_geometry` is artifact metadata; unknown layouts
@@ -240,7 +257,11 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   approval checks (`src/skulk/master/steward_staleness.py`, pure, shared with
   approval) and orders terminal `stale` (`decided_by: "fabric_staleness"`) once
   the reviewed target changes; the outcome names the change, and approval
-  refusals use the same wording. Past-deadline proposals are left to expiry.
+  refusals use the same wording. The pass runs with
+  `absence_is_evidence=False`: a cancel-download is marked only for a newer
+  attempt or the reviewed attempt's own completion or failure, since failover
+  clears live download telemetry; approval alone refuses an unseen attempt.
+  Past-deadline proposals are left to expiry.
   Deciding a non-pending proposal returns 409 with status and outcome.
   `dispatched` means command acceptance, not lifecycle completion. A promoted
   master reconciles dispatched proposals for five minutes from their separate
@@ -1709,3 +1730,10 @@ Ordinary Chat also pins asynchronous user and assistant writes to their originat
 - `dashboard-react/src/components/layout/SettingsPanel.tsx`: unsaved configuration and theme drafts survive Devices navigation; Save is the commit boundary. `DevicesPanel` invokes immediate independent inventory/revocation and invitation operations. QR secrets stay in `PairingSettings` component state.
 - `src/skulk/api/operator_auth.py`: device GET/DELETE retain scoped bearer access and additionally accept the existing trusted direct-dashboard authority check with the dashboard pairing header. Invalid bearer credentials never fall back to direct authority. Relay restrictions remain in force.
 - Integration setup remains configuration guidance, not observed connectivity. Runtime health uses existing runtime/node/operation evidence. No device-presence or request-observation service is introduced.
+
+### Installed capability declarations
+
+- `extensions/capabilities.py`: bounded `InstalledCapabilityRegistration` summaries bind declared operation purpose, id/version, descriptor revision, I/O mode and runtime prerequisites. They contain no credential values or configuration. `runtime_manager.installed_release` projects selected staged metadata; unreadable optional registration never hides installed identity. Aggregate inventory sheds optional registration before exceeding its frame budget.
+- `extensions/installed_capabilities.py`: `InstalledCapabilities` combines current local manager selections with separate owner reachability and exact live contract readiness. Readiness requires the selected bundle/version/digest-compatible descriptor and current manager/child admission. A ready provisioner does not prove acquired inference capacity.
+- `GET /v1/plugins/managed/capabilities` reads only this API host's configured manager. `GET /v1/plugins/managed/{plugin_id}/capabilities/{qualified_id}?revision=<digest>` reads one exact selected full descriptor, bounded to 64 KiB. Both require direct owner authority or `plugins:read`; neither attaches, repairs setup, enables children or invokes providers. Unknown metadata and retained uninstalled selections remain distinct from usable capacity.
+- Steward exposes `get_installed_capabilities` only through a request-bound authorized reader that checks `plugins:read` again on every invocation. No-argument reads give bounded installed summaries; an exact plugin/id@version/revision selection reads its schema. Oversized model results disclose omission and retain the authorized full-detail endpoint. Ordinary general Steward access grants no installation-read permission.

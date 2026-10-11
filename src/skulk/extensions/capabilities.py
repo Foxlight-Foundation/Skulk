@@ -26,9 +26,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Literal
+from typing import Literal, final
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 CapabilityIoMode = Literal[
     "unary", "server_streaming", "client_streaming", "bidirectional"
@@ -161,21 +161,13 @@ class CapabilityDescriptor(BaseModel):
         needs_input_chunks = self.io_mode in ("client_streaming", "bidirectional")
         needs_output_chunks = self.io_mode in ("server_streaming", "bidirectional")
         if needs_input_chunks and self.input_chunk_schema is None:
-            raise ValueError(
-                f"io_mode {self.io_mode!r} requires input_chunk_schema"
-            )
+            raise ValueError(f"io_mode {self.io_mode!r} requires input_chunk_schema")
         if not needs_input_chunks and self.input_chunk_schema is not None:
-            raise ValueError(
-                f"io_mode {self.io_mode!r} forbids input_chunk_schema"
-            )
+            raise ValueError(f"io_mode {self.io_mode!r} forbids input_chunk_schema")
         if needs_output_chunks and self.output_chunk_schema is None:
-            raise ValueError(
-                f"io_mode {self.io_mode!r} requires output_chunk_schema"
-            )
+            raise ValueError(f"io_mode {self.io_mode!r} requires output_chunk_schema")
         if not needs_output_chunks and self.output_chunk_schema is not None:
-            raise ValueError(
-                f"io_mode {self.io_mode!r} forbids output_chunk_schema"
-            )
+            raise ValueError(f"io_mode {self.io_mode!r} forbids output_chunk_schema")
         return self
 
     @property
@@ -206,3 +198,64 @@ def descriptor_revision(descriptor: CapabilityDescriptor) -> str:
         ensure_ascii=True,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+@final
+class RegisteredCapabilitySummary(BaseModel):
+    """One bounded declared operation; its digest locates the full contract."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    qualified_id: str = Field(max_length=256, description="Declared id@version.")
+    revision: str = Field(
+        pattern=r"^[a-f0-9]{16}$", description="Exact descriptor digest."
+    )
+    title: str = Field(max_length=128, description="Bounded declared title.")
+    purpose: str = Field(
+        max_length=256, description="Bounded declared purpose, possibly shortened."
+    )
+    io_mode: CapabilityIoMode = Field(description="Declared invocation media contract.")
+
+
+@final
+class InstalledCapabilityRegistration(BaseModel):
+    """Declared contracts from selected staged metadata, independent of readiness.
+
+    This display record grants no authority. Its purpose and operations are the
+    descriptor descriptions and schemas; requirements retain declared runtime
+    constraints, never current settings or credential values.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    capabilities: tuple[RegisteredCapabilitySummary, ...] = Field(
+        max_length=8,
+        description="Installed operation purposes, versions and contract digests. Full schemas require an exact-capability read.",
+    )
+    skulk_requires: str = Field(
+        max_length=128, description="Declared Skulk version range."
+    )
+    python_requires: str = Field(
+        max_length=128, description="Declared Python version range."
+    )
+    platforms: tuple[str, ...] = Field(
+        max_length=2, description="Declared runtime platforms."
+    )
+    configuration_required: bool = Field(
+        default=False,
+        description="Whether the installed manifest declares ordinary configuration.",
+    )
+    required_credential_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=16,
+        description="Declared required credential identifiers only; no values, fingerprints, configuration or backend paths.",
+    )
+
+    @model_validator(mode="after")
+    def bounded_contracts(self) -> "InstalledCapabilityRegistration":
+        """Reject ambiguous or oversized contracts without using them for admission."""
+        if len({value.qualified_id for value in self.capabilities}) != len(
+            self.capabilities
+        ):
+            raise ValueError("ambiguous installed contracts")
+        if len(self.model_dump_json().encode()) > 8192:
+            raise ValueError("installed contracts exceed metadata bound")
+        return self

@@ -144,7 +144,10 @@ class TelemetryView:
     def __init__(self) -> None:
         self.node_resources: dict[NodeId, NodeResources] = {}
         self.node_memory: dict[NodeId, MemoryUsage] = {}
+        self.node_memory_received_at: dict[NodeId, datetime] = {}
+        self.node_resources_received_at: dict[NodeId, datetime] = {}
         self.node_system: dict[NodeId, SystemPerformanceProfile] = {}
+        self.node_system_received_at: dict[NodeId, datetime] = {}
         # Slice 3 observational readings (disk/identity/rdma-ctl).
         self.node_disk: dict[NodeId, DiskUsage] = {}
         self.node_identities: dict[NodeId, NodeIdentity] = {}
@@ -247,7 +250,10 @@ class TelemetryView:
         """
         self.node_resources.pop(node_id, None)
         self.node_memory.pop(node_id, None)
+        self.node_memory_received_at.pop(node_id, None)
+        self.node_resources_received_at.pop(node_id, None)
         self.node_system.pop(node_id, None)
+        self.node_system_received_at.pop(node_id, None)
         self.node_disk.pop(node_id, None)
         self.node_identities.pop(node_id, None)
         self.node_rdma_ctl.pop(node_id, None)
@@ -298,17 +304,22 @@ class TelemetryView:
             return
         if isinstance(info, NodeResources):
             self.node_resources[node_id] = info
+            self.node_resources_received_at[node_id] = receipt_time
         elif isinstance(info, MemoryUsage):
             self.node_memory[node_id] = info
+            self.node_memory_received_at[node_id] = receipt_time
         elif isinstance(info, (MactopMetrics, MacmonMetrics)):
             # MacmonMetrics is a decode-only rolling-upgrade shim with the same
             # normalized memory/system_profile shape as MactopMetrics.
             self.node_memory[node_id] = info.memory
+            self.node_memory_received_at[node_id] = receipt_time
             self.node_system[node_id] = info.system_profile
+            self.node_system_received_at[node_id] = receipt_time
         elif isinstance(info, LinuxGpuMetrics):
             # AMD/Linux GPU collector: carries only the system profile (with its
             # accelerator block); node memory arrives separately via MemoryUsage.
             self.node_system[node_id] = info.system_profile
+            self.node_system_received_at[node_id] = receipt_time
         elif isinstance(info, NodeCapabilities):
             self.node_capabilities[node_id] = info.capabilities
         elif isinstance(info, NodePairingGateway):

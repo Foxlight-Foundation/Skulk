@@ -39,6 +39,7 @@ from skulk.extensions.runtime_manager import (
     CatalogRequest,
     CatalogStoreRequest,
     InstallationRequest,
+    InstalledContractRequest,
     InstalledRelease,
     InstallRecoveryRequest,
     InstallSubmission,
@@ -512,6 +513,7 @@ type ManagementRequest = (
     | CatalogStoreRequest
     | CatalogInstallRequest
     | InstallationRequest
+    | InstalledContractRequest
     | SubmitRequest
     | OperationRequest
     | ReleaseRequest
@@ -1052,6 +1054,24 @@ class ManagedServices:
             raise ValueError("managed service request refused")
         if isinstance(request, CatalogRequest) and request.action == "read_catalog":
             self._retry_deferred_followers(payload)
+        return payload
+
+    async def read_installed_metadata(
+        self, request: InventoryRequest | InstalledContractRequest
+    ) -> dict[str, JsonValue]:
+        """Read the configured manager without attaching, starting or invoking children.
+
+        The manager may answer while every child is disabled. Missing manager
+        observations remain unavailable; this method never repairs setup or
+        activates a runtime to make a read succeed.
+        """
+        connection = ServiceConnection.model_validate_json(
+            read_private(self.path, 8192)
+        )
+        result = await manager_request(Path(connection.manager_root), request)
+        payload = result.get("result")
+        if set(result) != {"result"} or not isinstance(payload, dict):
+            raise ValueError("installed metadata unavailable")
         return payload
 
     async def refresh(self) -> ManagedInventory:

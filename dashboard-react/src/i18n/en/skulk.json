@@ -1663,5 +1663,23 @@
   "topology.graphAria.completeMesh": "Cluster topology with {nodeCount} nodes and {routeCount} bidirectional routes. Node fill shows memory pressure, the outer arc shows compute utilization, and the inner ring and dot show health.",
   "topology.nodeActions.info": "Node information",
   "topology.nodeActions.label": "Node actions",
-  "topology.nodeHealth.fixPrefix": "Fix: {remediation}"
+  "topology.nodeHealth.fixPrefix": "Fix: {remediation}",
+  "assessment": {
+    "title": "Capacity estimate",
+    "local": "Estimated local fit",
+    "externalRequired": "Estimated external capacity required",
+    "blocked": "Planning blocked",
+    "insufficientEvidence": "More evidence needed",
+    "planningContext": "Planning context",
+    "context": "{tokens} tokens per request",
+    "concurrentRequests": "Simultaneous requests",
+    "invalidWorkload": "Enter 256–1,048,576 context tokens and 1–16 simultaneous requests.",
+    "unavailable": "Assessment unavailable. Local fit is unknown.",
+    "loading": "Assessing this workload…",
+    "configuration": "{count} remote replica(s), {backend}, at least {memory} GiB {pool} per node ({usable} GiB estimated workload).",
+    "loaded": "An idle loaded instance can be reused; this workload has not been verified.",
+    "estimated": "Memory feasibility is estimated; successful loading and serving are unverified.",
+    "evidence": "Assumptions and uncertainty",
+    "noProvisioning": "Recommendation only. No external capacity is acquired."
+  }
 }
