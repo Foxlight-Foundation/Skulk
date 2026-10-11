@@ -1971,10 +1971,12 @@ class Master:
         # Both guards apply whatever this node's own record holds: a winner
         # with an empty or missing record must not release peers whose
         # records still carry placements.
+        # Latch before the settle wait: a peer seen at any point, even one that
+        # drops out before the window ends, makes this a multi-node restart.
+        if len(connected_node_ids) > 1:
+            self._restart_recovery_spans_nodes = True
         if not topology_settled:
             return []
-        if len(connected_node_ids) != 1:
-            self._restart_recovery_spans_nodes = True
         if self._restart_recovery_spans_nodes:
             if not self._restart_recovery_multinode_noted:
                 self._restart_recovery_multinode_noted = True

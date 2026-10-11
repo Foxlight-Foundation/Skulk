@@ -391,3 +391,13 @@ async def test_a_lone_winner_without_placements_completes_after_settling() -> No
     assert _advance(master, settled=False) == []
     completion = _advance(master)
     assert len(completion) == 1 and isinstance(completion[0], RestartRecoveryCompleted)
+
+
+async def test_a_peer_seen_only_while_settling_still_counts() -> None:
+    """A peer that leaves before the window ends still makes it multi-node."""
+    master, global_recv = _master(None, record=_record())
+    await _index_seed(master, global_recv)
+
+    assert _advance(master, settled=False, nodes={LOCAL_NODE, NodeId("brief-peer")}) == []
+    assert _advance(master) == []
+    assert master.state.restart_recovery_pending is True
