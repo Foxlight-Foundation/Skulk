@@ -2130,6 +2130,59 @@ air-gapped use. A hash-bound support matrix that was previously TUF-verified is
 also usable offline; it never converts an experimental or negative decision
 into placement permission.
 
+### Assess local fit and external capacity
+
+**GET** `/models/assessment`
+
+| Parameter | Required | Behavior |
+|---|---|---|
+| `model_id` | Yes | Exact authorized artifact alias. Unknown aliases return 404; no repository discovery occurs. |
+| `context_tokens` | No | Input plus output tokens per request, 256–1,048,576; default 8192. |
+| `concurrent_requests` | No | Simultaneous requests, 1–16; default 1. |
+| `excluded_node_ids` | No | Repeatable node IDs excluded from the local dry-run. |
+
+The camel-case response binds `cardDigest`, `sourceRepository`, immutable
+`sourceRevision`, `selectedFile`, quantization and the requested `workload`.
+`weightEvidence: card_declared` identifies the card's selected weight size;
+it does not claim a measured runtime footprint. No benchmark is required.
+`status` is `local`, `external_required`, `blocked`, or `insufficient_evidence`.
+Reasons, assumptions and uncertainty accompany every result. Missing immutable
+identity or cache sizing abstains; a known context or artifact blocker is distinct
+from insufficient memory. Observed llama-server slots share an aggregate context
+pool. Other engines use conservative serial replicas; missing concurrent-engine
+evidence prevents a claim that those replicas establish external necessity.
+Management-only nodes do not require inference-memory telemetry. External groups
+respect effective speculative-vision slots and the command's aggregate context
+maximum; fixed-window RAM hosts include production context-window headroom.
+Incomplete artifact claims restrict matrix-derived admission while independent
+legacy compatibility remains available; legacy fit does not verify completeness.
+
+Local candidates use ordinary placement, supported sharding and current
+reservations. Idle ready instances of the same artifact can be reused.
+Memory/GPU receipt ages are bounded to 60 seconds and backend observations to
+120 seconds; receipt age is not the age of the underlying measurement.
+`readiness` distinguishes `not_observed` from `loaded_not_workload_verified`.
+Neither establishes successful inference for the requested workload.
+
+`externalConfigurations` contains hypothetical, independently admitted complete
+remote allocations. Each reports backend/build/hardware constraints, replica
+count, request count, aggregate context pool, estimated usable memory, minimum
+physical memory and selected-weight disk bytes per node. Disk numbers exclude
+installation/staging overhead; discrete-GPU host RAM is unknown. These are
+single-host replicas, with no local/remote hybrid sharding or unsupported GPU
+pooling. They are alternatives, not additive resources or provider offers.
+Price, stock, startup time, latency and throughput are unverified.
+An engine-family support row alone does not identify a concrete compute lane or
+memory pool. The assessment omits that hypothetical variant and reports missing
+evidence when no concrete alternative exists. Legacy card compatibility remains
+available alongside deduplicated matrix-specific build/hardware alternatives.
+
+This read never provisions, places, reserves or downloads. `provisioning` is
+`recommendation_only`; provider discovery and spending permission remain separate.
+Steward's `assess_inference` tool reads this same contract with bounded details
+and explicit coverage. Model selection displays this assessment; the coarse
+discovery Burst chip remains only a browsing hint.
+
 ### Read model capacity requirements
 
 **GET** `/models/requirements`

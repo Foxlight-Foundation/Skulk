@@ -346,6 +346,7 @@ from skulk.extensions import (
 from skulk.extensions.host_network import HostNetwork, private_namespace_configured
 from skulk.extensions.steward import StewardToolBinding
 from skulk.master.image_store import ImageStore
+from skulk.master.inference_assessment import assess_inference
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
@@ -403,6 +404,10 @@ from skulk.shared.election import ElectionMessage
 from skulk.shared.experimental import experimental_mode_enabled
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.inference_assessment import (
+    InferenceAssessment,
+    InferenceWorkload,
+)
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
@@ -2685,6 +2690,19 @@ class API:
                 "one preview. Unavailable previews include a stable error_code."
             ),
         )(self.get_placement_previews)
+        self.app.get(
+            "/models/assessment",
+            tags=["Models"],
+            summary="Assess local fit and estimated external inference capacity",
+            description=(
+                "Read-only assessment of an authorized exact artifact and requested text workload. "
+                "Uses production placement, reservations, context/cache estimates and compatibility. "
+                "Uses observed llama-server slots and shared context pools, otherwise serial replicas. Returns local, "
+                "external_required, blocked or insufficient_evidence with reasons, assumptions and "
+                "hypothetical full-model external configurations. Estimates do not prove load readiness "
+                "or performance. Creates no instance, reservation, provider offer or paid capacity."
+            ),
+        )(self.get_inference_assessment)
         self.app.get(
             "/instance/{instance_id}",
             tags=["Instances"],
@@ -10223,6 +10241,33 @@ class API:
             cards_by_id[model_id] = record.model_card
 
         return cards, store_installed_records
+
+    async def get_inference_assessment(
+        self,
+        model_id: ModelId,
+        context_tokens: Annotated[int, Query(ge=256, le=1_048_576)] = 8192,
+        concurrent_requests: Annotated[int, Query(ge=1, le=16)] = 1,
+        excluded_node_ids: Annotated[list[NodeId] | None, Query()] = None,
+    ) -> InferenceAssessment:
+        """Assess an authorized model without provisioning or changing cluster state.
+
+        Args:
+            model_id: Known selected artifact alias; no Hub discovery is performed.
+            context_tokens: Input plus output tokens per request.
+            concurrent_requests: Simultaneous requests to size in the dry-run.
+            excluded_node_ids: Operator-excluded nodes for this assessment.
+
+        Returns:
+            Estimated feasibility, candidate resources, evidence and uncertainty.
+        """
+        card = await self._load_authorized_model_card(model_id)
+        return assess_inference(
+            card, InferenceWorkload(context_tokens=context_tokens, concurrent_requests=concurrent_requests),
+            topology=self.state.topology, instances=self.state.instances,
+            network=self.state.node_network, telemetry=self._telemetry_view,
+            runners=self.state.runners,
+            excluded_nodes=set(excluded_node_ids or ()),
+        )
 
     async def get_model_requirements(
         self,

@@ -591,6 +591,15 @@ def _card_platform_backends(
     )
 
 
+def model_platform_backends(card: ModelCard, resources: NodeResources) -> frozenset[str]:
+    """Return evidenced backends supported by core for this artifact on a node.
+
+    Shares normal placement's signed-build, hardware and runner restrictions
+    with read-only workload consumers. This grants no placement authority.
+    """
+    return _card_platform_backends(card, resources) & resources.backends
+
+
 def _cycle_common_multi_node_engines(
     cycle: Cycle,
     card: ModelCard,
@@ -1140,6 +1149,9 @@ def place_instance(
     ]
     cycles_with_sufficient_memory: list[Cycle] = []
     memory_diagnostics = CycleMemoryDiagnostics()
+    # Filter with the requested workload before ranking. A fixed 8k floor can
+    # pick a small host that later refuses a larger window while another fits,
+    # or reject a valid smaller requested window before it is considered.
     for standard_cycle in standard_candidates:
         standard_fixed = (
             {standard_cycle.node_ids[0]: projector_memory}
@@ -1151,6 +1163,7 @@ def place_instance(
             node_memory,
             command.model_card,
             command.sharding,
+            context_budget=command.requested_context_tokens or KV_CONTEXT_BUDGET_TOKENS,
             node_vram=node_vram,
             fixed_memory_by_node=standard_fixed,
             resolved_backends={
@@ -1222,6 +1235,7 @@ def place_instance(
                 node_memory,
                 command.model_card,
                 Sharding.Pipeline,
+                context_budget=command.requested_context_tokens or KV_CONTEXT_BUDGET_TOKENS,
                 node_vram=rpc_vram_map,
                 exact_pipeline_layers=False,
                 fixed_memory_by_node=rpc_fixed,

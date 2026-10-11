@@ -1274,6 +1274,16 @@ is processed per call and never retained.
 
 ## Intelligent fabric (internal steward role)
 
+Model selection and Steward can assess an exact model artifact against a requested
+text workload using `GET /models/assessment`. The assessment reuses the production
+placer, usable-memory budgets, current reservations and shared runtime/cache
+estimator. It reports local fit, external need, a known blocker or missing evidence
+with the reasons and assumptions. Estimates support planning without benchmarking
+every model; actual load readiness remains a separate observation. Hypothetical
+external configurations host the whole workload on isolated full-model hosts;
+they do not sum local and remote memory or assume unsupported sharding. This
+recommendation-only surface performs no provisioning or placement.
+
 Skulk can maintain a resident model, the steward, to
 answer operator questions about the cluster. For setup, examples and the approval workflow, see [Talk to Skulk](steward.md). The mode is configured by the
 `intelligent_fabric` section of the cluster configuration and is off by

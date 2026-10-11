@@ -147,8 +147,8 @@ MAX_REQUESTED_CONTEXT_TOKENS: Final = 1_048_576
 placement's memory fit and the card's maximum still bound what is stamped."""
 
 KV_HEAD_DIM_FALLBACK: int = 128
-"""Attention head dimension assumed when a model card omits it (cards do not
-persist ``head_dim``). 128 dominates current MLX families (Llama/Qwen/GLM)."""
+"""Attention head dimension assumed when a model card omits published geometry.
+128 dominates current MLX families (Llama/Qwen/GLM)."""
 
 KV_DTYPE_BYTES: int = 2
 """Bytes per KV-cache element. MLX keeps the KV cache in fp16 even for 4-bit
@@ -215,7 +215,7 @@ def estimate_kv_cache_bytes(
 
     Returns zero when the card lacks ``num_key_value_heads`` or an argument is
     non-positive — the weight-overhead factor must absorb the slack then.
-    ``head_dim`` falls back to ``KV_HEAD_DIM_FALLBACK`` (cards omit it).
+    Head width uses ``attention_head_dim`` or ``KV_HEAD_DIM_FALLBACK`` when absent.
     """
     if context_tokens <= 0 or n_layers <= 0:
         return Memory()
@@ -380,6 +380,26 @@ def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
     )
 
 
+def shard_admission_context_tokens(
+    shard: ShardMetadata, context_token_limit: int | None
+) -> int:
+    """Return the context charged by reservations and the worker load guard.
+
+    Fixed-window engines charge their entire positive stamp. Lazy-cache engines
+    retain the ordinary floor, capped by a smaller enforced serving window.
+    A 512-token placement cannot allocate an 8192-token request cache, so charging
+    the larger floor would reject the reduced window that placement admitted.
+    Missing or non-positive stamps retain the conservative default.
+    """
+    if context_token_limit is None or context_token_limit <= 0:
+        return KV_CONTEXT_BUDGET_TOKENS
+    return (
+        context_token_limit
+        if shard_preallocates_kv_upfront(shard)
+        else min(KV_CONTEXT_BUDGET_TOKENS, context_token_limit)
+    )
+
+
 def vulkan_fills_carve_first(resolved_backend: str | None) -> bool:
     """Whether a shard's engine allocates through Vulkan.
 
@@ -499,7 +519,8 @@ def per_token_kv_bytes(
     kv_heads = model_card.num_key_value_heads
     if kv_heads is None or model_card.n_layers <= 0:
         return 0
-    return 2 * model_card.n_layers * kv_heads * KV_HEAD_DIM_FALLBACK * KV_DTYPE_BYTES
+    head_dim = model_card.attention_head_dim or KV_HEAD_DIM_FALLBACK
+    return 2 * model_card.n_layers * kv_heads * head_dim * KV_DTYPE_BYTES
 
 
 def shard_fraction_of_model(shard: ShardMetadata) -> float | None:

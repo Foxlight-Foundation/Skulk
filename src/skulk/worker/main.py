@@ -55,7 +55,6 @@ from skulk.shared.constants import (
 from skulk.shared.log_summaries import summarize_task_for_log
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
-    KV_CONTEXT_BUDGET_TOKENS,
     LOAD_FIT_TOLERANCE,
     UMA_GPU_OS_HEADROOM,
     backend_offloads_to_vram,
@@ -63,6 +62,7 @@ from skulk.shared.models.memory_estimate import (
     gb10_unified_memory_pool,
     gpu_working_set_ceiling,
     is_gb10_accelerator,
+    shard_admission_context_tokens,
     shard_preallocates_kv_upfront,
     vulkan_fills_carve_first,
 )
@@ -1460,17 +1460,9 @@ class Worker:
         would otherwise pass an 8192-sized guard and then OOM / fail to load if live
         VRAM has dropped since placement (stale telemetry, a concurrently loaded
         instance). MLX grows KV lazily (no up-front window), so the budget floor is
-        the correct estimate there.
+        the correct estimate there, capped by a smaller enforced serving window.
         """
-        kv_context = (
-            context_token_limit
-            if (
-                shard_preallocates_kv_upfront(shard)
-                and context_token_limit
-                and context_token_limit > 0
-            )
-            else KV_CONTEXT_BUDGET_TOKENS
-        )
+        kv_context = shard_admission_context_tokens(shard, context_token_limit)
         footprint = estimate_shard_footprint(
             shard.model_card,
             self._shard_memory_fraction(shard),

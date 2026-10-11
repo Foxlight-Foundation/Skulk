@@ -12,6 +12,23 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
+- **Inference assessment:** `master/inference_assessment.py:assess_inference`
+  performs read-only workload planning through `placement.py:place_instance`
+  and `shared/models/memory_estimate.py`. Contracts live in
+  `shared/models/inference_assessment.py`; `GET /models/assessment`, Steward's
+  `assess_inference` tool and the model-selection capacity panel share them.
+  Estimated feasibility and observed loaded state remain distinct. Cache sizing
+  uses published `ModelCard.attention_head_dim` where present, otherwise the
+  shared 128-element fallback; GGUF header geometry takes precedence. Concurrency
+  uses observed llama-server slots plus aggregate context, otherwise serial
+  replicas with explicit uncertainty. Candidate hosts never enter membership.
+  `TelemetryView` retains separate local memory/resource/GPU receipt timestamps;
+  heartbeats do not freshen capacity. Requested context filters candidates before
+  ranking. `memory_estimate.py:shard_admission_context_tokens` also caps lazy-cache
+  worker guards and system-RAM reservations at smaller stamped serving windows.
+  External results are full-model host specifications, not offers or
+  execution authority. No provisioning occurs.
+
 - **GGUF cache admission:** `shared/models/gguf_memory.py` resolves Qwen3.5 scalar
   header geometry into fixed FP32 recurrent state and per-token FP16 attention
   widths. `ModelCard.gguf_cache_geometry` is artifact metadata; unknown layouts

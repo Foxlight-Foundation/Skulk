@@ -352,9 +352,11 @@ async def test_stale_generated_card_is_superseded_by_curated(
     builtin_dir.mkdir()
     custom_dir.mkdir()
     (builtin_dir / "override-model.toml").write_text(
-        _MINIMAL_CARD.format(quantization="fp16")
+        "attention_head_dim = 256\n" + _MINIMAL_CARD.format(quantization="fp16")
     )
-    stale_revision = model_cards_module.CARD_GENERATOR_REVISION - 1
+    # Revision 3 predates published head widths and must not override the
+    # corrected cache geometry after an upgrade.
+    stale_revision = 3
     (custom_dir / "testorg--override-model.toml").write_text(
         _STAMPED_CARD.format(quantization="int4", generator_revision=stale_revision)
     )
@@ -363,6 +365,7 @@ async def test_stale_generated_card_is_superseded_by_curated(
 
     assert not card.is_custom, "the curated card must supersede a stale one"
     assert card.quantization == "fp16"
+    assert card.attention_head_dim == 256
 
 
 @pytest.mark.anyio

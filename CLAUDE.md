@@ -627,6 +627,19 @@ A model card's `placement.compatible_backends` selects which engine serves it
   simulated per-step wall time. Never enable it on a production node.
 
 ### Intelligent fabric (steward)
+Read-only workload assessment uses `GET /models/assessment` and Steward's
+`assess_inference` tool. Shared contracts in `shared/models/inference_assessment.py`
+and `master/inference_assessment.py` reuse production placement, cache estimates,
+current reservations and isolated hypothetical external hosts. It needs no model
+benchmark and performs no provisioning. Estimated feasibility, loaded instances
+and successful requested-workload serving remain distinct. Observed llama-server
+slots share an aggregate context pool; other engines use serial replicas with
+explicit uncertainty. Memory/resource/GPU receipt clocks are separate from
+heartbeats. Model selection renders the same assessment, while the discovery
+Burst chip remains advisory. Requested context filters candidates before ranking.
+The shared `shard_admission_context_tokens` calculation keeps worker guards and
+system-RAM reservations within a smaller stamped MLX context window.
+
 Optional resident operator assistant, config-gated (`intelligent_fabric` in
 skulk.yaml, default off). Identity = `BaseInstance.system_role` flagged
 placement (additive schema field); the master's `_maintain_steward_placement`
