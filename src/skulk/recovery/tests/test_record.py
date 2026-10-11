@@ -74,6 +74,25 @@ def test_record_round_trips_through_disk(tmp_path: Path) -> None:
     assert not any(child.name.endswith(".tmp") for child in path.parent.iterdir())
 
 
+def test_a_leftover_staging_file_never_exposes_the_record(tmp_path: Path) -> None:
+    """A world-readable temp file from an earlier crash is narrowed before use."""
+    path = tmp_path / "cluster-intent.json"
+    leftover = tmp_path / ".cluster-intent.json.tmp"
+    leftover.write_text("stale")
+    leftover.chmod(0o644)
+
+    write_record(
+        path,
+        derive_cluster_intent(
+            sample_state(), install_ids=INSTALL_IDS, session_id=SESSION, written_at=NOW
+        ),
+    )
+
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert not leftover.exists()
+    assert read_record(path) is not None
+
+
 def test_missing_or_corrupt_record_reads_as_none(tmp_path: Path) -> None:
     path = tmp_path / "cluster-intent.json"
     assert read_record(path) is None

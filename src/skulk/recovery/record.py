@@ -15,6 +15,7 @@ by their stable install IDs. Restored steward proposals are only ever
 terminal: a restart must never re-arm an action nobody approved after it.
 """
 
+import os
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -228,16 +229,32 @@ def restored_steward_proposals(
 
 
 def write_record(path: Path, record: ClusterIntentRecord) -> None:
-    """Write the record atomically, readable only by its owner.
+    """Write the record durably and atomically, readable only by its owner.
 
-    A crash mid-write leaves the previous record intact: the new content goes
-    to a sibling file that replaces the old one in a single rename.
+    The record exists for abrupt restarts (power loss, a kernel panic), so a
+    rename alone is not enough: without a flush the machine can come back with
+    the rename applied but the contents missing. The new content goes to a
+    sibling file that is owner-only from the moment it exists, is flushed to
+    disk, and then replaces the old record in one rename, after which the
+    directory entry is flushed too. A crash at any point leaves either the old
+    record or the new one.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     staging = path.with_name(f".{path.name}.tmp")
-    staging.write_text(record.model_dump_json(by_alias=True))
-    staging.chmod(0o600)
-    staging.replace(path)
+    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        # A staging file left by an earlier crash keeps its old mode; narrow it
+        # before any record bytes are written.
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(record.model_dump_json(by_alias=True).encode())
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(staging, path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def read_record(path: Path) -> ClusterIntentRecord | None:
