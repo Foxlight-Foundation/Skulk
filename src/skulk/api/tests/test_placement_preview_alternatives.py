@@ -145,6 +145,74 @@ async def test_preview_preserves_unknown_model_not_found_response(
     assert "Unknown model attacker/repository" in response.json()["error"]["message"]
 
 
+async def test_assessment_reads_authorized_artifact_without_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An external-required assessment has zero placement/provisioning effects."""
+    api = _build_api()
+    card = _card().model_copy(update={"source_revision": "a" * 40, "num_key_value_heads": 8})
+    load = AsyncMock(return_value=card)
+    send = AsyncMock()
+    monkeypatch.setattr(ModelCard, "load", load)
+    monkeypatch.setattr(api, "_send", send)
+    client = TestClient(api.app)
+    response = client.get("/models/assessment", params={
+        "model_id": str(_MODEL_ID), "context_tokens": 16384, "concurrent_requests": 2,
+    })
+    assert response.status_code == 200
+    payload = cast(dict[str, object], response.json())
+    assert payload["status"] == "external_required"
+    assert payload["workload"] == {"contextTokens": 16384, "concurrentRequests": 2}
+    assert payload["sourceRevision"] == "a" * 40
+    assert payload["externalConfigurations"]
+    assert payload["provisioning"] == "recommendation_only"
+    send.assert_not_awaited()
+    assert not api.state.instances
+    assert not list(api.state.topology.list_nodes())
+
+
+async def test_assessment_tool_available_without_mutation_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Steward reads the same assessment contract in a read-only turn."""
+    from skulk.api.steward import StewardHarness, steward_tool_definitions
+    api = _build_api()
+    card = _card().model_copy(update={"source_revision": "a" * 40, "num_key_value_heads": 8})
+    monkeypatch.setattr(ModelCard, "load", AsyncMock(return_value=card))
+    definitions = steward_tool_definitions(include_proposals=False)
+    assert any(tool["function"]["name"] == "assess_inference" for tool in definitions)
+    result = await StewardHarness(api, proposals_allowed=False).execute_tool(
+        "assess_inference", {"model_id": str(_MODEL_ID), "context_tokens": 8192, "concurrent_requests": 1},
+    )
+    payload = cast(dict[str, object], json.loads(result))
+    assert payload["status"] == "external_required"
+    assert cast(dict[str, object], payload["workload"])["context_tokens"] == 8192
+    assert payload["readiness"] == "not_observed"
+
+
+async def test_large_assessment_tool_retains_a_structured_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bound detail records without hiding workload/verdict in a string preview."""
+    from skulk.api.steward import MAX_TOOL_RESULT_CHARS, StewardHarness
+    api = _build_api()
+    card = _card().model_copy(update={"source_revision": "a" * 40, "num_key_value_heads": 8})
+    monkeypatch.setattr(ModelCard, "load", AsyncMock(return_value=card))
+    original = await api.get_inference_assessment(_MODEL_ID)
+    large = original.model_copy(update={
+        "external_configurations": tuple(config.model_copy(update={"hardware_classes": tuple("hardware-class-" + str(index) + "x" * 200 for index in range(16))}) for config in original.external_configurations) * 3,
+    })
+    monkeypatch.setattr(api, "get_inference_assessment", AsyncMock(return_value=large))
+    result = await StewardHarness(api, proposals_allowed=False).execute_tool(
+        "assess_inference", {"model_id": str(_MODEL_ID), "context_tokens": 8192, "concurrent_requests": 1},
+    )
+    payload = cast(dict[str, object], json.loads(result))
+    assert len(result) <= MAX_TOOL_RESULT_CHARS
+    assert payload["status"] == "external_required"
+    assert "preview" not in payload
+    assert cast(dict[str, object], payload["coverage"])["external_configurations"] == 3
+
+
 async def test_exact_instance_creation_accepts_publication_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

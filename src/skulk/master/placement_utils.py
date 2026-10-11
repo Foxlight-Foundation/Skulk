@@ -20,8 +20,8 @@ from skulk.shared.models.memory_estimate import (
     is_gb10_accelerator,
     memory_overhead_factor,
     per_token_kv_bytes,
+    shard_admission_context_tokens,
     shard_fraction_of_model,
-    shard_preallocates_kv_upfront,
     vulkan_fills_carve_first,
 )
 from skulk.shared.models.memory_estimate import (
@@ -405,11 +405,8 @@ def reserve_instance_system_ram(
                 fraction,
                 resolved_backend=shard.resolved_backend,
                 llama_server_settings=shard.llama_server_settings,
-                context_budget=(
-                    instance.context_token_limit
-                    if instance.context_token_limit is not None
-                    and shard_preallocates_kv_upfront(shard)
-                    else PLACEMENT_KV_CONTEXT_BUDGET_TOKENS
+                context_budget=shard_admission_context_tokens(
+                    shard, instance.context_token_limit
                 ),
             )
             committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes

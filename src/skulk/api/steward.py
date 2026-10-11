@@ -215,6 +215,10 @@ Rules:
 - supports describes advertised backends, not hardware-vendor inference or proof
   that a particular workload can run. Missing backend telemetry is unknown.
 - Answer in plain language an operator can act on, citing the evidence.
+- For model fit or burst questions, use assess_inference with the exact catalog
+  artifact and requested context/concurrency. Explain estimates separately from
+  observed readiness. External configurations are hypothetical full-workload
+  allocations, never a current offer, price or permission to provision.
 """
 
 
@@ -373,6 +377,23 @@ def steward_tool_definitions(*, include_proposals: bool = True) -> list[dict[str
             "Fetch the model catalog with card metadata: context length, "
             "family, quantization, and capability tags.",
             no_args,
+        ),
+        (
+            "assess_inference",
+            "Estimate whether an exact catalog artifact and requested text workload fit locally. "
+            "Returns local/external_required/blocked/insufficient_evidence, production admission "
+            "reasons and hypothetical full-workload external configurations. Read-only; "
+            "never provisions. Concurrency uses conservative independent replicas. "
+            "Memory estimates do not prove load readiness or latency/throughput.",
+            {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "model_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "context_tokens": {"type": "integer", "minimum": 256, "maximum": 1_048_576},
+                    "concurrent_requests": {"type": "integer", "minimum": 1, "maximum": 16},
+                },
+                "required": ["model_id", "context_tokens", "concurrent_requests"],
+            },
         ),
         (
             "propose_place_model",
@@ -1903,6 +1924,41 @@ class StewardHarness:
                     break
                 doc_results = candidate
             return json.dumps({"results": doc_results}, indent=1)
+        if name == "assess_inference":
+            model_id = arguments.get("model_id")
+            context = arguments.get("context_tokens")
+            concurrent = arguments.get("concurrent_requests")
+            if not isinstance(model_id, str) or not model_id.strip():
+                raise ValueError("assess_inference requires an exact model_id")
+            if type(context) is not int or not 256 <= context <= 1_048_576:
+                raise ValueError("context_tokens must be an integer between 256 and 1048576")
+            if type(concurrent) is not int or not 1 <= concurrent <= 16:
+                raise ValueError("concurrent_requests must be an integer between 1 and 16")
+            assessment = await api.get_inference_assessment(
+                ModelId(model_id), context_tokens=context, concurrent_requests=concurrent,
+            )
+            # Keep the verdict/workload structured under the tool-result budget;
+            # generic prefix truncation can otherwise hide the deciding evidence.
+            payload = assessment.model_copy(update={
+                "reasons": tuple(reason[:600] for reason in assessment.reasons[:3]),
+                "local_replicas": tuple(replica.model_copy(update={"shards": replica.shards[:4]}) for replica in assessment.local_replicas[:3]),
+                "external_configurations": assessment.external_configurations[:3],
+            }).model_dump(mode="json", by_alias=False)
+            payload["coverage"] = {
+                "replicas": len(assessment.local_replicas),
+                "external_configurations": len(assessment.external_configurations),
+                "detail_is_bounded": True,
+                "full_details_endpoint": "/models/assessment",
+            }
+            # Large topologies/support rows must not turn the authoritative
+            # verdict into a JSON string preview. Omit whole detail records,
+            # retaining identity, workload, reasons and uncertainty as fields.
+            for key in ("local_replicas", "external_configurations"):
+                details = cast(list[object], payload[key])
+                assert isinstance(details, list)
+                while details and len(json.dumps(payload, indent=1)) > MAX_TOOL_RESULT_CHARS - 256:
+                    details.pop()
+            return _bounded(payload)
         if name == "get_model_catalog":
             models = await api.get_models(status=None)
             return _bounded(

@@ -2782,6 +2782,8 @@ class ModelCard(CamelCaseModel):
     num_key_value_heads: PositiveInt | None = None
     """KV-head count for grouped-query attention, used in KV-cache sizing. ``None``
     when unknown/not applicable."""
+    attention_head_dim: PositiveInt | None = None
+    """Published attention head width; absent cards retain the 128-element estimate."""
     gguf_cache_geometry: GgufCacheGeometry | None = None
     """Artifact-derived attention and recurrent cache dimensions for GGUF admission.
 
@@ -2828,7 +2830,7 @@ class ModelCard(CamelCaseModel):
 
     ``None`` preserves the historical behavior of resolving the repository's
     mutable ``main`` branch. Curated or operator-authored cards should set this
-    to a full commit hash when the exact artifact has been qualified, so an
+    to a full commit hash when selecting the exact artifact, so an
     upstream file replacement cannot silently change what the store and workers
     execute.
     """
@@ -3354,6 +3356,7 @@ class ModelCard(CamelCaseModel):
             hidden_size=config_data.hidden_size or 0,
             supports_tensor=config_data.supports_tensor,
             num_key_value_heads=config_data.num_key_value_heads,
+            attention_head_dim=config_data.head_dim,
             context_length=config_data.max_position_embeddings or 0,
             tasks=[ModelTask.TextGeneration],
             source_revision=source_revision,
@@ -3605,6 +3608,7 @@ class ConfigData(BaseModel):
     architectures: list[str] | None = None
     hidden_size: Annotated[int, Field(ge=0)] | None = None
     num_key_value_heads: PositiveInt | None = None
+    head_dim: PositiveInt | None = None
     layer_count: int = Field(
         validation_alias=AliasChoices(
             "num_hidden_layers",
@@ -3645,6 +3649,7 @@ class ConfigData(BaseModel):
                 "architectures",
                 "hidden_size",
                 "num_key_value_heads",
+                "head_dim",
                 "num_hidden_layers",
                 "num_layers",
                 "n_layer",
