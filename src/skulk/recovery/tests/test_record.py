@@ -3,12 +3,16 @@
 import json
 from datetime import timedelta
 from pathlib import Path
+from uuid import UUID
 
 from skulk.recovery.record import (
+    DEPARTURE_GRACE,
     RESTARTED_BEFORE_DECISION,
     RESTARTED_BEFORE_FINISH,
     ClusterIntentRecord,
+    PlacementIntent,
     RecoveryStamp,
+    carry_departed_placements,
     derive_cluster_intent,
     read_record,
     restored_steward_proposals,
@@ -24,7 +28,7 @@ from skulk.recovery.tests.fixtures import (
     sample_proposal,
     sample_state,
 )
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.worker.instances import InstanceMeta
 from skulk.shared.types.worker.shards import Sharding
 
@@ -188,3 +192,57 @@ def test_restored_proposals_are_all_terminal() -> None:
         proposal.status not in {"pending", "approved", "dispatched"}
         for proposal in restored.values()
     )
+
+
+def _intent(model: str, *hosts: UUID) -> PlacementIntent:
+    return PlacementIntent(
+        model_id=ModelId(model),
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=max(len(hosts), 1),
+        host_install_ids=hosts,
+    )
+
+
+def test_departed_placements_keep_their_place_and_new_ones_follow() -> None:
+    first, departed, last = _intent("org/first", KITE1), _intent("org/gone", KITE2), _intent("org/last", KITE1)
+    added = _intent("org/new", KITE1)
+    placements, departed_since = carry_departed_placements(
+        (first, departed, last),
+        (first, last, added),
+        connected_install_ids={KITE1},
+        departed_since={},
+        now=NOW,
+    )
+    assert placements == (first, departed, last, added)
+    assert list(departed_since.items()) == [(departed, NOW)]
+
+
+def test_identical_copies_on_a_departed_machine_are_both_kept() -> None:
+    copy = _intent("org/model", KITE2)
+    placements, _ = carry_departed_placements(
+        (copy, copy), (), connected_install_ids={KITE1}, departed_since={}, now=NOW
+    )
+    assert placements == (copy, copy)
+
+
+def test_a_placement_spanning_a_departed_machine_is_kept() -> None:
+    """A two-machine placement goes away when either of its machines does."""
+    wide = _intent("org/wide", KITE1, KITE2)
+    placements, _ = carry_departed_placements(
+        (wide,), (), connected_install_ids={KITE1}, departed_since={}, now=NOW
+    )
+    assert placements == (wide,)
+
+
+def test_the_grace_runs_from_when_the_placement_first_went_missing() -> None:
+    departed = _intent("org/gone", KITE2)
+    placements, departed_since = carry_departed_placements(
+        (departed,),
+        (),
+        connected_install_ids=set(),
+        departed_since=dict([(departed, NOW - DEPARTURE_GRACE)]),
+        now=NOW,
+    )
+    assert placements == ()
+    assert departed_since == {}

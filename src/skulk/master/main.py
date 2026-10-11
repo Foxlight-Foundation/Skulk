@@ -40,16 +40,20 @@ from skulk.master.steward_staleness import (
     placement_card_staleness,
     steward_proposal_staleness,
 )
+from skulk.recovery.fetch import RestartRecordFetcher, fetch_peer_record
 from skulk.recovery.record import (
     ClusterIntentRecord,
     PlacementIntent,
     restored_steward_proposals,
 )
 from skulk.recovery.restore import (
+    HOST_WAIT_AFTER_SETTLE_SECONDS,
     INFO_WAIT_AFTER_SETTLE_SECONDS,
     intent_nodes,
     live_nodes_by_install_id,
+    record_sources,
     restore_failure_event,
+    unrestored_intents,
 )
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
@@ -968,6 +972,7 @@ class Master:
         initial_model_trust_identities: tuple[str, ...] = (),
         restart_recovery_record: ClusterIntentRecord | None = None,
         restart_recovery_enabled: bool = False,
+        restart_recovery_fetcher: RestartRecordFetcher = fetch_peer_record,
     ):
         self.node_id = node_id
         self.session_id = session_id
@@ -1057,6 +1062,14 @@ class Master:
             initial_state is not None and initial_state.restart_recovery_pending
         )
         self._restart_recovery_multinode_noted = False
+        # Multi-node cold start: which record restore uses is chosen once,
+        # across every node's advert, before any placement is requested.
+        self._restart_recovery_fetcher = restart_recovery_fetcher
+        self._restart_recovery_chosen = False
+        self._restart_recovery_settled_at: datetime | None = None
+        self._restart_recovery_unfetchable: set[NodeId] = set()
+        self._restart_recovery_fetched: tuple[NodeId, datetime, ClusterIntentRecord] | None = None
+        self._restart_recovery_reconciled = False
         self._ordered_steward_proposals = dict(
             initial_state.steward_action_proposals
             if initial_state is not None
@@ -1971,24 +1984,19 @@ class Master:
         # Both guards apply whatever this node's own record holds: a winner
         # with an empty or missing record must not release peers whose
         # records still carry placements.
-        # Latch before the settle wait: a peer seen at any point, even one that
-        # drops out before the window ends, makes this a multi-node restart.
-        if len(connected_node_ids) > 1:
-            self._restart_recovery_spans_nodes = True
+        self._latch_restart_recovery_span(connected_node_ids)
         if not topology_settled:
             return []
-        if self._restart_recovery_spans_nodes:
-            if not self._restart_recovery_multinode_noted:
-                self._restart_recovery_multinode_noted = True
-                logger.warning(
-                    "Restart recovery: the cluster came back with more than one "
-                    "node. Bringing placements back "
-                    "across nodes needs the freshest record from each node, "
-                    "which this build does not do yet; every node's record "
-                    "stays untouched."
-                )
+        if self._restart_recovery_spans_nodes and not self._restart_recovery_chosen:
+            # _choose_restart_recovery_record is still waiting for adverts,
+            # a fetch, or the recorded machines.
             return []
         events: list[Event] = []
+        if not self._restart_recovery_reconciled:
+            self._restart_recovery_reconciled = True
+            self._restart_recovery_remaining = unrestored_intents(
+                self._restart_recovery_remaining, self.state.instances
+            )
         if self._restart_recovery_remaining:
             events.extend(self._restore_recorded_placements(now, connected_node_ids))
             if self._restart_recovery_remaining:
@@ -2010,6 +2018,132 @@ class Master:
                 ),
             )
         )
+        return events
+
+    def _latch_restart_recovery_span(self, connected_node_ids: set[NodeId]) -> None:
+        """Remember that a recovering session has seen more than one node.
+
+        Latched at any point, even inside the settling window: a peer that
+        drops out later still made this a multi-node restart, so restore must
+        choose the freshest record across nodes rather than use its own.
+        """
+        if len(connected_node_ids) > 1:
+            self._restart_recovery_spans_nodes = True
+
+    def _finish_restored_intent(self) -> None:
+        """Retire the current intent; the next one gets its own deadline."""
+        self._restart_recovery_remaining.pop(0)
+        self._restart_recovery_info_deadline = None
+
+    async def _choose_restart_recovery_record(
+        self,
+        now: datetime,
+        *,
+        topology_settled: bool,
+        connected_node_ids: set[NodeId],
+    ) -> list[Event]:
+        """Choose which node's record a multi-node cold start restores from.
+
+        Every node keeps a record; the one most recently confirmed current
+        wins, so a node that was offline for days cannot restore an old
+        layout. After the settling window this waits (up to two minutes) for
+        every connected peer's advert and for the chosen record's machines to
+        rejoin, fetching a peer's record over its API when it is the freshest.
+        A peer whose record cannot be fetched is skipped for the next freshest.
+
+        Returns:
+            Proposal-history events carried from the chosen record when it is
+            not this node's own.
+        """
+        self._latch_restart_recovery_span(connected_node_ids)
+        if (
+            not self.state.restart_recovery_pending
+            or self._restart_recovery_completion_queued
+            or self._restart_recovery_chosen
+            or not self._restart_recovery_spans_nodes
+            or not topology_settled
+        ):
+            return []
+        if self._restart_recovery_settled_at is None:
+            self._restart_recovery_settled_at = now
+        waited_out = now >= self._restart_recovery_settled_at + timedelta(
+            seconds=HOST_WAIT_AFTER_SETTLE_SECONDS
+        )
+        adverts = self._telemetry_view.node_restart_recovery
+        peers = connected_node_ids - {self.node_id}
+        if not waited_out and any(peer not in adverts for peer in peers):
+            return []
+        own = self._restart_recovery_record
+        chosen: ClusterIntentRecord | None = None
+        source_label = "no node"
+        for source in record_sources(
+            own,
+            adverts,
+            local_node=self.node_id,
+            connected_node_ids=connected_node_ids,
+            unfetchable=self._restart_recovery_unfetchable,
+        ):
+            if source.node_id is None:
+                chosen, source_label = own, "this node"
+                break
+            cached = self._restart_recovery_fetched
+            if cached is not None and cached[:2] == (source.node_id, source.written_at):
+                chosen, source_label = cached[2], f"node {source.node_id}"
+                break
+            assert source.advert is not None
+            fetched = await self._restart_recovery_fetcher(
+                source.node_id, source.advert, self.state.node_network.get(source.node_id)
+            )
+            if fetched is None:
+                logger.warning(
+                    f"Restart recovery: could not fetch node {source.node_id}'s "
+                    "record; trying the next freshest"
+                )
+                self._restart_recovery_unfetchable.add(source.node_id)
+                continue
+            self._restart_recovery_fetched = (source.node_id, source.written_at, fetched)
+            chosen, source_label = fetched, f"node {source.node_id}"
+            break
+        if chosen is not None and not waited_out:
+            hosts = {
+                install_id
+                for placement in chosen.placements
+                for install_id in placement.host_install_ids
+            }
+            live = live_nodes_by_install_id(self._telemetry_view, connected_node_ids)
+            if not hosts <= set(live):
+                return []
+        events: list[Event] = []
+        if chosen is not None and chosen is not own:
+            events.extend(self._carry_restored_proposals(chosen, now))
+        self._restart_recovery_record = chosen
+        self._restart_recovery_remaining = (
+            list(chosen.placements) if chosen is not None else []
+        )
+        self._restart_recovery_chosen = True
+        logger.info(
+            f"Restart recovery: restoring from {source_label}'s record"
+            + (
+                f" (current as of {chosen.stamp.written_at.isoformat()}, "
+                f"{len(chosen.placements)} placement(s))"
+                if chosen is not None
+                else ""
+            )
+        )
+        return events
+
+    def _carry_restored_proposals(
+        self, record: ClusterIntentRecord, now: datetime
+    ) -> list[Event]:
+        """Adopt a fresher record's proposal history, all of it terminal."""
+        events: list[Event] = []
+        for proposal_id, proposal in restored_steward_proposals(record, now=now).items():
+            if self._ordered_steward_proposals.get(proposal_id) == proposal:
+                continue
+            self._ordered_steward_proposals[proposal_id] = proposal
+            events.append(StewardActionProposalChanged(proposal=proposal))
+        if events:
+            self._prune_ordered_steward_action_proposals()
         return events
 
     def _restore_recorded_placements(
@@ -2038,7 +2172,7 @@ class Master:
                         intent, "it is no longer in the model catalog.", now=now
                     )
                 )
-                self._restart_recovery_remaining.pop(0)
+                self._finish_restored_intent()
                 continue
             preferred, excluded = intent_nodes(intent, live)
             command = PlaceInstance(
@@ -2067,18 +2201,18 @@ class Master:
                         now=now,
                     )
                 )
-                self._restart_recovery_remaining.pop(0)
+                self._finish_restored_intent()
                 continue
             except PlacementError as error:
                 events.append(restore_failure_event(intent, str(error), now=now))
-                self._restart_recovery_remaining.pop(0)
+                self._finish_restored_intent()
                 continue
             events.extend(
                 get_transition_events(current, placement, self.state.tasks)
             )
             current = dict(placement)
             self._restart_recovery_restored += 1
-            self._restart_recovery_remaining.pop(0)
+            self._finish_restored_intent()
         return events
 
     def _place_restored_intent(
@@ -3929,6 +4063,12 @@ class Master:
                 time.monotonic() - self._started_monotonic
                 >= TOPOLOGY_SETTLE_GRACE_SECONDS
             )
+            for recovery_event in await self._choose_restart_recovery_record(
+                now,
+                topology_settled=topology_settled,
+                connected_node_ids=connected_node_ids,
+            ):
+                await self._queue_control_event(recovery_event)
             for recovery_event in self._restart_recovery_events(
                 now,
                 topology_settled=topology_settled,

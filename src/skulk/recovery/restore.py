@@ -1,18 +1,119 @@
 """Pure helpers for placing a restart recovery record's intents again."""
 
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from skulk.recovery.record import PlacementIntent
+from skulk.master.placement import (
+    PlacementError,
+    replacement_command_for_download_failed_instance,
+)
+from skulk.recovery.record import ClusterIntentRecord, PlacementIntent
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import InstanceFailureRecorded
+from skulk.shared.types.restart_recovery import RestartRecoveryAdvert
 from skulk.shared.types.telemetry import TelemetryView
-from skulk.shared.types.worker.instances import InstanceFailure, InstanceId
+from skulk.shared.types.worker.instances import Instance, InstanceFailure, InstanceId
 
 INFO_WAIT_AFTER_SETTLE_SECONDS = 300.0
-"""How long restore keeps retrying when the planner still lacks node
-information (memory, resources) after the post-election settling window."""
+"""How long restore keeps retrying one placement while the planner still
+lacks node information (memory, resources)."""
+
+HOST_WAIT_AFTER_SETTLE_SECONDS = 120.0
+"""How long a multi-node cold start waits, after settling, for every peer to
+advertise its record and for the chosen record's machines to rejoin."""
+
+
+@dataclass(frozen=True)
+class RecordSource:
+    """Where a candidate record lives: this node's own, or a peer's to fetch."""
+
+    written_at: datetime
+    node_id: NodeId | None
+    """``None`` for this node's own record."""
+    advert: RestartRecoveryAdvert | None
+
+
+def record_sources(
+    own: ClusterIntentRecord | None,
+    adverts: Mapping[NodeId, RestartRecoveryAdvert],
+    *,
+    local_node: NodeId,
+    connected_node_ids: set[NodeId],
+    unfetchable: set[NodeId],
+) -> list[RecordSource]:
+    """List the records a cold-started master could restore from, newest first.
+
+    A peer's record counts only while it is connected, has a record, runs an
+    API to serve it, and has not already failed to serve it. On a tie the
+    master's own record wins, since it needs no fetch.
+
+    Args:
+        own: This node's record, if it has one.
+        adverts: Every node's latest advert, from telemetry.
+        local_node: This node, whose own advert (if looped back) is ignored.
+        connected_node_ids: Nodes in the current topology.
+        unfetchable: Peers whose record could not be fetched this session.
+
+    Returns:
+        Candidate sources, freshest first.
+    """
+    sources: list[RecordSource] = []
+    if own is not None:
+        sources.append(RecordSource(own.stamp.written_at, None, None))
+    for node_id, advert in adverts.items():
+        if (
+            node_id == local_node
+            or node_id not in connected_node_ids
+            or node_id in unfetchable
+            or advert.written_at is None
+            or advert.api_port is None
+        ):
+            continue
+        sources.append(RecordSource(advert.written_at, node_id, advert))
+    return sorted(
+        sources, key=lambda source: (source.written_at, source.node_id is None), reverse=True
+    )
+
+
+def unrestored_intents(
+    intents: Sequence[PlacementIntent], instances: Mapping[InstanceId, Instance]
+) -> list[PlacementIntent]:
+    """Drop intents an existing ordinary instance already satisfies.
+
+    A master promoted in the middle of a restore inherits the placements its
+    predecessor already created; restoring the whole record again would place
+    them twice. Each existing ordinary instance of the same model and width
+    accounts for one intent.
+
+    Args:
+        intents: The record's placements, in order.
+        instances: Instances already in replicated state.
+
+    Returns:
+        The intents still to request, in their original order.
+    """
+    available: Counter[tuple[str, int]] = Counter()
+    for instance in instances.values():
+        if instance.system_role is not None:
+            continue
+        try:
+            width = replacement_command_for_download_failed_instance(
+                instance, frozenset()
+            ).min_nodes
+        except PlacementError:
+            continue
+        available[(str(instance.shard_assignments.model_id), width)] += 1
+    remaining: list[PlacementIntent] = []
+    for intent in intents:
+        key = (str(intent.model_id), intent.min_nodes)
+        if available[key] > 0:
+            available[key] -= 1
+            continue
+        remaining.append(intent)
+    return remaining
 
 
 def live_nodes_by_install_id(

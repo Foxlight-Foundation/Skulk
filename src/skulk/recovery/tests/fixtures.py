@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.topology import Topology
 from skulk.shared.types.common import CommandId, ModelId, NodeId, SessionId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
@@ -74,6 +75,14 @@ def sample_instance(
     )
 
 
+def connected(*nodes: str) -> Topology:
+    """Return a topology holding ``nodes``, the machines currently connected."""
+    topology = Topology()
+    for node in nodes:
+        topology.add_node(NodeId(node))
+    return topology
+
+
 def sample_proposal(status: StewardActionProposalStatus, minutes_ago: int) -> StewardActionProposal:
     """Return a stop proposal created ``minutes_ago`` before ``NOW`` in ``status``."""
     created = NOW - timedelta(minutes=minutes_ago)
@@ -108,5 +117,6 @@ def sample_state() -> State:
             proposal.proposal_id: proposal
             for proposal in (sample_proposal("rejected", 30), sample_proposal("pending", 2))
         },
+        topology=connected("node-a", "node-b"),
         last_event_applied_idx=42,
     )

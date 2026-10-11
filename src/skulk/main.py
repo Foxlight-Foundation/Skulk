@@ -88,6 +88,7 @@ from skulk.shared.types.events import (
     StateSnapshotHydrated,
 )
 from skulk.shared.types.profiling import NodeDataTransport, NodeResources
+from skulk.shared.types.restart_recovery import RestartRecoveryAdvert
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
@@ -1234,6 +1235,8 @@ class Node:
                         state_provider=self._replicated_view,
                         session_provider=lambda: self.event_router.session_id,
                         telemetry_view=self.telemetry_view,
+                        advert_sender=self._send_restart_recovery_advert,
+                        api_port=self.api.port if self.api is not None else None,
                     ).run
                 )
             if self.store_server:
@@ -1247,6 +1250,14 @@ class Node:
             if self.api:
                 tg.start_soon(self.api.run)
             tg.start_soon(self._elect_loop)
+
+    async def _send_restart_recovery_advert(
+        self, advert: RestartRecoveryAdvert
+    ) -> None:
+        """Publish this node's restart recovery advert on telemetry."""
+        await self.router.telemetry_sender().send(
+            NodeTelemetry(node_id=self.node_id, info=advert)
+        )
 
     def _replicated_view(self) -> State | None:
         """Return this node's replicated view for its restart recovery record.

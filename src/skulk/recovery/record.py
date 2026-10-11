@@ -16,8 +16,9 @@ terminal: a restart must never re-arm an action nobody approved after it.
 """
 
 import os
+from collections import Counter
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID
@@ -227,6 +228,72 @@ def derive_cluster_intent(
     )
 
 
+DEPARTURE_GRACE = timedelta(minutes=10)
+"""How long a placement whose machine left stays in the record. Machines in a
+shutdown go down seconds or minutes apart; without this, the last machine
+standing would record a layout without the models of those already gone."""
+
+
+def carry_departed_placements(
+    previous: tuple[PlacementIntent, ...],
+    live: tuple[PlacementIntent, ...],
+    *,
+    connected_install_ids: set[UUID],
+    departed_since: Mapping[PlacementIntent, datetime],
+    now: datetime,
+) -> tuple[tuple[PlacementIntent, ...], dict[PlacementIntent, datetime]]:
+    """Keep, for a grace period, placements that vanished because a machine left.
+
+    A placement missing from the live view is kept when at least one machine
+    it ran on is no longer connected: the master removed it because the node
+    went away, not because anyone stopped it. It is dropped at once when its
+    machines are all still connected (an operator stop or a move), when the
+    model is running again as many times as before (a repair re-placed it), or
+    when ``DEPARTURE_GRACE`` has passed.
+
+    Args:
+        previous: Placements in the last record written.
+        live: Placements derived from the current view.
+        connected_install_ids: Install IDs of the machines connected now.
+        departed_since: When each currently kept placement first went missing.
+        now: UTC time of this pass.
+
+    Returns:
+        The placements to record, in the order they were made, and the
+        updated "missing since" times for the departed ones kept.
+    """
+    # Copies of each model the departures may still account for: a repair
+    # that re-placed a departed copy elsewhere uses up its share.
+    missing_copies = Counter(placement.model_id for placement in previous)
+    missing_copies.subtract(placement.model_id for placement in live)
+    # Matched as a multiset, so two identical copies on one machine are two.
+    unmatched_live = Counter(live)
+    recorded: list[PlacementIntent] = []
+    still_departed: dict[PlacementIntent, datetime] = {}
+    for placement in previous:
+        if unmatched_live[placement] > 0:
+            unmatched_live[placement] -= 1
+            recorded.append(placement)
+            continue
+        hosts = set(placement.host_install_ids)
+        if not hosts or hosts <= connected_install_ids:
+            continue
+        if missing_copies[placement.model_id] <= 0:
+            continue
+        since = departed_since.get(placement, now)
+        if now - since >= DEPARTURE_GRACE:
+            continue
+        recorded.append(placement)
+        still_departed[placement] = since
+        missing_copies[placement.model_id] -= 1
+    # Placements made since the last record go after the ones it held.
+    for placement in live:
+        if unmatched_live[placement] > 0:
+            unmatched_live[placement] -= 1
+            recorded.append(placement)
+    return tuple(recorded), still_departed
+
+
 def restored_steward_proposals(
     record: ClusterIntentRecord, *, now: datetime
 ) -> dict[StewardActionProposalId, StewardActionProposal]:
@@ -313,3 +380,14 @@ def read_record(path: Path) -> ClusterIntentRecord | None:
             f"{error.error_count()} problem(s)"
         )
         return None
+
+
+class RestartRecoveryRecordResponse(FrozenModel):
+    """A node's restart recovery record, as served to a cold-started master."""
+
+    node_id: NodeId = Field(
+        description="Node serving the record, so a fetch can confirm it reached it."
+    )
+    record: ClusterIntentRecord | None = Field(
+        default=None, description="The node's record, or None when it has none."
+    )
