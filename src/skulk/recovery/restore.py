@@ -78,6 +78,56 @@ def record_sources(
     )
 
 
+def awaited_peers(
+    observed: Mapping[NodeId, UUID | None],
+    adverts: Mapping[NodeId, RestartRecoveryAdvert],
+    *,
+    own: ClusterIntentRecord | None,
+    connected_node_ids: set[NodeId],
+    live_install_ids: Mapping[UUID, NodeId],
+) -> set[NodeId]:
+    """Peers whose record could still beat every record reachable now.
+
+    Machines come and go while a cluster boots. A connected peer is awaited
+    until its advert arrives. A peer seen earlier in this recovery that has
+    since left is awaited too, unless it is back under a new node ID (handled
+    as connected), it holds no record, or its advert was no fresher than the
+    best record reachable now. The caller stops waiting at its deadline.
+
+    Args:
+        observed: Every peer seen during this recovery, with its install ID
+            when that was known.
+        adverts: Every node's latest advert, from telemetry.
+        own: This node's record, if it has one.
+        connected_node_ids: Nodes in the current topology.
+        live_install_ids: Install ID to node ID for connected machines.
+
+    Returns:
+        Node IDs still worth waiting for.
+    """
+    reachable = [own.stamp.written_at] if own is not None else []
+    reachable.extend(
+        advert.written_at
+        for node_id, advert in adverts.items()
+        if node_id in connected_node_ids and advert.written_at is not None
+    )
+    freshest_reachable = max(reachable, default=None)
+    awaited: set[NodeId] = set()
+    for peer, install_id in observed.items():
+        if peer in connected_node_ids:
+            if peer not in adverts:
+                awaited.add(peer)
+            continue
+        if install_id is not None and install_id in live_install_ids:
+            continue
+        advert = adverts.get(peer)
+        if advert is None or advert.written_at is not None and (
+            freshest_reachable is None or advert.written_at > freshest_reachable
+        ):
+            awaited.add(peer)
+    return awaited
+
+
 def unrestored_intents(
     intents: Sequence[PlacementIntent], instances: Mapping[InstanceId, Instance]
 ) -> list[PlacementIntent]:
@@ -90,7 +140,8 @@ def unrestored_intents(
 
     Args:
         intents: The record's placements, in order.
-        instances: Instances already in replicated state.
+        instances: Instances already in replicated state that will survive
+            this planning pass (the caller leaves out dying ones).
 
     Returns:
         The intents still to request, in their original order.

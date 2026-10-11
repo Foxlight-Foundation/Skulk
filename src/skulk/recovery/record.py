@@ -194,10 +194,20 @@ def derive_cluster_intent(
             for node_id in instance.shard_assignments.node_to_runner
             if node_id in install_ids
         )
+        # Exclusions of connected machines are node IDs; those of machines
+        # that were absent when the instance was placed are install IDs.
         excluded = tuple(
-            install_ids[node_id]
-            for node_id in sorted(instance.excluded_nodes)
-            if node_id in install_ids
+            sorted(
+                {
+                    *(
+                        install_ids[node_id]
+                        for node_id in instance.excluded_nodes
+                        if node_id in install_ids
+                    ),
+                    *instance.excluded_install_ids,
+                },
+                key=str,
+            )
         )
         placements.append(
             PlacementIntent(

@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from copy import deepcopy
 from typing import ClassVar, Final, Literal, Sequence, TypeAlias
+from uuid import UUID
 
 from skulk.master.placement_utils import (
     Cycle,
@@ -847,6 +848,7 @@ def place_instance(
     stamped_exclusions: set[NodeId] | None = None,
     approved_remote_code_identities: AbstractSet[str] | None = None,
     served_context_default: int | None = None,
+    node_install_ids: Mapping[NodeId, UUID] | None = None,
 ) -> dict[InstanceId, Instance]:
     if command.model_card.music is not None and command.min_nodes != 1:
         raise PlacementError("Music instances require exactly one node")
@@ -890,16 +892,28 @@ def place_instance(
     # current_instances, which this function never mutates), but the planner
     # treats the excluded node as if it were absent from the topology when
     # scoring fresh placements.
-    if excluded_nodes:
+    #
+    # Machines excluded by install ID (absent when the exclusion was made) are
+    # excluded under whatever node ID they run as now. They only narrow the
+    # search: the instance records them as install IDs, never as node IDs.
+    search_exclusions = set(excluded_nodes or ())
+    if command.excluded_install_ids and node_install_ids:
+        excluded_machines = set(command.excluded_install_ids)
+        search_exclusions |= {
+            node_id
+            for node_id, install_id in node_install_ids.items()
+            if install_id in excluded_machines
+        }
+    if search_exclusions:
         candidate_cycles = [
             cycle
             for cycle in candidate_cycles
-            if not (set(cycle.node_ids) & excluded_nodes)
+            if not (set(cycle.node_ids) & search_exclusions)
         ]
         if not candidate_cycles:
             raise PlacementError(
                 f"All cycles of at least {command.min_nodes} node(s) touch an "
-                f"excluded node ({len(excluded_nodes)} node(s) excluded). "
+                f"excluded node ({len(search_exclusions)} node(s) excluded). "
                 "Check the excluded_nodes list — node IDs change when a "
                 "cluster session restarts."
             )
@@ -1555,6 +1569,7 @@ def place_instance(
             context_token_limit=context_token_limit,
             requested_context_tokens=command.requested_context_tokens,
             excluded_nodes=stamped_exclusions_list,
+            excluded_install_ids=sorted(command.excluded_install_ids),
             system_role=command.system_role,
             driver_node=driver_node,
             donor_endpoints=donor_endpoints,
@@ -1604,6 +1619,7 @@ def place_instance(
                 context_token_limit=context_token_limit,
                 requested_context_tokens=command.requested_context_tokens,
                 excluded_nodes=stamped_exclusions_list,
+                excluded_install_ids=sorted(command.excluded_install_ids),
                 system_role=command.system_role,
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
@@ -1624,6 +1640,7 @@ def place_instance(
                 context_token_limit=context_token_limit,
                 requested_context_tokens=command.requested_context_tokens,
                 excluded_nodes=stamped_exclusions_list,
+                excluded_install_ids=sorted(command.excluded_install_ids),
                 system_role=command.system_role,
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
@@ -1689,6 +1706,7 @@ def fallback_command_for_refused_instance(
         # exclusions (#658): the anywhere-fallback still may not land on
         # nodes the caller excluded.
         excluded_nodes=sorted({*instance.excluded_nodes, refusing_node}),
+        excluded_install_ids=sorted(instance.excluded_install_ids),
         # System-role marker (intelligent-fabric steward): repair
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
@@ -1725,6 +1743,7 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         # The instance's original per-placement exclusions (#658); the wider
         # re-placement keeps honoring the caller's intent.
         excluded_nodes=sorted(instance.excluded_nodes),
+        excluded_install_ids=sorted(instance.excluded_install_ids),
         # System-role marker (intelligent-fabric steward): repair
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
@@ -1762,6 +1781,7 @@ def replacement_command_for_download_failed_instance(
         # (#658) and the newly failed node(s): repair must not land on
         # nodes the caller excluded, nor on the nodes that just failed.
         excluded_nodes=sorted({*instance.excluded_nodes, *excluded_nodes}),
+        excluded_install_ids=sorted(instance.excluded_install_ids),
         # System-role marker (intelligent-fabric steward): repair
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,

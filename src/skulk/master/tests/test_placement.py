@@ -1,3 +1,5 @@
+from uuid import UUID
+
 import pytest
 
 import skulk.master.placement as placement_module
@@ -429,6 +431,30 @@ def test_excluding_one_node_routes_placement_to_the_other() -> None:
     instance = next(iter(placements.values()))
     assigned_nodes = set(instance.shard_assignments.node_to_runner.keys())
     assert assigned_nodes == {node_b}
+
+
+def test_a_machine_excluded_by_install_id_is_excluded_under_its_current_node_id() -> None:
+    """An exclusion kept by install ID (the machine was absent when it was made)
+    narrows the search once the machine is back, without becoming a node ID."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    absent_then = UUID("33333333-3333-4333-8333-333333333333")
+    command = place_instance_command(_small_model_card()).model_copy(
+        update={"excluded_install_ids": [absent_then]}
+    )
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_install_ids={node_a: absent_then, node_b: UUID(int=2)},
+    )
+
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner) == {node_b}
+    assert instance.excluded_nodes == []
+    assert instance.excluded_install_ids == [absent_then]
 
 
 def test_excluding_all_candidate_nodes_fails_to_place() -> None:
@@ -2566,6 +2592,19 @@ def test_repair_commands_preserve_original_exclusions() -> None:
         instance, {node_ids[1]}
     )
     assert set(download_failed.excluded_nodes) == {operator_excluded, node_ids[1]}
+
+    # Exclusions kept by install ID ride every repair shape too.
+    absent_machine = UUID("33333333-3333-4333-8333-333333333333")
+    with_absent = instance.model_copy(update={"excluded_install_ids": [absent_machine]})
+    assert replacement_command_for_refused_instance(with_absent).excluded_install_ids == [
+        absent_machine
+    ]
+    assert fallback_command_for_refused_instance(
+        with_absent, refusing_node
+    ).excluded_install_ids == [absent_machine]
+    assert replacement_command_for_download_failed_instance(
+        with_absent, {node_ids[1]}
+    ).excluded_install_ids == [absent_machine]
 
     # A repair re-placement searches with the union but stamps only the
     # ORIGINAL intent on the new instance, so a transiently failed node is

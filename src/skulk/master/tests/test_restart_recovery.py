@@ -84,12 +84,14 @@ def _advance(
     settled: bool = True,
     nodes: set[NodeId] | None = None,
     now: datetime | None = None,
+    dying: set[InstanceId] | None = None,
 ) -> list[Event]:
     """Run one restart recovery step of the master's planning pass."""
     return master._restart_recovery_events(  # pyright: ignore[reportPrivateUsage]
         now or datetime.now(tz=timezone.utc),
         topology_settled=settled,
         connected_node_ids=nodes if nodes is not None else {LOCAL_NODE},
+        dying_instance_ids=dying or set(),
     )
 
 
@@ -633,6 +635,134 @@ async def test_restore_waits_for_the_recorded_machines_then_proceeds(
     await _choose(master, later)
     events = _advance(master, nodes={LOCAL_NODE, PEER}, now=later)
     assert [type(event).__name__ for event in events] == ["InstanceCreated", "RestartRecoveryCompleted"]
+
+
+async def _promoted_master(
+    monkeypatch: pytest.MonkeyPatch, carried: Instance, own: ClusterIntentRecord, planner: _Planner
+) -> Master:
+    """A master promoted mid-restore, carrying ``carried`` from its predecessor."""
+    prior = State(
+        instances={carried.instance_id: carried},
+        restart_recovery_pending=True,
+        last_event_applied_idx=7,
+    )
+    global_send, _ = channel[GlobalForwarderEvent]()
+    master = Master(
+        LOCAL_NODE,
+        SessionId(master_node_id=LOCAL_NODE, election_clock=3),
+        command_receiver=channel[ForwarderCommand]()[1],
+        event_sender=channel[Event]()[0],
+        local_event_receiver=channel[LocalForwarderEvent]()[1],
+        global_event_sender=global_send,
+        state_sync_receiver=channel[StateSyncMessage]()[1],
+        state_sync_sender=channel[StateSyncMessage]()[0],
+        download_command_sender=channel[ForwarderDownloadCommand]()[0],
+        initial_state=seed_state_for_new_session(prior),
+        restart_recovery_record=own,
+        restart_recovery_enabled=True,
+        restart_recovery_fetcher=_Fetcher({}),
+    )
+    master.state = seed_state_for_new_session(prior).model_copy(update={"last_event_applied_idx": 0})
+    master._telemetry_view.node_identities[LOCAL_NODE] = NodeIdentity(node_install_id=KITE1)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(master, "_ordered_placement_model_card", lambda model_id: _card(str(model_id)))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(master, "_place_for_steward_action", planner)
+    await master._choose_restart_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        datetime.now(tz=timezone.utc), topology_settled=True, connected_node_ids={LOCAL_NODE}
+    )
+    return master
+
+
+async def test_an_instance_dying_with_the_old_master_does_not_count_as_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cleanup later in the same pass deletes it, and the model with it."""
+    carried = sample_instance("on-the-dead-master", "org/first", ("dead-master",))
+    own = _record_written(1, _intent_on("org/first", KITE1), _intent_on("org/second", KITE1))
+    master = await _promoted_master(monkeypatch, carried, own, _Planner())
+
+    events = _advance(master, dying={carried.instance_id})
+
+    created = [e for e in events if isinstance(e, InstanceCreated)]
+    assert [str(e.instance.shard_assignments.model_id) for e in created] == ["org/first", "org/second"]
+    assert isinstance(events[-1], RestartRecoveryCompleted)
+
+
+async def test_an_absent_machines_exclusion_is_kept_by_install_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine excluded before the restart that has not come back yet."""
+    absent = UUID("33333333-3333-4333-8333-333333333333")
+    intent = PlacementIntent(
+        model_id=ModelId("org/model"),
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+        host_install_ids=(KITE1,),
+        excluded_install_ids=(KITE2, absent),
+    )
+    planner = _Planner()
+    master = await _two_node_master(
+        monkeypatch, own=_record_written(1, intent), fetcher=_Fetcher({}), planner=planner
+    )
+    view = master._telemetry_view  # pyright: ignore[reportPrivateUsage]
+    view.node_restart_recovery[PEER] = RestartRecoveryAdvert(written_at=None, placements=0, api_port=None)
+    await _choose(master)
+
+    _advance(master, nodes={LOCAL_NODE, PEER})
+
+    command = planner.commands[0]
+    assert command.excluded_nodes == [PEER]
+    assert command.excluded_install_ids == [absent]
+
+
+async def test_a_departed_peer_that_may_hold_a_fresher_record_is_waited_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    own = _record_written(10, _intent_on("org/model", KITE1))
+    master = await _two_node_master(monkeypatch, own=own, fetcher=_Fetcher({}))
+    view = master._telemetry_view  # pyright: ignore[reportPrivateUsage]
+    view.node_restart_recovery[PEER] = RestartRecoveryAdvert(
+        written_at=datetime.now(tz=timezone.utc) - timedelta(minutes=1), placements=2, api_port=52415
+    )
+    start = datetime.now(tz=timezone.utc)
+    # Seen while settling, then gone (and pruned from identities).
+    await master._choose_restart_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        start, topology_settled=False, connected_node_ids={LOCAL_NODE, PEER}
+    )
+    del view.node_identities[PEER]
+
+    async def choose(now: datetime) -> None:
+        await master._choose_restart_recovery_record(  # pyright: ignore[reportPrivateUsage]
+            now, topology_settled=True, connected_node_ids={LOCAL_NODE}
+        )
+
+    await choose(start)
+    assert not master._restart_recovery_chosen  # pyright: ignore[reportPrivateUsage]
+    await choose(start + timedelta(seconds=HOST_WAIT_AFTER_SETTLE_SECONDS + 1))
+    assert master._restart_recovery_chosen  # pyright: ignore[reportPrivateUsage]
+    assert master._restart_recovery_record is own  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_departed_peer_with_an_older_record_is_not_waited_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    own = _record_written(1, _intent_on("org/model", KITE1))
+    master = await _two_node_master(monkeypatch, own=own, fetcher=_Fetcher({}))
+    view = master._telemetry_view  # pyright: ignore[reportPrivateUsage]
+    view.node_restart_recovery[PEER] = RestartRecoveryAdvert(
+        written_at=datetime.now(tz=timezone.utc) - timedelta(minutes=30), placements=2, api_port=52415
+    )
+    now = datetime.now(tz=timezone.utc)
+    await master._choose_restart_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        now, topology_settled=False, connected_node_ids={LOCAL_NODE, PEER}
+    )
+    del view.node_identities[PEER]
+
+    await master._choose_restart_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        now, topology_settled=True, connected_node_ids={LOCAL_NODE}
+    )
+
+    assert master._restart_recovery_chosen  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_a_promoted_master_does_not_place_what_was_already_restored(

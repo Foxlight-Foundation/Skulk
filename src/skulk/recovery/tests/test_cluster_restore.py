@@ -1,8 +1,10 @@
 """Choosing the freshest record across nodes and fetching it."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import httpx
+import pytest
+from pydantic import ValidationError
 
 from skulk.recovery.fetch import RECORD_PATH, fetch_peer_record
 from skulk.recovery.record import (
@@ -11,10 +13,11 @@ from skulk.recovery.record import (
     RestartRecoveryRecordResponse,
     derive_cluster_intent,
 )
-from skulk.recovery.restore import record_sources, unrestored_intents
+from skulk.recovery.restore import awaited_peers, record_sources, unrestored_intents
 from skulk.recovery.tests.fixtures import (
     INSTALL_IDS,
     KITE1,
+    KITE2,
     NOW,
     SESSION,
     sample_instance,
@@ -153,3 +156,58 @@ async def test_fetch_needs_an_api_port_and_an_address() -> None:
     assert await fetch_peer_record(PEER, _advert(2, port=None), _network("10.0.0.1")) is None
     assert await fetch_peer_record(PEER, _advert(2), None) is None
 
+
+
+def test_a_connected_peer_is_awaited_until_its_advert_arrives() -> None:
+    observed = {PEER: KITE2}
+    assert awaited_peers(observed, {}, own=_record(5), connected_node_ids={LOCAL, PEER}, live_install_ids={}) == {PEER}
+    assert awaited_peers(
+        observed, {PEER: _advert(1)}, own=_record(5), connected_node_ids={LOCAL, PEER}, live_install_ids={}
+    ) == set()
+
+
+def test_a_departed_peer_is_awaited_only_while_it_may_hold_a_fresher_record() -> None:
+    observed = {PEER: KITE2}
+    connected = {LOCAL}
+    # Never advertised: what it holds is unknown.
+    assert awaited_peers(observed, {}, own=_record(5), connected_node_ids=connected, live_install_ids={}) == {PEER}
+    # Fresher than everything reachable now.
+    assert awaited_peers(
+        observed, {PEER: _advert(1)}, own=_record(5), connected_node_ids=connected, live_install_ids={}
+    ) == {PEER}
+    # No fresher than this node's own record, or holding none at all.
+    assert awaited_peers(
+        observed, {PEER: _advert(9)}, own=_record(5), connected_node_ids=connected, live_install_ids={}
+    ) == set()
+    assert awaited_peers(
+        observed, {PEER: _advert(None)}, own=_record(5), connected_node_ids=connected, live_install_ids={}
+    ) == set()
+
+
+def test_a_peer_back_under_a_new_node_id_is_judged_by_its_new_advert() -> None:
+    returned = NodeId("peer-after-restart")
+    observed = {PEER: KITE2, returned: KITE2}
+    connected = {LOCAL, returned}
+    assert awaited_peers(
+        observed, {}, own=_record(5), connected_node_ids=connected, live_install_ids={KITE2: returned}
+    ) == {returned}
+    assert awaited_peers(
+        observed,
+        {returned: _advert(1)},
+        own=_record(5),
+        connected_node_ids=connected,
+        live_install_ids={KITE2: returned},
+    ) == set()
+
+
+def test_adverts_must_carry_a_utc_offset() -> None:
+    """A naive time cannot be ordered against record stamps."""
+    with pytest.raises(ValidationError):
+        RestartRecoveryAdvert(written_at=datetime(2026, 10, 11, 12, 0), placements=1, api_port=52415)
+    with pytest.raises(ValidationError):
+        RestartRecoveryAdvert.model_validate_json(
+            '{"RestartRecoveryAdvert": {"written_at": "2026-10-11T12:00:00", "placements": 1, "api_port": 52415}}'
+        )
+    assert RestartRecoveryAdvert.model_validate_json(
+        '{"RestartRecoveryAdvert": {"written_at": "2026-10-11T12:00:00Z", "placements": 1, "api_port": 52415}}'
+    ).written_at is not None

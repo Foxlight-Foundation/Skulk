@@ -1,4 +1,5 @@
 from typing import Literal
+from uuid import UUID
 
 from pydantic import ConfigDict, Field
 
@@ -160,6 +161,12 @@ class PlaceInstance(BaseCommand):
     # instances on these nodes are not affected — exclusion is purely a hint
     # to the candidate-cycle search for *this* placement.
     excluded_nodes: list[NodeId] = Field(default_factory=list)
+    # Exclusions of machines that are not running, by stable install ID: a
+    # node ID cannot name them. The planner also excludes any connected node
+    # with one of these install IDs, and the minted instance carries them so
+    # repairs keep honoring them. Only restart recovery and repair builders
+    # set this; the operator placement API never does.
+    excluded_install_ids: list[UUID] = Field(default_factory=list)
     # System-placement marker stamped onto the minted instance (the
     # intelligent-fabric steward). Only the master's invariant pass and
     # repair builders set this; the operator placement API never does.
