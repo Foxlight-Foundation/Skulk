@@ -42,5 +42,15 @@ class RestartRecoveryAdvert(TaggedModel):
     @field_validator("written_at", mode="before")
     @classmethod
     def _coerce_datetime(cls, value: object) -> object:
-        """Restore strict datetimes from JSON wire values."""
-        return datetime.fromisoformat(value) if isinstance(value, str) else value
+        """Restore strict datetimes from JSON wire values, requiring UTC offsets.
+
+        The master orders adverts against offset-aware record stamps, and a
+        naive time cannot be compared with them; it is rejected here rather
+        than failing later in the planning loop.
+        """
+        parsed = datetime.fromisoformat(value) if isinstance(value, str) else value
+        if isinstance(parsed, datetime) and (
+            parsed.tzinfo is None or parsed.utcoffset() is None
+        ):
+            raise ValueError("written_at must carry a UTC offset")
+        return parsed

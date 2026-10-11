@@ -246,3 +246,15 @@ def test_the_grace_runs_from_when_the_placement_first_went_missing() -> None:
     )
     assert placements == ()
     assert departed_since == {}
+
+
+def test_exclusions_of_absent_machines_stay_in_the_record() -> None:
+    """A restored instance keeps an absent machine's exclusion by install ID."""
+    absent = UUID("33333333-3333-4333-8333-333333333333")
+    instance = sample_instance("restored", "org/model", ("node-b",), excluded=("node-a",))
+    instance = instance.model_copy(update={"excluded_install_ids": [absent]})
+    state = sample_state().model_copy(update={"instances": {instance.instance_id: instance}})
+
+    record = derive_cluster_intent(state, install_ids=INSTALL_IDS, session_id=SESSION, written_at=NOW)
+
+    assert set(record.placements[0].excluded_install_ids) == {KITE1, absent}

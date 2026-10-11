@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import Enum
 from hashlib import sha256
 from typing import Final, Literal, cast
+from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
@@ -169,6 +170,18 @@ class BaseInstance(TaggedModel):
             "honoring these instead of widening eligibility back to the "
             "full topology. Sorted for deterministic replicated events; "
             "empty for instances replayed from older event logs."
+        ),
+    )
+    excluded_install_ids: list[UUID] = Field(
+        default_factory=list,
+        description=(
+            "Machines the caller excluded that were not connected when this "
+            "placement was made, by stable install ID. A runtime node ID can "
+            "only name a machine while it is running, so an exclusion of an "
+            "absent machine is kept here; placement resolves it to the "
+            "machine's current node ID whenever it is connected, and repair "
+            "re-placements carry it. Sorted; empty when every exclusion was "
+            "connected, and for instances replayed from older event logs."
         ),
     )
     system_role: Literal["steward"] | None = Field(
