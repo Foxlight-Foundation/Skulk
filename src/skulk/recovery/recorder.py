@@ -7,6 +7,7 @@ from typing import final
 from uuid import UUID
 
 import anyio
+from anyio import to_thread
 from loguru import logger
 
 from skulk.recovery.record import (
@@ -83,8 +84,12 @@ class ClusterIntentRecorder:
         self._clock = clock
         self._last_written: ClusterIntentRecord | None = read_record(path)
 
-    def record_once(self) -> bool:
+    async def record_once(self) -> bool:
         """Write the record if the view is writable and it changed or aged.
+
+        The view is read on the event loop, where it is consistent; the
+        durable write (two flushes and a rename) runs on a worker thread so a
+        slow or congested disk cannot stall routing, elections, or the API.
 
         Returns:
             True when a new record was written.
@@ -109,7 +114,7 @@ class ClusterIntentRecorder:
         ):
             return False
         try:
-            write_record(self._path, candidate)
+            await to_thread.run_sync(write_record, self._path, candidate)
         except OSError as error:
             # A full or read-only disk must not take the node down; the cost
             # is only that this node cannot supply a record after a restart.
@@ -121,5 +126,5 @@ class ClusterIntentRecorder:
     async def run(self) -> None:
         """Check every few seconds for the life of the node."""
         while True:
-            self.record_once()
+            await self.record_once()
             await anyio.sleep(RECORD_CHECK_SECONDS)

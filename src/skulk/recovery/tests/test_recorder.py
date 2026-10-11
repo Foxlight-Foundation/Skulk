@@ -57,22 +57,22 @@ def test_unsynced_and_recovering_views_are_never_written() -> None:
     assert record_is_writable(State(last_event_applied_idx=0))
 
 
-def test_recovering_cluster_leaves_the_previous_record_in_place(tmp_path: Path) -> None:
+async def test_recovering_cluster_leaves_the_previous_record_in_place(tmp_path: Path) -> None:
     """A cold start's nearly empty view must not replace what restore needs."""
     path = tmp_path / "cluster-intent.json"
     clock = _Clock()
     current: list[State | None] = [sample_state()]
-    assert _recorder(path, current, clock).record_once()
+    assert await _recorder(path, current, clock).record_once()
     before = read_record(path)
 
     current[0] = State(last_event_applied_idx=0, restart_recovery_pending=True)
     clock.now += RECORD_REFRESH_AFTER * 2
-    assert not _recorder(path, current, clock).record_once()
+    assert not await _recorder(path, current, clock).record_once()
 
     assert read_record(path) == before
 
 
-def test_unchanged_content_is_restamped_only_after_the_refresh_interval(
+async def test_unchanged_content_is_restamped_only_after_the_refresh_interval(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "cluster-intent.json"
@@ -80,47 +80,47 @@ def test_unchanged_content_is_restamped_only_after_the_refresh_interval(
     current: list[State | None] = [sample_state()]
     recorder = _recorder(path, current, clock)
 
-    assert recorder.record_once()
+    assert await recorder.record_once()
     clock.now += timedelta(seconds=30)
-    assert not recorder.record_once()
+    assert not await recorder.record_once()
     clock.now += RECORD_REFRESH_AFTER
-    assert recorder.record_once()
+    assert await recorder.record_once()
     record = read_record(path)
     assert record is not None and record.stamp.written_at == clock.now
 
 
-def test_changed_content_is_written_immediately(tmp_path: Path) -> None:
+async def test_changed_content_is_written_immediately(tmp_path: Path) -> None:
     path = tmp_path / "cluster-intent.json"
     clock = _Clock()
     current: list[State | None] = [sample_state()]
     recorder = _recorder(path, current, clock)
-    assert recorder.record_once()
+    assert await recorder.record_once()
 
     state = current[0]
     assert state is not None
     current[0] = state.model_copy(update={"instances": {}})
     clock.now += timedelta(seconds=5)
 
-    assert recorder.record_once()
+    assert await recorder.record_once()
     record = read_record(path)
     assert record is not None and record.placements == ()
 
 
-def test_a_new_recorder_resumes_from_the_record_on_disk(tmp_path: Path) -> None:
+async def test_a_new_recorder_resumes_from_the_record_on_disk(tmp_path: Path) -> None:
     """After a restart the recorder does not rewrite identical content at once."""
     path = tmp_path / "cluster-intent.json"
     clock = _Clock()
     current: list[State | None] = [sample_state()]
-    assert _recorder(path, current, clock).record_once()
+    assert await _recorder(path, current, clock).record_once()
 
     clock.now += timedelta(seconds=10)
-    assert not _recorder(path, current, clock).record_once()
+    assert not await _recorder(path, current, clock).record_once()
 
 
-def test_unwritable_disk_is_reported_not_raised(tmp_path: Path) -> None:
+async def test_unwritable_disk_is_reported_not_raised(tmp_path: Path) -> None:
     blocked = tmp_path / "file"
     blocked.write_text("not a directory")
     clock = _Clock()
     current: list[State | None] = [sample_state()]
 
-    assert not _recorder(blocked / "cluster-intent.json", current, clock).record_once()
+    assert not await _recorder(blocked / "cluster-intent.json", current, clock).record_once()

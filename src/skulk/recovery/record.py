@@ -267,7 +267,9 @@ def read_record(path: Path) -> ClusterIntentRecord | None:
         raw = path.read_text()
     except FileNotFoundError:
         return None
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
+        # Damaged bytes must not stop the node from starting: the record is
+        # read while the node is being built.
         logger.warning(f"Restart recovery record unreadable at {path}: {error}")
         return None
     try:

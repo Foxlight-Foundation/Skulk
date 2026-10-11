@@ -100,6 +100,9 @@ def test_missing_or_corrupt_record_reads_as_none(tmp_path: Path) -> None:
     assert read_record(path) is None
     path.write_text('{"formatVersion": 99}')
     assert read_record(path) is None
+    # Damaged bytes that are not even UTF-8 must not stop the node starting.
+    path.write_bytes(b"\xff\xfe\x00garbage")
+    assert read_record(path) is None
 
 
 def test_content_comparison_ignores_the_stamp() -> None:
