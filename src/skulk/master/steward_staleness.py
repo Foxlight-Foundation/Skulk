@@ -205,16 +205,24 @@ def download_target_staleness(
     action: StewardCancelDownloadAction,
     *,
     downloads: Mapping[NodeId, Sequence[DownloadProgress]],
+    absence_is_evidence: bool = True,
 ) -> str | None:
     """Return why a download cancellation no longer applies to its attempt.
 
     Args:
         action: Cancellation recording the exact attempt the operator reviewed.
         downloads: Effective download truth by node, live and terminal.
+        absence_is_evidence: Whether a reviewed attempt that is simply not
+            seen counts as gone. Approval passes True, since cancelling
+            nothing would not do what the operator reviewed. The background
+            check passes False: live downloads are telemetry, which a master
+            change clears until the nodes report again, so only a newer
+            attempt or this attempt's own outcome proves it moved on.
 
     Returns:
-        ``None`` while the reviewed attempt is still active, otherwise the
-        reason cancelling it would no longer do what the operator reviewed.
+        ``None`` while the reviewed attempt is still active (or, without
+        ``absence_is_evidence``, not proven gone), otherwise the reason
+        cancelling it would no longer do what the operator reviewed.
     """
     matching = [
         progress
@@ -233,13 +241,20 @@ def download_target_staleness(
             "A newer download attempt replaced the one reviewed, and this "
             "proposal would not cancel it."
         )
-    if any(isinstance(progress, DownloadCompleted) for progress in matching):
+    # Only this attempt's own outcome says what happened to it; a completion
+    # left over from an earlier attempt says nothing about the reviewed one.
+    if any(
+        isinstance(progress, DownloadCompleted) and progress.attempt_id == action.attempt_id
+        for progress in matching
+    ):
         return f"The download of {action.model_id} finished after review."
     if any(
         isinstance(progress, DownloadFailed) and progress.attempt_id == action.attempt_id
         for progress in matching
     ):
         return f"The download of {action.model_id} already failed after review."
+    if not absence_is_evidence:
+        return None
     return "The proposed download is no longer active."
 
 
@@ -275,6 +290,7 @@ def steward_proposal_staleness(
     node_names: Mapping[NodeId, str],
     ordered_card: Callable[[ModelId], ModelCard | None],
     other_proposals: Iterable[StewardActionProposal],
+    absence_is_evidence: bool = True,
 ) -> str | None:
     """Return why a proposal no longer fits the cluster, or ``None``.
 
@@ -285,6 +301,8 @@ def steward_proposal_staleness(
         node_names: Friendly node names for readable reasons.
         ordered_card: Injected lookup of the master's command-ordered card.
         other_proposals: Every retained proposal, for ownership conflicts.
+        absence_is_evidence: Whether an unseen download attempt counts as
+            gone (see ``download_target_staleness``).
 
     Returns:
         ``None`` while the reviewed target still holds, otherwise one
@@ -296,7 +314,9 @@ def steward_proposal_staleness(
             action, ordered_card=ordered_card(action.model_card.model_id)
         )
     if isinstance(action, StewardCancelDownloadAction):
-        return download_target_staleness(action, downloads=downloads)
+        return download_target_staleness(
+            action, downloads=downloads, absence_is_evidence=absence_is_evidence
+        )
     return lifecycle_target_staleness(
         proposal,
         action,

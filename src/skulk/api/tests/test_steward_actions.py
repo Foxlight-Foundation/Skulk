@@ -438,12 +438,26 @@ def test_pending_proposal_goes_stale_when_its_target_disappears() -> None:
         "after review."
     )
     assert master._ordered_steward_proposals[proposal.proposal_id] == stale  # pyright: ignore[reportPrivateUsage]
+
     # Applying the ordered change makes the status replicated truth.
     replicated = apply(
         State(steward_action_proposals={proposal.proposal_id: proposal}),
         IndexedEvent(idx=0, event=changes[0]),
     )
     assert replicated.steward_action_proposals[proposal.proposal_id].status == "stale"
+
+
+def test_pending_cancellation_is_not_stale_while_download_telemetry_is_missing() -> None:
+    """A master change clears live downloads until the nodes report again."""
+    proposal = _cancel_proposal()
+    master = _master_with_channels()
+    master.state = State()
+    master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
+
+    changes = master._mark_stale_steward_action_proposals(datetime.now(tz=timezone.utc))  # pyright: ignore[reportPrivateUsage]
+
+    assert changes == []
+    assert master._ordered_steward_proposals[proposal.proposal_id] == proposal  # pyright: ignore[reportPrivateUsage]
 
 
 def test_current_pending_proposal_stays_pending() -> None:

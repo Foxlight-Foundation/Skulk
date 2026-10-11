@@ -1426,7 +1426,10 @@ The master publishes terminal expiry when a deadline passes. Each planning pass
 also rechecks every pending proposal with the approval checks
 (`master/steward_staleness.py`, pure functions shared with the approval path)
 and orders a terminal `stale` status as soon as the reviewed target changes,
-with an outcome naming the change. Approval refusals carry the same wording,
+with an outcome naming the change. A download cancellation is marked only on
+evidence (a newer attempt, or the reviewed attempt's own outcome), because a
+change of master clears live download telemetry until nodes report again;
+approval alone refuses an attempt it cannot see. Approval refusals carry the same wording,
 and the dashboard keeps a settled proposal on screen for ten minutes with its
 status and reason instead of dropping it.
 For five minutes from the separate dispatch timestamp, a promoted master reconciles the proposal's

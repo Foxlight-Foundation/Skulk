@@ -3027,6 +3027,11 @@ review: it now runs on kite2 instead of kite1." A proposal becomes stale when:
   retry; or
 - a placement's model card changed or left the catalog.
 
+A cancel-download whose attempt the master simply cannot see is not marked
+stale while it waits: live download progress is node telemetry, which a change
+of master clears until the nodes report again. Approving it is still refused,
+since cancelling nothing would not do what the operator reviewed.
+
 Free capacity is not part of staleness: approving a placement recomputes it at
 that moment. `stale` is terminal; a still-needed action is proposed again
 against current state. A proposal already past its deadline is left to expiry,
