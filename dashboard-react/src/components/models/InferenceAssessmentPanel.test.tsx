@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { userEvent } from 'vitest/browser';
 import { darkTheme } from '../../theme/theme';
 import { InferenceAssessmentPanel } from './InferenceAssessmentPanel';
+import { operatorSession } from '../../auth/operatorSession';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 vi.mock('../../i18n/tolgee', () => ({
@@ -17,7 +18,7 @@ let root: Root | null = null;
 let container: HTMLDivElement;
 afterEach(async () => {
   await act(async () => root?.unmount());
-  container.remove(); root = null; vi.unstubAllGlobals();
+  container.remove(); root = null; vi.unstubAllGlobals(); vi.restoreAllMocks();
 });
 
 async function render(payload: object, modelId = 'org/model') {
@@ -73,4 +74,14 @@ it('shows missing evidence and keeps acquisition inactive', async () => {
   await vi.waitFor(() => expect(container.textContent).toContain('More evidence needed'));
   expect(container.textContent).toContain('Memory observation is stale');
   expect(container.querySelector('button')).toBeNull();
+});
+
+it('routes reads through the operator session so paired credentials propagate', async () => {
+  vi.spyOn(operatorSession, 'fetch').mockImplementation((url, options) => fetch(url, {
+    ...options, headers: { Authorization: 'Bearer fixture-paired-access' },
+  }));
+  const fetcher = await render(external);
+  expect(operatorSession.fetch).toHaveBeenCalledOnce();
+  const [, options] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+  expect(new Headers(options.headers).get('Authorization')).toBe('Bearer fixture-paired-access');
 });

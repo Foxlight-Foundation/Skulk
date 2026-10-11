@@ -9,7 +9,13 @@ from skulk.master.inference_assessment import assess_inference
 from skulk.master.placement import place_instance
 from skulk.shared.models.inference_assessment import InferenceWorkload
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
-from skulk.shared.models.model_cards import ModelCard, ModelTask, PlacementCardConfig
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelTask,
+    PlacementCardConfig,
+    RuntimeCapabilityCardConfig,
+    VisionCardConfig,
+)
 from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
     RegistryEngineSupportClaim,
@@ -402,3 +408,68 @@ def test_legacy_and_deduplicated_matrix_alternatives_are_both_retained(
         if candidate.engine_build is None
     )
     assert legacy.hardware_classes == ()
+
+
+def test_management_host_never_requires_inference_memory_telemetry() -> None:
+    topology, view = _fleet(1 * 1024**3)
+    management = NodeId("management")
+    topology.add_node(management)
+    view.apply(
+        NodeTelemetry(
+            node_id=management,
+            info=NodeResources(
+                participation="management",
+                backends=frozenset(),
+            ),
+        ),
+        received_at=_NOW,
+    )
+    assert management not in view.node_memory
+    assert _assess(_card(), topology, view).status == "external_required"
+
+
+def test_incomplete_matrix_evidence_does_not_override_legacy_compatibility() -> None:
+    topology, view = _fleet(64 * 1024**3)
+    claim = RegistryCapabilityClaim(
+        capability_id="vision",
+        scope="artifact",
+        status="incomplete",
+        source="artifact_manifest",
+        confidence=0.9,
+    )
+    card = _card().model_copy(update={"registry_capability_claims": (claim,)})
+    result = _assess(card, topology, view)
+    assert result.status == "local"
+    assert any(
+        "legacy compatibility remains independent" in text
+        for text in result.uncertainty
+    )
+    matrix_only = card.model_copy(
+        update={"placement": PlacementCardConfig(compatible_backends=frozenset())}
+    )
+    assert _assess(matrix_only, topology, view).status == "blocked"
+
+
+def test_speculative_vision_remote_grouping_uses_effective_slots() -> None:
+    card = _card("llama_server-cpu").model_copy(
+        update={
+            "vision": VisionCardConfig(
+                projector_file="mmproj.gguf", projector_size=1024**2
+            ),
+            "runtime": RuntimeCapabilityCardConfig(served_spec_type="ngram"),
+        }
+    )
+    result = _assess(card, Topology(), TelemetryView(), concurrent=2)
+    assert result.status == "external_required"
+    candidate = result.external_configurations[0]
+    assert candidate.requests_per_replica == 1
+    assert candidate.replica_count == 2
+
+
+def test_external_groups_obey_the_command_context_limit() -> None:
+    card = _card("llama_server-cpu").model_copy(update={"context_length": 2_097_152})
+    result = _assess(card, Topology(), TelemetryView(), context=1_048_576, concurrent=2)
+    assert result.status == "external_required"
+    candidate = result.external_configurations[0]
+    assert candidate.context_pool_tokens == 1_048_576
+    assert candidate.replica_count == 2

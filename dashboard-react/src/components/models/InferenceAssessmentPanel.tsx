@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { operatorSession } from '../../auth/operatorSession';
 
 /** Read-only workload assessment from core; never a provider offer. */
 export interface InferenceAssessment {
@@ -82,7 +83,7 @@ export function InferenceAssessmentPanel({ modelId, contextTokens, excludedNodeI
       const params = new URLSearchParams({ model_id: modelId, context_tokens: String(context), concurrent_requests: String(concurrent) });
       for (const node of JSON.parse(excludedKey) as string[]) params.append('excluded_node_ids', node);
       try {
-        const response = await fetch(`/models/assessment?${params}`, { signal: controller.signal });
+        const response = await operatorSession.fetch(`/models/assessment?${params}`, { signal: controller.signal });
         if (!response.ok) throw new Error('Assessment unavailable');
         const result: InferenceAssessment = await response.json();
         if (!['local', 'external_required', 'blocked', 'insufficient_evidence'].includes(result.status)

@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 # whatever that generator got wrong (the fresh-fleet audit found exactly that:
 # pre-#652-fix cards forcing serial in-process llama_cpp over the served
 # engine).
-CARD_GENERATOR_REVISION: Final[int] = 3
+CARD_GENERATOR_REVISION: Final[int] = 4
 
 # kinda ugly...
 # TODO: load search path from config.toml

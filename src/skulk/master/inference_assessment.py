@@ -27,6 +27,7 @@ from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
+    LOAD_FIT_TOLERANCE,
     backend_offloads_to_vram,
     estimate_shard_footprint,
     gpu_working_set_ceiling,
@@ -157,15 +158,20 @@ def _replica_slots(instance: Instance) -> int:
             or shard.llama_server_settings is None
         ):
             return 1
-        runtime = shard.model_card.runtime
         slots.append(
-            shard.llama_server_settings.effective_slots(
-                speculative_vision=shard.model_card.vision is not None
-                and runtime is not None
-                and runtime.served_spec_type not in (None, "none"),
-            )
+            _effective_server_slots(shard.model_card, shard.llama_server_settings)
         )
     return min(slots, default=1)
+
+
+def _effective_server_slots(card: ModelCard, settings: LlamaServerSettings) -> int:
+    """Share the model-specific serving limit between local and remote grouping."""
+    runtime = card.runtime
+    return settings.effective_slots(
+        speculative_vision=card.vision is not None
+        and runtime is not None
+        and runtime.served_spec_type not in (None, "none")
+    )
 
 
 def _external_configurations(
@@ -217,7 +223,8 @@ def _external_configurations(
             requests = (
                 min(
                     workload.concurrent_requests,
-                    settings.parallel_slots,
+                    _effective_server_slots(card, settings),
+                    1_048_576 // workload.context_tokens,
                     max(1, card.context_length // workload.context_tokens),
                 )
                 if backend.startswith("llama_server")
@@ -235,7 +242,16 @@ def _external_configurations(
             fraction = (
                 GPU_VRAM_WORKING_SET_FRACTION if gpu else GPU_WORKING_SET_FRACTION
             )
-            total = math.ceil(required / fraction) + 1024**2
+            # Fixed-window RAM serving leaves production context headroom after
+            # applying the working-set ceiling. Include that same reserve in
+            # the hypothetical host, then let ordinary admission verify it.
+            context_fraction = (
+                1.0 - LOAD_FIT_TOLERANCE
+                if not gpu
+                and engine_of(backend) in {"llama_cpp", "llama_server", "vllm"}
+                else 1.0
+            )
+            total = math.ceil(required / (fraction * context_fraction)) + 1024**2
             node = NodeId("assessment-candidate")
             topology = Topology()
             topology.add_node(node)
@@ -353,7 +369,7 @@ def assess_inference(
         for claim in card.registry_capability_claims
         if claim.scope == "artifact" and claim.status == "incomplete"
     ]
-    if incomplete:
+    if incomplete and not card.placement.compatible_backends:
         return base.model_copy(
             update={
                 "status": "blocked",
@@ -361,6 +377,15 @@ def assess_inference(
                     "Selected artifact has incomplete capability components: "
                     + ", ".join(incomplete),
                 ),
+            }
+        )
+    if incomplete:
+        base = base.model_copy(
+            update={
+                "uncertainty": base.uncertainty
+                + (
+                    "Incomplete artifact capability evidence does not expand signed-matrix admission; legacy compatibility remains independent and does not prove capability completeness.",
+                )
             }
         )
     if ModelTask.TextGeneration not in card.tasks:
@@ -414,6 +439,10 @@ def assess_inference(
         node
         for node in topology.list_nodes()
         if node not in excluded
+        and (
+            telemetry.node_resources.get(node) is None
+            or telemetry.node_resources[node].participation == "full"
+        )
         and any(
             receipt is None
             or not 0 <= (read_at - receipt).total_seconds() <= maximum_age

@@ -2151,6 +2151,11 @@ identity or cache sizing abstains; a known context or artifact blocker is distin
 from insufficient memory. Observed llama-server slots share an aggregate context
 pool. Other engines use conservative serial replicas; missing concurrent-engine
 evidence prevents a claim that those replicas establish external necessity.
+Management-only nodes do not require inference-memory telemetry. External groups
+respect effective speculative-vision slots and the command's aggregate context
+maximum; fixed-window RAM hosts include production context-window headroom.
+Incomplete artifact claims restrict matrix-derived admission while independent
+legacy compatibility remains available; legacy fit does not verify completeness.
 
 Local candidates use ordinary placement, supported sharding and current
 reservations. Idle ready instances of the same artifact can be reused.
