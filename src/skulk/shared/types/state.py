@@ -58,6 +58,16 @@ class State(CamelCaseModel):
         default={},
         description="Bounded authoritative steward proposals keyed by identity.",
     )
+    restart_recovery_pending: bool = Field(
+        default=False,
+        description=(
+            "True from a cold-started session's first event until its master has "
+            "restored from the restart recovery record. While it is set, no node "
+            "overwrites its own record with the nearly empty view of a cluster "
+            "that is still coming back. Failover carries it, so a master that "
+            "takes over mid-recovery finishes the job."
+        ),
+    )
 
     @field_validator("instance_failures", mode="before")
     @classmethod

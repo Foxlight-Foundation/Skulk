@@ -199,3 +199,11 @@ def test_seeds_last_seen_for_node_in_only_thunderbolt_map():
     assert seed.node_thunderbolt[tb_only].interfaces == []
     # The TB-only node is armed for the prune loop.
     assert seed.last_seen.get(tb_only) == stamp
+
+
+def test_carries_an_unfinished_restart_recovery():
+    # A master that fails over in the middle of a cold-start restore must hand
+    # the restore on, or every node's record would stay frozen forever (the
+    # flag would be lost) or be overwritten before restore finished.
+    assert seed_state_for_new_session(State(restart_recovery_pending=True)).restart_recovery_pending
+    assert not seed_state_for_new_session(State()).restart_recovery_pending

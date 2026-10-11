@@ -40,6 +40,7 @@ from skulk.master.steward_staleness import (
     placement_card_staleness,
     steward_proposal_staleness,
 )
+from skulk.recovery.record import ClusterIntentRecord, restored_steward_proposals
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.log_summaries import summarize_command_for_log
@@ -111,6 +112,7 @@ from skulk.shared.types.events import (
     NodeGatheredInfo,
     NodeTimedOut,
     NodeTimeoutEvidence,
+    RestartRecoveryCompleted,
     StagedModelEvicted,
     StateSnapshotHydrated,
     StewardActionProposalChanged,
@@ -954,6 +956,8 @@ class Master:
         telemetry_view: TelemetryView | None = None,
         state_sync_store_http_host: str | None = None,
         initial_model_trust_identities: tuple[str, ...] = (),
+        restart_recovery_record: ClusterIntentRecord | None = None,
+        restart_recovery_enabled: bool = False,
     ):
         self.node_id = node_id
         self.session_id = session_id
@@ -1003,8 +1007,34 @@ class Master:
         # cannot spend the same memory while that echo is outstanding.
         self._pending_instance_reservations: dict[InstanceId, Instance] = {}
         self._runner_loaded_at: dict[RunnerId, float] = {}
+        # Restart recovery (initiative/restart-recovery). A cold start, with no
+        # prior replicated view, is a single-node reboot or a whole-cluster
+        # restart: nobody carried State, so this node's on-disk record is the
+        # only memory of what was running. Restored proposals are all terminal
+        # (restored_steward_proposals), so even a stale record cannot cause an
+        # action. A promoted master that inherits an unfinished restore keeps
+        # its record to finish the job.
+        # Production nodes enable recovery; a bare Master (tests, tools) keeps
+        # the historical empty cold start.
+        cold_start = initial_state is None and restart_recovery_enabled
+        self._restart_recovery_record = (
+            restart_recovery_record
+            if cold_start
+            or (initial_state is not None and initial_state.restart_recovery_pending)
+            else None
+        )
+        restored_proposals = (
+            restored_steward_proposals(
+                restart_recovery_record, now=datetime.now(tz=timezone.utc)
+            )
+            if cold_start and restart_recovery_record is not None
+            else {}
+        )
+        self._restart_recovery_completion_queued = False
         self._ordered_steward_proposals = dict(
-            initial_state.steward_action_proposals if initial_state is not None else {}
+            initial_state.steward_action_proposals
+            if initial_state is not None
+            else restored_proposals
         )
         # Restart approval and teardown are separate indexed steps. This
         # process-local marker prevents duplicate teardown while allowing a
@@ -1023,17 +1053,22 @@ class Master:
             model_trust_approved_remote_code_identities=tuple(
                 sorted(self._model_trust_approvals)
             ),
+            steward_action_proposals=restored_proposals,
+            # Every node keeps its record untouched until this session has
+            # restored from it; RestartRecoveryCompleted clears the flag.
+            restart_recovery_pending=cold_start,
         )
-        # A cold-start trust baseline needs the same indexed delivery path as
-        # failover state. Leaving non-empty approvals only in this idx=-1 State
-        # makes state-sync followers treat it as a fresh empty snapshot; their
-        # first unrelated event then replaces the config fallback with an empty
-        # replicated set. Index the baseline as event 0 before serving sync.
+        # A cold-start baseline (trust approvals, restored proposal history,
+        # the pending-recovery flag) needs the same indexed delivery path as
+        # failover state. Leaving it only in this idx=-1 State makes state-sync
+        # followers treat it as a fresh empty snapshot; their first unrelated
+        # event then replaces it. Index the baseline as event 0 before serving
+        # sync.
         self._seed_state = (
             initial_state
             if initial_state is not None
             else self.state
-            if self._model_trust_approvals
+            if self._model_trust_approvals or cold_start
             else None
         )
         self._started_monotonic = time.monotonic()
@@ -1873,6 +1908,30 @@ class Master:
             changes.append(StewardActionProposalChanged(proposal=expired))
         self._prune_ordered_steward_action_proposals()
         return changes
+
+    def _finish_restart_recovery(self) -> list[RestartRecoveryCompleted]:
+        """Close a cold start's restart recovery once its restore is in order.
+
+        The restored proposal history arrived with the session's first event,
+        so there is nothing further to wait for yet; placement restore will
+        hold this until its placements have been requested. Clearing the flag
+        lets every node keep its restart recovery record current again.
+        """
+        if (
+            not self.state.restart_recovery_pending
+            or self._restart_recovery_completion_queued
+        ):
+            return []
+        self._restart_recovery_completion_queued = True
+        record = self._restart_recovery_record
+        return [
+            RestartRecoveryCompleted(
+                restored_placements=0,
+                restored_proposals=(
+                    len(record.steward_proposals) if record is not None else 0
+                ),
+            )
+        ]
 
     def _steward_node_names(self) -> dict[NodeId, str]:
         """Return friendly node names for operator-readable steward reasons."""
@@ -3672,6 +3731,8 @@ class Master:
                 await self._queue_control_event(expiry_event)
             for stale_event in self._mark_stale_steward_action_proposals(now):
                 await self._queue_control_event(stale_event)
+            for recovery_event in self._finish_restart_recovery():
+                await self._queue_control_event(recovery_event)
             self._report_heartbeat_gap_changes(now=now)
             # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master

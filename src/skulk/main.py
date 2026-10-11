@@ -42,10 +42,16 @@ from skulk.extensions.host_network import (
 )
 from skulk.master.main import Master
 from skulk.operator.pairing import OperatorPairingService
+from skulk.recovery.record import ClusterIntentRecord, read_record
+from skulk.recovery.recorder import RECOVERY_RECORD_PATH, ClusterIntentRecorder
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router, TelemetrySender, get_node_id_keypair
 from skulk.routing.zenoh_status import ZenohPeerSampler
-from skulk.shared.constants import SKULK_LOG, set_offline_mode
+from skulk.shared.constants import (
+    SKULK_LOG,
+    SKULK_NO_RESTART_RECOVERY,
+    set_offline_mode,
+)
 from skulk.shared.election import Election, ElectionResult
 from skulk.shared.logging import (
     external_log_pipe_enabled,
@@ -638,6 +644,20 @@ def _configure_model_store_runtime(
     return store_client, store_server
 
 
+RESTART_RECOVERY_ENABLED = not SKULK_NO_RESTART_RECOVERY
+"""Whether this node keeps a restart recovery record and restores from it."""
+
+
+def _load_restart_recovery_record() -> ClusterIntentRecord | None:
+    """Read this node's restart recovery record when recovery is on.
+
+    Returns:
+        The record from the last time this node's view was current, or ``None``
+        when recovery is off or the node has never written one.
+    """
+    return read_record(RECOVERY_RECORD_PATH) if RESTART_RECOVERY_ENABLED else None
+
+
 def _state_sync_store_http_host(
     node_id: NodeId,
     skulk_config: SkulkConfig | None,
@@ -1133,6 +1153,8 @@ class Node:
                 if skulk_config is not None and skulk_config.model_trust is not None
                 else ()
             ),
+            restart_recovery_record=_load_restart_recovery_record(),
+            restart_recovery_enabled=RESTART_RECOVERY_ENABLED,
         )
 
         er_send, er_recv = channel[ElectionResult]()
@@ -1206,6 +1228,14 @@ class Node:
                     lambda: self.telemetry_view.local_pairing_gateway_active,
                 )
             tg.start_soon(self._monitor_zenoh_isolation)
+            if RESTART_RECOVERY_ENABLED:
+                tg.start_soon(
+                    ClusterIntentRecorder(
+                        state_provider=self._replicated_view,
+                        session_provider=lambda: self.event_router.session_id,
+                        telemetry_view=self.telemetry_view,
+                    ).run
+                )
             if self.store_server:
                 tg.start_soon(self.store_server.start)
             if self.download_coordinator:
@@ -1217,6 +1247,18 @@ class Node:
             if self.api:
                 tg.start_soon(self.api.run)
             tg.start_soon(self._elect_loop)
+
+    def _replicated_view(self) -> State | None:
+        """Return this node's replicated view for its restart recovery record.
+
+        Worker and API views follow the master through indexed events; a
+        management-only node falls back to the master it hosts, if any.
+        """
+        if self.worker is not None:
+            return self.worker.state
+        if self.api is not None:
+            return self.api.state
+        return self.master.state if self.master is not None else None
 
     def _mark_artifact_inventory_dirty(self) -> None:
         """Schedule one debounced local artifact rescan without blocking events."""
@@ -1785,11 +1827,21 @@ class Node:
                     self.master = Master(
                         self.node_id,
                         result.session_id,
+                        # A view that never applied an event is a cold start
+                        # (a rebooted node winning before it hydrated): with
+                        # restart recovery on, it restores from its record
+                        # instead of seeding an empty session.
                         initial_state=(
                             seed_state_for_new_session(prior_state)
                             if prior_state is not None
+                            and not (
+                                RESTART_RECOVERY_ENABLED
+                                and prior_state.last_event_applied_idx < 0
+                            )
                             else None
                         ),
+                        restart_recovery_record=_load_restart_recovery_record(),
+                        restart_recovery_enabled=RESTART_RECOVERY_ENABLED,
                         event_sender=self.event_router.sender(),
                         global_event_sender=self.router.sender(topics.GLOBAL_EVENTS),
                         local_event_receiver=self.router.receiver(topics.LOCAL_EVENTS),
