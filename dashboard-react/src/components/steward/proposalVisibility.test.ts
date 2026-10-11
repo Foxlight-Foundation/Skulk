@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StewardActionProposal } from '../../store/endpoints/steward';
 import {
+  DISMISSED_PROPOSALS_KEY,
   RECENT_SETTLED_PROPOSAL_MS,
   decisionErrorDetail,
+  loadDismissedProposalIds,
+  saveDismissedProposalIds,
   visibleStewardProposals,
 } from './proposalVisibility';
 
@@ -67,5 +70,35 @@ describe('decisionErrorDetail', () => {
     expect(decisionErrorDetail(new Error('network'))).toBeNull();
     expect(decisionErrorDetail({ status: 500, data: 'oops' })).toBeNull();
     expect(decisionErrorDetail({ status: 409, data: { detail: '' } })).toBeNull();
+  });
+});
+
+describe('dismissed proposal storage', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.localStorage.removeItem(DISMISSED_PROPOSALS_KEY);
+  });
+
+  it('round-trips dismissals and prunes ids the server no longer reports', () => {
+    const kept = saveDismissedProposalIds(new Set(['current', 'pruned']), new Set(['current', 'other']));
+    expect([...kept]).toEqual(['current']);
+    expect([...loadDismissedProposalIds()]).toEqual(['current']);
+  });
+
+  it('reads missing, corrupt, or foreign values as nothing dismissed', () => {
+    expect(loadDismissedProposalIds().size).toBe(0);
+    window.localStorage.setItem(DISMISSED_PROPOSALS_KEY, '{not json');
+    expect(loadDismissedProposalIds().size).toBe(0);
+    window.localStorage.setItem(DISMISSED_PROPOSALS_KEY, '{"a": 1}');
+    expect(loadDismissedProposalIds().size).toBe(0);
+    window.localStorage.setItem(DISMISSED_PROPOSALS_KEY, '["kept", 7]');
+    expect([...loadDismissedProposalIds()]).toEqual(['kept']);
+  });
+
+  it('keeps the dismissal for the page view when storage refuses writes', () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    expect([...saveDismissedProposalIds(new Set(['current']), new Set(['current']))]).toEqual(['current']);
   });
 });

@@ -51,7 +51,9 @@ This project records release notes here and mirrors public-facing notes in
   and can no longer be approved. A refused approval names what changed instead
   of "no longer matches current state", and the dashboard keeps each decided
   proposal on screen for ten minutes with its result and reason instead of
-  showing a success message while the action was refused.
+  showing a success message while the action was refused. Dismissing a
+  decided proposal is remembered in that browser, so it stays gone after a
+  reload.
 
 ### Fixed
 
