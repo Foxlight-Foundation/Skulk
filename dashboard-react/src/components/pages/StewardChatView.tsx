@@ -1,4 +1,5 @@
 import { StewardPrompt } from '../steward/StewardPrompt';
+import { operatorSession } from '../../auth/operatorSession';
 import { StewardProposalCard } from '../steward/StewardProposalCard';
 import {
   decisionErrorDetail,
@@ -406,9 +407,9 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
       let speechTail = '';
       const speechQueue = autoSpeakAssistant ? createSpeechQueue() : null;
       try {
-        const res = await fetch('/v1/chat/completions', {
+        const res = await operatorSession.fetch('/v1/chat/completions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1' },
           signal: controller.signal,
           body: JSON.stringify({
             model: STEWARD_MODEL_ID,

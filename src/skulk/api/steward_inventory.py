@@ -5,6 +5,7 @@ import re
 from typing import Literal, cast
 
 from skulk.api.build_identity import known_build_identifier
+from skulk.extensions.capabilities import InstalledCapabilityRegistration
 from skulk.shared.types.capability_nodes import CapabilityNodeSummary
 
 
@@ -103,6 +104,86 @@ def capability_inventory(
         "nodes": rows,
         "scope": "Current capability-node advertisements, not inference backends or installation inventory. Discovery does not grant execution authority.",
     }
+
+
+def render_installed_inventory(payload: dict[str, object]) -> str:
+    """Explain local installation and independent readiness without inference claims."""
+    raw = payload.get("installations")
+    if "error" in payload or not isinstance(raw, list):
+        return "I couldn't verify installed capability metadata on this API host. Other hosts remain outside this inventory."
+    lines = ["Managed capability installations on this API host:"]
+    for item in cast("list[object]", raw):
+        if not isinstance(item, dict):
+            continue
+        row = cast("dict[str, object]", item)
+        enabled = (
+            "enablement unknown"
+            if row.get("enabled") is None
+            else "enabled"
+            if row.get("enabled")
+            else "disabled"
+        )
+        if row.get("uninstalled"):
+            enabled = "uninstalled; retained metadata"
+        reachability = row.get("reachable")
+        reachable = (
+            "reachable"
+            if reachability is True
+            else "unreachable"
+            if reachability is False
+            else "reachability unknown"
+        )
+        ready = row.get("ready_capabilities")
+        readiness = (
+            ", ".join(str(value) for value in cast("list[object]", ready))
+            if isinstance(ready, list) and ready
+            else "no exact ready contracts observed"
+        )
+        lines.append(
+            f"- {row.get('bundle') or row.get('plugin_id')}, version {row.get('version') or 'unknown'}: {enabled}, {reachable}; {readiness}."
+        )
+        try:
+            registration = InstalledCapabilityRegistration.model_validate_json(
+                json.dumps(row.get("registration"))
+            )
+        except ValueError:
+            lines.append(
+                "  Declared operations and requirements are unavailable or omitted by the metadata bound."
+            )
+            continue
+        for declared in registration.capabilities:
+            lines.append(
+                f"  {declared.qualified_id}: {declared.purpose[:160]} ({declared.io_mode})."
+            )
+        if not registration.capabilities:
+            lines.append("  No operations were declared in this registration.")
+        requirements = [
+            f"Skulk {registration.skulk_requires}",
+            f"Python {registration.python_requires}",
+            "platforms " + ", ".join(registration.platforms),
+        ]
+        if registration.configuration_required:
+            requirements.append("ordinary configuration required")
+        if registration.required_credential_ids:
+            requirements.append(
+                "required credential identifiers: "
+                + ", ".join(registration.required_credential_ids[:3])
+            )
+            if len(registration.required_credential_ids) > 3:
+                requirements.append(
+                    f"{len(registration.required_credential_ids) - 3} additional credential identifiers omitted"
+                )
+        lines.append("  Declared requirements: " + "; ".join(requirements) + ".")
+    if not raw and not payload.get("omittedInstallations"):
+        lines.append("No entries were returned by this local manager.")
+    if payload.get("omittedInstallations"):
+        lines.append(
+            f"{payload['omittedInstallations']} additional installations were omitted from this bounded response."
+        )
+    lines.append(
+        "Installation and declared operations do not grant execution permission. A ready provisioner does not prove allocated inference capacity; other hosts and non-managed extensions are outside this inventory."
+    )
+    return "\n".join(lines)
 
 
 def bounded_inventory(payload: dict[str, object], limit: int) -> str:

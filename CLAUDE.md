@@ -1711,3 +1711,19 @@ Use the live-dashboard workflow in `CONTRIBUTING.md` and
 The capture script blocks non-read HTTP requests and records actual dashboard
 state. Inspect desktop and phone captures before committing; native operator-app
 screenshots come from the app separately.
+
+## Installed capability declaration discovery
+
+Selected staged releases optionally carry bounded registration summaries for
+capability purpose, version, operation digest, I/O mode and declared runtime and
+credential prerequisites. Missing/oversized registration keeps installation
+identity visible. The existing manager's read-only `installed_contract` request
+checks an exact id@version/revision against current selected metadata and returns
+one full descriptor (64 KiB bound). `ManagedServices.read_installed_metadata`
+uses only the protected configured connection, without attachment, setup repair,
+enablement or provider calls. `/v1/plugins/managed/capabilities` and the exact
+per-plugin contract route require existing `plugins:read` authority; inventory
+scope is the local API host, and installation, enablement, reachability and exact
+live readiness are distinct. Steward's optional installed-metadata reader is
+bound to the HTTP request and rechecks authority for each invocation. Provider
+approval/lifecycle and allocated compute remain separate from these declarations.

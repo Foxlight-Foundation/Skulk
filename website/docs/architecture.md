@@ -2483,6 +2483,18 @@ forms cannot contain credential fields, and setup completion does not imply
 preflight, enablement or paid approval. Public setup-file reads remain separate.
 
 
+Installed capability discovery also reads selected staged metadata independently
+of a child: `GET /v1/plugins/managed/capabilities` reports bounded declarations
+alongside separate enablement, owner reachability and exact live readiness. A
+digest-bound single-capability read returns full operation schemas. These reads
+do not attach, repair setup, start children or call providers, and cover only the
+API host's local manager. Steward's optional `get_installed_capabilities` tool
+requires separately authorized `plugins:read` access and rechecks that caller on
+every invocation. Large schemas remain available through the authorized HTTP
+read instead of becoming truncated model input. A ready provisioner is distinct
+from allocated inference capacity; provider lifecycle and approval remain owned
+by their existing implementations.
+
 Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
 and either the archive's optional `__manage__.py` or the `manage` launcher a signed
 wheel declares under `skulk.capability_runtime`. `extensions/local_setup.py`

@@ -1,4 +1,5 @@
 import { ReadyModelSelect } from '../chat/ReadyModelSelect';
+import { operatorSession } from '../../auth/operatorSession';
 import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
@@ -1246,9 +1247,9 @@ export function ChatView({
         let iterationThinking = '';
         const iterationToolCalls: StreamToolCall[] = [];
 
-        const res = await fetch('/v1/chat/completions', {
+        const res = await operatorSession.fetch('/v1/chat/completions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1' },
           body: JSON.stringify({
             model: selectedModelId,
             messages: apiMessages,
