@@ -7,6 +7,7 @@ import pytest
 import skulk.shared.models.model_cards as model_cards
 from skulk.master.inference_assessment import assess_inference
 from skulk.master.placement import place_instance
+from skulk.master.placement_utils import usable_vram_by_node
 from skulk.shared.models.inference_assessment import InferenceWorkload
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.model_cards import (
@@ -473,3 +474,76 @@ def test_external_groups_obey_the_command_context_limit() -> None:
     candidate = result.external_configurations[0]
     assert candidate.context_pool_tokens == 1_048_576
     assert candidate.replica_count == 2
+
+
+def test_incompatible_worker_does_not_gate_artifact_memory_freshness() -> None:
+    topology, view = _fleet(1 * 1024**3)
+    unrelated = NodeId("unrelated-cpu")
+    topology.add_node(unrelated)
+    view.apply(
+        NodeTelemetry(
+            node_id=unrelated,
+            info=NodeResources(
+                backends=frozenset({"llama_server-cpu"}),
+                participation="full",
+            ),
+        ),
+        received_at=_NOW,
+    )
+    assert unrelated not in view.node_memory
+    result = _assess(_card("mlx"), topology, view)
+    assert result.status == "external_required"
+
+
+def test_shared_gpu_pool_is_rebuilt_after_pending_ram_reservations() -> None:
+    topology, view = _fleet(80 * 1024**3, backend="llama_server-cuda")
+    view.node_memory[_NODE] = MemoryUsage.from_bytes(
+        ram_total=128 * 1024**3,
+        ram_available=80 * 1024**3,
+        swap_total=0,
+        swap_available=0,
+    )
+    profile = SystemPerformanceProfile(
+        accelerator=AcceleratorMetrics(
+            vendor="nvidia",
+            name="NVIDIA GB10",
+            compute_capability="12.1",
+            vram_total_bytes=128 * 1024**3,
+            vram_used_bytes=0,
+        )
+    )
+    view.apply(
+        NodeTelemetry(node_id=_NODE, info=LinuxGpuMetrics(system_profile=profile)),
+        received_at=_NOW,
+    )
+    existing = _card("llama_server-cuda").model_copy(
+        update={
+            "model_id": ModelId("existing/large"),
+            "storage_size": Memory.from_gb(40),
+        }
+    )
+    pending = place_instance(
+        PlaceInstance(
+            model_card=existing,
+            min_nodes=1,
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            requested_context_tokens=8192,
+        ),
+        topology=topology,
+        current_instances={},
+        node_memory=view.node_memory,
+        node_network={_NODE: NodeNetworkInfo()},
+        node_resources=view.node_resources,
+        node_vram=usable_vram_by_node(
+            view.node_system, view.node_resources, view.node_memory
+        ),
+        unified_memory_gpu_nodes=frozenset({_NODE}),
+    )
+    target = _card("llama_server-cuda").model_copy(
+        update={"storage_size": Memory.from_gb(30)}
+    )
+    assert _assess(target, topology, view).status == "local"
+    assert (
+        _assess(target, topology, view, instances=pending).status == "external_required"
+    )

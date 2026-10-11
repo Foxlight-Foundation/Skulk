@@ -11,6 +11,7 @@ from skulk.master.placement import (
     place_instance,
 )
 from skulk.master.placement_utils import (
+    carve_first_gpu_node_ids,
     reserve_system_ram_usage,
     unified_memory_gpu_node_ids,
     usable_vram_by_node,
@@ -51,9 +52,11 @@ from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.runners import (
     RunnerId,
+    RunnerLoaded,
     RunnerReady,
     RunnerRunning,
     RunnerStatus,
+    RunnerWarmingUp,
 )
 from skulk.shared.types.worker.shards import Sharding, TensorShardMetadata
 
@@ -429,11 +432,10 @@ def assess_inference(
     excluded = excluded_nodes or set()
     # Receipt clocks belong to the local telemetry view. A heartbeat must not
     # refresh a stale memory reading or a stale backend advertisement.
-    vram = usable_vram_by_node(
+    vram_membership = usable_vram_by_node(
         telemetry.node_system,
         telemetry.node_resources,
         telemetry.node_memory,
-        instances,
     )
     stale = {
         node
@@ -441,7 +443,10 @@ def assess_inference(
         if node not in excluded
         and (
             telemetry.node_resources.get(node) is None
-            or telemetry.node_resources[node].participation == "full"
+            or (
+                telemetry.node_resources[node].participation == "full"
+                and bool(model_platform_backends(card, telemetry.node_resources[node]))
+            )
         )
         and any(
             receipt is None
@@ -451,7 +456,7 @@ def assess_inference(
                 (telemetry.node_resources_received_at.get(node), 120),
                 *(
                     ((telemetry.node_system_received_at.get(node), 60),)
-                    if node in vram
+                    if node in vram_membership
                     else ()
                 ),
             )
@@ -462,8 +467,34 @@ def assess_inference(
             telemetry.node_system, telemetry.node_resources, telemetry.node_memory
         )
     )
+    loaded = (RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning)
+    unreflected = frozenset(
+        key
+        for key, instance in instances.items()
+        if not all(
+            isinstance((runners or {}).get(runner), loaded)
+            for runner in instance.shard_assignments.runner_to_shard
+        )
+    )
+    # Match master admission ordering: shared GPU pools include host RAM, so
+    # derive their capacity only after pending/system-RAM reservations apply.
     memory = reserve_system_ram_usage(
-        telemetry.node_memory, instances, vram, unified_memory_gpu_nodes=unified
+        telemetry.node_memory,
+        instances,
+        vram_membership,
+        unified_memory_gpu_nodes=unified,
+        carve_first_nodes=carve_first_gpu_node_ids(
+            telemetry.node_system,
+            telemetry.node_resources,
+            telemetry.node_memory,
+        ),
+        unreflected=unreflected,
+    )
+    vram = usable_vram_by_node(
+        telemetry.node_system,
+        telemetry.node_resources,
+        memory,
+        instances,
     )
     planned = dict(instances)
     replicas: list[AssessedReplica] = []
