@@ -2280,8 +2280,11 @@ class Master:
         checking while it waits means the operator sees that, with the reason,
         before spending attention on it. The checks are the approval checks,
         so a proposal never reads as current here and stale on approval for a
-        reason this pass could have seen. Expired proposals are left to the
-        expiry pass so each terminal status keeps one meaning.
+        reason this pass could have seen, with one exception: a download
+        attempt that is merely not seen is not marked here, because a master
+        change clears live download telemetry until the nodes report again.
+        Approval still refuses it. Expired proposals are left to the expiry
+        pass so each terminal status keeps one meaning.
         """
         pending = [
             (proposal_id, proposal)
@@ -2301,6 +2304,7 @@ class Master:
                 node_names=node_names,
                 ordered_card=self._ordered_placement_model_card,
                 other_proposals=self._ordered_steward_proposals.values(),
+                absence_is_evidence=False,
             )
             if reason is None:
                 continue

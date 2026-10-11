@@ -129,7 +129,10 @@ from skulk.api.node_health import (
     live_data_transports,
     live_skulk_build_mismatch,
 )
-from skulk.api.operator_auth import create_operator_auth_router
+from skulk.api.operator_auth import (
+    authorize_plugin_request,
+    create_operator_auth_router,
+)
 from skulk.api.operator_gateway import (
     OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY,
     OperatorGatewayAuthorization,
@@ -155,10 +158,12 @@ from skulk.api.realtime import (
 )
 from skulk.api.remote_pairing import RelayLink, RemotePairingController
 from skulk.api.steward import (
+    MAX_TOOL_RESULT_CHARS,
     STEWARD_NOT_READY_MESSAGES,
     STEWARD_RETRY_AFTER_SECONDS,
     STEWARD_SYSTEM_PROMPT,
     STEWARD_VIRTUAL_MODEL_ID,
+    InstalledMetadataReader,
     StewardActionDecisionRequest,
     StewardActionDecisionResponse,
     StewardActionProposalView,
@@ -346,6 +351,7 @@ from skulk.extensions import (
 from skulk.extensions.host_network import HostNetwork, private_namespace_configured
 from skulk.extensions.steward import StewardToolBinding
 from skulk.master.image_store import ImageStore
+from skulk.master.inference_assessment import assess_inference
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
@@ -406,6 +412,10 @@ from skulk.shared.election import ElectionMessage
 from skulk.shared.experimental import experimental_mode_enabled
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.inference_assessment import (
+    InferenceAssessment,
+    InferenceWorkload,
+)
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
@@ -2689,6 +2699,19 @@ class API:
             ),
         )(self.get_placement_previews)
         self.app.get(
+            "/models/assessment",
+            tags=["Models"],
+            summary="Assess local fit and estimated external inference capacity",
+            description=(
+                "Read-only assessment of an authorized exact artifact and requested text workload. "
+                "Uses production placement, reservations, context/cache estimates and compatibility. "
+                "Uses observed llama-server slots and shared context pools, otherwise serial replicas. Returns local, "
+                "external_required, blocked or insufficient_evidence with reasons, assumptions and "
+                "hypothetical full-model external configurations. Estimates do not prove load readiness "
+                "or performance. Creates no instance, reservation, provider offer or paid capacity."
+            ),
+        )(self.get_inference_assessment)
+        self.app.get(
             "/instance/{instance_id}",
             tags=["Instances"],
             summary="Get one running instance",
@@ -4773,6 +4796,7 @@ class API:
         payload: ChatCompletionRequest,
         *,
         proposals_allowed: bool = True,
+        installation_reader: InstalledMetadataReader | None = None,
     ) -> StreamingResponse:
         """Serve the steward through the standard chat-completions surface.
 
@@ -4867,7 +4891,11 @@ class API:
                 detail=detail,
                 headers={"Retry-After": str(STEWARD_RETRY_AFTER_SECONDS)},
             )
-        harness = StewardHarness(self, proposals_allowed=proposals_allowed)
+        harness = StewardHarness(
+            self,
+            proposals_allowed=proposals_allowed,
+            installation_reader=installation_reader,
+        )
         command_id = CommandId()
         history, system_prompt, task_params = await self._steward_extension_transform(
             history, stream=payload.stream
@@ -6768,9 +6796,71 @@ class API:
         Returns:
             A streaming or collected chat-completions response.
         """
+        installation_reader = None
+        if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
+            try:
+                await authorize_plugin_request(
+                    request, self._operator_pairing_service, "plugins:read"
+                )
+            except HTTPException:
+                pass
+            else:
+
+                async def read_registration(
+                    plugin_id: str | None,
+                    qualified_id: str | None,
+                    revision: str | None,
+                ) -> dict[str, object]:
+                    """Recheck the same caller's plugin authority before every metadata read."""
+                    await authorize_plugin_request(
+                        request, self._operator_pairing_service, "plugins:read"
+                    )
+                    from skulk.extensions.installed_capabilities import (
+                        read_installed_capabilities,
+                        read_installed_contract,
+                        steward_installed_result,
+                    )
+                    from skulk.extensions.runtime_manager import (
+                        InstalledContractRequest,
+                    )
+
+                    services = (
+                        self._extensions.managed_services if self._extensions else None
+                    )
+                    if services is None:
+                        return {
+                            "error": "local managed installation inventory unavailable",
+                            "scope": "local_api_host",
+                        }
+                    async with asyncio.timeout(5):
+                        if (
+                            plugin_id is None
+                            and qualified_id is None
+                            and revision is None
+                        ):
+                            observation = await read_installed_capabilities(services)
+                        elif (
+                            plugin_id is not None
+                            and qualified_id is not None
+                            and revision is not None
+                        ):
+                            observation = await read_installed_contract(
+                                services,
+                                InstalledContractRequest(
+                                    plugin_id=plugin_id,
+                                    qualified_id=qualified_id,
+                                    revision=revision,
+                                ),
+                            )
+                        else:
+                            raise ValueError("incomplete installed contract selection")
+                    return steward_installed_result(observation, MAX_TOOL_RESULT_CHARS)
+
+                installation_reader = read_registration
         return await self.chat_completions(
             payload,
             steward_proposals_allowed=self._operator_mutation_allowed(request),
+            steward_installation_reader=installation_reader,
         )
 
     async def chat_completions(
@@ -6778,6 +6868,7 @@ class API:
         payload: ChatCompletionRequest,
         *,
         steward_proposals_allowed: bool = True,
+        steward_installation_reader: InstalledMetadataReader | None = None,
     ) -> StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
@@ -6788,6 +6879,7 @@ class API:
             return await self._steward_chat_completions(
                 payload,
                 proposals_allowed=steward_proposals_allowed,
+                installation_reader=steward_installation_reader,
             )
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
         model_card = await self._get_running_model_card(resolved_model)
@@ -10260,6 +10352,33 @@ class API:
             cards_by_id[model_id] = record.model_card
 
         return cards, store_installed_records
+
+    async def get_inference_assessment(
+        self,
+        model_id: ModelId,
+        context_tokens: Annotated[int, Query(ge=256, le=1_048_576)] = 8192,
+        concurrent_requests: Annotated[int, Query(ge=1, le=16)] = 1,
+        excluded_node_ids: Annotated[list[NodeId] | None, Query()] = None,
+    ) -> InferenceAssessment:
+        """Assess an authorized model without provisioning or changing cluster state.
+
+        Args:
+            model_id: Known selected artifact alias; no Hub discovery is performed.
+            context_tokens: Input plus output tokens per request.
+            concurrent_requests: Simultaneous requests to size in the dry-run.
+            excluded_node_ids: Operator-excluded nodes for this assessment.
+
+        Returns:
+            Estimated feasibility, candidate resources, evidence and uncertainty.
+        """
+        card = await self._load_authorized_model_card(model_id)
+        return assess_inference(
+            card, InferenceWorkload(context_tokens=context_tokens, concurrent_requests=concurrent_requests),
+            topology=self.state.topology, instances=self.state.instances,
+            network=self.state.node_network, telemetry=self._telemetry_view,
+            runners=self.state.runners,
+            excluded_nodes=set(excluded_node_ids or ()),
+        )
 
     async def get_model_requirements(
         self,

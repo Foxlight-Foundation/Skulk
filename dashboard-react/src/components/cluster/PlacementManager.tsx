@@ -7,6 +7,7 @@ import type { TopologyData } from '../../types/topology';
 import { detectDeviceModel } from '../../types/topology';
 import type { PlacementPreview } from '../../types/models';
 import { ModelCard } from '../models/ModelCard';
+import { InferenceAssessmentPanel } from '../models/InferenceAssessmentPanel';
 import { Button } from '../common/Button';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
@@ -798,6 +799,8 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                   </NodePillHint>
                 </Section>
               )}
+
+              {!isEmbedding && <InferenceAssessmentPanel key={modelId} modelId={modelId} contextTokens={contextChoice} excludedNodeIds={[...excludedNodes]} />}
 
               {/* Context window: the window the engine serves. Engines that
                   reserve it at load commit its memory whether or not requests

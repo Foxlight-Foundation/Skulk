@@ -2130,6 +2130,59 @@ air-gapped use. A hash-bound support matrix that was previously TUF-verified is
 also usable offline; it never converts an experimental or negative decision
 into placement permission.
 
+### Assess local fit and external capacity
+
+**GET** `/models/assessment`
+
+| Parameter | Required | Behavior |
+|---|---|---|
+| `model_id` | Yes | Exact authorized artifact alias. Unknown aliases return 404; no repository discovery occurs. |
+| `context_tokens` | No | Input plus output tokens per request, 256–1,048,576; default 8192. |
+| `concurrent_requests` | No | Simultaneous requests, 1–16; default 1. |
+| `excluded_node_ids` | No | Repeatable node IDs excluded from the local dry-run. |
+
+The camel-case response binds `cardDigest`, `sourceRepository`, immutable
+`sourceRevision`, `selectedFile`, quantization and the requested `workload`.
+`weightEvidence: card_declared` identifies the card's selected weight size;
+it does not claim a measured runtime footprint. No benchmark is required.
+`status` is `local`, `external_required`, `blocked`, or `insufficient_evidence`.
+Reasons, assumptions and uncertainty accompany every result. Missing immutable
+identity or cache sizing abstains; a known context or artifact blocker is distinct
+from insufficient memory. Observed llama-server slots share an aggregate context
+pool. Other engines use conservative serial replicas; missing concurrent-engine
+evidence prevents a claim that those replicas establish external necessity.
+Management-only nodes do not require inference-memory telemetry. External groups
+respect effective speculative-vision slots and the command's aggregate context
+maximum; fixed-window RAM hosts include production context-window headroom.
+Incomplete artifact claims restrict matrix-derived admission while independent
+legacy compatibility remains available; legacy fit does not verify completeness.
+
+Local candidates use ordinary placement, supported sharding and current
+reservations. Idle ready instances of the same artifact can be reused.
+Memory/GPU receipt ages are bounded to 60 seconds and backend observations to
+120 seconds; receipt age is not the age of the underlying measurement.
+`readiness` distinguishes `not_observed` from `loaded_not_workload_verified`.
+Neither establishes successful inference for the requested workload.
+
+`externalConfigurations` contains hypothetical, independently admitted complete
+remote allocations. Each reports backend/build/hardware constraints, replica
+count, request count, aggregate context pool, estimated usable memory, minimum
+physical memory and selected-weight disk bytes per node. Disk numbers exclude
+installation/staging overhead; discrete-GPU host RAM is unknown. These are
+single-host replicas, with no local/remote hybrid sharding or unsupported GPU
+pooling. They are alternatives, not additive resources or provider offers.
+Price, stock, startup time, latency and throughput are unverified.
+An engine-family support row alone does not identify a concrete compute lane or
+memory pool. The assessment omits that hypothetical variant and reports missing
+evidence when no concrete alternative exists. Legacy card compatibility remains
+available alongside deduplicated matrix-specific build/hardware alternatives.
+
+This read never provisions, places, reserves or downloads. `provisioning` is
+`recommendation_only`; provider discovery and spending permission remain separate.
+Steward's `assess_inference` tool reads this same contract with bounded details
+and explicit coverage. Model selection displays this assessment; the coarse
+discovery Burst chip remains only a browsing hint.
+
 ### Read model capacity requirements
 
 **GET** `/models/requirements`
@@ -2973,6 +3026,11 @@ review: it now runs on kite2 instead of kite1." A proposal becomes stale when:
 - a cancel-download's reviewed attempt finished, failed, or was replaced by a
   retry; or
 - a placement's model card changed or left the catalog.
+
+A cancel-download whose attempt the master simply cannot see is not marked
+stale while it waits: live download progress is node telemetry, which a change
+of master clears until the nodes report again. Approving it is still refused,
+since cancelling nothing would not do what the operator reviewed.
 
 Free capacity is not part of staleness: approving a placement recomputes it at
 that moment. `stale` is terminal; a still-needed action is proposed again
@@ -4332,6 +4390,8 @@ without restart. Missing setup returns an actionable unavailable response.
 | POST | `/v1/plugins/managed/service/setup` | Direct localhost/Tailscale owner administration only; no body. Starts the one-time per-user setup described under [Local plugin service setup](#local-plugin-service-setup) in the background and returns the status at once; poll the GET route for progress. The first setup copies the node's environment and takes a few minutes. A running setup is not restarted, and none starts while a refresh attempt for a Skulk update is copying a runtime or restarting the manager on it, including a background retry after a reported failure; the response is then the current status. A host connected to a system service is not changed: its status names the terminal repair command, because registering a system service needs local elevation, which a node never requests. |
 | GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `release`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. `release` names the selected signed release from its staged metadata: `bundle_id`, `title` (null when the manifest declares none), `bundle_version`, `publisher` and `sequence`. It is null before a release is staged or when that metadata cannot be read, and it is display information only, never a trust or compatibility decision. `reload_runtime` is true when the manager can select a staged runtime and restart on request; a host reads it before asking, so a manager from before that request is told apart from one refusing a generation. `store_trust_retry` is true while installations following the built-in capability store were busy when its trust was last followed (by any caller, a terminal catalog read included); the host then renews that trust again within five minutes. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
 | POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
+| GET | `/v1/plugins/managed/capabilities` | Requires `plugins:read` or direct owner authority. No parameters. Reads declarations from this API host's configured local manager without attaching, repairing setup, enabling or invoking a child. Returns `source`, `observedAt`, `scope: local_api_host`, and at most sixteen `installations`: selected metadata plus independent `reachable` (nullable) and exact `readyCapabilities`. A ready provisioning capability does not establish allocated inference capacity. `release.registration`, also additive to the existing manager inventory, contains at most eight purpose/version/operation-digest summaries, declared Skulk/Python/platform requirements, configuration requirement and required credential identifiers only. Optional registration is unavailable when malformed or outside the 8 KiB per-registration or manager response budget; the installed identity remains visible. Uninstalled retained metadata does not imply usable capacity. |
+| GET | `/v1/plugins/managed/{plugin_id}/capabilities/{qualified_id}` | Requires `plugins:read` or direct owner authority. Path: exact installed plugin and declared `id@version` (at most 256 characters). Required query: `revision`, sixteen lowercase hexadecimal characters from registration. Returns the selected generation digest, exact descriptor and revision, including input/output/media schemas. The current selected declaration must still match; a changed/unavailable contract is refused. Reads are bounded to 64 KiB per descriptor and work with disabled children. No operation is invoked and declaration grants no execution authority. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
 | DELETE | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:manage`. No body. Removes one installation that is uninstalled, or that never selected a release, together with everything it retained: lifecycle records, staged generations, feed credentials and cleanup state. Returns `plugin_id` and `purged: true`; the installation leaves the inventory. A live installation, or one with an operation or a release download under way, is refused with 409 and left unchanged. The terminal equivalent is `skulk-plugin-service purge-plugin <plugin_id>`. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. A generation whose configuration schema differs from the selected one is refused with `configuration schema requires migration`, unless its owner speaks plugin protocol 3 or later and the new schema still accepts every stored setting: only descriptions, titles, defaults, examples or comments changed, optional settings were added to a closed object, or required settings became optional. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending withdrawal cannot be superseded. `activate` and `select` revalidate the staged metadata; a runtime that a host update has moved outside the protocol window answers `409` with the sentence the guided installer prints (which protocol the host accepts, which the runtime offers, and that the fix is to update Skulk on this host or choose a release published for it). |

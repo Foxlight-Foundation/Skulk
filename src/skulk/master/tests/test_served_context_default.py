@@ -80,7 +80,9 @@ def test_default_leaves_a_lazy_engine_at_its_fit() -> None:
 def test_a_request_is_honored_exactly_up_to_the_ceiling() -> None:
     assignments = _assignments(_card(gguf=True), "llama_server-vulkan")
     assert (
-        served_context_window(assignments, 262144, requested=131072, served_default=32768)
+        served_context_window(
+            assignments, 262144, requested=131072, served_default=32768
+        )
         == 131072
     )
     # A request below the default is honored too: the caller chose it.
@@ -153,8 +155,33 @@ def test_placement_stamps_and_records_a_caller_request() -> None:
 
 def test_placement_refuses_a_request_the_nodes_cannot_hold() -> None:
     card = _card(gguf=True).model_copy(update={"context_length": 1048576})
-    with pytest.raises(PlacementError, match="exceeds"):
+    with pytest.raises(PlacementError, match="KV@1048576tok"):
         _place(_command(card, requested=1048576), served_default=32768)
+
+
+def test_small_requested_context_can_fit_below_the_default_admission_floor() -> None:
+    """A caller-selected 512-token window need not hold the old 8192-token floor."""
+    topology = Topology()
+    node = NodeId("small-window")
+    topology.add_node(node)
+    card = _card(gguf=True)
+    memory = {
+        node: create_node_memory(
+            Memory.from_gb(5).in_bytes, ram_total=Memory.from_gb(8).in_bytes
+        )
+    }
+    with pytest.raises(PlacementError, match="No candidate cycle fits"):
+        place_instance(
+            _command(card), topology, {}, memory, {node: create_node_network()}
+        )
+    result = place_instance(
+        _command(card, requested=512),
+        topology,
+        {},
+        memory,
+        {node: create_node_network()},
+    )
+    assert next(iter(result.values())).context_token_limit == 512
 
 
 def test_repairs_carry_the_callers_request_forward() -> None:
@@ -190,7 +217,6 @@ def test_master_reads_the_default_from_the_converged_config(
 
     monkeypatch.setattr(master_main, "load_skulk_config", unreadable)
     assert master._served_context_default() == SERVED_CONTEXT_DEFAULT_TOKENS  # pyright: ignore[reportPrivateUsage]
-
 
 
 def test_an_exact_placement_keeps_its_window_through_repair() -> None:
@@ -237,4 +263,7 @@ def test_an_exact_placement_keeps_its_window_through_repair() -> None:
     )[exact.instance_id]
     assert placed.context_token_limit == 131072
     assert placed.requested_context_tokens == 131072
-    assert replacement_command_for_refused_instance(placed).requested_context_tokens == 131072
+    assert (
+        replacement_command_for_refused_instance(placed).requested_context_tokens
+        == 131072
+    )
