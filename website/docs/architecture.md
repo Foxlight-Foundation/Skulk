@@ -1412,7 +1412,13 @@ Back-to-back restart replacements reserve capacity before their State echo.
 records retained past it), ten-minute
 harness expiry, and `SKULK_FABRIC_CAPABILITIES_DISABLE=1` master kill switch
 bound the feature, including fail-closed handling of carried dispatch recovery.
-The master publishes terminal expiry when a deadline passes.
+The master publishes terminal expiry when a deadline passes. Each planning pass
+also rechecks every pending proposal with the approval checks
+(`master/steward_staleness.py`, pure functions shared with the approval path)
+and orders a terminal `stale` status as soon as the reviewed target changes,
+with an outcome naming the change. Approval refusals carry the same wording,
+and the dashboard keeps a settled proposal on screen for ten minutes with its
+status and reason instead of dropping it.
 For five minutes from the separate dispatch timestamp, a promoted master reconciles the proposal's
 exact command identity against replicated state and reissues a missing effect
 once, closing the failover window between proposal and action events.

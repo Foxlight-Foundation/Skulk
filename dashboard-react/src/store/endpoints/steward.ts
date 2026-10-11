@@ -50,7 +50,9 @@ export interface StewardActionProposal {
   expected_effect: string;
   created_at: string;
   expires_at: string;
-  status: 'pending' | 'approved' | 'dispatched' | 'rejected' | 'expired' | 'failed';
+  /** `stale`: the reviewed target changed before a decision; `outcome` says what changed. */
+  status: 'pending' | 'approved' | 'dispatched' | 'rejected' | 'expired' | 'failed' | 'stale';
+  /** When the proposal left pending (decision, expiry, or going out of date). */
   decided_at: string | null;
   decided_by: string | null;
   outcome: string | null;

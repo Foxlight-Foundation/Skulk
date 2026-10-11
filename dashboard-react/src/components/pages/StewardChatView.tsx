@@ -1,5 +1,6 @@
 import { StewardPrompt } from '../steward/StewardPrompt';
 import { StewardProposalCard } from '../steward/StewardProposalCard';
+import { decisionErrorDetail, visibleStewardProposals } from '../steward/proposalVisibility';
 import { createContext, useContext, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useStore } from 'react-redux';
@@ -199,13 +200,19 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
   const { data: status, refetch } = useGetStewardStatusQuery(undefined, {
     pollingInterval: 15000,
   });
-  const { data: proposals = [] } = useGetStewardProposalsQuery(undefined, {
+  const { data: proposals = [], fulfilledTimeStamp: proposalsFetchedAt } = useGetStewardProposalsQuery(undefined, {
     pollingInterval: 3000,
     skip: status?.enabled !== true,
   });
   const [decideProposal, { isLoading: isDecidingProposal }] =
     useDecideStewardProposalMutation();
-  const pendingProposals = proposals.filter((proposal) => proposal.status === 'pending');
+  const [dismissedProposalIds, setDismissedProposalIds] = useState<ReadonlySet<string>>(() => new Set());
+  // The last poll's time keeps render pure, and polling every few seconds
+  // ages settled cards out of the window without a timer of their own.
+  const visibleProposals = visibleStewardProposals(proposals, proposalsFetchedAt ?? 0, dismissedProposalIds);
+  const dismissProposal = useCallback((proposalId: string) => {
+    setDismissedProposalIds((current) => new Set(current).add(proposalId));
+  }, []);
 
   const handleProposalDecision = useCallback(async (proposalId: string, approved: boolean) => {
     try {
@@ -213,13 +220,18 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
       addToast({
         type: approved ? 'success' : 'info',
         message: approved
-          ? t('stewardChat.proposals.approvalSubmitted', 'Action approval submitted')
+          ? t('stewardChat.proposals.approvalSent', 'Approval sent. The card shows what happened.')
           : t('stewardChat.proposals.rejectionSubmitted', 'Action rejected'),
       });
-    } catch {
+    } catch (error: unknown) {
+      // A proposal that went out of date or expired before the click is
+      // refused with its reason; show that rather than a generic failure.
+      const detail = decisionErrorDetail(error);
       addToast({
         type: 'error',
-        message: t('stewardChat.proposals.decisionFailed', 'Could not submit the action decision'),
+        message: detail
+          ? t('stewardChat.proposals.decisionRefused', 'Not submitted: {reason}', { reason: detail })
+          : t('stewardChat.proposals.decisionFailed', 'Could not submit the action decision'),
       });
     }
   }, [decideProposal, t]);
@@ -508,7 +520,7 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
   return { draft, setDraft, submitDraft, status, messages, isLoading,
     streamingContent: requestConversationRef.current === conversationId ? streamingContent : null,
     streamingThinking: requestConversationRef.current === conversationId ? streamingThinking : null,
-    pendingProposals, isDecidingProposal, handleProposalDecision, handleSend, handleCancel,
+    visibleProposals, dismissProposal, isDecidingProposal, handleProposalDecision, handleSend, handleCancel,
     speechModel, speechVoice, autoSpeakAssistant, stopSpeechPlayback, speakDraft, isSpeaking, speechError };
 }
 
@@ -543,7 +555,7 @@ function StewardPresentation({ controller, presentation = 'page', modelSelector 
   const { t } = useSkulkTranslation();
   const dispatch = useAppDispatch();
   const { draft, setDraft, status, messages, isLoading, streamingContent, streamingThinking,
-    pendingProposals, isDecidingProposal, handleProposalDecision, handleSend, handleCancel,
+    visibleProposals, dismissProposal, isDecidingProposal, handleProposalDecision, handleSend, handleCancel,
     speechModel, speechVoice, autoSpeakAssistant, stopSpeechPlayback, speakDraft, isSpeaking, speechError } = controller;
   if (!status) {
     // Gate on the first status response so the chat surface cannot render
@@ -618,10 +630,16 @@ function StewardPresentation({ controller, presentation = 'page', modelSelector 
           })}
         </ModelTag>
       )}
-      {pendingProposals.length > 0 && (
-        <ProposalTray aria-label={t('stewardChat.proposals.label', 'Pending actions')}>
-          {pendingProposals.map((proposal) => (
-            <StewardProposalCard key={proposal.proposal_id} proposal={proposal} busy={isDecidingProposal} onDecision={approved => void handleProposalDecision(proposal.proposal_id, approved)} />
+      {visibleProposals.length > 0 && (
+        <ProposalTray aria-label={t('stewardChat.proposals.trayLabel', 'Steward actions')}>
+          {visibleProposals.map((proposal) => (
+            <StewardProposalCard
+              key={proposal.proposal_id}
+              proposal={proposal}
+              busy={isDecidingProposal}
+              onDecision={approved => void handleProposalDecision(proposal.proposal_id, approved)}
+              onDismiss={proposal.status === 'pending' ? undefined : () => dismissProposal(proposal.proposal_id)}
+            />
           ))}
         </ProposalTray>
       )}

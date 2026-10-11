@@ -710,7 +710,10 @@ waits for replicated deletion plus released-capacity telemetry before placing
 the captured intent, failing after five minutes. 32 pending and a 128-record
 audit target bound state while actionable recovery records are retained.
 `dispatched` means command acceptance, not completion; the
-master publishes terminal expiry when deadlines pass. A promoted master
+master publishes terminal expiry when deadlines pass, and each planning pass
+marks a pending proposal `stale`, naming what changed, once its reviewed
+target no longer fits (`master/steward_staleness.py`, the same checks approval
+runs). A promoted master
 inherits the bounded proposal map in the new-session seed, reconciles
 dispatched proposals for five minutes from dispatch, and reissues a missing
 exact command effect once.

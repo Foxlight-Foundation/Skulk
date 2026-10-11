@@ -2953,9 +2953,31 @@ Each response item contains:
 - `proposal_id`, `created_at`, and `expires_at`;
 - `action`: `place_model`, `stop_model`, `restart_model`, or `cancel_download`;
 - a safe `target` label, `rationale`, bounded `evidence`, and `expected_effect`;
-- `status`: `pending`, `approved`, `dispatched`, `rejected`, `expired`, or
-  `failed`; and
-- optional `decided_at`, safe actor class in `decided_by`, and `outcome`.
+- `status`: `pending`, `approved`, `dispatched`, `rejected`, `expired`,
+  `failed`, or `stale`; and
+- optional `decided_at` (when the proposal left `pending`), safe actor class in
+  `decided_by`, and `outcome`.
+
+`stale` means the target the operator would be approving changed before anyone
+decided. The master rechecks every pending proposal on each planning pass
+(about every ten seconds) with the same checks approval runs, and marks one
+`stale` as soon as it no longer fits, with `decided_by: "fabric_staleness"` and
+an `outcome` that names what changed, for example "The instance changed after
+review: it now runs on kite2 instead of kite1." A proposal becomes stale when:
+
+- a stop or restart target was removed or replaced, now serves a different
+  model, or changed its nodes, runners, layer split, context window, excluded
+  nodes, or model card;
+- another approved stop or restart already owns the same instance;
+- a restart's model card is no longer the catalog's card;
+- a cancel-download's reviewed attempt finished, failed, or was replaced by a
+  retry; or
+- a placement's model card changed or left the catalog.
+
+Free capacity is not part of staleness: approving a placement recomputes it at
+that moment. `stale` is terminal; a still-needed action is proposed again
+against current state. A proposal already past its deadline is left to expiry,
+so `expired` and `stale` each keep one meaning.
 
 Proposals created by the built-in harness expire after ten minutes. The master
 refuses already-expired proposals, proposals with a lifetime over fifteen
@@ -2981,7 +3003,8 @@ The action set is intentionally narrow:
 
 System-role instances are never eligible. Targets are resolved before proposal
 creation and revalidated by the elected master at approval, so stale or
-ambiguous proposals fail without mutation.
+ambiguous proposals fail without mutation. A refusal at approval records
+`failed` with an `outcome` that names what changed, worded as for `stale`.
 
 ### POST `/v1/steward/proposals/{proposal_id}/decision`
 
@@ -2994,8 +3017,10 @@ parameter is the `proposal_id`; the JSON body is:
 
 `approved: false` rejects the proposal. This route requires trusted-fabric or
 authenticated operator-gateway authority. Decisions are single use. Missing
-proposals return `404`; proposals already decided in the local replicated view
-return `409`.
+proposals return `404`; proposals already decided, expired, or stale in the
+local replicated view return `409` whose `detail` carries the status and, when
+present, the outcome, for example `Steward proposal is already stale: The
+instance changed after review: its runners were replaced.`
 
 A successful response contains the proposal ID, the decision command ID, and an
 acceptance message. Acceptance means the decision entered the ordered command

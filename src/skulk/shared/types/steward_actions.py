@@ -91,6 +91,9 @@ StewardActionProposalStatus = Literal[
     "rejected",
     "expired",
     "failed",
+    # The reviewed target changed before anyone decided; terminal, so a still
+    # needed action is proposed again against current state.
+    "stale",
 ]
 
 
@@ -125,7 +128,10 @@ class StewardActionProposal(FrozenModel):
     )
     decided_at: datetime | None = Field(
         default=None,
-        description="UTC approval or rejection time.",
+        description=(
+            "UTC time the proposal left pending: approval, rejection, expiry, "
+            "or being marked out of date."
+        ),
     )
     dispatched_at: datetime | None = Field(
         default=None,
@@ -143,7 +149,10 @@ class StewardActionProposal(FrozenModel):
     outcome: str | None = Field(
         default=None,
         max_length=1024,
-        description="Bounded execution outcome or refusal explanation.",
+        description=(
+            "Bounded execution outcome, refusal explanation, or what changed "
+            "when the proposal went out of date."
+        ),
     )
 
     @field_validator(

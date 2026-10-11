@@ -355,6 +355,43 @@ describe('StewardChatView', () => {
     await waitFor(() => decision !== undefined, 'approval was never submitted');
     expect(decision).toEqual({ approved: true });
   });
+
+  it('shows why a proposal went out of date and lets the operator dismiss it', async () => {
+    stubFetch({
+      status: READY,
+      proposals: [{
+        proposal_id: 'proposal-stale',
+        action: 'stop_model',
+        target: 'org/stale-model',
+        rationale: 'The instance is idle.',
+        evidence: ['No requests for an hour.'],
+        expected_effect: 'Stop the ordinary model instance.',
+        created_at: new Date(Date.now() - 60_000).toISOString(),
+        expires_at: new Date(Date.now() + 540_000).toISOString(),
+        status: 'stale',
+        decided_at: new Date().toISOString(),
+        decided_by: 'fabric_staleness',
+        outcome: 'The instance changed after review: it now runs on kite2 instead of kite1.',
+      }],
+    });
+    await renderPage();
+    await waitFor(
+      () => container?.textContent?.includes('stop model: org/stale-model') ?? false,
+      'stale proposal never rendered',
+    );
+    expect(container?.textContent).toContain('Out of date');
+    expect(container?.textContent).toContain('it now runs on kite2 instead of kite1.');
+    const buttons = [...(container?.querySelectorAll('button') ?? [])];
+    expect(buttons.find((button) => button.textContent === 'Approve')).toBeUndefined();
+
+    const dismiss = buttons.find((button) => button.textContent === 'Dismiss');
+    expect(dismiss).toBeDefined();
+    await userEvent.click(dismiss as HTMLButtonElement);
+    await waitFor(
+      () => !(container?.textContent?.includes('org/stale-model') ?? true),
+      'dismissed proposal stayed on screen',
+    );
+  });
 });
 
 describe('StewardChatView stream errors', () => {

@@ -3421,8 +3421,10 @@ class API:
             description=(
                 "Return the bounded replicated proposal audit, newest first, with "
                 "internal node, instance, command, and model-card payloads removed. "
-                "The surface requires operator authority because it is paired with "
-                "the approval workflow."
+                "A pending proposal whose reviewed target changes becomes 'stale' "
+                "within one master planning pass (about ten seconds), with the "
+                "change named in its outcome. The surface requires operator "
+                "authority because it is paired with the approval workflow."
             ),
         )(self.list_steward_action_proposals)
         self.app.post(
@@ -3432,7 +3434,10 @@ class API:
             description=(
                 "Submit one authenticated, single-use decision to the elected master. "
                 "Approval revalidates expiry, model truth, system-placement protection, "
-                "and current cluster state before dispatching an existing typed command."
+                "and current cluster state before dispatching an existing typed command; "
+                "a refusal names what changed in the proposal's outcome. Deciding a "
+                "proposal that already left pending returns 409 with its status and "
+                "outcome."
             ),
         )(self.decide_steward_action_proposal)
         self.app.post(
@@ -5186,10 +5191,12 @@ class API:
         if proposal is None:
             raise HTTPException(status_code=404, detail="Steward proposal not found")
         if proposal.status != "pending":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Steward proposal is already {proposal.status}",
-            )
+            # An out-of-date or expired proposal carries why; repeating it here
+            # spares a client the extra list call to learn what changed.
+            detail = f"Steward proposal is already {proposal.status}"
+            if proposal.outcome:
+                detail = f"{detail}: {proposal.outcome}"
+            raise HTTPException(status_code=409, detail=detail)
         actor = (
             "authenticated_operator_gateway"
             if request.scope.get(OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY) is True
