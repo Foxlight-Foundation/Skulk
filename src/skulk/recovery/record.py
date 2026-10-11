@@ -25,7 +25,10 @@ from uuid import UUID
 from loguru import logger
 from pydantic import Field, ValidationError, field_validator
 
-from skulk.master.placement import replacement_command_for_download_failed_instance
+from skulk.master.placement import (
+    PlacementError,
+    replacement_command_for_download_failed_instance,
+)
 from skulk.shared.types.common import ModelId, NodeId, SessionId
 from skulk.shared.types.state import State
 from skulk.shared.types.steward_actions import (
@@ -137,7 +140,9 @@ def derive_cluster_intent(
     """Build the record from one node's replicated view.
 
     System placements (the steward) are left out: the steward's own placement
-    invariant brings it back. A node without a known install ID cannot be
+    invariant brings it back. So is a placement that cannot be expressed as an
+    intent (no shards, or no node), with a warning, so one malformed instance
+    can never stop the record, or the node, from carrying on. A node without a known install ID cannot be
     named across a restart, so it is omitted from hosts and exclusions; the
     placement still restores, and the planner chooses in its place.
 
@@ -154,7 +159,23 @@ def derive_cluster_intent(
     for instance in state.instances.values():
         if instance.system_role is not None:
             continue
-        intent = replacement_command_for_download_failed_instance(instance, frozenset())
+        try:
+            intent = replacement_command_for_download_failed_instance(
+                instance, frozenset()
+            )
+        except PlacementError as error:
+            # A placement with no shards cannot be placed again; keeping the
+            # record current for every other placement matters more than it.
+            logger.warning(
+                f"Restart recovery leaves out instance {instance.instance_id}: {error}"
+            )
+            continue
+        if intent.min_nodes < 1:
+            logger.warning(
+                f"Restart recovery leaves out instance {instance.instance_id}: "
+                "it runs on no node"
+            )
+            continue
         hosts = tuple(
             install_ids[node_id]
             for node_id in instance.shard_assignments.node_to_runner

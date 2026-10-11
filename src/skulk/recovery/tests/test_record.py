@@ -19,6 +19,7 @@ from skulk.recovery.tests.fixtures import (
     KITE2,
     NOW,
     SESSION,
+    sample_instance,
     sample_proposal,
     sample_state,
 )
@@ -59,6 +60,26 @@ def test_unknown_install_ids_are_left_out_rather_than_guessed() -> None:
     )
     assert record.placements[0].host_install_ids == (KITE2,)
     assert record.placements[1].excluded_install_ids == ()
+
+
+def test_a_placement_without_nodes_is_left_out_instead_of_failing() -> None:
+    """One malformed instance must not stop the record from being kept."""
+    state = sample_state()
+    husk = sample_instance("husk", "org/husk", ("node-a",))
+    husk = husk.model_copy(
+        update={
+            "shard_assignments": husk.shard_assignments.model_copy(
+                update={"node_to_runner": {}, "runner_to_shard": {}}
+            )
+        }
+    )
+    state = state.model_copy(update={"instances": {**state.instances, husk.instance_id: husk}})
+
+    record = derive_cluster_intent(
+        state, install_ids=INSTALL_IDS, session_id=SESSION, written_at=NOW
+    )
+
+    assert [placement.model_id for placement in record.placements] == ["org/big", "org/small"]
 
 
 def test_record_round_trips_through_disk(tmp_path: Path) -> None:
