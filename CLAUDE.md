@@ -775,6 +775,7 @@ The system uses event sourcing for state management:
   instance ID. `POST /place_instance` returns both fields so clients correlate
   concurrent same-model placements with exact runtime truth.
 - `apply()` (src/skulk/shared/apply.py): Pure function that applies events to state
+- Restart recovery (`src/skulk/recovery/`, initiative `initiative/restart-recovery`): every node keeps an on-disk record of placement intents (by stable `node_install_id`) and the steward proposal audit; a cold-started master seeds event 0 from it with all restored proposals terminal and `State.restart_recovery_pending` set until `RestartRecoveryCompleted`. Nodes never overwrite their record while that flag is set. `SKULK_NO_RESTART_RECOVERY=1` opts out.
 - Master admits only the explicit durable control-event allowlist, indexes and
   broadcasts those events, and payload-free skips any decodable non-control
   event before ordering; workers apply indexed control events

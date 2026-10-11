@@ -299,6 +299,21 @@ class StewardActionProposalChanged(BaseEvent):
     proposal: StewardActionProposal
 
 
+class RestartRecoveryCompleted(BaseEvent):
+    """The master finished restoring a cold-started cluster from its record.
+
+    Clears ``State.restart_recovery_pending`` so nodes resume keeping their
+    restart recovery records current.
+    """
+
+    restored_placements: int = Field(
+        ge=0, description="Placements re-requested from the record."
+    )
+    restored_proposals: int = Field(
+        ge=0, description="Steward proposals carried back from the record."
+    )
+
+
 Event = (
     TestEvent
     | TaskCreated
@@ -324,6 +339,7 @@ Event = (
     | TracingStateChanged
     | ModelTrustApprovalChanged
     | StewardActionProposalChanged
+    | RestartRecoveryCompleted
     | CustomModelCardAdded
     | CustomModelCardDeleted
     | StagedModelEvicted
@@ -350,6 +366,7 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TracingStateChanged,
     ModelTrustApprovalChanged,
     StewardActionProposalChanged,
+    RestartRecoveryCompleted,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     StagedModelEvicted,
