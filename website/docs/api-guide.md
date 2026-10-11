@@ -2167,6 +2167,10 @@ installation/staging overhead; discrete-GPU host RAM is unknown. These are
 single-host replicas, with no local/remote hybrid sharding or unsupported GPU
 pooling. They are alternatives, not additive resources or provider offers.
 Price, stock, startup time, latency and throughput are unverified.
+An engine-family support row alone does not identify a concrete compute lane or
+memory pool. The assessment omits that hypothetical variant and reports missing
+evidence when no concrete alternative exists. Legacy card compatibility remains
+available alongside deduplicated matrix-specific build/hardware alternatives.
 
 This read never provisions, places, reserves or downloads. `provisioning` is
 `recommendation_only`; provider discovery and spending permission remain separate.

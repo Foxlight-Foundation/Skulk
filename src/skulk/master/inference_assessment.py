@@ -40,6 +40,7 @@ from skulk.shared.models.model_cards import (
     get_model_engine_support,
     same_authorized_model_card,
 )
+from skulk.shared.models.registry import RegistryEngineSupportClaim
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import PlaceInstance
 from skulk.shared.types.common import NodeId
@@ -170,22 +171,47 @@ def _replica_slots(instance: Instance) -> int:
 def _external_configurations(
     card: ModelCard,
     workload: InferenceWorkload,
-) -> tuple[ExternalConfiguration, ...]:
+) -> tuple[tuple[ExternalConfiguration, ...], bool]:
     """Dry-run each evidenced engine on a separate full-model host specification."""
     configs: list[ExternalConfiguration] = []
     claims = get_model_engine_support(card)
     backends = set(card.placement.compatible_backends)
-    backends.update(claim.engine for claim in claims if claim.status == "supported")
+    unresolved_compute = False
+    for claim in claims:
+        if claim.status != "supported":
+            continue
+        # Family support can match a real node's concrete lane, but it does not
+        # supply that lane or its memory architecture for a hypothetical host.
+        # MLX is intrinsically Apple unified-memory serving; the other families
+        # require an explicit compute specification before resource sizing.
+        if claim.engine == engine_of(claim.engine) and claim.engine != "mlx":
+            unresolved_compute = True
+            continue
+        backends.add(claim.engine)
     for backend in sorted(backends):
         if engine_of(backend) is None:
+            continue
+        if backend == "vllm":
+            unresolved_compute = True
             continue
         matching = [
             claim
             for claim in claims
             if claim.status == "supported" and claim.engine == backend
         ]
-        # Never combine build and hardware evidence from different support rows.
-        variants = matching or [None]
+        # Legacy compatibility is independent of matrix constraints. Preserve
+        # that option rather than making an optional row a mandatory build.
+        variants: list[RegistryEngineSupportClaim | None] = (
+            [None] if backend in card.placement.compatible_backends else []
+        )
+        seen: set[tuple[str, tuple[str, ...]]] = set()
+        for claim in matching:
+            if backend == engine_of(backend) and backend != "mlx":
+                continue
+            key = (claim.engine_build, tuple(sorted(claim.hardware_classes)))
+            if key not in seen:
+                variants.append(claim)
+                seen.add(key)
         for claim in variants:
             settings = LlamaServerSettings()
             requests = (
@@ -267,7 +293,7 @@ def _external_configurations(
                     host_ram_bytes=None if gpu else total,
                 )
             )
-    return tuple(configs)
+    return tuple(configs), unresolved_compute
 
 
 def assess_inference(
@@ -365,7 +391,16 @@ def assess_inference(
                 )
             }
         )
-    external = _external_configurations(card, workload)
+    external, unresolved_compute = _external_configurations(card, workload)
+    if unresolved_compute:
+        base = base.model_copy(
+            update={
+                "uncertainty": base.uncertainty
+                + (
+                    "Some engine-family support claims have no concrete compute/memory specification; those external variants are omitted.",
+                )
+            }
+        )
     excluded = excluded_nodes or set()
     # Receipt clocks belong to the local telemetry view. A heartbeat must not
     # refresh a stale memory reading or a stale backend advertisement.
@@ -597,6 +632,15 @@ def assess_inference(
                     "Serial replicas do not fit, but this engine's concurrent capacity is not advertised; external necessity is uncertain.",
                 ),
                 "external_configurations": external,
+            }
+        )
+    if not external and unresolved_compute:
+        return base.model_copy(
+            update={
+                "reasons": (
+                    "External sizing needs an evidenced concrete backend and memory architecture; a signed engine-family claim alone cannot identify RAM versus VRAM or GPU count.",
+                )
+                + failures[:2]
             }
         )
     return base.model_copy(

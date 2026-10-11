@@ -4,11 +4,16 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import skulk.shared.models.model_cards as model_cards
 from skulk.master.inference_assessment import assess_inference
 from skulk.master.placement import place_instance
 from skulk.shared.models.inference_assessment import InferenceWorkload
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.model_cards import ModelCard, ModelTask, PlacementCardConfig
+from skulk.shared.models.registry import (
+    RegistryCapabilityClaim,
+    RegistryEngineSupportClaim,
+)
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import PlaceInstance
 from skulk.shared.types.common import ModelId, NodeId
@@ -297,3 +302,103 @@ def test_published_head_width_changes_cache_estimate_without_a_benchmark() -> No
     result = _assess(wide, topology, view)
     assert result.status == "external_required"
     assert not any("128-element" in text for text in result.uncertainty)
+
+
+def _matrix_card(backend: str, *, legacy: bool) -> ModelCard:
+    card = _card(backend)
+    return card.model_copy(
+        update={
+            "placement": PlacementCardConfig(
+                compatible_backends=frozenset({backend}) if legacy else frozenset()
+            ),
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_provenance": "agent",
+            "registry_architecture": "test-model",
+            "registry_artifact_format": "gguf" if card.gguf_file else "safetensors",
+            "registry_capability_claims": (
+                RegistryCapabilityClaim(
+                    capability_id="text_generation",
+                    scope="model",
+                    status="claimed",
+                    source="upstream_structured",
+                    confidence=0.9,
+                ),
+            ),
+        }
+    )
+
+
+def _support(card: ModelCard, engine: str) -> RegistryEngineSupportClaim:
+    return RegistryEngineSupportClaim(
+        engine=engine,
+        engine_build="test-build",
+        architecture="test-model",
+        artifact_format="gguf" if card.gguf_file else "safetensors",
+        capability_id="text_generation",
+        status="supported",
+        evidence_kind="upstream_compatibility",
+        evidence_trust="third_party_reported",
+        source_url="https://example.org/engine-support",
+        source_sha256="b" * 64,
+        rationale="Published architecture compatibility, not a measured artifact load.",
+        hardware_classes=("nvidia-sm80",),
+        claim_id="support_" + "b" * 52,
+        recorded_by="test-publisher",
+        created_at=_NOW,
+    )
+
+
+@pytest.mark.parametrize("engine", ["vllm", "llama_server"])
+def test_family_only_matrix_claim_never_invents_a_cpu_or_vram_lane(
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+) -> None:
+    card = _matrix_card(engine, legacy=False)
+    monkeypatch.setattr(
+        model_cards, "_registry_engine_support", (_support(card, engine),)
+    )
+    result = _assess(card, Topology(), TelemetryView())
+    assert result.status == "insufficient_evidence"
+    assert not result.external_configurations
+    assert "concrete backend" in result.reasons[0]
+
+
+def test_concrete_matrix_lane_preserves_gpu_pool_and_exact_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = _matrix_card("vllm-cuda", legacy=False)
+    monkeypatch.setattr(
+        model_cards, "_registry_engine_support", (_support(card, "vllm-cuda"),)
+    )
+    result = _assess(card, Topology(), TelemetryView())
+    assert result.status == "external_required"
+    assert len(result.external_configurations) == 1
+    candidate = result.external_configurations[0]
+    assert candidate.memory_pool == "vram"
+    assert candidate.gpus_per_node == 1
+    assert candidate.engine_build == "test-build"
+
+
+def test_legacy_and_deduplicated_matrix_alternatives_are_both_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = _matrix_card("llama_server-cuda", legacy=True)
+    claim = _support(card, "llama_server-cuda")
+    duplicate = claim.model_copy(update={"claim_id": "support_" + "c" * 52})
+    monkeypatch.setattr(model_cards, "_registry_engine_support", (claim, duplicate))
+    result = _assess(card, Topology(), TelemetryView())
+    assert result.status == "external_required"
+    assert len(result.external_configurations) == 2
+    assert {candidate.engine_build for candidate in result.external_configurations} == {
+        None,
+        "test-build",
+    }
+    assert all(
+        candidate.memory_pool == "vram" for candidate in result.external_configurations
+    )
+    legacy = next(
+        candidate
+        for candidate in result.external_configurations
+        if candidate.engine_build is None
+    )
+    assert legacy.hardware_classes == ()
