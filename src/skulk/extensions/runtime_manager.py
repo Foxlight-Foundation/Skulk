@@ -18,6 +18,12 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, TypeAdapter
 
+from skulk.extensions.capabilities import (
+    CapabilityDescriptor,
+    InstalledCapabilityRegistration,
+    RegisteredCapabilitySummary,
+    descriptor_revision,
+)
 from skulk.extensions.capability_store import (
     EMBEDDED_CAPABILITY_STORE_ROOT,
     StoreTrustClient,
@@ -105,6 +111,11 @@ class _Request(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
 
+def _registration_unavailable(value: object) -> bool:
+    """Keep legacy metadata shape when optional registration is unavailable."""
+    return value is None
+
+
 class InstalledRelease(BaseModel):
     """Display identity of the signed release an installation has selected.
 
@@ -138,6 +149,11 @@ class InstalledRelease(BaseModel):
     sequence: int = Field(
         ge=1, description="The publisher's increasing release sequence number."
     )
+    registration: InstalledCapabilityRegistration | None = Field(
+        default=None,
+        exclude_if=_registration_unavailable,
+        description="Selected metadata's capability contracts and declared requirements; absent when unavailable. This is not live readiness or execution authority.",
+    )
 
 
 _STAGED_METADATA_BYTES: Final = 131072
@@ -160,6 +176,43 @@ def installed_release(staged: Path) -> InstalledRelease | None:
     if not isinstance(release, dict) or not isinstance(manifest, dict):
         return None
     title = manifest.get("title")
+    registration = None
+    try:
+        descriptors = TypeAdapter(tuple[CapabilityDescriptor, ...]).validate_json(
+            json.dumps(manifest.get("descriptors"))
+        )
+        credential_inputs = TypeAdapter(list[dict[str, JsonValue]]).validate_json(
+            json.dumps(manifest.get("credential_inputs") or [])
+        )
+        registration = InstalledCapabilityRegistration.model_validate_json(
+            json.dumps(
+                {
+                    "capabilities": [
+                        RegisteredCapabilitySummary(
+                            qualified_id=value.qualified_id,
+                            revision=descriptor_revision(value),
+                            title=value.title[:128],
+                            purpose=value.description[:256],
+                            io_mode=value.io_mode,
+                        ).model_dump(mode="json")
+                        for value in descriptors
+                    ],
+                    "skulk_requires": manifest.get("skulk_requires"),
+                    "python_requires": release.get("python_requires"),
+                    "platforms": release.get("platforms"),
+                    "configuration_required": manifest.get("configuration_schema")
+                    is not None,
+                    "required_credential_ids": [
+                        value.get("credential_id")
+                        for value in credential_inputs
+                        if value.get("required", True) is True
+                    ],
+                }
+            )
+        )
+    except ValueError:
+        # Older or malformed display contracts must not hide the installation.
+        pass
     try:
         return InstalledRelease.model_validate(
             {
@@ -168,6 +221,7 @@ def installed_release(staged: Path) -> InstalledRelease | None:
                 "bundle_version": manifest.get("bundle_version"),
                 "publisher": release.get("publisher"),
                 "sequence": release.get("sequence"),
+                "registration": registration,
             }
         )
     except ValueError:
@@ -193,6 +247,21 @@ class InstallationRequest(_Request):
     action: Literal["register", "get", "purge"]
     plugin_id: PluginIdentifier = Field(
         description="Stable local installation ID; never a path."
+    )
+
+
+class InstalledContractRequest(_Request):
+    """Read one selected declaration without starting or invoking its child."""
+
+    action: Literal["installed_contract"] = "installed_contract"
+    plugin_id: PluginIdentifier = Field(
+        description="Exact local installation identity."
+    )
+    qualified_id: str = Field(
+        min_length=1, max_length=256, description="Exact declared id@version."
+    )
+    revision: str = Field(
+        pattern=r"^[a-f0-9]{16}$", description="Observed exact descriptor digest."
     )
 
 
@@ -614,6 +683,7 @@ type ManagerRequest = (
     | StoreTrustRequest
     | CatalogInstallRequest
     | InstallationRequest
+    | InstalledContractRequest
     | SubmitRequest
     | OperationRequest
     | AttachmentRequest
@@ -1046,6 +1116,17 @@ class RuntimeManager:
             }
             if self.store_trust_retry:
                 inventory["store_trust_retry"] = True
+            # Registration is optional display data. Never let its schema or
+            # text growth break the existing bounded management inventory.
+            rows = inventory["installations"]
+            if isinstance(rows, list):
+                for row in reversed(rows):
+                    if len(json.dumps(inventory).encode()) <= 120000:
+                        break
+                    if isinstance(row, dict):
+                        release = row.get("release")
+                        if isinstance(release, dict):
+                            release["registration"] = None
             return inventory
         if isinstance(request, AttachmentRequest):
             return await finish_runtime_work(asyncio.create_task(self._attach(request)))
@@ -1142,6 +1223,7 @@ class RuntimeManager:
     async def _dispatch_installation(
         self,
         request: InstallationRequest
+        | InstalledContractRequest
         | SubmitRequest
         | OperationRequest
         | ReleaseRequest
@@ -1157,6 +1239,46 @@ class RuntimeManager:
         controller = self.controllers.get(identifier)
         if controller is None:
             raise ValueError("installation is unavailable")
+        if isinstance(request, InstalledContractRequest):
+            selection = controller.selector.current()
+            if selection is None:
+                raise ValueError("no selected installed contract")
+            document = _OBJECT.validate_json(
+                read_private(
+                    controller.root
+                    / "generations"
+                    / selection.runtime_digest
+                    / "staged.json",
+                    _STAGED_METADATA_BYTES,
+                )
+            )
+            runtime = document.get("runtime")
+            release = runtime.get("release") if isinstance(runtime, dict) else None
+            manifest = release.get("manifest") if isinstance(release, dict) else None
+            if not isinstance(manifest, dict):
+                raise ValueError("installed contract metadata unavailable")
+            descriptors = TypeAdapter(tuple[CapabilityDescriptor, ...]).validate_json(
+                json.dumps(manifest.get("descriptors"))
+            )
+            matching = [
+                value
+                for value in descriptors
+                if value.qualified_id == request.qualified_id
+            ]
+            if (
+                len(matching) != 1
+                or descriptor_revision(matching[0]) != request.revision
+            ):
+                raise ValueError("installed contract changed or unavailable")
+            raw = matching[0].model_dump_json()
+            if len(raw.encode()) > 65536:
+                raise ValueError("installed contract exceeds read bound")
+            return {
+                "plugin_id": identifier,
+                "selected_digest": selection.runtime_digest,
+                "descriptor": _OBJECT.validate_json(raw),
+                "revision": request.revision,
+            }
         if isinstance(request, InstallRecoveryRequest):
             return (
                 await self.downloads[identifier].recover(
@@ -1229,7 +1351,9 @@ class RuntimeManager:
         async def remove() -> None:
             # Held for the whole removal: an inspection that arrives now finds
             # the source busy, then closed, and never recreates the directory.
-            async with downloads.guard if downloads is not None else contextlib.nullcontext():
+            async with (
+                downloads.guard if downloads is not None else contextlib.nullcontext()
+            ):
                 await controller.close()
                 if downloads is not None:
                     await downloads.close()

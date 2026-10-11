@@ -18,7 +18,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast, final
@@ -33,6 +33,7 @@ from skulk.api.steward_inventory import (
     internal_service_question,
     inventory_question,
     observed_build_value,
+    render_installed_inventory,
     render_inventory,
 )
 from skulk.api.steward_observations import (
@@ -192,6 +193,10 @@ Rules:
 - Capability nodes are installed extensions providing fabric services/actions, not
   GPUs, model modalities, or backend engines. For available capabilities, read
   get_capability_nodes; distinguish owner availability from permission to execute.
+  When offered, get_installed_capabilities reads selected local declarations even
+  for disabled children. Use its purposes, schemas and requirements to understand
+  operations; declarations never grant authority. A ready provisioner does not
+  prove acquired inference capacity, and local inventory excludes other hosts.
 - Report Skulk versions only from actual skulkVersion/skulkCommit evidence.
   A current/consistent build status does not mean the latest release.
 - fabricSystemInstances are internal services, not operator-placed models. Do
@@ -232,11 +237,19 @@ STEWARD_PROPOSAL_TOOL_NAMES = frozenset(
 )
 
 
-def steward_tool_definitions(*, include_proposals: bool = True) -> list[dict[str, Any]]:
+type InstalledMetadataReader = Callable[
+    [str | None, str | None, str | None], Awaitable[dict[str, object]]
+]
+
+
+def steward_tool_definitions(
+    *, include_proposals: bool = True, include_installations: bool = False
+) -> list[dict[str, Any]]:
     """Return steward read tools and, when authorized, inert proposal tools.
 
     Args:
         include_proposals: Whether to expose proposal-creation tools to the model.
+        include_installations: Whether this caller has separately scoped installation-read access.
 
     Returns:
         OpenAI-compatible server-side function definitions for this request.
@@ -332,6 +345,19 @@ def steward_tool_definitions(*, include_proposals: bool = True) -> list[dict[str
             no_args,
         ),
         (
+            "get_installed_capabilities",
+            "Read declared capability purposes, versions, operations and requirements on this API host, including disabled children. With no arguments, list bounded installed summaries and separate enabled/reachable/ready observations. Supply plugin_id, qualified_id and revision together for one exact full operation schema. Other hosts are outside this inventory; a ready provisioner is not allocated inference capacity. Declarations grant no execution authority.",
+            {
+                "type": "object",
+                "properties": {
+                    "plugin_id": {"type": "string", "maxLength": 128},
+                    "qualified_id": {"type": "string", "maxLength": 256},
+                    "revision": {"type": "string", "pattern": "^[a-f0-9]{16}$"},
+                },
+                "required": [],
+            },
+        ),
+        (
             "get_performance_envelopes",
             "Fetch observed performance envelopes: per (hardware, model, "
             "engine, quant) concurrency buckets with TTFT and decode "
@@ -386,11 +412,20 @@ def steward_tool_definitions(*, include_proposals: bool = True) -> list[dict[str
             "never provisions. Concurrency uses conservative independent replicas. "
             "Memory estimates do not prove load readiness or latency/throughput.",
             {
-                "type": "object", "additionalProperties": False,
+                "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "model_id": {"type": "string", "minLength": 1, "maxLength": 512},
-                    "context_tokens": {"type": "integer", "minimum": 256, "maximum": 1_048_576},
-                    "concurrent_requests": {"type": "integer", "minimum": 1, "maximum": 16},
+                    "context_tokens": {
+                        "type": "integer",
+                        "minimum": 256,
+                        "maximum": 1_048_576,
+                    },
+                    "concurrent_requests": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 16,
+                    },
                 },
                 "required": ["model_id", "context_tokens", "concurrent_requests"],
             },
@@ -477,13 +512,14 @@ def steward_tool_definitions(*, include_proposals: bool = True) -> list[dict[str
             "function": {"name": name, "description": desc, "parameters": params},
         }
         for name, desc, params in tools
-        if include_proposals or name not in STEWARD_PROPOSAL_TOOL_NAMES
+        if (include_proposals or name not in STEWARD_PROPOSAL_TOOL_NAMES)
+        and (include_installations or name != "get_installed_capabilities")
     ]
 
 
 STEWARD_TOOL_NAMES: tuple[str, ...] = tuple(
     spec["function"]["name"]  # pyright's view: constructed literally above
-    for spec in steward_tool_definitions()
+    for spec in steward_tool_definitions(include_installations=True)
 )
 
 
@@ -1513,9 +1549,17 @@ class StewardHarness:
     to callers.
     """
 
-    def __init__(self, api: "API", *, proposals_allowed: bool = True) -> None:
+    def __init__(
+        self,
+        api: "API",
+        *,
+        proposals_allowed: bool = True,
+        installation_reader: InstalledMetadataReader | None = None,
+    ) -> None:
+        """Bind per-turn tool authority; installation reads recheck their HTTP scope."""
         self._api = api
         self._proposals_allowed = proposals_allowed
+        self._installation_reader = installation_reader
         self._extension_tools: tuple[StewardToolBinding, ...] = ()
         self._include_internal_services = False
         # The inner TextGeneration currently in flight for this turn, so an
@@ -1812,6 +1856,27 @@ class StewardHarness:
                 ),
                 MAX_TOOL_RESULT_CHARS,
             )
+        if name == "get_installed_capabilities":
+            if self._installation_reader is None:
+                return '{"error":"installed metadata requires separate plugins:read authority"}'
+            values = [
+                arguments.get(key) for key in ("plugin_id", "qualified_id", "revision")
+            ]
+            if any(value is not None for value in values) and not all(
+                isinstance(value, str) and value for value in values
+            ):
+                return (
+                    '{"error":"select plugin_id, qualified_id and revision together"}'
+                )
+            try:
+                payload = await self._installation_reader(
+                    cast("str | None", values[0]),
+                    cast("str | None", values[1]),
+                    cast("str | None", values[2]),
+                )
+            except Exception:  # noqa: BLE001 - manager failures may carry local paths
+                return '{"error":"installed metadata unavailable or access refused"}'
+            return json.dumps(payload)
         if name == "get_cluster_versions":
             cluster = await api.get_cluster_diagnostics()
             payload = await api.get_cluster_state()
@@ -1931,19 +1996,30 @@ class StewardHarness:
             if not isinstance(model_id, str) or not model_id.strip():
                 raise ValueError("assess_inference requires an exact model_id")
             if type(context) is not int or not 256 <= context <= 1_048_576:
-                raise ValueError("context_tokens must be an integer between 256 and 1048576")
+                raise ValueError(
+                    "context_tokens must be an integer between 256 and 1048576"
+                )
             if type(concurrent) is not int or not 1 <= concurrent <= 16:
-                raise ValueError("concurrent_requests must be an integer between 1 and 16")
+                raise ValueError(
+                    "concurrent_requests must be an integer between 1 and 16"
+                )
             assessment = await api.get_inference_assessment(
-                ModelId(model_id), context_tokens=context, concurrent_requests=concurrent,
+                ModelId(model_id),
+                context_tokens=context,
+                concurrent_requests=concurrent,
             )
             # Keep the verdict/workload structured under the tool-result budget;
             # generic prefix truncation can otherwise hide the deciding evidence.
-            payload = assessment.model_copy(update={
-                "reasons": tuple(reason[:600] for reason in assessment.reasons[:3]),
-                "local_replicas": tuple(replica.model_copy(update={"shards": replica.shards[:4]}) for replica in assessment.local_replicas[:3]),
-                "external_configurations": assessment.external_configurations[:3],
-            }).model_dump(mode="json", by_alias=False)
+            payload = assessment.model_copy(
+                update={
+                    "reasons": tuple(reason[:600] for reason in assessment.reasons[:3]),
+                    "local_replicas": tuple(
+                        replica.model_copy(update={"shards": replica.shards[:4]})
+                        for replica in assessment.local_replicas[:3]
+                    ),
+                    "external_configurations": assessment.external_configurations[:3],
+                }
+            ).model_dump(mode="json", by_alias=False)
             payload["coverage"] = {
                 "replicas": len(assessment.local_replicas),
                 "external_configurations": len(assessment.external_configurations),
@@ -1956,7 +2032,10 @@ class StewardHarness:
             for key in ("local_replicas", "external_configurations"):
                 details = cast(list[object], payload[key])
                 assert isinstance(details, list)
-                while details and len(json.dumps(payload, indent=1)) > MAX_TOOL_RESULT_CHARS - 256:
+                while (
+                    details
+                    and len(json.dumps(payload, indent=1)) > MAX_TOOL_RESULT_CHARS - 256
+                ):
                     details.pop()
             return _bounded(payload)
         if name == "get_model_catalog":
@@ -2148,9 +2227,7 @@ class StewardHarness:
         if not await self._api.cancel_local_command(active):
             # No local stream remains to finalize this command, so nothing
             # would ever discard a retained local-finish marker.
-            await self._api.send_task_cancellation(
-                active, suppress_local_finish=False
-            )
+            await self._api.send_task_cancellation(active, suppress_local_finish=False)
 
     async def _run_investigation(
         self,
@@ -2211,9 +2288,16 @@ class StewardHarness:
         )
         inventory_topic = inventory_question(question)
         if inventory_topic is not None:
+            installed_question = (
+                inventory_topic == "capability_nodes"
+                and "installed" in question.lower()
+                and self._installation_reader is not None
+            )
             tool = (
                 "get_cluster_versions"
                 if inventory_topic == "versions"
+                else "get_installed_capabilities"
+                if installed_question
                 else "get_capability_nodes"
             )
             yield TokenChunk(
@@ -2235,7 +2319,9 @@ class StewardHarness:
                 inventory_payload = {"error": "invalid inventory"}
             yield TokenChunk(
                 model=ModelId(STEWARD_VIRTUAL_MODEL_ID),
-                text=render_inventory(inventory_payload, inventory_topic),
+                text=render_installed_inventory(inventory_payload)
+                if installed_question
+                else render_inventory(inventory_payload, inventory_topic),
                 token_id=-1,
                 usage=None,
                 finish_reason="stop",
@@ -2442,7 +2528,10 @@ class StewardHarness:
         request = ChatCompletionRequest(
             model=model_id,  # type: ignore[arg-type]
             messages=messages,
-            tools=steward_tool_definitions(include_proposals=self._proposals_allowed)
+            tools=steward_tool_definitions(
+                include_proposals=self._proposals_allowed,
+                include_installations=self._installation_reader is not None,
+            )
             + extension_definitions,
             temperature=0.1,
             max_tokens=1024,

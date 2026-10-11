@@ -299,6 +299,7 @@ describe('StewardChatView', () => {
     expect(chatInit?.method).toBe('POST');
     const body: unknown = JSON.parse(String(chatInit?.body));
     expect((body as { model?: string }).model).toBe('skulk/steward');
+    expect(new Headers(chatInit?.headers).get('X-Skulk-Dashboard')).toBe('pairing-v1');
     expect((body as { stream?: boolean }).stream).toBe(true);
     expect(container?.textContent).toContain('Is the cluster healthy?');
   });

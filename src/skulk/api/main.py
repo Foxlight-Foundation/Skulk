@@ -129,7 +129,10 @@ from skulk.api.node_health import (
     live_data_transports,
     live_skulk_build_mismatch,
 )
-from skulk.api.operator_auth import create_operator_auth_router
+from skulk.api.operator_auth import (
+    authorize_plugin_request,
+    create_operator_auth_router,
+)
 from skulk.api.operator_gateway import (
     OPERATOR_GATEWAY_AUTHORIZED_SCOPE_KEY,
     OperatorGatewayAuthorization,
@@ -155,10 +158,12 @@ from skulk.api.realtime import (
 )
 from skulk.api.remote_pairing import RelayLink, RemotePairingController
 from skulk.api.steward import (
+    MAX_TOOL_RESULT_CHARS,
     STEWARD_NOT_READY_MESSAGES,
     STEWARD_RETRY_AFTER_SECONDS,
     STEWARD_SYSTEM_PROMPT,
     STEWARD_VIRTUAL_MODEL_ID,
+    InstalledMetadataReader,
     StewardActionDecisionRequest,
     StewardActionDecisionResponse,
     StewardActionProposalView,
@@ -4773,6 +4778,7 @@ class API:
         payload: ChatCompletionRequest,
         *,
         proposals_allowed: bool = True,
+        installation_reader: InstalledMetadataReader | None = None,
     ) -> StreamingResponse:
         """Serve the steward through the standard chat-completions surface.
 
@@ -4867,7 +4873,11 @@ class API:
                 detail=detail,
                 headers={"Retry-After": str(STEWARD_RETRY_AFTER_SECONDS)},
             )
-        harness = StewardHarness(self, proposals_allowed=proposals_allowed)
+        harness = StewardHarness(
+            self,
+            proposals_allowed=proposals_allowed,
+            installation_reader=installation_reader,
+        )
         command_id = CommandId()
         history, system_prompt, task_params = await self._steward_extension_transform(
             history, stream=payload.stream
@@ -6749,9 +6759,71 @@ class API:
         Returns:
             A streaming or collected chat-completions response.
         """
+        installation_reader = None
+        if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
+            try:
+                await authorize_plugin_request(
+                    request, self._operator_pairing_service, "plugins:read"
+                )
+            except HTTPException:
+                pass
+            else:
+
+                async def read_registration(
+                    plugin_id: str | None,
+                    qualified_id: str | None,
+                    revision: str | None,
+                ) -> dict[str, object]:
+                    """Recheck the same caller's plugin authority before every metadata read."""
+                    await authorize_plugin_request(
+                        request, self._operator_pairing_service, "plugins:read"
+                    )
+                    from skulk.extensions.installed_capabilities import (
+                        read_installed_capabilities,
+                        read_installed_contract,
+                        steward_installed_result,
+                    )
+                    from skulk.extensions.runtime_manager import (
+                        InstalledContractRequest,
+                    )
+
+                    services = (
+                        self._extensions.managed_services if self._extensions else None
+                    )
+                    if services is None:
+                        return {
+                            "error": "local managed installation inventory unavailable",
+                            "scope": "local_api_host",
+                        }
+                    async with asyncio.timeout(5):
+                        if (
+                            plugin_id is None
+                            and qualified_id is None
+                            and revision is None
+                        ):
+                            observation = await read_installed_capabilities(services)
+                        elif (
+                            plugin_id is not None
+                            and qualified_id is not None
+                            and revision is not None
+                        ):
+                            observation = await read_installed_contract(
+                                services,
+                                InstalledContractRequest(
+                                    plugin_id=plugin_id,
+                                    qualified_id=qualified_id,
+                                    revision=revision,
+                                ),
+                            )
+                        else:
+                            raise ValueError("incomplete installed contract selection")
+                    return steward_installed_result(observation, MAX_TOOL_RESULT_CHARS)
+
+                installation_reader = read_registration
         return await self.chat_completions(
             payload,
             steward_proposals_allowed=self._operator_mutation_allowed(request),
+            steward_installation_reader=installation_reader,
         )
 
     async def chat_completions(
@@ -6759,6 +6831,7 @@ class API:
         payload: ChatCompletionRequest,
         *,
         steward_proposals_allowed: bool = True,
+        steward_installation_reader: InstalledMetadataReader | None = None,
     ) -> StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
@@ -6769,6 +6842,7 @@ class API:
             return await self._steward_chat_completions(
                 payload,
                 proposals_allowed=steward_proposals_allowed,
+                installation_reader=steward_installation_reader,
             )
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
         model_card = await self._get_running_model_card(resolved_model)

@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import Literal
 
 import anyio
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +16,12 @@ from skulk.api.operator_auth import (
     TailnetPeerVerifier,
     authorize_plugin_owner_request,
     authorize_plugin_request,
+)
+from skulk.extensions.installed_capabilities import (
+    InstalledCapabilities,
+    InstalledContract,
+    read_installed_capabilities,
+    read_installed_contract,
 )
 from skulk.extensions.loader import LoadedExtensions
 from skulk.extensions.managed_services import (
@@ -57,6 +63,7 @@ from skulk.extensions.runtime_manager import (
     CatalogRequest,
     CatalogStoreRequest,
     InstallationRequest,
+    InstalledContractRequest,
     InstallRecoveryRequest,
     InstallSubmission,
     OperationRequest,
@@ -231,6 +238,46 @@ def create_managed_plugins_router(
         return await invoke(services.refresh)
 
     setup_runner = ServiceSetupRunner()
+
+    @router.get(
+        "/capabilities",
+        response_model=InstalledCapabilities,
+        summary="Read installed capability declarations",
+        description="Read selected purposes, versions, operation digests and declared runtime requirements independently of child enablement and readiness. Scope is this API host's local manager. Does not attach, repair setup, enable children or call providers. Requires plugins:read or direct owner authority. Missing metadata remains unknown; retained uninstalled selections do not imply usable capacity.",
+    )
+    async def installed_capabilities(
+        request: Request, response: Response
+    ) -> InstalledCapabilities:
+        """Authorize a bounded local metadata read without activating an installation."""
+        services = await authorized(request, response, "plugins:read")
+        return await invoke(lambda: read_installed_capabilities(services))
+
+    @router.get(
+        "/{plugin_id}/capabilities/{qualified_id}",
+        response_model=InstalledContract,
+        summary="Read one installed capability contract",
+        description="Read the full selected descriptor and input/output/media schemas for an exact installed id@version and required revision. Reads are bounded to 64 KiB per descriptor and do not require the child to be enabled or reachable. A changed or unavailable declaration is refused. Requires plugins:read or direct owner authority; declaration grants no execution permission.",
+    )
+    async def installed_contract(
+        plugin_id: InstallationIdentifier,
+        request: Request,
+        response: Response,
+        qualified_id: str = Path(
+            min_length=1,
+            max_length=256,
+            description="Exact installed id@version from the inventory.",
+        ),
+        revision: str = Query(
+            pattern=r"^[a-f0-9]{16}$",
+            description="Exact descriptor digest from the installed inventory.",
+        ),
+    ) -> InstalledContract:
+        """Return the exact selected contract without invoking its operation."""
+        services = await authorized(request, response, "plugins:read")
+        selected = InstalledContractRequest(
+            plugin_id=plugin_id, qualified_id=qualified_id, revision=revision
+        )
+        return await invoke(lambda: read_installed_contract(services, selected))
 
     async def runtime_update() -> RuntimeUpdate | None:
         """Where bringing the manager to this host's Skulk build stands, if anywhere."""

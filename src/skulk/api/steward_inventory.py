@@ -105,6 +105,54 @@ def capability_inventory(
     }
 
 
+def render_installed_inventory(payload: dict[str, object]) -> str:
+    """Explain local installation and independent readiness without inference claims."""
+    raw = payload.get("installations")
+    if "error" in payload or not isinstance(raw, list):
+        return "I couldn't verify installed capability metadata on this API host. Other hosts remain outside this inventory."
+    lines = ["Managed capability installations on this API host:"]
+    for item in cast("list[object]", raw):
+        if not isinstance(item, dict):
+            continue
+        row = cast("dict[str, object]", item)
+        enabled = (
+            "enablement unknown"
+            if row.get("enabled") is None
+            else "enabled"
+            if row.get("enabled")
+            else "disabled"
+        )
+        if row.get("uninstalled"):
+            enabled = "uninstalled; retained metadata"
+        reachability = row.get("reachable")
+        reachable = (
+            "reachable"
+            if reachability is True
+            else "unreachable"
+            if reachability is False
+            else "reachability unknown"
+        )
+        ready = row.get("ready_capabilities")
+        readiness = (
+            ", ".join(str(value) for value in cast("list[object]", ready))
+            if isinstance(ready, list) and ready
+            else "no exact ready contracts observed"
+        )
+        lines.append(
+            f"- {row.get('bundle') or row.get('plugin_id')}, version {row.get('version') or 'unknown'}: {enabled}, {reachable}; {readiness}."
+        )
+    if not raw:
+        lines.append("No entries were returned by this local manager.")
+    if payload.get("omittedInstallations"):
+        lines.append(
+            f"{payload['omittedInstallations']} additional installations were omitted from this bounded response."
+        )
+    lines.append(
+        "Installation and declared operations do not grant execution permission. A ready provisioner does not prove allocated inference capacity; other hosts and non-managed extensions are outside this inventory."
+    )
+    return "\n".join(lines)
+
+
 def bounded_inventory(payload: dict[str, object], limit: int) -> str:
     """Keep inventory JSON valid and disclose any omitted rows within a budget."""
     rows = cast("list[dict[str, object]]", payload["nodes"])
