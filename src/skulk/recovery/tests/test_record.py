@@ -1,5 +1,6 @@
 """The restart recovery record: derivation, round trip, and restored proposals."""
 
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -120,6 +121,13 @@ def test_missing_or_corrupt_record_reads_as_none(tmp_path: Path) -> None:
     path.write_text("{not json")
     assert read_record(path) is None
     path.write_text('{"formatVersion": 99}')
+    assert read_record(path) is None
+    # A naive time would break the recorder's arithmetic; it reads as unreadable.
+    good = derive_cluster_intent(
+        sample_state(), install_ids=INSTALL_IDS, session_id=SESSION, written_at=NOW
+    ).model_dump(mode="json", by_alias=True)
+    good["stamp"]["writtenAt"] = "2026-10-11T12:00:00"
+    path.write_text(json.dumps(good))
     assert read_record(path) is None
     # Damaged bytes that are not even UTF-8 must not stop the node starting.
     path.write_bytes(b"\xff\xfe\x00garbage")
