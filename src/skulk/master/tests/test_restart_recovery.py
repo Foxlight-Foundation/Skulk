@@ -184,15 +184,20 @@ async def test_recovery_completes_once_and_clears_the_flag() -> None:
     assert cleared.restart_recovery_pending is False
 
 
-def test_master_promoted_mid_recovery_finishes_it() -> None:
-    """Failover carries an unfinished restore to the new master."""
+def test_master_promoted_mid_recovery_keeps_it_pending() -> None:
+    """Failover carries an unfinished restore, and keeps every record untouched.
+
+    Inheriting a restore means a second node existed, which is the multi-node
+    case: even if only this node remains, it does not restore from its own
+    record alone.
+    """
     prior = State(restart_recovery_pending=True, last_event_applied_idx=3)
     master, _ = _master(seed_state_for_new_session(prior), record=_record())
 
     assert master._restart_recovery_record is not None  # pyright: ignore[reportPrivateUsage]
-    # The flag arrives with the carried seed; once applied, completion follows.
     master.state = master.state.model_copy(update={"restart_recovery_pending": True})
-    assert len(_advance(master)) == 1
+    assert _advance(master) == []
+    assert master.state.restart_recovery_pending is True
 
 
 def _card(model: str) -> ModelCard:
@@ -374,6 +379,15 @@ async def test_a_winner_without_placements_still_waits_for_the_whole_cluster() -
     assert _advance(master, settled=False) == []
     assert _advance(master, nodes={LOCAL_NODE, NodeId("peer-with-a-record")}) == []
     assert master.state.restart_recovery_pending is True
+    # The peer dropping out later does not turn this into a one-node restore.
+    assert _advance(master) == []
+    assert master.state.restart_recovery_pending is True
 
+
+async def test_a_lone_winner_without_placements_completes_after_settling() -> None:
+    master, global_recv = _master(None, record=None)
+    await _index_seed(master, global_recv)
+
+    assert _advance(master, settled=False) == []
     completion = _advance(master)
     assert len(completion) == 1 and isinstance(completion[0], RestartRecoveryCompleted)

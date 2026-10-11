@@ -1049,6 +1049,13 @@ class Master:
         )
         self._restart_recovery_restored = 0
         self._restart_recovery_info_deadline: datetime | None = None
+        # Latched once a recovering session has seen more than one node, or
+        # inherited from a failover (which needs a second node): restoring
+        # across nodes needs the freshest record from each, so a later shrink
+        # to one node must not restore from this node's record alone.
+        self._restart_recovery_spans_nodes = (
+            initial_state is not None and initial_state.restart_recovery_pending
+        )
         self._restart_recovery_multinode_noted = False
         self._ordered_steward_proposals = dict(
             initial_state.steward_action_proposals
@@ -1967,11 +1974,13 @@ class Master:
         if not topology_settled:
             return []
         if len(connected_node_ids) != 1:
+            self._restart_recovery_spans_nodes = True
+        if self._restart_recovery_spans_nodes:
             if not self._restart_recovery_multinode_noted:
                 self._restart_recovery_multinode_noted = True
                 logger.warning(
-                    "Restart recovery: the cluster came back with "
-                    f"{len(connected_node_ids)} nodes. Bringing placements back "
+                    "Restart recovery: the cluster came back with more than one "
+                    "node. Bringing placements back "
                     "across nodes needs the freshest record from each node, "
                     "which this build does not do yet; every node's record "
                     "stays untouched."
