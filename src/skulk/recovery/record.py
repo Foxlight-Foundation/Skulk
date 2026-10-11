@@ -73,6 +73,18 @@ class RecoveryStamp(FrozenModel):
         """Restore strict datetimes from the JSON file."""
         return datetime.fromisoformat(value) if isinstance(value, str) else value
 
+    @field_validator("written_at")
+    @classmethod
+    def _require_timezone(cls, value: datetime) -> datetime:
+        """Refuse a naive time, so a damaged record is ignored, not compared.
+
+        The recorder subtracts this from an aware UTC clock; a naive value would
+        raise there and stop the recorder instead of taking the unreadable path.
+        """
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("written_at must carry a timezone")
+        return value
+
 
 class PlacementIntent(FrozenModel):
     """One ordinary placement as the operator asked for it, free of live IDs."""

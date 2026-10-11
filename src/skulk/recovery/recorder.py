@@ -83,6 +83,10 @@ class ClusterIntentRecorder:
         self._path = path
         self._clock = clock
         self._last_written: ClusterIntentRecord | None = read_record(path)
+        # Install IDs this node has ever seen. A machine that drops out of
+        # telemetry for a while keeps its install ID here, so an operator's
+        # exclusion of it survives in the record until it returns.
+        self._known_install_ids: dict[NodeId, UUID] = {}
 
     async def record_once(self) -> bool:
         """Write the record if the view is writable and it changed or aged.
@@ -100,9 +104,26 @@ class ClusterIntentRecorder:
             return False
         assert state is not None
         now = self._clock()
+        live_ids = node_install_ids(self._telemetry_view)
+        self._known_install_ids.update(live_ids)
+        # Keep only IDs still referenced, since node IDs change on every
+        # restart and this map would otherwise grow for the life of the node.
+        referenced = {
+            node_id
+            for instance in state.instances.values()
+            for node_id in (
+                *instance.shard_assignments.node_to_runner,
+                *instance.excluded_nodes,
+            )
+        }
+        self._known_install_ids = {
+            node_id: install_id
+            for node_id, install_id in self._known_install_ids.items()
+            if node_id in live_ids or node_id in referenced
+        }
         candidate = derive_cluster_intent(
             state,
-            install_ids=node_install_ids(self._telemetry_view),
+            install_ids=self._known_install_ids,
             session_id=session_id,
             written_at=now,
         )

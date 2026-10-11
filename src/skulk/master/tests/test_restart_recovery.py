@@ -1,31 +1,48 @@
 """A cold-started master carries steward history back from the node's record."""
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
 import anyio
+import pytest
 
 from skulk.master.main import Master
+from skulk.master.placement import PlacementError, PlacementInfoPendingError
 from skulk.recovery.record import (
     RESTARTED_BEFORE_DECISION,
     ClusterIntentRecord,
+    PlacementIntent,
     RecoveryStamp,
 )
-from skulk.recovery.tests.fixtures import sample_proposal
+from skulk.recovery.restore import INFO_WAIT_AFTER_SETTLE_SECONDS
+from skulk.recovery.tests.fixtures import KITE1, sample_instance, sample_proposal
 from skulk.shared.apply import apply
+from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.session_carryover import seed_state_for_new_session
-from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
-from skulk.shared.types.common import NodeId, SessionId
+from skulk.shared.types.commands import (
+    ForwarderCommand,
+    ForwarderDownloadCommand,
+    PlaceInstance,
+)
+from skulk.shared.types.common import ModelId, NodeId, SessionId
 from skulk.shared.types.events import (
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
+    InstanceCreated,
+    InstanceFailureRecorded,
     LocalForwarderEvent,
     RestartRecoveryCompleted,
     StateSnapshotHydrated,
 )
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
+from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from skulk.shared.types.worker.shards import Sharding
 from skulk.utils.channels import Receiver, channel
+
+LOCAL_NODE = NodeId("local-node")
 
 
 def _master(
@@ -36,7 +53,7 @@ def _master(
 ) -> tuple[Master, Receiver[GlobalForwarderEvent]]:
     global_send, global_recv = channel[GlobalForwarderEvent]()
     master = Master(
-        NodeId(),
+        LOCAL_NODE,
         SessionId(master_node_id=NodeId(), election_clock=1),
         command_receiver=channel[ForwarderCommand]()[1],
         event_sender=channel[Event]()[0],
@@ -50,6 +67,21 @@ def _master(
         restart_recovery_enabled=enabled,
     )
     return master, global_recv
+
+
+def _advance(
+    master: Master,
+    *,
+    settled: bool = True,
+    nodes: set[NodeId] | None = None,
+    now: datetime | None = None,
+) -> list[Event]:
+    """Run one restart recovery step of the master's planning pass."""
+    return master._restart_recovery_events(  # pyright: ignore[reportPrivateUsage]
+        now or datetime.now(tz=timezone.utc),
+        topology_settled=settled,
+        connected_node_ids=nodes if nodes is not None else {LOCAL_NODE},
+    )
 
 
 def _record() -> ClusterIntentRecord:
@@ -130,7 +162,7 @@ def test_failover_keeps_live_history_and_ignores_the_disk_record() -> None:
 
     assert dict(master._ordered_steward_proposals) == {live.proposal_id: live}  # pyright: ignore[reportPrivateUsage]
     assert master._restart_recovery_record is None  # pyright: ignore[reportPrivateUsage]
-    assert master._finish_restart_recovery() == []  # pyright: ignore[reportPrivateUsage]
+    assert _advance(master) == []
 
 
 async def test_recovery_completes_once_and_clears_the_flag() -> None:
@@ -138,7 +170,7 @@ async def test_recovery_completes_once_and_clears_the_flag() -> None:
     master, global_recv = _master(None, record=record)
     await _index_seed(master, global_recv)
 
-    completion = master._finish_restart_recovery()  # pyright: ignore[reportPrivateUsage]
+    completion = _advance(master)
 
     assert completion == [
         RestartRecoveryCompleted(
@@ -147,17 +179,225 @@ async def test_recovery_completes_once_and_clears_the_flag() -> None:
             restored_proposals=2,
         )
     ]
-    assert master._finish_restart_recovery() == []  # pyright: ignore[reportPrivateUsage]
+    assert _advance(master) == []
     cleared = apply(master.state, IndexedEvent(idx=1, event=completion[0]))
     assert cleared.restart_recovery_pending is False
 
 
-def test_master_promoted_mid_recovery_finishes_it() -> None:
-    """Failover carries an unfinished restore to the new master."""
+def test_master_promoted_mid_recovery_keeps_it_pending() -> None:
+    """Failover carries an unfinished restore, and keeps every record untouched.
+
+    Inheriting a restore means a second node existed, which is the multi-node
+    case: even if only this node remains, it does not restore from its own
+    record alone.
+    """
     prior = State(restart_recovery_pending=True, last_event_applied_idx=3)
     master, _ = _master(seed_state_for_new_session(prior), record=_record())
 
     assert master._restart_recovery_record is not None  # pyright: ignore[reportPrivateUsage]
-    # The flag arrives with the carried seed; once applied, completion follows.
     master.state = master.state.model_copy(update={"restart_recovery_pending": True})
-    assert len(master._finish_restart_recovery()) == 1  # pyright: ignore[reportPrivateUsage]
+    assert _advance(master) == []
+    assert master.state.restart_recovery_pending is True
+
+
+def _card(model: str) -> ModelCard:
+    return ModelCard(
+        model_id=ModelId(model),
+        storage_size=Memory.from_gb(4),
+        n_layers=4,
+        hidden_size=8,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+
+
+def _intent(model: str) -> PlacementIntent:
+    return PlacementIntent(
+        model_id=ModelId(model),
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+        requested_context_tokens=8192,
+        host_install_ids=(KITE1,),
+    )
+
+
+class _Planner:
+    """Stand-in for the placement path: records commands, places one instance each."""
+
+    def __init__(self, *, failing: set[str] | None = None, pending: bool = False) -> None:
+        self.commands: list[PlaceInstance] = []
+        self._failing = failing or set()
+        self._pending = pending
+
+    def __call__(
+        self, command: PlaceInstance, current: Mapping[InstanceId, Instance]
+    ) -> dict[InstanceId, Instance]:
+        self.commands.append(command)
+        model = str(command.model_card.model_id)
+        if self._pending:
+            raise PlacementInfoPendingError("node memory has not been reported yet")
+        if model in self._failing:
+            raise PlacementError("not enough memory on any node")
+        placed = sample_instance(f"restored-{len(self.commands)}", model, (str(LOCAL_NODE),))
+        return {**current, placed.instance_id: placed}
+
+
+async def _cold_master_with(
+    monkeypatch: pytest.MonkeyPatch, *models: str, planner: _Planner, catalog: set[str] | None = None
+) -> Master:
+    record = _record().model_copy(update={"placements": tuple(_intent(m) for m in models)})
+    master, global_recv = _master(None, record=record)
+    await _index_seed(master, global_recv)
+    known = set(models) if catalog is None else catalog
+
+    def ordered_card(model_id: ModelId) -> ModelCard | None:
+        return _card(str(model_id)) if str(model_id) in known else None
+
+    monkeypatch.setattr(master, "_ordered_placement_model_card", ordered_card)
+    monkeypatch.setattr(master, "_place_for_steward_action", planner)
+    return master
+
+
+async def test_single_node_cold_start_brings_placements_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planner = _Planner()
+    master = await _cold_master_with(monkeypatch, "org/first", "org/second", planner=planner)
+
+    # Nothing happens before the settling window: node information and the
+    # returning machines must be visible first.
+    assert _advance(master, settled=False) == []
+
+    events = _advance(master)
+
+    created = [event for event in events if isinstance(event, InstanceCreated)]
+    assert [str(event.instance.shard_assignments.model_id) for event in created] == [
+        "org/first",
+        "org/second",
+    ]
+    assert isinstance(events[-1], RestartRecoveryCompleted)
+    assert events[-1].restored_placements == 2
+    assert [command.requested_context_tokens for command in planner.commands] == [8192, 8192]
+    # The second placement planned against the first, before either echoed.
+    assert _advance(master) == []
+
+
+async def test_multi_node_cold_start_keeps_every_record_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planner = _Planner()
+    master = await _cold_master_with(monkeypatch, "org/first", planner=planner)
+
+    assert _advance(master, nodes={LOCAL_NODE, NodeId("other-node")}) == []
+    assert planner.commands == []
+    assert master.state.restart_recovery_pending is True
+
+
+async def test_placements_that_cannot_come_back_are_reported_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planner = _Planner(failing={"org/huge"})
+    master = await _cold_master_with(
+        monkeypatch,
+        "org/gone",
+        "org/huge",
+        "org/fits",
+        planner=planner,
+        catalog={"org/huge", "org/fits"},
+    )
+
+    events = _advance(master)
+
+    failures = [event for event in events if isinstance(event, InstanceFailureRecorded)]
+    assert [failure.failure.error_message for failure in failures] == [
+        "Could not bring back org/gone after the restart: it is no longer in the model catalog.",
+        "Could not bring back org/huge after the restart: not enough memory on any node",
+    ]
+    assert {failure.failure.error_code for failure in failures} == {"placement_failed"}
+    assert [type(event).__name__ for event in events] == [
+        "InstanceFailureRecorded",
+        "InstanceFailureRecorded",
+        "InstanceCreated",
+        "RestartRecoveryCompleted",
+    ]
+    completion = events[-1]
+    assert isinstance(completion, RestartRecoveryCompleted)
+    assert completion.restored_placements == 1
+
+
+async def test_missing_node_information_is_retried_then_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master = await _cold_master_with(monkeypatch, "org/first", planner=_Planner(pending=True))
+    start = datetime.now(tz=timezone.utc)
+
+    assert _advance(master, now=start) == []
+    assert _advance(master, now=start + timedelta(seconds=60)) == []
+
+    events = _advance(master, now=start + timedelta(seconds=INFO_WAIT_AFTER_SETTLE_SECONDS + 1))
+    assert isinstance(events[0], InstanceFailureRecorded)
+    assert "node information did not arrive in time" in events[0].failure.error_message
+    assert isinstance(events[-1], RestartRecoveryCompleted)
+
+
+def test_old_machines_are_preferred_then_the_planner_chooses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master, _ = _master(None, record=None)
+    old_machine, other = NodeId("old-machine"), NodeId("other-machine")
+    attempts: list[list[NodeId]] = []
+
+    def planner(
+        command: PlaceInstance, current: Mapping[InstanceId, Instance]
+    ) -> dict[InstanceId, Instance]:
+        attempts.append(list(command.excluded_nodes))
+        if len(attempts) == 1:
+            raise PlacementError("the old machine is full")
+        return dict(current)
+
+    monkeypatch.setattr(master, "_place_for_steward_action", planner)
+    command = PlaceInstance(
+        model_card=_card("org/model"),
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+    )
+
+    master._place_restored_intent(  # pyright: ignore[reportPrivateUsage]
+        command, {}, frozenset({old_machine}), {old_machine, other}
+    )
+
+    assert attempts == [[other], []]
+
+
+async def test_a_winner_without_placements_still_waits_for_the_whole_cluster() -> None:
+    """An empty local record must not release peers whose records hold placements."""
+    master, global_recv = _master(None, record=None)
+    await _index_seed(master, global_recv)
+
+    assert _advance(master, settled=False) == []
+    assert _advance(master, nodes={LOCAL_NODE, NodeId("peer-with-a-record")}) == []
+    assert master.state.restart_recovery_pending is True
+    # The peer dropping out later does not turn this into a one-node restore.
+    assert _advance(master) == []
+    assert master.state.restart_recovery_pending is True
+
+
+async def test_a_lone_winner_without_placements_completes_after_settling() -> None:
+    master, global_recv = _master(None, record=None)
+    await _index_seed(master, global_recv)
+
+    assert _advance(master, settled=False) == []
+    completion = _advance(master)
+    assert len(completion) == 1 and isinstance(completion[0], RestartRecoveryCompleted)
+
+
+async def test_a_peer_seen_only_while_settling_still_counts() -> None:
+    """A peer that leaves before the window ends still makes it multi-node."""
+    master, global_recv = _master(None, record=_record())
+    await _index_seed(master, global_recv)
+
+    assert _advance(master, settled=False, nodes={LOCAL_NODE, NodeId("brief-peer")}) == []
+    assert _advance(master) == []
+    assert master.state.restart_recovery_pending is True

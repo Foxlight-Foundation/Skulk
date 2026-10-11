@@ -124,3 +124,34 @@ async def test_unwritable_disk_is_reported_not_raised(tmp_path: Path) -> None:
     current: list[State | None] = [sample_state()]
 
     assert not await _recorder(blocked / "cluster-intent.json", current, clock).record_once()
+
+
+async def test_an_offline_excluded_machine_stays_excluded(tmp_path: Path) -> None:
+    """A machine missing from telemetry keeps its install ID while referenced."""
+    path = tmp_path / "cluster-intent.json"
+    clock = _Clock()
+    telemetry = _telemetry()
+    telemetry.node_identities[NodeId("node-b")] = NodeIdentity(
+        friendly_name="kite2",
+        node_install_id=UUID("22222222-2222-4222-8222-222222222222"),
+    )
+    current: list[State | None] = [sample_state()]
+    recorder = ClusterIntentRecorder(
+        state_provider=lambda: current[0],
+        session_provider=lambda: SESSION,
+        telemetry_view=telemetry,
+        path=path,
+        clock=clock,
+    )
+    assert await recorder.record_once()
+
+    # node-a, which the second placement excludes, drops out of telemetry.
+    del telemetry.node_identities[NodeId("node-a")]
+    clock.now += RECORD_REFRESH_AFTER * 2
+    assert await recorder.record_once()
+
+    record = read_record(path)
+    assert record is not None
+    assert record.placements[1].excluded_install_ids == (
+        UUID("11111111-1111-4111-8111-111111111111"),
+    )
