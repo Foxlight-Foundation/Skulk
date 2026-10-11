@@ -366,6 +366,9 @@ from skulk.operator.relay import (
     OperatorRelayConfiguration,
     OperatorRelayRouteRejectedError,
 )
+from skulk.recovery.fetch import RECORD_PATH as RESTART_RECOVERY_RECORD_PATH
+from skulk.recovery.record import RestartRecoveryRecordResponse, read_record
+from skulk.recovery.recorder import RECOVERY_RECORD_PATH
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
@@ -3427,6 +3430,21 @@ class API:
                 "authority because it is paired with the approval workflow."
             ),
         )(self.list_steward_action_proposals)
+        self.app.get(
+            RESTART_RECOVERY_RECORD_PATH,
+            tags=["Restart recovery"],
+            summary="Read this node's restart recovery record",
+            description=(
+                "Return the record this node keeps of what the cluster was "
+                "running: ordinary placement intents by stable install ID, the "
+                "steward proposal audit, and when the content was last confirmed "
+                "current. A master that starts cold after a whole-cluster restart "
+                "fetches the freshest record from the node that holds it. "
+                "Requires loopback, a direct trusted-fabric peer, or the "
+                "authenticated operator gateway."
+            ),
+            response_model=RestartRecoveryRecordResponse,
+        )(self.get_restart_recovery_record)
         self.app.post(
             "/v1/steward/proposals/{proposal_id}/decision",
             tags=["Intelligent Fabric"],
@@ -5117,6 +5135,25 @@ class API:
             HTTPException: When the alias is not authorized in the catalog.
         """
         return await self._load_authorized_model_card(model_id)
+
+    async def get_restart_recovery_record(
+        self, request: Request
+    ) -> RestartRecoveryRecordResponse:
+        """Serve this node's restart recovery record to a cold-started master.
+
+        Args:
+            request: Incoming request; must come from loopback, a direct
+                trusted-fabric peer, or the authenticated operator gateway.
+
+        Returns:
+            This node's identity and its record, or no record when it has none.
+
+        Raises:
+            HTTPException: If the caller lacks that authority.
+        """
+        self._require_operator_mutation(request)
+        record = await to_thread.run_sync(read_record, RECOVERY_RECORD_PATH)
+        return RestartRecoveryRecordResponse(node_id=self.node_id, record=record)
 
     async def list_steward_action_proposals(
         self, request: Request

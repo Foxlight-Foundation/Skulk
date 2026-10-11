@@ -4,15 +4,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
 
-from skulk.recovery.record import read_record
+import anyio
+
+from skulk.recovery.record import DEPARTURE_GRACE, read_record
 from skulk.recovery.recorder import (
     RECORD_REFRESH_AFTER,
     ClusterIntentRecorder,
     record_is_writable,
 )
-from skulk.recovery.tests.fixtures import sample_state
+from skulk.recovery.tests.fixtures import connected, sample_instance, sample_state
 from skulk.shared.types.common import NodeId, SessionId
 from skulk.shared.types.profiling import NodeIdentity
+from skulk.shared.types.restart_recovery import RestartRecoveryAdvert
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import TelemetryView
 
@@ -155,3 +158,200 @@ async def test_an_offline_excluded_machine_stays_excluded(tmp_path: Path) -> Non
     assert record.placements[1].excluded_install_ids == (
         UUID("11111111-1111-4111-8111-111111111111"),
     )
+
+
+async def test_the_advert_describes_the_record_and_goes_out_at_once(tmp_path: Path) -> None:
+    """A cold-started master needs every node's advert before it writes anything."""
+    path = tmp_path / "cluster-intent.json"
+    sent: list[RestartRecoveryAdvert] = []
+
+    async def send(advert: RestartRecoveryAdvert) -> None:
+        sent.append(advert)
+
+    clock = _Clock()
+    current: list[State | None] = [State(last_event_applied_idx=0, restart_recovery_pending=True)]
+    recorder = ClusterIntentRecorder(
+        state_provider=lambda: current[0],
+        session_provider=lambda: SESSION,
+        telemetry_view=_telemetry(),
+        path=path,
+        clock=clock,
+        advert_sender=send,
+        api_port=52915,
+    )
+    assert recorder.advert() == RestartRecoveryAdvert(written_at=None, placements=0, api_port=52915)
+
+    with anyio.move_on_after(0.2):
+        await recorder.run()
+    # Recovery is pending, so nothing was written, but the advert still went out.
+    assert sent == [RestartRecoveryAdvert(written_at=None, placements=0, api_port=52915)]
+
+    current[0] = sample_state()
+    assert await recorder.record_once()
+    assert recorder.advert() == RestartRecoveryAdvert(
+        written_at=clock.now, placements=2, api_port=52915
+    )
+
+
+def _two_machine_telemetry() -> TelemetryView:
+    telemetry = _telemetry()
+    telemetry.node_identities[NodeId("node-b")] = NodeIdentity(
+        friendly_name="kite2",
+        node_install_id=UUID("22222222-2222-4222-8222-222222222222"),
+    )
+    return telemetry
+
+
+def _one_model_per_machine() -> State:
+    on_a = sample_instance("on-a", "org/on-a", ("node-a",))
+    on_b = sample_instance("on-b", "org/on-b", ("node-b",))
+    return State(
+        instances={on_a.instance_id: on_a, on_b.instance_id: on_b},
+        topology=connected("node-a", "node-b"),
+        last_event_applied_idx=42,
+    )
+
+
+def _recorded_models(path: Path) -> list[str]:
+    record = read_record(path)
+    assert record is not None
+    return [placement.model_id for placement in record.placements]
+
+
+def _two_machine_recorder(
+    path: Path, current: list[State | None], clock: _Clock, telemetry: TelemetryView
+) -> ClusterIntentRecorder:
+    return ClusterIntentRecorder(
+        state_provider=lambda: current[0],
+        session_provider=lambda: SESSION,
+        telemetry_view=telemetry,
+        path=path,
+        clock=clock,
+    )
+
+
+def _after_node_b_left(state: State) -> State:
+    """The master's view once node-b timed out: its node and placement gone."""
+    return state.model_copy(
+        update={
+            "instances": {
+                instance_id: instance
+                for instance_id, instance in state.instances.items()
+                if NodeId("node-b") not in instance.shard_assignments.node_to_runner
+            },
+            "topology": connected("node-a"),
+        }
+    )
+
+
+async def test_a_departed_machines_placement_outlives_it_for_the_grace(
+    tmp_path: Path,
+) -> None:
+    """Machines in a shutdown go down minutes apart; the last one standing
+    must still record the models of the ones already gone."""
+    path = tmp_path / "cluster-intent.json"
+    clock = _Clock()
+    current: list[State | None] = [_one_model_per_machine()]
+    recorder = _two_machine_recorder(path, current, clock, _two_machine_telemetry())
+    assert await recorder.record_once()
+
+    state = current[0]
+    assert state is not None
+    current[0] = _after_node_b_left(state)
+    clock.now += timedelta(seconds=40)
+    # The content is unchanged, so nothing new is written.
+    assert not await recorder.record_once()
+    assert _recorded_models(path) == ["org/on-a", "org/on-b"]
+
+    clock.now += RECORD_REFRESH_AFTER
+    assert await recorder.record_once()
+    assert _recorded_models(path) == ["org/on-a", "org/on-b"]
+
+    clock.now += DEPARTURE_GRACE
+    assert await recorder.record_once()
+    assert _recorded_models(path) == ["org/on-a"]
+
+
+async def test_a_stopped_placement_leaves_the_record_at_once(tmp_path: Path) -> None:
+    """Its machine is still connected, so the operator (or the steward) stopped it."""
+    path = tmp_path / "cluster-intent.json"
+    clock = _Clock()
+    current: list[State | None] = [_one_model_per_machine()]
+    recorder = _two_machine_recorder(path, current, clock, _two_machine_telemetry())
+    assert await recorder.record_once()
+
+    state = current[0]
+    assert state is not None
+    current[0] = state.model_copy(
+        update={
+            "instances": {
+                instance_id: instance
+                for instance_id, instance in state.instances.items()
+                if instance_id != "on-b"
+            }
+        }
+    )
+    clock.now += timedelta(seconds=5)
+    assert await recorder.record_once()
+    assert _recorded_models(path) == ["org/on-a"]
+
+
+async def test_a_departed_placement_repaired_elsewhere_is_recorded_once(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "cluster-intent.json"
+    clock = _Clock()
+    current: list[State | None] = [_one_model_per_machine()]
+    recorder = _two_machine_recorder(path, current, clock, _two_machine_telemetry())
+    assert await recorder.record_once()
+
+    state = current[0]
+    assert state is not None
+    departed = _after_node_b_left(state)
+    current[0] = departed
+    clock.now += timedelta(seconds=40)
+    assert not await recorder.record_once()
+
+    moved = sample_instance("moved", "org/on-b", ("node-a",))
+    current[0] = departed.model_copy(
+        update={"instances": {**departed.instances, moved.instance_id: moved}}
+    )
+    clock.now += timedelta(seconds=5)
+    assert await recorder.record_once()
+    record = read_record(path)
+    assert record is not None
+    assert [
+        (placement.model_id, placement.host_install_ids) for placement in record.placements
+    ] == [
+        ("org/on-a", (UUID("11111111-1111-4111-8111-111111111111"),)),
+        ("org/on-b", (UUID("11111111-1111-4111-8111-111111111111"),)),
+    ]
+
+
+async def test_a_returning_machine_without_its_model_ends_the_grace(
+    tmp_path: Path,
+) -> None:
+    """Back in the cluster and not running the model: the record follows suit."""
+    path = tmp_path / "cluster-intent.json"
+    clock = _Clock()
+    telemetry = _two_machine_telemetry()
+    current: list[State | None] = [_one_model_per_machine()]
+    recorder = _two_machine_recorder(path, current, clock, telemetry)
+    assert await recorder.record_once()
+
+    state = current[0]
+    assert state is not None
+    departed = _after_node_b_left(state)
+    current[0] = departed
+    clock.now += timedelta(seconds=40)
+    assert not await recorder.record_once()
+
+    # node-b restarts under a new runtime node ID with the same install ID.
+    telemetry.node_identities[NodeId("node-b-again")] = NodeIdentity(
+        friendly_name="kite2",
+        node_install_id=UUID("22222222-2222-4222-8222-222222222222"),
+    )
+    current[0] = departed.model_copy(update={"topology": connected("node-a", "node-b-again")})
+    clock.now += timedelta(seconds=30)
+    assert await recorder.record_once()
+    assert _recorded_models(path) == ["org/on-a"]
