@@ -329,6 +329,51 @@ def test_finished_and_failed_downloads_say_so() -> None:
     )
 
 
+def test_an_unseen_attempt_is_stale_only_when_absence_counts() -> None:
+    """Live downloads are telemetry: a master change clears them for a while."""
+    assert download_target_staleness(_cancel(), downloads={}, absence_is_evidence=False) is None
+
+
+def test_an_earlier_attempts_completion_is_not_this_attempts() -> None:
+    earlier = _downloads(
+        DownloadCompleted(
+            node_id=NodeId("node-a"),
+            shard_metadata=_shard(),
+            attempt_id=DownloadAttemptId("earlier"),
+            total=Memory.from_gb(8),
+        )
+    )
+    assert download_target_staleness(_cancel(), downloads=earlier) == (
+        "The proposed download is no longer active."
+    )
+    assert (
+        download_target_staleness(_cancel(), downloads=earlier, absence_is_evidence=False)
+        is None
+    )
+
+
+def test_proven_outcomes_are_stale_even_when_absence_does_not_count() -> None:
+    newer = _downloads(
+        DownloadPending(
+            node_id=NodeId("node-a"),
+            shard_metadata=_shard(),
+            attempt_id=DownloadAttemptId("retry"),
+        )
+    )
+    failed = _downloads(
+        DownloadFailed(
+            node_id=NodeId("node-a"),
+            shard_metadata=_shard(),
+            attempt_id=DownloadAttemptId("attempt"),
+            error_message="disk full",
+        )
+    )
+    assert download_target_staleness(_cancel(), downloads=newer, absence_is_evidence=False)
+    assert download_target_staleness(_cancel(), downloads=failed, absence_is_evidence=False) == (
+        "The download of org/model already failed after review."
+    )
+
+
 def _place(card: ModelCard) -> StewardPlaceModelAction:
     return StewardPlaceModelAction(
         model_card=card,

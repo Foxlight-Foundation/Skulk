@@ -48,7 +48,9 @@ This project records release notes here and mirrors public-facing notes in
   changes while it waits (the instance moved, was replaced or now serves a
   different model, the download finished or was retried, the model card
   changed) is marked out of date within about ten seconds, with what changed,
-  and can no longer be approved. A refused approval names what changed instead
+  and can no longer be approved. A download cancellation is marked only when
+  the cluster can see what happened to that download, so a change of master,
+  which briefly hides download progress, does not mark it. A refused approval names what changed instead
   of "no longer matches current state", and the dashboard keeps each decided
   proposal on screen for ten minutes with its result and reason instead of
   showing a success message while the action was refused. Dismissing a

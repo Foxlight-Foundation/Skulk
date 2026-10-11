@@ -256,7 +256,11 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   approval checks (`src/skulk/master/steward_staleness.py`, pure, shared with
   approval) and orders terminal `stale` (`decided_by: "fabric_staleness"`) once
   the reviewed target changes; the outcome names the change, and approval
-  refusals use the same wording. Past-deadline proposals are left to expiry.
+  refusals use the same wording. The pass runs with
+  `absence_is_evidence=False`: a cancel-download is marked only for a newer
+  attempt or the reviewed attempt's own completion or failure, since failover
+  clears live download telemetry; approval alone refuses an unseen attempt.
+  Past-deadline proposals are left to expiry.
   Deciding a non-pending proposal returns 409 with status and outcome.
   `dispatched` means command acceptance, not lifecycle completion. A promoted
   master reconciles dispatched proposals for five minutes from their separate
