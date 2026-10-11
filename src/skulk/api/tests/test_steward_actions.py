@@ -6,9 +6,14 @@ from typing import cast
 
 import anyio
 import pytest
+from fastapi import HTTPException, Request
 
 from skulk.api.main import API
-from skulk.api.steward import StewardHarness, steward_tool_definitions
+from skulk.api.steward import (
+    StewardActionDecisionRequest,
+    StewardHarness,
+    steward_tool_definitions,
+)
 from skulk.master.main import Master
 from skulk.shared.apply import apply
 from skulk.shared.models.model_cards import ModelCard, ModelTask
@@ -315,7 +320,7 @@ async def test_cancel_approval_rejects_a_replacement_download_attempt() -> None:
     master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
     master.download_command_sender = download_sender
 
-    with pytest.raises(ValueError, match="no longer active"):
+    with pytest.raises(ValueError, match="newer download attempt replaced"):
         await master._execute_approved_steward_action(  # pyright: ignore[reportPrivateUsage]
             proposal
         )
@@ -396,8 +401,106 @@ async def test_stop_approval_rejects_replaced_instance_state() -> None:
     master.state = State(instances={replacement.instance_id: replacement})
     master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
 
-    with pytest.raises(ValueError, match="intent no longer matches"):
+    with pytest.raises(ValueError, match="placement details changed"):
         await master._execute_approved_steward_action(proposal)  # pyright: ignore[reportPrivateUsage]
+
+
+def _stop_proposal(instance: MlxRingInstance, *, expires_in: timedelta) -> StewardActionProposal:
+    now = datetime.now(tz=timezone.utc)
+    return StewardActionProposal(
+        action=StewardStopInstanceAction(instance=instance),
+        rationale="The instance is no longer required.",
+        evidence=("No active workload requires the instance.",),
+        expected_effect="Stop the reviewed ordinary model instance.",
+        created_at=now - timedelta(minutes=1),
+        expires_at=now + expires_in,
+    )
+
+
+def test_pending_proposal_goes_stale_when_its_target_disappears() -> None:
+    """The operator sees an out-of-date proposal before deciding on it."""
+    reviewed = _ordinary_instance()
+    proposal = _stop_proposal(reviewed, expires_in=timedelta(minutes=9))
+    master = _master_with_channels()
+    master.state = State()
+    master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
+    now = datetime.now(tz=timezone.utc)
+
+    changes = master._mark_stale_steward_action_proposals(now)  # pyright: ignore[reportPrivateUsage]
+
+    assert len(changes) == 1
+    stale = changes[0].proposal
+    assert stale.status == "stale"
+    assert stale.decided_at == now
+    assert stale.decided_by == "fabric_staleness"
+    assert stale.outcome == (
+        "The instance no longer exists: org/restart-model was stopped or removed "
+        "after review."
+    )
+    assert master._ordered_steward_proposals[proposal.proposal_id] == stale  # pyright: ignore[reportPrivateUsage]
+    # Applying the ordered change makes the status replicated truth.
+    replicated = apply(
+        State(steward_action_proposals={proposal.proposal_id: proposal}),
+        IndexedEvent(idx=0, event=changes[0]),
+    )
+    assert replicated.steward_action_proposals[proposal.proposal_id].status == "stale"
+
+
+def test_current_pending_proposal_stays_pending() -> None:
+    """An unchanged target leaves the proposal for the operator to decide."""
+    instance = _ordinary_instance()
+    proposal = _stop_proposal(instance, expires_in=timedelta(minutes=9))
+    master = _master_with_channels()
+    master.state = State(instances={instance.instance_id: instance})
+    master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
+
+    assert master._mark_stale_steward_action_proposals(  # pyright: ignore[reportPrivateUsage]
+        datetime.now(tz=timezone.utc)
+    ) == []
+    assert master._ordered_steward_proposals[proposal.proposal_id].status == "pending"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_past_deadline_proposal_is_left_to_expiry() -> None:
+    """Each terminal status keeps one meaning: a lapsed proposal expires."""
+    proposal = _stop_proposal(_ordinary_instance(), expires_in=timedelta(seconds=-1))
+    master = _master_with_channels()
+    master.state = State()
+    master._ordered_steward_proposals = {proposal.proposal_id: proposal}  # pyright: ignore[reportPrivateUsage]
+    now = datetime.now(tz=timezone.utc)
+
+    assert master._mark_stale_steward_action_proposals(now) == []  # pyright: ignore[reportPrivateUsage]
+    expired = master._expire_steward_action_proposals(now)  # pyright: ignore[reportPrivateUsage]
+    assert [change.proposal.status for change in expired] == ["expired"]
+
+
+@pytest.mark.asyncio
+async def test_deciding_a_stale_proposal_returns_its_reason() -> None:
+    """A late click learns what changed instead of a bare conflict."""
+    proposal = _stop_proposal(
+        _ordinary_instance(), expires_in=timedelta(minutes=9)
+    ).model_copy(
+        update={
+            "status": "stale",
+            "decided_at": datetime.now(tz=timezone.utc),
+            "decided_by": "fabric_staleness",
+            "outcome": "The instance changed after review: its runners were replaced.",
+        }
+    )
+    api = object.__new__(API)
+    api.state = State(steward_action_proposals={proposal.proposal_id: proposal})
+
+    with pytest.raises(HTTPException) as refused:
+        await api.decide_steward_action_proposal(
+            proposal.proposal_id,
+            StewardActionDecisionRequest(approved=True),
+            Request({"type": "http", "headers": [], "client": ("127.0.0.1", 52415)}),
+        )
+
+    assert refused.value.status_code == 409
+    assert refused.value.detail == (
+        "Steward proposal is already stale: The instance changed after review: "
+        "its runners were replaced."
+    )
 
 
 @pytest.mark.asyncio
@@ -930,6 +1033,8 @@ async def test_place_approvals_reserve_capacity_before_state_echo(
     master._steward_dispatched_effect_issued = set()  # pyright: ignore[reportPrivateUsage]
     master._steward_reserved_placements = {}  # pyright: ignore[reportPrivateUsage]
     master.download_command_sender = download_sender
+    # Approval checks card truth before planning; seed it as the catalog would.
+    _authorize_instance_card(master, template)
     observed_counts: list[int] = []
 
     def reserve_place(

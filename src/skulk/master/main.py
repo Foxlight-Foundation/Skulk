@@ -33,6 +33,13 @@ from skulk.master.placement_utils import (
     unified_memory_gpu_node_ids,
     usable_vram_by_node,
 )
+from skulk.master.steward_staleness import (
+    describe_instance_drift,
+    download_target_staleness,
+    lifecycle_target_staleness,
+    placement_card_staleness,
+    steward_proposal_staleness,
+)
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.log_summaries import summarize_command_for_log
@@ -1736,6 +1743,16 @@ class Master:
         """
         action = proposal.action
         if isinstance(action, StewardPlaceModelAction):
+            # Name a changed card the way the pending check would, before the
+            # placer's generic card-identity refusal can.
+            card_staleness = placement_card_staleness(
+                action,
+                ordered_card=self._ordered_placement_model_card(
+                    action.model_card.model_id
+                ),
+            )
+            if card_staleness is not None:
+                raise ValueError(card_staleness)
             command = PlaceInstance(
                 model_card=action.model_card,
                 sharding=action.sharding,
@@ -1764,14 +1781,11 @@ class Master:
             )
 
         if isinstance(action, StewardCancelDownloadAction):
-            active_download = any(
-                isinstance(progress, (DownloadPending, DownloadOngoing))
-                and progress.shard_metadata.model_card.model_id == action.model_id
-                and progress.attempt_id == action.attempt_id
-                for progress in self._effective_downloads().get(action.node_id, ())
+            download_staleness = download_target_staleness(
+                action, downloads=self._effective_downloads()
             )
-            if not active_download:
-                raise ValueError("The proposed download is no longer active")
+            if download_staleness is not None:
+                raise ValueError(download_staleness)
             command = CancelDownload(
                 target_node_id=action.node_id,
                 model_id=action.model_id,
@@ -1779,30 +1793,18 @@ class Master:
             )
             return [], command.command_id, "approved"
 
-        instance_id = action.instance.instance_id
-        model_id = action.instance.shard_assignments.model_id
-        instance = self.state.instances.get(instance_id)
-        if instance is None:
-            raise ValueError("The proposed instance no longer exists")
-        if instance.system_role is not None:
-            raise ValueError("System placements cannot be changed by steward actions")
-        if instance.shard_assignments.model_id != model_id:
-            raise ValueError("The proposed instance now serves different model truth")
-        if instance != action.instance:
-            raise ValueError("The proposed instance intent no longer matches current state")
-        if any(
-            other.proposal_id != proposal.proposal_id
-            and other.status in {"approved", "dispatched"}
-            and isinstance(
-                other.action,
-                (StewardStopInstanceAction, StewardRestartInstanceAction),
-            )
-            and other.action.instance.instance_id == instance_id
-            for other in self._ordered_steward_proposals.values()
-        ):
-            raise ValueError("Another steward action already owns this instance")
+        lifecycle_staleness = lifecycle_target_staleness(
+            proposal,
+            action,
+            instances=self.state.instances,
+            node_names=self._steward_node_names(),
+            other_proposals=self._ordered_steward_proposals.values(),
+            ordered_card=self._ordered_placement_model_card,
+        )
+        if lifecycle_staleness is not None:
+            raise ValueError(lifecycle_staleness)
 
-        delete_command = DeleteInstance(instance_id=instance_id)
+        delete_command = DeleteInstance(instance_id=action.instance.instance_id)
         if isinstance(action, StewardStopInstanceAction):
             return [], delete_command.command_id, "dispatched"
 
@@ -1872,6 +1874,60 @@ class Master:
         self._prune_ordered_steward_action_proposals()
         return changes
 
+    def _steward_node_names(self) -> dict[NodeId, str]:
+        """Return friendly node names for operator-readable steward reasons."""
+        return {
+            node_id: identity.friendly_name
+            for node_id, identity in self._telemetry_view.node_identities.items()
+        }
+
+    def _mark_stale_steward_action_proposals(
+        self, now: datetime
+    ) -> list[StewardActionProposalChanged]:
+        """Order out-of-date status for pending proposals whose target changed.
+
+        Approval already refuses a proposal whose reviewed target moved on;
+        checking while it waits means the operator sees that, with the reason,
+        before spending attention on it. The checks are the approval checks,
+        so a proposal never reads as current here and stale on approval for a
+        reason this pass could have seen. Expired proposals are left to the
+        expiry pass so each terminal status keeps one meaning.
+        """
+        pending = [
+            (proposal_id, proposal)
+            for proposal_id, proposal in self._ordered_steward_proposals.items()
+            if proposal.status == "pending" and proposal.expires_at > now
+        ]
+        if not pending:
+            return []
+        changes: list[StewardActionProposalChanged] = []
+        node_names = self._steward_node_names()
+        effective_downloads = self._effective_downloads()
+        for proposal_id, proposal in pending:
+            reason = steward_proposal_staleness(
+                proposal,
+                instances=self.state.instances,
+                downloads=effective_downloads,
+                node_names=node_names,
+                ordered_card=self._ordered_placement_model_card,
+                other_proposals=self._ordered_steward_proposals.values(),
+            )
+            if reason is None:
+                continue
+            stale = proposal.model_copy(
+                update={
+                    "status": "stale",
+                    "decided_at": now,
+                    "decided_by": "fabric_staleness",
+                    "outcome": reason[:1024],
+                }
+            )
+            self._ordered_steward_proposals[proposal_id] = stale
+            changes.append(StewardActionProposalChanged(proposal=stale))
+        if changes:
+            self._prune_ordered_steward_action_proposals()
+        return changes
+
     async def _resume_approved_steward_restarts(self, now: datetime) -> None:
         """Place approved restarts only after teardown and capacity converge."""
         for proposal_id, proposal in tuple(self._ordered_steward_proposals.items()):
@@ -1922,12 +1978,18 @@ class Master:
                         }
                     )
                 elif current_instance != action.instance:
+                    drift = describe_instance_drift(
+                        action.instance,
+                        current_instance,
+                        node_names=self._steward_node_names(),
+                    )
                     failed = proposal.model_copy(
                         update={
                             "status": "failed",
                             "outcome": (
-                                "The approved restart intent no longer matches current state."
-                            ),
+                                "The approved restart was not carried out. "
+                                f"{drift or 'The instance changed after approval.'}"
+                            )[:1024],
                         }
                     )
                 elif proposal_id in self._steward_restart_teardown_issued:
@@ -2186,7 +2248,15 @@ class Master:
                         )
                     if instance != action.instance:
                         raise ValueError(
-                            "The dispatched stop intent no longer matches current state"
+                            "The approved stop was not carried out. "
+                            + (
+                                describe_instance_drift(
+                                    action.instance,
+                                    instance,
+                                    node_names=self._steward_node_names(),
+                                )
+                                or "The instance changed after approval."
+                            )
                         )
                     after_delete = delete_instance(
                         DeleteInstance(
@@ -2216,9 +2286,21 @@ class Master:
                         continue
                     original = self.state.instances.get(action.instance.instance_id)
                     if original is not None:
-                        if original.system_role is not None or original != action.instance:
+                        if original.system_role is not None:
                             raise ValueError(
-                                "The dispatched restart intent no longer matches current state"
+                                "System placements cannot be changed by steward actions"
+                            )
+                        if original != action.instance:
+                            raise ValueError(
+                                "The approved restart was not carried out. "
+                                + (
+                                    describe_instance_drift(
+                                        action.instance,
+                                        original,
+                                        node_names=self._steward_node_names(),
+                                    )
+                                    or "The instance changed after approval."
+                                )
                             )
                         replacement_command = (
                             replacement_command_for_download_failed_instance(
@@ -3588,6 +3670,8 @@ class Master:
             now = datetime.now(tz=timezone.utc)
             for expiry_event in self._expire_steward_action_proposals(now):
                 await self._queue_control_event(expiry_event)
+            for stale_event in self._mark_stale_steward_action_proposals(now):
+                await self._queue_control_event(stale_event)
             self._report_heartbeat_gap_changes(now=now)
             # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master

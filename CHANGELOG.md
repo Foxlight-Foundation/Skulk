@@ -42,6 +42,17 @@ This project records release notes here and mirrors public-facing notes in
   build on anyio's public memory streams instead of a state class anyio made
   private in 4.12; channel behavior is unchanged.
 
+### Added
+
+- Steward proposals now say what happened to them. A proposal whose target
+  changes while it waits (the instance moved, was replaced or now serves a
+  different model, the download finished or was retried, the model card
+  changed) is marked out of date within about ten seconds, with what changed,
+  and can no longer be approved. A refused approval names what changed instead
+  of "no longer matches current state", and the dashboard keeps each decided
+  proposal on screen for ten minutes with its result and reason instead of
+  showing a success message while the action was refused.
+
 ### Fixed
 
 - Gemma 4 models on the MLX engine no longer end every tool-calling reply with

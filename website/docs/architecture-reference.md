@@ -235,6 +235,12 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   dispatched proposals inside the five-minute recovery window are retained
   even when that temporarily exceeds the target. The master accepts at most a
   15-minute proposal lifetime and publishes terminal expiry on deadline.
+  Each planning pass (about ten seconds) rechecks pending proposals with the
+  approval checks (`src/skulk/master/steward_staleness.py`, pure, shared with
+  approval) and orders terminal `stale` (`decided_by: "fabric_staleness"`) once
+  the reviewed target changes; the outcome names the change, and approval
+  refusals use the same wording. Past-deadline proposals are left to expiry.
+  Deciding a non-pending proposal returns 409 with status and outcome.
   `dispatched` means command acceptance, not lifecycle completion. A promoted
   master reconciles dispatched proposals for five minutes from their separate
   dispatch timestamp and reissues a
@@ -310,7 +316,9 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   from "the model failed mid-answer".
 - Dashboard: instances with `systemRole` set are hidden from all instance
   surfaces (filter in App.tsx instanceCards). The steward chat polls the safe
-  proposal list and presents separate Approve and Reject controls.
+  proposal list and presents separate Approve and Reject controls. Settled
+  proposals stay on screen for ten minutes with their status and reason
+  (`components/steward/proposalVisibility.ts`), dismissible per view.
 - Cards: `unsloth/Qwen3.6-35B-A3B-GGUF` (text-only so served lanes stay
   eligible) and `mlx-community/Qwen3.6-35B-A3B-4bit` (vision, MLX) are the
   v1 brain, both revision-pinned; `Qwen/Qwen3.6-35B-A3B-FP8` adds the
