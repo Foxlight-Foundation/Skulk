@@ -364,3 +364,16 @@ def test_old_machines_are_preferred_then_the_planner_chooses(
     )
 
     assert attempts == [[other], []]
+
+
+async def test_a_winner_without_placements_still_waits_for_the_whole_cluster() -> None:
+    """An empty local record must not release peers whose records hold placements."""
+    master, global_recv = _master(None, record=None)
+    await _index_seed(master, global_recv)
+
+    assert _advance(master, settled=False) == []
+    assert _advance(master, nodes={LOCAL_NODE, NodeId("peer-with-a-record")}) == []
+    assert master.state.restart_recovery_pending is True
+
+    completion = _advance(master)
+    assert len(completion) == 1 and isinstance(completion[0], RestartRecoveryCompleted)

@@ -1961,21 +1961,24 @@ class Master:
             or self._restart_recovery_completion_queued
         ):
             return []
+        # Both guards apply whatever this node's own record holds: a winner
+        # with an empty or missing record must not release peers whose
+        # records still carry placements.
+        if not topology_settled:
+            return []
+        if len(connected_node_ids) != 1:
+            if not self._restart_recovery_multinode_noted:
+                self._restart_recovery_multinode_noted = True
+                logger.warning(
+                    "Restart recovery: the cluster came back with "
+                    f"{len(connected_node_ids)} nodes. Bringing placements back "
+                    "across nodes needs the freshest record from each node, "
+                    "which this build does not do yet; every node's record "
+                    "stays untouched."
+                )
+            return []
         events: list[Event] = []
         if self._restart_recovery_remaining:
-            if not topology_settled:
-                return []
-            if len(connected_node_ids) != 1:
-                if not self._restart_recovery_multinode_noted:
-                    self._restart_recovery_multinode_noted = True
-                    logger.warning(
-                        "Restart recovery: the cluster came back with "
-                        f"{len(connected_node_ids)} nodes. Bringing placements back "
-                        "across nodes needs the freshest record from each node, "
-                        "which this build does not do yet; every node's record "
-                        "stays untouched."
-                    )
-                return []
             events.extend(self._restore_recorded_placements(now, connected_node_ids))
             if self._restart_recovery_remaining:
                 # The planner still lacks node information; retry next pass.
