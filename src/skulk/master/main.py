@@ -1781,8 +1781,18 @@ class Master:
         self,
         command: PlaceInstance,
         current_instances: Mapping[InstanceId, Instance],
+        *,
+        stamped_exclusions: set[NodeId] | None = None,
     ) -> dict[InstanceId, Instance]:
-        """Compute one approved steward placement using authoritative inputs."""
+        """Compute one approved steward placement using authoritative inputs.
+
+        Args:
+            command: The placement to compute; its exclusions bound the search.
+            current_instances: Instance map to place against.
+            stamped_exclusions: The operator's exclusions to record on the new
+                instance when the search excludes more than they did; None
+                records the command's own exclusions.
+        """
         self._require_ordered_place_instance_card(command)
         credited_memory, credited_vram = self._placement_memory_inputs(
             current_instances
@@ -1795,6 +1805,7 @@ class Master:
             self.state.node_network,
             download_status=self._effective_downloads(),
             excluded_nodes=set(command.excluded_nodes),
+            stamped_exclusions=stamped_exclusions,
             node_resources=self._telemetry_view.node_resources,
             node_vram=credited_vram,
             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
@@ -2225,9 +2236,12 @@ class Master:
         """Place a restored intent on its old machines, else where it fits.
 
         The planner has no "prefer these nodes" input, so the first attempt
-        excludes every other connected node. If the old machines cannot take
-        it now, the second attempt lets the planner choose, honoring only the
-        operator's own exclusions.
+        excludes every other connected node. Only the operator's own
+        exclusions are recorded on the instance: the narrowing is how restore
+        steers, not something anyone asked for, and recording it would keep
+        repairs and later restores off every other machine for good. If the
+        old machines cannot take it now, the second attempt lets the planner
+        choose, honoring only the operator's exclusions.
         """
         others = connected_node_ids - preferred
         if preferred and others and len(preferred) >= command.min_nodes:
@@ -2239,7 +2253,11 @@ class Master:
             try:
                 # The steward helper is the generic "place against this
                 # instance map with authoritative inputs" path.
-                return self._place_for_steward_action(narrowed, current)
+                return self._place_for_steward_action(
+                    narrowed,
+                    current,
+                    stamped_exclusions=set(command.excluded_nodes),
+                )
             except PlacementInfoPendingError:
                 raise
             except PlacementError:

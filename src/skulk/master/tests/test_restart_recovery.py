@@ -7,6 +7,7 @@ from uuid import UUID
 import anyio
 import pytest
 
+import skulk.master.main as master_main
 from skulk.master.main import Master
 from skulk.master.placement import PlacementError, PlacementInfoPendingError
 from skulk.recovery.record import (
@@ -235,13 +236,19 @@ class _Planner:
 
     def __init__(self, *, failing: set[str] | None = None, pending: bool = False) -> None:
         self.commands: list[PlaceInstance] = []
+        self.stamped: list[set[NodeId] | None] = []
         self._failing = failing or set()
         self._pending = pending
 
     def __call__(
-        self, command: PlaceInstance, current: Mapping[InstanceId, Instance]
+        self,
+        command: PlaceInstance,
+        current: Mapping[InstanceId, Instance],
+        *,
+        stamped_exclusions: set[NodeId] | None = None,
     ) -> dict[InstanceId, Instance]:
         self.commands.append(command)
+        self.stamped.append(stamped_exclusions)
         model = str(command.model_card.model_id)
         if self._pending:
             raise PlacementInfoPendingError("node memory has not been reported yet")
@@ -355,11 +362,16 @@ def test_old_machines_are_preferred_then_the_planner_chooses(
     master, _ = _master(None, record=None)
     old_machine, other = NodeId("old-machine"), NodeId("other-machine")
     attempts: list[list[NodeId]] = []
+    stamped: list[set[NodeId] | None] = []
 
     def planner(
-        command: PlaceInstance, current: Mapping[InstanceId, Instance]
+        command: PlaceInstance,
+        current: Mapping[InstanceId, Instance],
+        *,
+        stamped_exclusions: set[NodeId] | None = None,
     ) -> dict[InstanceId, Instance]:
         attempts.append(list(command.excluded_nodes))
+        stamped.append(stamped_exclusions)
         if len(attempts) == 1:
             raise PlacementError("the old machine is full")
         return dict(current)
@@ -377,6 +389,51 @@ def test_old_machines_are_preferred_then_the_planner_chooses(
     )
 
     assert attempts == [[other], []]
+    # The steering toward the old machine is never recorded as an exclusion.
+    assert stamped == [set(), None]
+
+
+def test_steering_toward_old_machines_is_not_recorded_as_an_exclusion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the operator's exclusions reach the instance, never the steering."""
+    master, _ = _master(None, record=None)
+    old_machine, other, excluded = (
+        NodeId("old-machine"),
+        NodeId("other-machine"),
+        NodeId("operator-excluded"),
+    )
+    searches: list[tuple[set[NodeId], set[NodeId] | None]] = []
+
+    def place(
+        command: PlaceInstance,
+        topology: object,
+        current_instances: Mapping[InstanceId, Instance],
+        node_memory: object,
+        node_network: object,
+        *,
+        excluded_nodes: set[NodeId] | None = None,
+        stamped_exclusions: set[NodeId] | None = None,
+        **_: object,
+    ) -> dict[InstanceId, Instance]:
+        searches.append((set(excluded_nodes or ()), stamped_exclusions))
+        return dict(current_instances)
+
+    monkeypatch.setattr(master_main, "place_instance", place)
+    monkeypatch.setattr(master, "_require_ordered_place_instance_card", lambda command: None)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    command = PlaceInstance(
+        model_card=_card("org/model"),
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=1,
+        excluded_nodes=[excluded],
+    )
+
+    master._place_restored_intent(  # pyright: ignore[reportPrivateUsage]
+        command, {}, frozenset({old_machine}), {old_machine, other, excluded}
+    )
+
+    assert searches == [({other, excluded}, {excluded})]
 
 
 async def test_a_winner_without_placements_still_waits_for_the_whole_cluster() -> None:
@@ -629,11 +686,17 @@ async def test_each_placement_gets_its_own_wait_for_node_information(
             super().__init__()
             self.ready = False
 
-        def __call__(self, command: PlaceInstance, current: Mapping[InstanceId, Instance]) -> dict[InstanceId, Instance]:
+        def __call__(
+            self,
+            command: PlaceInstance,
+            current: Mapping[InstanceId, Instance],
+            *,
+            stamped_exclusions: set[NodeId] | None = None,
+        ) -> dict[InstanceId, Instance]:
             if not self.ready:
                 self.commands.append(command)
                 raise PlacementInfoPendingError("node memory has not been reported yet")
-            return super().__call__(command, current)
+            return super().__call__(command, current, stamped_exclusions=stamped_exclusions)
 
     planner = _SlowFirst()
     master = await _cold_master_with(monkeypatch, "org/first", "org/second", planner=planner)
