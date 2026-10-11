@@ -5,6 +5,7 @@ import re
 from typing import Literal, cast
 
 from skulk.api.build_identity import known_build_identifier
+from skulk.extensions.capabilities import InstalledCapabilityRegistration
 from skulk.shared.types.capability_nodes import CapabilityNodeSummary
 
 
@@ -141,7 +142,39 @@ def render_installed_inventory(payload: dict[str, object]) -> str:
         lines.append(
             f"- {row.get('bundle') or row.get('plugin_id')}, version {row.get('version') or 'unknown'}: {enabled}, {reachable}; {readiness}."
         )
-    if not raw:
+        try:
+            registration = InstalledCapabilityRegistration.model_validate_json(
+                json.dumps(row.get("registration"))
+            )
+        except ValueError:
+            lines.append(
+                "  Declared operations and requirements are unavailable or omitted by the metadata bound."
+            )
+            continue
+        for declared in registration.capabilities:
+            lines.append(
+                f"  {declared.qualified_id}: {declared.purpose[:160]} ({declared.io_mode})."
+            )
+        if not registration.capabilities:
+            lines.append("  No operations were declared in this registration.")
+        requirements = [
+            f"Skulk {registration.skulk_requires}",
+            f"Python {registration.python_requires}",
+            "platforms " + ", ".join(registration.platforms),
+        ]
+        if registration.configuration_required:
+            requirements.append("ordinary configuration required")
+        if registration.required_credential_ids:
+            requirements.append(
+                "required credential identifiers: "
+                + ", ".join(registration.required_credential_ids[:3])
+            )
+            if len(registration.required_credential_ids) > 3:
+                requirements.append(
+                    f"{len(registration.required_credential_ids) - 3} additional credential identifiers omitted"
+                )
+        lines.append("  Declared requirements: " + "; ".join(requirements) + ".")
+    if not raw and not payload.get("omittedInstallations"):
         lines.append("No entries were returned by this local manager.")
     if payload.get("omittedInstallations"):
         lines.append(

@@ -17,6 +17,7 @@ from skulk.api.steward_inventory import (
     capability_inventory,
     internal_service_question,
     inventory_question,
+    render_installed_inventory,
     render_inventory,
 )
 from skulk.shared.types.chunks import TokenChunk
@@ -24,6 +25,69 @@ from skulk.shared.types.worker.instances import InstanceId
 
 if TYPE_CHECKING:
     from skulk.api.main import API
+
+
+def test_installed_answer_reports_declarations_and_requirements() -> None:
+    """A deterministic inventory answer retains the facts needed to understand use."""
+    from skulk.extensions.capabilities import (
+        InstalledCapabilityRegistration,
+        RegisteredCapabilitySummary,
+    )
+
+    registration = InstalledCapabilityRegistration(
+        capabilities=(
+            RegisteredCapabilitySummary(
+                qualified_id="capacity@1.0.0",
+                revision="a" * 16,
+                title="Capacity",
+                purpose="Estimate external offers under owner policy.",
+                io_mode="unary",
+            ),
+        ),
+        skulk_requires=">=2.0.3",
+        python_requires=">=3.12",
+        platforms=("linux",),
+        configuration_required=True,
+        required_credential_ids=("provider_key",),
+    )
+    payload: dict[str, object] = {
+        "installations": [
+            {
+                "bundle": "example.plugin",
+                "version": "1.0.0",
+                "enabled": False,
+                "reachable": None,
+                "ready_capabilities": [],
+                "registration": registration.model_dump(mode="json"),
+            }
+        ]
+    }
+    answer = render_installed_inventory(payload)
+    assert "capacity@1.0.0" in answer and "Estimate external offers" in answer
+    assert (
+        "Skulk >=2.0.3" in answer
+        and "Python >=3.12" in answer
+        and "platforms linux" in answer
+    )
+    assert "ordinary configuration required" in answer and "provider_key" in answer
+    assert "disabled" in answer and "reachability unknown" in answer
+    assert "does not prove allocated inference capacity" in answer
+
+
+def test_installed_answer_discloses_unknown_or_omitted_registration() -> None:
+    """Missing or bounded-away declarations are never an empty installed inventory."""
+    missing: dict[str, object] = {
+        "installations": [{"plugin_id": "managed.fixture", "registration": None}]
+    }
+    assert "unavailable or omitted" in render_installed_inventory(missing)
+    omitted: dict[str, object] = {
+        "installations": [],
+        "installedCount": 5,
+        "omittedInstallations": 5,
+    }
+    answer = render_installed_inventory(omitted)
+    assert "5 additional installations" in answer
+    assert "No entries were returned" not in answer
 
 
 @pytest.mark.parametrize(
