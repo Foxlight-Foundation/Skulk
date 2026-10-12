@@ -806,7 +806,11 @@ class ManagedOwner:
             return BurstNodeReadiness(state="unavailable", message=_BURST_UNREACHABLE)
 
     async def burst_offer(
-        self, node_id: str, model_id: str, context_tokens: int
+        self,
+        node_id: str,
+        model_id: str,
+        context_tokens: int,
+        excluded_node_ids: tuple[str, ...] = (),
     ) -> BurstNodeOffer:
         """Ask one provider node for an offer; it retains an inert, unsigned proposal.
 
@@ -819,16 +823,18 @@ class ManagedOwner:
             raise LookupError("installed node is not a burst provider")
         if not self.host_callbacks_available:
             raise ValueError("burst provider unavailable")
-        result = await self._request(
-            {
-                "operation": "burst-offer",
-                "plugin_id": self.name,
-                "node_id": node_id,
-                "model_id": model_id,
-                "context_tokens": context_tokens,
-            },
-            timeout=20,
-        )
+        message: dict[str, JsonValue] = {
+            "operation": "burst-offer",
+            "plugin_id": self.name,
+            "node_id": node_id,
+            "model_id": model_id,
+            "context_tokens": context_tokens,
+        }
+        if excluded_node_ids:
+            # Sent only when present, so a provider that predates exclusions
+            # still answers the ordinary offer.
+            message["excluded_node_ids"] = list(excluded_node_ids)
+        result = await self._request(message, timeout=20)
         offer = BurstNodeOffer.model_validate_json(json.dumps(result))
         if offer.reference is not None and (
             offer.reference.plugin_id != self.name or offer.reference.node_id != node_id

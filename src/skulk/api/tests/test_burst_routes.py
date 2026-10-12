@@ -76,6 +76,7 @@ class Provider(ManagedExtension):
         self.approvable = True
         self.actors: list[str] = []
         self.released_by: list[str] = []
+        self.excluded: list[tuple[str, ...]] = []
         self.reference = ProposalReference(
             plugin_id=name,
             node_id="gpu",
@@ -102,12 +103,17 @@ class Provider(ManagedExtension):
         )
 
     async def burst_offer(
-        self, node_id: str, model_id: str, context_tokens: int
+        self,
+        node_id: str,
+        model_id: str,
+        context_tokens: int,
+        excluded_node_ids: tuple[str, ...] = (),
     ) -> BurstNodeOffer:
         """Retain one inert offer, or refuse without saying why to this host."""
         if self.refuse:
             raise ValueError("sensitive provider refusal")
         self.offers.append((node_id, model_id, context_tokens))
+        self.excluded.append(excluded_node_ids)
         return BurstNodeOffer(
             state="offer",
             message="Remote capacity is available.",
@@ -223,8 +229,11 @@ def client(
 ) -> httpx.AsyncClient:
     app = FastAPI()
 
-    async def assess(model_id: str, context_tokens: int) -> InferenceAssessment:
+    async def assess(
+        model_id: str, context_tokens: int, excluded: tuple[str, ...]
+    ) -> InferenceAssessment:
         assert (model_id, context_tokens) == ("example/large", 8192)
+        assessed_exclusions.append(excluded)
         return assessment(verdict)
 
     app.include_router(
@@ -238,6 +247,7 @@ def client(
 
 
 REQUEST = {"modelId": "example/large", "contextTokens": 8192}
+assessed_exclusions: list[tuple[str, ...]] = []
 
 
 async def recommend(http: httpx.AsyncClient, **provider: str) -> BurstRecommendation:
@@ -337,7 +347,9 @@ async def test_a_paired_device_needs_manage_scope_for_an_offer(tmp_path: Path) -
     provider = Provider()
     app = FastAPI()
 
-    async def assess(model_id: str, context_tokens: int) -> InferenceAssessment:
+    async def assess(
+        model_id: str, context_tokens: int, excluded: tuple[str, ...]
+    ) -> InferenceAssessment:
         return assessment("external_required")
 
     app.include_router(
@@ -429,7 +441,9 @@ async def test_approval_and_release_need_the_approve_scope(tmp_path: Path) -> No
     provider = Provider()
     app = FastAPI()
 
-    async def assess(model_id: str, context_tokens: int) -> InferenceAssessment:
+    async def assess(
+        model_id: str, context_tokens: int, excluded: tuple[str, ...]
+    ) -> InferenceAssessment:
         return assessment("external_required")
 
     app.include_router(
@@ -493,3 +507,18 @@ async def test_active_rentals_are_listed_until_released() -> None:
             (await http.get("/v1/burst/operations")).text
         )
     assert [item.plugin_id for item in after.rentals] == ["managed.second"]
+
+
+async def test_excluded_nodes_reach_the_verdict_and_the_provider() -> None:
+    """An operator who excluded nodes is assessed and offered without them."""
+    provider = Provider()
+    assessed_exclusions.clear()
+    async with client(provider) as http:
+        answer = await recommend(http)
+        response = await http.post(
+            "/v1/burst/recommendations",
+            json=REQUEST | {"excludedNodeIds": ["node-a", "node-b"]},
+        )
+    assert answer.state == "offer" and response.status_code == 200
+    assert assessed_exclusions == [(), ("node-a", "node-b")]
+    assert provider.excluded == [(), ("node-a", "node-b")]

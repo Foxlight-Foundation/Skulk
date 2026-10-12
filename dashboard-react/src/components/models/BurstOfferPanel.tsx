@@ -21,6 +21,8 @@ import { Button } from '../common/Button';
 export interface BurstOfferPanelProps {
   modelId: string;
   contextTokens: number;
+  /** Nodes the operator excluded in the placement dialog; the offer is assessed without them. */
+  excludedNodeIds?: string[];
 }
 
 const Panel = styled.section`
@@ -72,7 +74,7 @@ const when = (seconds: number) => new Date(seconds * 1000).toLocaleString();
  * approval's operation ID is saved before it is sent, so a lost reply is
  * followed, never approved twice.
  */
-export function BurstOfferPanel({ modelId, contextTokens }: BurstOfferPanelProps) {
+export function BurstOfferPanel({ modelId, contextTokens, excludedNodeIds = [] }: BurstOfferPanelProps) {
   const { t } = useSkulkTranslation();
   const providers = useGetBurstProvidersQuery(undefined, { refetchOnMountOrArgChange: true });
   const [recommend, recommending] = useRecommendBurstMutation();
@@ -108,7 +110,7 @@ export function BurstOfferPanel({ modelId, contextTokens }: BurstOfferPanelProps
     setNotice('');
     setRecommendation(null);
     try {
-      setRecommendation(await recommend({ modelId, contextTokens }).unwrap());
+      setRecommendation(await recommend({ modelId, contextTokens, ...(excludedNodeIds.length ? { excludedNodeIds } : {}) }).unwrap());
     } catch {
       setNotice(t('burst.offerFailed', 'The burst provider could not answer. It may be busy; try again in a moment.'));
     }
@@ -194,6 +196,9 @@ export function BurstOfferPanel({ modelId, contextTokens }: BurstOfferPanelProps
           : available.length === 0
             ? <p>{firstProvider.message}</p>
             : null}
+    {excludedNodeIds.length > 0 && !offer
+      ? <p>{t('burst.excluded', 'Assessed without the {count} node(s) excluded above.', { count: excludedNodeIds.length })}</p>
+      : null}
     {recommendation && !offer ? <p role="status">{recommendation.message}</p> : null}
     {offer && recommendation ? <section aria-label={t('burst.offerTitle', 'Remote offer')}>
       <p>{recommendation.message}</p>

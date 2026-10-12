@@ -10473,19 +10473,22 @@ class API:
         )
 
     async def _assess_for_burst(
-        self, model_id: str, context_tokens: int
+        self, model_id: str, context_tokens: int, excluded_node_ids: tuple[str, ...]
     ) -> InferenceAssessment:
         """Run the ordinary inference assessment for a burst recommendation.
 
         Args:
             model_id: Exact known alias; unknown aliases raise the usual 404.
             context_tokens: Input plus output tokens per request.
+            excluded_node_ids: Nodes the operator excluded from the placement.
 
         Returns:
             The same verdict ``GET /models/assessment`` reports for one request.
         """
         return await self.get_inference_assessment(
-            ModelId(model_id), context_tokens=context_tokens
+            ModelId(model_id),
+            context_tokens=context_tokens,
+            excluded_node_ids=[NodeId(node) for node in excluded_node_ids],
         )
 
     async def get_model_requirements(

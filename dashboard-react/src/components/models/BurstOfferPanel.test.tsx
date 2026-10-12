@@ -127,3 +127,15 @@ it('says what is missing when no provider can offer', async () => {
   expect([...host.querySelectorAll('button')].some((item) => item.textContent === 'Get a remote offer')).toBe(false);
   expect(calls.every((call) => call.method === 'GET')).toBe(true);
 });
+
+it('asks for an offer without the nodes the operator excluded', async () => {
+  await act(async () => {
+    root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><BurstOfferPanel modelId="example/large" contextTokens={8192} excludedNodeIds={['node-a', 'node-b']} /></ThemeProvider></Provider>);
+  });
+  await contains('Assessed without the 2 node(s) excluded above.');
+  await contains('Get a remote offer');
+  await click('Get a remote offer');
+  await contains('NVIDIA A100 80GB in US');
+  const asked = calls.find((call) => call.path === '/v1/burst/recommendations')!;
+  expect(JSON.parse(asked.body)).toEqual({ modelId: 'example/large', contextTokens: 8192, excludedNodeIds: ['node-a', 'node-b'] });
+});

@@ -802,7 +802,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
               )}
 
               {!isEmbedding && <InferenceAssessmentPanel key={modelId} modelId={modelId} contextTokens={contextChoice} excludedNodeIds={[...excludedNodes]}
-                externalAction={(context) => <BurstOfferPanel modelId={modelId} contextTokens={context} />} />}
+                externalAction={(context) => <BurstOfferPanel modelId={modelId} contextTokens={context} excludedNodeIds={[...excludedNodes]} />} />}
 
               {/* Context window: the window the engine serves. Engines that
                   reserve it at load commit its memory whether or not requests

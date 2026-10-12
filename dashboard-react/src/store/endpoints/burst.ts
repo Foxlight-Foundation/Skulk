@@ -126,7 +126,7 @@ const burstApi = apiSlice.injectEndpoints({
       query: () => ({ url: '/v1/burst/providers', headers, cache: 'no-store' }),
       keepUnusedDataFor: 0,
     }),
-    recommendBurst: build.mutation<BurstRecommendation, { modelId: string; contextTokens: number }>({
+    recommendBurst: build.mutation<BurstRecommendation, { modelId: string; contextTokens: number; excludedNodeIds?: string[] }>({
       query: (body) => ({ url: '/v1/burst/recommendations', headers, method: 'POST', body }),
     }),
     approveBurst: build.mutation<BurstOperation, { operationId: string; reference: ProposalReference; approvalRevision: string }>({

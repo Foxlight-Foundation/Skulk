@@ -210,7 +210,11 @@ class NodeBurstProvider(Protocol):
         ...
 
     async def burst_offer(
-        self, node_id: str, model_id: str, context_tokens: int
+        self,
+        node_id: str,
+        model_id: str,
+        context_tokens: int,
+        excluded_node_ids: tuple[str, ...] = (),
     ) -> BurstNodeOffer:
         """Ask one provider node to prepare and retain one inert offer."""
         ...
@@ -442,6 +446,16 @@ class BurstRecommendationRequest(FrozenModel):
     )
     node_id: ConfigurationNodeId | None = Field(
         default=None, description="Provider node; required with plugin_id."
+    )
+    # A list, not a tuple: request bodies are validated strictly from JSON
+    # arrays, which a strict tuple field refuses.
+    excluded_node_ids: list[str] = Field(
+        default_factory=list,
+        max_length=64,
+        description=(
+            "Cluster nodes the operator excluded, as for GET /models/assessment; "
+            "the cluster's verdict and the provider's offer are both read without them."
+        ),
     )
 
     @model_validator(mode="after")

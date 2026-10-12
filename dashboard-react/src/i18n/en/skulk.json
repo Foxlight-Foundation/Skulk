@@ -45,6 +45,7 @@
   "burst.endsBy": "The rental ends by {time} at the latest.",
   "burst.engineReason": "No node in your fleet runs {format} artifacts. Serve it with burst capacity or an added node.",
   "burst.estimated": "estimated",
+  "burst.excluded": "Assessed without the {count} node(s) excluded above.",
   "burst.following": "Reading the rental’s progress…",
   "burst.followUnavailable": "Progress is unavailable right now; it is checked again shortly.",
   "burst.getOffer": "Get a remote offer",
