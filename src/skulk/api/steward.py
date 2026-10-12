@@ -197,6 +197,11 @@ Rules:
   for disabled children. Use its purposes, schemas and requirements to understand
   operations; declarations never grant authority. A ready provisioner does not
   prove acquired inference capacity, and local inventory excludes other hosts.
+- When offered, get_burst_capacity reads installed burst providers and active
+  rentals. For a model the cluster cannot run, say whether remote capacity is
+  available and what a provider still needs. You cannot request offers,
+  approve or release; point the operator to Get a remote offer in the model
+  placement dialog. Quote money only as the dollar amounts the tool reports.
 - Report Skulk versions only from actual skulkVersion/skulkCommit evidence.
   A current/consistent build status does not mean the latest release.
 - fabricSystemInstances are internal services, not operator-placed models. Do
@@ -241,9 +246,15 @@ type InstalledMetadataReader = Callable[
     [str | None, str | None, str | None], Awaitable[dict[str, object]]
 ]
 
+type BurstCapacityReader = Callable[[], Awaitable[dict[str, object]]]
+"""Read installed burst providers and active rentals under the caller's plugin access."""
+
 
 def steward_tool_definitions(
-    *, include_proposals: bool = True, include_installations: bool = False
+    *,
+    include_proposals: bool = True,
+    include_installations: bool = False,
+    include_burst: bool = False,
 ) -> list[dict[str, Any]]:
     """Return steward read tools and, when authorized, inert proposal tools.
 
@@ -356,6 +367,11 @@ def steward_tool_definitions(
                 },
                 "required": [],
             },
+        ),
+        (
+            "get_burst_capacity",
+            "Read remote capacity on this API host: installed burst providers (capabilities that rent remote machines for models the cluster cannot run) with their readiness, next setup step and the owner's cost and lifetime ceilings in US dollars, and active rentals with their phase, model and serving instance. Read-only. You cannot request offers, approve or release; the operator does that with Get a remote offer in the model placement dialog, or through /v1/burst.",
+            no_args,
         ),
         (
             "get_performance_envelopes",
@@ -514,12 +530,13 @@ def steward_tool_definitions(
         for name, desc, params in tools
         if (include_proposals or name not in STEWARD_PROPOSAL_TOOL_NAMES)
         and (include_installations or name != "get_installed_capabilities")
+        and (include_burst or name != "get_burst_capacity")
     ]
 
 
 STEWARD_TOOL_NAMES: tuple[str, ...] = tuple(
     spec["function"]["name"]  # pyright's view: constructed literally above
-    for spec in steward_tool_definitions(include_installations=True)
+    for spec in steward_tool_definitions(include_installations=True, include_burst=True)
 )
 
 
@@ -1555,11 +1572,13 @@ class StewardHarness:
         *,
         proposals_allowed: bool = True,
         installation_reader: InstalledMetadataReader | None = None,
+        burst_reader: BurstCapacityReader | None = None,
     ) -> None:
-        """Bind per-turn tool authority; installation reads recheck their HTTP scope."""
+        """Bind per-turn tool authority; plugin reads recheck their HTTP scope."""
         self._api = api
         self._proposals_allowed = proposals_allowed
         self._installation_reader = installation_reader
+        self._burst_reader = burst_reader
         self._extension_tools: tuple[StewardToolBinding, ...] = ()
         self._include_internal_services = False
         # The inner TextGeneration currently in flight for this turn, so an
@@ -1877,6 +1896,14 @@ class StewardHarness:
             except Exception:  # noqa: BLE001 - manager failures may carry local paths
                 return '{"error":"installed metadata unavailable or access refused"}'
             return json.dumps(payload)
+        if name == "get_burst_capacity":
+            if self._burst_reader is None:
+                return '{"error":"remote capacity requires separate plugins:read authority"}'
+            try:
+                payload = await self._burst_reader()
+            except Exception:  # noqa: BLE001 - provider failures may carry local paths
+                return '{"error":"remote capacity unavailable or access refused"}'
+            return _bounded(payload)
         if name == "get_cluster_versions":
             cluster = await api.get_cluster_diagnostics()
             payload = await api.get_cluster_state()
@@ -2531,6 +2558,7 @@ class StewardHarness:
             tools=steward_tool_definitions(
                 include_proposals=self._proposals_allowed,
                 include_installations=self._installation_reader is not None,
+                include_burst=self._burst_reader is not None,
             )
             + extension_definitions,
             temperature=0.1,

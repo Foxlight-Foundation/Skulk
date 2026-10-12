@@ -2531,7 +2531,10 @@ estimate shows a remote offer (`BurstOfferPanel`) when the verdict is
 `external_required`: provider readiness, the offer in dollars, approval with
 the operation ID saved before sending, and progress to ready. Active instances
 on rented machines are marked Remote and offer Release, from
-`GET /v1/burst/operations`.
+`GET /v1/burst/operations`. The steward's optional `get_burst_capacity` tool
+reads the same providers and rentals through a request-bound reader that
+rechecks `plugins:read` on every call; it cannot ask for offers, approve or
+release.
 
 Each API also keeps per-instance request activity (`api/instance_activity.py`),
 derived from the replicated task events as it applies them: requests in flight

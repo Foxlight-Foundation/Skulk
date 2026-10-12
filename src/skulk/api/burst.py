@@ -76,6 +76,58 @@ _OFFER_STATES: dict[str, BurstRecommendationState] = {
 }
 
 
+async def read_burst_providers(
+    extensions: LoadedExtensions,
+) -> tuple[BurstProvider, ...]:
+    """Read every installed burst provider's own readiness on this API host.
+
+    One installation that fails or is slow is left out rather than hiding
+    the rest. Prepares nothing.
+    """
+
+    async def read(provider: NodeBurstProvider) -> tuple[BurstProvider, ...]:
+        try:
+            async with asyncio.timeout(5):
+                return await provider.burst_providers()
+        except Exception:  # noqa: BLE001 - one installation must not hide the rest
+            return ()
+
+    providers = [
+        provider
+        for provider in extensions.configuration_providers.values()
+        if isinstance(provider, NodeBurstProvider)
+    ][:32]
+    found = await asyncio.gather(*(read(provider) for provider in providers))
+    return tuple(item for group in found for item in group)[:32]
+
+
+async def read_burst_rentals(
+    extensions: LoadedExtensions,
+) -> tuple[BurstOperation, ...]:
+    """Read every installation's rentals not yet confirmed gone, newest first."""
+
+    async def one(provider: NodeBurstRentals) -> tuple[BurstOperation, ...]:
+        try:
+            async with asyncio.timeout(12):
+                return await provider.burst_rentals()
+        except Exception:  # noqa: BLE001 - one installation must not hide the rest
+            return ()
+
+    found = await asyncio.gather(
+        *(
+            one(provider)
+            for provider in extensions.configuration_providers.values()
+            if isinstance(provider, NodeBurstRentals)
+        )
+    )
+    rentals = sorted(
+        (item for group in found for item in group),
+        key=lambda item: item.acquisition.updated_at,
+        reverse=True,
+    )
+    return tuple(rentals[:64])
+
+
 def create_burst_router(
     extensions: LoadedExtensions,
     pairing_service: OperatorPairingService | None,
@@ -139,17 +191,7 @@ def create_burst_router(
         return selected
 
     async def read_providers() -> tuple[BurstProvider, ...]:
-        async def read(provider: NodeBurstProvider) -> tuple[BurstProvider, ...]:
-            try:
-                async with asyncio.timeout(5):
-                    return await provider.burst_providers()
-            except Exception:  # noqa: BLE001 - one installation must not hide the rest
-                return ()
-
-        found = await asyncio.gather(
-            *(read(provider) for provider in installations().values())
-        )
-        return tuple(item for group in found for item in group)[:32]
+        return await read_burst_providers(extensions)
 
     @router.get(
         "/providers",
@@ -365,27 +407,9 @@ def create_burst_router(
         response.headers["Cache-Control"] = "no-store"
 
         async def read() -> BurstRentals:
-            async def one(provider: NodeBurstRentals) -> tuple[BurstOperation, ...]:
-                try:
-                    async with asyncio.timeout(12):
-                        return await provider.burst_rentals()
-                except Exception:  # noqa: BLE001 - one installation must not hide the rest
-                    return ()
-
-            found = await asyncio.gather(
-                *(
-                    one(provider)
-                    for provider in extensions.configuration_providers.values()
-                    if isinstance(provider, NodeBurstRentals)
-                )
-            )
-            rentals = sorted(
-                (item for group in found for item in group),
-                key=lambda item: item.acquisition.updated_at,
-                reverse=True,
-            )
             return BurstRentals(
-                observed_at=int(time.time()), rentals=tuple(rentals[:64])
+                observed_at=int(time.time()),
+                rentals=await read_burst_rentals(extensions),
             )
 
         return await invoke(read)

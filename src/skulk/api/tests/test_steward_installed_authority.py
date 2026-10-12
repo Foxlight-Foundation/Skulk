@@ -7,7 +7,11 @@ from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from skulk.api.main import API
-from skulk.api.steward import STEWARD_VIRTUAL_MODEL_ID, InstalledMetadataReader
+from skulk.api.steward import (
+    STEWARD_VIRTUAL_MODEL_ID,
+    BurstCapacityReader,
+    InstalledMetadataReader,
+)
 from skulk.api.tests.test_operator_gateway import paired_service
 from skulk.api.types import ChatCompletionRequest
 from skulk.operator.pairing import PluginGrantUpdate
@@ -40,6 +44,7 @@ async def test_steward_reader_is_omitted_without_grant_and_rechecks_revocation(
         operator_pairing_service=pairing,
     )
     readers: list[InstalledMetadataReader | None] = []
+    burst_readers: list[BurstCapacityReader | None] = []
 
     async def capture(
         _self: API,
@@ -47,8 +52,10 @@ async def test_steward_reader_is_omitted_without_grant_and_rechecks_revocation(
         *,
         steward_proposals_allowed: bool = True,
         steward_installation_reader: InstalledMetadataReader | None = None,
+        steward_burst_reader: BurstCapacityReader | None = None,
     ) -> StreamingResponse:
         readers.append(steward_installation_reader)
+        burst_readers.append(steward_burst_reader)
         return StreamingResponse(iter(()))
 
     monkeypatch.setattr(API, "chat_completions", capture)
@@ -67,18 +74,24 @@ async def test_steward_reader_is_omitted_without_grant_and_rechecks_revocation(
         model=ModelId(STEWARD_VIRTUAL_MODEL_ID), messages=[]
     )
     await api.chat_completions_route(payload, request)
-    assert readers == [None]
+    assert readers == [None] and burst_readers == [None]
     pairing.set_plugin_grant(
         exchange.device_id,
         PluginGrantUpdate(expected_revision=0, scopes=("plugins:read",)),
     )
     await api.chat_completions_route(payload, request)
     reader = readers[-1]
-    assert reader is not None
+    burst = burst_readers[-1]
+    assert reader is not None and burst is not None
     assert "unavailable" in str(await reader(None, None, None))
+    # No provider is installed, so remote capacity reads as empty, not refused.
+    assert await burst() == {"scope": "local_api_host", "providers": [], "rentals": []}
     pairing.set_plugin_grant(
         exchange.device_id, PluginGrantUpdate(expected_revision=1, scopes=())
     )
     with pytest.raises(HTTPException) as refused:
         await reader(None, None, None)
     assert refused.value.status_code == 403
+    with pytest.raises(HTTPException) as burst_refused:
+        await burst()
+    assert burst_refused.value.status_code == 403
