@@ -158,6 +158,10 @@ export interface RawStateResponse {
   /** Capability-node summaries per host node id (topology satellites). */
   capabilityNodes?: Record<string, RawCapabilityNodeSummary[]>;
   thunderboltBridgeCycles?: string[][];
+  /** True while a cluster that started cold is still restoring from its record. */
+  restartRecoveryPending?: boolean;
+  /** Models the restore is bringing back, once chosen; null outside a restore. */
+  restartRecoveryPlacements?: number | null;
 }
 
 export interface RawLocalNodeIdentityResponse {

@@ -66,8 +66,9 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
     - ``steward_action_proposals`` — bounded pending, approved, dispatched, and
       terminal audit truth. Actionable records drive the promoted master's
       exact-command recovery paths.
-    - ``restart_recovery_pending`` — an unfinished cold-start restore passes to
-      the promoted master rather than being dropped.
+    - ``restart_recovery_pending`` and ``restart_recovery_placements`` — an
+      unfinished cold-start restore passes to the promoted master rather than
+      being dropped, still showing how many models are coming back.
 
     - ``last_seen`` — carried, but re-stamped to ``now`` for every node the
       seed still knows about (the union of the carried ``node_*`` maps) rather
@@ -131,6 +132,7 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
         # A failover in the middle of a cold-start restore hands the unfinished
         # restore to the new master instead of declaring it done.
         restart_recovery_pending=prior.restart_recovery_pending,
+        restart_recovery_placements=prior.restart_recovery_placements,
         last_seen=last_seen,
         node_network=prior.node_network,
         node_thunderbolt=prior.node_thunderbolt,

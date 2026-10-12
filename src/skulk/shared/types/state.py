@@ -69,6 +69,16 @@ class State(CamelCaseModel):
         ),
     )
 
+    restart_recovery_placements: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "While a restore runs, how many placements the master is bringing "
+            "back from the restart recovery record. None outside a restore and "
+            "before the master has chosen which record to restore from."
+        ),
+    )
+
     @field_validator("instance_failures", mode="before")
     @classmethod
     def _coerce_instance_failures(cls, value: object) -> object:

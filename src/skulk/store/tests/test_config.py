@@ -227,6 +227,16 @@ def test_intelligent_fabric_config_defaults() -> None:
     assert not default_section.enabled
 
 
+def test_restart_recovery_config_defaults_to_bringing_models_back() -> None:
+    from skulk.store.config import RestartRecoveryConfig, SkulkConfig
+
+    assert SkulkConfig.model_validate({}).restart_recovery is None
+    assert RestartRecoveryConfig().enabled
+    parsed = SkulkConfig.model_validate({"restart_recovery": {"enabled": False}})
+    assert parsed.restart_recovery is not None
+    assert not parsed.restart_recovery.enabled
+
+
 def test_enabled_store_refuses_blank_host() -> None:
     """The installer-shaped brokenness fails loudly at validation (#888).
 

@@ -3141,6 +3141,15 @@ The response is:
 
 The record never holds live node IDs, runner IDs, credentials, or model data.
 
+**Progress and settings.** `GET /state` carries `restartRecoveryPending` (true
+from a cold-started session's first event until restore finishes) and
+`restartRecoveryPlacements` (how many models the restore is bringing back,
+once the master has chosen its record; `null` outside a restore). The
+`restart_recovery.enabled` section of `GET /config` and `PUT /config` turns
+placement restore off (default on). Steward proposal history is restored
+either way, nodes keep recording what runs, and the setting applies to the
+next restart.
+
 ## Download Management
 
 ### Start a node download

@@ -207,3 +207,12 @@ def test_carries_an_unfinished_restart_recovery():
     # flag would be lost) or be overwritten before restore finished.
     assert seed_state_for_new_session(State(restart_recovery_pending=True)).restart_recovery_pending
     assert not seed_state_for_new_session(State()).restart_recovery_pending
+
+
+def test_an_unfinished_restore_keeps_its_model_count_across_failover() -> None:
+    prior = State(restart_recovery_pending=True, restart_recovery_placements=3)
+
+    seeded = seed_state_for_new_session(prior)
+
+    assert seeded.restart_recovery_pending is True
+    assert seeded.restart_recovery_placements == 3

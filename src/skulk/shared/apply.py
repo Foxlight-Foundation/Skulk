@@ -22,6 +22,7 @@ from skulk.shared.types.events import (
     NodeGatheredInfo,
     NodeTimedOut,
     RestartRecoveryCompleted,
+    RestartRecoveryStarted,
     RunnerStatusUpdated,
     StagedModelEvicted,
     StateSnapshotHydrated,
@@ -163,8 +164,17 @@ def event_apply(event: Event, state: State) -> State:
                 for proposal in terminal[: len(proposals) - 128]:
                     proposals.pop(proposal.proposal_id, None)
             return state.model_copy(update={"steward_action_proposals": proposals})
+        case RestartRecoveryStarted():
+            return state.model_copy(
+                update={"restart_recovery_placements": event.placements}
+            )
         case RestartRecoveryCompleted():
-            return state.model_copy(update={"restart_recovery_pending": False})
+            return state.model_copy(
+                update={
+                    "restart_recovery_pending": False,
+                    "restart_recovery_placements": None,
+                }
+            )
         case StateSnapshotHydrated():
             return _sanitize_snapshot_downloads(event.state)
 
