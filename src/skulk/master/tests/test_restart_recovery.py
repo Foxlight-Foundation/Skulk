@@ -185,14 +185,15 @@ async def test_recovery_completes_once_and_clears_the_flag() -> None:
     completion = _advance(master)
 
     assert completion == [
+        RestartRecoveryStarted(event_id=completion[0].event_id, placements=0, intents=()),
         RestartRecoveryCompleted(
-            event_id=completion[0].event_id,
+            event_id=completion[1].event_id,
             restored_placements=0,
             restored_proposals=2,
-        )
+        ),
     ]
     assert _advance(master) == []
-    cleared = apply(master.state, IndexedEvent(idx=1, event=completion[0]))
+    cleared = apply(master.state, IndexedEvent(idx=1, event=completion[1]))
     assert cleared.restart_recovery_pending is False
 
 
@@ -334,6 +335,7 @@ async def test_placements_that_cannot_come_back_are_reported_once(
     ]
     assert {failure.failure.error_code for failure in failures} == {"placement_failed"}
     assert [type(event).__name__ for event in events] == [
+        "RestartRecoveryStarted",
         "InstanceFailureRecorded",
         "InstanceFailureRecorded",
         "InstanceCreated",
@@ -350,7 +352,8 @@ async def test_missing_node_information_is_retried_then_reported(
     master = await _cold_master_with(monkeypatch, "org/first", planner=_Planner(pending=True))
     start = datetime.now(tz=timezone.utc)
 
-    assert _advance(master, now=start) == []
+    # The first pass settles the plan; placing waits for node information.
+    assert [type(event) for event in _advance(master, now=start)] == [RestartRecoveryStarted]
     assert _advance(master, now=start + timedelta(seconds=60)) == []
 
     events = _advance(master, now=start + timedelta(seconds=INFO_WAIT_AFTER_SETTLE_SECONDS + 1))
@@ -458,7 +461,7 @@ async def test_a_lone_winner_without_placements_completes_after_settling() -> No
 
     assert _advance(master, settled=False) == []
     completion = _advance(master)
-    assert len(completion) == 1 and isinstance(completion[0], RestartRecoveryCompleted)
+    assert [type(event) for event in completion] == [RestartRecoveryStarted, RestartRecoveryCompleted]
 
 
 async def test_a_peer_seen_only_while_settling_still_counts() -> None:
@@ -602,7 +605,8 @@ async def test_the_masters_own_fresher_record_needs_no_fetch(
     master = await _two_node_master(monkeypatch, own=own, fetcher=fetcher)
     master._telemetry_view.node_restart_recovery[PEER] = _advert_for(peer_record)  # pyright: ignore[reportPrivateUsage]
 
-    assert await _choose(master) == []
+    # Choosing its own record settles the plan without a fetch.
+    assert [type(event) for event in await _choose(master)] == [RestartRecoveryStarted]
     assert fetcher.calls == []
     created = [e for e in _advance(master, nodes={LOCAL_NODE, PEER}) if isinstance(e, InstanceCreated)]
     assert [str(e.instance.shard_assignments.model_id) for e in created] == ["org/own"]
@@ -864,7 +868,7 @@ async def test_each_placement_gets_its_own_wait_for_node_information(
     planner = _SlowFirst()
     master = await _cold_master_with(monkeypatch, "org/first", "org/second", planner=planner)
     start = datetime.now(tz=timezone.utc)
-    assert _advance(master, now=start) == []
+    assert [type(event) for event in _advance(master, now=start)] == [RestartRecoveryStarted]
     # Most of the first placement's window passes before information arrives.
     nearly = start + timedelta(seconds=INFO_WAIT_AFTER_SETTLE_SECONDS - 10)
     planner.ready = True
@@ -941,4 +945,59 @@ async def test_turning_restore_off_in_settings_requests_no_placements(
     events = _advance(master)
 
     assert planner.commands == []
-    assert [type(event) for event in events] == [RestartRecoveryCompleted]
+    # An empty plan is still settled, so a promoted master would not go
+    # looking for another record to restore.
+    assert [type(event) for event in events] == [RestartRecoveryStarted, RestartRecoveryCompleted]
+    started = events[0]
+    assert isinstance(started, RestartRecoveryStarted) and started.intents == ()
+
+
+async def test_a_master_promoted_mid_restore_finishes_the_carried_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The node whose record was chosen may be gone; the plan is in State."""
+    carried_plan = (_intent_on("org/first", KITE1), _intent_on("org/second", KITE1))
+    already = sample_instance("already-restored", "org/first", (str(LOCAL_NODE),))
+    prior = State(
+        instances={already.instance_id: already},
+        restart_recovery_pending=True,
+        restart_recovery_placements=2,
+        restart_recovery_intents=carried_plan,
+        last_event_applied_idx=9,
+    )
+    # This node's own record is stale and names a model the plan does not.
+    stale = _record_written(60, _intent_on("org/stale", KITE1))
+    planner = _Planner()
+    fetcher = _Fetcher({})
+    global_send, _ = channel[GlobalForwarderEvent]()
+    master = Master(
+        LOCAL_NODE,
+        SessionId(master_node_id=LOCAL_NODE, election_clock=4),
+        command_receiver=channel[ForwarderCommand]()[1],
+        event_sender=channel[Event]()[0],
+        local_event_receiver=channel[LocalForwarderEvent]()[1],
+        global_event_sender=global_send,
+        state_sync_receiver=channel[StateSyncMessage]()[1],
+        state_sync_sender=channel[StateSyncMessage]()[0],
+        download_command_sender=channel[ForwarderDownloadCommand]()[0],
+        initial_state=seed_state_for_new_session(prior),
+        restart_recovery_record=stale,
+        restart_recovery_enabled=True,
+        restart_recovery_fetcher=fetcher,
+    )
+    master.state = seed_state_for_new_session(prior).model_copy(update={"last_event_applied_idx": 0})
+    master._telemetry_view.node_identities[LOCAL_NODE] = NodeIdentity(node_install_id=KITE1)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(master, "_ordered_placement_model_card", lambda model_id: _card(str(model_id)))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(master, "_place_for_steward_action", planner)
+
+    assert await master._choose_restart_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        datetime.now(tz=timezone.utc), topology_settled=True, connected_node_ids={LOCAL_NODE, PEER}
+    ) == []
+    events = _advance(master, nodes={LOCAL_NODE, PEER})
+
+    assert fetcher.calls == []
+    created = [e for e in events if isinstance(e, InstanceCreated)]
+    assert [str(e.instance.shard_assignments.model_id) for e in created] == ["org/second"]
+    started = [e for e in events if isinstance(e, RestartRecoveryStarted)]
+    assert [len(e.intents or ()) for e in started] == [1]
+    assert isinstance(events[-1], RestartRecoveryCompleted)

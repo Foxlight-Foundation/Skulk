@@ -7,11 +7,13 @@ session's event index).
 """
 
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 from skulk.shared.session_carryover import seed_state_for_new_session
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.profiling import NodeNetworkInfo
+from skulk.shared.types.restart_recovery import PlacementIntent
 from skulk.shared.types.state import State
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
@@ -22,7 +24,12 @@ from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
     DownloadOngoing,
 )
-from skulk.shared.types.worker.instances import InstanceFailure, InstanceId
+from skulk.shared.types.worker.instances import (
+    InstanceFailure,
+    InstanceId,
+    InstanceMeta,
+)
+from skulk.shared.types.worker.shards import Sharding
 
 
 def _prior_state() -> tuple[State, NodeId]:
@@ -209,10 +216,26 @@ def test_carries_an_unfinished_restart_recovery():
     assert not seed_state_for_new_session(State()).restart_recovery_pending
 
 
-def test_an_unfinished_restore_keeps_its_model_count_across_failover() -> None:
-    prior = State(restart_recovery_pending=True, restart_recovery_placements=3)
+def test_an_unfinished_restore_keeps_its_plan_across_failover() -> None:
+    plan = (
+        PlacementIntent(
+            model_id=ModelId("org/model"),
+            sharding=Sharding.Pipeline,
+            instance_meta=InstanceMeta.MlxRing,
+            min_nodes=1,
+            host_install_ids=(UUID("11111111-1111-4111-8111-111111111111"),),
+        ),
+    )
+    prior = State(
+        restart_recovery_pending=True,
+        restart_recovery_placements=1,
+        restart_recovery_intents=plan,
+    )
 
     seeded = seed_state_for_new_session(prior)
 
     assert seeded.restart_recovery_pending is True
-    assert seeded.restart_recovery_placements == 3
+    assert seeded.restart_recovery_placements == 1
+    assert seeded.restart_recovery_intents == plan
+    # The plan survives the wire too, as replicated state does.
+    assert State.model_validate_json(seeded.model_dump_json(by_alias=True)).restart_recovery_intents == plan

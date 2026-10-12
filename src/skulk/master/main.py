@@ -1079,7 +1079,20 @@ class Master:
             if cold_start
             else (initial_state.restart_recovery_placements if initial_state is not None else None)
         )
-        self._restart_recovery_chosen = False
+        # The settled plan, replicated so a promoted master finishes it.
+        self._restart_recovery_announced_intents: tuple[PlacementIntent, ...] | None = (
+            initial_state.restart_recovery_intents if initial_state is not None else None
+        )
+        # A master promoted after its predecessor settled the plan finishes
+        # that plan: the record it came from may have left with that node.
+        carried_plan = (
+            initial_state.restart_recovery_intents
+            if initial_state is not None and initial_state.restart_recovery_pending
+            else None
+        )
+        self._restart_recovery_chosen = carried_plan is not None
+        if carried_plan is not None:
+            self._restart_recovery_remaining = list(carried_plan)
         self._restart_recovery_settled_at: datetime | None = None
         self._restart_recovery_unfetchable: set[NodeId] = set()
         # Every peer seen while recovering, with its install ID once known.
@@ -2044,7 +2057,7 @@ class Master:
                 },
             )
             events.extend(
-                self._announce_restart_recovery_count(len(self._restart_recovery_remaining))
+                self._announce_restart_recovery_plan(self._restart_recovery_remaining)
             )
         if self._restart_recovery_remaining:
             events.extend(self._restore_recorded_placements(now, connected_node_ids))
@@ -2069,17 +2082,28 @@ class Master:
         )
         return events
 
-    def _announce_restart_recovery_count(self, placements: int) -> list[Event]:
-        """Order the number of models coming back, when it changed.
+    def _announce_restart_recovery_plan(
+        self, intents: Sequence[PlacementIntent]
+    ) -> list[Event]:
+        """Order what the restore is bringing back, when it changed.
+
+        Replicating the plan itself, not only its size, lets a master promoted
+        in the middle of the restore finish it even when the node whose record
+        was chosen is gone.
 
         Returns:
-            One ``RestartRecoveryStarted`` when the count differs from the last
+            One ``RestartRecoveryStarted`` when the plan differs from the last
             one announced (or seeded), otherwise nothing.
         """
-        if placements == self._restart_recovery_announced:
+        plan = tuple(intents)
+        if (
+            len(plan) == self._restart_recovery_announced
+            and plan == self._restart_recovery_announced_intents
+        ):
             return []
-        self._restart_recovery_announced = placements
-        return [RestartRecoveryStarted(placements=placements)]
+        self._restart_recovery_announced = len(plan)
+        self._restart_recovery_announced_intents = plan
+        return [RestartRecoveryStarted(placements=len(plan), intents=plan)]
 
     def _latch_restart_recovery_span(self, connected_node_ids: set[NodeId]) -> None:
         """Remember that a recovering session has seen more than one node.
@@ -2205,10 +2229,10 @@ class Master:
         if chosen is not None and chosen is not own:
             events.extend(self._carry_restored_proposals(chosen, now))
         events.extend(
-            self._announce_restart_recovery_count(
-                len(chosen.placements)
+            self._announce_restart_recovery_plan(
+                chosen.placements
                 if chosen is not None and self._restart_recovery_restores_placements
-                else 0
+                else ()
             )
         )
         self._restart_recovery_record = chosen
