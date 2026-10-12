@@ -243,3 +243,27 @@ async def test_status_and_release_are_forwarded_for_the_exact_operation(
         await fixture.owner.burst_status("gpu", "1" * 32)
     with pytest.raises(LookupError):
         await fixture.owner.burst_status("other", "1" * 32)
+
+
+async def test_rentals_are_listed_per_provider_node_and_fenced(tmp_path: Path) -> None:
+    fixture = _Owner(tmp_path, node("gpu"), node("other", None))
+    fixture.replies = [{"rentals": [status_reply()]}]
+    (rental,) = await fixture.owner.burst_rentals()
+    assert (rental.plugin_id, rental.node_id, rental.operation_id) == (
+        "managed.fixture",
+        "gpu",
+        "1" * 32,
+    )
+    assert rental.instance_id == "instance-1" and rental.phase == "ready"
+    assert fixture.sent == [
+        {"operation": "burst-list", "plugin_id": "managed.fixture", "node_id": "gpu"}
+    ]
+    # A node that answers for another installation contributes nothing.
+    foreign = status_reply()
+    acquisition = foreign["acquisition"]
+    assert isinstance(acquisition, dict)
+    reference = acquisition["reference"]
+    assert isinstance(reference, dict)
+    reference["plugin_id"] = "managed.other"
+    fixture.replies = [{"rentals": [foreign]}]
+    assert await fixture.owner.burst_rentals() == ()

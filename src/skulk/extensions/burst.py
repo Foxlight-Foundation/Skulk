@@ -296,6 +296,15 @@ class NodeBurstOperations(Protocol):
         ...
 
 
+@runtime_checkable
+class NodeBurstRentals(Protocol):
+    """Optional facet that lists an installation's active rentals."""
+
+    async def burst_rentals(self) -> tuple["BurstOperation", ...]:
+        """Read rentals not yet confirmed gone, across the installation's nodes."""
+        ...
+
+
 class BurstOperationRequest(FrozenModel):
     """Approve one returned offer, exactly as recommended."""
 
@@ -398,6 +407,20 @@ class BurstOperation(FrozenModel):
             acquisition=status.acquisition,
             release=status.release,
         )
+
+
+class BurstRentals(FrozenModel):
+    """Active rentals known to the burst providers on this API host."""
+
+    scope: Literal["local_api_host"] = Field(
+        default="local_api_host",
+        description="Only providers installed on the API host that answered.",
+    )
+    observed_at: int = Field(gt=0, description="Read time as UTC Unix seconds.")
+    rentals: tuple[BurstOperation, ...] = Field(
+        max_length=64,
+        description="Rentals approved and not yet confirmed gone, newest first.",
+    )
 
 
 class BurstRecommendationRequest(FrozenModel):
