@@ -112,8 +112,9 @@ export interface BurstOperationAddress {
   operationId: string;
 }
 
-/** Phases after which a rental needs no more polling. */
-export const SETTLED_BURST_PHASES: readonly BurstPhase[] = ['ready', 'refused', 'released'];
+/** Phases after which a rental needs no more polling. `ready` is not one: the
+ *  provider can still release an idle rental, or its expiry end it. */
+export const SETTLED_BURST_PHASES: readonly BurstPhase[] = ['refused', 'released'];
 
 const headers = { 'X-Skulk-Dashboard': 'pairing-v1' };
 const operationPath = ({ operationId }: BurstOperationAddress) => `/v1/burst/operations/${encodeURIComponent(operationId)}`;

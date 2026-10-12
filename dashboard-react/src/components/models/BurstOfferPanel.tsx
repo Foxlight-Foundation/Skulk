@@ -85,7 +85,12 @@ export function BurstOfferPanel({ modelId, contextTokens }: BurstOfferPanelProps
   const followed = useGetBurstOperationQuery(address ?? skipToken, { refetchOnMountOrArgChange: true });
   const operation = followed.currentData;
   const settled = operation ? SETTLED_BURST_PHASES.includes(operation.phase) : false;
-  useGetBurstOperationQuery(address && !settled ? address : skipToken, { pollingInterval: 3000, skipPollingIfUnfocused: true });
+  // Coming up, poll briskly; once ready, slowly, so an idle release or the
+  // rental's expiry still shows here.
+  useGetBurstOperationQuery(address && !settled ? address : skipToken, {
+    pollingInterval: operation?.phase === 'ready' ? 15000 : 3000,
+    skipPollingIfUnfocused: true,
+  });
 
   const remember = (value: BurstOperationAddress | null) => {
     // Only the lookup address is stored, before the approval is sent; reload
