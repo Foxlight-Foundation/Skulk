@@ -1746,3 +1746,12 @@ inert, unsigned proposal, and the response adds its review so the reference and
 approval revision go straight to the existing owner proposal approval
 (`plugins:approve`). Money crosses the API only as dollar strings. The gateway
 maps `/v1/burst` onto the plugin scopes.
+
+## Instance request activity
+
+`api/instance_activity.py` keeps, per instance, the last time this API saw a
+request start or finish (local receipt time) and counts open requests from task
+state; lifecycle tasks (download, install, load, warmup, group, cancel,
+shutdown) are not requests. `GET /instance/{instance_id}/activity` exposes it
+for burst idle release. It is in-memory only, never in `State` or the event log.
+

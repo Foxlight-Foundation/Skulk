@@ -2515,6 +2515,13 @@ the existing owner proposal approval under `plugins:approve`. Money crosses the
 API only as dollar strings; provider units, credentials and signing stay in the
 provider. The gateway maps `/v1/burst` onto the same plugin scopes.
 
+Each API also keeps per-instance request activity (`api/instance_activity.py`),
+derived from the replicated task events as it applies them: requests in flight
+are counted from current task state, and the last request start or finish is
+stamped with the API's own receipt time. Lifecycle tasks are not requests.
+`GET /instance/{instance_id}/activity` exposes it so a burst provider can
+release a rented machine whose model has gone idle; nothing in core acts on it.
+
 Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
 and either the archive's optional `__manage__.py` or the `manage` launcher a signed
 wheel declares under `skulk.capability_runtime`. `extensions/local_setup.py`

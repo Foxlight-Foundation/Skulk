@@ -1731,6 +1731,11 @@ Ordinary Chat also pins asynchronous user and assistant writes to their originat
 - `src/skulk/api/operator_auth.py`: device GET/DELETE retain scoped bearer access and additionally accept the existing trusted direct-dashboard authority check with the dashboard pairing header. Invalid bearer credentials never fall back to direct authority. Relay restrictions remain in force.
 - Integration setup remains configuration guidance, not observed connectivity. Runtime health uses existing runtime/node/operation evidence. No device-presence or request-observation service is introduced.
 
+### Instance request activity
+
+- `api/instance_activity.py`: `InstanceActivity.observe(event, previous_tasks, tasks)` runs in `API._apply_state` after `apply()`. A task is a request unless it is `CreateRunner`, `DownloadModel`, `InstallEngine`, `ConnectToGroup`, `LoadModel`, `StartWarmup`, `CancelTask` or `Shutdown`. `TaskCreated`, `TaskStatusUpdated`, `TaskFailed` and `TaskDeleted` for a request stamp the instance's last activity with local receipt time; `InstanceDeleted` drops it, so the map is bounded by live instances. `read()` counts Pending and Running requests from current state.
+- `GET /instance/{instance_id}/activity` returns `inFlight`, `lastActivityAt` (null before any request since this API started), `observedSince` and `readAt`; 404 for unknown instances. Not persisted, not replicated, not in `State`.
+
 ### Installed capability declarations
 
 - `extensions/capabilities.py`: bounded `InstalledCapabilityRegistration` summaries bind declared operation purpose, id/version, descriptor revision, I/O mode and runtime prerequisites. They contain no credential values or configuration. `runtime_manager.installed_release` projects selected staged metadata; unreadable optional registration never hides installed identity. Aggregate inventory sheds optional registration before exceeding its frame budget.

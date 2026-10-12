@@ -113,6 +113,10 @@ from skulk.api.field_telemetry import (
     prepare_telemetry_config_update,
     tap_generation_stream,
 )
+from skulk.api.instance_activity import (
+    InstanceActivity,
+    InstanceActivityReading,
+)
 from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import (
     fetch_card_summary,
@@ -2073,6 +2077,7 @@ class API:
             CommandId, StewardHarness
         ] = weakref.WeakValueDictionary()
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
+        self._instance_activity = InstanceActivity()
         self._event_log_appends_since_retention_check = 0
         self._system_id = SystemId()
         self.command_sender = command_sender
@@ -2730,6 +2735,21 @@ class API:
             summary="Get one running instance",
             description="Return the current instance object for the exact instance ID. Unknown instances return 404; presence does not imply runner readiness.",
         )(self.get_instance)
+        self.app.get(
+            "/instance/{instance_id}/activity",
+            tags=["Instances"],
+            summary="Read one instance's request activity",
+            description=(
+                "Return how many requests are in flight on the exact instance and "
+                "when this API last saw one start or finish (UTC Unix seconds, null "
+                "when none since it started), plus the time since which it has been "
+                "watching. Derived from the replicated task events, so every API "
+                "counts the same requests; times are this API's receipt times. "
+                "Lifecycle tasks such as downloads, loading and shutdown are not "
+                "requests. Unknown instances return 404. A burst provider reads "
+                "this to release an idle rented machine."
+            ),
+        )(self.get_instance_activity)
         self.app.delete(
             "/instance/{instance_id}",
             tags=["Instances"],
@@ -4803,6 +4823,23 @@ class API:
         if instance_id not in self.state.instances:
             raise HTTPException(status_code=404, detail="Instance not found")
         return self.state.instances[instance_id]
+
+    def get_instance_activity(self, instance_id: InstanceId) -> InstanceActivityReading:
+        """Read requests in flight and the last request movement on one instance.
+
+        Args:
+            instance_id: Exact running instance.
+
+        Returns:
+            Open request count, last start or finish this API saw, and the time
+            since which it has been watching.
+
+        Raises:
+            HTTPException: 404 for an unknown instance.
+        """
+        if instance_id not in self.state.instances:
+            raise HTTPException(status_code=404, detail="Instance not found")
+        return self._instance_activity.read(instance_id, self.state.tasks)
 
     async def _steward_chat_completions(
         self,
@@ -11544,6 +11581,9 @@ class API:
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
+                self._instance_activity.observe(
+                    event, previous_tasks, self.state.tasks
+                )
 
                 if self._apply_custom_card_mutations_locally:
                     await self._apply_local_custom_card_mutation(event)
