@@ -174,6 +174,7 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `GET /instance/placement`
 - `GET /instance/previews`
 - `GET /instance/{instance_id}`
+- `GET /instance/{instance_id}/activity`
 - `DELETE /instance/{instance_id}`
 - `GET /state`
 - `GET /events`
@@ -2734,6 +2735,22 @@ for bounded readiness observation and cleanup responsibilities.
 Pass the exact instance ID as the path parameter. Returns its current instance
 object, including shard assignments and context limit; an unknown ID returns
 `404`. Presence alone does not imply all runners are ready.
+
+### Read one instance's request activity
+
+**GET** `/instance/{instance_id}/activity`
+
+Returns `instanceId`, `inFlight` (requests created and not yet finished on the
+instance), `lastActivityAt` (UTC Unix seconds when this API last saw a request
+start or finish there, or `null` if it has seen none since it started),
+`observedSince` (when this API started watching; an idle period cannot be
+known to have begun earlier) and `readAt`. Requests are every task a caller
+asked for, such as chat, embeddings, images or speech; the instance's own
+lifecycle tasks (download, engine install, loading, warmup, group connection,
+cancellation and shutdown) are not counted. Counts come from the replicated
+task events, so every API sees the same requests; times are this API's own
+receipt times. An unknown ID returns `404`. Burst providers read it to release
+an idle rented machine; it grants nothing and changes nothing.
 
 ### Delete an instance
 
