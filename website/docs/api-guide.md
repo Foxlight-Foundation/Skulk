@@ -4483,6 +4483,12 @@ To rent, approve, follow and release with the burst operations:
 - `GET /v1/burst/operations/{operation_id}` requires direct owner authority or
   `plugins:read`, with query parameters `plugin_id` and `node_id` from the
   recommendation. It changes nothing.
+- `GET /v1/burst/operations` requires direct owner authority or `plugins:read`.
+  It returns `scope` (`local_api_host`), `observedAt` and up to 64 `rentals`,
+  each in the shape below: every rental the providers here approved and have not
+  yet confirmed gone. The dashboard uses it to mark burst instances and offer
+  **Release**. A provider that cannot answer is left out; its rentals stay
+  readable by operation ID.
 - `DELETE /v1/burst/operations/{operation_id}` requires direct owner authority
   or `plugins:approve`, with the same query parameters. The provider stops the
   burst model through the ordinary instance delete first, so the cluster records

@@ -21,6 +21,7 @@ from skulk.extensions.burst import (
     BurstProvider,
     BurstProviders,
     BurstRecommendation,
+    BurstRentals,
 )
 from skulk.extensions.proposal_actions import ProposalApproval, ProposalOperation
 from skulk.extensions.proposal_review import (
@@ -191,6 +192,16 @@ class Provider(ManagedExtension):
                 observed_at=1_800_000_000,
             ),
             release=self.operation("2" * 32) if released else None,
+        )
+
+    async def burst_rentals(self) -> tuple[BurstOperation, ...]:
+        """One ready rental, while it is not released."""
+        if self.released_by:
+            return ()
+        return (
+            BurstOperation.of(
+                self.name, "gpu", "1" * 32, self.status("1" * 32, released=False)
+            ),
         )
 
     async def burst_status(self, node_id: str, operation_id: str) -> BurstNodeStatus:
@@ -465,3 +476,20 @@ async def test_approval_and_release_need_the_approve_scope(tmp_path: Path) -> No
         assert (await http.delete(FOLLOW)).status_code == 200
     assert provider.actors == [str(exchange.device_id)]
     assert provider.released_by == [str(exchange.device_id)]
+
+
+async def test_active_rentals_are_listed_until_released() -> None:
+    first, second = Provider(), Provider("managed.second")
+    async with client(first, second) as http:
+        listed = BurstRentals.model_validate_json(
+            (await http.get("/v1/burst/operations")).text
+        )
+        assert {(item.plugin_id, item.instance_id) for item in listed.rentals} == {
+            ("managed.fixture", "instance-1"),
+            ("managed.second", "instance-1"),
+        }
+        assert (await http.delete(FOLLOW)).status_code == 200
+        after = BurstRentals.model_validate_json(
+            (await http.get("/v1/burst/operations")).text
+        )
+    assert [item.plugin_id for item in after.rentals] == ["managed.second"]

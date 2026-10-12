@@ -1749,7 +1749,8 @@ maps `/v1/burst` onto the plugin scopes. `POST /v1/burst/operations`
 (`plugins:approve`) approves an offer with a caller-chosen durable operation ID;
 `GET`/`DELETE /v1/burst/operations/{id}` reach the provider's `burst-status` and
 `burst-release` (model stopped first, then the signed machine release) through
-the `NodeBurstOperations` facet. Providers also release a ready rental after
+the `NodeBurstOperations` facet; `GET /v1/burst/operations` lists active
+rentals (`burst-list`, `NodeBurstRentals`). Providers also release a ready rental after
 five idle minutes, read from `GET /instance/{id}/activity`.
 
 ## Instance request activity

@@ -21,8 +21,10 @@ from skulk.extensions.burst import (
     BurstRecommendation,
     BurstRecommendationRequest,
     BurstRecommendationState,
+    BurstRentals,
     NodeBurstOperations,
     NodeBurstProvider,
+    NodeBurstRentals,
 )
 from skulk.extensions.configuration import ConfigurationNodeId
 from skulk.extensions.loader import LoadedExtensions
@@ -340,6 +342,53 @@ def create_burst_router(
             return BurstOperation.accepted(operation)
 
         return await invoke(run)
+
+    @router.get(
+        "/operations",
+        response_model=BurstRentals,
+        summary="List active burst rentals",
+        description=(
+            "List every rental the burst providers on this API host approved and "
+            "have not yet confirmed gone, newest first, each in the same shape as "
+            "GET /v1/burst/operations/{operation_id}, including the Skulk "
+            "instance serving it once observed. Requires direct owner authority "
+            "or plugins:read. Changes nothing. A provider that cannot answer is "
+            "left out; its rentals stay readable by operation ID. An empty list "
+            "makes no statement about other hosts."
+        ),
+    )
+    async def list_rentals(request: Request, response: Response) -> BurstRentals:
+        """Gather every installation's active rentals in one bounded read."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+
+        async def read() -> BurstRentals:
+            async def one(provider: NodeBurstRentals) -> tuple[BurstOperation, ...]:
+                try:
+                    async with asyncio.timeout(12):
+                        return await provider.burst_rentals()
+                except Exception:  # noqa: BLE001 - one installation must not hide the rest
+                    return ()
+
+            found = await asyncio.gather(
+                *(
+                    one(provider)
+                    for provider in extensions.configuration_providers.values()
+                    if isinstance(provider, NodeBurstRentals)
+                )
+            )
+            rentals = sorted(
+                (item for group in found for item in group),
+                key=lambda item: item.acquisition.updated_at,
+                reverse=True,
+            )
+            return BurstRentals(
+                observed_at=int(time.time()), rentals=tuple(rentals[:64])
+            )
+
+        return await invoke(read)
 
     @router.get(
         "/operations/{operation_id}",

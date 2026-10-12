@@ -27,6 +27,7 @@ from skulk.extensions.burst import (
     BurstNodeOffer,
     BurstNodeReadiness,
     BurstNodeStatus,
+    BurstOperation,
     BurstProvider,
     burst_memory_pools,
 )
@@ -839,6 +840,49 @@ class ManagedOwner:
         ):
             raise ValueError("burst offer is for another workload")
         return offer
+
+    async def burst_rentals(self) -> tuple[BurstOperation, ...]:
+        """List each provider node's rentals that are not yet confirmed gone.
+
+        A node that cannot answer contributes nothing rather than failing the
+        list; its rentals stay reachable by operation ID.
+        """
+        await self.refresh()
+        rentals: list[BurstOperation] = []
+        for node in self.nodes:
+            if not any(burst_memory_pools(d) is not None for d in node.descriptors):
+                continue
+            try:
+                result = await self._request(
+                    {
+                        "operation": "burst-list",
+                        "plugin_id": self.name,
+                        "node_id": node.node_id,
+                    },
+                    timeout=10,
+                )
+                raw = result.get("rentals")
+                if set(result) != {"rentals"} or not isinstance(raw, list):
+                    raise ValueError("invalid burst rental list")
+                for item in raw[:64]:
+                    status = BurstNodeStatus.model_validate_json(json.dumps(item))
+                    reference = status.acquisition.reference
+                    if (
+                        reference.plugin_id != self.name
+                        or reference.node_id != node.node_id
+                    ):
+                        raise ValueError("burst rental names another installation")
+                    rentals.append(
+                        BurstOperation.of(
+                            self.name,
+                            node.node_id,
+                            status.acquisition.operation_id,
+                            status,
+                        )
+                    )
+            except (OSError, ValueError, TimeoutError):
+                continue
+        return tuple(rentals)
 
     async def burst_status(self, node_id: str, operation_id: str) -> BurstNodeStatus:
         """Read one rental's approval, machine and release progress; no effect."""
