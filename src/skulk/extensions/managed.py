@@ -23,6 +23,12 @@ from pydantic import (
     model_validator,
 )
 
+from skulk.extensions.burst import (
+    BurstNodeOffer,
+    BurstNodeReadiness,
+    BurstProvider,
+    burst_memory_pools,
+)
 from skulk.extensions.calls import CapabilityCall
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.configuration import (
@@ -304,6 +310,10 @@ def _read_connection(path: Path) -> ManagedConnection:
         return ManagedConnection.model_validate_json(raw)
     finally:
         os.close(descriptor)
+
+
+_BURST_DISABLED = "This burst provider is turned off. Turn it on from the Plugins page."
+_BURST_UNREACHABLE = "This burst provider is not running on this computer right now."
 
 
 @final
@@ -727,6 +737,107 @@ class ManagedOwner:
         ):
             raise ValueError("proposal action response differs")
         return operation
+
+    async def burst_providers(self) -> tuple[BurstProvider, ...]:
+        """Read each declared burst provider node's readiness; nothing is prepared.
+
+        A turned-off installation answers without contacting its owner, and an
+        unreachable owner reads as unavailable instead of raising, so one
+        missing provider never hides another from the operator.
+        """
+        with contextlib.suppress(RuntimeError):
+            await self.refresh()
+        providers: list[BurstProvider] = []
+        for node in self.nodes:
+            pools = next(
+                (
+                    declared
+                    for descriptor in node.descriptors
+                    if (declared := burst_memory_pools(descriptor)) is not None
+                ),
+                None,
+            )
+            if pools is None:
+                continue
+            readiness = await self._burst_readiness(node.node_id)
+            providers.append(
+                BurstProvider(
+                    plugin_id=self.name,
+                    node_id=node.node_id,
+                    bundle_id=node.bundle_id,
+                    version=node.version,
+                    title=node.title,
+                    memory_pools=pools,
+                    state="disabled"
+                    if self.disabled or self.manager_enabled is False
+                    else readiness.state,
+                    message=_BURST_DISABLED
+                    if self.disabled or self.manager_enabled is False
+                    else readiness.message,
+                    maximum_total_usd=readiness.maximum_total_usd,
+                    maximum_lifetime_seconds=readiness.maximum_lifetime_seconds,
+                )
+            )
+        return tuple(providers)
+
+    async def _burst_readiness(self, node_id: str) -> BurstNodeReadiness:
+        # Offers run the provider's native preparation through this host's
+        # callbacks, so an owner without them cannot offer whatever it reports.
+        if (
+            self.disabled
+            or self.manager_enabled is False
+            or not self.available
+            or not self.host_callbacks_available
+        ):
+            return BurstNodeReadiness(state="unavailable", message=_BURST_UNREACHABLE)
+        try:
+            result = await self._request(
+                {
+                    "operation": "burst-readiness",
+                    "plugin_id": self.name,
+                    "node_id": node_id,
+                },
+                timeout=2,
+            )
+            return BurstNodeReadiness.model_validate_json(json.dumps(result))
+        except (OSError, ValueError, TimeoutError):
+            return BurstNodeReadiness(state="unavailable", message=_BURST_UNREACHABLE)
+
+    async def burst_offer(
+        self, node_id: str, model_id: str, context_tokens: int
+    ) -> BurstNodeOffer:
+        """Ask one provider node for an offer; it retains an inert, unsigned proposal.
+
+        Nothing is rented, reserved or signed. The returned reference must
+        name this exact installation and node, or the answer is refused.
+        """
+        await self.refresh()
+        node = self._node(node_id)
+        if not any(burst_memory_pools(d) is not None for d in node.descriptors):
+            raise LookupError("installed node is not a burst provider")
+        if not self.host_callbacks_available:
+            raise ValueError("burst provider unavailable")
+        result = await self._request(
+            {
+                "operation": "burst-offer",
+                "plugin_id": self.name,
+                "node_id": node_id,
+                "model_id": model_id,
+                "context_tokens": context_tokens,
+            },
+            timeout=20,
+        )
+        offer = BurstNodeOffer.model_validate_json(json.dumps(result))
+        if offer.reference is not None and (
+            offer.reference.plugin_id != self.name or offer.reference.node_id != node_id
+        ):
+            raise ValueError("burst offer names another installation")
+        if offer.offer is not None and (
+            offer.offer.model_id != model_id
+            or offer.offer.context_tokens != context_tokens
+        ):
+            raise ValueError("burst offer is for another workload")
+        return offer
 
     async def handle_steward_tool(
         self,

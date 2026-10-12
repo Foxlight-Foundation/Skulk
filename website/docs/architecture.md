@@ -2499,6 +2499,22 @@ read instead of becoming truncated model input. A ready provisioner is distinct
 from allocated inference capacity; provider lifecycle and approval remain owned
 by their existing implementations.
 
+Burst providers are installed capabilities that rent remote machines for a model
+the cluster cannot run. A provider declares itself with the reserved descriptor
+annotations `skulk.burst.provider` (contract version `1`) and
+`skulk.burst.memory_pools`; core (`extensions/burst.py`) reads only those keys and
+never names a provider. `GET /v1/burst/providers` (`plugins:read`) asks each
+declared provider node for its own readiness over the owner control socket
+(`burst-readiness`), so the message names the provider's first missing setup
+step. `POST /v1/burst/recommendations` (`plugins:manage`) runs core's own
+inference assessment first and asks a provider only for an `external_required`
+verdict. The provider's `burst-offer` runs the same native preparation as its
+steward tool and retains an inert, unsigned proposal; core adds the provider's
+proposal review, so the returned reference and approval revision go straight to
+the existing owner proposal approval under `plugins:approve`. Money crosses the
+API only as dollar strings; provider units, credentials and signing stay in the
+provider. The gateway maps `/v1/burst` onto the same plugin scopes.
+
 Installed plugin terminal management uses `skulk-plugin-service manage-plugin`
 and either the archive's optional `__manage__.py` or the `manage` launcher a signed
 wheel declares under `skulk.capability_runtime`. `extensions/local_setup.py`

@@ -81,8 +81,11 @@ class CapabilityDescriptor(BaseModel):
         output_chunk_schema: JSON Schema for one outbound stream chunk;
             required for ``server_streaming``/``bidirectional``, forbidden
             otherwise.
-        annotations: Optional opaque string hints for callers (for example
-            ``{"latency": "interactive"}``); never interpreted by the fabric.
+        annotations: Optional string hints for callers (for example
+            ``{"latency": "interactive"}``). The fabric interprets only the
+            reserved ``skulk.`` keys it documents: ``skulk.burst.provider`` and
+            ``skulk.burst.memory_pools`` declare a burst provider (see
+            ``skulk.extensions.burst``). Every other key stays opaque.
     """
 
     # Extension-facing contract type: strict, frozen, no silent extras. Not a

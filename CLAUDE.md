@@ -1731,3 +1731,18 @@ scope is the local API host, and installation, enablement, reachability and exac
 live readiness are distinct. Steward's optional installed-metadata reader is
 bound to the HTTP request and rechecks authority for each invocation. Provider
 approval/lifecycle and allocated compute remain separate from these declarations.
+
+## Burst providers
+
+An installed capability declares itself a burst provider with the reserved
+descriptor annotations `skulk.burst.provider: "1"` and
+`skulk.burst.memory_pools` (`vram`/`ram`); core (`extensions/burst.py`) reads
+only those keys and never names a provider. `GET /v1/burst/providers`
+(`plugins:read`) reports each provider node's own readiness through the owner
+control operation `burst-readiness`. `POST /v1/burst/recommendations`
+(`plugins:manage`) runs core's assessment first and asks a provider
+(`burst-offer`) only for an `external_required` verdict; the provider retains an
+inert, unsigned proposal, and the response adds its review so the reference and
+approval revision go straight to the existing owner proposal approval
+(`plugins:approve`). Money crosses the API only as dollar strings. The gateway
+maps `/v1/burst` onto the plugin scopes.

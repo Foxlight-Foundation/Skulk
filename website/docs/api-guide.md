@@ -4389,6 +4389,74 @@ or credentials and never automatically resumes an interrupted approval. The
 separate **Resume original approval** action is available only for that phase.
 Providers retain raw failure evidence in protected host-local storage.
 
+### Burst capacity offers
+
+A burst provider is an installed capability that can rent remote machines to run
+a model the cluster cannot. It declares itself with two reserved descriptor
+annotations: `skulk.burst.provider: "1"` (the contract version) and
+`skulk.burst.memory_pools` (a comma-separated list of `vram` and `ram`). Skulk
+reads only those keys and never names a provider. A descriptor with another
+contract version, or an unknown or missing pool, is not treated as a provider.
+
+These routes use the plugin scopes, on direct and relay connections alike.
+Responses use `Cache-Control: no-store`. Money crosses the API only as exact US
+dollar strings with six decimal places, for example `"4.000000"`.
+
+- `GET /v1/burst/providers` requires direct owner authority or `plugins:read`.
+  It returns `scope` (`local_api_host`), `observedAt` (UTC Unix seconds) and up
+  to 32 `providers`. Each has `pluginId`, `nodeId`, `bundleId`, `version`,
+  nullable `title`, `memoryPools`, `state`, a plain-text `message` naming the
+  next step, and the owner's nullable ceilings `maximumTotalUsd` and
+  `maximumLifetimeSeconds` for one rental. `state` is `available`,
+  `configuration_required` (the message names the missing setting or setup
+  step), `unavailable` (the owner is not running, not ready, or actions are
+  turned off), or `disabled` (the installation is turned off). The read prepares
+  nothing and calls no provider service. An empty list makes no statement about
+  other hosts.
+- `POST /v1/burst/recommendations` requires direct owner authority or
+  `plugins:manage`. The body has `modelId`, `contextTokens` (default 8192, range
+  256 to 1,048,576, as for `GET /models/assessment`), and optional `pluginId`
+  plus `nodeId`, which must be given together. Skulk first runs its own
+  assessment. Only an `external_required` verdict asks a provider; an unknown
+  model returns 404. Without a named provider, the single `available` provider
+  is asked. The provider prepares its cheapest fitting offer within the owner's
+  limits and retains it as an inert, unsigned proposal. Nothing is rented,
+  reserved or signed.
+
+The recommendation always has `state`, a plain-text `message`, `modelId`,
+`contextTokens`, the verdict as `assessmentStatus`, up to 16
+`assessmentReasons`, and the nullable `provider` that was asked. `state` is one
+of:
+
+| State | Meaning |
+| --- | --- |
+| `offer` | An approvable offer, below |
+| `not_required` | The verdict is `local` or `insufficient_evidence`; place the model normally |
+| `blocked` | The model cannot be served as requested, locally or remotely |
+| `no_provider` | No burst provider is installed here, or the named one is not |
+| `provider_required` | Several providers are available; name one |
+| `provider_unavailable` | The chosen provider cannot offer now, or prepared an offer it cannot take approval for (expired or already decided before review); its message says why |
+| `no_eligible_capacity` | No offer fits within the owner's limits right now |
+| `skulk_build_unavailable` | The provider has no Skulk build to install that matches this cluster |
+| `refused` | The provider refused this workload; its message says why |
+
+An offer is returned only while its fresh review is still pending approval and carries an approval revision. It adds `reference` (the same `pluginId`, `nodeId`, `proposalId` and
+`proposalDigest` the plugin proposal routes take), `approvalRevision`, the
+provider's plain-text `review` facts (the same `fields` as a proposal review),
+and `offer`: `gpu`, `region`, `hourlyPriceUsd` (quoted, advisory),
+`maximumHourlyPriceUsd`, `maximumTotalUsd` (the worst case the approval
+permits), `planExpiresAt` (after which it can no longer be approved),
+`resourceExpiresAt` (when a rental ends at the latest), `modelId`,
+`contextTokens`, `backend` and `skulkBuild`. To rent, approve `reference` with
+`approvalRevision` as the `reviewRevision` through
+`POST /v1/plugins/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}/approve`,
+which requires `plugins:approve`.
+
+A provider that refuses the request without an outcome (most often because it
+is preparing another offer) returns 409; retry. A timeout returns 504, an
+unavailable provider 503, and a burst of concurrent requests 429. Errors carry
+no provider text.
+
 ### Managed plugin HTTP lifecycle
 
 The Plugins page and these routes use the same independently supervised manager
