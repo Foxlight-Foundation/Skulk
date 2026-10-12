@@ -161,6 +161,21 @@ def test_config_writes_leave_unset_sections_out(tmp_path: Path) -> None:
     assert "logging" in written
 
 
+def test_a_config_update_returns_what_it_wrote(tmp_path: Path) -> None:
+    """Callers broadcast the result; it must match the rollback-safe file."""
+    import yaml as yaml_module
+
+    from skulk.store.config import update_skulk_config_atomic
+
+    path = tmp_path / "skulk.yaml"
+    result = update_skulk_config_atomic(
+        path, lambda current: {**current, "future_section": None, "logging": {"enabled": True}}
+    )
+
+    assert result == yaml_module.safe_load(path.read_text())
+    assert "future_section" not in result
+
+
 def test_load_skulk_config_fails_loud_on_legacy_exo_yaml(tmp_path: Path) -> None:
     """A leftover exo.yaml without skulk.yaml fails loudly with the rename, not
     a silent zero-config boot that would drop store/logging/auth settings (#324)."""
