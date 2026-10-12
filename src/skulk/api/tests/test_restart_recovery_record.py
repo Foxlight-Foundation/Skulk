@@ -12,8 +12,9 @@ from skulk.recovery.tests.fixtures import INSTALL_IDS, NOW, SESSION, sample_stat
 from skulk.shared.types.common import NodeId
 
 
-def _request(host: str) -> Request:
-    return Request({"type": "http", "headers": [], "client": (host, 52415)})
+def _request(host: str, origin: str | None = None) -> Request:
+    headers = [(b"origin", origin.encode())] if origin is not None else []
+    return Request({"type": "http", "headers": headers, "client": (host, 52415)})
 
 
 async def test_a_fabric_peer_reads_the_record(
@@ -55,5 +56,33 @@ async def test_a_public_caller_is_refused(
 
     with pytest.raises(HTTPException) as refused:
         await api.get_restart_recovery_record(_request("198.51.100.10"))
+
+    assert refused.value.status_code == 403
+
+
+async def test_a_thunderbolt_only_peer_reads_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thunderbolt Bridge peers reach each other on self-assigned link-local IPv4."""
+    monkeypatch.setattr(api_main, "RECOVERY_RECORD_PATH", tmp_path / "missing.json")
+    api = object.__new__(API)
+    api.node_id = NodeId("serving-node")
+
+    served = await api.get_restart_recovery_record(_request("169.254.10.20"))
+
+    assert served.node_id == NodeId("serving-node")
+
+
+async def test_a_browser_on_a_link_local_address_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api_main, "RECOVERY_RECORD_PATH", tmp_path / "missing.json")
+    api = object.__new__(API)
+    api.node_id = NodeId("serving-node")
+
+    with pytest.raises(HTTPException) as refused:
+        await api.get_restart_recovery_record(
+            _request("169.254.10.20", origin="http://attacker.example")
+        )
 
     assert refused.value.status_code == 403

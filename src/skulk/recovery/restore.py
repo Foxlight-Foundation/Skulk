@@ -83,7 +83,9 @@ def awaited_peers(
     adverts: Mapping[NodeId, RestartRecoveryAdvert],
     *,
     own: ClusterIntentRecord | None,
+    local_node: NodeId,
     connected_node_ids: set[NodeId],
+    unfetchable: set[NodeId],
     live_install_ids: Mapping[UUID, NodeId],
 ) -> set[NodeId]:
     """Peers whose record could still beat every record reachable now.
@@ -92,26 +94,31 @@ def awaited_peers(
     until its advert arrives. A peer seen earlier in this recovery that has
     since left is awaited too, unless it is back under a new node ID (handled
     as connected), it holds no record, or its advert was no fresher than the
-    best record reachable now. The caller stops waiting at its deadline.
+    best record reachable now. "Reachable" means a source ``record_sources``
+    would actually use: a connected peer with no API, or whose fetch already
+    failed, does not count. The caller stops waiting at its deadline.
 
     Args:
         observed: Every peer seen during this recovery, with its install ID
             when that was known.
         adverts: Every node's latest advert, from telemetry.
         own: This node's record, if it has one.
+        local_node: This node.
         connected_node_ids: Nodes in the current topology.
+        unfetchable: Peers whose record could not be fetched this session.
         live_install_ids: Install ID to node ID for connected machines.
 
     Returns:
         Node IDs still worth waiting for.
     """
-    reachable = [own.stamp.written_at] if own is not None else []
-    reachable.extend(
-        advert.written_at
-        for node_id, advert in adverts.items()
-        if node_id in connected_node_ids and advert.written_at is not None
+    usable = record_sources(
+        own,
+        adverts,
+        local_node=local_node,
+        connected_node_ids=connected_node_ids,
+        unfetchable=unfetchable,
     )
-    freshest_reachable = max(reachable, default=None)
+    freshest_reachable = usable[0].written_at if usable else None
     awaited: set[NodeId] = set()
     for peer, install_id in observed.items():
         if peer in connected_node_ids:

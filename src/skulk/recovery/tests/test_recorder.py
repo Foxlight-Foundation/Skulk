@@ -1,6 +1,7 @@
 """The node's recorder writes only safe, current views of the cluster."""
 
 from datetime import datetime, timedelta, timezone
+from ipaddress import ip_address
 from pathlib import Path
 from uuid import UUID
 
@@ -10,12 +11,16 @@ from skulk.recovery.record import DEPARTURE_GRACE, read_record
 from skulk.recovery.recorder import (
     RECORD_REFRESH_AFTER,
     ClusterIntentRecorder,
+    own_addresses,
     record_is_writable,
 )
 from skulk.recovery.tests.fixtures import connected, sample_instance, sample_state
 from skulk.shared.types.common import NodeId, SessionId
 from skulk.shared.types.profiling import NodeIdentity
-from skulk.shared.types.restart_recovery import RestartRecoveryAdvert
+from skulk.shared.types.restart_recovery import (
+    ADVERT_ADDRESS_LIMIT,
+    RestartRecoveryAdvert,
+)
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import TelemetryView
 
@@ -178,18 +183,25 @@ async def test_the_advert_describes_the_record_and_goes_out_at_once(tmp_path: Pa
         clock=clock,
         advert_sender=send,
         api_port=52915,
+        address_provider=lambda: ("192.168.1.20",),
     )
-    assert recorder.advert() == RestartRecoveryAdvert(written_at=None, placements=0, api_port=52915)
+    assert recorder.advert() == RestartRecoveryAdvert(
+        written_at=None, placements=0, api_port=52915, addresses=("192.168.1.20",)
+    )
 
     with anyio.move_on_after(0.2):
         await recorder.run()
     # Recovery is pending, so nothing was written, but the advert still went out.
-    assert sent == [RestartRecoveryAdvert(written_at=None, placements=0, api_port=52915)]
+    assert sent == [
+        RestartRecoveryAdvert(
+            written_at=None, placements=0, api_port=52915, addresses=("192.168.1.20",)
+        )
+    ]
 
     current[0] = sample_state()
     assert await recorder.record_once()
     assert recorder.advert() == RestartRecoveryAdvert(
-        written_at=clock.now, placements=2, api_port=52915
+        written_at=clock.now, placements=2, api_port=52915, addresses=("192.168.1.20",)
     )
 
 
@@ -355,3 +367,27 @@ async def test_a_returning_machine_without_its_model_ends_the_grace(
     clock.now += timedelta(seconds=30)
     assert await recorder.record_once()
     assert _recorded_models(path) == ["org/on-a"]
+
+
+def test_a_node_without_an_api_advertises_no_addresses(tmp_path: Path) -> None:
+    """Nothing could fetch its record, so it names nowhere to fetch it from."""
+    current: list[State | None] = [sample_state()]
+    recorder = ClusterIntentRecorder(
+        state_provider=lambda: current[0],
+        session_provider=lambda: SESSION,
+        telemetry_view=_telemetry(),
+        path=tmp_path / "cluster-intent.json",
+        api_port=None,
+        address_provider=lambda: ("192.168.1.20",),
+    )
+    assert recorder.advert().addresses == ()
+
+
+def test_own_addresses_leave_out_what_no_peer_can_use() -> None:
+    addresses = own_addresses()
+    assert len(addresses) <= ADVERT_ADDRESS_LIMIT
+    assert all(not ip_address(address).is_loopback for address in addresses)
+    assert all(
+        not (ip_address(address).version == 6 and ip_address(address).is_link_local)
+        for address in addresses
+    )

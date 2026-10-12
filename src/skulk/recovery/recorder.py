@@ -1,13 +1,16 @@
 """Keep this node's restart recovery record current."""
 
+import socket
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from ipaddress import ip_address
 from pathlib import Path
 from typing import final
 from uuid import UUID
 
 import anyio
+import psutil
 from anyio import to_thread
 from loguru import logger
 
@@ -21,7 +24,10 @@ from skulk.recovery.record import (
 )
 from skulk.shared.constants import SKULK_DATA_HOME
 from skulk.shared.types.common import NodeId, SessionId
-from skulk.shared.types.restart_recovery import RestartRecoveryAdvert
+from skulk.shared.types.restart_recovery import (
+    ADVERT_ADDRESS_LIMIT,
+    RestartRecoveryAdvert,
+)
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import TelemetryView
 
@@ -38,6 +44,29 @@ master that starts later still sees every node's advert."""
 RECORD_REFRESH_AFTER = timedelta(minutes=5)
 """Re-stamp unchanged content this often, so the freshest record across nodes
 is the one most recently confirmed current, not the one last changed."""
+
+
+def own_addresses() -> tuple[str, ...]:
+    """This machine's addresses a peer could fetch its record from.
+
+    Loopback and link-local IPv6 are left out (no peer can use them), IPv4
+    first, at most ``ADVERT_ADDRESS_LIMIT``, in a stable order so an
+    unchanged machine advertises an unchanged list.
+    """
+    found: set[str] = set()
+    for services in psutil.net_if_addrs().values():
+        for service in services:
+            if service.family not in (socket.AF_INET, socket.AF_INET6):
+                continue
+            try:
+                parsed = ip_address(service.address.split("%", 1)[0])
+            except ValueError:
+                continue
+            if parsed.is_loopback or (parsed.version == 6 and parsed.is_link_local):
+                continue
+            found.add(str(parsed))
+    ordered = sorted(found, key=lambda address: (":" in address, address))
+    return tuple(ordered[:ADVERT_ADDRESS_LIMIT])
 
 
 def node_install_ids(telemetry_view: TelemetryView) -> dict[NodeId, UUID]:
@@ -78,6 +107,8 @@ class ClusterIntentRecorder:
             None for a recorder that only keeps the file (tests, tools).
         api_port: Port of this node's API, which serves the record; None when
             the node runs without one.
+        address_provider: Returns this node's own addresses for the advert;
+            injected so tests need no network.
     """
 
     def __init__(
@@ -90,6 +121,7 @@ class ClusterIntentRecorder:
         clock: Callable[[], datetime] = lambda: datetime.now(tz=timezone.utc),
         advert_sender: Callable[[RestartRecoveryAdvert], Awaitable[None]] | None = None,
         api_port: int | None = None,
+        address_provider: Callable[[], tuple[str, ...]] = own_addresses,
     ) -> None:
         self._state_provider = state_provider
         self._session_provider = session_provider
@@ -98,6 +130,7 @@ class ClusterIntentRecorder:
         self._clock = clock
         self._advert_sender = advert_sender
         self._api_port = api_port
+        self._address_provider = address_provider
         self._last_written: ClusterIntentRecord | None = read_record(path)
         # Install IDs this node has ever seen. A machine that drops out of
         # telemetry for a while keeps its install ID here, so an operator's
@@ -183,6 +216,7 @@ class ClusterIntentRecorder:
             written_at=record.stamp.written_at if record is not None else None,
             placements=len(record.placements) if record is not None else 0,
             api_port=self._api_port,
+            addresses=self._address_provider() if self._api_port is not None else (),
         )
 
     async def run(self) -> None:

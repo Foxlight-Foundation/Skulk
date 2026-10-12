@@ -1,10 +1,15 @@
 """Telemetry that lets a cold-started cluster choose the freshest restart record."""
 
 from datetime import datetime
+from ipaddress import ip_address
+from typing import cast
 
 from pydantic import ConfigDict, Field, field_validator
 
 from skulk.utils.pydantic_ext import TaggedModel
+
+ADVERT_ADDRESS_LIMIT = 16
+"""Most addresses one advert carries; a node with more lists the first ones."""
 
 
 class RestartRecoveryAdvert(TaggedModel):
@@ -38,6 +43,29 @@ class RestartRecoveryAdvert(TaggedModel):
             "node runs without an API."
         ),
     )
+
+    addresses: tuple[str, ...] = Field(
+        default=(),
+        max_length=ADVERT_ADDRESS_LIMIT,
+        description=(
+            "This node's own reachable IP addresses, so its record can be "
+            "fetched even when it publishes no interface list (a node without "
+            "a worker). Loopback and link-local IPv6 are left out."
+        ),
+    )
+
+    @field_validator("addresses", mode="before")
+    @classmethod
+    def _coerce_addresses(cls, value: object) -> object:
+        """Restore tuples from JSON arrays and require IP literals."""
+        if not isinstance(value, (list, tuple)):
+            return value
+        items = tuple(cast("list[object] | tuple[object, ...]", value))
+        for item in items:
+            if not isinstance(item, str):
+                raise ValueError("addresses must be strings")
+            ip_address(item)
+        return items
 
     @field_validator("written_at", mode="before")
     @classmethod

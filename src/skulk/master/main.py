@@ -2101,15 +2101,23 @@ class Master:
         )
         adverts = self._telemetry_view.node_restart_recovery
         own = self._restart_recovery_record
-        if not waited_out and awaited_peers(
-            self._restart_recovery_observed,
-            adverts,
-            own=own,
-            connected_node_ids=connected_node_ids,
-            live_install_ids=live_nodes_by_install_id(
-                self._telemetry_view, connected_node_ids
-            ),
-        ):
+
+        def still_waiting() -> bool:
+            return not waited_out and bool(
+                awaited_peers(
+                    self._restart_recovery_observed,
+                    adverts,
+                    own=own,
+                    local_node=self.node_id,
+                    connected_node_ids=connected_node_ids,
+                    unfetchable=self._restart_recovery_unfetchable,
+                    live_install_ids=live_nodes_by_install_id(
+                        self._telemetry_view, connected_node_ids
+                    ),
+                )
+            )
+
+        if still_waiting():
             return []
         chosen: ClusterIntentRecord | None = None
         source_label = "no node"
@@ -2137,6 +2145,10 @@ class Master:
                     "record; trying the next freshest"
                 )
                 self._restart_recovery_unfetchable.add(source.node_id)
+                # Losing that source may make a departed peer's record the
+                # best one left, worth waiting for before settling for less.
+                if still_waiting():
+                    return []
                 continue
             self._restart_recovery_fetched = (source.node_id, source.written_at, fetched)
             chosen, source_label = fetched, f"node {source.node_id}"
