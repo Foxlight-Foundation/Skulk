@@ -4445,8 +4445,12 @@ dollar strings with six decimal places, for example `"4.000000"`.
   other hosts.
 - `POST /v1/burst/recommendations` requires direct owner authority or
   `plugins:manage`. The body has `modelId`, `contextTokens` (default 8192, range
-  256 to 1,048,576, as for `GET /models/assessment`), and optional `pluginId`
-  plus `nodeId`, which must be given together. Skulk first runs its own
+  256 to 1,048,576, as for `GET /models/assessment`), optional `pluginId` plus
+  `nodeId`, which must be given together, and optional `excludedNodeIds` (up to
+  64): nodes the operator excluded from the placement, as for
+  `GET /models/assessment`. Both the cluster's verdict and the provider's own
+  assessment are read without them, so an operator can ask for remote capacity
+  for a model the remaining nodes cannot run. Skulk first runs its own
   assessment. Only an `external_required` verdict asks a provider; an unknown
   model returns 404. Without a named provider, the single `available` provider
   is asked. The provider prepares its cheapest fitting offer within the owner's

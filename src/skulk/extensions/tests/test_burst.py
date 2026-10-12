@@ -267,3 +267,13 @@ async def test_rentals_are_listed_per_provider_node_and_fenced(tmp_path: Path) -
     reference["plugin_id"] = "managed.other"
     fixture.replies = [{"rentals": [foreign]}]
     assert await fixture.owner.burst_rentals() == ()
+
+
+async def test_exclusions_are_sent_only_when_present(tmp_path: Path) -> None:
+    """A provider that predates exclusions still gets the ordinary offer."""
+    fixture = _Owner(tmp_path, node("gpu"))
+    fixture.replies = [offer_reply(), offer_reply()]
+    await fixture.owner.burst_offer("gpu", "example/large", 8192)
+    await fixture.owner.burst_offer("gpu", "example/large", 8192, ("node-a",))
+    assert "excluded_node_ids" not in fixture.sent[0]
+    assert fixture.sent[1]["excluded_node_ids"] == ["node-a"]

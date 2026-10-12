@@ -39,8 +39,8 @@ from skulk.shared.models.inference_assessment import InferenceAssessment
 
 _Result = TypeVar("_Result")
 
-type Assess = Callable[[str, int], Awaitable[InferenceAssessment]]
-"""Run the cluster's own inference assessment for one model and context."""
+type Assess = Callable[[str, int, tuple[str, ...]], Awaitable[InferenceAssessment]]
+"""Run the cluster's own inference assessment for a model, context and exclusions."""
 
 _NOT_REQUIRED = {
     "local": (
@@ -251,7 +251,8 @@ def create_burst_router(
         response.headers["Cache-Control"] = "no-store"
         # The assessment raises its own 404 for an unknown model, so it runs
         # outside the provider failure mapping.
-        assessment = await assess(payload.model_id, payload.context_tokens)
+        excluded = tuple(payload.excluded_node_ids)
+        assessment = await assess(payload.model_id, payload.context_tokens, excluded)
 
         def answer(
             state: BurstRecommendationState,
@@ -298,7 +299,10 @@ def create_burst_router(
             if installation is None:
                 raise LookupError("burst provider left during the request")
             prepared: BurstNodeOffer = await installation.burst_offer(
-                chosen.node_id, payload.model_id, payload.context_tokens
+                chosen.node_id,
+                payload.model_id,
+                payload.context_tokens,
+                excluded,
             )
             state = _OFFER_STATES[prepared.state]
             if prepared.reference is None:
