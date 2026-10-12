@@ -17,6 +17,7 @@ from skulk.shared.types.profiling import (
     NodeThunderboltInfo,
     ThunderboltBridgeStatus,
 )
+from skulk.shared.types.restart_recovery import PlacementIntent
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
     StewardActionProposalId,
@@ -78,6 +79,26 @@ class State(CamelCaseModel):
             "before the master has chosen which record to restore from."
         ),
     )
+
+    restart_recovery_intents: tuple[PlacementIntent, ...] | None = Field(
+        default=None,
+        description=(
+            "The placements a restore is bringing back, once the master has "
+            "settled them (chosen its record, then reconciled it with what is "
+            "running). Replicated so a master promoted in the middle of a "
+            "restore finishes the same plan even when the node that held the "
+            "chosen record is gone. None outside a restore and before the plan "
+            "is settled."
+        ),
+    )
+
+    @field_validator("restart_recovery_intents", mode="before")
+    @classmethod
+    def _coerce_restart_recovery_intents(cls, value: object) -> object:
+        """Restore the immutable restore plan from JSON array wire values."""
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
 
     @field_validator("instance_failures", mode="before")
     @classmethod

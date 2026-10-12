@@ -30,14 +30,13 @@ from skulk.master.placement import (
     PlacementError,
     replacement_command_for_download_failed_instance,
 )
-from skulk.shared.types.common import ModelId, NodeId, SessionId
+from skulk.shared.types.common import NodeId, SessionId
+from skulk.shared.types.restart_recovery import PlacementIntent
 from skulk.shared.types.state import State
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
     StewardActionProposalId,
 )
-from skulk.shared.types.worker.instances import InstanceMeta
-from skulk.shared.types.worker.shards import Sharding
 from skulk.utils.pydantic_ext import FrozenModel
 
 RECORD_FORMAT_VERSION = 1
@@ -84,33 +83,6 @@ class RecoveryStamp(FrozenModel):
         """
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("written_at must carry a timezone")
-        return value
-
-
-class PlacementIntent(FrozenModel):
-    """One ordinary placement as the operator asked for it, free of live IDs."""
-
-    model_id: ModelId = Field(description="Model to place again.")
-    sharding: Sharding = Field(description="Sharding strategy it was placed with.")
-    instance_meta: InstanceMeta = Field(description="Serving topology it used.")
-    min_nodes: int = Field(ge=1, description="Width: how many machines it spanned.")
-    requested_context_tokens: int | None = Field(
-        default=None, description="Context window the operator asked for, if any."
-    )
-    host_install_ids: tuple[UUID, ...] = Field(
-        description="Stable install IDs of the machines it ran on, in rank order."
-    )
-    excluded_install_ids: tuple[UUID, ...] = Field(
-        default=(), description="Machines the operator excluded, by install ID."
-    )
-
-    @field_validator("host_install_ids", "excluded_install_ids", mode="before")
-    @classmethod
-    def _coerce_uuids(cls, value: object) -> object:
-        """Restore tuples of UUIDs from JSON arrays of strings."""
-        if isinstance(value, list):
-            items = cast("list[object]", value)
-            return tuple(UUID(item) if isinstance(item, str) else item for item in items)
         return value
 
 

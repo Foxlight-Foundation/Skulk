@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Literal, final
+from typing import Literal, cast, final
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Connection
@@ -15,6 +15,7 @@ from skulk.shared.types.common import (
     SystemId,
 )
 from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.restart_recovery import PlacementIntent
 from skulk.shared.types.state import State
 from skulk.shared.types.steward_actions import StewardActionProposal
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
@@ -300,18 +301,33 @@ class StewardActionProposalChanged(BaseEvent):
 
 
 class RestartRecoveryStarted(BaseEvent):
-    """How many models a restore is bringing back changed.
+    """What a restore is bringing back was settled or changed.
 
-    Sets ``State.restart_recovery_placements``. The cold-start seed already
-    carries the count from the master's own record; this is ordered when the
-    count changes: a multi-node restore chose another node's record, or
-    reconciliation found some placements already running (a master promoted
-    in the middle of a restore).
+    Sets ``State.restart_recovery_placements`` and, when present,
+    ``State.restart_recovery_intents``. The cold-start seed already carries
+    the count from the master's own record; this is ordered when the master
+    chooses a record and when it reconciles that record with what is running,
+    so a master promoted mid-restore can finish the same plan.
     """
 
     placements: int = Field(
         ge=0, description="Placements the master is about to request from the record."
     )
+    intents: tuple[PlacementIntent, ...] | None = Field(
+        default=None,
+        description=(
+            "The placements themselves, in order; None when only the count is "
+            "known."
+        ),
+    )
+
+    @field_validator("intents", mode="before")
+    @classmethod
+    def _coerce_intents(cls, value: object) -> object:
+        """Restore the immutable plan from JSON array wire values."""
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
 
 
 class RestartRecoveryCompleted(BaseEvent):

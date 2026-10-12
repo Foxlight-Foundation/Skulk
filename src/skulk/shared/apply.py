@@ -165,14 +165,16 @@ def event_apply(event: Event, state: State) -> State:
                     proposals.pop(proposal.proposal_id, None)
             return state.model_copy(update={"steward_action_proposals": proposals})
         case RestartRecoveryStarted():
-            return state.model_copy(
-                update={"restart_recovery_placements": event.placements}
-            )
+            update: dict[str, object] = {"restart_recovery_placements": event.placements}
+            if event.intents is not None:
+                update["restart_recovery_intents"] = event.intents
+            return state.model_copy(update=update)
         case RestartRecoveryCompleted():
             return state.model_copy(
                 update={
                     "restart_recovery_pending": False,
                     "restart_recovery_placements": None,
+                    "restart_recovery_intents": None,
                 }
             )
         case StateSnapshotHydrated():
