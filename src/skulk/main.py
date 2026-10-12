@@ -1768,7 +1768,17 @@ class Node:
         # (it would only be clobbered by that same broadcast).
         from skulk.store.config import normalized_hf_token
 
-        broadcast_dict = copy.deepcopy(self.skulk_config.model_dump())
+        # Unset sections stay out of what every node writes, so a section a
+        # newer build adds can never stop an older one from starting (see
+        # skulk.store.config.without_unset_sections).
+        unset_sections = {
+            name
+            for name in SkulkConfig.model_fields
+            if getattr(self.skulk_config, name) is None
+        }
+        broadcast_dict = copy.deepcopy(
+            self.skulk_config.model_dump(exclude=unset_sections)
+        )
         broadcast_dict["model_store"]["store_http_host"] = reachable_host
         if normalized_hf_token(broadcast_dict.get("hf_token")) is None:
             broadcast_dict.pop("hf_token", None)

@@ -234,6 +234,10 @@ async def test_store_host_rebroadcast_uses_persisted_config_not_the_startup_snap
     assert isinstance(broadcast, dict)
     assert broadcast["hf_token"] == "rotated-token-b"
     assert "stale-token-a" not in config_yaml
+    # Unset sections never ride the broadcast: every node writes it, and a
+    # null section a newer build added would stop an older build at startup.
+    assert "intelligent_fabric" not in broadcast
+    assert all(value is not None for value in broadcast.values())
 
 
 def test_provenance_marker_survives_in_place_restart(
