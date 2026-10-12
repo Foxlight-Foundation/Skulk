@@ -184,3 +184,62 @@ async def test_an_offer_is_forwarded_exactly_and_must_name_this_node(
         await fixture.owner.burst_offer("gpu", "example/large", 4096)
     with pytest.raises(LookupError):
         await fixture.owner.burst_offer("other", "example/large", 8192)
+
+
+def status_reply(**acquisition: str) -> dict[str, JsonValue]:
+    return {
+        "phase": "ready",
+        "message": "The model is ready on the remote machine.",
+        "acquisition": {
+            "operation_id": "1" * 32,
+            "reference": {
+                "plugin_id": "managed.fixture",
+                "node_id": "gpu",
+                "proposal_id": "a" * 64,
+                "proposal_digest": "a" * 64,
+            },
+            "phase": "acknowledged",
+            "updated_at": 1_800_000_000,
+            **acquisition,
+        },
+        "job": {
+            "phase": "ready",
+            "ready": True,
+            "model_id": "example/large",
+            "instance_id": "instance-1",
+            "resource_expires_at": 1_800_003_600,
+            "observed_at": 1_800_000_000,
+        },
+        "release": None,
+    }
+
+
+async def test_status_and_release_are_forwarded_for_the_exact_operation(
+    tmp_path: Path,
+) -> None:
+    fixture = _Owner(tmp_path, node("gpu"), node("other", None))
+    fixture.replies = [status_reply(), status_reply()]
+    status = await fixture.owner.burst_status("gpu", "1" * 32)
+    released = await fixture.owner.burst_release("gpu", "1" * 32, "operator-1")
+    assert status.job is not None and status.job.instance_id == "instance-1"
+    assert released.phase == "ready"
+    assert fixture.sent == [
+        {
+            "operation": "burst-status",
+            "plugin_id": "managed.fixture",
+            "node_id": "gpu",
+            "operation_id": "1" * 32,
+        },
+        {
+            "operation": "burst-release",
+            "plugin_id": "managed.fixture",
+            "node_id": "gpu",
+            "operation_id": "1" * 32,
+            "operator_id": "operator-1",
+        },
+    ]
+    fixture.replies = [status_reply(operation_id="2" * 32)]
+    with pytest.raises(ValueError, match="another operation"):
+        await fixture.owner.burst_status("gpu", "1" * 32)
+    with pytest.raises(LookupError):
+        await fixture.owner.burst_status("other", "1" * 32)

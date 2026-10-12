@@ -4,24 +4,33 @@
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import Annotated, TypeVar
 
 import anyio
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from skulk.api.managed_plugins import ProtectedManagementRoute
 from skulk.api.operator_auth import TailnetPeerVerifier, authorize_plugin_request
 from skulk.connectivity.tailscale import is_tailscale_peer
 from skulk.extensions.burst import (
     BurstNodeOffer,
+    BurstOperation,
+    BurstOperationRequest,
     BurstProvider,
     BurstProviders,
     BurstRecommendation,
     BurstRecommendationRequest,
     BurstRecommendationState,
+    NodeBurstOperations,
     NodeBurstProvider,
 )
+from skulk.extensions.configuration import ConfigurationNodeId
 from skulk.extensions.loader import LoadedExtensions
+from skulk.extensions.proposal_actions import (
+    NodeProposalActionsProvider,
+    ProposalApproval,
+    ProposalOperationId,
+)
 from skulk.extensions.proposal_review import NodeProposalReviewProvider
 from skulk.operator.pairing import OperatorPairingService
 from skulk.shared.models.inference_assessment import InferenceAssessment
@@ -103,8 +112,8 @@ def create_burst_router(
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "the burst provider refused this request; it may be preparing "
-                    "another offer, so try again"
+                    "the burst provider refused this request; it may be busy with "
+                    "another one, so try again"
                 ),
             ) from None
         except TimeoutError:
@@ -279,5 +288,148 @@ def create_burst_router(
             )
 
         return await invoke(offer)
+
+    def operations(plugin_id: str) -> NodeBurstOperations:
+        installation = extensions.configuration_providers.get(plugin_id)
+        if not isinstance(installation, NodeBurstOperations):
+            raise HTTPException(status_code=404, detail="burst provider not found")
+        return installation
+
+    @router.post(
+        "/operations",
+        response_model=BurstOperation,
+        summary="Approve a burst offer and rent the machine",
+        description=(
+            "Approve one recommendation exactly as returned: its reference and "
+            "approval revision, under a caller-chosen 32-hex operationId saved "
+            "before sending. Requires direct owner authority or plugins:approve. "
+            "The provider revalidates its terms, signs with its own approval "
+            "credential and rents the machine; the API supplies the authenticated "
+            "operator. Repeating the request with the same operationId observes "
+            "the same action and never rents twice. The response is the "
+            "approval's first progress (usually approving); follow it with GET."
+        ),
+    )
+    async def approve(
+        payload: BurstOperationRequest, request: Request, response: Response
+    ) -> BurstOperation:
+        """Approve through the owner proposal action, then report its progress."""
+        operator_id = await authorize_plugin_request(
+            request, pairing_service, "plugins:approve", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        reference = payload.reference
+        installation = operations(reference.plugin_id)
+        if not isinstance(installation, NodeProposalActionsProvider):
+            raise HTTPException(status_code=404, detail="burst provider not found")
+
+        async def run() -> BurstOperation:
+            operation = await installation.approve_node_proposal(
+                ProposalApproval(
+                    operation_id=payload.operation_id,
+                    reference=reference,
+                    review_revision=payload.approval_revision,
+                ),
+                operator_id,
+            )
+            if (
+                operation.reference != reference
+                or operation.operation_id != payload.operation_id
+            ):
+                raise ValueError("approval answered for another operation")
+            return BurstOperation.accepted(operation)
+
+        return await invoke(run)
+
+    @router.get(
+        "/operations/{operation_id}",
+        response_model=BurstOperation,
+        summary="Follow one burst rental",
+        description=(
+            "Read an approved rental's progress from its provider: the approval "
+            "(with cleanup reconciliation), the machine's phase, the Skulk "
+            "instance serving the model once observed, the rental's latest end, "
+            "and any release. phase is approving, refused, attention, uncertain, "
+            "starting, installing, joining, downloading, loading, ready, "
+            "releasing or released; released means the provider confirmed the "
+            "machine is gone. Requires direct owner authority or plugins:read, "
+            "and the plugin_id and node_id the recommendation named. Changes "
+            "nothing. A provider busy with another request returns 409; retry."
+        ),
+    )
+    async def follow(
+        operation_id: ProposalOperationId,
+        request: Request,
+        response: Response,
+        plugin_id: Annotated[
+            str,
+            Query(
+                pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$",
+                description="Provider installation from the recommendation.",
+            ),
+        ],
+        node_id: Annotated[
+            ConfigurationNodeId,
+            Query(description="Provider node from the recommendation."),
+        ],
+    ) -> BurstOperation:
+        """Read approval, machine and release progress in one view."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        installation = operations(plugin_id)
+
+        async def read() -> BurstOperation:
+            status = await installation.burst_status(node_id, operation_id)
+            return BurstOperation.of(plugin_id, node_id, operation_id, status)
+
+        return await invoke(read)
+
+    @router.delete(
+        "/operations/{operation_id}",
+        response_model=BurstOperation,
+        summary="Release one burst rental",
+        description=(
+            "Stop the burst model through the ordinary instance delete, then have "
+            "the provider release the machine under a signed release for the "
+            "authenticated operator. Requires direct owner authority or "
+            "plugins:approve, and the plugin_id and node_id the recommendation "
+            "named. Repeating it observes the first release. A rental the "
+            "provider's controller does not know yet cannot be released yet "
+            "(409); the rental's own expiry still ends it. Follow with GET until "
+            "phase is released."
+        ),
+    )
+    async def release(
+        operation_id: ProposalOperationId,
+        request: Request,
+        response: Response,
+        plugin_id: Annotated[
+            str,
+            Query(
+                pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$",
+                description="Provider installation from the recommendation.",
+            ),
+        ],
+        node_id: Annotated[
+            ConfigurationNodeId,
+            Query(description="Provider node from the recommendation."),
+        ],
+    ) -> BurstOperation:
+        """Release the machine; the operator is the API's own authentication."""
+        operator_id = await authorize_plugin_request(
+            request, pairing_service, "plugins:approve", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        installation = operations(plugin_id)
+
+        async def run() -> BurstOperation:
+            status = await installation.burst_release(
+                node_id, operation_id, operator_id
+            )
+            return BurstOperation.of(plugin_id, node_id, operation_id, status)
+
+        return await invoke(run)
 
     return router

@@ -13,12 +13,16 @@ from skulk.api.tests.test_operator_gateway import paired_service
 from skulk.api.tests.test_plugins import ManagedExtension
 from skulk.extensions import LoadedExtensions
 from skulk.extensions.burst import (
+    BurstJob,
     BurstNodeOffer,
+    BurstNodeStatus,
     BurstOffer,
+    BurstOperation,
     BurstProvider,
     BurstProviders,
     BurstRecommendation,
 )
+from skulk.extensions.proposal_actions import ProposalApproval, ProposalOperation
 from skulk.extensions.proposal_review import (
     ProposalField,
     ProposalPage,
@@ -69,6 +73,8 @@ class Provider(ManagedExtension):
         self.refuse = False
         self.review_state: Literal["pending_approval", "expired"] = "pending_approval"
         self.approvable = True
+        self.actors: list[str] = []
+        self.released_by: list[str] = []
         self.reference = ProposalReference(
             plugin_id=name,
             node_id="gpu",
@@ -138,6 +144,67 @@ class Provider(ManagedExtension):
             approval_revision="b" * 64 if self.approvable else None,
             fields=(ProposalField(label="GPU", value="NVIDIA A100 80GB"),),
         )
+
+    def operation(self, operation_id: str) -> ProposalOperation:
+        """The acquisition's durable progress, as the owner journal reports it."""
+        return ProposalOperation(
+            operation_id=operation_id,
+            reference=self.reference,
+            phase="accepted",
+            updated_at=1_800_000_000,
+        )
+
+    async def approve_node_proposal(
+        self, mutation: ProposalApproval, operator_id: str
+    ) -> ProposalOperation:
+        """Record the authenticated actor; the mutation is exactly the offer's."""
+        assert mutation.reference == self.reference
+        assert mutation.review_revision == "b" * 64
+        self.actors.append(operator_id)
+        return self.operation(mutation.operation_id)
+
+    async def node_proposal_operation(
+        self, node_id: str, operation_id: str
+    ) -> ProposalOperation:
+        """Not part of the burst routes."""
+        raise AssertionError("not read")
+
+    async def resume_node_proposal(
+        self, node_id: str, operation_id: str, operator_id: str
+    ) -> ProposalOperation:
+        """Not part of the burst routes."""
+        raise AssertionError("not read")
+
+    def status(self, operation_id: str, *, released: bool) -> BurstNodeStatus:
+        return BurstNodeStatus(
+            phase="releasing" if released else "ready",
+            message="The model is ready on the remote machine.",
+            acquisition=self.operation(operation_id).model_copy(
+                update={"phase": "acknowledged"}
+            ),
+            job=BurstJob(
+                phase="ready",
+                ready=True,
+                model_id="example/large",
+                instance_id="instance-1",
+                resource_expires_at=1_900_003_600,
+                observed_at=1_800_000_000,
+            ),
+            release=self.operation("2" * 32) if released else None,
+        )
+
+    async def burst_status(self, node_id: str, operation_id: str) -> BurstNodeStatus:
+        """A ready rental."""
+        assert node_id == "gpu"
+        return self.status(operation_id, released=bool(self.released_by))
+
+    async def burst_release(
+        self, node_id: str, operation_id: str, operator_id: str
+    ) -> BurstNodeStatus:
+        """Release under the authenticated operator only."""
+        assert node_id == "gpu"
+        self.released_by.append(operator_id)
+        return self.status(operation_id, released=True)
 
 
 def client(
@@ -308,3 +375,93 @@ async def test_an_offer_that_cannot_be_approved_is_not_returned_as_one() -> None
         assert answer.state == "provider_unavailable"
         assert "Nothing was rented" in answer.message
         assert answer.reference is None and answer.approval_revision is None
+
+
+OPERATION = "1" * 32
+APPROVAL = {
+    "operationId": OPERATION,
+    "reference": {
+        "pluginId": "managed.fixture",
+        "nodeId": "gpu",
+        "proposalId": "a" * 64,
+        "proposalDigest": "a" * 64,
+    },
+    "approvalRevision": "b" * 64,
+}
+FOLLOW = f"/v1/burst/operations/{OPERATION}?plugin_id=managed.fixture&node_id=gpu"
+
+
+async def test_an_offer_is_approved_followed_and_released_through_the_api() -> None:
+    provider = Provider()
+    async with client(provider) as http:
+        approved = await http.post("/v1/burst/operations", json=APPROVAL)
+        followed = await http.get(FOLLOW)
+        released = await http.delete(FOLLOW)
+        missing = await http.get(
+            f"/v1/burst/operations/{OPERATION}?plugin_id=managed.absent&node_id=gpu"
+        )
+    assert approved.status_code == 200
+    first = BurstOperation.model_validate_json(approved.text)
+    assert first.phase == "approving" and first.operation_id == OPERATION
+    assert provider.actors == ["local-owner"]
+    ready = BurstOperation.model_validate_json(followed.text)
+    assert ready.phase == "ready" and ready.instance_id == "instance-1"
+    assert ready.model_id == "example/large"
+    gone = BurstOperation.model_validate_json(released.text)
+    assert gone.phase == "releasing" and gone.release is not None
+    assert provider.released_by == ["local-owner"]
+    assert missing.status_code == 404
+
+
+async def test_approval_and_release_need_the_approve_scope(tmp_path: Path) -> None:
+    service, exchange = paired_service(tmp_path)
+    provider = Provider()
+    app = FastAPI()
+
+    async def assess(model_id: str, context_tokens: int) -> InferenceAssessment:
+        return assessment("external_required")
+
+    app.include_router(
+        create_burst_router(LoadedExtensions([provider]), service, assess)
+    )
+    service.set_plugin_grant(
+        exchange.device_id,
+        PluginGrantUpdate(
+            expected_revision=0, scopes=("plugins:read", "plugins:manage")
+        ),
+    )
+    headers = {"Authorization": f"Bearer {exchange.access_token}"}
+    for application in (app, OperatorGatewayAuthorization(app, service)):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application),
+            base_url="https://localhost",
+            headers=headers,
+        ) as http:
+            assert (await http.get(FOLLOW)).status_code == 200
+            assert (
+                await http.post("/v1/burst/operations", json=APPROVAL)
+            ).status_code == 403
+            assert (await http.delete(FOLLOW)).status_code == 403
+    assert provider.actors == [] and provider.released_by == []
+    service.set_plugin_grant(
+        exchange.device_id,
+        PluginGrantUpdate(
+            expected_revision=1, scopes=("plugins:read", "plugins:approve")
+        ),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=OperatorGatewayAuthorization(app, service)),
+        base_url="https://localhost",
+        headers=headers,
+    ) as http:
+        assert (
+            await http.post("/v1/burst/operations", json=APPROVAL)
+        ).status_code == 200
+        assert (
+            await http.post(
+                "/v1/burst/operations", json=APPROVAL | {"operatorId": "spoofed"}
+            )
+        ).status_code == 422
+        assert (await http.delete(FOLLOW)).status_code == 200
+    assert provider.actors == [str(exchange.device_id)]
+    assert provider.released_by == [str(exchange.device_id)]

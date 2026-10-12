@@ -26,6 +26,7 @@ from pydantic import (
 from skulk.extensions.burst import (
     BurstNodeOffer,
     BurstNodeReadiness,
+    BurstNodeStatus,
     BurstProvider,
     burst_memory_pools,
 )
@@ -838,6 +839,47 @@ class ManagedOwner:
         ):
             raise ValueError("burst offer is for another workload")
         return offer
+
+    async def burst_status(self, node_id: str, operation_id: str) -> BurstNodeStatus:
+        """Read one rental's approval, machine and release progress; no effect."""
+        return await self._burst_operation(node_id, operation_id, None)
+
+    async def burst_release(
+        self, node_id: str, operation_id: str, operator_id: str
+    ) -> BurstNodeStatus:
+        """Ask the provider to stop the model, then release the machine.
+
+        ``operator_id`` is the identity the API authenticated, never caller
+        input. Repeating a release observes the first one.
+        """
+        return await self._burst_operation(node_id, operation_id, operator_id)
+
+    async def _burst_operation(
+        self, node_id: str, operation_id: str, operator_id: str | None
+    ) -> BurstNodeStatus:
+        await self.refresh()
+        node = self._node(node_id)
+        if not any(burst_memory_pools(d) is not None for d in node.descriptors):
+            raise LookupError("installed node is not a burst provider")
+        message: dict[str, JsonValue] = {
+            "operation": "burst-status" if operator_id is None else "burst-release",
+            "plugin_id": self.name,
+            "node_id": node_id,
+            "operation_id": operation_id,
+        }
+        if operator_id is not None:
+            message["operator_id"] = operator_id
+        # A release stops the model and waits briefly for the delete before the
+        # signed release, so it gets the longer bound.
+        result = await self._request(message, timeout=10 if operator_id is None else 25)
+        status = BurstNodeStatus.model_validate_json(json.dumps(result))
+        if (
+            status.acquisition.operation_id != operation_id
+            or status.acquisition.reference.plugin_id != self.name
+            or status.acquisition.reference.node_id != node_id
+        ):
+            raise ValueError("burst status names another operation")
+        return status
 
     async def handle_steward_tool(
         self,
