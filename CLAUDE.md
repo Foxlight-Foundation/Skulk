@@ -1754,7 +1754,8 @@ rentals (`burst-list`, `NodeBurstRentals`). Providers also release a ready renta
 five idle minutes, read from `GET /instance/{id}/activity`. Dashboard:
 `components/models/BurstOfferPanel.tsx` (offer, approve, follow, release) in the
 placement dialog's capacity estimate on `external_required`; remote instances
-show Release (`store/endpoints/burst.ts`).
+show Release (`store/endpoints/burst.ts`). Steward: read-only `get_burst_capacity`,
+offered only under separate `plugins:read` (request-bound reader).
 
 ## Instance request activity
 

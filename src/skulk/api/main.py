@@ -100,7 +100,11 @@ from skulk.api.adapters.responses import (
     generate_responses_stream,
     responses_request_to_text_generation,
 )
-from skulk.api.burst import create_burst_router
+from skulk.api.burst import (
+    create_burst_router,
+    read_burst_providers,
+    read_burst_rentals,
+)
 from skulk.api.data_plane import DataPlaneObserver
 from skulk.api.diagnostics_compatibility import (
     aggregate_diagnostics_version_status,
@@ -168,6 +172,7 @@ from skulk.api.steward import (
     STEWARD_RETRY_AFTER_SECONDS,
     STEWARD_SYSTEM_PROMPT,
     STEWARD_VIRTUAL_MODEL_ID,
+    BurstCapacityReader,
     InstalledMetadataReader,
     StewardActionDecisionRequest,
     StewardActionDecisionResponse,
@@ -4847,6 +4852,7 @@ class API:
         *,
         proposals_allowed: bool = True,
         installation_reader: InstalledMetadataReader | None = None,
+        burst_reader: BurstCapacityReader | None = None,
     ) -> StreamingResponse:
         """Serve the steward through the standard chat-completions surface.
 
@@ -4945,6 +4951,7 @@ class API:
             self,
             proposals_allowed=proposals_allowed,
             installation_reader=installation_reader,
+            burst_reader=burst_reader,
         )
         command_id = CommandId()
         history, system_prompt, task_params = await self._steward_extension_transform(
@@ -6849,6 +6856,7 @@ class API:
             A streaming or collected chat-completions response.
         """
         installation_reader = None
+        burst_reader: BurstCapacityReader | None = None
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
             try:
                 await authorize_plugin_request(
@@ -6909,10 +6917,40 @@ class API:
                     return steward_installed_result(observation, MAX_TOOL_RESULT_CHARS)
 
                 installation_reader = read_registration
+
+                async def read_burst() -> dict[str, object]:
+                    """Recheck the same caller's plugin authority before every read."""
+                    await authorize_plugin_request(
+                        request, self._operator_pairing_service, "plugins:read"
+                    )
+                    extensions = self._extensions or LoadedExtensions([])
+                    async with asyncio.timeout(15):
+                        providers, rentals = await asyncio.gather(
+                            read_burst_providers(extensions),
+                            read_burst_rentals(extensions),
+                        )
+                    return {
+                        "scope": "local_api_host",
+                        "providers": [
+                            item.model_dump(mode="json", by_alias=True)
+                            for item in providers
+                        ],
+                        "rentals": [
+                            item.model_dump(
+                                mode="json",
+                                by_alias=True,
+                                exclude={"acquisition", "release"},
+                            )
+                            for item in rentals
+                        ],
+                    }
+
+                burst_reader = read_burst
         return await self.chat_completions(
             payload,
             steward_proposals_allowed=self._operator_mutation_allowed(request),
             steward_installation_reader=installation_reader,
+            steward_burst_reader=burst_reader,
         )
 
     async def chat_completions(
@@ -6921,6 +6959,7 @@ class API:
         *,
         steward_proposals_allowed: bool = True,
         steward_installation_reader: InstalledMetadataReader | None = None,
+        steward_burst_reader: BurstCapacityReader | None = None,
     ) -> StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
@@ -6932,6 +6971,7 @@ class API:
                 payload,
                 proposals_allowed=steward_proposals_allowed,
                 installation_reader=steward_installation_reader,
+                burst_reader=steward_burst_reader,
             )
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
         model_card = await self._get_running_model_card(resolved_model)
