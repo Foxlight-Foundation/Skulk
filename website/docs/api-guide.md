@@ -2863,6 +2863,19 @@ Semantics of the reserved id:
   advisory questions. The four proposal tools are included only for a direct
   trusted-fabric request or an authenticated operator-gateway request; this
   prevents public chat access from filling the bounded proposal queue.
+- Two read tools need separate plugin read access: they are offered only when
+  the chat request itself holds direct owner authority or `plugins:read`, and
+  each call checks that access again, so a revoked grant stops them mid-turn.
+  `get_installed_capabilities` reads installed capability declarations.
+  `get_burst_capacity` (no arguments) reads remote capacity on this API host:
+  the installed burst providers with their readiness, next setup step and the
+  owner's cost and lifetime ceilings in US dollars, and active rentals with
+  their phase, model and serving instance (without approval internals), as
+  `GET /v1/burst/providers` and `GET /v1/burst/operations` report them. A
+  provider being available does not prove an offer exists for a particular
+  model; only `POST /v1/burst/recommendations` establishes that. The steward
+  cannot request offers, approve or release; it points the operator to **Get a
+  remote offer** in the placement dialog.
 - The tool trace is returned as reasoning content: in streaming responses,
   each tool step arrives as a `reasoning_content` delta while the
   investigation runs, followed by the answer as `content`; non-streaming

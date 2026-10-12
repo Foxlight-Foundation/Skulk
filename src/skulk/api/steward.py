@@ -198,10 +198,11 @@ Rules:
   operations; declarations never grant authority. A ready provisioner does not
   prove acquired inference capacity, and local inventory excludes other hosts.
 - When offered, get_burst_capacity reads installed burst providers and active
-  rentals. For a model the cluster cannot run, say whether remote capacity is
-  available and what a provider still needs. You cannot request offers,
-  approve or release; point the operator to Get a remote offer in the model
-  placement dialog. Quote money only as the dollar amounts the tool reports.
+  rentals. For a model the cluster cannot run, report whether a provider is
+  ready to make offers and what it still needs. A ready provider does not
+  prove an offer exists for that model: only Get a remote offer in the model
+  placement dialog establishes that. You cannot request offers, approve or
+  release. Quote money only as the dollar amounts the tool reports.
 - Report Skulk versions only from actual skulkVersion/skulkCommit evidence.
   A current/consistent build status does not mean the latest release.
 - fabricSystemInstances are internal services, not operator-placed models. Do
