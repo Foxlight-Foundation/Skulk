@@ -1751,7 +1751,10 @@ maps `/v1/burst` onto the plugin scopes. `POST /v1/burst/operations`
 `burst-release` (model stopped first, then the signed machine release) through
 the `NodeBurstOperations` facet; `GET /v1/burst/operations` lists active
 rentals (`burst-list`, `NodeBurstRentals`). Providers also release a ready rental after
-five idle minutes, read from `GET /instance/{id}/activity`.
+five idle minutes, read from `GET /instance/{id}/activity`. Dashboard:
+`components/models/BurstOfferPanel.tsx` (offer, approve, follow, release) in the
+placement dialog's capacity estimate on `external_required`; remote instances
+show Release (`store/endpoints/burst.ts`).
 
 ## Instance request activity
 

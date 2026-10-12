@@ -7,6 +7,7 @@ import type { TopologyData } from '../../types/topology';
 import { detectDeviceModel } from '../../types/topology';
 import type { PlacementPreview } from '../../types/models';
 import { ModelCard } from '../models/ModelCard';
+import { BurstOfferPanel } from '../models/BurstOfferPanel';
 import { InferenceAssessmentPanel } from '../models/InferenceAssessmentPanel';
 import { Button } from '../common/Button';
 import { useSkulkTranslation } from '../../i18n/tolgee';
@@ -800,7 +801,8 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                 </Section>
               )}
 
-              {!isEmbedding && <InferenceAssessmentPanel key={modelId} modelId={modelId} contextTokens={contextChoice} excludedNodeIds={[...excludedNodes]} />}
+              {!isEmbedding && <InferenceAssessmentPanel key={modelId} modelId={modelId} contextTokens={contextChoice} excludedNodeIds={[...excludedNodes]}
+                externalAction={(context) => <BurstOfferPanel modelId={modelId} contextTokens={context} />} />}
 
               {/* Context window: the window the engine serves. Engines that
                   reserve it at load commit its memory whether or not requests

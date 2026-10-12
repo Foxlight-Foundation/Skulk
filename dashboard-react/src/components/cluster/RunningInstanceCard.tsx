@@ -48,6 +48,12 @@ export interface RunningInstanceCardProps {
   loadProgress?: number;
   onDelete?: () => void;
   onChat?: () => void;
+  /** Whether the instance runs on a rented remote machine from a burst provider. */
+  remote?: boolean;
+  /** Release the remote machine: the provider stops the model, then the machine.
+   *  Shown instead of Delete for a remote instance, since deleting only the
+   *  model would leave the rented machine running until its idle release. */
+  onRelease?: () => void;
   isEmbedding?: boolean;
   /** Whether the model can directly serve text chat, independent of readiness. */
   supportsTextChat?: boolean;
@@ -364,6 +370,8 @@ export function RunningInstanceCard({
   loadProgress,
   onDelete,
   onChat,
+  remote = false,
+  onRelease,
   isEmbedding,
   supportsTextChat = true,
   speculation,
@@ -386,7 +394,9 @@ export function RunningInstanceCard({
           <StatusDot $color={cfg.color} />
           <InstanceIdText>{formatInstanceId(instanceId)}</InstanceIdText>
         </IdGroup>
-        {onDelete && <DeleteBtn onClick={onDelete}>{t('common.delete', 'Delete')}</DeleteBtn>}
+        {remote && onRelease
+          ? <DeleteBtn onClick={onRelease}>{t('instance.release', 'Release')}</DeleteBtn>
+          : onDelete && <DeleteBtn onClick={onDelete}>{t('common.delete', 'Delete')}</DeleteBtn>}
       </Header>
 
       <ModelIdText>{modelId}</ModelIdText>
@@ -396,6 +406,11 @@ export function RunningInstanceCard({
           {formatEngineLabel(engine, accelerator, sharding, instanceType, t)}
         </span>
         <StatusBadge $color={cfg.color}>{cfg.label}</StatusBadge>
+        {remote && (
+          <StatusBadge $color={theme.colors.textSecondary} title={t('instance.remoteHint', 'Runs on a rented remote machine')}>
+            {t('instance.remote', 'Remote')}
+          </StatusBadge>
+        )}
         {speculation && (
           <InfoTooltip
             content={t(
