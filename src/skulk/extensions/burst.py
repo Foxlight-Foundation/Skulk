@@ -15,6 +15,7 @@ from pydantic import Field, model_validator
 
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.configuration import ConfigurationDigest, ConfigurationNodeId
+from skulk.extensions.proposal_actions import ProposalOperation, ProposalOperationId
 from skulk.extensions.proposal_review import ProposalField, ProposalReference
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -213,6 +214,190 @@ class NodeBurstProvider(Protocol):
     ) -> BurstNodeOffer:
         """Ask one provider node to prepare and retain one inert offer."""
         ...
+
+
+type BurstPhase = Literal[
+    "approving",
+    "refused",
+    "attention",
+    "uncertain",
+    "starting",
+    "installing",
+    "joining",
+    "downloading",
+    "loading",
+    "ready",
+    "releasing",
+    "released",
+]
+
+type BurstJobPhase = Literal[
+    "starting",
+    "installing",
+    "joining",
+    "joined",
+    "downloading",
+    "loading",
+    "ready",
+    "releasing",
+    "absent",
+]
+
+
+class BurstJob(FrozenModel):
+    """The provider controller's progress for one rented machine."""
+
+    phase: BurstJobPhase = Field(description="Controller phase for the machine.")
+    ready: bool = Field(description="In the controller's fresh ready set.")
+    model_id: str | None = Field(
+        default=None, max_length=512, description="Model the machine serves."
+    )
+    instance_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Skulk instance serving the model, once observed.",
+    )
+    resource_expires_at: int = Field(
+        gt=0, description="UTC Unix seconds when the rental ends at the latest."
+    )
+    observed_at: int = Field(gt=0, description="Controller observation time.")
+
+
+class BurstNodeStatus(FrozenModel):
+    """One provider node's view of a rental: approval, machine and release."""
+
+    phase: BurstPhase = Field(description="Summary for the operator, absence first.")
+    message: str = Field(
+        min_length=1, max_length=512, description="Operator-readable phase."
+    )
+    acquisition: ProposalOperation = Field(
+        description="The approval that rented the machine, with reconciliation."
+    )
+    job: BurstJob | None = Field(
+        default=None, description="Machine progress, once the controller knows it."
+    )
+    release: ProposalOperation | None = Field(
+        default=None, description="The release action, once one was requested."
+    )
+
+
+@runtime_checkable
+class NodeBurstOperations(Protocol):
+    """Optional facet that follows and releases rentals by their approval ID."""
+
+    async def burst_status(self, node_id: str, operation_id: str) -> BurstNodeStatus:
+        """Read approval, machine and release progress without any effect."""
+        ...
+
+    async def burst_release(
+        self, node_id: str, operation_id: str, operator_id: str
+    ) -> BurstNodeStatus:
+        """Stop the model, then release the machine under the authenticated operator."""
+        ...
+
+
+class BurstOperationRequest(FrozenModel):
+    """Approve one returned offer, exactly as recommended."""
+
+    operation_id: ProposalOperationId = Field(
+        description=(
+            "Caller-chosen durable action ID (32 lowercase hex). Save it before "
+            "sending: repeating the request with it observes the same action."
+        )
+    )
+    reference: ProposalReference = Field(
+        description="The recommendation's reference, unchanged."
+    )
+    approval_revision: ConfigurationDigest = Field(
+        description="The recommendation's approval revision, unchanged."
+    )
+
+
+_ACCEPTED_MESSAGES: dict[str, str] = {
+    "approving": "The approval is being signed and sent to the provider.",
+    "refused": "The provider refused this approval; nothing was rented.",
+    "attention": "The approval was interrupted; resume it from the Plugins page.",
+    "uncertain": (
+        "The provider may or may not have rented the machine. Its cleanup "
+        "follows it; nothing is retried."
+    ),
+    "starting": "The machine is starting.",
+}
+
+
+class BurstOperation(FrozenModel):
+    """One approved rental's progress, from approval to confirmed release."""
+
+    plugin_id: str = Field(description="Provider installation.")
+    node_id: ConfigurationNodeId = Field(description="Provider node.")
+    operation_id: ProposalOperationId = Field(description="The approval's action ID.")
+    phase: BurstPhase = Field(
+        description=(
+            "approving, refused, attention, uncertain, starting, installing, "
+            "joining, downloading, loading, ready, releasing or released."
+        )
+    )
+    message: str = Field(description="Operator-readable phase.")
+    instance_id: str | None = Field(
+        default=None, description="Skulk instance serving the model, once observed."
+    )
+    model_id: str | None = Field(default=None, description="Model the machine serves.")
+    resource_expires_at: int | None = Field(
+        default=None, description="UTC Unix seconds when the rental ends at the latest."
+    )
+    acquisition: ProposalOperation = Field(
+        description="The approval that rented the machine, with reconciliation."
+    )
+    release: ProposalOperation | None = Field(
+        default=None, description="The release action, once one was requested."
+    )
+
+    @classmethod
+    def accepted(cls, operation: ProposalOperation) -> "BurstOperation":
+        """Project a just-submitted approval before the machine exists.
+
+        The provider's status read would compete with the approval it just
+        started for the same host channel, so the first answer comes from the
+        approval's own durable progress.
+        """
+        phase: BurstPhase = (
+            "refused"
+            if operation.phase == "refused"
+            else "attention"
+            if operation.phase == "approval_interrupted"
+            else "uncertain"
+            if operation.phase == "uncertain"
+            else "starting"
+            if operation.phase in ("acknowledged", "succeeded")
+            else "approving"
+        )
+        return cls(
+            plugin_id=operation.reference.plugin_id,
+            node_id=operation.reference.node_id,
+            operation_id=operation.operation_id,
+            phase=phase,
+            message=_ACCEPTED_MESSAGES[phase],
+            acquisition=operation,
+        )
+
+    @classmethod
+    def of(
+        cls, plugin_id: str, node_id: str, operation_id: str, status: BurstNodeStatus
+    ) -> "BurstOperation":
+        """Project one provider status onto the API's operation view."""
+        job = status.job
+        return cls(
+            plugin_id=plugin_id,
+            node_id=node_id,
+            operation_id=operation_id,
+            phase=status.phase,
+            message=status.message,
+            instance_id=job.instance_id if job is not None else None,
+            model_id=job.model_id if job is not None else None,
+            resource_expires_at=job.resource_expires_at if job is not None else None,
+            acquisition=status.acquisition,
+            release=status.release,
+        )
 
 
 class BurstRecommendationRequest(FrozenModel):

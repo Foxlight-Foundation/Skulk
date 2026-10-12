@@ -1745,7 +1745,12 @@ control operation `burst-readiness`. `POST /v1/burst/recommendations`
 inert, unsigned proposal, and the response adds its review so the reference and
 approval revision go straight to the existing owner proposal approval
 (`plugins:approve`). Money crosses the API only as dollar strings. The gateway
-maps `/v1/burst` onto the plugin scopes.
+maps `/v1/burst` onto the plugin scopes. `POST /v1/burst/operations`
+(`plugins:approve`) approves an offer with a caller-chosen durable operation ID;
+`GET`/`DELETE /v1/burst/operations/{id}` reach the provider's `burst-status` and
+`burst-release` (model stopped first, then the signed machine release) through
+the `NodeBurstOperations` facet. Providers also release a ready rental after
+five idle minutes, read from `GET /instance/{id}/activity`.
 
 ## Instance request activity
 

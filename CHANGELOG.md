@@ -44,6 +44,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Remote capacity for a model the cluster cannot run. With a capability that
+  provides remote machines installed (one that declares itself a burst
+  provider), choosing a model that does not fit now offers a remote machine for
+  it, priced in dollars with the most it can cost. Approving the offer rents
+  the machine, which joins the cluster and serves the model like any other.
+  Releasing it stops the model and then the machine, and a machine whose model
+  has been idle for five minutes is released on its own. The API is
+  `/v1/burst` (providers, recommendations and operations), under the plugin
+  permissions: reading needs `plugins:read`, asking for an offer
+  `plugins:manage`, and renting or releasing `plugins:approve`.
+- `GET /instance/{instance_id}/activity` reports requests in flight on an
+  instance and when the last one started or finished.
+
 - Models now come back on their own after a reboot or a whole-cluster restart.
   Each machine keeps a small record of what the cluster was running. After a
   restart, Skulk uses the most recently confirmed record from any machine and

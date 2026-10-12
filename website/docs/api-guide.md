@@ -4469,8 +4469,52 @@ permits), `planExpiresAt` (after which it can no longer be approved),
 `POST /v1/plugins/{plugin_id}/nodes/{node_id}/proposals/{proposal_id}/approve`,
 which requires `plugins:approve`.
 
+To rent, approve, follow and release with the burst operations:
+
+- `POST /v1/burst/operations` requires direct owner authority or
+  `plugins:approve`. The body has `operationId` (32 lowercase hexadecimal
+  characters, chosen and saved by the caller before sending), `reference` and
+  `approvalRevision`, both exactly as the recommendation returned them. The
+  provider revalidates its terms, signs with its own approval credential and
+  rents the machine; the API supplies the authenticated operator, and a caller
+  field such as `operatorId` is rejected with 422. Repeating the request with the
+  same `operationId` observes the same action and never rents twice. The
+  response is the approval's first progress, usually `approving`.
+- `GET /v1/burst/operations/{operation_id}` requires direct owner authority or
+  `plugins:read`, with query parameters `plugin_id` and `node_id` from the
+  recommendation. It changes nothing.
+- `DELETE /v1/burst/operations/{operation_id}` requires direct owner authority
+  or `plugins:approve`, with the same query parameters. The provider stops the
+  burst model through the ordinary instance delete first, so the cluster records
+  a deliberate stop, then releases the machine under a signed release for the
+  authenticated operator. Repeating it observes the first release. Before the
+  provider's controller knows the machine there is nothing to release yet (409);
+  the rental's own expiry still ends it.
+
+Each returns `pluginId`, `nodeId`, `operationId`, `phase`, a plain-text
+`message`, nullable `instanceId` (the Skulk instance serving the model, once
+observed), `modelId`, `resourceExpiresAt`, `acquisition` (the approval's
+progress, as `GET .../proposal-operations/{operation_id}` reports it, including
+cleanup `reconciliation`) and nullable `release` (the release action's
+progress). `phase` is one of:
+
+| Phase | Meaning |
+| --- | --- |
+| `approving` | The approval is being signed and sent |
+| `refused` | The provider refused the approval; nothing was rented |
+| `attention` | The approval was interrupted; resume it from the Plugins page |
+| `uncertain` | The provider may have rented the machine; cleanup follows it, nothing is retried |
+| `starting`, `installing`, `joining`, `downloading`, `loading` | The machine is coming up |
+| `ready` | The model serves from the remote machine; use it like any instance |
+| `releasing` | A release is in progress |
+| `released` | The provider confirmed the machine is gone |
+
+A provider releases a `ready` rental on its own once its model has had no
+request in flight for five minutes (see `GET /instance/{instance_id}/activity`),
+under the approval that rented it. The rental's signed expiry is the backstop.
+
 A provider that refuses the request without an outcome (most often because it
-is preparing another offer) returns 409; retry. A timeout returns 504, an
+is busy with another request) returns 409; retry. A timeout returns 504, an
 unavailable provider 503, and a burst of concurrent requests 429. Errors carry
 no provider text.
 

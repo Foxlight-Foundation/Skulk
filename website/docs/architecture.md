@@ -2514,6 +2514,15 @@ proposal review, so the returned reference and approval revision go straight to
 the existing owner proposal approval under `plugins:approve`. Money crosses the
 API only as dollar strings; provider units, credentials and signing stay in the
 provider. The gateway maps `/v1/burst` onto the same plugin scopes.
+`POST /v1/burst/operations` (`plugins:approve`) approves a returned offer through
+the same owner proposal action, with a caller-chosen durable operation ID.
+`GET` and `DELETE /v1/burst/operations/{operation_id}` reach the provider's
+`burst-status` and `burst-release` owner operations through the optional
+`NodeBurstOperations` facet: status joins the approval's progress with the
+provider controller's phase and observed instance, and release stops the model
+through the ordinary instance delete before the provider signs the machine's
+release. The provider also releases a ready rental after five idle minutes,
+read from core's per-instance activity.
 
 Each API also keeps per-instance request activity (`api/instance_activity.py`),
 derived from the replicated task events as it applies them: requests in flight
