@@ -67,6 +67,8 @@ class Provider(ManagedExtension):
         self.state: Literal["available", "configuration_required"] = "available"
         self.offers: list[tuple[str, str, int]] = []
         self.refuse = False
+        self.review_state: Literal["pending_approval", "expired"] = "pending_approval"
+        self.approvable = True
         self.reference = ProposalReference(
             plugin_id=name,
             node_id="gpu",
@@ -130,10 +132,10 @@ class Provider(ManagedExtension):
                 reference=reference,
                 summary="Rent one A100 for example/large.",
                 expires_at=1_900_000_000,
-                state="pending_approval",
+                state=self.review_state,
             ),
             observed_at=1_800_000_000,
-            approval_revision="b" * 64,
+            approval_revision="b" * 64 if self.approvable else None,
             fields=(ProposalField(label="GPU", value="NVIDIA A100 80GB"),),
         )
 
@@ -292,3 +294,17 @@ async def test_a_paired_device_needs_manage_scope_for_an_offer(tmp_path: Path) -
     ) as http:
         answer = await recommend(http)
     assert answer.state == "offer"
+
+
+async def test_an_offer_that_cannot_be_approved_is_not_returned_as_one() -> None:
+    """An expiry or approval race between offer and review is not an offer."""
+    expired = Provider()
+    expired.review_state = "expired"
+    unapprovable = Provider()
+    unapprovable.approvable = False
+    for provider in (expired, unapprovable):
+        async with client(provider) as http:
+            answer = await recommend(http)
+        assert answer.state == "provider_unavailable"
+        assert "Nothing was rented" in answer.message
+        assert answer.reference is None and answer.approval_revision is None

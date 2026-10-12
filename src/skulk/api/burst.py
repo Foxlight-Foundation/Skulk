@@ -51,6 +51,10 @@ _NO_PROVIDER = (
 )
 _NO_NAMED_PROVIDER = "The named burst provider is not installed on this computer."
 _PROVIDER_REQUIRED = "More than one burst provider is available. Name the one to ask."
+_NOT_APPROVABLE = (
+    "The provider prepared an offer but cannot take approval for it right now. "
+    "Nothing was rented. Ask for a new offer."
+)
 _OFFER_STATES: dict[str, BurstRecommendationState] = {
     "offer": "offer",
     "not_required": "not_required",
@@ -253,6 +257,13 @@ def create_burst_router(
             review = await installation.node_proposal(prepared.reference)
             if review.proposal.reference != prepared.reference:
                 raise ValueError("proposal review differs from the offer")
+            # An offer must be approvable as returned. A proposal that expired,
+            # was decided, or cannot take approval right now is not one.
+            if (
+                review.proposal.state != "pending_approval"
+                or review.approval_revision is None
+            ):
+                return answer("provider_unavailable", _NOT_APPROVABLE, chosen)
             return BurstRecommendation(
                 state=state,
                 message=prepared.message,

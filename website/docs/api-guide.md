@@ -4435,12 +4435,12 @@ of:
 | `blocked` | The model cannot be served as requested, locally or remotely |
 | `no_provider` | No burst provider is installed here, or the named one is not |
 | `provider_required` | Several providers are available; name one |
-| `provider_unavailable` | The chosen provider cannot offer now; its message says why |
+| `provider_unavailable` | The chosen provider cannot offer now, or prepared an offer it cannot take approval for (expired or already decided before review); its message says why |
 | `no_eligible_capacity` | No offer fits within the owner's limits right now |
 | `skulk_build_unavailable` | The provider has no Skulk build to install that matches this cluster |
 | `refused` | The provider refused this workload; its message says why |
 
-An offer adds `reference` (the same `pluginId`, `nodeId`, `proposalId` and
+An offer is returned only while its fresh review is still pending approval and carries an approval revision. It adds `reference` (the same `pluginId`, `nodeId`, `proposalId` and
 `proposalDigest` the plugin proposal routes take), `approvalRevision`, the
 provider's plain-text `review` facts (the same `fields` as a proposal review),
 and `offer`: `gpu`, `region`, `hourlyPriceUsd` (quoted, advisory),
