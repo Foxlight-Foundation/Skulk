@@ -262,6 +262,8 @@ def steward_tool_definitions(
     Args:
         include_proposals: Whether to expose proposal-creation tools to the model.
         include_installations: Whether this caller has separately scoped installation-read access.
+        include_burst: Whether this caller has separately scoped plugin read access for
+            the read-only remote capacity tool, get_burst_capacity.
 
     Returns:
         OpenAI-compatible server-side function definitions for this request.
