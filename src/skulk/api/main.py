@@ -100,6 +100,7 @@ from skulk.api.adapters.responses import (
     generate_responses_stream,
     responses_request_to_text_generation,
 )
+from skulk.api.burst import create_burst_router
 from skulk.api.data_plane import DataPlaneObserver
 from skulk.api.diagnostics_compatibility import (
     aggregate_diagnostics_version_status,
@@ -1581,6 +1582,10 @@ API_TAGS_METADATA = [
         "description": "Administrative operations such as node restart.",
     },
     {
+        "name": "Burst",
+        "description": "Remote capacity offers from installed burst providers, for models the cluster cannot run.",
+    },
+    {
         "name": "Authentication",
         "description": "Host-authorized device pairing and operator credential lifecycle.",
     },
@@ -2173,6 +2178,13 @@ class API:
                 self._extensions or LoadedExtensions([]),
                 operator_pairing_service,
                 host_network=host_network_provider,
+            )
+        )
+        self.app.include_router(
+            create_burst_router(
+                self._extensions or LoadedExtensions([]),
+                operator_pairing_service,
+                self._assess_for_burst,
             )
         )
         if operator_pairing_service is not None:
@@ -10381,6 +10393,22 @@ class API:
             network=self.state.node_network, telemetry=self._telemetry_view,
             runners=self.state.runners,
             excluded_nodes=set(excluded_node_ids or ()),
+        )
+
+    async def _assess_for_burst(
+        self, model_id: str, context_tokens: int
+    ) -> InferenceAssessment:
+        """Run the ordinary inference assessment for a burst recommendation.
+
+        Args:
+            model_id: Exact known alias; unknown aliases raise the usual 404.
+            context_tokens: Input plus output tokens per request.
+
+        Returns:
+            The same verdict ``GET /models/assessment`` reports for one request.
+        """
+        return await self.get_inference_assessment(
+            ModelId(model_id), context_tokens=context_tokens
         )
 
     async def get_model_requirements(
