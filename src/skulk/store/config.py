@@ -942,7 +942,9 @@ def update_skulk_config_atomic(
             sort_keys=False,
         )
         _write_skulk_config_atomic_unlocked(path, config_yaml)
-        return updated
+        # Callers broadcast this, so it must be what was written: returning
+        # the unfiltered mapping would send unset sections back out as null.
+        return written
 
 
 def persist_model_trust_config(
