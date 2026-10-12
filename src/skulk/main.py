@@ -16,6 +16,7 @@ from typing import Final, Self, cast
 
 import anyio
 import psutil
+import yaml
 from anyio import (
     BrokenResourceError,
     ClosedResourceError,
@@ -24,7 +25,7 @@ from anyio import (
     to_thread,
 )
 from loguru import logger
-from pydantic import PositiveInt
+from pydantic import PositiveInt, ValidationError
 
 import skulk.routing.topics as topics
 from skulk.api.main import API
@@ -42,10 +43,16 @@ from skulk.extensions.host_network import (
 )
 from skulk.master.main import Master
 from skulk.operator.pairing import OperatorPairingService
+from skulk.recovery.record import ClusterIntentRecord, read_record
+from skulk.recovery.recorder import RECOVERY_RECORD_PATH, ClusterIntentRecorder
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router, TelemetrySender, get_node_id_keypair
 from skulk.routing.zenoh_status import ZenohPeerSampler
-from skulk.shared.constants import SKULK_LOG, set_offline_mode
+from skulk.shared.constants import (
+    SKULK_LOG,
+    SKULK_NO_RESTART_RECOVERY,
+    set_offline_mode,
+)
 from skulk.shared.election import Election, ElectionResult
 from skulk.shared.logging import (
     external_log_pipe_enabled,
@@ -82,6 +89,7 @@ from skulk.shared.types.events import (
     StateSnapshotHydrated,
 )
 from skulk.shared.types.profiling import NodeDataTransport, NodeResources
+from skulk.shared.types.restart_recovery import RestartRecoveryAdvert
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
@@ -638,6 +646,40 @@ def _configure_model_store_runtime(
     return store_client, store_server
 
 
+RESTART_RECOVERY_ENABLED = not SKULK_NO_RESTART_RECOVERY
+"""Whether this node keeps a restart recovery record and restores from it."""
+
+
+def _restart_recovery_restores_placements() -> bool:
+    """Read the Settings toggle that brings models back after a restart.
+
+    Read when a master is created, so a change made in Settings applies to
+    the next restart. A config that cannot be read keeps the default (on):
+    the operator's other settings are already failing loudly elsewhere, and a
+    restart should not also lose their models.
+    """
+    try:
+        config = load_skulk_config()
+    except (ValidationError, yaml.YAMLError, OSError) as error:
+        logger.warning(
+            f"Restart recovery: could not read Settings ({error}); keeping models on"
+        )
+        return True
+    if config is None or config.restart_recovery is None:
+        return True
+    return config.restart_recovery.enabled
+
+
+def _load_restart_recovery_record() -> ClusterIntentRecord | None:
+    """Read this node's restart recovery record when recovery is on.
+
+    Returns:
+        The record from the last time this node's view was current, or ``None``
+        when recovery is off or the node has never written one.
+    """
+    return read_record(RECOVERY_RECORD_PATH) if RESTART_RECOVERY_ENABLED else None
+
+
 def _state_sync_store_http_host(
     node_id: NodeId,
     skulk_config: SkulkConfig | None,
@@ -1133,6 +1175,9 @@ class Node:
                 if skulk_config is not None and skulk_config.model_trust is not None
                 else ()
             ),
+            restart_recovery_record=_load_restart_recovery_record(),
+            restart_recovery_enabled=RESTART_RECOVERY_ENABLED,
+            restart_recovery_restores_placements=_restart_recovery_restores_placements(),
         )
 
         er_send, er_recv = channel[ElectionResult]()
@@ -1206,6 +1251,16 @@ class Node:
                     lambda: self.telemetry_view.local_pairing_gateway_active,
                 )
             tg.start_soon(self._monitor_zenoh_isolation)
+            if RESTART_RECOVERY_ENABLED:
+                tg.start_soon(
+                    ClusterIntentRecorder(
+                        state_provider=self._replicated_view,
+                        session_provider=lambda: self.event_router.session_id,
+                        telemetry_view=self.telemetry_view,
+                        advert_sender=self._send_restart_recovery_advert,
+                        api_port=self.api.port if self.api is not None else None,
+                    ).run
+                )
             if self.store_server:
                 tg.start_soon(self.store_server.start)
             if self.download_coordinator:
@@ -1217,6 +1272,26 @@ class Node:
             if self.api:
                 tg.start_soon(self.api.run)
             tg.start_soon(self._elect_loop)
+
+    async def _send_restart_recovery_advert(
+        self, advert: RestartRecoveryAdvert
+    ) -> None:
+        """Publish this node's restart recovery advert on telemetry."""
+        await self.router.telemetry_sender().send(
+            NodeTelemetry(node_id=self.node_id, info=advert)
+        )
+
+    def _replicated_view(self) -> State | None:
+        """Return this node's replicated view for its restart recovery record.
+
+        Worker and API views follow the master through indexed events; a
+        management-only node falls back to the master it hosts, if any.
+        """
+        if self.worker is not None:
+            return self.worker.state
+        if self.api is not None:
+            return self.api.state
+        return self.master.state if self.master is not None else None
 
     def _mark_artifact_inventory_dirty(self) -> None:
         """Schedule one debounced local artifact rescan without blocking events."""
@@ -1795,11 +1870,22 @@ class Node:
                     self.master = Master(
                         self.node_id,
                         result.session_id,
+                        # A view that never applied an event is a cold start
+                        # (a rebooted node winning before it hydrated): with
+                        # restart recovery on, it restores from its record
+                        # instead of seeding an empty session.
                         initial_state=(
                             seed_state_for_new_session(prior_state)
                             if prior_state is not None
+                            and not (
+                                RESTART_RECOVERY_ENABLED
+                                and prior_state.last_event_applied_idx < 0
+                            )
                             else None
                         ),
+                        restart_recovery_record=_load_restart_recovery_record(),
+                        restart_recovery_enabled=RESTART_RECOVERY_ENABLED,
+                        restart_recovery_restores_placements=_restart_recovery_restores_placements(),
                         event_sender=self.event_router.sender(),
                         global_event_sender=self.router.sender(topics.GLOBAL_EVENTS),
                         local_event_receiver=self.router.receiver(topics.LOCAL_EVENTS),

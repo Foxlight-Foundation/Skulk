@@ -69,14 +69,44 @@ export interface StewardActionDecision {
  * chat-completions surface with the reserved virtual model id (see
  * StewardChatView); only presence/readiness needs a dedicated query.
  */
+/** The proposal audit together with the serving node's clock when it answered. */
+export interface StewardProposalsSnapshot {
+  /** Server-owned proposals, newest first. */
+  proposals: StewardActionProposal[];
+  /**
+   * The server's clock when it answered, in epoch milliseconds, read from the
+   * response `Date` header; null when it sent none. Settled cards age by this
+   * clock, the same family as `decided_at`, so a browser whose clock is off
+   * does not hide them early or keep them too long.
+   */
+  serverTimeMs: number | null;
+}
+
+/**
+ * Read the server's clock from a response's `Date` header.
+ *
+ * @param response The fetch response, when the base query exposes it.
+ * @returns Epoch milliseconds, or null when the header is absent or unreadable.
+ */
+export function serverTimeFromResponse(response: Response | undefined): number | null {
+  const header = response?.headers.get('date');
+  if (!header) return null;
+  const parsed = Date.parse(header);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export const stewardApi = apiSlice.injectEndpoints({
   endpoints: (build) => ({
     getStewardStatus: build.query<StewardStatus, void>({
       query: () => ({ url: '/v1/steward' }),
       providesTags: ['StewardStatus'],
     }),
-    getStewardProposals: build.query<StewardActionProposal[], void>({
+    getStewardProposals: build.query<StewardProposalsSnapshot, void>({
       query: () => ({ url: '/v1/steward/proposals' }),
+      transformResponse: (proposals: StewardActionProposal[], meta) => ({
+        proposals,
+        serverTimeMs: serverTimeFromResponse(meta?.response),
+      }),
       providesTags: ['StewardProposals'],
     }),
     decideStewardProposal: build.mutation<void, StewardActionDecision>({

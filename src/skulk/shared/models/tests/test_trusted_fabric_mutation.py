@@ -12,6 +12,7 @@ import pytest
 from skulk.shared.models.remote_code_approval import (
     loopback_mutation_allowed,
     trusted_fabric_mutation_allowed,
+    trusted_fabric_peer_read_allowed,
 )
 
 
@@ -136,4 +137,30 @@ def test_self_hostname_match_is_case_insensitive() -> None:
             self_host_names={"kite3.local"},
         )
         is True
+    )
+
+
+@pytest.mark.parametrize(
+    "client_host",
+    [
+        "169.254.10.20",  # Thunderbolt Bridge self-assigned address
+        "::ffff:169.254.10.20",
+        "fe80::1c2d:3e4f:5a6b:7c8d",
+        "fd12:3456:789a::1",
+    ],
+)
+def test_peer_reads_admit_links_a_thunderbolt_or_ipv6_cluster_uses(client_host: str) -> None:
+    assert trusted_fabric_peer_read_allowed(client_host, None)
+
+
+@pytest.mark.parametrize("client_host", ["198.51.100.10", "2001:db8::1", None, "not-an-address"])
+def test_peer_reads_refuse_public_or_unknown_peers(client_host: str | None) -> None:
+    assert not trusted_fabric_peer_read_allowed(client_host, None)
+
+
+def test_peer_reads_never_admit_browsers_or_proxies() -> None:
+    """A web page always sends Origin; a forwarded request hides its source."""
+    assert not trusted_fabric_peer_read_allowed("169.254.10.20", "http://169.254.10.20:52415")
+    assert not trusted_fabric_peer_read_allowed(
+        "169.254.10.20", None, forwarding_headers_present=True
     )

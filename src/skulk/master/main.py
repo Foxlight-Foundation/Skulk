@@ -7,6 +7,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal, cast, final
+from uuid import UUID
 
 import anyio
 import yaml
@@ -39,6 +40,22 @@ from skulk.master.steward_staleness import (
     lifecycle_target_staleness,
     placement_card_staleness,
     steward_proposal_staleness,
+)
+from skulk.recovery.fetch import RestartRecordFetcher, fetch_peer_record
+from skulk.recovery.record import (
+    ClusterIntentRecord,
+    PlacementIntent,
+    restored_steward_proposals,
+)
+from skulk.recovery.restore import (
+    HOST_WAIT_AFTER_SETTLE_SECONDS,
+    INFO_WAIT_AFTER_SETTLE_SECONDS,
+    awaited_peers,
+    intent_nodes,
+    live_nodes_by_install_id,
+    record_sources,
+    restore_failure_event,
+    unrestored_intents,
 )
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
@@ -111,6 +128,8 @@ from skulk.shared.types.events import (
     NodeGatheredInfo,
     NodeTimedOut,
     NodeTimeoutEvidence,
+    RestartRecoveryCompleted,
+    RestartRecoveryStarted,
     StagedModelEvicted,
     StateSnapshotHydrated,
     StewardActionProposalChanged,
@@ -954,6 +973,10 @@ class Master:
         telemetry_view: TelemetryView | None = None,
         state_sync_store_http_host: str | None = None,
         initial_model_trust_identities: tuple[str, ...] = (),
+        restart_recovery_record: ClusterIntentRecord | None = None,
+        restart_recovery_enabled: bool = False,
+        restart_recovery_fetcher: RestartRecordFetcher = fetch_peer_record,
+        restart_recovery_restores_placements: bool = True,
     ):
         self.node_id = node_id
         self.session_id = session_id
@@ -1003,8 +1026,83 @@ class Master:
         # cannot spend the same memory while that echo is outstanding.
         self._pending_instance_reservations: dict[InstanceId, Instance] = {}
         self._runner_loaded_at: dict[RunnerId, float] = {}
+        # Restart recovery (initiative/restart-recovery). A cold start, with no
+        # prior replicated view, is a single-node reboot or a whole-cluster
+        # restart: nobody carried State, so this node's on-disk record is the
+        # only memory of what was running. Restored proposals are all terminal
+        # (restored_steward_proposals), so even a stale record cannot cause an
+        # action. A promoted master that inherits an unfinished restore keeps
+        # its record to finish the job.
+        # Production nodes enable recovery; a bare Master (tests, tools) keeps
+        # the historical empty cold start.
+        cold_start = initial_state is None and restart_recovery_enabled
+        self._restart_recovery_record = (
+            restart_recovery_record
+            if cold_start
+            or (initial_state is not None and initial_state.restart_recovery_pending)
+            else None
+        )
+        restored_proposals = (
+            restored_steward_proposals(
+                restart_recovery_record, now=datetime.now(tz=timezone.utc)
+            )
+            if cold_start and restart_recovery_record is not None
+            else {}
+        )
+        self._restart_recovery_completion_queued = False
+        # Placements still owed by restore, in their recorded order.
+        self._restart_recovery_remaining: list[PlacementIntent] = (
+            list(self._restart_recovery_record.placements)
+            if self._restart_recovery_record is not None
+            else []
+        )
+        self._restart_recovery_restored = 0
+        self._restart_recovery_info_deadline: datetime | None = None
+        # Latched once a recovering session has seen more than one node, or
+        # inherited from a failover (which needs a second node): restoring
+        # across nodes needs the freshest record from each, so a later shrink
+        # to one node must not restore from this node's record alone.
+        self._restart_recovery_spans_nodes = (
+            initial_state is not None and initial_state.restart_recovery_pending
+        )
+        # Multi-node cold start: which record restore uses is chosen once,
+        # across every node's advert, before any placement is requested.
+        self._restart_recovery_fetcher = restart_recovery_fetcher
+        # The Settings toggle ("Bring models back after a restart"). Off, a
+        # restore still carries steward history but requests no placements.
+        self._restart_recovery_restores_placements = restart_recovery_restores_placements
+        # The model count operators see while restore runs: seeded from this
+        # node's record, then updated when the chosen record or the
+        # reconciliation with running instances changes it.
+        self._restart_recovery_announced: int | None = (
+            (len(self._restart_recovery_remaining) if restart_recovery_restores_placements else 0)
+            if cold_start
+            else (initial_state.restart_recovery_placements if initial_state is not None else None)
+        )
+        # The settled plan, replicated so a promoted master finishes it.
+        self._restart_recovery_announced_intents: tuple[PlacementIntent, ...] | None = (
+            initial_state.restart_recovery_intents if initial_state is not None else None
+        )
+        # A master promoted after its predecessor settled the plan finishes
+        # that plan: the record it came from may have left with that node.
+        carried_plan = (
+            initial_state.restart_recovery_intents
+            if initial_state is not None and initial_state.restart_recovery_pending
+            else None
+        )
+        self._restart_recovery_chosen = carried_plan is not None
+        if carried_plan is not None:
+            self._restart_recovery_remaining = list(carried_plan)
+        self._restart_recovery_settled_at: datetime | None = None
+        self._restart_recovery_unfetchable: set[NodeId] = set()
+        # Every peer seen while recovering, with its install ID once known.
+        self._restart_recovery_observed: dict[NodeId, UUID | None] = {}
+        self._restart_recovery_fetched: tuple[NodeId, datetime, ClusterIntentRecord] | None = None
+        self._restart_recovery_reconciled = False
         self._ordered_steward_proposals = dict(
-            initial_state.steward_action_proposals if initial_state is not None else {}
+            initial_state.steward_action_proposals
+            if initial_state is not None
+            else restored_proposals
         )
         # Restart approval and teardown are separate indexed steps. This
         # process-local marker prevents duplicate teardown while allowing a
@@ -1023,17 +1121,25 @@ class Master:
             model_trust_approved_remote_code_identities=tuple(
                 sorted(self._model_trust_approvals)
             ),
+            steward_action_proposals=restored_proposals,
+            # Every node keeps its record untouched until this session has
+            # restored from it; RestartRecoveryCompleted clears the flag.
+            restart_recovery_pending=cold_start,
+            # How many models are coming back is known from the start, so the
+            # dashboard can say so through the whole settling wait.
+            restart_recovery_placements=self._restart_recovery_announced,
         )
-        # A cold-start trust baseline needs the same indexed delivery path as
-        # failover state. Leaving non-empty approvals only in this idx=-1 State
-        # makes state-sync followers treat it as a fresh empty snapshot; their
-        # first unrelated event then replaces the config fallback with an empty
-        # replicated set. Index the baseline as event 0 before serving sync.
+        # A cold-start baseline (trust approvals, restored proposal history,
+        # the pending-recovery flag) needs the same indexed delivery path as
+        # failover state. Leaving it only in this idx=-1 State makes state-sync
+        # followers treat it as a fresh empty snapshot; their first unrelated
+        # event then replaces it. Index the baseline as event 0 before serving
+        # sync.
         self._seed_state = (
             initial_state
             if initial_state is not None
             else self.state
-            if self._model_trust_approvals
+            if self._model_trust_approvals or cold_start
             else None
         )
         self._started_monotonic = time.monotonic()
@@ -1269,6 +1375,7 @@ class Master:
             download_status=self._effective_downloads(),
             excluded_nodes=set(command.excluded_nodes),
             node_resources=resources,
+            node_install_ids=self._node_install_ids(),
             node_vram=credited_vram,
             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                 self._telemetry_view.node_system,
@@ -1707,8 +1814,18 @@ class Master:
         self,
         command: PlaceInstance,
         current_instances: Mapping[InstanceId, Instance],
+        *,
+        stamped_exclusions: set[NodeId] | None = None,
     ) -> dict[InstanceId, Instance]:
-        """Compute one approved steward placement using authoritative inputs."""
+        """Compute one approved steward placement using authoritative inputs.
+
+        Args:
+            command: The placement to compute; its exclusions bound the search.
+            current_instances: Instance map to place against.
+            stamped_exclusions: The operator's exclusions to record on the new
+                instance when the search excludes more than they did; None
+                records the command's own exclusions.
+        """
         self._require_ordered_place_instance_card(command)
         credited_memory, credited_vram = self._placement_memory_inputs(
             current_instances
@@ -1721,6 +1838,8 @@ class Master:
             self.state.node_network,
             download_status=self._effective_downloads(),
             excluded_nodes=set(command.excluded_nodes),
+            stamped_exclusions=stamped_exclusions,
+            node_install_ids=self._node_install_ids(),
             node_resources=self._telemetry_view.node_resources,
             node_vram=credited_vram,
             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
@@ -1873,6 +1992,410 @@ class Master:
             changes.append(StewardActionProposalChanged(proposal=expired))
         self._prune_ordered_steward_action_proposals()
         return changes
+
+    def _restart_recovery_events(
+        self,
+        now: datetime,
+        *,
+        topology_settled: bool,
+        connected_node_ids: set[NodeId],
+        dying_instance_ids: AbstractSet[InstanceId] = frozenset(),
+    ) -> list[Event]:
+        """Bring a cold-started cluster back from its record, then close recovery.
+
+        Restore waits for the post-election settling window, so the planner
+        sees node information and every returning machine. A cold start that
+        has seen several nodes also waits for the record chosen across them.
+        It then requests each recorded placement once; completion follows only
+        after every placement was requested or reported as unable to come
+        back, so no node overwrites its record while placements are still owed.
+
+        Args:
+            now: UTC time of this planning pass.
+            topology_settled: Whether the settling window has passed.
+            connected_node_ids: Nodes in the current topology.
+            dying_instance_ids: Instances this pass's dead-node cleanup will
+                delete. A master promoted mid-restore must not count one as
+                already restored: it would be gone moments later, and the
+                model with it.
+
+        Returns:
+            Placement, failure, and completion events to order, in order.
+        """
+        if (
+            not self.state.restart_recovery_pending
+            or self._restart_recovery_completion_queued
+        ):
+            return []
+        # Both guards apply whatever this node's own record holds: a winner
+        # with an empty or missing record must not release peers whose
+        # records still carry placements.
+        self._latch_restart_recovery_span(connected_node_ids)
+        if not topology_settled:
+            return []
+        if self._restart_recovery_spans_nodes and not self._restart_recovery_chosen:
+            # _choose_restart_recovery_record is still waiting for adverts,
+            # a fetch, or the recorded machines.
+            return []
+        events: list[Event] = []
+        if not self._restart_recovery_reconciled:
+            self._restart_recovery_reconciled = True
+            if not self._restart_recovery_restores_placements:
+                if self._restart_recovery_remaining:
+                    logger.info(
+                        "Restart recovery: bringing models back after a restart "
+                        f"is turned off in Settings; leaving "
+                        f"{len(self._restart_recovery_remaining)} placement(s) unrequested"
+                    )
+                self._restart_recovery_remaining = []
+            self._restart_recovery_remaining = unrestored_intents(
+                self._restart_recovery_remaining,
+                {
+                    instance_id: instance
+                    for instance_id, instance in self.state.instances.items()
+                    if instance_id not in dying_instance_ids
+                },
+            )
+            events.extend(
+                self._announce_restart_recovery_plan(self._restart_recovery_remaining)
+            )
+        if self._restart_recovery_remaining:
+            events.extend(self._restore_recorded_placements(now, connected_node_ids))
+            if self._restart_recovery_remaining:
+                # The planner still lacks node information; retry next pass.
+                return events
+        self._restart_recovery_completion_queued = True
+        record = self._restart_recovery_record
+        logger.info(
+            "Restart recovery complete: requested "
+            f"{self._restart_recovery_restored} placement(s), carried "
+            f"{len(record.steward_proposals) if record is not None else 0} "
+            "steward proposal(s)"
+        )
+        events.append(
+            RestartRecoveryCompleted(
+                restored_placements=self._restart_recovery_restored,
+                restored_proposals=(
+                    len(record.steward_proposals) if record is not None else 0
+                ),
+            )
+        )
+        return events
+
+    def _announce_restart_recovery_plan(
+        self, intents: Sequence[PlacementIntent]
+    ) -> list[Event]:
+        """Order what the restore is bringing back, when it changed.
+
+        Replicating the plan itself, not only its size, lets a master promoted
+        in the middle of the restore finish it even when the node whose record
+        was chosen is gone.
+
+        Returns:
+            One ``RestartRecoveryStarted`` when the plan differs from the last
+            one announced (or seeded), otherwise nothing.
+        """
+        plan = tuple(intents)
+        if (
+            len(plan) == self._restart_recovery_announced
+            and plan == self._restart_recovery_announced_intents
+        ):
+            return []
+        self._restart_recovery_announced = len(plan)
+        self._restart_recovery_announced_intents = plan
+        return [RestartRecoveryStarted(placements=len(plan), intents=plan)]
+
+    def _latch_restart_recovery_span(self, connected_node_ids: set[NodeId]) -> None:
+        """Remember that a recovering session has seen more than one node.
+
+        Latched at any point, even inside the settling window: a peer that
+        drops out later still made this a multi-node restart, so restore must
+        choose the freshest record across nodes rather than use its own. Each
+        peer is remembered too, with its install ID once known, so the choice
+        can wait for one that left and may hold a fresher record.
+        """
+        if len(connected_node_ids) > 1:
+            self._restart_recovery_spans_nodes = True
+        identities = self._telemetry_view.node_identities
+        for peer in connected_node_ids - {self.node_id}:
+            identity = identities.get(peer)
+            install_id = identity.node_install_id if identity is not None else None
+            if install_id is not None or peer not in self._restart_recovery_observed:
+                self._restart_recovery_observed[peer] = install_id
+
+    def _finish_restored_intent(self) -> None:
+        """Retire the current intent; the next one gets its own deadline."""
+        self._restart_recovery_remaining.pop(0)
+        self._restart_recovery_info_deadline = None
+
+    async def _choose_restart_recovery_record(
+        self,
+        now: datetime,
+        *,
+        topology_settled: bool,
+        connected_node_ids: set[NodeId],
+    ) -> list[Event]:
+        """Choose which node's record a multi-node cold start restores from.
+
+        Every node keeps a record; the one most recently confirmed current
+        wins, so a node that was offline for days cannot restore an old
+        layout. After the settling window this waits (up to two minutes) for
+        every connected peer's advert and for the chosen record's machines to
+        rejoin, fetching a peer's record over its API when it is the freshest.
+        A peer whose record cannot be fetched is skipped for the next freshest.
+
+        Returns:
+            Proposal-history events carried from the chosen record when it is
+            not this node's own.
+        """
+        self._latch_restart_recovery_span(connected_node_ids)
+        if (
+            not self.state.restart_recovery_pending
+            or self._restart_recovery_completion_queued
+            or self._restart_recovery_chosen
+            or not self._restart_recovery_spans_nodes
+            or not topology_settled
+        ):
+            return []
+        if self._restart_recovery_settled_at is None:
+            self._restart_recovery_settled_at = now
+        waited_out = now >= self._restart_recovery_settled_at + timedelta(
+            seconds=HOST_WAIT_AFTER_SETTLE_SECONDS
+        )
+        adverts = self._telemetry_view.node_restart_recovery
+        own = self._restart_recovery_record
+
+        def still_waiting() -> bool:
+            return not waited_out and bool(
+                awaited_peers(
+                    self._restart_recovery_observed,
+                    adverts,
+                    own=own,
+                    local_node=self.node_id,
+                    connected_node_ids=connected_node_ids,
+                    unfetchable=self._restart_recovery_unfetchable,
+                    live_install_ids=live_nodes_by_install_id(
+                        self._telemetry_view, connected_node_ids
+                    ),
+                )
+            )
+
+        if still_waiting():
+            return []
+        chosen: ClusterIntentRecord | None = None
+        source_label = "no node"
+        for source in record_sources(
+            own,
+            adverts,
+            local_node=self.node_id,
+            connected_node_ids=connected_node_ids,
+            unfetchable=self._restart_recovery_unfetchable,
+        ):
+            if source.node_id is None:
+                chosen, source_label = own, "this node"
+                break
+            cached = self._restart_recovery_fetched
+            if cached is not None and cached[:2] == (source.node_id, source.written_at):
+                chosen, source_label = cached[2], f"node {source.node_id}"
+                break
+            assert source.advert is not None
+            fetched = await self._restart_recovery_fetcher(
+                source.node_id, source.advert, self.state.node_network.get(source.node_id)
+            )
+            if fetched is None:
+                logger.warning(
+                    f"Restart recovery: could not fetch node {source.node_id}'s "
+                    "record; trying the next freshest"
+                )
+                self._restart_recovery_unfetchable.add(source.node_id)
+                # Losing that source may make a departed peer's record the
+                # best one left, worth waiting for before settling for less.
+                if still_waiting():
+                    return []
+                continue
+            self._restart_recovery_fetched = (source.node_id, source.written_at, fetched)
+            chosen, source_label = fetched, f"node {source.node_id}"
+            break
+        if chosen is not None and not waited_out:
+            hosts = {
+                install_id
+                for placement in chosen.placements
+                for install_id in placement.host_install_ids
+            }
+            live = live_nodes_by_install_id(self._telemetry_view, connected_node_ids)
+            if not hosts <= set(live):
+                return []
+        events: list[Event] = []
+        if chosen is not None and chosen is not own:
+            events.extend(self._carry_restored_proposals(chosen, now))
+        events.extend(
+            self._announce_restart_recovery_plan(
+                chosen.placements
+                if chosen is not None and self._restart_recovery_restores_placements
+                else ()
+            )
+        )
+        self._restart_recovery_record = chosen
+        self._restart_recovery_remaining = (
+            list(chosen.placements) if chosen is not None else []
+        )
+        self._restart_recovery_chosen = True
+        logger.info(
+            f"Restart recovery: restoring from {source_label}'s record"
+            + (
+                f" (current as of {chosen.stamp.written_at.isoformat()}, "
+                f"{len(chosen.placements)} placement(s))"
+                if chosen is not None
+                else ""
+            )
+        )
+        return events
+
+    def _carry_restored_proposals(
+        self, record: ClusterIntentRecord, now: datetime
+    ) -> list[Event]:
+        """Adopt a fresher record's proposal history, all of it terminal."""
+        events: list[Event] = []
+        for proposal_id, proposal in restored_steward_proposals(record, now=now).items():
+            if self._ordered_steward_proposals.get(proposal_id) == proposal:
+                continue
+            self._ordered_steward_proposals[proposal_id] = proposal
+            events.append(StewardActionProposalChanged(proposal=proposal))
+        if events:
+            self._prune_ordered_steward_action_proposals()
+        return events
+
+    def _restore_recorded_placements(
+        self, now: datetime, connected_node_ids: set[NodeId]
+    ) -> list[Event]:
+        """Request each remaining recorded placement through the planner.
+
+        Placements are threaded through one instance map so each sees the
+        capacity the previous ones claimed before their creations echo. A
+        placement prefers the machines it ran on and falls back to the
+        planner's choice; one that cannot be placed is recorded once, and
+        restore never stops anything to make room.
+        """
+        events: list[Event] = []
+        current: dict[InstanceId, Instance] = dict(self.state.instances)
+        current.update(self._pending_instance_reservations)
+        for reservation in self._steward_reserved_placements.values():
+            current.update(reservation)
+        live = live_nodes_by_install_id(self._telemetry_view, connected_node_ids)
+        while self._restart_recovery_remaining:
+            intent = self._restart_recovery_remaining[0]
+            card = self._ordered_placement_model_card(intent.model_id)
+            if card is None:
+                events.append(
+                    restore_failure_event(
+                        intent, "it is no longer in the model catalog.", now=now
+                    )
+                )
+                self._finish_restored_intent()
+                continue
+            preferred, excluded = intent_nodes(intent, live)
+            command = PlaceInstance(
+                model_card=card,
+                sharding=intent.sharding,
+                instance_meta=intent.instance_meta,
+                min_nodes=intent.min_nodes,
+                excluded_nodes=sorted(excluded),
+                # A machine excluded before the restart that has not come
+                # back has no node ID to exclude; keep it by install ID so
+                # the exclusion holds when it returns and stays in the record.
+                excluded_install_ids=sorted(
+                    install_id
+                    for install_id in intent.excluded_install_ids
+                    if install_id not in live
+                ),
+                requested_context_tokens=intent.requested_context_tokens,
+            )
+            try:
+                placement = self._place_restored_intent(
+                    command, current, preferred, connected_node_ids
+                )
+            except PlacementInfoPendingError as error:
+                if self._restart_recovery_info_deadline is None:
+                    self._restart_recovery_info_deadline = now + timedelta(
+                        seconds=INFO_WAIT_AFTER_SETTLE_SECONDS
+                    )
+                if now < self._restart_recovery_info_deadline:
+                    return events
+                events.append(
+                    restore_failure_event(
+                        intent,
+                        f"node information did not arrive in time ({error}).",
+                        now=now,
+                    )
+                )
+                self._finish_restored_intent()
+                continue
+            except PlacementError as error:
+                events.append(restore_failure_event(intent, str(error), now=now))
+                self._finish_restored_intent()
+                continue
+            events.extend(
+                get_transition_events(current, placement, self.state.tasks)
+            )
+            current = dict(placement)
+            self._restart_recovery_restored += 1
+            self._finish_restored_intent()
+        return events
+
+    def _place_restored_intent(
+        self,
+        command: PlaceInstance,
+        current: Mapping[InstanceId, Instance],
+        preferred: frozenset[NodeId],
+        connected_node_ids: set[NodeId],
+    ) -> dict[InstanceId, Instance]:
+        """Place a restored intent on its old machines, else where it fits.
+
+        The planner has no "prefer these nodes" input, so the first attempt
+        excludes every other connected node. Only the operator's own
+        exclusions are recorded on the instance: the narrowing is how restore
+        steers, not something anyone asked for, and recording it would keep
+        repairs and later restores off every other machine for good. If the
+        old machines cannot take it now, the second attempt lets the planner
+        choose, honoring only the operator's exclusions.
+        """
+        others = connected_node_ids - preferred
+        if preferred and others and len(preferred) >= command.min_nodes:
+            narrowed = command.model_copy(
+                update={
+                    "excluded_nodes": sorted({*command.excluded_nodes, *others})
+                }
+            )
+            try:
+                # The steward helper is the generic "place against this
+                # instance map with authoritative inputs" path.
+                return self._place_for_steward_action(
+                    narrowed,
+                    current,
+                    stamped_exclusions=set(command.excluded_nodes),
+                )
+            except PlacementInfoPendingError:
+                raise
+            except PlacementError as error:
+                # Said once per model, so an operator who finds it on another
+                # machine after the restart can see why.
+                logger.info(
+                    f"Restart recovery: {command.model_card.model_id} does not fit on "
+                    f"the machines it ran on now ({error}); letting the planner choose"
+                )
+        return self._place_for_steward_action(command, current)
+
+    def _node_install_ids(self) -> dict[NodeId, UUID]:
+        """Map live node IDs to their machines' stable install IDs, where known.
+
+        Placement uses it to honor exclusions recorded by install ID for
+        machines that were absent when they were excluded.
+        """
+        return {
+            node_id: identity.node_install_id
+            for node_id, identity in self._telemetry_view.node_identities.items()
+            if identity.node_install_id is not None
+        }
 
     def _steward_node_names(self) -> dict[NodeId, str]:
         """Return friendly node names for operator-readable steward reasons."""
@@ -3364,6 +3887,7 @@ class Master:
                                         )
                                         | lineage_failed,
                                         stamped_exclusions=set(refused.excluded_nodes),
+                                        node_install_ids=self._node_install_ids(),
                                         node_resources=self._telemetry_view.node_resources,
                                         node_vram=repair_vram,
                                         unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
@@ -3425,6 +3949,7 @@ class Master:
                                             stamped_exclusions=set(
                                                 refused.excluded_nodes
                                             ),
+                                            node_install_ids=self._node_install_ids(),
                                             node_resources=self._telemetry_view.node_resources,
                                             node_vram=repair_vram,
                                             unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
@@ -3713,6 +4238,21 @@ class Master:
                 if topology_settled
                 else set()
             )
+            for recovery_event in await self._choose_restart_recovery_record(
+                now,
+                topology_settled=topology_settled,
+                connected_node_ids=connected_node_ids,
+            ):
+                await self._queue_control_event(recovery_event)
+            # Restore runs before the dead-node cleanup below, so it is told
+            # which instances that cleanup is about to delete.
+            for recovery_event in self._restart_recovery_events(
+                now,
+                topology_settled=topology_settled,
+                connected_node_ids=connected_node_ids,
+                dying_instance_ids=dying_instance_ids,
+            ):
+                await self._queue_control_event(recovery_event)
 
             # Fail in-flight API tasks stranded by a dead or dying instance
             # so open HTTP requests terminate with an error instead of
@@ -3882,6 +4422,7 @@ class Master:
                     download_status=self._effective_downloads(),
                     excluded_nodes=set(replace_command.excluded_nodes),
                     stamped_exclusions=set(instance.excluded_nodes),
+                    node_install_ids=self._node_install_ids(),
                     node_resources=self._telemetry_view.node_resources,
                     node_vram=repair_vram,
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(

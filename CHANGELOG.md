@@ -44,6 +44,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Models now come back on their own after a reboot or a whole-cluster restart.
+  Each machine keeps a small record of what the cluster was running. After a
+  restart, Skulk uses the most recently confirmed record from any machine and
+  places each model again, on the same machines when they are back and
+  otherwise wherever it fits. A model you stopped stays stopped, and one that
+  no longer fits is reported in the placement failure history instead of
+  being retried. Exclusions you set are kept, including for machines that
+  have not come back yet. Machines that shut down minutes apart still bring
+  everything back. While it runs, the dashboard shows how many models are
+  coming back. Steward proposal history survives too: a proposal still
+  pending at the restart comes back expired and is never re-armed. Turn it
+  off with **Bring models back after a restart** in Settings, or on one
+  machine at launch with `SKULK_NO_RESTART_RECOVERY=1`.
 - Steward proposals now say what happened to them. A proposal whose target
   changes while it waits (the instance moved, was replaced or now serves a
   different model, the download finished or was retried, the model card
@@ -55,7 +68,8 @@ This project records release notes here and mirrors public-facing notes in
   proposal on screen for ten minutes with its result and reason instead of
   showing a success message while the action was refused. Dismissing a
   decided proposal is remembered in that browser, so it stays gone after a
-  reload.
+  reload. Those ten minutes are measured on the server's clock, so a browser
+  whose clock is off neither hides cards early nor keeps them too long.
 
 ### Fixed
 

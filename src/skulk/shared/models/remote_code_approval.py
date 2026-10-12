@@ -234,6 +234,59 @@ def _is_trusted_fabric_host(host: str | None) -> bool:
     return _is_loopback_host(host) or _is_fabric_ipv4(host)
 
 
+_UNIQUE_LOCAL_IPV6 = ip_network("fc00::/7")
+"""IPv6 unique local addresses, the IPv6 counterpart of private-LAN IPv4."""
+
+
+def _is_link_or_private_ipv6_peer(host: str | None) -> bool:
+    """Whether a socket peer is on-link IPv4/IPv6 or an IPv6 unique local address.
+
+    Thunderbolt Bridge addresses itself with self-assigned link-local IPv4 by
+    default, so a cluster cabled only by Thunderbolt reaches its peers on
+    169.254.0.0/16. Link-local addresses cannot be routed off the segment.
+    """
+    if host is None:
+        return False
+    try:
+        parsed = ip_address(host)
+    except ValueError:
+        return False
+    if parsed.version == 6 and parsed.ipv4_mapped is not None:
+        parsed = parsed.ipv4_mapped
+    if parsed.version == 4:
+        return parsed.is_link_local
+    return parsed.is_link_local or parsed in _UNIQUE_LOCAL_IPV6
+
+
+def trusted_fabric_peer_read_allowed(
+    client_host: str | None,
+    origin: str | None,
+    *,
+    forwarding_headers_present: bool = False,
+) -> bool:
+    """Return whether a direct machine-to-machine read from a cluster peer is allowed.
+
+    Nodes read each other's internal state over whatever link they share,
+    including the link-local addresses a Thunderbolt-only cluster uses and
+    IPv6 private addressing, which the dashboard mutation policy does not
+    admit. This admits those peers for reads only, and only for requests no
+    browser made (no Origin header) that no proxy forwarded, so it widens
+    nothing a web page can reach. Callers check the mutation policy first.
+
+    Args:
+        client_host: Socket peer host reported by the ASGI server.
+        origin: Optional browser Origin header.
+        forwarding_headers_present: Whether a proxy-origin header was supplied.
+
+    Returns:
+        ``True`` for a direct, Origin-less request from an on-link or IPv6
+        unique local peer.
+    """
+    if forwarding_headers_present or origin is not None:
+        return False
+    return _is_link_or_private_ipv6_peer(client_host)
+
+
 def trusted_fabric_mutation_allowed(
     client_host: str | None,
     origin: str | None,

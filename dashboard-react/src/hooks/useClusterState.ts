@@ -422,6 +422,10 @@ export interface ClusterState {
   /** Instances waiting for their node to install an on-demand engine, with
    *  each install's approximate download in bytes. */
   engineInstallBytesByInstance: ReadonlyMap<string, number>;
+  /** True while a cluster that started cold is still restoring from its record. */
+  restartRecoveryPending: boolean;
+  /** Models the restore is bringing back, once chosen; null otherwise. */
+  restartRecoveryPlacements: number | null;
 }
 
 const CAPABILITY_NODE_STATUSES: ReadonlySet<string> = new Set([
@@ -613,5 +617,7 @@ export function useClusterState(): ClusterState {
     capabilityNodes,
     thunderboltBridgeCycles: data?.thunderboltBridgeCycles ?? [],
     engineInstallBytesByInstance: installingEngine,
+    restartRecoveryPending: data?.restartRecoveryPending ?? false,
+    restartRecoveryPlacements: data?.restartRecoveryPlacements ?? null,
   };
 }

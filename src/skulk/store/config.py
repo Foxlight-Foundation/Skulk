@@ -522,6 +522,8 @@ class SkulkConfig(FrozenModel):
             operator has never been asked (nothing is queued or sent).
         intelligent_fabric: Intelligent-fabric (resident steward) settings.
             ``None`` means the mode is off.
+        restart_recovery: Restart recovery settings. ``None`` means the
+            defaults: models come back after a restart.
         model_trust: Deprecated persisted compatibility state from the retired
             secondary repository-code approval ceremony. Current execution
             authorization does not consult it.
@@ -537,6 +539,7 @@ class SkulkConfig(FrozenModel):
     experiments: ExperimentsConfig | None = None
     telemetry: "TelemetryConfig | None" = None
     intelligent_fabric: "IntelligentFabricConfig | None" = None
+    restart_recovery: "RestartRecoveryConfig | None" = None
     model_trust: "ModelTrustConfig | None" = None
     hf_token: str | None = None
 
@@ -615,6 +618,22 @@ class IntelligentFabricConfig(FrozenModel):
             "unsloth/Qwen3.5-0.8B-GGUF",
         ]
     )
+
+
+@final
+class RestartRecoveryConfig(FrozenModel):
+    """Restart recovery settings (cluster-synced).
+
+    Attributes:
+        enabled: Whether a cluster that restarts brings its placed models back
+            on its own. On by default. Turned off, a restart places nothing;
+            steward proposal history (made terminal) still comes back, and
+            nodes keep recording what runs, so turning it on again applies
+            from the next restart. ``SKULK_NO_RESTART_RECOVERY=1`` turns the
+            whole feature off at launch instead.
+    """
+
+    enabled: bool = True
 
 
 @final

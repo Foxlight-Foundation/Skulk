@@ -253,6 +253,11 @@ SKULK_VIDEO_STORE_MAX_BYTES = int(
 
 SKULK_OFFLINE = (_env("SKULK_OFFLINE", "false") or "false").lower() == "true"
 
+# Restart recovery brings placed models and steward proposal history back
+# after a single-node reboot or a whole-cluster restart. ``1`` turns it off at
+# launch: the node neither keeps its recovery record nor restores from it.
+SKULK_NO_RESTART_RECOVERY = (_env("SKULK_NO_RESTART_RECOVERY", "0") or "0") == "1"
+
 # ``skulk --offline`` switches this on at startup. The environment variable is
 # read once at import, so modules that ask ``offline_mode()`` at call time see
 # either way of going offline.

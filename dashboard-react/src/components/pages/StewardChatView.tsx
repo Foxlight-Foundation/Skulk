@@ -19,6 +19,7 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 import { tolgee } from '../../i18n/tolgee';
 import { addToast } from '../../hooks/useToast';
 import {
+  type StewardActionProposal,
   useDecideStewardProposalMutation,
   useGetStewardProposalsQuery,
   useGetStewardStatusQuery,
@@ -63,6 +64,9 @@ export interface StewardChatViewProps {
   /** Chat's model chooser belongs in the composer, sharing its current controller. */
   modelSelector?: ReactNode;
 }
+
+/** One shared empty list, so callbacks that depend on proposals keep their identity. */
+const NO_PROPOSALS: readonly StewardActionProposal[] = [];
 
 const Container = styled.div`
   display: flex;
@@ -206,17 +210,24 @@ function useStewardController({ readyInstances = EMPTY_INSTANCES }: StewardChatV
   const { data: status, refetch } = useGetStewardStatusQuery(undefined, {
     pollingInterval: 15000,
   });
-  const { data: proposals = [], fulfilledTimeStamp: proposalsFetchedAt } = useGetStewardProposalsQuery(undefined, {
+  const { data: proposalsSnapshot, fulfilledTimeStamp: proposalsFetchedAt } = useGetStewardProposalsQuery(undefined, {
     pollingInterval: 3000,
     skip: status?.enabled !== true,
   });
+  const proposals = proposalsSnapshot?.proposals ?? NO_PROPOSALS;
   const [decideProposal, { isLoading: isDecidingProposal }] =
     useDecideStewardProposalMutation();
   // Dismissals persist in this browser so a dismissed card stays gone after a reload.
   const [dismissedProposalIds, setDismissedProposalIds] = useState<ReadonlySet<string>>(loadDismissedProposalIds);
   // The last poll's time keeps render pure, and polling every few seconds
-  // ages settled cards out of the window without a timer of their own.
-  const visibleProposals = visibleStewardProposals(proposals, proposalsFetchedAt ?? 0, dismissedProposalIds);
+  // ages settled cards out of the window without a timer of their own. The
+  // server's clock is preferred, since `decided_at` is server time; the
+  // browser's arrival time is the fallback when no Date header came back.
+  const visibleProposals = visibleStewardProposals(
+    proposals,
+    proposalsSnapshot?.serverTimeMs ?? proposalsFetchedAt ?? 0,
+    dismissedProposalIds,
+  );
   const dismissProposal = useCallback((proposalId: string) => {
     setDismissedProposalIds(saveDismissedProposalIds(
       new Set(dismissedProposalIds).add(proposalId),

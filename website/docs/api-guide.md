@@ -3105,6 +3105,51 @@ dispatch recovery rather than reissuing its effect. There are no autonomous appr
 per-action grants in this release: every proposal requires a separate operator
 decision.
 
+## Restart Recovery
+
+### GET `/v1/internal/restart-recovery/record`
+
+Returns the record this node keeps so a cluster can come back after a
+single-node reboot or a whole-cluster restart. A master that starts with no
+surviving cluster state compares every node's record freshness (the
+`RestartRecoveryAdvert` telemetry reading: when the record was last confirmed
+current, how many placements it holds, and the port of the node's API) and
+fetches the freshest record from the node that holds it, trying the addresses
+in the node's replicated interface list and then the `addresses` its advert
+lists (so a node without a worker, which publishes no interface list, can still
+serve its record). Operators and clients normally have no reason to call it.
+
+Authorization: loopback, a direct trusted-fabric peer (private LAN or CGNAT
+socket without proxy-forwarding headers), or the authenticated operator gateway.
+Because peers fetch each other over every link they share, it also admits a
+direct request from a link-local IPv4 or IPv6 peer (the self-assigned addresses
+a Thunderbolt-only cluster uses) or an IPv6 unique local peer, provided the
+request carries no `Origin` header and no proxy-forwarding headers, so no
+browser page can use that path. Anything else receives `403`.
+
+The response is:
+
+- `nodeId`: the node that answered, so a caller reaching a shared address can
+  confirm it reached the node it meant;
+- `record`: the record, or `null` when the node has none. A record holds:
+  - `stamp`: `writtenAt` (UTC, when the content was last confirmed current),
+    plus the session and event index it was written in;
+  - `placements`: ordinary placements as intent: `modelId`, `sharding`,
+    `instanceMeta`, `minNodes`, `requestedContextTokens`, and the machines it ran
+    on and the machines the operator excluded, as stable install IDs;
+  - `stewardProposals`: the bounded steward proposal audit.
+
+The record never holds live node IDs, runner IDs, credentials, or model data.
+
+**Progress and settings.** `GET /state` carries `restartRecoveryPending` (true
+from a cold-started session's first event until restore finishes) and
+`restartRecoveryPlacements` (how many models the restore is bringing back,
+once the master has chosen its record; `null` outside a restore). The
+`restart_recovery.enabled` section of `GET /config` and `PUT /config` turns
+placement restore off (default on). Steward proposal history is restored
+either way, nodes keep recording what runs, and the setting applies to the
+next restart.
+
 ## Download Management
 
 ### Start a node download

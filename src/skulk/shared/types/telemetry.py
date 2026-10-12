@@ -39,6 +39,7 @@ from skulk.shared.types.profiling import (
     NodeResources,
     SystemPerformanceProfile,
 )
+from skulk.shared.types.restart_recovery import RestartRecoveryAdvert
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadCompleted,
@@ -111,7 +112,7 @@ class NodeTelemetry(CamelCaseModel):
     event: it is gossiped node -> all and never enters the event log."""
 
     node_id: NodeId
-    info: GatheredInfo | LiveDownloadProgress | NodeArtifactInventory
+    info: GatheredInfo | LiveDownloadProgress | NodeArtifactInventory | RestartRecoveryAdvert
 
     def coalescing_key(self) -> str:
         """Return the bounded latest-value identity used before network egress.
@@ -167,6 +168,9 @@ class TelemetryView:
         # stay in the store; this is only the latest per-node observation.
         self.node_artifact_inventories: dict[NodeId, NodeArtifactInventory] = {}
         self.node_artifact_inventory_received_at: dict[NodeId, datetime] = {}
+        # Freshness of each node's restart recovery record (see
+        # RestartRecoveryAdvert); read by a cold-started master.
+        self.node_restart_recovery: dict[NodeId, RestartRecoveryAdvert] = {}
         # Non-terminal download status is observational and last-write-wins.
         # Durable State retains only completed/failed terminal outcomes.
         self.node_downloads: dict[NodeId, dict[str, LiveDownloadProgress]] = {}
@@ -259,6 +263,7 @@ class TelemetryView:
         self.node_capability_nodes_received_at.pop(node_id, None)
         self.node_artifact_inventories.pop(node_id, None)
         self.node_artifact_inventory_received_at.pop(node_id, None)
+        self.node_restart_recovery.pop(node_id, None)
         self.node_downloads.pop(node_id, None)
         for attempts in (
             self._node_download_attempts,
@@ -334,6 +339,8 @@ class TelemetryView:
         elif isinstance(info, NodeArtifactInventory):
             self.node_artifact_inventories[node_id] = info
             self.node_artifact_inventory_received_at[node_id] = receipt_time
+        elif isinstance(info, RestartRecoveryAdvert):
+            self.node_restart_recovery[node_id] = info
         elif isinstance(info, (DownloadPending, DownloadOngoing)):
             model_id = str(info.shard_metadata.model_card.model_id)
             key = (node_id, model_id)

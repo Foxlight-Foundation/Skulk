@@ -475,8 +475,11 @@ async def test_api_only_promotion_seeds_master_from_replicated_trust_state(
     )
 
     election_sender, election_receiver = channel[ElectionResult]()
+    # Trust decisions only arrive through indexed events, so a view that holds
+    # one has applied at least one event.
     api_state = State(
-        model_trust_approved_remote_code_identities=(replicated_identity,)
+        model_trust_approved_remote_code_identities=(replicated_identity,),
+        last_event_applied_idx=4,
     )
     node = Node(
         router=cast(Router, cast(object, _FakeRouter())),
@@ -518,6 +521,85 @@ async def test_api_only_promotion_seeds_master_from_replicated_trust_state(
     assert promotion_seed.model_trust_approved_remote_code_identities == (
         replicated_identity,
     )
+
+
+@pytest.mark.asyncio
+async def test_never_synced_promotion_is_a_cold_start_with_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A winner whose view never applied an event restores from its record."""
+
+    order_events: list[str] = []
+    captured: list[dict[str, Any]] = []
+
+    class NewEventRouter:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def sender(self) -> object:
+            return object()
+
+        def receiver(self) -> object:
+            return object()
+
+        async def run(self) -> None:
+            return
+
+    class NewMaster:
+        def __init__(self, *_args: Any, **kwargs: Any) -> None:
+            captured.append(kwargs)
+
+        async def run(self) -> None:
+            return
+
+    monkeypatch.setattr("skulk.main.EventRouter", NewEventRouter)
+    monkeypatch.setattr("skulk.main.Master", NewMaster)
+    monkeypatch.setattr("skulk.main.RESTART_RECOVERY_ENABLED", True)
+    monkeypatch.setattr("skulk.main._load_restart_recovery_record", lambda: None)
+
+    async def _unexpected_request_cluster_config(
+        *_args: Any, **_kwargs: Any
+    ) -> str | None:
+        raise AssertionError("new master should not request config before startup")
+
+    monkeypatch.setattr(
+        Node, "_request_cluster_config", _unexpected_request_cluster_config
+    )
+
+    election_sender, election_receiver = channel[ElectionResult]()
+    node = Node(
+        router=cast(Router, cast(object, _FakeRouter())),
+        event_router=cast(EventRouter, cast(object, _OldEventRouter(order_events))),
+        download_coordinator=None,
+        worker=None,
+        election=cast(Election, object()),
+        election_result_receiver=election_receiver,
+        master=None,
+        api=cast(API, cast(object, _FakeApi(order_events, state=State()))),
+        node_id=NodeId("self"),
+        offline=False,
+        skulk_config=SkulkConfig(),
+        store_client=None,
+        store_server=None,
+        telemetry_view=TelemetryView(),
+        telemetry_receiver=channel[NodeTelemetry]()[1],
+    )
+    node._tg = _FakeTaskGroup(order_events)  # pyright: ignore[reportAttributeAccessIssue]
+
+    await election_sender.send(
+        ElectionResult(
+            session_id=SessionId(master_node_id=NodeId("self"), election_clock=2),
+            won_clock=2,
+            is_new_master=True,
+        )
+    )
+    election_sender.close()
+
+    await node._elect_loop()
+
+    assert len(captured) == 1
+    assert captured[0]["initial_state"] is None
+    assert captured[0]["restart_recovery_enabled"] is True
 
 
 class _StateSyncOnlyRouter:
