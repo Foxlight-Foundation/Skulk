@@ -3114,12 +3114,18 @@ single-node reboot or a whole-cluster restart. A master that starts with no
 surviving cluster state compares every node's record freshness (the
 `RestartRecoveryAdvert` telemetry reading: when the record was last confirmed
 current, how many placements it holds, and the port of the node's API) and
-fetches the freshest record from the node that holds it. Operators and clients
-normally have no reason to call it.
+fetches the freshest record from the node that holds it, trying the addresses
+in the node's replicated interface list and then the `addresses` its advert
+lists (so a node without a worker, which publishes no interface list, can still
+serve its record). Operators and clients normally have no reason to call it.
 
 Authorization: loopback, a direct trusted-fabric peer (private LAN or CGNAT
-socket without proxy-forwarding headers), or the authenticated operator gateway;
-anything else receives `403`.
+socket without proxy-forwarding headers), or the authenticated operator gateway.
+Because peers fetch each other over every link they share, it also admits a
+direct request from a link-local IPv4 or IPv6 peer (the self-assigned addresses
+a Thunderbolt-only cluster uses) or an IPv6 unique local peer, provided the
+request carries no `Origin` header and no proxy-forwarding headers, so no
+browser page can use that path. Anything else receives `403`.
 
 The response is:
 

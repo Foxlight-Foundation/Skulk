@@ -743,6 +743,34 @@ async def test_a_departed_peer_that_may_hold_a_fresher_record_is_waited_for(
     assert master._restart_recovery_record is own  # pyright: ignore[reportPrivateUsage]
 
 
+async def test_a_failed_fetch_makes_a_departed_peer_worth_waiting_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the freshest reachable record fails, a departed peer's may be best."""
+    departed = NodeId("departed-peer")
+    own = _record_written(5, _intent_on("org/model", KITE1))
+    fetcher = _Fetcher({PEER: None})
+    master = await _two_node_master(monkeypatch, own=own, fetcher=fetcher)
+    view = master._telemetry_view  # pyright: ignore[reportPrivateUsage]
+    now = datetime.now(tz=timezone.utc)
+    view.node_restart_recovery[PEER] = RestartRecoveryAdvert(
+        written_at=now - timedelta(minutes=1), placements=1, api_port=52415
+    )
+    view.node_restart_recovery[departed] = RestartRecoveryAdvert(
+        written_at=now - timedelta(minutes=3), placements=1, api_port=52415
+    )
+    await master._choose_restart_recovery_record(  # pyright: ignore[reportPrivateUsage]
+        now, topology_settled=False, connected_node_ids={LOCAL_NODE, PEER, departed}
+    )
+
+    await _choose(master, now)
+
+    assert fetcher.calls == [PEER]
+    assert not master._restart_recovery_chosen  # pyright: ignore[reportPrivateUsage]
+    await _choose(master, now + timedelta(seconds=HOST_WAIT_AFTER_SETTLE_SECONDS + 1))
+    assert master._restart_recovery_record is own  # pyright: ignore[reportPrivateUsage]
+
+
 async def test_a_departed_peer_with_an_older_record_is_not_waited_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

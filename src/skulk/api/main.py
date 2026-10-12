@@ -466,6 +466,7 @@ from skulk.shared.models.remote_code_approval import (
     remote_code_is_automatically_trusted,
     remote_code_trust_identity,
     trusted_fabric_mutation_allowed,
+    trusted_fabric_peer_read_allowed,
 )
 from skulk.shared.tracing import (
     TraceEvent,
@@ -5171,7 +5172,9 @@ class API:
 
         Args:
             request: Incoming request; must come from loopback, a direct
-                trusted-fabric peer, or the authenticated operator gateway.
+                trusted-fabric peer (including the link-local and IPv6
+                private links peers share), or the authenticated operator
+                gateway.
 
         Returns:
             This node's identity and its record, or no record when it has none.
@@ -5179,7 +5182,7 @@ class API:
         Raises:
             HTTPException: If the caller lacks that authority.
         """
-        self._require_operator_mutation(request)
+        self._require_cluster_peer_read(request)
         record = await to_thread.run_sync(read_record, RECOVERY_RECORD_PATH)
         return RestartRecoveryRecordResponse(node_id=self.node_id, record=record)
 
@@ -10764,6 +10767,44 @@ class API:
                 "This operator mutation requires a direct loopback or "
                 "trusted-fabric (private LAN / CGNAT) connection, or an "
                 "authenticated operator-gateway credential"
+            ),
+        )
+
+    @classmethod
+    def _require_cluster_peer_read(cls, request: Request) -> None:
+        """Allow an internal read from another node over any link they share.
+
+        Everything the operator mutation policy admits is admitted. So is a
+        direct, Origin-less request from an on-link or IPv6 private peer,
+        which is how a Thunderbolt-only cluster reaches its peers; browsers
+        always send Origin on cross-origin requests, so no web page gains
+        access this way.
+        """
+        try:
+            cls._require_operator_mutation(request)
+            return
+        except HTTPException:
+            pass
+        client_host = request.client.host if request.client is not None else None
+        forwarding_headers_present = any(
+            raw_name.lower() == b"forwarded"
+            or raw_name.lower().startswith(b"x-forwarded-")
+            or raw_name.lower()
+            in {b"x-real-ip", b"cf-connecting-ip", b"true-client-ip"}
+            for raw_name, _raw_value in request.headers.raw
+        )
+        if trusted_fabric_peer_read_allowed(
+            client_host,
+            request.headers.get("origin"),
+            forwarding_headers_present=forwarding_headers_present,
+        ):
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This internal read requires a direct loopback or trusted-fabric "
+                "connection (private LAN, CGNAT, link-local, or IPv6 unique "
+                "local), or an authenticated operator-gateway credential"
             ),
         )
 
