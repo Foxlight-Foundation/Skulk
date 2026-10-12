@@ -2376,8 +2376,13 @@ class Master:
                 )
             except PlacementInfoPendingError:
                 raise
-            except PlacementError:
-                pass
+            except PlacementError as error:
+                # Said once per model, so an operator who finds it on another
+                # machine after the restart can see why.
+                logger.info(
+                    f"Restart recovery: {command.model_card.model_id} does not fit on "
+                    f"the machines it ran on now ({error}); letting the planner choose"
+                )
         return self._place_for_steward_action(command, current)
 
     def _node_install_ids(self) -> dict[NodeId, UUID]:
