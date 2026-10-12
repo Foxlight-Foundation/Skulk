@@ -299,11 +299,26 @@ class StewardActionProposalChanged(BaseEvent):
     proposal: StewardActionProposal
 
 
+class RestartRecoveryStarted(BaseEvent):
+    """How many models a restore is bringing back changed.
+
+    Sets ``State.restart_recovery_placements``. The cold-start seed already
+    carries the count from the master's own record; this is ordered when the
+    count changes: a multi-node restore chose another node's record, or
+    reconciliation found some placements already running (a master promoted
+    in the middle of a restore).
+    """
+
+    placements: int = Field(
+        ge=0, description="Placements the master is about to request from the record."
+    )
+
+
 class RestartRecoveryCompleted(BaseEvent):
     """The master finished restoring a cold-started cluster from its record.
 
     Clears ``State.restart_recovery_pending`` so nodes resume keeping their
-    restart recovery records current.
+    restart recovery records current, and clears the placement count.
     """
 
     restored_placements: int = Field(
@@ -339,6 +354,7 @@ Event = (
     | TracingStateChanged
     | ModelTrustApprovalChanged
     | StewardActionProposalChanged
+    | RestartRecoveryStarted
     | RestartRecoveryCompleted
     | CustomModelCardAdded
     | CustomModelCardDeleted
@@ -366,6 +382,7 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TracingStateChanged,
     ModelTrustApprovalChanged,
     StewardActionProposalChanged,
+    RestartRecoveryStarted,
     RestartRecoveryCompleted,
     CustomModelCardAdded,
     CustomModelCardDeleted,

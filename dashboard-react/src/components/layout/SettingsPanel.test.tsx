@@ -359,3 +359,68 @@ it('preserves an unsaved draft across Devices and commits it only with Save', as
   await userEvent.click([...container.querySelectorAll('button')].find(button => button.textContent === 'Save changes')!);
   expect(saveFullConfig).toHaveBeenCalledWith(expect.objectContaining({ hf_token: 'fixture-unsaved-token' }));
 });
+
+describe('restart recovery setting', () => {
+  async function renderWithConfig(fullConfig: Record<string, unknown>) {
+    localStorage.setItem('skulk-settings-sections', JSON.stringify({ restartRecovery: true }));
+    const saveFullConfig = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
+    useConfigMock.mockReturnValue({
+      fullConfig,
+      effective: { kv_cache_backend: 'default', has_hf_token: false, experimental_mode_enabled: false },
+      configPath: 'skulk.yaml',
+      loading: false,
+      saving: false,
+      error: null,
+      fetchConfig: vi.fn(async () => undefined),
+      saveFullConfig,
+    });
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <SettingsPanel open onClose={vi.fn()} />
+        </ThemeProvider>,
+      );
+    });
+    const save = async () => {
+      const saveButton = [...(container?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+        .find((button) => button.textContent === 'Save changes');
+      await act(async () => {
+        saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+    };
+    const toggle = () => container?.querySelector<HTMLElement>('[aria-label="Bring models back after a restart"]');
+    return { saveFullConfig, save, toggle };
+  }
+
+  it('is on by default and saves nothing until the operator changes it', async () => {
+    const { saveFullConfig, save, toggle } = await renderWithConfig({});
+    expect(toggle()?.getAttribute('aria-checked')).toBe('true');
+
+    await save();
+
+    expect(saveFullConfig.mock.calls[0]?.[0]).not.toHaveProperty('restart_recovery');
+  });
+
+  it('saves turning it off', async () => {
+    const { saveFullConfig, save, toggle } = await renderWithConfig({});
+    await act(async () => {
+      toggle()?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await save();
+
+    expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({ restart_recovery: { enabled: false } });
+  });
+
+  it('keeps a saved choice when other settings are saved', async () => {
+    const { saveFullConfig, save, toggle } = await renderWithConfig({ restart_recovery: { enabled: false } });
+    expect(toggle()?.getAttribute('aria-checked')).toBe('false');
+
+    await save();
+
+    expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({ restart_recovery: { enabled: false } });
+  });
+});

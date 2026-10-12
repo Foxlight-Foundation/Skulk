@@ -16,6 +16,7 @@ from typing import Final, Self, cast
 
 import anyio
 import psutil
+import yaml
 from anyio import (
     BrokenResourceError,
     ClosedResourceError,
@@ -24,7 +25,7 @@ from anyio import (
     to_thread,
 )
 from loguru import logger
-from pydantic import PositiveInt
+from pydantic import PositiveInt, ValidationError
 
 import skulk.routing.topics as topics
 from skulk.api.main import API
@@ -649,6 +650,26 @@ RESTART_RECOVERY_ENABLED = not SKULK_NO_RESTART_RECOVERY
 """Whether this node keeps a restart recovery record and restores from it."""
 
 
+def _restart_recovery_restores_placements() -> bool:
+    """Read the Settings toggle that brings models back after a restart.
+
+    Read when a master is created, so a change made in Settings applies to
+    the next restart. A config that cannot be read keeps the default (on):
+    the operator's other settings are already failing loudly elsewhere, and a
+    restart should not also lose their models.
+    """
+    try:
+        config = load_skulk_config()
+    except (ValidationError, yaml.YAMLError, OSError) as error:
+        logger.warning(
+            f"Restart recovery: could not read Settings ({error}); keeping models on"
+        )
+        return True
+    if config is None or config.restart_recovery is None:
+        return True
+    return config.restart_recovery.enabled
+
+
 def _load_restart_recovery_record() -> ClusterIntentRecord | None:
     """Read this node's restart recovery record when recovery is on.
 
@@ -1156,6 +1177,7 @@ class Node:
             ),
             restart_recovery_record=_load_restart_recovery_record(),
             restart_recovery_enabled=RESTART_RECOVERY_ENABLED,
+            restart_recovery_restores_placements=_restart_recovery_restores_placements(),
         )
 
         er_send, er_recv = channel[ElectionResult]()
@@ -1853,6 +1875,7 @@ class Node:
                         ),
                         restart_recovery_record=_load_restart_recovery_record(),
                         restart_recovery_enabled=RESTART_RECOVERY_ENABLED,
+                        restart_recovery_restores_placements=_restart_recovery_restores_placements(),
                         event_sender=self.event_router.sender(),
                         global_event_sender=self.router.sender(topics.GLOBAL_EVENTS),
                         local_event_receiver=self.router.receiver(topics.LOCAL_EVENTS),

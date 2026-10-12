@@ -129,6 +129,7 @@ from skulk.shared.types.events import (
     NodeTimedOut,
     NodeTimeoutEvidence,
     RestartRecoveryCompleted,
+    RestartRecoveryStarted,
     StagedModelEvicted,
     StateSnapshotHydrated,
     StewardActionProposalChanged,
@@ -975,6 +976,7 @@ class Master:
         restart_recovery_record: ClusterIntentRecord | None = None,
         restart_recovery_enabled: bool = False,
         restart_recovery_fetcher: RestartRecordFetcher = fetch_peer_record,
+        restart_recovery_restores_placements: bool = True,
     ):
         self.node_id = node_id
         self.session_id = session_id
@@ -1066,6 +1068,17 @@ class Master:
         # Multi-node cold start: which record restore uses is chosen once,
         # across every node's advert, before any placement is requested.
         self._restart_recovery_fetcher = restart_recovery_fetcher
+        # The Settings toggle ("Bring models back after a restart"). Off, a
+        # restore still carries steward history but requests no placements.
+        self._restart_recovery_restores_placements = restart_recovery_restores_placements
+        # The model count operators see while restore runs: seeded from this
+        # node's record, then updated when the chosen record or the
+        # reconciliation with running instances changes it.
+        self._restart_recovery_announced: int | None = (
+            (len(self._restart_recovery_remaining) if restart_recovery_restores_placements else 0)
+            if cold_start
+            else (initial_state.restart_recovery_placements if initial_state is not None else None)
+        )
         self._restart_recovery_chosen = False
         self._restart_recovery_settled_at: datetime | None = None
         self._restart_recovery_unfetchable: set[NodeId] = set()
@@ -1099,6 +1112,9 @@ class Master:
             # Every node keeps its record untouched until this session has
             # restored from it; RestartRecoveryCompleted clears the flag.
             restart_recovery_pending=cold_start,
+            # How many models are coming back is known from the start, so the
+            # dashboard can say so through the whole settling wait.
+            restart_recovery_placements=self._restart_recovery_announced,
         )
         # A cold-start baseline (trust approvals, restored proposal history,
         # the pending-recovery flag) needs the same indexed delivery path as
@@ -2011,6 +2027,14 @@ class Master:
         events: list[Event] = []
         if not self._restart_recovery_reconciled:
             self._restart_recovery_reconciled = True
+            if not self._restart_recovery_restores_placements:
+                if self._restart_recovery_remaining:
+                    logger.info(
+                        "Restart recovery: bringing models back after a restart "
+                        f"is turned off in Settings; leaving "
+                        f"{len(self._restart_recovery_remaining)} placement(s) unrequested"
+                    )
+                self._restart_recovery_remaining = []
             self._restart_recovery_remaining = unrestored_intents(
                 self._restart_recovery_remaining,
                 {
@@ -2018,6 +2042,9 @@ class Master:
                     for instance_id, instance in self.state.instances.items()
                     if instance_id not in dying_instance_ids
                 },
+            )
+            events.extend(
+                self._announce_restart_recovery_count(len(self._restart_recovery_remaining))
             )
         if self._restart_recovery_remaining:
             events.extend(self._restore_recorded_placements(now, connected_node_ids))
@@ -2041,6 +2068,18 @@ class Master:
             )
         )
         return events
+
+    def _announce_restart_recovery_count(self, placements: int) -> list[Event]:
+        """Order the number of models coming back, when it changed.
+
+        Returns:
+            One ``RestartRecoveryStarted`` when the count differs from the last
+            one announced (or seeded), otherwise nothing.
+        """
+        if placements == self._restart_recovery_announced:
+            return []
+        self._restart_recovery_announced = placements
+        return [RestartRecoveryStarted(placements=placements)]
 
     def _latch_restart_recovery_span(self, connected_node_ids: set[NodeId]) -> None:
         """Remember that a recovering session has seen more than one node.
@@ -2165,6 +2204,13 @@ class Master:
         events: list[Event] = []
         if chosen is not None and chosen is not own:
             events.extend(self._carry_restored_proposals(chosen, now))
+        events.extend(
+            self._announce_restart_recovery_count(
+                len(chosen.placements)
+                if chosen is not None and self._restart_recovery_restores_placements
+                else 0
+            )
+        )
         self._restart_recovery_record = chosen
         self._restart_recovery_remaining = (
             list(chosen.placements) if chosen is not None else []
@@ -2306,8 +2352,13 @@ class Master:
                 )
             except PlacementInfoPendingError:
                 raise
-            except PlacementError:
-                pass
+            except PlacementError as error:
+                # Said once per model, so an operator who finds it on another
+                # machine after the restart can see why.
+                logger.info(
+                    f"Restart recovery: {command.model_card.model_id} does not fit on "
+                    f"the machines it ran on now ({error}); letting the planner choose"
+                )
         return self._place_for_steward_action(command, current)
 
     def _node_install_ids(self) -> dict[NodeId, UUID]:

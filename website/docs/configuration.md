@@ -135,6 +135,21 @@ operations or purchases. Plugin proposal configuration and explicit approval
 remain separate. See [Talk to Skulk](steward) and
 [Capabilities and plugins](capability-nodes).
 
+## Restart recovery
+
+**Bring models back after a restart** is on by default. After a reboot or a
+whole-cluster restart, Skulk places the models that were running again, on the
+same machines when they are back and otherwise wherever they fit. A model you
+stopped before the restart stays stopped, and one that no longer fits is
+reported in the placement failure history instead of being retried. While it
+runs, the dashboard shows how many models are coming back.
+
+Turning it off means models stay stopped after a restart until you place them
+again; steward proposal history still survives the restart. Skulk keeps
+recording what runs either way, so turning it back on applies from the next
+restart. The choice is synced to every node. To turn the whole feature off on one machine at
+launch, set `SKULK_NO_RESTART_RECOVERY=1`.
+
 ## Telemetry
 
 **Performance telemetry** and **Crash diagnostics** are independent consent

@@ -79,6 +79,16 @@ export interface IntelligentFabricConfig {
   steward_models?: string[];
 }
 
+/** Restart recovery settings (cluster-synced). */
+export interface RestartRecoveryConfig {
+  /**
+   * Whether a cluster that restarts brings its placed models back on its own.
+   * On by default. Off, a restart places nothing; steward proposal history
+   * still comes back.
+   */
+  enabled: boolean;
+}
+
 /** Cluster-wide operator decisions for exact model-card identities. */
 export interface ModelTrustConfig {
   /** Cards approved to execute repository-supplied code on every node. */
@@ -92,6 +102,7 @@ export interface FullConfig {
   experiments?: ExperimentsConfig;
   telemetry?: TelemetryConfig;
   intelligent_fabric?: IntelligentFabricConfig;
+  restart_recovery?: RestartRecoveryConfig;
   model_trust?: ModelTrustConfig;
   hf_token?: string;
 }

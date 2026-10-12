@@ -38,6 +38,7 @@ from skulk.shared.types.events import (
     InstanceFailureRecorded,
     LocalForwarderEvent,
     RestartRecoveryCompleted,
+    RestartRecoveryStarted,
     StateSnapshotHydrated,
     StewardActionProposalChanged,
 )
@@ -578,7 +579,11 @@ async def test_a_fresher_peer_record_is_fetched_and_restored_across_nodes(
     carried = await _choose(master)
 
     assert fetcher.calls == [PEER]
-    assert [type(event).__name__ for event in carried] == ["StewardActionProposalChanged"]
+    # The peer's proposal history, then its (different) count of models.
+    assert [type(event).__name__ for event in carried] == [
+        "StewardActionProposalChanged",
+        "RestartRecoveryStarted",
+    ]
     restored_proposal = carried[0]
     assert isinstance(restored_proposal, StewardActionProposalChanged)
     assert restored_proposal.proposal.status == "expired"
@@ -866,3 +871,74 @@ async def test_each_placement_gets_its_own_wait_for_node_information(
     events = _advance(master, now=nearly)
     created = [e for e in events if isinstance(e, InstanceCreated)]
     assert [str(e.instance.shard_assignments.model_id) for e in created] == ["org/first", "org/second"]
+
+
+async def test_the_count_coming_back_is_known_from_the_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dashboard can say how many models are coming back through the whole wait."""
+    own = _record_written(1, _intent_on("org/first", KITE1), _intent_on("org/second", KITE1))
+    master = await _two_node_master(monkeypatch, own=own, fetcher=_Fetcher({}))
+
+    assert master.state.restart_recovery_placements == 2
+
+
+async def test_choosing_a_peer_record_updates_the_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    own = _record_written(10, _intent_on("org/first", KITE1))
+    fresher = _record_written(
+        1, _intent_on("org/first", KITE1), _intent_on("org/second", KITE2), _intent_on("org/third", KITE2)
+    )
+    master = await _two_node_master(monkeypatch, own=own, fetcher=_Fetcher({PEER: fresher}))
+    view = master._telemetry_view  # pyright: ignore[reportPrivateUsage]
+    view.node_restart_recovery[PEER] = _advert_for(fresher)
+
+    events = await _choose(master)
+
+    counts = [event.placements for event in events if isinstance(event, RestartRecoveryStarted)]
+    assert counts == [3]
+    state = master.state
+    for event in events:
+        state = apply(state, IndexedEvent(idx=state.last_event_applied_idx + 1, event=event))
+    assert state.restart_recovery_placements == 3
+    finished = apply(
+        state,
+        IndexedEvent(
+            idx=state.last_event_applied_idx + 1,
+            event=RestartRecoveryCompleted(restored_placements=3, restored_proposals=0),
+        ),
+    )
+    assert finished.restart_recovery_placements is None
+
+
+async def test_turning_restore_off_in_settings_requests_no_placements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Steward history still comes back; models are not brought back."""
+    own = _record_written(1, _intent_on("org/first", KITE1))
+    planner = _Planner()
+    global_send, global_recv = channel[GlobalForwarderEvent]()
+    master = Master(
+        LOCAL_NODE,
+        SessionId(master_node_id=LOCAL_NODE, election_clock=1),
+        command_receiver=channel[ForwarderCommand]()[1],
+        event_sender=channel[Event]()[0],
+        local_event_receiver=channel[LocalForwarderEvent]()[1],
+        global_event_sender=global_send,
+        state_sync_receiver=channel[StateSyncMessage]()[1],
+        state_sync_sender=channel[StateSyncMessage]()[0],
+        download_command_sender=channel[ForwarderDownloadCommand]()[0],
+        restart_recovery_record=own,
+        restart_recovery_enabled=True,
+        restart_recovery_restores_placements=False,
+    )
+    await _index_seed(master, global_recv)
+    monkeypatch.setattr(master, "_place_for_steward_action", planner)
+    # Nothing is announced as coming back.
+    assert master.state.restart_recovery_placements == 0
+
+    events = _advance(master)
+
+    assert planner.commands == []
+    assert [type(event) for event in events] == [RestartRecoveryCompleted]

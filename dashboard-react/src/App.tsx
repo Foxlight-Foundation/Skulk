@@ -23,6 +23,7 @@ import { useIsMobile, useCompactHeader, MOBILE_BREAKPOINT_PX } from './hooks/use
 import { TopologyGraph } from './components/topology/TopologyGraph';
 // ClusterWarnings replaced by inline header warning indicator
 import { ConnectionBanner } from './components/status/ConnectionBanner';
+import { RestartRecoveryBanner } from './components/status/RestartRecoveryBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
 import { SceneBackdrop } from './components/common/SceneBackdrop';
@@ -162,6 +163,8 @@ export function App() {
     nodeResources,
     thunderboltBridgeCycles,
     engineInstallBytesByInstance,
+    restartRecoveryPending,
+    restartRecoveryPlacements,
   } = useClusterState();
   const realtimeTranscriptionAvailable = Boolean(
     localNodeId && nodeCapabilities[localNodeId]?.includes('stt.realtime'),
@@ -609,6 +612,7 @@ export function App() {
       <StewardControllerProvider readyInstances={instanceCards}>
       <Shell>
         <ConnectionBanner connected={connected} />
+        <RestartRecoveryBanner pending={restartRecoveryPending} placements={restartRecoveryPlacements} />
         <HeaderAnchor>
         <HeaderNav
           showHome

@@ -9,6 +9,7 @@ import {
   type FullConfig,
   type IntelligentFabricConfig,
   type LoggingConfig,
+  type RestartRecoveryConfig,
   type TelemetryConfig,
 } from '../../hooks/useConfig';
 import {
@@ -223,6 +224,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
     enabled: false, ingest_url: '',
   });
+  // On by default, unlike most sections: a restart bringing models back is the
+  // expected behavior, so an absent section reads as on.
+  const [recoveryDraft, setRecoveryDraft] = useState<RestartRecoveryConfig>({ enabled: true });
   // Fetch config when panel opens
   useEffect(() => {
     if (!open) return;
@@ -255,6 +259,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
     });
+    setRecoveryDraft({ enabled: fullConfig?.restart_recovery?.enabled ?? true });
     setTelemetryDraft(
       fullConfig?.telemetry ?? {
         consent: 'unasked',
@@ -326,6 +331,11 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     // Include logging config
     updated.logging = { ...loggingDraft };
     updated.intelligent_fabric = { ...fabricDraft };
+    // Written only once it says something: an untouched default stays absent,
+    // which already means on.
+    if (fullConfig?.restart_recovery || !recoveryDraft.enabled) {
+      updated.restart_recovery = { ...recoveryDraft };
+    }
     // Retain compatibility with nodes that still expose the retired model-trust
     // field, but never write the inert legacy allow-list back through Settings.
     delete updated.model_trust;
@@ -356,7 +366,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
+  }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, recoveryDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Closing the modal resets its nested navigation for the next opening.
   useEffect(() => { if (!open) setDevicesOpen(false); }, [open]);
@@ -683,6 +693,30 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 {t(
                   'settings.intelligentFabric.syncHint',
                   'Skulk prepares its resident intelligence automatically after saving; the first start downloads its model. Turning it off removes that system placement.',
+                )}
+              </HintText>
+            )}
+          </CollapsibleSection>
+
+          <CollapsibleSection {...section('restartRecovery')} title={t('settings.restartRecovery.legend', 'Restart recovery')} summary={recoveryDraft.enabled ? t('common.on', 'On') : t('common.off', 'Off')}>
+            <Row>
+              <FieldLabel>
+                {t('settings.restartRecovery.enabled', 'Bring models back after a restart')}
+                <InfoTooltip
+                  filled
+                  content={t(
+                    'settings.restartRecovery.enabledTooltip',
+                    'After a reboot or a whole-cluster restart, Skulk places the models that were running again, on the same machines when they are back. A model you stopped stays stopped, and one that no longer fits is reported instead.',
+                  )}
+                />
+              </FieldLabel>
+              <Toggle aria-label={t('settings.restartRecovery.enabled', 'Bring models back after a restart')} $on={recoveryDraft.enabled} onClick={() => setRecoveryDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
+            </Row>
+            {!recoveryDraft.enabled && (
+              <HintText>
+                {t(
+                  'settings.restartRecovery.offHint',
+                  'Models stay stopped after a restart until you place them again. Steward proposal history is still kept.',
                 )}
               </HintText>
             )}
