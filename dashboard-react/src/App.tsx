@@ -37,6 +37,7 @@ import { ChatView } from './components/pages/ChatView';
 import { OperatorPage } from './components/pages/OperatorPage';
 import { RightDrawer } from './components/common/RightDrawer';
 import { Button } from './components/common/Button';
+import { useGetBurstRentalsQuery, useReleaseBurstMutation } from './store/endpoints/burst';
 import { useGetStewardStatusQuery } from './store/endpoints/steward';
 import { StewardClusterPrompt, StewardControllerProvider, STEWARD_MODEL_ID, StewardChatView } from './components/pages/StewardChatView';
 import { IntegrationsPage } from './components/pages/IntegrationsPage';
@@ -588,6 +589,32 @@ export function App() {
 
   const hasInstances = instanceCards.length > 0;
 
+  // Rented remote machines from burst providers, so their instances are marked
+  // and released (model, then machine) instead of only deleted. A host without
+  // providers, or a connection without plugin access, simply marks none.
+  const burstRentals = useGetBurstRentalsQuery(undefined, {
+    pollingInterval: 15000,
+    skipPollingIfUnfocused: true,
+    skip: !hasInstances,
+  });
+  const rentalByInstance = useMemo(() => new Map(
+    (burstRentals.currentData?.rentals ?? [])
+      .filter((rental) => rental.instanceId && rental.phase !== 'released')
+      .map((rental) => [rental.instanceId as string, rental]),
+  ), [burstRentals.currentData]);
+  const remoteInstanceIds = useMemo(() => new Set(rentalByInstance.keys()), [rentalByInstance]);
+  const [releaseBurst] = useReleaseBurstMutation();
+  const handleReleaseInstance = useCallback(async (instanceId: string) => {
+    const rental = rentalByInstance.get(instanceId);
+    if (!rental) return;
+    try {
+      await releaseBurst({ pluginId: rental.pluginId, nodeId: rental.nodeId, operationId: rental.operationId }).unwrap();
+      addToast({ type: 'success', message: t('app.toasts.burstReleasing', 'Releasing the remote machine') });
+    } catch {
+      addToast({ type: 'error', message: t('app.toasts.burstReleaseFailed', 'The release was not confirmed; try again') });
+    }
+  }, [rentalByInstance, releaseBurst, addToast, t]);
+
   const handleDeleteInstance = useCallback(async (instanceId: string) => {
     try {
       const res = await fetch(`/instance/${instanceId}`, { method: 'DELETE' });
@@ -728,6 +755,8 @@ export function App() {
             <PanelOverlay $side="right">
             <InstancePanel
               instances={instanceCards}
+              remoteInstanceIds={remoteInstanceIds}
+              onRelease={(instanceId) => void handleReleaseInstance(instanceId)}
               onDelete={handleDeleteInstance}
               onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
             />

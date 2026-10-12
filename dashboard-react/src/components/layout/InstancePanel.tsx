@@ -31,6 +31,10 @@ export interface InstanceCardData {
 
 export interface InstancePanelProps {
   instances: InstanceCardData[];
+  /** Instances running on rented remote machines, shown with Release. */
+  remoteInstanceIds?: ReadonlySet<string>;
+  /** Release one remote instance's machine. */
+  onRelease?: (instanceId: string) => void;
   onDelete?: (instanceId: string) => void;
   onChat?: (modelId: string) => void;
   className?: string;
@@ -77,7 +81,7 @@ const CardList = styled.div`
 
 /* ── Component ────────────────────────────────────────── */
 
-export function InstancePanel({ instances, onDelete, onChat, className }: InstancePanelProps) {
+export function InstancePanel({ instances, remoteInstanceIds, onRelease, onDelete, onChat, className }: InstancePanelProps) {
   const { t } = useSkulkTranslation();
 
   return (
@@ -91,6 +95,8 @@ export function InstancePanel({ instances, onDelete, onChat, className }: Instan
           <RunningInstanceCard
             key={inst.instanceId}
             {...inst}
+            remote={remoteInstanceIds?.has(inst.instanceId) ?? false}
+            onRelease={onRelease ? () => onRelease(inst.instanceId) : undefined}
             onDelete={onDelete ? () => onDelete(inst.instanceId) : undefined}
             onChat={onChat ? () => onChat(inst.modelId) : undefined}
           />

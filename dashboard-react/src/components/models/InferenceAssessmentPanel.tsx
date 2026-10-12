@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { operatorSession } from '../../auth/operatorSession';
@@ -28,6 +28,12 @@ export interface InferenceAssessmentPanelProps {
   modelId: string;
   contextTokens: number | null;
   excludedNodeIds: string[];
+  /**
+   * What to offer when the verdict is that external capacity is required,
+   * given the assessed context; for example a remote offer from an installed
+   * burst provider. The assessment itself never acquires anything.
+   */
+  externalAction?: (contextTokens: number) => ReactNode;
 }
 
 const Panel = styled.section`
@@ -62,7 +68,7 @@ const Fields = styled.div`
 `;
 
 /** Display the core estimate and let operators assess concurrency without effects. */
-export function InferenceAssessmentPanel({ modelId, contextTokens, excludedNodeIds }: InferenceAssessmentPanelProps) {
+export function InferenceAssessmentPanel({ modelId, contextTokens, excludedNodeIds, externalAction }: InferenceAssessmentPanelProps) {
   const { t } = useSkulkTranslation();
   const [planningContext, setPlanningContext] = useState('8192');
   const [concurrency, setConcurrency] = useState('1');
@@ -142,5 +148,6 @@ export function InferenceAssessmentPanel({ modelId, contextTokens, excludedNodeI
             </>}
     </div>
     <p>{t('assessment.noProvisioning', 'Recommendation only. No external capacity is acquired.')}</p>
+    {assessment?.status === 'external_required' && externalAction ? externalAction(context) : null}
   </Panel>;
 }

@@ -2526,7 +2526,12 @@ providers on this API host approved and have not yet confirmed gone, through
 the optional `NodeBurstRentals` facet and the provider's `burst-list` owner
 operation, so any dashboard can mark a burst instance and release it. The
 provider also releases a ready rental after five idle minutes, read from core's
-per-instance activity.
+per-instance activity. In the dashboard, the placement dialog's capacity
+estimate shows a remote offer (`BurstOfferPanel`) when the verdict is
+`external_required`: provider readiness, the offer in dollars, approval with
+the operation ID saved before sending, and progress to ready. Active instances
+on rented machines are marked Remote and offer Release, from
+`GET /v1/burst/operations`.
 
 Each API also keeps per-instance request activity (`api/instance_activity.py`),
 derived from the replicated task events as it applies them: requests in flight
