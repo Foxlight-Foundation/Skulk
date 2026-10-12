@@ -882,6 +882,31 @@ def fill_model_store_defaults(raw_store: Mapping[str, object]) -> dict[str, obje
     return store
 
 
+def without_unset_sections(config: object) -> object:
+    """Drop top-level sections whose value is null; they mean "unset".
+
+    Every top-level section defaults to unset, so ``section: null`` and an
+    absent section load the same. Writing nulls, and refusing them, made any
+    new section fatal to an older build: a file a newer node had written with
+    ``new_section: null`` stopped the older one at startup with
+    ``extra_forbidden`` (a rollback or a bisect took a whole fleet down this
+    way). Writers leave unset sections out, and loading ignores null ones, so
+    only a section someone actually set can be unknown to an older build, and
+    that still fails loudly.
+
+    Args:
+        config: A decoded YAML object; anything but a mapping is returned
+            unchanged for validation to reject.
+
+    Returns:
+        The mapping without null top-level values.
+    """
+    if not isinstance(config, dict):
+        return config
+    mapping = cast("dict[object, object]", config)
+    return {key: value for key, value in mapping.items() if value is not None}
+
+
 def write_skulk_config_atomic(path: Path, config_yaml: str) -> None:
     """Atomically replace a cluster config with owner-only permissions.
 
@@ -928,13 +953,17 @@ def update_skulk_config_atomic(
                     for key, value in decoded_mapping.items()
                 }
         updated = update(current)
+        # Leave unset sections out of the file (see without_unset_sections).
+        written = cast("dict[str, object]", without_unset_sections(updated))
         config_yaml = yaml.safe_dump(
-            updated,
+            written,
             default_flow_style=False,
             sort_keys=False,
         )
         _write_skulk_config_atomic_unlocked(path, config_yaml)
-        return updated
+        # Callers broadcast this, so it must be what was written: returning
+        # the unfiltered mapping would send unset sections back out as null.
+        return written
 
 
 def persist_model_trust_config(
@@ -1041,7 +1070,7 @@ def load_skulk_config(
     # it the same as a missing file to preserve zero-config compatibility.
     if raw is None:
         return None
-    return SkulkConfig.model_validate(raw)
+    return SkulkConfig.model_validate(without_unset_sections(raw))
 
 
 def resolve_node_staging(

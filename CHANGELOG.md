@@ -73,6 +73,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Rolling a cluster back to an earlier build no longer stops its nodes from
+  starting over a settings section the newer build added. Nodes used to
+  write every section into `skulk.yaml`, including ones nobody had set, as
+  `name: null`. An older build, which does not know the new section, then
+  refused the file at startup. Unset sections are now left out of the file,
+  and a section written as null loads as unset. A section someone actually
+  set that the build does not know still fails loudly, since ignoring it
+  would silently drop that setting.
 - Gemma 4 models on the MLX engine no longer end every tool-calling reply with
   a stray `<|tool_response>` in the text. That token is how Gemma 4 hands its
   turn to the tool, and Google's own configuration stops on it; Skulk now does
