@@ -2521,8 +2521,12 @@ the same owner proposal action, with a caller-chosen durable operation ID.
 `NodeBurstOperations` facet: status joins the approval's progress with the
 provider controller's phase and observed instance, and release stops the model
 through the ordinary instance delete before the provider signs the machine's
-release. The provider also releases a ready rental after five idle minutes,
-read from core's per-instance activity.
+release. `GET /v1/burst/operations` (`plugins:read`) lists every rental the
+providers on this API host approved and have not yet confirmed gone, through
+the optional `NodeBurstRentals` facet and the provider's `burst-list` owner
+operation, so any dashboard can mark a burst instance and release it. The
+provider also releases a ready rental after five idle minutes, read from core's
+per-instance activity.
 
 Each API also keeps per-instance request activity (`api/instance_activity.py`),
 derived from the replicated task events as it applies them: requests in flight
