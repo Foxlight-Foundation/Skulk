@@ -2920,7 +2920,9 @@ selects a preprepared binary; package preparation obeys offline mode and
 `SKULK_NO_ENGINE_AUTOPROVISION`. Ordered reference edits use slot-indexed
 `VISION_MEDIA` frames and worker-local media, never replicated input bytes.
 Qwen Image 2.1 and Turbo CUDA/Vulkan instances enable Flash Attention at load time
-to reduce attention memory pressure at the default 2048-square canvas.
+to reduce attention memory pressure at the default 2048-square canvas. ROCm
+instances also enable it to avoid observed native kernel-launch failures at
+that canvas.
 Native shutdown retains process ownership through a bounded 30-second graceful
 wait and 15-second forced reap. Its supervisor allows 50 seconds for this cleanup,
 including large BF16 GPU contexts; failed reaping remains a visible failure.

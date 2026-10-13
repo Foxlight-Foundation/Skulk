@@ -1736,7 +1736,8 @@ approval/lifecycle and allocated compute remain separate from these declarations
 Native image profiles use the single-host/single-GPU `stable_diffusion_cpp`
 runner, with verified component hashes and private native-job ownership.
 Qwen Image 2.1 and Turbo CUDA/Vulkan loads enable Flash Attention to reduce memory
-pressure at the default 2048-square canvas.
+pressure at the default 2048-square canvas. ROCm loads also enable it to avoid
+observed native kernel-launch failures at that canvas.
 Native CUDA wheel assembly requires `GGML_CUDA_NCCL=OFF` for the single-GPU
 image contract and to avoid an unnecessary host-library dependency.
 Native image teardown retains the producer handle through a 30-second graceful

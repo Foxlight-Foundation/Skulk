@@ -33,7 +33,8 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
     """Verify component identities and select loader flags for the placed backend.
 
     Qwen Image 2.1 CUDA/Vulkan instances enable Flash Attention to reduce attention
-    memory at the model's default 2048-square canvas.
+    memory at the default 2048-square canvas. ROCm uses the same path to avoid
+    observed native kernel-launch failures at that canvas.
     """
     profile = card.image
     if profile is None:
@@ -74,11 +75,13 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
         arguments.extend(
             (_ROLE_FLAGS[component.role], str(root / component.entry_file))
         )
-    # Full attention pressured Halo host memory and exceeded 24GB CUDA VRAM at
-    # the default canvas; the pinned builds completed with Flash Attention.
+    # Full attention exceeded tested Vulkan/CUDA memory capacity and failed
+    # native ROCm kernel launches at the default canvas. The same pinned builds
+    # completed with Flash Attention; the ROCm launch failure is not an OOM claim.
     if backend in (
         "stable_diffusion_cpp-vulkan",
         "stable_diffusion_cpp-cuda",
+        "stable_diffusion_cpp-rocm",
     ) and profile.family in (
         "qwen_image_21",
         "qwen_image_21_turbo",
