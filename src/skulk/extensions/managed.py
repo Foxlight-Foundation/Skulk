@@ -54,6 +54,7 @@ from skulk.extensions.proposal_review import (
     ProposalReference,
     ProposalReview,
 )
+from skulk.extensions.refusals import ManagedRefusalError, refusal_message
 from skulk.extensions.runtime_attachment import ProfileIdentifier
 from skulk.extensions.runtime_service import ServiceProcessState
 from skulk.extensions.setup import NodeSetup
@@ -71,6 +72,33 @@ from skulk.shared.types.capability_nodes import (
 )
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
+# A refusal frame: the error, optionally the plugin's plain-language next step,
+# and optionally a reference to evidence the owner retained about the failure.
+_REFUSAL_KEYS = frozenset({"error", "message", "evidence_reference"})
+
+
+def owner_response_payload(result: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Return the payload of one decoded owner response frame, or raise its refusal.
+
+    Args:
+        result: One control-socket response frame, already decoded.
+
+    Returns:
+        The ``result`` object of a successful response.
+
+    Raises:
+        ManagedRefusalError: The owner refused. Its ``message`` is the plugin's own
+            next step when the frame carried a usable one, otherwise None.
+        ValueError: Any other frame shape, including a refusal with an
+            unexpected member.
+    """
+    if "error" in result and set(result) <= _REFUSAL_KEYS:
+        # An unusable message leaves a bare refusal rather than a failure.
+        raise ManagedRefusalError(refusal_message(result.get("message")))
+    payload = result.get("result")
+    if set(result) != {"result"} or not isinstance(payload, dict):
+        raise ValueError("invalid managed response")
+    return payload
 
 MAX_HANDSHAKE_PEERS = 8
 """Peers one handshake request carries at most."""
@@ -514,13 +542,7 @@ class ManagedOwner:
                 response = await reader.readline()
                 if not response.endswith(b"\n") or len(response) > 131072:
                     raise ValueError("invalid managed response frame")
-                result = _OBJECT.validate_json(response)
-                if set(result) == {"error"}:
-                    raise ValueError("managed operation refused")
-                payload = result.get("result")
-                if set(result) != {"result"} or not isinstance(payload, dict):
-                    raise ValueError("invalid managed response")
-                return payload
+                return owner_response_payload(_OBJECT.validate_json(response))
             finally:
                 writer.close()
                 await writer.wait_closed()

@@ -23,6 +23,8 @@ let calls: { method: string; path: string; body: string }[];
 let providers: BurstProvider[];
 let phase: BurstOperation['phase'];
 let store: ReturnType<typeof makeStore>;
+// The 409 detail a refused offer request answers with, when set.
+let offerRefusal: string | null;
 const storageKey = 'skulk-burst-operation-v1:example%2Flarge';
 const reference = { pluginId: 'managed.runpod', nodeId: 'gpu', proposalId: 'a'.repeat(64), proposalDigest: 'a'.repeat(64) };
 
@@ -64,7 +66,7 @@ function operation(operationId: string): BurstOperation {
 
 beforeEach(async () => {
   localStorage.removeItem(storageKey);
-  calls = []; phase = 'approving';
+  calls = []; phase = 'approving'; offerRefusal = null;
   providers = [provider('available', 'Ready to prepare offers.')];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
@@ -72,7 +74,9 @@ beforeEach(async () => {
     calls.push({ method: request.method, path: url.pathname, body });
     let result: unknown;
     if (url.pathname === '/v1/burst/providers') result = { scope: 'local_api_host', observedAt: 1, providers };
-    else if (url.pathname === '/v1/burst/recommendations') result = recommendation;
+    else if (url.pathname === '/v1/burst/recommendations' && offerRefusal !== null) {
+      return new Response(JSON.stringify({ detail: offerRefusal }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+    } else if (url.pathname === '/v1/burst/recommendations') result = recommendation;
     else if (request.method === 'POST') result = operation(JSON.parse(body).operationId);
     else {
       if (request.method === 'DELETE') phase = 'releasing';
@@ -126,6 +130,19 @@ it('says what is missing when no provider can offer', async () => {
   await contains('Turn on proposals');
   expect([...host.querySelectorAll('button')].some((item) => item.textContent === 'Get a remote offer')).toBe(false);
   expect(calls.every((call) => call.method === 'GET')).toBe(true);
+});
+
+it('shows the provider\'s own next step when it refuses to offer, and its own advice otherwise', async () => {
+  offerRefusal = 'Add your RunPod API key under Credentials.';
+  await render();
+  await contains('Get a remote offer');
+  await click('Get a remote offer');
+  await contains('The burst provider made no offer. Add your RunPod API key under Credentials.');
+  // Core's generic refusal is not shown word for word.
+  offerRefusal = 'the burst provider refused this request; it may be busy with another one, so try again';
+  await click('Get a remote offer');
+  await contains('The burst provider could not answer. It may be busy; try again in a moment.');
+  expect(host.textContent).not.toContain('refused this request');
 });
 
 it('asks for an offer without the nodes the operator excluded', async () => {

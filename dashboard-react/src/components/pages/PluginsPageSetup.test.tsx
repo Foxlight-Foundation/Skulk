@@ -206,7 +206,7 @@ it('falls back to Turn on with the host\'s reason when turning on is refused', a
   await renderAt('/plugins?view=browse');
   await install('Review and install', 'Install');
   await setupTitleIs('Example Studio is installed');
-  await contains('It was not turned on. The host said: A video model must be placed before the studio can start.');
+  await contains('It was not turned on. A video model must be placed before the studio can start.');
   await act(async () => { await vi.waitFor(() => expect(button('Turn on')).not.toBeNull(), { timeout: 5000 }); });
   expect(button('Open settings')).not.toBeNull();
   // Its own checks run at once and say what is missing.

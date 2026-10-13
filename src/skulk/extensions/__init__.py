@@ -55,6 +55,7 @@ from skulk.extensions.proposal_review import (
     ProposalReview,
     ProposalSummary,
 )
+from skulk.extensions.refusals import ManagedRefusalError
 from skulk.extensions.speech import (
     REALTIME_STT_CAPABILITY_DESCRIPTOR,
     STT_CAPABILITY_DESCRIPTOR,
@@ -144,6 +145,7 @@ __all__ = [
     "ProposalReference",
     "ProposalReview",
     "ProposalSummary",
+    "ManagedRefusalError",
     "DEFAULT_CALL_TIMEOUT_SECONDS",
     "ENTRY_POINT_GROUP",
     "MAX_CALL_PAYLOAD_BYTES",
