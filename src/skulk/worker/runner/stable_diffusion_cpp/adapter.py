@@ -29,8 +29,12 @@ _ROLE_FLAGS = {
 }
 
 
-def native_component_arguments(card: ModelCard) -> list[str]:
-    """Verify every component byte identity and return only recognized native loader flags."""
+def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
+    """Verify component identities and select loader flags for the placed backend.
+
+    Qwen Image 2.1 Vulkan instances enable Flash Attention to reduce attention
+    memory at the model's default 2048-square canvas.
+    """
     profile = card.image
     if profile is None:
         raise ValueError("native image placement has no image contract")
@@ -70,6 +74,13 @@ def native_component_arguments(card: ModelCard) -> list[str]:
         arguments.extend(
             (_ROLE_FLAGS[component.role], str(root / component.entry_file))
         )
+    # Full attention caused unsafe memory pressure during the Halo canvas smoke;
+    # the same pinned build completed that canvas with Flash Attention enabled.
+    if backend == "stable_diffusion_cpp-vulkan" and profile.family in (
+        "qwen_image_21",
+        "qwen_image_21_turbo",
+    ):
+        arguments.append("--fa")
     return arguments
 
 

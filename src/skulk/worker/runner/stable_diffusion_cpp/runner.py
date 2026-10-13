@@ -160,7 +160,7 @@ class Runner(ServedConcurrentDispatch):
                     Path(binary),
                     build,
                     backend,
-                    native_component_arguments(self.card),
+                    native_component_arguments(self.card, backend=backend),
                     self.work_dir / "native.log",
                 )
                 self.current_status = RunnerLoaded()

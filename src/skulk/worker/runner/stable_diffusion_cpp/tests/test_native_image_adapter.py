@@ -159,10 +159,24 @@ def test_invalid_reference_is_refused_without_native_decoding() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("backend", "turbo", "runtime_flags"),
+    [
+        ("stable_diffusion_cpp-vulkan", False, ["--fa"]),
+        ("stable_diffusion_cpp-vulkan", True, ["--fa"]),
+        ("stable_diffusion_cpp-cuda", True, []),
+        ("stable_diffusion_cpp-metal", True, []),
+        ("stable_diffusion_cpp-rocm", True, []),
+    ],
+)
 def test_component_verification_checks_every_digest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    turbo: bool,
+    runtime_flags: list[str],
 ) -> None:
-    card = _card()
+    card = _card(turbo=turbo)
     assert card.image is not None
     for component in card.image.components:
         (tmp_path / component.entry_file).write_bytes(b"abc")
@@ -171,11 +185,12 @@ def test_component_verification_checks_every_digest(
         return tmp_path / entry
 
     monkeypatch.setattr(adapter, "build_sidecar_path", locate)
-    arguments = adapter.native_component_arguments(card)
-    assert arguments[::2] == ["--diffusion-model", "--vae", "--llm", "--llm_vision"]
+    arguments = adapter.native_component_arguments(card, backend=backend)
+    assert arguments[:8:2] == ["--diffusion-model", "--vae", "--llm", "--llm_vision"]
+    assert arguments[8:] == runtime_flags
     (tmp_path / "text_encoder_vision.gguf").write_bytes(b"bad")
     with pytest.raises(ValueError, match="immutable file identity"):
-        adapter.native_component_arguments(card)
+        adapter.native_component_arguments(card, backend=backend)
 
 
 def test_ephemeral_reference_bytes_are_excluded_from_state_and_logs() -> None:

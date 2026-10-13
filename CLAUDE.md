@@ -1735,6 +1735,8 @@ approval/lifecycle and allocated compute remain separate from these declarations
 
 Native image profiles use the single-host/single-GPU `stable_diffusion_cpp`
 runner, with verified component hashes and private native-job ownership.
+Qwen Image 2.1 and Turbo Vulkan loads enable Flash Attention to reduce memory
+pressure at the default 2048-square canvas.
 Published installable builds and installed measured builds remain separate in
 NodeResources. Candidate wheels grant no normal placement support; no CPU-only
 native image lane is delivered. See the architecture reference and
