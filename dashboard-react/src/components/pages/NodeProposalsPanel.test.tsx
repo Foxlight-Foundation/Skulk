@@ -125,6 +125,20 @@ it('keeps the default review to plain words, without identifiers or lookup by ID
   store = makeStore(); root = createRoot(host);
   await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ProposalControls pluginId="managed.fixture" nodeId="node" actionsAvailable /></ThemeProvider></Provider>); });
   await contains('Not done: the plugin refused it · Raise your spending limit, then ask again.');
+  expect(host.textContent).not.toContain('cannot be approved from here');
   expect(host.textContent).not.toContain('budget_exhausted');
   expect(host.textContent).not.toContain('c'.repeat(32));
+});
+
+it('says nothing about approval for a proposal already decided', async () => {
+  review = { ...review, approvalRevision: null, proposal: { ...review.proposal, state: 'approved' } };
+  await click('Review proposals'); await contains('Acquire GPU'); await click('Review'); await contains('Cleanup terms');
+  expect(host.textContent).not.toContain('cannot be approved from here');
+});
+
+it('says approval is unavailable, without a cause, for a waiting proposal', async () => {
+  review = { ...review, approvalRevision: null };
+  await click('Review proposals'); await contains('Acquire GPU'); await click('Review'); await contains('Cleanup terms');
+  await contains('This cannot be approved from here right now.');
+  expect(button('Approve').disabled).toBe(true);
 });

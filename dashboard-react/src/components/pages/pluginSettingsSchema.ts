@@ -114,9 +114,12 @@ export function settingsUnit(schema: Record<string, unknown>): SettingsUnit | nu
  * advisory: anything malformed reads as none, which lists every credential.
  */
 export function setupFilledCredentials(schema: Record<string, unknown> | undefined): ReadonlySet<string> {
-  const raw = schema?.['x-skulk-setup-credentials'];
-  if (!Array.isArray(raw)) return new Set();
-  return new Set(raw.filter((item): item is string => typeof item === 'string' && item.length > 0 && item.length <= 128).slice(0, 32));
+  const raw: unknown = schema?.['x-skulk-setup-credentials'];
+  // Fold nothing unless the whole list is valid: a plugin's typo must not
+  // hide a credential the owner may need.
+  if (!Array.isArray(raw) || raw.length > 32) return new Set();
+  const names = raw.filter((item): item is string => typeof item === 'string' && item.length > 0 && item.length <= 128);
+  return names.length === raw.length ? new Set(names) : new Set();
 }
 
 /** Whether a field asks, with `"x-skulk-advanced": true`, to sit in the collapsed Advanced section. */

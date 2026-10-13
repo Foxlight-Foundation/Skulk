@@ -146,7 +146,10 @@ export function ProposalControls({ pluginId, nodeId, actionsAvailable, troublesh
       </> : null}
       <Button type="button" disabled={!actionsAvailable || busy || !!operationId || review.isFetching || review.isError || !current.approvalRevision || current.proposal.state !== 'pending_approval' || current.proposal.expiresAt * 1000 <= Date.now()}
         onClick={() => void approveReviewed()}>{t('plugins.proposalApprove', 'Approve')}</Button>
-      {!current.approvalRevision ? <p>{t('plugins.proposalApprovalUnavailable', 'Approval is not set up on this computer yet. Open Plugins and finish this plugin\'s setup.')}</p> : null}
+      {/* The review gives no reason when approval is unavailable, so the
+          sentence names none; a decided or expired proposal already says so. */}
+      {!current.approvalRevision && current.proposal.state === 'pending_approval'
+        ? <p>{t('plugins.proposalApprovalUnavailable', 'This cannot be approved from here right now. If that does not change, check this plugin\'s setup in Plugins.')}</p> : null}
     </section> : null}
     {operationId ? <section aria-label={t('plugins.proposalProgress', 'Progress')}>
       {troubleshooting || storageFailed ? <p>{t('plugins.proposalOperationId', 'Operation ID')}: {operationId}</p> : null}

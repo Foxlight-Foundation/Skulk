@@ -1245,7 +1245,7 @@
   "plugins.preflight": "Setup checks",
   "plugins.proposalAbsent": "Confirmed gone",
   "plugins.proposalAnother": "Back to the list",
-  "plugins.proposalApprovalUnavailable": "Approval is not set up on this computer yet. Open Plugins and finish this plugin's setup.",
+  "plugins.proposalApprovalUnavailable": "This cannot be approved from here right now. If that does not change, check this plugin's setup in Plugins.",
   "plugins.proposalApprove": "Approve",
   "plugins.proposalApproveBy": "approve by {time}",
   "plugins.proposalCleanup": "Cleanup service",

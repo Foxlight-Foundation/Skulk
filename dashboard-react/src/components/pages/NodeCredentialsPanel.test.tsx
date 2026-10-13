@@ -124,6 +124,7 @@ it('preserves multiline credential bytes and clears drafts before an unconfirmed
 
 
 it('folds the credentials setup fills in below the ones the owner enters', async () => {
+  let hint: unknown = ['authority-rpc'];
   current = { ...current, credentials: [
     { credentialId: 'runpod-api-key', title: 'RunPod API key', description: 'From your RunPod account.', required: false, ready: true },
     { credentialId: 'authority-rpc', title: 'Spending authority access', description: 'Filled in by setup.', required: true, ready: true },
@@ -132,7 +133,7 @@ it('folds the credentials setup fills in below the ones the owner enters', async
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     if (new URL(request.url).pathname.endsWith('/credentials')) return response(current);
     return response({ nodeId: 'stable-node', revision: 0, schemaDigest: 'c'.repeat(64), enabled: true, values: {},
-      configurationSchema: { type: 'object', properties: {}, 'x-skulk-setup-credentials': ['authority-rpc', 7] } });
+      configurationSchema: { type: 'object', properties: {}, 'x-skulk-setup-credentials': hint } });
   });
   await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
   store = makeStore(); root = createRoot(host);
@@ -143,4 +144,11 @@ it('folds the credentials setup fills in below the ones the owner enters', async
   expect(folded?.textContent).toContain('Spending authority access');
   expect(folded?.textContent).not.toContain('RunPod API key');
   expect(host.textContent).toContain('RunPod API key');
+  // One bad entry makes the whole hint malformed, so everything is listed.
+  hint = ['authority-rpc', 7];
+  await act(async () => { root.unmount(); store.dispatch(apiSlice.util.resetApiState()); });
+  store = makeStore(); root = createRoot(host);
+  await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><NodeCredentialsPanel pluginId="fixture" nodeId="stable-node" configurable /></ThemeProvider></Provider>); });
+  await contains('Spending authority access');
+  expect(host.querySelector('details')).toBeNull();
 });
