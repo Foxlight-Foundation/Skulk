@@ -314,7 +314,13 @@ export function CapabilityPanel() {
               )}
             </Empty>
           ) : shownTab === 'rentals' ? (
-            <BurstRentalsView nodeId={summary.nodeId} pluginId={summary.pluginId} />
+            // Keyed by host and provider so a draft, a pending change or a
+            // proposal review never carries over to another provider.
+            <BurstRentalsView
+              key={`${target?.hostNodeId ?? ''}/${capabilityNodeKey(summary)}`}
+              nodeId={summary.nodeId}
+              pluginId={summary.pluginId}
+            />
           ) : shownTab === 'overview' ? (
             <Grid>
               <dt>{t('capabilityPanel.field.status', 'Status')}</dt>

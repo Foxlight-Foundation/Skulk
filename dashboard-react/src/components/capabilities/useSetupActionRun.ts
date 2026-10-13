@@ -10,9 +10,14 @@ import {
   type SetupAction,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
+import { UNCONFIRMED_POLL_MS, UNCONFIRMED_WAIT_MS } from './setupRunTiming';
 
-/** Where one run of a provider's setup action stands. */
-export type SetupActionRunPhase = 'idle' | 'running' | 'complete' | 'failed';
+/**
+ * Where one run of a provider's setup action stands. `uncertain` means the
+ * request may have landed but its outcome was never seen: the run keeps
+ * looking for it and cannot be submitted again.
+ */
+export type SetupActionRunPhase = 'idle' | 'running' | 'complete' | 'failed' | 'uncertain';
 
 /** What a setup action run reports to its view. */
 export interface SetupActionRun {
@@ -25,12 +30,12 @@ export interface SetupActionRun {
   action: (actionId: string) => SetupAction | null;
   /** Runs the named action with these values, bound to the forms just read. */
   start: (actionId: string, values: Record<string, unknown>) => Promise<void>;
-  /** Forgets the last outcome. */
+  /**
+   * Forgets the last outcome. A run still in flight, or one whose outcome was
+   * never confirmed, is kept, so it is never submitted a second time.
+   */
   reset: () => void;
 }
-
-/** How long a run waits for its operation to appear after an unconfirmed reply. */
-export const UNCONFIRMED_WAIT_MS = 30_000;
 
 /** How the request that started a run ended, before its operation is observed. */
 type Submission =
@@ -46,9 +51,10 @@ type Submission =
  * The provider's setup forms are read while `active`, and a run binds to the
  * exact revisions it read, so a change made elsewhere meanwhile is refused
  * rather than overwritten. A refusal is reported in the provider's own words.
- * A reply that never arrives is not retried: the run watches for its own
- * operation and gives up after a short wait. A completed run refreshes the
- * provider's spending limit.
+ * A reply that never arrives is never retried: the run watches for its own
+ * operation, and after a short wait reports the outcome as unconfirmed while
+ * it keeps looking, so the same change is never submitted twice. A completed
+ * or unconfirmed run refreshes the provider's spending limit.
  */
 export function useSetupActionRun(address: NodeAddress, active: boolean): SetupActionRun {
   const dispatch = useAppDispatch();
@@ -74,14 +80,19 @@ export function useSetupActionRun(address: NodeAddress, active: boolean): SetupA
   else if (operation?.phase === 'failed') {
     phase = 'failed';
     detail = operation.correctiveAction;
-  } else if (submission.state === 'unconfirmed' && submission.gaveUp) phase = 'failed';
+  } else if (submission.state === 'unconfirmed' && submission.gaveUp) phase = 'uncertain';
 
-  // A second subscription to the same cached forms polls only while the run
-  // is still running, so a settled outcome stops the reads.
-  useGetNodeSetupActionsQuery(address, { skip: phase !== 'running', pollingInterval: 2000 });
+  // A second subscription to the same cached forms polls while the outcome is
+  // still open, so a settled outcome stops the reads and a late operation is
+  // still seen.
+  useGetNodeSetupActionsQuery(address, {
+    skip: phase !== 'running' && phase !== 'uncertain',
+    pollingInterval: phase === 'uncertain' ? UNCONFIRMED_POLL_MS : 2000,
+  });
 
   useEffect(() => {
-    if (phase === 'complete') dispatch(apiSlice.util.invalidateTags(['BurstBudget']));
+    // An unconfirmed change may have landed, so the limit is read again too.
+    if (phase === 'complete' || phase === 'uncertain') dispatch(apiSlice.util.invalidateTags(['BurstBudget']));
   }, [phase, dispatch]);
 
   const waitingUnconfirmed = submission.state === 'unconfirmed' && !submission.gaveUp && operation === undefined;
@@ -92,7 +103,7 @@ export function useSetupActionRun(address: NodeAddress, active: boolean): SetupA
   }, [waitingUnconfirmed]);
 
   const start = async (actionId: string, values: Record<string, unknown>) => {
-    if (sending.current || !snapshot) return;
+    if (sending.current || !snapshot || phase === 'running' || phase === 'uncertain') return;
     const identity = randomHex32();
     const action = snapshot.actions.find((item) => item.actionId === actionId);
     setOperationId(identity);
@@ -131,6 +142,9 @@ export function useSetupActionRun(address: NodeAddress, active: boolean): SetupA
   };
 
   const reset = () => {
+    // A run in flight, or one that may have landed, stays observable, so the
+    // same change is never submitted a second time.
+    if (phase === 'running' || phase === 'uncertain') return;
     setOperationId(null);
     setSubmission({ state: 'sent' });
   };

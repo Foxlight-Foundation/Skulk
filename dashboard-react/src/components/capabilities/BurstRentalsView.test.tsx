@@ -17,6 +17,8 @@ vi.mock('../../i18n/tolgee', () => ({
       fallback.replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? `{${name}}`)),
   }),
 }));
+// A short wait, so an unconfirmed reply settles within a test.
+vi.mock('./setupRunTiming', () => ({ UNCONFIRMED_WAIT_MS: 100, UNCONFIRMED_POLL_MS: 100 }));
 
 const SETUP_PATH = '/v1/plugins/managed.runpod/nodes/gpu/setup-actions';
 const OPERATIONS_PATH = '/v1/plugins/managed.runpod/nodes/gpu/setup-operations';
@@ -30,6 +32,7 @@ let operations: SetupOperation[];
 let refuseSetup: { status: number; detail: string } | null;
 let limitSchema: Record<string, unknown>;
 let startOverSchema: Record<string, unknown>;
+let loseReply: boolean;
 
 /** The change-limit form RunPod's provider publishes. */
 const RUNPOD_LIMIT_SCHEMA = {
@@ -151,6 +154,7 @@ beforeEach(() => {
   refuseSetup = null;
   limitSchema = RUNPOD_LIMIT_SCHEMA;
   startOverSchema = { type: 'object', properties: {}, additionalProperties: false };
+  loseReply = false;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     const body = await request.text();
@@ -163,6 +167,8 @@ beforeEach(() => {
     if (url.pathname === SETUP_PATH) return json(snapshot());
     if (url.pathname === OPERATIONS_PATH) {
       if (refuseSetup) return json({ detail: refuseSetup.detail }, refuseSetup.status);
+      // The reply is lost: the host may or may not have taken the change.
+      if (loseReply) return json({ detail: 'upstream unavailable' }, 503);
       const mutation = JSON.parse(body) as { operationId: string; actionId: string };
       // The provider applies the change before the next read of its forms.
       operations = [{ operationId: mutation.operationId, nodeId: 'gpu', actionId: mutation.actionId, phase: 'complete', code: null, correctiveAction: null }];
@@ -291,6 +297,23 @@ it('sends the amount as the field the provider’s own form names, within its bo
   await contains('Your limit is now $30.00.');
   const submitted = calls.find((call) => call.path === OPERATIONS_PATH);
   expect((JSON.parse(submitted!.body) as { values: unknown }).values).toEqual({ budget: 30 });
+});
+
+it('never offers an unconfirmed start-over again, even after closing it', async () => {
+  loseReply = true;
+  await render();
+  await contains('$2.50 of $10.00 spent');
+  await click('Start over');
+  await enabled('Start over');
+  await click('Start over');
+  await contains('The provider did not confirm this change, so it may already have been made.');
+  expect(() => button('Start over')).toThrow();
+  await click('Done');
+  await click('Start over');
+  await contains('The provider did not confirm this change, so it may already have been made.');
+  // Reopened, it still shows the unconfirmed change and offers no second submit.
+  expect(() => button('Start over')).toThrow();
+  expect(calls.filter((call) => call.path === OPERATIONS_PATH)).toHaveLength(1);
 });
 
 it('offers start over from one button only when its form takes no values', async () => {

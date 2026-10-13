@@ -102,6 +102,7 @@
   "burst.rentals.newLimitHelp": "The most all your rentals together may cost, counting what they have already used.",
   "burst.rentals.noneRunning": "No rented machines are running.",
   "burst.rentals.notChanged": "Not changed. Try again.",
+  "burst.rentals.notConfirmed": "The provider did not confirm this change, so it may already have been made. Check your spending above; it updates when the provider answers.",
   "burst.rentals.release": "Release",
   "burst.rentals.releaseFailed": "The release was not confirmed. Try again. The rental still ends on its own by its end time.",
   "burst.rentals.releasing": "Releasing the machine.",

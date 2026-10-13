@@ -242,6 +242,16 @@ function RunOutcome({ run, done }: { run: SetupActionRun; done: string }) {
   if (run.phase === 'running') return <p role="status">{t('burst.rentals.saving', 'Saving…')}</p>;
   if (run.phase === 'complete') return <p role="status">{done}</p>;
   if (run.phase === 'failed') return <p role="alert">{run.detail ?? t('burst.rentals.notChanged', 'Not changed. Try again.')}</p>;
+  if (run.phase === 'uncertain') {
+    return (
+      <p role="alert">
+        {t(
+          'burst.rentals.notConfirmed',
+          'The provider did not confirm this change, so it may already have been made. Check your spending above; it updates when the provider answers.',
+        )}
+      </p>
+    );
+  }
   return null;
 }
 
@@ -279,7 +289,9 @@ function LimitForm({
   const field = run.ready ? limitField(run.action(actionId)?.parametersSchema) : null;
   const amount = parsedAmount(text, field);
   const submitting = run.phase === 'running';
-  const finished = run.phase === 'complete';
+  // An unconfirmed change may already have been made, so it is never offered
+  // again; the spending above shows whether it landed.
+  const finished = run.phase === 'complete' || run.phase === 'uncertain';
   if (run.ready && field === null && run.phase === 'idle') {
     return (
       <Card>
@@ -349,7 +361,9 @@ function LimitForm({
 function StartOverConfirm({ actionId, run, onClose }: { actionId: string; run: SetupActionRun; onClose: () => void }) {
   const { t } = useSkulkTranslation();
   const submitting = run.phase === 'running';
-  const finished = run.phase === 'complete';
+  // Starting over twice would also forget rentals that finished in between,
+  // so an unconfirmed start-over is never offered again.
+  const finished = run.phase === 'complete' || run.phase === 'uncertain';
   // One button can only run an action whose form takes no values.
   if (run.ready && run.phase === 'idle' && !takesNoValues(run.action(actionId)?.parametersSchema)) {
     return (
