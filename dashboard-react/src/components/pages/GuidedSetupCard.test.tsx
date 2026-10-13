@@ -33,6 +33,8 @@ let keyReady: boolean;
 let credentialRevision: number;
 let operations: { operationId: string; nodeId: string; actionId: string; phase: string; code: string | null; correctiveAction: string | null }[];
 let setupStatus: number;
+// The start lands but its reply is lost.
+let dropStartReply: boolean;
 let credentialPosts: Record<string, unknown>[];
 let setupPosts: Record<string, unknown>[];
 let turnedOn: number;
@@ -58,6 +60,7 @@ beforeEach(async () => {
   credentialRevision = 0;
   operations = [];
   setupStatus = 200;
+  dropStartReply = false;
   credentialPosts = [];
   setupPosts = [];
   turnedOn = 0;
@@ -94,6 +97,7 @@ beforeEach(async () => {
       const started = { operationId: String(body.operationId), nodeId: 'runpod', actionId: 'clean-up-here', phase: 'running', code: 'cleanup_runs_while_signed_in',
         correctiveAction: 'Cleanup runs while you are signed in to this computer.' };
       operations = [started];
+      if (dropStartReply) throw new TypeError('network connection lost');
       return json(started);
     }
     return json({ detail: 'not found' }, 404);
@@ -178,4 +182,16 @@ it('shows nothing when the plugin offers no guided setup', async () => {
   await render();
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)); });
   expect(host.textContent).toBe('');
+});
+
+it('follows a start whose reply was lost instead of starting again', async () => {
+  keyReady = true;
+  dropStartReply = true;
+  await render();
+  await contains('Saved. Enter a new one only to replace it.');
+  await type(field('Spend no more than'), '10');
+  await act(async () => { button('Set up')!.click(); });
+  await contains('Set up. Turning it on now.');
+  expect(setupPosts).toHaveLength(1);
+  await act(async () => { await vi.waitFor(() => expect(turnedOn).toBe(1)); });
 });

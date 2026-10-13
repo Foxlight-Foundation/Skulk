@@ -1130,6 +1130,7 @@
   "plugins.guided.notTurnedOn": "Set up, but it was not turned on. Its setup checks below show why.",
   "plugins.guided.retry": "Try again",
   "plugins.guided.start": "Set up",
+  "plugins.guided.unconfirmed": "The host did not confirm that setup started. Check the status above before trying again.",
   "plugins.guided.working": "Setting up…",
   "plugins.guided.workingHelp": "This takes about a minute. It starts nothing that costs money.",
   "plugins.healthUnknown": "Status unavailable",

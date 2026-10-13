@@ -5,12 +5,14 @@ import { operatorSession } from '../../auth/operatorSession';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   pluginRefusalDetail,
+  pluginRequestRefused,
   refusalSentence,
   useGetNodeCredentialsQuery,
   useGetNodeSetupActionsQuery,
   useResumeNodeSetupMutation,
   useStartNodeSetupMutation,
   type NodeAddress,
+  type SetupActions,
   type SetupOperation,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
@@ -28,6 +30,9 @@ export interface GuidedSetupCardProps {
 }
 
 type Phase = 'form' | 'working' | 'done' | 'failed';
+
+/** How long a start whose reply was lost is followed before the card gives up. */
+const UNCONFIRMED_WAIT_MS = 30_000;
 
 /** True when a required form value is still missing, so Set up stays disabled. */
 function missingRequired(schema: Record<string, unknown>, values: Record<string, unknown>): boolean {
@@ -49,6 +54,8 @@ export function GuidedSetupCard({ address, onTurnOn }: GuidedSetupCardProps) {
   const [phase, setPhase] = useState<Phase>('form');
   const [operationId, setOperationId] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // A start's reply was lost, so its operation may or may not exist.
+  const [unconfirmed, setUnconfirmed] = useState(false);
   const [values, setValues] = useState<Record<string, unknown>>({});
   const keys = useRef<Record<string, HTMLInputElement | null>>({});
   const actions = useGetNodeSetupActionsQuery(address, { pollingInterval: phase === 'working' ? 2000 : 0 });
@@ -73,6 +80,21 @@ export function GuidedSetupCard({ address, onTurnOn }: GuidedSetupCardProps) {
     setPhase('failed');
     setProblem(operation.correctiveAction ?? t('plugins.guided.failed', 'Setup did not finish. Try again.'));
   }
+
+  // A lost start reply is settled by the operation appearing; without it,
+  // the card gives up after a while and says so, and nothing is resent.
+  const appeared = operation !== undefined;
+  const waiting = unconfirmed && !appeared;
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = window.setTimeout(() => {
+      setUnconfirmed(false);
+      setPhase('form');
+      setOperationId(null);
+      setProblem(t('plugins.guided.unconfirmed', 'The host did not confirm that setup started. Check the status above before trying again.'));
+    }, UNCONFIRMED_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [waiting, t]);
 
   // Turning on is the parent's, so it starts after this render commits, and
   // exactly once however often the parent renders afterwards.
@@ -125,20 +147,28 @@ export function GuidedSetupCard({ address, onTurnOn }: GuidedSetupCardProps) {
   const start = async () => {
     setProblem(null);
     setPhase('working');
+    let fresh: SetupActions;
+    let current: ReturnType<typeof guidedAction>;
     try {
       if (!(await saveCredentials())) { setPhase('form'); return; }
       await credentials.refetch();
       // Saving a credential moves the fences the action is bound to.
-      const fresh = await actions.refetch().unwrap();
-      const current = guidedAction(fresh);
-      if (!current) {
-        setPhase('form');
-        setProblem(t('plugins.guided.notOffered', 'This plugin is already set up.'));
-        return;
-      }
-      setBound(current);
-      const id = randomHex32();
-      setOperationId(id);
+      fresh = await actions.refetch().unwrap();
+      current = guidedAction(fresh);
+    } catch {
+      setPhase('form');
+      setProblem(t('plugins.guided.notStarted', 'Setup was not started. Try again.'));
+      return;
+    }
+    if (!current) {
+      setPhase('form');
+      setProblem(t('plugins.guided.notOffered', 'This plugin is already set up.'));
+      return;
+    }
+    setBound(current);
+    const id = randomHex32();
+    setOperationId(id);
+    try {
       await startSetup({
         ...address,
         mutation: {
@@ -154,9 +184,16 @@ export function GuidedSetupCard({ address, onTurnOn }: GuidedSetupCardProps) {
         },
       }).unwrap();
     } catch (error: unknown) {
-      setPhase('form');
-      setOperationId(null);
-      setProblem(refusalSentence(pluginRefusalDetail(error)) ?? t('plugins.guided.notStarted', 'Setup was not started. Try again.'));
+      if (pluginRequestRefused(error) !== null) {
+        // A decided refusal: nothing started.
+        setPhase('form');
+        setOperationId(null);
+        setProblem(refusalSentence(pluginRefusalDetail(error)) ?? t('plugins.guided.notStarted', 'Setup was not started. Try again.'));
+        return;
+      }
+      // The start may have landed with its reply lost. Never send it again:
+      // keep following this exact operation, and give up only if it never appears.
+      setUnconfirmed(true);
     }
   };
 
