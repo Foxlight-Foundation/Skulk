@@ -1789,3 +1789,9 @@ Native image wheel publication promotes selected qualified artifacts from a
 successful candidate workflow run. The dispatch requires a filename/digest map,
 verifies the originating workflow and source commit attestation, and publishes
 those exact bytes without rebuilding; model/device claims remain separately gated.
+
+Apple hardware inventory retains the generic `apple:apple-gpu` class and adds
+the passively observed chip class (for example `apple:apple-m4`) when macOS
+reports it. Missing chip observations add no exact class. Native image package
+eligibility and signed support claims can therefore select measured Apple
+hardware without broadening qualification to every Metal device.

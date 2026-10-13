@@ -1801,3 +1801,9 @@ offload. Metal SDXL and Z-Image Turbo additionally use Flash Attention and
 512-pixel VAE tiles with 25% overlap; SDXL uses separate guidance passes.
 The tested Q8 SDXL and Z-Image default workflows stayed below kernel warning
 pressure on a 16 GiB Apple host.
+
+Apple hardware inventory retains the generic `apple:apple-gpu` class and adds
+the passively observed chip class (for example `apple:apple-m4`) when macOS
+reports it. Missing chip observations add no exact class. Native image package
+eligibility and signed support claims can therefore select measured Apple
+hardware without broadening qualification to every Metal device.

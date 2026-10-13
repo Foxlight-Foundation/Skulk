@@ -33,6 +33,7 @@ from skulk.shared.types.node_facts import (
 # sibling probe logic (#614: nobody probes ad hoc; existing gatherers become
 # sources for this one record).
 from skulk.utils.info_gatherer.nvidia_gpu import NvmlLike, load_nvml
+from skulk.utils.info_gatherer.system_info import observe_apple_chip
 
 
 @final
@@ -434,7 +435,7 @@ def gather_node_facts(
     if platform == "darwin":
         gpus.append(
             GpuDeviceFact(
-                vendor="apple", name="Apple GPU", detection_source="apple_platform"
+                vendor="apple", name=observe_apple_chip() or "Apple GPU", detection_source="apple_platform"
             )
         )
     else:

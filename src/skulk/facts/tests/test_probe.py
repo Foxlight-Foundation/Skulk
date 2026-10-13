@@ -317,3 +317,16 @@ def test_loader_error_echoing_flag_is_failed_not_unsupported(
         drm_root=tmp_path / "no-drm",
     )
     assert facts.llama_server_device_probe.outcome == "failed"
+
+
+def test_apple_chip_class_is_observed_and_retains_legacy_matching(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Measured chip classes support exact wheels while generic claims keep matching."""
+    monkeypatch.setattr(probe, "observe_apple_chip", lambda: "Apple M4")
+    facts = gather_node_facts(env={}, platform="darwin", drm_root=tmp_path / "no-drm")
+    assert facts.gpus[0].name == "Apple M4"
+    assert {"apple", "apple:apple-gpu", "apple:apple-m4"} <= hardware_class_inventory(facts)
+    monkeypatch.setattr(probe, "observe_apple_chip", lambda: None)
+    missing = gather_node_facts(env={}, platform="darwin", drm_root=tmp_path / "no-drm")
+    assert "apple:apple-m4" not in hardware_class_inventory(missing)

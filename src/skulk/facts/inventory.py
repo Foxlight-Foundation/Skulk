@@ -279,6 +279,10 @@ def hardware_class_inventory(facts: NodeFacts) -> frozenset[str]:
     for gpu in facts.gpus:
         vendor = gpu.vendor.lower()
         classes.add(vendor)
+        if vendor == "apple":
+            # Keep the established generic constraint while adding the observed
+            # chip class, so qualification can select a measured Apple target.
+            classes.add("apple:apple-gpu")
         name = _HARDWARE_TOKEN.sub("-", gpu.name.lower()).strip("-")
         if name and name != "unknown":
             classes.add(f"{vendor}:{name}")
