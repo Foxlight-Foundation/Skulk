@@ -44,6 +44,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- A plugin can now offer a guided setup: one short card that asks only for its
+  key and the few choices that matter, runs the setup in one step, and turns
+  the plugin on. RunPod uses it: add your RunPod API key, say how much to spend
+  at most, and select **Set up**. A plugin's other setup actions, setup files
+  and proposals now sit under **Advanced setup** on its card.
+
 - Remote capacity for a model the cluster cannot run. With a capability that
   provides remote machines installed (one that declares itself a burst
   provider), choosing a model that does not fit now offers a remote machine for

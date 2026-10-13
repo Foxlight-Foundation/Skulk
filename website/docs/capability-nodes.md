@@ -330,7 +330,7 @@ Replace `MODEL_ID` with an exact catalog selection. This example does not imply
 that every model has suitable cloud capacity or that every placement shortfall
 automatically rents a GPU.
 
-Open **Plugins → Review proposals**, refresh, and review the retained proposal.
+Open **Plugins**, expand **Advanced setup** on the RunPod node, choose **Review proposals**, refresh, and review the retained proposal.
 Check the model, context, hardware, location, price, maximum cost, campaign usage,
 resource lifetime, and approval expiry. **Approve and execute reviewed proposal**
 is the distinct action that can begin paid work. Keep its operation ID and follow

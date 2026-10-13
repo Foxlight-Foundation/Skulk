@@ -1,11 +1,14 @@
 import { useMemo, useState } from 'react';
+import { skipToken } from '@reduxjs/toolkit/query';
 import styled from 'styled-components';
 import { FiAlertCircle, FiCheckCircle, FiClock, FiExternalLink, FiPower, FiXCircle } from 'react-icons/fi';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useClusterState } from '../../hooks/useClusterState';
 import {
-  pluginRefusalDetail, pluginRequestRefused, refusalSentence, useConfigurePluginNodeMutation, useGetPluginNodesQuery, useLazyGetNodeConfigurationQuery, useNodesEnabled,
+  pluginRefusalDetail, pluginRequestRefused, refusalSentence, useConfigurePluginNodeMutation, useGetNodeSetupActionsQuery, useGetPluginNodesQuery, useLazyGetNodeConfigurationQuery, useNodesEnabled,
 } from '../../store/endpoints/plugins';
+import { GuidedSetupCard } from './GuidedSetupCard';
+import { guidedAction } from './guidedSetup';
 import { capabilityNodeKey, capabilityNodeTitle, type CapabilityNodeStatus, type CapabilityNodeSummary, type CapabilityNodeSurface } from '../../types/capabilityNodes';
 import { Button } from '../common/Button';
 import { Spinner } from '../common/Spinner';
@@ -82,7 +85,17 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
   const [turnedOnAt, setTurnedOnAt] = useState<ReadonlyMap<string, string>>(() => new Map((target.turnedOn ?? []).map((nodeId) => [
     capabilityNodeKey({ pluginId: target.pluginId, nodeId }), summaries.find((summary) => summary.nodeId === nodeId)?.observedAt ?? '',
   ])));
-  const withChecks = new Set(plugins.data?.find((plugin) => plugin.pluginId === target.pluginId)?.nodes.filter((node) => node.preflightAvailable).map((node) => node.nodeId) ?? []);
+  const pluginNodes = plugins.data?.find((plugin) => plugin.pluginId === target.pluginId)?.nodes;
+  const withChecks = new Set(pluginNodes?.filter((node) => node.preflightAvailable).map((node) => node.nodeId) ?? []);
+  // A plugin may mark one setup action as its guided setup. While it is
+  // offered, that card is the next step instead of the plugin's settings.
+  const guidedNodeId = pluginNodes?.find((node) => node.setupActionsAvailable)?.nodeId ?? null;
+  const guidedActions = useGetNodeSetupActionsQuery(guidedNodeId ? { pluginId: target.pluginId, nodeId: guidedNodeId } : skipToken);
+  const guidedOffered = guidedAction(guidedActions.currentData) !== null;
+  // Once shown, the card stays, so it can say how setup ended after the
+  // plugin stops offering it.
+  const [showGuided, setShowGuided] = useState(false);
+  if (guidedOffered && !showGuided) setShowGuided(true);
   // As in the topology, a loopback screen opens only from a browser on its own host.
   const surfaces = useMemo(() => openableSurfaces(hosted, localNodeId, window.location.hostname), [hosted, localNodeId]);
   const reachable = surfaces.filter((item) => item.reachable);
@@ -140,18 +153,19 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
   // the Turn on step, with the host's reason and the settings beside it; an
   // unconfirmed one may have landed, and turning on again re-reads it first.
   const decided = refusal !== null && refusal.status !== null;
-  const next: 'settings' | 'turn-on' | 'open' | null = needsSettings && onManage ? 'settings'
-    : off.length > 0 ? 'turn-on'
-      : ready && reachable.length > 0 ? 'open' : null;
+  const next: 'guided' | 'settings' | 'turn-on' | 'open' | null = guidedOffered ? 'guided'
+    : needsSettings && onManage ? 'settings'
+      : off.length > 0 ? 'turn-on'
+        : ready && reachable.length > 0 ? 'open' : null;
 
-  const turnOn = async () => {
-    if (turning || off.length === 0) return;
+  const turnOnIds = async (nodeIds: readonly string[]) => {
+    if (turning || nodeIds.length === 0) return;
     setTurning(true);
     setRefusal(null);
     const outcome = await turnOnNodes({ readConfiguration: (address) => readConfiguration(address, false), configure }, target.pluginId,
-      off.map((summary) => summary.nodeId), pluginRefusalDetail, pluginRequestRefused);
+      nodeIds, pluginRefusalDetail, pluginRequestRefused);
     // Each is shown turning on against the report that was current when it was sent.
-    const sent = off.filter((summary) => outcome.enabled.includes(summary.nodeId));
+    const sent = summaries.filter((summary) => outcome.enabled.includes(summary.nodeId));
     if (sent.length > 0) setTurnedOnAt((current) => new Map([...current, ...sent.map((summary) => [capabilityNodeKey(summary), summary.observedAt] as const)]));
     if (outcome.refusal) {
       setRefusal(outcome.refusal);
@@ -160,16 +174,23 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
     }
     setTurning(false);
   };
+  const turnOn = () => turnOnIds(off.map((summary) => summary.nodeId));
+  // The guided setup's node, turned on as soon as its setup completes, while
+  // the host's report may still call it unset.
+  const turnOnGuided = () => { if (guidedNodeId) void turnOnIds([guidedNodeId]); };
 
   const lead = ready ? (surfaces.length > 0 ? t('plugins.setup.readyLead', 'It is running.') : t('plugins.setup.noScreens', 'It opens no screens of its own; its capabilities are ready for clients and tools.'))
     : summaries.length === 0 ? t('plugins.setup.waitingLead', 'Waiting for it to report…')
+      : next === 'guided' ? t('plugins.setup.guidedLead', 'A couple of quick steps and it is ready.')
       : next === 'settings' ? t('plugins.setup.settingsLead', 'It needs its settings before it can run.')
         : next === 'turn-on' ? t('plugins.setup.offLead', 'It is turned off. Turn it on to start it.')
           : states.includes('unavailable') ? t('plugins.setup.unavailableLead', 'Its plugin service is not answering. After a Skulk update that takes a few minutes; this page updates by itself.')
             : t('plugins.setup.startingLead', 'It is starting. This page updates by itself.');
   const openLabel = (surface: CapabilityNodeSurface) => t('plugins.setup.open', 'Open {surface}', { surface: surface.title });
   // Checks are shown when something needs more than turning on.
+  // The guided setup says what it needs itself; its checks would only repeat it.
   const checked = summaries.filter((summary, index) => withChecks.has(summary.nodeId)
+    && !(guidedOffered && summary.nodeId === guidedNodeId)
     && (states[index] === 'settings' || states[index] === 'stopped' || (decided && refusal?.nodeId === summary.nodeId)));
   return <Panel aria-labelledby="capability-setup-title">
     <Header>
@@ -192,6 +213,7 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
         </Item>;
       })}
     </Items>
+    {showGuided && guidedNodeId ? <GuidedSetupCard address={{ pluginId: target.pluginId, nodeId: guidedNodeId }} onTurnOn={turnOnGuided} /> : null}
     {refusal && decided ? <Problem role="alert">
       <strong>{t('plugins.setup.turnOnRefused', 'It was not turned on.')}</strong>{' '}
       {/* A plugin's own next step stands alone; without one, point at what shows the cause. */}
@@ -213,7 +235,7 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
       {ready ? unreachable.map(({ surface }) => <Button key={surface.url} variant="outline" disabled>{openLabel(surface)}</Button>) : null}
       {/* Settings cannot be read while the plugin service is silent, and it is not
           a settings problem, so nothing here sends the operator there. */}
-      {onManage && next !== 'settings' && !states.includes('unavailable') ? (refusal && decided
+      {onManage && next !== 'settings' && next !== 'guided' && !states.includes('unavailable') ? (refusal && decided
         ? <Button variant="outline" onClick={() => onManage(target.pluginId, refusal.nodeId)}>{t('plugins.setup.openSettings', 'Open settings')}</Button>
         : <Button variant="outline" onClick={() => onManage(target.pluginId)}>{t('plugins.setup.settings', 'Settings')}</Button>) : null}
       <Button variant="outline" onClick={onDone}>{t('plugins.setup.done', 'Done')}</Button>
