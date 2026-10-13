@@ -363,6 +363,25 @@ class BurstNodeBudget(FrozenModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _shape_follows_state(self) -> Self:
+        """An available budget has every amount; an unavailable one says why."""
+        amounts = (self.limit_usd, self.spent_usd, self.held_usd, self.left_usd)
+        if self.state == "available":
+            if any(amount is None for amount in amounts) or self.rentals is None:
+                raise ValueError(
+                    "an available budget carries every amount and the rental count"
+                )
+        elif (
+            self.message is None
+            or any(amount is not None for amount in amounts)
+            or self.rentals is not None
+            or self.change_limit_action is not None
+            or self.start_over_action is not None
+        ):
+            raise ValueError("an unavailable budget carries a message and no amounts")
+        return self
+
 
 class BurstBudget(BurstNodeBudget):
     """A burst provider node's spending limit, as the API returns it."""

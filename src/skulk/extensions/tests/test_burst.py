@@ -307,6 +307,20 @@ async def test_the_budget_is_read_from_the_exact_provider_node(tmp_path: Path) -
     with pytest.raises(LookupError):
         await fixture.owner.burst_budget("other")
     # An answer outside the contract is refused rather than shown.
-    fixture.replies = [{"state": "available", "limit_usd": "ten dollars"}]
-    with pytest.raises(ValueError):
-        await fixture.owner.burst_budget("gpu")
+    malformed: tuple[dict[str, JsonValue], ...] = (
+        {"state": "available", "limit_usd": "ten dollars"},
+        # Available without its amounts.
+        {"state": "available"},
+        # Unavailable without saying why, or with amounts beside it.
+        {"state": "unavailable"},
+        {"state": "unavailable", "message": "Not now.", "limit_usd": "1.000000"},
+    )
+    for reply in malformed:
+        fixture.replies = [reply]
+        with pytest.raises(ValueError):
+            await fixture.owner.burst_budget("gpu")
+    fixture.replies = [
+        {"state": "unavailable", "message": "The cleanup service did not answer."}
+    ]
+    unavailable = await fixture.owner.burst_budget("gpu")
+    assert unavailable.limit_usd is None and unavailable.message is not None
