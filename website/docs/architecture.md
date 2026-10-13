@@ -2909,8 +2909,11 @@ Its compute lanes are `metal`, `cuda`, `vulkan`, and `rocm`; CPU-only serving is
 excluded. Complete immutable component files are verified before load. Model
 placement can schedule an `InstallEngine` task for an exact published package;
 browsing does not acquire packages. `NodeResources.installable_engine_builds`
-records those candidates separately from measured `engine_builds`. Signed support
-claims, exact build identity, hardware match, and runner limits still gate normal
+records those candidates separately from measured `engine_builds`.
+Native package descriptors and build manifests additionally declare compiled
+CPU helper instructions. Package discovery refuses incompatible hosts, and
+managed-binary probing checks these prerequisites before execution.
+Signed support claims, exact build identity, hardware match, and runner limits still gate normal
 placement. A candidate source build alone grants no support.
 
 The runner serializes image work with bounded admission, forwards previews and

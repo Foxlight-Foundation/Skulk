@@ -89,6 +89,47 @@ def test_unpublished_package_is_not_installable() -> None:
         )
 
 
+def test_package_selection_requires_compiled_cpu_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel = image_engine.StableDiffusionCppWheel(
+        filename="skulk_stable_diffusion_cpp_vulkan-0.1.0-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="a" * 64,
+        binary_sha256="b" * 64,
+        compute="vulkan",
+        system="linux",
+        architecture="x86_64",
+        hardware_classes=frozenset({"qualified-gpu"}),
+        required_cpu_features=frozenset({"avx2", "f16c"}),
+    )
+    monkeypatch.setattr(image_engine, "PUBLISHED_WHEELS", (wheel,))
+    monkeypatch.setattr(image_engine.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(image_engine.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(image_engine, "_host_cpu_features", lambda: frozenset({"avx2"}))
+    assert image_engine.wheel_for_host("stable_diffusion_cpp-vulkan", frozenset({"qualified-gpu"})) is None
+    monkeypatch.setattr(image_engine, "_host_cpu_features", lambda: frozenset({"avx2", "f16c"}))
+    assert image_engine.wheel_for_host("stable_diffusion_cpp-vulkan", frozenset({"qualified-gpu"})) == wheel
+
+
+def test_native_probe_refuses_missing_cpu_instructions_before_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary = tmp_path / "native" / "bin" / "sd-server"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"native")
+    (binary.parent.parent / "build.json").write_text(
+        json.dumps({"required_cpu_features": ["avx2", "f16c"], "source_revision": "a" * 40})
+    )
+    monkeypatch.setattr(image_engine, "_host_cpu_features", lambda: frozenset({"avx2"}))
+
+    def refuse_execution(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a CPU-incompatible binary must not execute")
+
+    monkeypatch.setattr(image_engine.subprocess, "run", refuse_execution)
+    with pytest.raises(ValueError, match="unavailable CPU instructions"):
+        image_engine.probe_native_image(binary)
+
+
 def test_installed_native_build_cannot_be_overridden_by_a_declaration() -> None:
     from skulk.shared.types.node_facts import EngineBinaryFact
 

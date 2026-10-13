@@ -586,3 +586,9 @@ and is assembled by `scripts/build_stable_diffusion_cpp_wheel.py` from pinned
 source with the recorded lifecycle patch. Model placement never compiles native
 source. GPU qualification and append-only artifact publication are required
 before a package is added to the on-demand manifest.
+Linux Vulkan builds use the SHA-256-pinned LunarG 1.4.350.0 SDK rather than an
+unavailable Ubuntu 22.04 `glslc` package. The assembler records enabled x86 CPU
+helper instructions in the descriptor and native build manifest; installable
+package discovery and binary probing require the host to support those flags.
+The wheel carries its Vulkan loader and copyright notice, while the GPU driver
+remains an operating-system dependency.

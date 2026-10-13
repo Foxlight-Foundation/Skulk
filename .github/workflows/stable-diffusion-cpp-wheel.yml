@@ -32,7 +32,14 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Linux build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential ninja-build libvulkan-dev glslc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build libvulkan-dev xz-utils patchelf
+          curl --fail --location --retry 3 https://sdk.lunarg.com/sdk/download/1.4.350.0/linux/vulkansdk-linux-x86_64-1.4.350.0.tar.xz -o vulkan-sdk.tar.xz
+          echo 'b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2  vulkan-sdk.tar.xz' | sha256sum --check --strict
+          tar -xf vulkan-sdk.tar.xz
+          echo "VULKAN_SDK=$GITHUB_WORKSPACE/1.4.350.0/x86_64" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/1.4.350.0/x86_64/bin" >> "$GITHUB_PATH"
       - name: Fetch immutable source and carry recorded lifecycle patch
         run: |
           git clone --no-checkout https://github.com/leejet/stable-diffusion.cpp.git native-source
@@ -56,7 +63,15 @@ jobs:
           VARIANT: ${{ matrix.variant }}
           PLATFORM_TAG: ${{ matrix.tag }}
         run: |
-          uv run --no-project python scripts/build_stable_diffusion_cpp_wheel.py --source native-source --build native-build --output candidate-wheels --variant "$VARIANT" --platform-tag "$PLATFORM_TAG"
+          runtime_flags=()
+          if [[ "$VARIANT" == vulkan ]]; then
+            mkdir native-runtime
+            cp -L /usr/lib/x86_64-linux-gnu/libvulkan.so.1 native-runtime/libvulkan.so.1
+            cp /usr/share/doc/libvulkan1/copyright native-runtime/VULKAN_LOADER_COPYRIGHT.txt
+            patchelf --set-rpath '$ORIGIN/../lib' native-build/bin/sd-server
+            runtime_flags=(--runtime native-runtime)
+          fi
+          uv run --no-project python scripts/build_stable_diffusion_cpp_wheel.py --source native-source --build native-build --output candidate-wheels --variant "$VARIANT" --platform-tag "$PLATFORM_TAG" "${runtime_flags[@]}"
       - uses: actions/attest-build-provenance@v3
         with:
           subject-path: candidate-wheels/*.whl

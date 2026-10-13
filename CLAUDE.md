@@ -1742,6 +1742,10 @@ SDXL Metal loads disable batched classifier-free guidance to avoid blank
 outputs and enable Flash Attention at the default 1024-square canvas.
 Native CUDA wheel assembly requires `GGML_CUDA_NCCL=OFF` for the single-GPU
 image contract and to avoid an unnecessary host-library dependency.
+The portable Vulkan workflow pins and hashes the LunarG 1.4.350.0 shader SDK,
+records the compiled CPU instruction requirements, and bundles the Vulkan loader
+with its copyright notice. Package discovery and managed-binary probing reject
+hosts lacking required CPU instructions. GPU drivers remain host dependencies.
 Native image teardown retains the producer handle through a 30-second graceful
 wait and 15-second forced reap; its supervisor allows 50 seconds for cleanup.
 Published installable builds and installed measured builds remain separate in

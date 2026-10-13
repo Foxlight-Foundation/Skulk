@@ -85,6 +85,19 @@ def assemble_wheel(
         for line in cache.splitlines()
         if ":" in line and "=" in line and not line.startswith(("#", "//"))
     }
+    cpu_flags = {
+        "GGML_AVX": "avx",
+        "GGML_AVX2": "avx2",
+        "GGML_BMI2": "bmi2",
+        "GGML_F16C": "f16c",
+        "GGML_FMA": "fma",
+        "GGML_SSE42": "sse4_2",
+    }
+    required_cpu_features = (
+        sorted(feature for key, feature in cpu_flags.items() if cache_values.get(key) == "ON")
+        if platform_tag.endswith("x86_64")
+        else []
+    )
     if variant == "metal" and cache_values.get("CMAKE_OSX_DEPLOYMENT_TARGET") != "15.0":
         raise ValueError("Metal wheel deployment target differs from its wheel tag")
     # A developer image can silently add NCCL when its headers are present.
@@ -122,6 +135,7 @@ def assemble_wheel(
         "backend": variant,
         "platform_tag": platform_tag,
         "binary_sha256": hashlib.sha256(payload[f"{module}/bin/sd-server"]).hexdigest(),
+        "required_cpu_features": required_cpu_features,
         "members": {
             name: hashlib.sha256(data).hexdigest()
             for name, data in sorted(payload.items())
@@ -171,6 +185,7 @@ def assemble_wheel(
         "source_revision": SOURCE_REVISION,
         "server_patch_sha256": PATCH_SHA256,
         "qualification_status": "unqualified",
+        "required_cpu_features": required_cpu_features,
     }
     destination.with_suffix(".json").write_text(
         json.dumps(descriptor, sort_keys=True, indent=2) + "\n"

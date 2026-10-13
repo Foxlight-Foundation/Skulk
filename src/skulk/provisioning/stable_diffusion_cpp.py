@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast, final
 import httpx
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from skulk.provisioning.llama_server import AUTOPROVISION_OPT_OUT_ENV
 from skulk.shared.constants import SKULK_ENGINES_DIR
@@ -35,6 +35,7 @@ SERVER_PATCH_SHA256: Final = (
 )
 BINARY_ENV: Final = "SKULK_STABLE_DIFFUSION_CPP_BIN"
 ImageCompute = Literal["metal", "cuda", "vulkan", "rocm"]
+CpuInstruction = Literal["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
 _INSTALL_LOCK = threading.Lock()
 _MAX_PACKAGE_BYTES = 1024 * 1024 * 1024
 _MAX_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
@@ -72,6 +73,10 @@ class StableDiffusionCppWheel(FrozenModel):
     )
     hardware_classes: frozenset[str] = Field(
         min_length=1, description="Hardware classes this exact package has qualified."
+    )
+    required_cpu_features: frozenset[CpuInstruction] = Field(
+        default=frozenset(),
+        description="CPU instructions required by the package's compiled helper kernels.",
     )
 
     @property
@@ -134,8 +139,44 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+@final
+class NativeCpuRequirements(FrozenModel):
+    """Read the compiled CPU requirements from a managed native build manifest."""
+
+    # Other provenance is checked separately by the archive and executable probes.
+    model_config = ConfigDict(extra="ignore")
+
+    required_cpu_features: frozenset[CpuInstruction] = Field(
+        default=frozenset(),
+        description="Required x86 helper instructions; empty for other CPU targets.",
+    )
+
+
+def _host_cpu_features() -> frozenset[str]:
+    if platform.system().lower() != "linux":
+        return frozenset()
+    try:
+        cpu_info = Path("/proc/cpuinfo").read_text()
+    except OSError:
+        return frozenset()
+    processors = [
+        frozenset(value.split())
+        for line in cpu_info.splitlines()
+        if (parts := line.partition(":"))[0].strip() == "flags"
+        and (value := parts[2])
+    ]
+    return processors[0].intersection(*processors[1:]) if processors else frozenset()
+
+
 def probe_native_image(binary: Path) -> NativeImageProbe:
-    """Verify source identity and enumerate GPU devices; reject a CPU-only binary."""
+    """Verify compiled CPU requirements, source identity and a real GPU device."""
+    metadata = binary.parent.parent / "build.json"
+    if metadata.is_file():
+        requirements = NativeCpuRequirements.model_validate_json(metadata.read_text())
+        if requirements.required_cpu_features and not (
+            requirements.required_cpu_features <= _host_cpu_features()
+        ):
+            raise ValueError("native image engine requires unavailable CPU instructions")
     completed = subprocess.run(
         [str(binary), "--skulk-probe"],
         capture_output=True,
@@ -204,6 +245,10 @@ def wheel_for_host(
             and wheel.architecture == machine
             and backend == f"stable_diffusion_cpp-{wheel.compute}"
             and bool(wheel.hardware_classes & hardware_classes)
+            and (
+                not wheel.required_cpu_features
+                or wheel.required_cpu_features <= _host_cpu_features()
+            )
         ),
         None,
     )
