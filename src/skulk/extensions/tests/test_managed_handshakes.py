@@ -8,6 +8,7 @@ handshakes addressed to its host.
 """
 
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from skulk.extensions.managed import (
+    HANDSHAKE_REQUEST_BUDGET,
     MAX_HANDSHAKE_PEERS,
     ManagedConnection,
     ManagedNode,
@@ -28,6 +30,8 @@ from skulk.extensions.tests.test_managed_topology import PROFILE
 from skulk.extensions.tests.test_steward_tools import context
 from skulk.shared.topology import Topology
 from skulk.shared.types.capability_nodes import (
+    MAX_CAPABILITY_NODES_PER_HOST,
+    MAX_HANDSHAKE_CONTENT_LENGTH,
     CapabilityNodeHandshake,
     CapabilityNodeSummary,
 )
@@ -205,6 +209,98 @@ def test_peers_with_a_handshake_for_this_host_come_first(tmp_path: Path) -> None
     assert isinstance(peers, list) and len(peers) == MAX_HANDSHAKE_PEERS
     first = peers[0]
     assert isinstance(first, dict) and first["node_id"] == PEER
+
+
+def _frame_size(request: Mapping[str, object]) -> int:
+    """Bytes the request takes on the owner's control socket."""
+    return len(json.dumps(request, allow_nan=False).encode()) + 1
+
+
+def _largest(recipient: str = SELF) -> CapabilityNodeHandshake:
+    # Every quote serializes as two bytes, the largest a handshake can become.
+    return handshake(recipient, '"' * MAX_HANDSHAKE_CONTENT_LENGTH)
+
+
+def test_one_peer_with_many_large_handshakes_stays_within_the_frame(
+    tmp_path: Path,
+) -> None:
+    """A full peer is trimmed to what fits; nothing makes the request oversize."""
+    crowded = peer(
+        *(
+            summary("foxlight.runpod", _largest(), _largest(), node=f"node-{index}")
+            for index in range(MAX_CAPABILITY_NODES_PER_HOST)
+        )
+    )
+    managed = owner(tmp_path, private=True, peers=(crowded,))
+    request = managed._handshake_request()  # pyright: ignore[reportPrivateUsage]
+    assert _frame_size(request) <= HANDSHAKE_REQUEST_BUDGET + 1 < 65_536
+    peers = request["peers"]
+    assert isinstance(peers, list) and len(peers) == 1
+    first = peers[0]
+    assert isinstance(first, dict)
+    nodes = first["nodes"]
+    assert isinstance(nodes, list) and 0 < len(nodes) < MAX_CAPABILITY_NODES_PER_HOST
+
+
+def test_addressed_nodes_and_peers_win_the_budget(tmp_path: Path) -> None:
+    """When not everything fits, what is addressed to this host goes in first."""
+    noisy = tuple(
+        peer(
+            *(
+                summary("foxlight.runpod", _largest("other-host"), node=f"n-{index}")
+                for index in range(MAX_CAPABILITY_NODES_PER_HOST)
+            ),
+            node_id=f"noisy-{number}",
+        )
+        for number in range(4)
+    )
+    crowded = peer(
+        *(
+            summary("foxlight.runpod", node=f"quiet-{index}")
+            for index in range(MAX_CAPABILITY_NODES_PER_HOST - 1)
+        ),
+        summary("foxlight.runpod", _largest(), _largest(), node="addressed"),
+    )
+    managed = owner(tmp_path, private=True, peers=(*noisy, crowded))
+    request = managed._handshake_request()  # pyright: ignore[reportPrivateUsage]
+    assert _frame_size(request) <= HANDSHAKE_REQUEST_BUDGET + 1
+    peers = request["peers"]
+    assert isinstance(peers, list)
+    first = peers[0]
+    assert isinstance(first, dict) and first["node_id"] == PEER
+    nodes = first["nodes"]
+    assert isinstance(nodes, list)
+    lead = nodes[0]
+    assert isinstance(lead, dict) and lead["node_id"] == "addressed"
+    assert len(lead["handshakes"]) == 2  # pyright: ignore[reportArgumentType]
+
+
+def test_every_addressed_node_wins_over_other_peers_ordinary_nodes(
+    tmp_path: Path,
+) -> None:
+    """Ordinary nodes of earlier peers never crowd out a later peer's handshake."""
+    crowded = tuple(
+        peer(
+            summary("foxlight.runpod", _largest(), _largest(), node="addressed"),
+            *(
+                summary("foxlight.runpod", node=f"ordinary-{index}")
+                for index in range(MAX_CAPABILITY_NODES_PER_HOST - 1)
+            ),
+            node_id=f"peer-{number}",
+        )
+        for number in range(7)
+    )
+    managed = owner(tmp_path, private=True, peers=crowded)
+    request = managed._handshake_request()  # pyright: ignore[reportPrivateUsage]
+    assert _frame_size(request) <= HANDSHAKE_REQUEST_BUDGET + 1
+    peers = request["peers"]
+    assert isinstance(peers, list) and len(peers) == 7
+    for entry in peers:
+        assert isinstance(entry, dict)
+        nodes = entry["nodes"]
+        assert isinstance(nodes, list)
+        lead = nodes[0]
+        assert isinstance(lead, dict) and lead["node_id"] == "addressed"
 
 
 def test_a_public_fabric_neither_delivers_nor_publishes_handshakes(
