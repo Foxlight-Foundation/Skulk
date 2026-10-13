@@ -12,6 +12,8 @@ export interface LimitField {
   exclusiveMinimum: number | null;
   /** The amount must be at most this, when the form says so. */
   maximum: number | null;
+  /** True when the form takes whole dollars only. */
+  wholeDollars: boolean;
 }
 
 const NUMBER_TYPES = new Set(['number', 'integer']);
@@ -52,12 +54,24 @@ export function limitField(schema: Record<string, unknown> | null | undefined): 
     minimum: finite(field.minimum),
     exclusiveMinimum: finite(field.exclusiveMinimum),
     maximum: finite(field.maximum),
+    wholeDollars: field.type === 'integer',
   };
 }
 
-/** Whether an amount in dollars fits the field's own bounds (and is above zero). */
+/**
+ * Whether a setup action's form takes no values, so it can run from a single
+ * button: no required field, or no form at all.
+ */
+export function takesNoValues(schema: Record<string, unknown> | null | undefined): boolean {
+  if (!schema) return false;
+  const declared: unknown = schema.required;
+  return !Array.isArray(declared) || declared.length === 0;
+}
+
+/** Whether an amount in dollars fits the field's own type and bounds (and is above zero). */
 export function amountFits(field: LimitField, amount: number): boolean {
   if (!(amount > 0)) return false;
+  if (field.wholeDollars && !Number.isInteger(amount)) return false;
   if (field.minimum !== null && amount < field.minimum) return false;
   if (field.exclusiveMinimum !== null && amount <= field.exclusiveMinimum) return false;
   if (field.maximum !== null && amount > field.maximum) return false;

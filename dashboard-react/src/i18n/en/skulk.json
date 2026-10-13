@@ -117,6 +117,7 @@
   "burst.rentals.startOver": "Start over",
   "burst.rentals.startOverConfirm": "Start over",
   "burst.rentals.startOverExplain": "Finished rentals stop counting, so your whole limit is available again. A machine running now keeps counting.",
+  "burst.rentals.startOverUnavailable": "This provider can't start over from here. Use the provider's own setup.",
   "burst.rentals.waitingIntro": "Rentals the steward proposed wait here for you. Nothing is rented until you approve one.",
   "burst.rentals.waitingTitle": "Waiting for your approval",
   "burst.rentalTitle": "Remote rental",

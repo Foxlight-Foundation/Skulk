@@ -13,7 +13,7 @@ import { useGetPluginNodesQuery } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
 import { burstPhaseLabels, formatCents, positiveUsd, spentOfLimit } from '../models/burstPresentation';
 import { ProposalControls } from '../pages/NodeProposalsPanel';
-import { amountFits, limitField, type LimitField } from './limitField';
+import { amountFits, limitField, takesNoValues, type LimitField } from './limitField';
 import { useSetupActionRun, type SetupActionRun } from './useSetupActionRun';
 
 /** How often the view reads spending and rentals again while open. */
@@ -350,6 +350,24 @@ function StartOverConfirm({ actionId, run, onClose }: { actionId: string; run: S
   const { t } = useSkulkTranslation();
   const submitting = run.phase === 'running';
   const finished = run.phase === 'complete';
+  // One button can only run an action whose form takes no values.
+  if (run.ready && run.phase === 'idle' && !takesNoValues(run.action(actionId)?.parametersSchema)) {
+    return (
+      <Card>
+        <p role="alert">
+          {t(
+            'burst.rentals.startOverUnavailable',
+            "This provider can't start over from here. Use the provider's own setup.",
+          )}
+        </p>
+        <Actions>
+          <Button onClick={onClose} type="button">
+            {t('burst.rentals.cancel', 'Cancel')}
+          </Button>
+        </Actions>
+      </Card>
+    );
+  }
   return (
     <Card>
       <p>

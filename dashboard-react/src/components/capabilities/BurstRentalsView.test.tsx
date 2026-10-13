@@ -29,6 +29,7 @@ let rentals: BurstOperation[];
 let operations: SetupOperation[];
 let refuseSetup: { status: number; detail: string } | null;
 let limitSchema: Record<string, unknown>;
+let startOverSchema: Record<string, unknown>;
 
 /** The change-limit form RunPod's provider publishes. */
 const RUNPOD_LIMIT_SCHEMA = {
@@ -91,7 +92,7 @@ function snapshot(): SetupActions {
     credentialSchemaDigest: 'd'.repeat(64),
     actions: [
       { actionId: 'campaign-limits', title: 'Change spending limit', description: '', parametersSchema: limitSchema, schemaDigest: 'e'.repeat(64), requiresApproval: true },
-      { actionId: 'start-over', title: 'Start over', description: '', parametersSchema: {}, schemaDigest: 'f'.repeat(64), requiresApproval: true },
+      { actionId: 'start-over', title: 'Start over', description: '', parametersSchema: startOverSchema, schemaDigest: 'f'.repeat(64), requiresApproval: true },
     ],
     operations,
   };
@@ -149,6 +150,7 @@ beforeEach(() => {
   operations = [];
   refuseSetup = null;
   limitSchema = RUNPOD_LIMIT_SCHEMA;
+  startOverSchema = { type: 'object', properties: {}, additionalProperties: false };
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     const body = await request.text();
@@ -289,6 +291,19 @@ it('sends the amount as the field the provider’s own form names, within its bo
   await contains('Your limit is now $30.00.');
   const submitted = calls.find((call) => call.path === OPERATIONS_PATH);
   expect((JSON.parse(submitted!.body) as { values: unknown }).values).toEqual({ budget: 30 });
+});
+
+it('offers start over from one button only when its form takes no values', async () => {
+  startOverSchema = {
+    type: 'object',
+    required: ['confirm'],
+    properties: { confirm: { type: 'boolean' } },
+  };
+  await render();
+  await contains('$2.50 of $10.00 spent');
+  await click('Start over');
+  await contains("This provider can't start over from here.");
+  expect(calls.some((call) => call.path === OPERATIONS_PATH)).toBe(false);
 });
 
 it('says plainly when the provider’s limit form needs more than one amount', async () => {
