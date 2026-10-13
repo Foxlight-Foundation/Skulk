@@ -694,6 +694,24 @@ spending_limit_usd: float = Field(
 cleanup_port: int = Field(default=22, json_schema_extra={"x-skulk-advanced": True})
 ```
 
+### Credentials setup fills in
+
+A plugin whose setup creates some of its own credentials can say so with
+`"x-skulk-setup-credentials"` at the top level of `configuration_schema`: a
+list of credential IDs. **Manage credentials** then shows the other
+credentials, the ones a person enters, and folds the named ones under a
+collapsed **Filled in by setup** section. They can still be replaced there,
+for troubleshooting. With pydantic, set it on the settings model:
+
+```python
+model_config = ConfigDict(
+    json_schema_extra={"x-skulk-setup-credentials": ["authority-rpc", "witness-rpc"]}
+)
+```
+
+Validators ignore the keyword. A malformed value, or an older dashboard,
+lists every credential as before.
+
 ### Guided setup
 
 A managed plugin whose setup takes one action can ask the dashboard to present
