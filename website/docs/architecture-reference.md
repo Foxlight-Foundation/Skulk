@@ -1782,3 +1782,8 @@ Qwen Image 2.1 Vulkan loads also select 512-pixel VAE tiles with 25% overlap.
 This avoids the tested device single-buffer limit at 2K and its expensive CPU
 decode retry. Native teardown checks for an already-reaped process before
 signalling its former group; the runner retains ownership until exit is confirmed.
+
+Native image runners revalidate the exact installed package at model load when
+their inherited environment predates installation. This cache lookup never
+downloads and keeps model/engine preparation parallel while preventing a first-use
+runner crash. Explicit binary overrides still take precedence.

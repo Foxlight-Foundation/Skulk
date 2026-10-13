@@ -1,8 +1,10 @@
 """Native image preparation must never confuse available packages with usable GPUs."""
 
+import hashlib
 import json
 import subprocess
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,48 @@ from skulk.facts.derive import derive_node_backends
 from skulk.facts.inventory import engine_build_inventory
 from skulk.provisioning import stable_diffusion_cpp as image_engine
 from skulk.shared.types.node_facts import NodeFacts, StableDiffusionCppProbe
+
+
+def test_spawned_runner_resolves_exact_prepared_cache_without_inherited_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "prepared"
+    prefix = "skulk_stable_diffusion_cpp_vulkan"
+    filename = "skulk_stable_diffusion_cpp_vulkan-0.1.0-py3-none-manylinux_2_35_x86_64.whl"
+    payload = {
+        f"{prefix}/bin/sd-server": b"verified executable",
+        f"{prefix}/lib/runtime.txt": b"verified runtime",
+    }
+    root.mkdir()
+    with zipfile.ZipFile(root / filename, "w") as archive:
+        for name, data in payload.items():
+            archive.writestr(name, data)
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+    binary = root / prefix / "bin/sd-server"
+    binary.chmod(0o755)
+    wheel = image_engine.StableDiffusionCppWheel(
+        filename=filename,
+        sha256=hashlib.sha256((root / filename).read_bytes()).hexdigest(),
+        binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+        compute="vulkan", system="linux", architecture="x86_64",
+        hardware_classes=frozenset({"qualified-gpu"}),
+    )
+    monkeypatch.setattr(image_engine, "PUBLISHED_WHEELS", (wheel,))
+    monkeypatch.setattr(image_engine.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(image_engine.platform, "machine", lambda: "x86_64")
+    def prepared_root(_wheel: image_engine.StableDiffusionCppWheel) -> Path:
+        return root
+
+    monkeypatch.setattr(image_engine, "_root", prepared_root)
+    monkeypatch.delenv(image_engine.BINARY_ENV, raising=False)
+    classes = frozenset({"qualified-gpu"})
+    assert image_engine.prepared_native_image("stable_diffusion_cpp-vulkan", wheel.build_identity, classes) == binary
+    assert image_engine.prepared_native_image("stable_diffusion_cpp-vulkan", "another-build", classes) is None
+    assert image_engine.prepared_native_image("stable_diffusion_cpp-vulkan", wheel.build_identity, frozenset({"another-gpu"})) is None
+    (root / prefix / "lib/runtime.txt").write_bytes(b"corrupt runtime")
+    assert image_engine.prepared_native_image("stable_diffusion_cpp-vulkan", wheel.build_identity, classes) is None
 
 
 def test_native_probe_rejects_cpu_only_devices(

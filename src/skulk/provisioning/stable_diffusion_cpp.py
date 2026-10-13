@@ -311,6 +311,21 @@ def rehydrate_native_image(hardware_classes: frozenset[str]) -> Path | None:
     return None
 
 
+def prepared_native_image(
+    backend: str, expected_build: str, hardware_classes: frozenset[str]
+) -> Path | None:
+    """Resolve a verified installed package for a spawned runner without downloading.
+
+    The runner may have started before its worker installed the engine, so its
+    inherited environment cannot prove current cache readiness. Only the exact
+    eligible package/build is returned; loading still probes the actual GPU.
+    """
+    wheel = wheel_for_host(backend, hardware_classes)
+    if wheel is None or wheel.build_identity != expected_build:
+        return None
+    return _verify_payload(_root(wheel), wheel)
+
+
 def _verify_payload(root: Path, wheel: StableDiffusionCppWheel) -> Path | None:
     archive_path = root / wheel.filename
     binary = root / wheel.prefix / "bin/sd-server"
