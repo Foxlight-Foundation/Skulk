@@ -694,6 +694,41 @@ spending_limit_usd: float = Field(
 cleanup_port: int = Field(default=22, json_schema_extra={"x-skulk-advanced": True})
 ```
 
+### Guided setup
+
+A managed plugin whose setup takes one action can ask the dashboard to present
+that action as a short guided card instead of its settings form. Set
+`"x-skulk-guided"` on the action's `parameters_schema`:
+
+```json
+{
+  "type": "object",
+  "required": ["spending_limit_usd"],
+  "properties": {
+    "spending_limit_usd": {"type": "number", "title": "Spend no more than", "x-skulk-unit": "usd"}
+  },
+  "x-skulk-guided": {"credentials": ["runpod-api-key"], "turn_on": true}
+}
+```
+
+While the plugin offers the action, the dashboard's setup page and the node's
+card on **Plugins** show it as the next step:
+
+1. Each credential named in `credentials` gets a password field, using the
+   credential input's own title and description. A value goes straight to the
+   node's credential store and never enters dashboard state.
+2. The action's ordinary fields follow, with `x-skulk-advanced` fields
+   collapsed.
+3. **Set up** saves the credentials, reads the setup fences again (a saved
+   credential moves them), starts the action, and follows it to the end.
+4. With `"turn_on": true`, the node is turned on once the action completes.
+
+A refusal or a failed operation shows the plugin's own next step. Offer the
+guided action only while it is the thing to do (RunPod offers it only on an
+unconfigured node). Once it is no longer offered, the card shows how setup
+ended, and the node's other setup actions stay under **Advanced setup**. An
+older dashboard ignores the keyword and lists the action with the others.
+
 ### Refusing with a next step
 
 When `configure_node` refuses an operation, such as turning a node on before
