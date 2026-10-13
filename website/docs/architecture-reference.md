@@ -1794,3 +1794,9 @@ library/code-object paths rather than inherited SDK overrides. Wheel descriptors
 carry exact archive and expanded sizes, bounded at 3 GiB and 8 GiB respectively;
 installation checks staging space for both plus a 1 GiB reserve. Legacy candidate
 packages retain the earlier executable identity and conservative size defaults.
+
+Metal native image instances keep parameters on their verified GPU to avoid
+duplicated residency in unified memory. CUDA/Vulkan/ROCm retain CPU parameter
+offload. Metal SDXL additionally uses 512-pixel VAE tiles with 25% overlap;
+separate guidance and Flash Attention remain enabled. The tested Q8 default
+workflow stayed below kernel warning pressure on a 16 GiB Apple host.

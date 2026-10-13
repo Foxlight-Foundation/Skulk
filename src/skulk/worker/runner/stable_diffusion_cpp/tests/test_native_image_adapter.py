@@ -198,7 +198,7 @@ def test_component_verification_checks_every_digest(
 @pytest.mark.parametrize(
     ("backend", "runtime_flags"),
     [
-        ("stable_diffusion_cpp-metal", ["--batched-cfg", "off", "--fa"]),
+        ("stable_diffusion_cpp-metal", ["--batched-cfg", "off", "--fa", "--vae-tiling", "--vae-tile-size", "512", "--vae-tile-overlap", "0.25"]),
         ("stable_diffusion_cpp-cuda", []),
         ("stable_diffusion_cpp-rocm", []),
         ("stable_diffusion_cpp-vulkan", []),

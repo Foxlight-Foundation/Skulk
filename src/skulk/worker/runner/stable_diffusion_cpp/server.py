@@ -148,7 +148,10 @@ class NativeImageServer:
                     "--backend",
                     observed.devices[0],
                     "--params-backend",
-                    "cpu",
+                    # Unified memory gains no capacity from duplicate CPU/GPU
+                    # parameter copies. GPU residency kept the tested 16 GiB
+                    # Metal default workflow below warning pressure.
+                    observed.devices[0] if compute == "metal" else "cpu",
                     "--listen-ip",
                     "127.0.0.1",
                     "--listen-port",

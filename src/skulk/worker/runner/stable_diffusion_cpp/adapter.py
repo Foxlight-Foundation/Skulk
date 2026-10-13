@@ -100,7 +100,7 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
     if backend == "stable_diffusion_cpp-metal" and profile.family == "sdxl":
         # The pinned Metal build produced white output with batched guidance;
         # separate conditional/unconditional forwards restored the reference.
-        arguments.extend(("--batched-cfg", "off", "--fa"))
+        arguments.extend(("--batched-cfg", "off", "--fa", "--vae-tiling", "--vae-tile-size", "512", "--vae-tile-overlap", "0.25"))
     return arguments
 
 
