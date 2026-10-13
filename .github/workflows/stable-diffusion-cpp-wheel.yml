@@ -3,6 +3,13 @@ name: stable-diffusion-cpp-wheel
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["initiative/**", dev]
+    paths:
+      - ".github/workflows/stable-diffusion-cpp-wheel.yml"
+      - "packaging/skulk-stable-diffusion-cpp/**"
+      - "scripts/build_stable_diffusion_cpp_wheel.py"
+      - "scripts/bundle_stable_diffusion_cpp_rocm.py"
 
 permissions:
   contents: read
@@ -22,7 +29,25 @@ jobs:
           - runner: ubuntu-22.04
             variant: vulkan
             tag: manylinux_2_35_x86_64
+            image: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+            gpu_targets: ""
+          - runner: ubuntu-22.04
+            variant: cuda
+            tag: manylinux_2_35_x86_64
+            image: nvidia/cuda@sha256:bd4e2680a261c212f1e2fea241606f71497dc67a417f73175d794ec8212b5ba8
+            gpu_targets: "80-real;86-real;89-real;90-virtual"
+          - runner: ubuntu-22.04-arm
+            variant: cuda
+            tag: manylinux_2_35_aarch64
+            image: nvidia/cuda@sha256:1c517d4fb96528c8999e14e6e6b16d7e2ff9ae8d194fd788d60fdc88e693e982
+            gpu_targets: "121a-real"
+          - runner: ubuntu-22.04
+            variant: rocm
+            tag: manylinux_2_35_x86_64
+            image: rocm/dev-ubuntu-22.04@sha256:e3909c89d9434e2816568f727e89bf6a00d6d9d746defc6b9957dbeb16d1ac31
+            gpu_targets: gfx942
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     permissions:
       contents: read
       id-token: write
@@ -30,48 +55,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - name: Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential ninja-build libvulkan-dev xz-utils patchelf
-          curl --fail --location --retry 3 https://sdk.lunarg.com/sdk/download/1.4.350.0/linux/vulkansdk-linux-x86_64-1.4.350.0.tar.xz -o vulkan-sdk.tar.xz
-          echo 'b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2  vulkan-sdk.tar.xz' | sha256sum --check --strict
-          tar -xf vulkan-sdk.tar.xz
-          echo "VULKAN_SDK=$GITHUB_WORKSPACE/1.4.350.0/x86_64" >> "$GITHUB_ENV"
-          echo "$GITHUB_WORKSPACE/1.4.350.0/x86_64/bin" >> "$GITHUB_PATH"
       - name: Fetch immutable source and carry recorded lifecycle patch
         run: |
           git clone --no-checkout https://github.com/leejet/stable-diffusion.cpp.git native-source
           git -C native-source checkout "$SDCPP_REF"
           git -C native-source submodule update --init --recursive
           git -C native-source apply ../packaging/skulk-stable-diffusion-cpp/server-lifecycle.patch
-      - name: Configure portable GPU server
+      - name: Build and assemble portable Linux candidate
+        if: runner.os == 'Linux'
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PLATFORM_TAG: ${{ matrix.tag }}
+          BUILD_IMAGE: ${{ matrix.image }}
+          GPU_TARGETS: ${{ matrix.gpu_targets }}
+        run: |
+          # Hosted images include unrelated SDKs; reclaim disposable runner disk
+          # before pulling the pinned CUDA/ROCm compiler image.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" "$BUILD_IMAGE" bash /work/packaging/skulk-stable-diffusion-cpp/build-linux.sh "$VARIANT" "$PLATFORM_TAG" "$GPU_TARGETS"
+      - name: Configure portable Metal server
+        if: runner.os == 'macOS'
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
           flags=(-DCMAKE_BUILD_TYPE=Release -DSD_BUILD_EXAMPLES=ON -DSD_SERVER_BUILD_FRONTEND=OFF -DSD_RPC=OFF -DSD_WEBM=OFF -DSD_WEBP=ON -DGGML_NATIVE=OFF -DGGML_STATIC=ON)
-          if [[ "$VARIANT" == metal ]]; then
-            flags+=(-DSD_METAL=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DGGML_CPU_ARM_ARCH=armv8.2-a+fp16)
-          else
-            flags+=(-DSD_VULKAN=ON)
-          fi
+          flags+=(-DSD_METAL=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DGGML_CPU_ARM_ARCH=armv8.2-a+fp16)
           uv tool run --from cmake cmake -S native-source -B native-build "${flags[@]}"
           uv tool run --from cmake cmake --build native-build --target sd-server --parallel 3
-      - name: Assemble unqualified immutable candidate
+      - name: Assemble unqualified immutable Metal candidate
+        if: runner.os == 'macOS'
         env:
           VARIANT: ${{ matrix.variant }}
           PLATFORM_TAG: ${{ matrix.tag }}
         run: |
-          runtime_flags=()
-          if [[ "$VARIANT" == vulkan ]]; then
-            mkdir native-runtime
-            cp -L /usr/lib/x86_64-linux-gnu/libvulkan.so.1 native-runtime/libvulkan.so.1
-            cp /usr/share/doc/libvulkan1/copyright native-runtime/VULKAN_LOADER_COPYRIGHT.txt
-            patchelf --set-rpath '$ORIGIN/../lib' native-build/bin/sd-server
-            runtime_flags=(--runtime native-runtime)
-          fi
-          uv run --no-project python scripts/build_stable_diffusion_cpp_wheel.py --source native-source --build native-build --output candidate-wheels --variant "$VARIANT" --platform-tag "$PLATFORM_TAG" "${runtime_flags[@]}"
+          uv run --no-project python scripts/build_stable_diffusion_cpp_wheel.py --source native-source --build native-build --output candidate-wheels --variant "$VARIANT" --platform-tag "$PLATFORM_TAG"
       - uses: actions/attest-build-provenance@v3
         with:
           subject-path: candidate-wheels/*.whl

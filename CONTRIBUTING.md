@@ -592,3 +592,11 @@ helper instructions in the descriptor and native build manifest; installable
 package discovery and binary probing require the host to support those flags.
 The wheel carries its Vulkan loader and copyright notice, while the GPU driver
 remains an operating-system dependency.
+
+The native image candidate build workflow covers Metal ARM64, CUDA ARM64/x86_64,
+Vulkan x86_64 and ROCm x86_64. Linux compiler images are digest-pinned; CUDA
+embeds runtime/BLAS with an external driver, Vulkan bundles its loader, and the
+ROCm candidate records runtime libraries plus gfx942 code objects. Builds retain
+component notices and nested payload hashes and remain unqualified until exact
+hardware/model, loader and lifecycle gates pass. See
+`packaging/skulk-stable-diffusion-cpp/README.md`.

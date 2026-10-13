@@ -74,11 +74,18 @@ def test_native_package_records_compiled_cpu_requirements(
         return patch if arguments == ("diff", "--", "examples/server") else b""
 
     monkeypatch.setattr(builder, "_git", git)
+    runtime = tmp_path / "runtime"
+    kernel = runtime / "rocblas/library/TensileLibrary_gfx942.dat"
+    kernel.parent.mkdir(parents=True)
+    kernel.write_bytes(b"immutable runtime kernel index")
     wheel = builder.assemble_wheel(
-        source, build, tmp_path / "output", "vulkan", "manylinux_2_35_x86_64"
+        source, build, tmp_path / "output", "vulkan", "manylinux_2_35_x86_64", runtime
     )
     descriptor = json.loads(wheel.with_suffix(".json").read_text())
     assert descriptor["required_cpu_features"] == ["avx2", "f16c"]
     with zipfile.ZipFile(wheel) as archive:
         manifest = json.loads(archive.read("skulk_stable_diffusion_cpp_vulkan/build.json"))
+        name = "skulk_stable_diffusion_cpp_vulkan/lib/rocblas/library/TensileLibrary_gfx942.dat"
+        assert archive.read(name) == kernel.read_bytes()
+        assert name in manifest["members"]
     assert manifest["required_cpu_features"] == descriptor["required_cpu_features"]

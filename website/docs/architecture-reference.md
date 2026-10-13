@@ -1769,3 +1769,11 @@ outputs and enable Flash Attention at the default 1024-square canvas.
 Native shutdown retains process ownership through a bounded 30-second graceful
 wait and 15-second forced reap. Its supervisor allows 50 seconds for this cleanup,
 including large BF16 GPU contexts; failed reaping remains a visible failure.
+
+The native image candidate build workflow covers Metal ARM64, CUDA ARM64/x86_64,
+Vulkan x86_64 and ROCm x86_64. Linux compiler images are digest-pinned; CUDA
+embeds runtime/BLAS with an external driver, Vulkan bundles its loader, and the
+ROCm candidate records runtime libraries plus gfx942 code objects. Builds retain
+component notices and nested payload hashes and remain unqualified until exact
+hardware/model, loader and lifecycle gates pass. See
+`packaging/skulk-stable-diffusion-cpp/README.md`.

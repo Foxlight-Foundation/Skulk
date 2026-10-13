@@ -21,3 +21,14 @@ Candidate descriptors are **unqualified**. They cannot enter the installable
 manifest until loader/device, generation, failure/lifecycle, memory, and fresh
 installation evidence has passed on the exact target hardware. Publication is
 append-only: never overwrite a published package or reuse a version with new bytes.
+
+The candidate workflow builds all five OS/CPU/backend targets. Linux compilation
+runs in digest-pinned Ubuntu 22.04 compiler images. CUDA x86 embeds SM 80/86/89
+and SM 90 PTX; ARM CUDA selects SM 121a with CUDA 13. Neither compiled target
+coverage nor a successful CI build establishes model support on another GPU.
+CUDA runtime/BLAS libraries are statically linked, while the NVIDIA driver stays
+external. Vulkan includes its loader, with the vendor driver external. ROCm
+candidate assembly includes resolved runtime libraries and the selected gfx942
+code objects; exact loader/model tests remain required before publication.
+Component license notices accompany the runtime files. Nested runtime data is
+included in the same immutable payload digest manifest as the executable.

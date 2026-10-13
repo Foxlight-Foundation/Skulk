@@ -125,9 +125,10 @@ def assemble_wheel(
     for name, path in licenses.items():
         payload[f"{module}/licenses/{name}"] = path.read_bytes()
     if runtime is not None:
-        for path in sorted(runtime.iterdir()):
+        for path in sorted(runtime.rglob("*")):
             if path.is_file():
-                payload[f"{module}/lib/{path.name}"] = path.read_bytes()
+                relative = path.relative_to(runtime).as_posix()
+                payload[f"{module}/lib/{relative}"] = path.read_bytes()
     provenance = {
         "source_revision": SOURCE_REVISION,
         "ggml_revision": GGML_REVISION,
@@ -146,7 +147,7 @@ def assemble_wheel(
     ).encode()
     payload[f"{distribution}/METADATA"] = (
         f"Metadata-Version: 2.4\nName: {module.replace('_', '-')}\nVersion: {VERSION}\n"
-        "Requires-Python: >=3.13\nLicense-Expression: MIT\n"
+        "Requires-Python: >=3.13\nLicense: See bundled component license notices\n"
         f"Summary: Pinned {variant} stable-diffusion.cpp image engine for Skulk\n\n"
     ).encode()
     payload[f"{distribution}/WHEEL"] = (
