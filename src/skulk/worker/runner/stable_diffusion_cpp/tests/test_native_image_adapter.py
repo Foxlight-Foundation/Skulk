@@ -164,7 +164,8 @@ def test_invalid_reference_is_refused_without_native_decoding() -> None:
     [
         ("stable_diffusion_cpp-vulkan", False, ["--fa"]),
         ("stable_diffusion_cpp-vulkan", True, ["--fa"]),
-        ("stable_diffusion_cpp-cuda", True, []),
+        ("stable_diffusion_cpp-cuda", False, ["--fa"]),
+        ("stable_diffusion_cpp-cuda", True, ["--fa"]),
         ("stable_diffusion_cpp-metal", True, []),
         ("stable_diffusion_cpp-rocm", True, []),
     ],

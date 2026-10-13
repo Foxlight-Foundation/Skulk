@@ -1735,7 +1735,7 @@ approval/lifecycle and allocated compute remain separate from these declarations
 
 Native image profiles use the single-host/single-GPU `stable_diffusion_cpp`
 runner, with verified component hashes and private native-job ownership.
-Qwen Image 2.1 and Turbo Vulkan loads enable Flash Attention to reduce memory
+Qwen Image 2.1 and Turbo CUDA/Vulkan loads enable Flash Attention to reduce memory
 pressure at the default 2048-square canvas.
 Native CUDA wheel assembly requires `GGML_CUDA_NCCL=OFF` for the single-GPU
 image contract and to avoid an unnecessary host-library dependency.

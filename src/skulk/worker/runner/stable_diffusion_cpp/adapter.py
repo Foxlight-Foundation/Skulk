@@ -32,7 +32,7 @@ _ROLE_FLAGS = {
 def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
     """Verify component identities and select loader flags for the placed backend.
 
-    Qwen Image 2.1 Vulkan instances enable Flash Attention to reduce attention
+    Qwen Image 2.1 CUDA/Vulkan instances enable Flash Attention to reduce attention
     memory at the model's default 2048-square canvas.
     """
     profile = card.image
@@ -74,9 +74,12 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
         arguments.extend(
             (_ROLE_FLAGS[component.role], str(root / component.entry_file))
         )
-    # Full attention caused unsafe memory pressure during the Halo canvas smoke;
-    # the same pinned build completed that canvas with Flash Attention enabled.
-    if backend == "stable_diffusion_cpp-vulkan" and profile.family in (
+    # Full attention pressured Halo host memory and exceeded 24GB CUDA VRAM at
+    # the default canvas; the pinned builds completed with Flash Attention.
+    if backend in (
+        "stable_diffusion_cpp-vulkan",
+        "stable_diffusion_cpp-cuda",
+    ) and profile.family in (
         "qwen_image_21",
         "qwen_image_21_turbo",
     ):

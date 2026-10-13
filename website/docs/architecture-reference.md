@@ -1757,7 +1757,7 @@ native jobs. The native watchdog exits on owner death. `SKULK_STABLE_DIFFUSION_C
 selects a preprepared binary; package preparation obeys offline mode and
 `SKULK_NO_ENGINE_AUTOPROVISION`. Ordered reference edits use slot-indexed
 `VISION_MEDIA` frames and worker-local media, never replicated input bytes.
-Qwen Image 2.1 and Turbo Vulkan instances enable Flash Attention at load time
+Qwen Image 2.1 and Turbo CUDA/Vulkan instances enable Flash Attention at load time
 to reduce attention memory pressure at the default 2048-square canvas.
 Native shutdown retains process ownership through a bounded 30-second graceful
 wait and 15-second forced reap. Its supervisor allows 50 seconds for this cleanup,
