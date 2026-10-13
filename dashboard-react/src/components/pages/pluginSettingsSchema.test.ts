@@ -104,8 +104,8 @@ describe('field hints', () => {
     expect(fieldLabel('spending_limit_usd', undefined, 'usd')).toBe('Spending limit');
     expect(fieldLabel('idle_minutes', 'Idle Minutes', 'minutes')).toBe('Idle');
     expect(fieldLabel('rental_lifetime_hours', undefined, 'hours')).toBe('Rental lifetime');
-    // Without the hint the unit word still reads as a qualifier.
-    expect(humanizeKey('spending_limit_usd')).toBe('Spending limit (US dollars)');
+    // Without the hint a key reads exactly as it did before hints existed.
+    expect(humanizeKey('spending_limit_usd')).toBe('Spending limit usd');
     expect(humanizeKey('idle_minutes')).toBe('Idle (minutes)');
     // An author's own title is kept as written.
     expect(fieldLabel('spending_limit_usd', 'Spend no more than', 'usd')).toBe('Spend no more than');

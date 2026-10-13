@@ -132,8 +132,7 @@ export function formatUsdAmount(value: number): string {
 // Short words a mechanical title would write as "Api" or "Url".
 const ACRONYMS = new Set(['api', 'url', 'urls', 'id', 'ids', 'uri', 'http', 'https', 'ui', 'gpu', 'cpu', 'ip', 'tls', 'json', 'llm', 'tts', 'stt', 'vram', 'ram']);
 // A trailing unit reads as a qualifier: "Render timeout (seconds)".
-const UNITS = new Map([['seconds', 'seconds'], ['minutes', 'minutes'], ['hours', 'hours'], ['days', 'days'], ['bytes', 'bytes'],
-  ['megabytes', 'megabytes'], ['gigabytes', 'gigabytes'], ['percent', 'percent'], ['usd', 'US dollars']]);
+const UNITS = new Set(['seconds', 'minutes', 'hours', 'days', 'bytes', 'megabytes', 'gigabytes', 'percent']);
 // The key words a declared unit already says beside the control, so the label leaves them out.
 const UNIT_KEY_WORDS: Record<SettingsUnit, readonly string[]> = { usd: ['usd', 'dollars'], minutes: ['minutes'], hours: ['hours'] };
 
@@ -147,14 +146,14 @@ function mechanicalTitle(key: string): string {
  *
  * With a declared `unit`, a trailing word naming that same unit is left
  * out, since the control shows the unit itself: `spending_limit_usd` with
- * unit `usd` becomes `Spending limit`, not `Spending limit (US dollars)` beside a "$".
+ * unit `usd` becomes `Spending limit` beside its "$". Without the hint a key
+ * reads exactly as it always has.
  */
 export function humanizeKey(key: string, unit: SettingsUnit | null = null): string {
   const words = key.split(/[_\s-]+/).filter(Boolean).map((word) => word.toLowerCase());
   if (words.length === 0) return key;
   if (unit && words.length > 1 && UNIT_KEY_WORDS[unit].includes(words[words.length - 1])) words.pop();
-  const qualifier = words.length > 1 ? UNITS.get(words[words.length - 1]) : undefined;
-  if (qualifier) words.pop();
+  const qualifier = words.length > 1 && UNITS.has(words[words.length - 1]) ? words.pop() : undefined;
   const text = words.map((word, index) => ACRONYMS.has(word) ? word.toUpperCase() : index === 0 ? word[0].toUpperCase() + word.slice(1) : word).join(' ');
   return qualifier ? `${text} (${qualifier})` : text;
 }

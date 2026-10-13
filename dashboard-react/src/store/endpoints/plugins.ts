@@ -326,15 +326,15 @@ const GENERIC_PLUGIN_REFUSAL = 'configuration refused; reload settings and valid
  * A refusal reason ready to show as its own sentence after "It was not turned on."
  *
  * A plugin may refuse with its own plain next step ("Add your RunPod API
- * key under Credentials."), which is shown as written, with a closing full
- * stop added when it has none. Core's generic refusal sentence returns null,
- * as does a missing reason, so the caller shows its own translated guidance.
+ * key under Credentials."), which is shown as written, casing included (a
+ * step may begin with a name such as "npm"), with a closing full stop added
+ * when it has none. Core's generic refusal sentence returns null, as does a
+ * missing reason, so the caller shows its own translated guidance.
  */
 export function refusalSentence(detail: string | null | undefined): string | null {
   const text = detail?.trim();
   if (!text || text === GENERIC_PLUGIN_REFUSAL) return null;
-  const sentence = text[0].toUpperCase() + text.slice(1);
-  return /[.!?…]$/.test(sentence) ? sentence : `${sentence}.`;
+  return /[.!?…]$/.test(text) ? text : `${text}.`;
 }
 
 /**

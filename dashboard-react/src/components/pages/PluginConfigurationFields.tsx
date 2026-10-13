@@ -108,8 +108,10 @@ export function PluginConfigurationFields({ schema, rootSchema = schema, values,
   // A required advanced field with no value must never hide behind a closed
   // section: reloaded settings, a changed schema or a cleared value can all
   // leave one empty, and the browser cannot point at a hidden invalid input.
+  // A cleared text input holds an empty string, which counts as no value.
   const advancedNeedsValue = advanced.some(({ name, schema: field }) =>
-    required.includes(name) && (values[name] === undefined || values[name] === null) && (field.default === undefined || field.default === null));
+    required.includes(name) && (values[name] === undefined || values[name] === null || values[name] === '')
+    && (field.default === undefined || field.default === null));
   const unitText = (unit: SettingsUnit) => ({
     usd: t('plugins.unit.usd', '$'),
     minutes: t('plugins.unit.minutes', 'minutes'),
@@ -196,8 +198,10 @@ export function PluginConfigurationFields({ schema, rootSchema = schema, values,
     {advanced.length > 0 ? <Advanced open={advancedOpen || advancedNeedsValue} onToggle={(event) => {
       const section = event.currentTarget;
       // React leaves an unchanged `open` prop alone, so closing the section
-      // while a required field is empty is undone here rather than by a render.
-      if (advancedNeedsValue && !section.open) section.open = true;
+      // while it holds a missing or otherwise invalid control (a cleared
+      // required value, one inside a nested group, a value out of bounds) is
+      // undone here rather than by a render.
+      if (!section.open && (advancedNeedsValue || section.querySelector(':invalid') !== null)) section.open = true;
       else setAdvancedOpen(section.open);
     }}>
       <summary>{t('plugins.advanced', 'Advanced')}</summary>

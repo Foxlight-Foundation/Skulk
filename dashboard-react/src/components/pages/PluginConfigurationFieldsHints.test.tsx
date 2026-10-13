@@ -93,6 +93,37 @@ it('reopens the section, and keeps it open, while a required advanced field is e
   await act(async () => { await vi.waitFor(() => expect(advancedSection()!.open).toBe(true)); });
 });
 
+it('keeps the section open for a cleared required text field and an invalid nested one', async () => {
+  const schema = {
+    type: 'object',
+    required: ['account', 'tunnel'],
+    properties: {
+      account: { type: 'string', title: 'Account', 'x-skulk-advanced': true },
+      tunnel: {
+        type: 'object', title: 'Tunnel', 'x-skulk-advanced': true, required: ['host'],
+        properties: { host: { type: 'string', title: 'Tunnel host' } },
+      },
+    },
+  };
+  await render(schema, { account: 'owner', tunnel: { host: 'cleanup' } });
+  expect(advancedSection()!.open).toBe(false);
+  await act(async () => { advancedSection()!.querySelector('summary')!.click(); });
+  // A cleared text input holds an empty string; it still counts as missing.
+  await type(input('Account'), '');
+  expect(changes.at(-1)).toEqual({ account: '', tunnel: { host: 'cleanup' } });
+  await act(async () => { advancedSection()!.querySelector('summary')!.click(); });
+  await act(async () => { await vi.waitFor(() => expect(advancedSection()!.open).toBe(true)); });
+  // A required field inside a nested group is invalid though its parent object is present.
+  await type(input('Account'), 'owner');
+  await type(input('Tunnel host'), '');
+  await act(async () => { advancedSection()!.querySelector('summary')!.click(); });
+  await act(async () => { await vi.waitFor(() => expect(advancedSection()!.open).toBe(true)); });
+  // Once nothing is invalid, the section closes as asked.
+  await type(input('Tunnel host'), 'cleanup');
+  await act(async () => { advancedSection()!.querySelector('summary')!.click(); });
+  await act(async () => { await vi.waitFor(() => expect(advancedSection()!.open).toBe(false)); });
+});
+
 it('steps dollars by the cent unless a stored amount is finer', async () => {
   await render(hintedSchema, { spending_limit_usd: 1.005, authority_port: 4100 });
   const limit = input('Spending limit');
