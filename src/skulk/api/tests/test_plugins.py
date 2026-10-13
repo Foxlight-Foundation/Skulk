@@ -14,6 +14,7 @@ from skulk.extensions import (
     ConfigurationMutation,
     ConfigurationResult,
     LoadedExtensions,
+    ManagedRefusalError,
     NodeConfiguration,
 )
 from skulk.operator.pairing import PluginGrantUpdate
@@ -38,6 +39,8 @@ class ManagedExtension:
         )
         self.fail = False
         self.calls = 0
+        # The plugin's own next step when turning the node on is refused.
+        self.enable_refusal: str | None = None
 
     def chat_middleware(self) -> None:
         """Management does not participate in inference hooks."""
@@ -73,6 +76,8 @@ class ManagedExtension:
             or prior.schema_digest != mutation.expected_schema_digest
         ):
             raise ValueError("sensitive provider exception")
+        if mutation.operation == "enable" and self.enable_refusal is not None:
+            raise ManagedRefusalError(self.enable_refusal)
         self.calls += 1
         if mutation.operation == "edit":
             self.settings = prior.model_copy(
@@ -133,6 +138,38 @@ async def test_configuration_requires_explicit_scope_and_revision(
         body["operation"] = "approve"
         assert (await client.post(path, json=body, headers=bearer)).status_code == 422
         assert extension.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refused_turn_on_shows_the_plugins_own_next_step() -> None:
+    """A plugin's refusal message replaces the generic sentence; others keep it."""
+    extension = ManagedExtension()
+    app = FastAPI()
+    app.include_router(create_plugins_router(LoadedExtensions([extension]), None))
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
+    path = "/v1/plugins/configurable/nodes/stable-node/configuration"
+    body: dict[str, JsonValue] = {
+        "operation": "enable",
+        "expectedRevision": 0,
+        "expectedSchemaDigest": "a" * 64,
+    }
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://localhost"
+    ) as client:
+        extension.enable_refusal = "Add your RunPod API key under Credentials."
+        refused = await client.post(path, json=body, headers=_HEADERS)
+        assert refused.status_code == 409
+        assert refused.json() == {
+            "detail": "Add your RunPod API key under Credentials."
+        }
+        stale = await client.post(
+            path, json=body | {"expectedRevision": 7}, headers=_HEADERS
+        )
+        assert stale.status_code == 409
+        assert stale.json() == {
+            "detail": "configuration refused; reload settings and validation"
+        }
+        assert extension.calls == 0
 
 
 @pytest.mark.asyncio

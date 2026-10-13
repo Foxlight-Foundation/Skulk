@@ -123,7 +123,8 @@ it('shows the host\'s reason when it still does not start', async () => {
   await check();
   await contains('All 6 checks passed.');
   await act(async () => { button('Start it again')!.click(); });
-  await contains('It did not start. The host said: node preflight failed');
+  await contains('It did not start. Node preflight failed.');
+  expect(host.textContent).not.toContain('The host said');
 });
 
 it('leaves a node that is turned off by the time it is started again off', async () => {

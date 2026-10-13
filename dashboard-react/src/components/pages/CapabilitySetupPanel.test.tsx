@@ -25,6 +25,7 @@ let summaries: CapabilityNodeSummary[];
 let hostNode: string;
 let preflightAvailable: boolean;
 let enableStatus: number;
+let enableRefusal: string;
 let posts: { path: string; body: Record<string, unknown> }[];
 // The node's own configuration, which a status report can lag.
 let configEnabled: boolean;
@@ -52,6 +53,7 @@ beforeEach(async () => {
   hostNode = 'host-node';
   preflightAvailable = true;
   enableStatus = 200;
+  enableRefusal = 'configuration refused; reload settings and validation';
   configEnabled = false;
   afterEnable = () => { summaries = [summary({ status: 'starting', surfaces: [] })]; };
   enableReplyMs = 0;
@@ -63,7 +65,7 @@ beforeEach(async () => {
       if (request.method === 'GET') return json({ nodeId: 'studio', revision: 2, schemaDigest: 'a'.repeat(64), configurationSchema: { type: 'object', properties: { tags: { type: 'array' } } }, values: {}, enabled: configEnabled });
       const body = await request.json() as Record<string, unknown>;
       posts.push({ path, body });
-      if (enableStatus !== 200) return json({ detail: 'configuration refused; reload settings and validation' }, enableStatus);
+      if (enableStatus !== 200) return json({ detail: enableRefusal }, enableStatus);
       configEnabled = true;
       afterEnable();
       if (enableReplyMs > 0) await new Promise((resolve) => setTimeout(resolve, enableReplyMs));
@@ -187,12 +189,26 @@ it('stays on Turn on with the host\'s reason and its checks when turning on is r
   await render(onManage);
   await act(async () => { await vi.waitFor(() => expect(button('Turn on')).not.toBeNull(), { timeout: 5000 }); });
   await act(async () => { button('Turn on')!.click(); });
-  await contains('It was not turned on. The host said: configuration refused; reload settings and validation');
+  // Core's generic refusal is not shown; the page points at what shows the cause.
+  await contains('It was not turned on. The host refused the change (HTTP 409). Its setup checks below show what is missing.');
+  expect(host.textContent).not.toContain('configuration refused');
   // Its own checks run at once and say what is missing.
   await contains('Place a model on a node that can serve it.');
   expect(button('Turn on')).not.toBeNull();
   await act(async () => { button('Open settings')!.click(); });
   expect(onManage).toHaveBeenCalledWith(pluginId, 'studio');
+});
+
+it('shows the plugin\'s own next step when it refuses to turn on', async () => {
+  summaries = [summary({ status: 'disabled', surfaces: [] })];
+  enableStatus = 409;
+  enableRefusal = 'Add your RunPod API key under Credentials';
+  await render();
+  await act(async () => { await vi.waitFor(() => expect(button('Turn on')).not.toBeNull(), { timeout: 5000 }); });
+  await act(async () => { button('Turn on')!.click(); });
+  await contains('It was not turned on. Add your RunPod API key under Credentials.');
+  expect(host.textContent).not.toContain('The host said');
+  expect(host.textContent).not.toContain('HTTP 409');
 });
 
 it('waits for a plugin the host has not reported, and shows a starting one as waiting', async () => {

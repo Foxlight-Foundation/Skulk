@@ -11,7 +11,7 @@ from skulk.api.burst import create_burst_router
 from skulk.api.operator_gateway import OperatorGatewayAuthorization
 from skulk.api.tests.test_operator_gateway import paired_service
 from skulk.api.tests.test_plugins import ManagedExtension
-from skulk.extensions import LoadedExtensions
+from skulk.extensions import LoadedExtensions, ManagedRefusalError
 from skulk.extensions.burst import (
     BurstJob,
     BurstNodeOffer,
@@ -72,6 +72,7 @@ class Provider(ManagedExtension):
         self.state: Literal["available", "configuration_required"] = "available"
         self.offers: list[tuple[str, str, int]] = []
         self.refuse = False
+        self.next_step: str | None = None
         self.review_state: Literal["pending_approval", "expired"] = "pending_approval"
         self.approvable = True
         self.actors: list[str] = []
@@ -109,7 +110,9 @@ class Provider(ManagedExtension):
         context_tokens: int,
         excluded_node_ids: tuple[str, ...] = (),
     ) -> BurstNodeOffer:
-        """Retain one inert offer, or refuse without saying why to this host."""
+        """Retain one inert offer, or refuse, saying why only through a refusal."""
+        if self.next_step is not None:
+            raise ManagedRefusalError(self.next_step)
         if self.refuse:
             raise ValueError("sensitive provider refusal")
         self.offers.append((node_id, model_id, context_tokens))
@@ -329,6 +332,15 @@ async def test_a_provider_refusal_reveals_nothing_of_its_own() -> None:
         response = await http.post("/v1/burst/recommendations", json=REQUEST)
     assert response.status_code == 409
     assert "sensitive" not in response.text and "try again" in response.text
+
+
+async def test_a_provider_refusal_shows_the_next_step_it_names() -> None:
+    provider = Provider()
+    provider.next_step = "Add your RunPod API key under Credentials."
+    async with client(provider) as http:
+        response = await http.post("/v1/burst/recommendations", json=REQUEST)
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Add your RunPod API key under Credentials."}
 
 
 def test_burst_routes_take_the_plugin_scopes() -> None:

@@ -42,6 +42,7 @@ from skulk.extensions.proposal_review import (
     ProposalReference,
     ProposalReview,
 )
+from skulk.extensions.refusals import refusal_detail
 from skulk.extensions.setup import NodeSetup, NodeSetupProvider
 from skulk.extensions.setup_actions import (
     NodeSetupActionsProvider,
@@ -139,7 +140,9 @@ def create_plugins_router(
         try:
             capacity.acquire_nowait()
         except anyio.WouldBlock:
-            raise HTTPException(status_code=429, detail="plugin management busy") from None
+            raise HTTPException(
+                status_code=429, detail="plugin management busy"
+            ) from None
         try:
             async with asyncio.timeout(2):
                 return await host_network()
@@ -166,10 +169,13 @@ def create_plugins_router(
             raise HTTPException(
                 status_code=404, detail="installed node not found"
             ) from None
-        except ValueError:
+        except ValueError as refused:
+            # A plugin's own next step reads better than this generic sentence.
             raise HTTPException(
                 status_code=409,
-                detail="configuration refused; reload settings and validation",
+                detail=refusal_detail(
+                    refused, "configuration refused; reload settings and validation"
+                ),
             ) from None
         except TimeoutError:
             raise HTTPException(

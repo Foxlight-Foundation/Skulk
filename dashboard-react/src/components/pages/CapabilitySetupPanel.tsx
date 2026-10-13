@@ -4,7 +4,7 @@ import { FiAlertCircle, FiCheckCircle, FiClock, FiExternalLink, FiPower, FiXCirc
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { useClusterState } from '../../hooks/useClusterState';
 import {
-  pluginRefusalDetail, pluginRequestRefused, useConfigurePluginNodeMutation, useGetPluginNodesQuery, useLazyGetNodeConfigurationQuery, useNodesEnabled,
+  pluginRefusalDetail, pluginRequestRefused, refusalSentence, useConfigurePluginNodeMutation, useGetPluginNodesQuery, useLazyGetNodeConfigurationQuery, useNodesEnabled,
 } from '../../store/endpoints/plugins';
 import { capabilityNodeKey, capabilityNodeTitle, type CapabilityNodeStatus, type CapabilityNodeSummary, type CapabilityNodeSurface } from '../../types/capabilityNodes';
 import { Button } from '../common/Button';
@@ -194,9 +194,11 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
     </Items>
     {refusal && decided ? <Problem role="alert">
       <strong>{t('plugins.setup.turnOnRefused', 'It was not turned on.')}</strong>{' '}
-      {refusal.detail ? t('plugins.setup.hostSaid', 'The host said: {reason}', { reason: refusal.detail })
-        : t('plugins.setup.turnOnRefusedStatus', 'The host refused the change (HTTP {status}).', { status: refusal.status ?? '' })}
-      {' '}{withChecks.has(refusal.nodeId) ? t('plugins.setup.refusedChecks', 'Its setup checks below show what is missing.') : t('plugins.setup.refusedSettings', 'Its settings show what is missing.')}
+      {/* A plugin's own next step stands alone; without one, point at what shows the cause. */}
+      {refusalSentence(refusal.detail) ?? <>
+        {t('plugins.setup.turnOnRefusedStatus', 'The host refused the change (HTTP {status}).', { status: refusal.status ?? '' })}
+        {' '}{withChecks.has(refusal.nodeId) ? t('plugins.setup.refusedChecks', 'Its setup checks below show what is missing.') : t('plugins.setup.refusedSettings', 'Its settings show what is missing.')}
+      </>}
     </Problem> : null}
     {refusal && !decided ? <Problem role="alert">
       {t('plugins.setup.turnOnUnconfirmed', 'The host did not confirm turning it on. This page shows its status as soon as it reports again; Turn on checks first and never repeats a change that landed.')}

@@ -34,6 +34,7 @@ from skulk.extensions.proposal_actions import (
     ProposalOperationId,
 )
 from skulk.extensions.proposal_review import NodeProposalReviewProvider
+from skulk.extensions.refusals import refusal_detail
 from skulk.operator.pairing import OperatorPairingService
 from skulk.shared.models.inference_assessment import InferenceAssessment
 
@@ -160,14 +161,16 @@ def create_burst_router(
             raise HTTPException(
                 status_code=404, detail="burst provider not found"
             ) from None
-        except ValueError:
-            # The provider's own refusal carries no text to this host. Its
-            # single-flight guard is the usual cause, so say how to recover.
+        except ValueError as refused:
+            # The provider's own next step is shown when it names one. Without
+            # one, its single-flight guard is the usual cause, so say how to
+            # recover.
             raise HTTPException(
                 status_code=409,
-                detail=(
+                detail=refusal_detail(
+                    refused,
                     "the burst provider refused this request; it may be busy with "
-                    "another one, so try again"
+                    "another one, so try again",
                 ),
             ) from None
         except TimeoutError:

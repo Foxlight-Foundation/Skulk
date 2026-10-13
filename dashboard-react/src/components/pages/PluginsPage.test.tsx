@@ -26,7 +26,8 @@ let clusterState: Record<string, unknown>;
 let installations: ManagedRuntime[];
 let installOperation: RuntimeInstallation | null;
 let recovers: { path: string; body: unknown }[];
-let refuseEnable: boolean;
+// True refuses with core's generic sentence; a string is the plugin's own next step.
+let refuseEnable: boolean | string;
 // When set, configuration reads wait for it: the refetch after a change is still in flight.
 let heldReads: Promise<void> | null;
 
@@ -116,7 +117,7 @@ beforeEach(async () => {
     const mutation = await request.json() as Record<string, unknown>;
     mutations.push(mutation);
     if (mutation.expectedRevision !== configuration.revision) return response({}, 409);
-    if (mutation.operation === 'enable' && refuseEnable) return response({ detail: 'configuration refused; reload settings and validation' }, 409);
+    if (mutation.operation === 'enable' && refuseEnable) return response({ detail: refuseEnable === true ? 'configuration refused; reload settings and validation' : refuseEnable }, 409);
     if (mutation.operation !== 'validate') {
       configuration = { ...configuration, revision: configuration.revision + 1, values: mutation.values as Record<string, unknown> ?? configuration.values,
         enabled: mutation.operation === 'enable' ? true : mutation.operation === 'disable' ? false : configuration.enabled };
@@ -285,10 +286,20 @@ it('edits the optional settings a studio declares and saves an emptied one as nu
   expect(mutations[0]).toEqual({ operation: 'edit', values: { default_model: null }, expectedRevision: 0, expectedSchemaDigest: 'a'.repeat(64) });
 });
 
-it('shows the host\'s reason when it refuses to turn a node on', async () => {
+it('gives its own guidance, not core\'s generic sentence, when turning a node on is refused', async () => {
   refuseEnable = true;
   await ready();
   await click('Turn on');
-  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('It was not turned on. The host said: configuration refused; reload settings and validation')); });
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('It was not turned on. Check your access, then reload if another operator changed this node. Setup checks show what is missing.')); });
+  expect(host.textContent).not.toContain('configuration refused');
+  expect(button('Turn on').disabled).toBe(false);
+});
+
+it('shows the plugin\'s own next step when it refuses to turn a node on', async () => {
+  refuseEnable = 'Add your RunPod API key under Credentials.';
+  await ready();
+  await click('Turn on');
+  await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('It was not turned on. Add your RunPod API key under Credentials.')); });
+  expect(host.textContent).not.toContain('The host said');
   expect(button('Turn on').disabled).toBe(false);
 });

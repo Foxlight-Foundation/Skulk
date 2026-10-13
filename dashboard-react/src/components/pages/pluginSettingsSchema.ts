@@ -89,31 +89,74 @@ export function supportedConfigurationSchema(schema: Record<string, unknown>, ro
   return SCALAR_KINDS.includes(String(type));
 }
 
+/**
+ * The units a plugin may declare for a number setting with `x-skulk-unit`.
+ *
+ * The stored value is already in that unit; the form only shows it ("$"
+ * before a dollar amount, "minutes" or "hours" after a duration) and never
+ * converts. A person never sees millionths of a dollar or seconds this way.
+ */
+export type SettingsUnit = 'usd' | 'minutes' | 'hours';
+
+const SETTINGS_UNITS: readonly SettingsUnit[] = ['usd', 'minutes', 'hours'];
+
+/** The unit a number field declares with `x-skulk-unit`, or null for none or one this dashboard does not know. */
+export function settingsUnit(schema: Record<string, unknown>): SettingsUnit | null {
+  const kind = schemaKind(schema);
+  if (kind !== 'number' && kind !== 'integer') return null;
+  return SETTINGS_UNITS.find((unit) => unit === schema['x-skulk-unit']) ?? null;
+}
+
+/** Whether a field asks, with `"x-skulk-advanced": true`, to sit in the collapsed Advanced section. */
+export function isAdvancedField(schema: Record<string, unknown>): boolean {
+  return schema['x-skulk-advanced'] === true;
+}
+
+/**
+ * A dollar amount as a person reads it: two decimals ("10.00", "0.50"), or
+ * every decimal it has when it is finer than a cent, so nothing is hidden.
+ */
+export function formatUsdAmount(value: number): string {
+  return Number.isInteger(Math.round(value * 1e6) / 1e4) ? value.toFixed(2) : String(value);
+}
+
 // Short words a mechanical title would write as "Api" or "Url".
 const ACRONYMS = new Set(['api', 'url', 'urls', 'id', 'ids', 'uri', 'http', 'https', 'ui', 'gpu', 'cpu', 'ip', 'tls', 'json', 'llm', 'tts', 'stt', 'vram', 'ram']);
 // A trailing unit reads as a qualifier: "Render timeout (seconds)".
-const UNITS = new Set(['seconds', 'minutes', 'hours', 'days', 'bytes', 'megabytes', 'gigabytes', 'percent']);
+const UNITS = new Map([['seconds', 'seconds'], ['minutes', 'minutes'], ['hours', 'hours'], ['days', 'days'], ['bytes', 'bytes'],
+  ['megabytes', 'megabytes'], ['gigabytes', 'gigabytes'], ['percent', 'percent'], ['usd', 'US dollars']]);
+// The key words a declared unit already says beside the control, so the label leaves them out.
+const UNIT_KEY_WORDS: Record<SettingsUnit, readonly string[]> = { usd: ['usd', 'dollars'], minutes: ['minutes'], hours: ['hours'] };
 
 /** What Python's `str.title()` makes of a key, as pydantic does when it names a field: `skulk_api_url` becomes `Skulk Api Url`. */
 function mechanicalTitle(key: string): string {
   return key.replace(/[A-Za-z]+/g, (word) => word[0].toUpperCase() + word.slice(1).toLowerCase()).replaceAll('_', ' ');
 }
 
-/** A key in plain words: `skulk_api_url` becomes `Skulk API URL`, `render_timeout_seconds` becomes `Render timeout (seconds)`. */
-export function humanizeKey(key: string): string {
+/**
+ * A key in plain words: `skulk_api_url` becomes `Skulk API URL`, `render_timeout_seconds` becomes `Render timeout (seconds)`.
+ *
+ * With a declared `unit`, a trailing word naming that same unit is left
+ * out, since the control shows the unit itself: `spending_limit_usd` with
+ * unit `usd` becomes `Spending limit`, not `Spending limit (US dollars)` beside a "$".
+ */
+export function humanizeKey(key: string, unit: SettingsUnit | null = null): string {
   const words = key.split(/[_\s-]+/).filter(Boolean).map((word) => word.toLowerCase());
   if (words.length === 0) return key;
-  const unit = words.length > 1 && UNITS.has(words[words.length - 1]) ? words.pop() : null;
+  if (unit && words.length > 1 && UNIT_KEY_WORDS[unit].includes(words[words.length - 1])) words.pop();
+  const qualifier = words.length > 1 ? UNITS.get(words[words.length - 1]) : undefined;
+  if (qualifier) words.pop();
   const text = words.map((word, index) => ACRONYMS.has(word) ? word.toUpperCase() : index === 0 ? word[0].toUpperCase() + word.slice(1) : word).join(' ');
-  return unit ? `${text} (${unit})` : text;
+  return qualifier ? `${text} (${qualifier})` : text;
 }
 
 /**
  * The label for one settings field: the author's title when it wrote one,
  * otherwise the key in plain words. A title that is only the generated
- * title-casing of the key counts as no title.
+ * title-casing of the key counts as no title. `unit` is the field's
+ * declared unit, which a label made from the key does not repeat.
  */
-export function fieldLabel(key: string, title: unknown): string {
+export function fieldLabel(key: string, title: unknown, unit: SettingsUnit | null = null): string {
   if (typeof title === 'string' && title.trim() && title !== mechanicalTitle(key)) return title.trim();
-  return humanizeKey(key);
+  return humanizeKey(key, unit);
 }
