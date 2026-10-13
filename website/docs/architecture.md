@@ -2923,6 +2923,8 @@ Qwen Image 2.1 and Turbo CUDA/Vulkan instances enable Flash Attention at load ti
 to reduce attention memory pressure at the default 2048-square canvas. ROCm
 instances also enable it to avoid observed native kernel-launch failures at
 that canvas.
+SDXL Metal loads disable batched classifier-free guidance to avoid blank
+outputs and enable Flash Attention at the default 1024-square canvas.
 Native shutdown retains process ownership through a bounded 30-second graceful
 wait and 15-second forced reap. Its supervisor allows 50 seconds for this cleanup,
 including large BF16 GPU contexts; failed reaping remains a visible failure.

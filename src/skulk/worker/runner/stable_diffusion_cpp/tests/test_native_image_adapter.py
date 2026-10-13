@@ -195,6 +195,54 @@ def test_component_verification_checks_every_digest(
         adapter.native_component_arguments(card, backend=backend)
 
 
+@pytest.mark.parametrize(
+    ("backend", "runtime_flags"),
+    [
+        ("stable_diffusion_cpp-metal", ["--batched-cfg", "off", "--fa"]),
+        ("stable_diffusion_cpp-cuda", []),
+        ("stable_diffusion_cpp-rocm", []),
+        ("stable_diffusion_cpp-vulkan", []),
+    ],
+)
+def test_sdxl_guidance_workaround_is_limited_to_metal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    runtime_flags: list[str],
+) -> None:
+    component = ImageComponent(
+        role="model",
+        repository="owner/model",
+        revision="a" * 40,
+        entry_file="checkpoint.safetensors",
+        files=(
+            ImageComponentFile(
+                path="checkpoint.safetensors",
+                size_bytes=3,
+                object_id="sha256:" + hashlib.sha256(b"abc").hexdigest(),
+            ),
+        ),
+    )
+    card = ModelCard(
+        model_id=ModelId("owner/model"),
+        source_revision="a" * 40,
+        storage_size=Memory.from_bytes(3),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToImage],
+        image=ImageCardConfig(family="sdxl", components=(component,), default_steps=20),
+    )
+    (tmp_path / component.entry_file).write_bytes(b"abc")
+
+    def locate(_identifier: ModelId, entry: str, _revision: str | None = None) -> Path:
+        return tmp_path / entry
+
+    monkeypatch.setattr(adapter, "build_sidecar_path", locate)
+    arguments = adapter.native_component_arguments(card, backend=backend)
+    assert arguments == ["--model", str(tmp_path / component.entry_file), *runtime_flags]
+
+
 def test_ephemeral_reference_bytes_are_excluded_from_state_and_logs() -> None:
     params = ImageEditsTaskParams(
         model="owner/model",

@@ -35,6 +35,8 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
     Qwen Image 2.1 CUDA/Vulkan instances enable Flash Attention to reduce attention
     memory at the default 2048-square canvas. ROCm uses the same path to avoid
     observed native kernel-launch failures at that canvas.
+    SDXL Metal loads disable batched guidance to avoid blank outputs and enable
+    Flash Attention to bound workspace at the default 1024-square canvas.
     """
     profile = card.image
     if profile is None:
@@ -87,6 +89,10 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
         "qwen_image_21_turbo",
     ):
         arguments.append("--fa")
+    if backend == "stable_diffusion_cpp-metal" and profile.family == "sdxl":
+        # The pinned Metal build produced white output with batched guidance;
+        # separate conditional/unconditional forwards restored the reference.
+        arguments.extend(("--batched-cfg", "off", "--fa"))
     return arguments
 
 

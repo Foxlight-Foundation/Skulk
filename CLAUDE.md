@@ -1738,6 +1738,8 @@ runner, with verified component hashes and private native-job ownership.
 Qwen Image 2.1 and Turbo CUDA/Vulkan loads enable Flash Attention to reduce memory
 pressure at the default 2048-square canvas. ROCm loads also enable it to avoid
 observed native kernel-launch failures at that canvas.
+SDXL Metal loads disable batched classifier-free guidance to avoid blank
+outputs and enable Flash Attention at the default 1024-square canvas.
 Native CUDA wheel assembly requires `GGML_CUDA_NCCL=OFF` for the single-GPU
 image contract and to avoid an unnecessary host-library dependency.
 Native image teardown retains the producer handle through a 30-second graceful
