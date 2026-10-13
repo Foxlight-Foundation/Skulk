@@ -478,6 +478,9 @@ function RentalCard({ rental }: { rental: BurstOperation }) {
       <p>
         <strong>{rental.modelId ?? t('burst.rentals.someModel', 'A model')}</strong> · {phaseLabels[rental.phase]}
       </p>
+      {/* The provider's own words say what happened and, when a rental needs
+          attention, what to do; the phase label alone cannot. */}
+      {rental.message ? <p>{rental.message}</p> : null}
       {rental.resourceExpiresAt ? (
         <Muted>{t('burst.rentals.endsBy', 'Ends by {time}', { time: when(rental.resourceExpiresAt) })}</Muted>
       ) : null}

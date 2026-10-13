@@ -280,10 +280,18 @@ it('lists only this provider’s machines and releases one', async () => {
   await contains('example/large');
   expect(host.textContent).not.toContain('example/elsewhere');
   expect(host.textContent).toContain('Ready');
+  expect(host.textContent).toContain('The model is ready on the remote machine.');
   expect(host.textContent).toContain('Ends by');
   await click('Release');
   await contains('Releasing the machine.');
   expect(calls.some((call) => call.method === 'DELETE' && call.path === `/v1/burst/operations/${'1'.repeat(32)}`)).toBe(true);
+});
+
+it('says in the provider’s words what a rental needing attention needs', async () => {
+  rentals = [rental({ phase: 'attention', message: 'The machine stopped answering. Release it to stop paying for it.' })];
+  await render();
+  await contains('Needs attention');
+  expect(host.textContent).toContain('The machine stopped answering. Release it to stop paying for it.');
 });
 
 it('says when no machines are running', async () => {
