@@ -50,6 +50,8 @@ export interface ImageParamsPanelProps {
   onChange: (params: ImageGenerationParams) => void;
   isEditMode?: boolean;
   imageProfile?: ImageCapabilityInfo | null;
+  /** Whether the owning request flow consumes progressive image events. */
+  streamingAvailable?: boolean;
 }
 
 /* ================================================================
@@ -254,7 +256,7 @@ const ResetBtn = styled(Button)`
    ================================================================ */
 
 /** Render options admitted by the selected model, including fixed distilled sampling. */
-export function ImageParamsPanel({ params, onChange, isEditMode = false, imageProfile }: ImageParamsPanelProps) {
+export function ImageParamsPanel({ params, onChange, isEditMode = false, imageProfile, streamingAvailable = true }: ImageParamsPanelProps) {
   const { t } = useSkulkTranslation();
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -347,7 +349,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false, imagePr
       )}
 
       {/* Stream toggle */}
-      {!isEditMode && (
+      {!isEditMode && streamingAvailable && (
         <ParamGroup>
           <Label>{t('imageParams.stream', 'Stream')}</Label>
           <Switch role="switch" aria-label={t('imageParams.stream', 'Stream')} aria-checked={params.stream} $on={params.stream} onClick={() => update({ stream: !params.stream })} />

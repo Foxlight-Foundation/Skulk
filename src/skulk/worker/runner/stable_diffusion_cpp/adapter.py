@@ -91,6 +91,8 @@ def native_image_request(
         width_text, height_text = str(params.size).split("x", 1)
         width, height = int(width_text), int(height_text)
     profile.validate_canvas(width, height)
+    if not 0 <= seed < 2**63 or len(params.prompt.encode("utf-8")) > 32_768:
+        raise ValueError("native image prompt or seed exceeds its bound")
     if (
         len(references) > profile.max_reference_images
         or sum(map(len, references)) > 24 * 1024 * 1024
@@ -113,6 +115,8 @@ def native_image_request(
         if advanced and advanced.negative_prompt is not None
         else ""
     )
+    if len(negative.encode("utf-8")) > 32_768:
+        raise ValueError("native negative prompt exceeds its bound")
     if profile.family == "qwen_image_21_turbo" and (
         steps != 8 or guidance != 1.0 or negative
     ):

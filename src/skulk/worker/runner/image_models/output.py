@@ -70,4 +70,3 @@ def send_image_chunks(
                 ),
             )
         )
-

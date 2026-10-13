@@ -64,6 +64,7 @@ def _card(*, turbo: bool = False) -> ModelCard:
     return ModelCard(
         model_id=ModelId("owner/model"),
         source_revision="a" * 40,
+        gguf_file="diffusion.gguf",
         storage_size=Memory.from_bytes(12),
         n_layers=1,
         hidden_size=1,

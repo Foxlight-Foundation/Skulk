@@ -2971,11 +2971,13 @@ class API:
             response_model=None,
             tags=["Images"],
             summary="Edit images",
+            description="Edit a placed model using one image or ordered image[] references. The selected image card validates geometry, sampling and input limits before dispatch; oversized aggregate uploads return 413.",
         )(self.image_edits)
         self.app.post(
             "/bench/images/edits",
             tags=["Images"],
             summary="Benchmark image editing",
+            description="Edit a placed image model with one image or ordered image[] references and return timing and measured memory statistics. Streaming and partial images are disabled.",
         )(self.bench_image_edits)
         self.app.get("/images", tags=["Images"], summary="List stored images")(
             self.list_images
@@ -7027,7 +7029,7 @@ class API:
             )
         return resolved_model
 
-    def _validate_image_request(self, model: ModelId, size: str, n: int, advanced: AdvancedImageParams | None, references: int = 0) -> bool:
+    def _validate_image_request(self, model: ModelId, size: str, n: int, advanced: AdvancedImageParams | None, references: int = 0, *, prompt: str = "") -> bool:
         """Validate the mounted image contract before admitting downloads or GPU work."""
         card: ModelCard | None = None
         for instance in self.state.instances.values():
@@ -7041,6 +7043,10 @@ class API:
                 raise HTTPException(status_code=400, detail="This image engine does not support the requested canvas or reference count")
             return False
         try:
+            if len(prompt.encode("utf-8")) > 32_768 or (advanced is not None and len((advanced.negative_prompt or "").encode("utf-8")) > 32_768):
+                raise ValueError("Native image prompts exceed the 32768-byte limit")
+            if advanced is not None and advanced.seed is not None and advanced.seed > 2**63 - n:
+                raise ValueError("Native image seed exceeds the signed 64-bit range for this image count")
             if not 1 <= n <= 4 or references > profile.max_reference_images:
                 raise ValueError("Image count or references exceed this model's limits")
             width, height = (profile.default_width, profile.default_height) if size == "auto" else tuple(int(part) for part in size.split("x", 1))
@@ -9246,7 +9252,7 @@ class API:
             owner_node=self.node_id,
             task_params=payload,
         )
-        self._validate_image_request(ModelId(payload.model), payload.size, payload.n or 1, payload.advanced_params)
+        self._validate_image_request(ModelId(payload.model), payload.size, 1 if payload.n is None else payload.n, payload.advanced_params, prompt=payload.prompt)
         await self._send(command)
 
         # Check if streaming is requested
@@ -9546,7 +9552,7 @@ class API:
             }
         )
 
-        self._validate_image_request(ModelId(payload.model), payload.size, payload.n or 1, payload.advanced_params)
+        self._validate_image_request(ModelId(payload.model), payload.size, 1 if payload.n is None else payload.n, payload.advanced_params, prompt=payload.prompt)
         command = ImageGeneration(
             owner_node=self.node_id,
             task_params=payload,
@@ -9581,7 +9587,7 @@ class API:
         advanced_params = _ensure_seed(advanced_params)
 
         uploads = image if isinstance(image, list) else [image]
-        native = self._validate_image_request(resolved_model, size, n, advanced_params, len(uploads))
+        native = self._validate_image_request(resolved_model, size, n, advanced_params, len(uploads), prompt=prompt)
         reference_data: list[bytes] = []
         encoded_images: list[str] = []
         input_bytes = 0
@@ -9717,7 +9723,7 @@ class API:
     async def bench_image_edits(
         self,
         request: Request,
-        image: UploadFile = File(...),  # noqa: B008
+        image: UploadFile | None = File(None),  # noqa: B008
         prompt: str = Form(...),
         model: str = Form(...),
         n: int = Form(1),
@@ -9727,8 +9733,11 @@ class API:
         quality: Literal["high", "medium", "low"] = Form("medium"),
         output_format: Literal["png", "jpeg", "webp"] = Form("png"),
         advanced_params: str | None = Form(None),
+        images: list[UploadFile] | None = File(None, alias="image[]"),  # noqa: B008
     ) -> BenchImageGenerationResponse:
         """Handle benchmark image editing requests with generation stats."""
+        if (image is None) == (not images):
+            raise HTTPException(status_code=400, detail="Provide one image field or an ordered image[] array")
         parsed_advanced_params: AdvancedImageParams | None = None
         if advanced_params:
             with contextlib.suppress(Exception):
@@ -9737,7 +9746,7 @@ class API:
                 )
 
         command = await self._send_image_edits_command(
-            image=image,
+            image=image if image is not None else images or [],
             prompt=prompt,
             model=ModelId(model),
             n=n,

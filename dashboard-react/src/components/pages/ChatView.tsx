@@ -1,3 +1,5 @@
+import { ImageParamsPanel, DEFAULT_IMAGE_PARAMS, type ImageGenerationParams } from '../display/ImageParamsPanel';
+import { requestDashboardImages } from './chatImageRequest';
 import { ReadyModelSelect } from '../chat/ReadyModelSelect';
 import { operatorSession } from '../../auth/operatorSession';
 import { useGetStewardStatusQuery } from '../../store/endpoints/steward';
@@ -525,7 +527,11 @@ export function ChatView({
       ? s.chat.conversations[s.chat.activeConversationId]?.messages ?? EMPTY_MESSAGES
       : EMPTY_MESSAGES,
   );
-  const selectModel = (modelId: string) => dispatch(chatActions.selectModel(modelId));
+  const [imageParams, setImageParams] = useState<ImageGenerationParams>({ ...DEFAULT_IMAGE_PARAMS });
+  const selectModel = (modelId: string) => {
+    setImageParams({ ...DEFAULT_IMAGE_PARAMS });
+    dispatch(chatActions.selectModel(modelId));
+  };
   const selectTranscriptionModel = (modelId: string | null) =>
     dispatch(chatActions.selectTranscriptionModel(modelId));
   const selectSpeechModel = (modelId: string | null) =>
@@ -800,8 +806,10 @@ export function ChatView({
   const voiceCatalogReady = !selectedSpeechOption?.supportsVoiceListing
     || voiceOptions.length > 0;
 
+  const selectedImageProfile = selectedModelId ? modelCatalogById[selectedModelId]?.image : null;
+  const nativeImageSelected = readyRunnableInstances.some((instance) => instance.modelId === selectedModelId && instance.engine === 'stable_diffusion_cpp');
   const canSendMessages = Boolean(
-    selectedModelId && readyModels.some((model) => model.modelId === selectedModelId),
+    selectedModelId && readyModels.some((model) => model.modelId === selectedModelId) && (!nativeImageSelected || selectedImageProfile),
   );
 
   const stopSpeechPlayback = useCallback(() => {
@@ -1122,6 +1130,35 @@ export function ChatView({
     setStreamingThinking(null);
     setTtftMs(null);
     setTps(null);
+
+    if (selectedImageProfile) {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        const generatedImages = await requestDashboardImages(
+          selectedModelId, text, imageParams, selectedImageProfile,
+          imageAttachments.map((attachment) => attachment.dataUrl), controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        dispatch(chatActions.appendConversationMessage({ conversationId, message: {
+          id: uuidv4(), role: 'assistant', content: '', generatedImages, timestamp: Date.now(),
+        } }));
+      } catch (error: unknown) {
+        if (!controller.signal.aborted) {
+          dispatch(chatActions.appendConversationMessage({ conversationId, message: {
+            id: uuidv4(), role: 'assistant', timestamp: Date.now(),
+            content: error instanceof Error ? error.message : t('chat.view.errors.imageFailed', 'Image generation failed.'),
+          } }));
+        }
+      } finally {
+        if (abortRef.current === controller) {
+          setIsLoading(false);
+          setStreamingContent(null);
+          abortRef.current = null;
+        }
+      }
+      return;
+    }
 
     // Read messages from store (includes the user message we just added)
     const chatState = store.getState().chat;
@@ -1516,6 +1553,8 @@ export function ChatView({
 
   }, [
     dispatch,
+    imageParams,
+    selectedImageProfile,
     autoSpeakAssistant,
     canSendMessages,
     createSpeechSentenceQueue,
@@ -1633,6 +1672,7 @@ export function ChatView({
         />
       </MessagesScroll>
       <InputArea>
+        {selectedImageProfile && <ImageParamsPanel params={imageParams} onChange={setImageParams} imageProfile={selectedImageProfile} streamingAvailable={false} />}
         <ChatForm
           onSend={handleSend}
           onCancel={handleCancel}
@@ -1642,10 +1682,10 @@ export function ChatView({
           ttftMs={ttftMs}
           tps={tps}
           contextLength={canSendMessages ? contextLength : 0}
-          showThinkingToggle={canSendMessages && supportsThinking}
+          showThinkingToggle={canSendMessages && !selectedImageProfile && supportsThinking}
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
-          supportsImageAttachments={canSendMessages && supportsImageAttachments}
+          supportsImageAttachments={canSendMessages && (selectedImageProfile ? selectedImageProfile.maxReferenceImages > 0 : supportsImageAttachments)}
           canSendMessages={canSendMessages}
           transcriptionModels={readyTranscriptionModels}
           realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}

@@ -453,6 +453,8 @@ def platform_compatible_backends(
         compatible_backends: the card's declared backend tags.
         card_serves_vision: whether the card declares a vision capability.
         card_serves_speech: whether the card declares a speech capability.
+        card_has_native_image_profile: whether complete typed image components
+            require the native image runner; legacy image runners cannot load them.
         card_has_pinned_projector: whether a vision card identifies one exact
             immutable projector that the served runner can validate and load.
         card_supports_tool_calling: whether the model exposes tool calling.
@@ -467,7 +469,11 @@ def platform_compatible_backends(
     Returns:
         The subset of tags whose engine can serve everything the card declares.
     """
-    filtered = frozenset(tag for tag in compatible_backends if engine_of(tag) != "stable_diffusion_cpp" or card_has_native_image_profile)
+    # Legacy image runners do not yet consume the immutable component profile.
+    if card_has_native_image_profile:
+        filtered = frozenset(tag for tag in compatible_backends if engine_of(tag) == "stable_diffusion_cpp")
+    else:
+        filtered = frozenset(tag for tag in compatible_backends if engine_of(tag) != "stable_diffusion_cpp")
     if card_serves_vision:
         vision_engines = (
             _VISION_SERVING_ENGINES | frozenset({"llama_server"})

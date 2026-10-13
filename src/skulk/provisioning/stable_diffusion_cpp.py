@@ -158,6 +158,18 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
     computes: list[ImageCompute] = []
     for line in report.splitlines():
         name = line.split("\t", 1)[0]
+        # Vulkan software devices have GPU-like names; their prefix is not hardware proof.
+        if any(
+            marker in line.lower()
+            for marker in (
+                "llvmpipe",
+                "lavapipe",
+                "swiftshader",
+                "softpipe",
+                "software rasterizer",
+            )
+        ):
+            continue
         prefix = re.sub(r"\d+$", "", name).upper()
         if (compute := _DEVICE_COMPUTES.get(prefix)) is not None:
             devices.append(name)

@@ -230,7 +230,7 @@ class Runner(ServedConcurrentDispatch):
                     params,
                     seed + index,
                     references,
-                    preview=index == 0 and partial_limit > 0,
+                    preview=partial_limit > 0,
                 )
                 with closing(server.generate(body, cancelled)) as outputs:
 

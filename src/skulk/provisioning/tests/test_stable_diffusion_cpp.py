@@ -132,3 +132,43 @@ def test_installable_native_build_is_not_installed_inventory() -> None:
     assert not engine_build_inventory(
         frozenset({"stable_diffusion_cpp-metal"}), facts, environ={}
     )
+
+
+@pytest.mark.parametrize(
+    "description",
+    ["llvmpipe (LLVM)", "lavapipe", "SwiftShader Device", "software rasterizer"],
+)
+def test_native_probe_refuses_vulkan_software_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, description: str
+) -> None:
+    binary = tmp_path / "sd-server"
+    binary.write_bytes(b"native")
+
+    def run_probe(
+        *_args: object, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                {
+                    "protocol": 1,
+                    "source_revision": image_engine.SOURCE_REVISION,
+                    "device_report": f"Vulkan0\t{description}\nCPU\tprocessor\n",
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(image_engine.subprocess, "run", run_probe)
+    with pytest.raises(ValueError, match="no GPU"):
+        image_engine.probe_native_image(binary)
+
+
+def test_native_image_profile_cannot_be_placed_on_a_legacy_loader() -> None:
+    from skulk.shared.backends import platform_compatible_backends
+
+    candidates = frozenset({"mlx", "mlx-metal", "stable_diffusion_cpp-metal"})
+    assert platform_compatible_backends(candidates, card_serves_vision=False,
+        card_has_native_image_profile=True) == frozenset({"stable_diffusion_cpp-metal"})
+    assert platform_compatible_backends(candidates, card_serves_vision=False) == frozenset({"mlx", "mlx-metal"})

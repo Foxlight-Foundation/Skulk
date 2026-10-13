@@ -2884,6 +2884,7 @@ class ModelCard(CamelCaseModel):
     grid, canvas rules, audio output, reference bounds, sampling defaults,
     pinned companions); ``None`` for models that do not generate video."""
     image: ImageCardConfig | None = None
+    """Immutable image components, canvas, references, and checkpoint sampling truth."""
     """Complete image components, geometry, reference limits and sampling contract."""
     license: LicenseCardConfig | None = None
     """Optional operator-facing license facts surfaced by the catalog and
@@ -2932,6 +2933,12 @@ class ModelCard(CamelCaseModel):
         profile = self.image
         if profile is None:
             return self
+        primary_role = "model" if profile.family == "sdxl" else "diffusion"
+        primary = next(component for component in profile.components if component.role == primary_role)
+        if primary.repository != str(self.artifact_repository):
+            raise ValueError("image primary component differs from its selected artifact repository")
+        if (self.gguf_file is not None or primary.entry_file.endswith(".gguf")) and self.gguf_file != primary.entry_file:
+            raise ValueError("image primary component differs from its selected GGUF artifact")
         if ModelTask.TextToImage not in self.tasks:
             raise ValueError("an image profile requires the TextToImage task")
         if (ModelTask.ImageToImage in self.tasks) != (profile.max_reference_images > 0):

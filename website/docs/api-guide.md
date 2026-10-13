@@ -1661,8 +1661,14 @@ Request fields:
 | `advanced_params` | object | Optional `seed`, `num_inference_steps` (1-100), `guidance` (1.0-20.0), `negative_prompt`, and `num_sync_steps` (1-100). When `seed` is omitted, Skulk assigns one so multi-node generation stays deterministic |
 
 Native image cards admit `n` from 1 to 4 and expose geometry, reference count,
-RGBA support, and sampling defaults in `/v1/models` under `image`. Qwen Image
-2.1 Turbo requires its fixed eight-step schedule, guidance 1, and an empty
+RGBA support, and sampling defaults in `/v1/models` under `image`. Native prompts
+and negative prompts are each bounded to 32,768 UTF-8 bytes.
+Seeds must fit the signed 64-bit range, including successive seeds for `n` images.
+Blank or corrupt terminal outputs fail the task. Native benchmark memory uses
+sampled host process RSS (`memory_scope: native_process_rss`); GPU allocation
+measurements require separate hardware telemetry.
+
+Qwen Image 2.1 Turbo requires its fixed eight-step schedule, guidance 1, and an empty
 negative prompt; incompatible overrides return **400** before dispatch.
 PNG and WebP preserve native alpha output; JPEG encoding discards alpha.
 Native producers run one image at a time and retain no terminal job after

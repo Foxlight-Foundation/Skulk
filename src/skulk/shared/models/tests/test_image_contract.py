@@ -118,3 +118,15 @@ def test_oversized_or_unaligned_work_is_refused_before_admission(
 ) -> None:
     with pytest.raises(ValueError, match="canvas"):
         ImageCardConfig.model_validate(_document()).validate_canvas(width, height)
+
+
+def test_image_card_cannot_load_another_artifact_under_selected_gguf_identity() -> None:
+    from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+    from skulk.shared.types.memory import Memory
+
+    profile = ImageCardConfig.model_validate(_document())
+    with pytest.raises(ValidationError, match="selected GGUF"):
+        ModelCard(model_id=ModelId("owner/model"), source_revision="a" * 40,
+            gguf_file="different.gguf", storage_size=Memory.from_bytes(28),
+            n_layers=1, hidden_size=1, supports_tensor=False,
+            tasks=[ModelTask.TextToImage, ModelTask.ImageToImage], image=profile)
