@@ -13,7 +13,9 @@ from skulk.api.tests.test_operator_gateway import paired_service
 from skulk.api.tests.test_plugins import ManagedExtension
 from skulk.extensions import LoadedExtensions, ManagedRefusalError
 from skulk.extensions.burst import (
+    BurstBudget,
     BurstJob,
+    BurstNodeBudget,
     BurstNodeOffer,
     BurstNodeStatus,
     BurstOffer,
@@ -211,6 +213,20 @@ class Provider(ManagedExtension):
             BurstOperation.of(
                 self.name, "gpu", "1" * 32, self.status("1" * 32, released=False)
             ),
+        )
+
+    async def burst_budget(self, node_id: str) -> BurstNodeBudget:
+        """Ten dollars, a quarter used, on this computer."""
+        assert node_id == "gpu"
+        return BurstNodeBudget(
+            state="available",
+            limit_usd="10.000000",
+            spent_usd="2.500000",
+            held_usd="0.000000",
+            left_usd="7.500000",
+            rentals=1,
+            change_limit_action="campaign-limits",
+            start_over_action="start-over",
         )
 
     async def burst_status(self, node_id: str, operation_id: str) -> BurstNodeStatus:
@@ -534,3 +550,27 @@ async def test_excluded_nodes_reach_the_verdict_and_the_provider() -> None:
     assert answer.state == "offer" and response.status_code == 200
     assert assessed_exclusions == [(), ("node-a", "node-b")]
     assert provider.excluded == [(), ("node-a", "node-b")]
+
+
+async def test_a_providers_spending_limit_is_read_in_dollars() -> None:
+    async with client(Provider()) as http:
+        response = await http.get(
+            "/v1/burst/budget", params={"plugin_id": "managed.fixture", "node_id": "gpu"}
+        )
+        missing = await http.get(
+            "/v1/burst/budget", params={"plugin_id": "managed.absent", "node_id": "gpu"}
+        )
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    # The wire names are camelCase; the typed model reads them back.
+    assert '"limitUsd":"10.000000"' in response.text.replace(" ", "")
+    budget = BurstBudget.model_validate_json(response.text)
+    assert (budget.plugin_id, budget.node_id) == ("managed.fixture", "gpu")
+    assert (budget.limit_usd, budget.spent_usd, budget.left_usd) == (
+        "10.000000",
+        "2.500000",
+        "7.500000",
+    )
+    assert budget.start_over_action == "start-over"
+    assert missing.status_code == 404
+    assert required_plugin_scope("GET", "/v1/burst/budget") == "plugins:read"

@@ -24,6 +24,7 @@ from pydantic import (
 )
 
 from skulk.extensions.burst import (
+    BurstNodeBudget,
     BurstNodeOffer,
     BurstNodeReadiness,
     BurstNodeStatus,
@@ -235,6 +236,13 @@ def summaries_for(
 
 class _WireModel(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+
+BUDGET_UNAVAILABLE = (
+    "This burst provider cannot report its spending limit. Update it from the "
+    "store if this stays."
+)
+"""Said when a provider refuses a budget read without its own next step."""
 
 
 class ManagedConnection(_WireModel):
@@ -1102,6 +1110,34 @@ class ManagedOwner:
     async def burst_status(self, node_id: str, operation_id: str) -> BurstNodeStatus:
         """Read one rental's approval, machine and release progress; no effect."""
         return await self._burst_operation(node_id, operation_id, None)
+
+    async def burst_budget(self, node_id: str) -> BurstNodeBudget:
+        """Read one provider node's spending limit and what counted against it.
+
+        The provider reads its cleanup service over its own connection, not the
+        host channel, so this answers while an offer is being prepared.
+        """
+        await self.refresh()
+        node = self._node(node_id)
+        if not any(burst_memory_pools(d) is not None for d in node.descriptors):
+            raise LookupError("installed node is not a burst provider")
+        try:
+            result = await self._request(
+                {
+                    "operation": "burst-budget",
+                    "plugin_id": self.name,
+                    "node_id": node_id,
+                },
+                timeout=5,
+            )
+        except ManagedRefusalError as refusal:
+            # A provider released before budget reads refuses the operation;
+            # it is a provider that cannot report its limit, not a busy one.
+            return BurstNodeBudget(
+                state="unavailable",
+                message=refusal.message or BUDGET_UNAVAILABLE,
+            )
+        return BurstNodeBudget.model_validate_json(json.dumps(result))
 
     async def burst_release(
         self, node_id: str, operation_id: str, operator_id: str

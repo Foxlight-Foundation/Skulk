@@ -13,6 +13,7 @@ from skulk.api.managed_plugins import ProtectedManagementRoute
 from skulk.api.operator_auth import TailnetPeerVerifier, authorize_plugin_request
 from skulk.connectivity.tailscale import is_tailscale_peer
 from skulk.extensions.burst import (
+    BurstBudget,
     BurstNodeOffer,
     BurstOperation,
     BurstOperationRequest,
@@ -22,6 +23,7 @@ from skulk.extensions.burst import (
     BurstRecommendationRequest,
     BurstRecommendationState,
     BurstRentals,
+    NodeBurstBudget,
     NodeBurstOperations,
     NodeBurstProvider,
     NodeBurstRentals,
@@ -418,6 +420,58 @@ def create_burst_router(
                 observed_at=int(time.time()),
                 rentals=await read_burst_rentals(extensions),
             )
+
+        return await invoke(read)
+
+    def budgets(plugin_id: str) -> NodeBurstBudget:
+        installation = extensions.configuration_providers.get(plugin_id)
+        if not isinstance(installation, NodeBurstBudget):
+            raise HTTPException(status_code=404, detail="burst provider not found")
+        return installation
+
+    @router.get(
+        "/budget",
+        response_model=BurstBudget,
+        summary="Read a burst provider's spending limit",
+        description=(
+            "Read one provider node's spending limit and what has counted against "
+            "it, in US dollars: limitUsd, spentUsd (what finished rentals used, "
+            "each at the most its running time could cost), heldUsd (running "
+            "rentals at their full approved cost), leftUsd, rentals counted, and "
+            "countingSince, the last start-over. Where the limit can be changed "
+            "from this computer, changeLimitAction and startOverAction name the "
+            "provider node's setup actions that do it; otherwise message says "
+            "where. state is unavailable, with a plain message, when the "
+            "provider cannot read its limit now. Requires direct owner authority "
+            "or plugins:read and the plugin_id and node_id of a burst provider. "
+            "Changes nothing."
+        ),
+    )
+    async def read_budget(
+        request: Request,
+        response: Response,
+        plugin_id: Annotated[
+            str,
+            Query(
+                pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$",
+                description="Provider installation, as GET /v1/burst/providers lists it.",
+            ),
+        ],
+        node_id: Annotated[
+            ConfigurationNodeId,
+            Query(description="Provider node, as GET /v1/burst/providers lists it."),
+        ],
+    ) -> BurstBudget:
+        """Read one provider node's spending limit without any effect."""
+        await authorize_plugin_request(
+            request, pairing_service, "plugins:read", tailnet_peer_verifier
+        )
+        response.headers["Cache-Control"] = "no-store"
+        installation = budgets(plugin_id)
+
+        async def read() -> BurstBudget:
+            budget = await installation.burst_budget(node_id)
+            return BurstBudget.of(plugin_id, node_id, budget)
 
         return await invoke(read)
 

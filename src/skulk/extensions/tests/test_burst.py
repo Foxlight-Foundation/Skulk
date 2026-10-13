@@ -7,7 +7,13 @@ from pydantic import JsonValue
 
 from skulk.extensions.burst import BurstNodeOffer, burst_memory_pools
 from skulk.extensions.capabilities import CapabilityDescriptor
-from skulk.extensions.managed import ManagedConnection, ManagedNode, ManagedOwner
+from skulk.extensions.managed import (
+    BUDGET_UNAVAILABLE,
+    ManagedConnection,
+    ManagedNode,
+    ManagedOwner,
+)
+from skulk.extensions.refusals import ManagedRefusalError
 
 PROVIDER = {"skulk.burst.provider": "1", "skulk.burst.memory_pools": "vram"}
 
@@ -277,3 +283,63 @@ async def test_exclusions_are_sent_only_when_present(tmp_path: Path) -> None:
     await fixture.owner.burst_offer("gpu", "example/large", 8192, ("node-a",))
     assert "excluded_node_ids" not in fixture.sent[0]
     assert fixture.sent[1]["excluded_node_ids"] == ["node-a"]
+
+
+async def test_the_budget_is_read_from_the_exact_provider_node(tmp_path: Path) -> None:
+    fixture = _Owner(tmp_path, node("gpu"), node("other", None))
+    fixture.replies = [
+        {
+            "state": "available",
+            "limit_usd": "10.000000",
+            "spent_usd": "1.250000",
+            "held_usd": "2.250000",
+            "left_usd": "6.500000",
+            "rentals": 2,
+            "counting_since": 1_800_000_000,
+            "change_limit_action": "campaign-limits",
+            "start_over_action": "start-over",
+        }
+    ]
+    budget = await fixture.owner.burst_budget("gpu")
+    assert (budget.limit_usd, budget.spent_usd, budget.left_usd) == (
+        "10.000000",
+        "1.250000",
+        "6.500000",
+    )
+    assert budget.start_over_action == "start-over"
+    assert fixture.sent == [
+        {"operation": "burst-budget", "plugin_id": "managed.fixture", "node_id": "gpu"}
+    ]
+    with pytest.raises(LookupError):
+        await fixture.owner.burst_budget("other")
+    # An answer outside the contract is refused rather than shown.
+    malformed: tuple[dict[str, JsonValue], ...] = (
+        {"state": "available", "limit_usd": "ten dollars"},
+        # Available without its amounts.
+        {"state": "available"},
+        # Unavailable without saying why, or with amounts beside it.
+        {"state": "unavailable"},
+        {"state": "unavailable", "message": "Not now.", "limit_usd": "1.000000"},
+        # Available, with no way to change the limit and no word on where to.
+        {
+            "state": "available",
+            "limit_usd": "10.000000",
+            "spent_usd": "0.000000",
+            "held_usd": "0.000000",
+            "left_usd": "10.000000",
+            "rentals": 0,
+        },
+    )
+    for reply in malformed:
+        fixture.replies = [reply]
+        with pytest.raises(ValueError):
+            await fixture.owner.burst_budget("gpu")
+    # A provider released before budget reads refuses the operation.
+    fixture.replies = [ManagedRefusalError(None)]
+    older = await fixture.owner.burst_budget("gpu")
+    assert older.state == "unavailable" and older.message == BUDGET_UNAVAILABLE
+    fixture.replies = [
+        {"state": "unavailable", "message": "The cleanup service did not answer."}
+    ]
+    unavailable = await fixture.owner.burst_budget("gpu")
+    assert unavailable.limit_usd is None and unavailable.message is not None

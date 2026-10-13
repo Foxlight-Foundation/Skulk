@@ -309,6 +309,123 @@ class NodeBurstRentals(Protocol):
         ...
 
 
+type BurstBudgetState = Literal["available", "unavailable"]
+
+
+class BurstNodeBudget(FrozenModel):
+    """One provider node's spending limit and what has counted against it.
+
+    Every amount is in US dollars. What finished rentals used counts each at
+    the most its running time could cost; a running rental counts at its full
+    approved cost until its machine is confirmed gone.
+    """
+
+    state: BurstBudgetState = Field(
+        description="available, or unavailable when the limit cannot be read now."
+    )
+    message: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=300,
+        description="A plain next step when the limit cannot be read or changed here.",
+    )
+    limit_usd: str | None = Field(
+        default=None, pattern=_DOLLARS, description="The spending limit."
+    )
+    spent_usd: str | None = Field(
+        default=None, pattern=_DOLLARS, description="What finished rentals used."
+    )
+    held_usd: str | None = Field(
+        default=None, pattern=_DOLLARS, description="What running rentals hold."
+    )
+    left_usd: str | None = Field(
+        default=None, pattern=_DOLLARS, description="What new offers may still use."
+    )
+    rentals: int | None = Field(
+        default=None, ge=0, description="Rentals counted since the last start-over."
+    )
+    counting_since: int | None = Field(
+        default=None,
+        description="UTC Unix seconds of the last start-over; null if never.",
+    )
+    change_limit_action: ConfigurationNodeId | None = Field(
+        default=None,
+        description=(
+            "The provider node's setup action that changes the limit, when it can "
+            "be changed from this computer."
+        ),
+    )
+    start_over_action: ConfigurationNodeId | None = Field(
+        default=None,
+        description=(
+            "The provider node's setup action that starts the count over, when it "
+            "can be started over from this computer."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _shape_follows_state(self) -> Self:
+        """An available budget has every amount; an unavailable one says why."""
+        amounts = (self.limit_usd, self.spent_usd, self.held_usd, self.left_usd)
+        if self.state == "available":
+            if any(amount is None for amount in amounts) or self.rentals is None:
+                raise ValueError(
+                    "an available budget carries every amount and the rental count"
+                )
+            # Start over alone may be missing (cleanup that cannot settle), but
+            # a limit that cannot change here must say where it can.
+            if self.change_limit_action is None and self.message is None:
+                raise ValueError(
+                    "a budget whose limit cannot change here says where it can"
+                )
+        elif (
+            self.message is None
+            or any(amount is not None for amount in amounts)
+            or self.rentals is not None
+            or self.change_limit_action is not None
+            or self.start_over_action is not None
+        ):
+            raise ValueError("an unavailable budget carries a message and no amounts")
+        return self
+
+
+class BurstBudget(BurstNodeBudget):
+    """A burst provider node's spending limit, as the API returns it."""
+
+    plugin_id: str = Field(
+        pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$",
+        description="Provider installation.",
+    )
+    node_id: ConfigurationNodeId = Field(description="Provider node.")
+
+    @classmethod
+    def of(cls, plugin_id: str, node_id: str, budget: BurstNodeBudget) -> Self:
+        """Name the provider node a budget came from."""
+        return cls(
+            plugin_id=plugin_id,
+            node_id=node_id,
+            state=budget.state,
+            message=budget.message,
+            limit_usd=budget.limit_usd,
+            spent_usd=budget.spent_usd,
+            held_usd=budget.held_usd,
+            left_usd=budget.left_usd,
+            rentals=budget.rentals,
+            counting_since=budget.counting_since,
+            change_limit_action=budget.change_limit_action,
+            start_over_action=budget.start_over_action,
+        )
+
+
+@runtime_checkable
+class NodeBurstBudget(Protocol):
+    """Optional facet that reads a provider node's spending limit."""
+
+    async def burst_budget(self, node_id: str) -> BurstNodeBudget:
+        """Read the limit and what has counted against it, without any effect."""
+        ...
+
+
 class BurstOperationRequest(FrozenModel):
     """Approve one returned offer, exactly as recommended."""
 

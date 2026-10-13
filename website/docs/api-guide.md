@@ -4525,8 +4525,26 @@ To rent, approve, follow and release with the burst operations:
   authenticated operator. Repeating it observes the first release. Before the
   provider's controller knows the machine there is nothing to release yet (409);
   the rental's own expiry still ends it.
+- `GET /v1/burst/budget` requires direct owner authority or `plugins:read`, with
+  query parameters `plugin_id` and `node_id` naming a provider node from
+  `GET /v1/burst/providers`. It changes nothing and returns that node's spending
+  limit, all amounts in US dollars as six-decimal strings: `limitUsd`,
+  `spentUsd` (what finished rentals used, each at the most its running time
+  could cost), `heldUsd` (running rentals at their full approved cost),
+  `leftUsd`, `rentals` counted, and `countingSince` (Unix seconds of the last
+  start-over, or null). Where the limit can be changed from this computer,
+  `changeLimitAction` and `startOverAction` name the provider node's setup
+  actions that do it, run through the ordinary setup operations, which need
+  `plugins:manage` and, because these actions require approval, also
+  `plugins:approve`; otherwise `changeLimitAction` is null and `message` says
+  where to change it. `startOverAction` alone may be null when the provider's
+  cleanup cannot start the count over. `state` is `unavailable`, with a plain `message` and no amounts, when the
+  provider cannot read its limit now, or is a release that predates this read;
+  a provider reply of any other shape is refused. An unknown provider returns
+  404.
 
-Each returns `pluginId`, `nodeId`, `operationId`, `phase`, a plain-text
+Each operation route above (all but `GET /v1/burst/budget`) returns
+`pluginId`, `nodeId`, `operationId`, `phase`, a plain-text
 `message`, nullable `instanceId` (the Skulk instance serving the model, once
 observed), `modelId`, `resourceExpiresAt`, `acquisition` (the approval's
 progress, as `GET .../proposal-operations/{operation_id}` reports it, including
