@@ -256,6 +256,24 @@ function SpendingSection({
   );
 }
 
+/**
+ * Says why a form cannot be sent while the provider is still working on an
+ * earlier change, such as one sent before the page reloaded.
+ */
+function BusyNote({ run }: { run: SetupActionRun }) {
+  const { t } = useSkulkTranslation();
+  // Only where the form would otherwise offer to send.
+  if (!run.busy || (run.phase !== 'idle' && run.phase !== 'failed')) return null;
+  return (
+    <p role="status">
+      {t(
+        'burst.rentals.changeUnderWay',
+        "A change to this provider's setup is already under way. You can make another once it finishes.",
+      )}
+    </p>
+  );
+}
+
 /** The outcome of a run, in plain words, or nothing while idle. */
 function RunOutcome({ run, done }: { run: SetupActionRun; done: string }) {
   const { t } = useSkulkTranslation();
@@ -358,6 +376,7 @@ function LimitForm({
           )}
         </Muted>
         {field !== null && text.trim() !== '' && amount === null ? <p role="alert">{rangeMessage(field, t)}</p> : null}
+        <BusyNote run={run} />
         <RunOutcome
           done={t('burst.rentals.limitChanged', 'Your limit is now {limit}.', {
             limit: amount !== null ? `$${amount.toFixed(2)}` : '',
@@ -366,7 +385,7 @@ function LimitForm({
         />
         <Actions>
           {!finished ? (
-            <Button disabled={amount === null || field === null || submitting} type="submit">
+            <Button disabled={amount === null || field === null || submitting || run.busy} type="submit">
               {t('burst.rentals.save', 'Save')}
             </Button>
           ) : null}
@@ -412,10 +431,11 @@ function StartOverConfirm({ actionId, run, onClose }: { actionId: string; run: S
           'Finished rentals stop counting, so your whole limit is available again. A machine running now keeps counting.',
         )}
       </p>
+      <BusyNote run={run} />
       <RunOutcome done={t('burst.rentals.startedOver', 'Started over. Finished rentals no longer count.')} run={run} />
       <Actions>
         {!finished ? (
-          <Button disabled={!run.ready || submitting} onClick={() => void run.start(actionId, {})} type="button">
+          <Button disabled={!run.ready || submitting || run.busy} onClick={() => void run.start(actionId, {})} type="button">
             {t('burst.rentals.startOverConfirm', 'Start over')}
           </Button>
         ) : null}

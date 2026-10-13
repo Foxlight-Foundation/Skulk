@@ -384,6 +384,21 @@ it('keeps a change still in flight when the drawer closes, and never sends it tw
   expect(host.textContent).not.toContain('Your limit is now');
 });
 
+it('waits for setup work the provider is still doing, such as a start-over sent before a reload', async () => {
+  // A fresh page knows nothing of the earlier request; only the provider does.
+  operations = [{ operationId: '9'.repeat(32), nodeId: 'gpu', actionId: 'start-over', phase: 'running', code: null, correctiveAction: null }];
+  await render();
+  await contains('$2.50 of $10.00 spent');
+  await click('Start over');
+  await contains("A change to this provider's setup is already under way. You can make another once it finishes.");
+  expect(button('Start over').disabled).toBe(true);
+  // The open form keeps reading, so it is offered again once that work finishes.
+  operations = [{ ...operations[0]!, phase: 'complete' }];
+  await enabled('Start over');
+  expect(host.textContent).not.toContain('already under way');
+  expect(calls.some((call) => call.path === OPERATIONS_PATH)).toBe(false);
+});
+
 it('keeps an unconfirmed start-over when the drawer closes, and never offers it again', async () => {
   loseReply = true;
   const store = await render();

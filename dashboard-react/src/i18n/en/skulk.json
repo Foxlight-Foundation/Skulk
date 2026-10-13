@@ -85,6 +85,7 @@
   "burst.rentals.budgetUnavailable": "Your spending limit cannot be read right now. This is checked again shortly.",
   "burst.rentals.cancel": "Cancel",
   "burst.rentals.changeLimit": "Change limit",
+  "burst.rentals.changeUnderWay": "A change to this provider's setup is already under way. You can make another once it finishes.",
   "burst.rentals.countingSince": "Counting since {date}",
   "burst.rentals.done": "Done",
   "burst.rentals.endsBy": "Ends by {time}",

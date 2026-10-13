@@ -356,7 +356,9 @@ what machines running now hold. **Rentals** opens the provider's Rentals view:
   is available again. Both are the provider's own setup actions and need plugin
   approval access. A change is sent once: if you close the panel before the
   provider answers, opening Rentals again shows that change and how it stands,
-  and a change the provider never confirmed is not offered a second time.
+  and a change the provider never confirmed is not offered a second time. While
+  the provider is still working on a change, including one sent before the page
+  reloaded or from another browser, the form waits until it finishes.
 - **Running now**: each rented machine's model, where it stands, when it ends at
   the latest, and **Release**.
 - **Waiting for your approval**: rentals the steward proposed, with the same

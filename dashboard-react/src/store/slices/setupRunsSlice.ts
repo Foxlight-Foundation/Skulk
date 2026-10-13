@@ -29,7 +29,10 @@ export interface SetupRunRecord {
  * view unmounts when its drawer closes. A run whose request is still in
  * flight, or whose reply was lost, must stay visible when the drawer opens
  * again, or a second operation could be submitted for a change that already
- * landed. The slice is not persisted: it covers this dashboard session.
+ * landed. The slice is not persisted: a record kept in one browser cannot
+ * tell a request that never arrived from one still being worked on, and would
+ * block the action there for good. Past a reload, the provider's own list of
+ * unfinished setup work blocks a second submit instead (`useSetupActionRun`).
  */
 export type SetupRunsState = Record<string, SetupRunRecord>;
 

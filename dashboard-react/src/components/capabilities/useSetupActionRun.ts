@@ -29,6 +29,12 @@ export interface SetupActionRun {
   ready: boolean;
   /** The values the current run sent, or null with no run. */
   values: Record<string, unknown> | null;
+  /**
+   * True while the provider lists unfinished setup work other than this run's,
+   * whether from another tab, another device, or before the page reloaded.
+   * No run starts until that work finishes.
+   */
+  busy: boolean;
   /** The provider's current form for one action, once known, or null. */
   action: (actionId: string) => SetupAction | null;
   /** Runs the named action with these values, bound to the forms just read. */
@@ -54,7 +60,9 @@ export interface SetupActionRun {
  *
  * The run is kept in the store under the provider and `runName`, so a view
  * that unmounts mid-run, as a closed drawer does, finds it again on return
- * instead of offering a second submit.
+ * instead of offering a second submit. Across a page reload, another tab or
+ * another device, the provider's own list of unfinished setup work blocks a
+ * new run until that work finishes.
  */
 export function useSetupActionRun(address: NodeAddress, runName: string, active: boolean): SetupActionRun {
   const dispatch = useAppDispatch();
@@ -88,11 +96,21 @@ export function useSetupActionRun(address: NodeAddress, runName: string, active:
     detail = operation.correctiveAction;
   } else if (submission.state === 'unconfirmed' && submission.gaveUp) phase = 'uncertain';
 
+  // The provider's own record is what survives a page reload or another tab,
+  // so unfinished work it lists blocks a new run, as the Plugins page's setup
+  // forms do. A run kept only in this browser could not tell a request that
+  // never arrived from one still being worked on.
+  const busy =
+    snapshot?.operations.some(
+      (item) => item.operationId !== operationId && (item.phase === 'queued' || item.phase === 'running'),
+    ) ?? false;
+
   // A second subscription to the same cached forms polls while the outcome is
-  // still open, so a settled outcome stops the reads and a late operation is
-  // still seen.
+  // still open, or while other work blocks an open form, so a settled outcome
+  // stops the reads and a late operation is still seen.
+  const following = phase === 'running' || phase === 'uncertain';
   useGetNodeSetupActionsQuery(address, {
-    skip: phase !== 'running' && phase !== 'uncertain',
+    skip: !following && !(active && busy),
     pollingInterval: phase === 'uncertain' ? UNCONFIRMED_POLL_MS : 2000,
   });
 
@@ -122,7 +140,7 @@ export function useSetupActionRun(address: NodeAddress, runName: string, active:
   }, [unconfirmedSince, operationId, key, dispatch]);
 
   const start = async (actionId: string, values: Record<string, unknown>) => {
-    if (sending.current || !snapshot || phase === 'running' || phase === 'uncertain') return;
+    if (sending.current || !snapshot || busy || following) return;
     const identity = randomHex32();
     const action = snapshot.actions.find((item) => item.actionId === actionId);
     if (!action) {
@@ -165,11 +183,11 @@ export function useSetupActionRun(address: NodeAddress, runName: string, active:
   const reset = () => {
     // A run in flight, or one that may have landed, stays observable, so the
     // same change is never submitted a second time.
-    if (operationId === null || phase === 'running' || phase === 'uncertain') return;
+    if (operationId === null || following) return;
     dispatch(setupRunsActions.forgotten({ key, operationId }));
   };
 
   const action = (actionId: string) => snapshot?.actions.find((item) => item.actionId === actionId) ?? null;
 
-  return { phase, detail, ready: snapshot !== undefined, values: record?.values ?? null, action, start, reset };
+  return { phase, detail, ready: snapshot !== undefined, values: record?.values ?? null, busy, action, start, reset };
 }
