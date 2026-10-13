@@ -73,7 +73,50 @@ from skulk.shared.types.capability_nodes import (
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 
 MAX_HANDSHAKE_PEERS = 8
-"""Peers one handshake request carries; keeps it within the owner's frame bound."""
+"""Peers one handshake request carries at most."""
+
+HANDSHAKE_REQUEST_BUDGET = 60_000
+"""Serialized bytes one handshake request may use.
+
+The owner's large control frame is 64 KiB; the budget leaves room for the
+request envelope and the newline, so a full request is never refused for its
+size and mistaken for an owner that does not answer handshakes."""
+
+
+def _serialized_size(value: JsonValue) -> int:
+    """Bytes ``value`` takes in a control request, serialized the same way."""
+    return len(json.dumps(value, allow_nan=False).encode())
+
+
+def _fit_handshake_peers(
+    candidates: list[tuple[bool, dict[str, JsonValue], list[tuple[bool, JsonValue]]]],
+    budget: int,
+) -> list[JsonValue]:
+    """Choose peers, and their nodes, that fit in ``budget`` serialized bytes.
+
+    Peers with a handshake for this host come first, and within a peer so do
+    its nodes carrying one, so the one exchange that matters is the last to be
+    left out. A peer goes in with as many of its nodes as fit; one with none
+    left over is skipped, and a smaller peer after it may still fit.
+    """
+    ordered = sorted(candidates, key=lambda item: not item[0])
+    chosen: list[JsonValue] = []
+    remaining = budget
+    for _, base, nodes in ordered:
+        if len(chosen) >= MAX_HANDSHAKE_PEERS:
+            break
+        # The separator before this entry, and the peer without nodes.
+        cost = (2 if chosen else 0) + _serialized_size({**base, "nodes": []})
+        kept: list[JsonValue] = []
+        for _, node in sorted(nodes, key=lambda item: not item[0]):
+            node_cost = (2 if kept else 0) + _serialized_size(node)
+            if cost + node_cost <= remaining:
+                kept.append(node)
+                cost += node_cost
+        if kept:
+            chosen.append({**base, "nodes": kept})
+            remaining -= cost
+    return chosen
 
 
 _SUMMARY_STATUS: dict[str, CapabilityNodeStatus] = {
@@ -556,10 +599,11 @@ class ManagedOwner:
         if private:
             bundles = {node.bundle_id for node in self.nodes}
             me = str(self.context.node_id)
-            candidates: list[tuple[bool, dict[str, JsonValue]]] = []
+            candidates: list[
+                tuple[bool, dict[str, JsonValue], list[tuple[bool, JsonValue]]]
+            ] = []
             for peer in self.context.read_capability_peers():
-                nodes: list[JsonValue] = []
-                addressed = False
+                nodes: list[tuple[bool, JsonValue]] = []
                 for summary in peer.capability_nodes:
                     if summary.bundle_id not in bundles:
                         continue
@@ -568,29 +612,35 @@ class ManagedOwner:
                         for item in summary.handshakes
                         if item.recipient == me
                     ]
-                    addressed = addressed or bool(inbound)
                     nodes.append(
-                        {
-                            "bundle_id": summary.bundle_id,
-                            "node_id": summary.node_id,
-                            "status": summary.status,
-                            "handshakes": inbound,
-                        }
+                        (
+                            bool(inbound),
+                            {
+                                "bundle_id": summary.bundle_id,
+                                "node_id": summary.node_id,
+                                "status": summary.status,
+                                "handshakes": inbound,
+                            },
+                        )
                     )
                 if nodes:
                     candidates.append(
                         (
-                            addressed,
+                            any(addressed for addressed, _ in nodes),
                             {
                                 "node_id": str(peer.node_id),
                                 "friendly_name": peer.friendly_name,
                                 "addresses": list(peer.addresses),
-                                "nodes": nodes,
                             },
+                            nodes,
                         )
                     )
-            candidates.sort(key=lambda item: not item[0])
-            peers = [entry for _, entry in candidates[:MAX_HANDSHAKE_PEERS]]
+            envelope = _serialized_size(
+                {"operation": "handshakes", "private_fabric": private, "peers": []}
+            )
+            peers = _fit_handshake_peers(
+                candidates, HANDSHAKE_REQUEST_BUDGET - envelope
+            )
         return {"operation": "handshakes", "private_fabric": private, "peers": peers}
 
     async def _exchange_handshakes(self) -> None:
