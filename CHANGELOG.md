@@ -56,6 +56,14 @@ This project records release notes here and mirrors public-facing notes in
   `plugins:manage`, and renting or releasing `plugins:approve`.
 - `GET /instance/{instance_id}/activity` reports requests in flight on an
   instance and when the last one started or finished.
+- Two installations of the same plugin on different computers in one cluster
+  can now hand each other their setup codes, so a plugin that needs a second
+  computer, such as a cleanup or backup computer, can pair the two without
+  copying codes between them. A capability node's summary may carry up to two
+  short public messages addressed to another host, and plugins can read the
+  peers running the same plugin along with the addresses this computer reaches
+  them at. The exchange happens only on a cluster with its own private name:
+  on the default public name any Skulk node could join and send one.
 
 - Models now come back on their own after a reboot or a whole-cluster restart.
   Each machine keeps a small record of what the cluster was running. After a
