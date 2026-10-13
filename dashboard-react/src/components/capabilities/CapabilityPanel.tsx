@@ -27,8 +27,12 @@ import {
 } from '../topology/capabilityActions';
 import { satelliteColor, satelliteStatusLabel } from '../topology/capabilityPresentation';
 import { dashboardUrlOn, pluginsPath, tailnetAddress } from '../../utils/hostDashboard';
+import { useLocalBurstProviderKeys } from '../../hooks/useLocalBurstProviders';
+import { BurstRentalsView } from './BurstRentalsView';
 
 const TAB_ORDER: CapabilityPanelTab[] = ['overview', 'surfaces', 'actions'];
+/** A burst provider on this dashboard's host also gets its Rentals tab. */
+const BURST_TAB_ORDER: CapabilityPanelTab[] = ['overview', 'rentals', 'surfaces', 'actions'];
 
 const Scroll = styled.div`
   flex: 1;
@@ -209,6 +213,14 @@ export function CapabilityPanel() {
     ? topology?.nodes[target.hostNodeId]?.friendly_name ?? target.hostNodeId.slice(-8)
     : '';
   const isLocalHost = target !== null && localNodeId !== null && localNodeId === target.hostNodeId;
+  // The burst routes answer only for this dashboard's host, so only a local
+  // provider gets the Rentals tab; its own host's dashboard shows the rest.
+  const burstProviderKeys = useLocalBurstProviderKeys(open && isLocalHost);
+  const burstProvider = isLocalHost && summary !== null && burstProviderKeys.has(capabilityNodeKey(summary));
+  const tabs = burstProvider ? BURST_TAB_ORDER : TAB_ORDER;
+  // A tab restored from an earlier session, or one the node no longer offers,
+  // falls back to the overview.
+  const shownTab: CapabilityPanelTab = tabs.includes(activeTab) ? activeTab : 'overview';
   const hostAddress = target ? tailnetAddress(topology?.nodes[target.hostNodeId]) : null;
   // The host's own dashboard, opened on this plugin: the host admits a browser
   // that reaches it over the tailnet.
@@ -254,7 +266,9 @@ export function CapabilityPanel() {
       ? t('capabilityPanel.tabs.overview', 'Overview')
       : tab === 'surfaces'
         ? t('capabilityPanel.tabs.surfaces', 'Surfaces')
-        : t('capabilityPanel.tabs.actions', 'Actions');
+        : tab === 'rentals'
+          ? t('burst.rentals.action', 'Rentals')
+          : t('capabilityPanel.tabs.actions', 'Actions');
   const [nowMs, setNowMs] = useState(Date.now);
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -276,11 +290,11 @@ export function CapabilityPanel() {
       width={width}
     >
       <DrawerTabBar role="tablist" aria-label={t('capabilityPanel.views', 'Capability node views')}>
-        {TAB_ORDER.map((tab) => (
+        {tabs.map((tab) => (
           <DrawerTabButton
-            $active={activeTab === tab}
+            $active={shownTab === tab}
             aria-controls={`capability-panel-${tab}`}
-            aria-selected={activeTab === tab}
+            aria-selected={shownTab === tab}
             id={`capability-tab-${tab}`}
             key={tab}
             onClick={() => dispatch(uiActions.setCapabilityPanelTab(tab))}
@@ -290,7 +304,7 @@ export function CapabilityPanel() {
           </DrawerTabButton>
         ))}
       </DrawerTabBar>
-      <DrawerBody aria-labelledby={`capability-tab-${activeTab}`} id={`capability-panel-${activeTab}`} role="tabpanel">
+      <DrawerBody aria-labelledby={`capability-tab-${shownTab}`} id={`capability-panel-${shownTab}`} role="tabpanel">
         <Scroll>
           {!summary ? (
             <Empty>
@@ -299,7 +313,9 @@ export function CapabilityPanel() {
                 'This capability node is no longer reported by its host.',
               )}
             </Empty>
-          ) : activeTab === 'overview' ? (
+          ) : shownTab === 'rentals' ? (
+            <BurstRentalsView nodeId={summary.nodeId} pluginId={summary.pluginId} />
+          ) : shownTab === 'overview' ? (
             <Grid>
               <dt>{t('capabilityPanel.field.status', 'Status')}</dt>
               <dd>
@@ -346,7 +362,7 @@ export function CapabilityPanel() {
                 </>
               ) : null}
             </Grid>
-          ) : activeTab === 'surfaces' ? (
+          ) : shownTab === 'surfaces' ? (
             summary.surfaces.length === 0 ? (
               <Empty>{t('capabilityPanel.noSurfaces', 'This node exposes no surfaces.')}</Empty>
             ) : (

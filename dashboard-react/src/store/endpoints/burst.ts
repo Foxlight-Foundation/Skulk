@@ -105,6 +105,38 @@ export interface BurstRentals {
   rentals: BurstOperation[];
 }
 
+/** One burst provider node's spending limit (`GET /v1/burst/budget`). */
+export interface BurstBudget {
+  pluginId: string;
+  nodeId: string;
+  /** available, or unavailable when the provider cannot read its limit now. */
+  state: 'available' | 'unavailable';
+  /** A plain next step when the limit cannot be read or changed here. */
+  message: string | null;
+  /** The spending limit, as an exact dollar string. */
+  limitUsd: string | null;
+  /** What finished rentals used, each at the most its running time could cost. */
+  spentUsd: string | null;
+  /** What running rentals hold, each at its full approved cost. */
+  heldUsd: string | null;
+  /** What new offers may still use. */
+  leftUsd: string | null;
+  /** Rentals counted since the last start-over. */
+  rentals: number | null;
+  /** UTC Unix seconds of the last start-over; null if never. */
+  countingSince: number | null;
+  /** The provider node's setup action that changes the limit, when it can be changed here. */
+  changeLimitAction: string | null;
+  /** The provider node's setup action that starts the count over, when it can be done here. */
+  startOverAction: string | null;
+}
+
+/** One provider node, as the burst routes address it. */
+export interface BurstProviderAddress {
+  pluginId: string;
+  nodeId: string;
+}
+
 /** Address of one rental: its provider and approval operation. */
 export interface BurstOperationAddress {
   pluginId: string;
@@ -145,6 +177,15 @@ const burstApi = apiSlice.injectEndpoints({
       query: () => ({ url: '/v1/burst/operations', headers, cache: 'no-store' }),
       providesTags: ['BurstRentals'],
     }),
+    getBurstBudget: build.query<BurstBudget, BurstProviderAddress>({
+      query: ({ pluginId, nodeId }) => ({
+        url: '/v1/burst/budget',
+        params: { plugin_id: pluginId, node_id: nodeId },
+        headers,
+        cache: 'no-store',
+      }),
+      providesTags: (_result, _error, { pluginId, nodeId }) => [{ type: 'BurstBudget', id: `${pluginId}/${nodeId}` }],
+    }),
   }),
 });
 
@@ -155,4 +196,5 @@ export const {
   useGetBurstOperationQuery,
   useReleaseBurstMutation,
   useGetBurstRentalsQuery,
+  useGetBurstBudgetQuery,
 } = burstApi;

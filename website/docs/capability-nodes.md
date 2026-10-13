@@ -341,6 +341,29 @@ If approval or acquisition has an uncertain result, observe that same operation.
 Do not submit another acquisition to retry an ambiguous create. Proposal records,
 approval history, and cleanup receipts must be preserved across restarts.
 
+### Follow rentals and spending
+
+A burst provider such as the RunPod plugin appears as a satellite of the
+computer it is installed on. On that computer's dashboard, its flyout shows what
+has been spent of your spending limit, for example **$2.50 of $10.00 spent**, and
+what machines running now hold. **Rentals** opens the provider's Rentals view:
+
+- **Spending**: what finished rentals used, what is left, and what running
+  machines hold, in dollars and cents. A running machine counts at the most it
+  can cost until it is gone; a finished one counts only for the time it ran.
+  Where the provider allows it from this computer, **Change limit** sets a new
+  amount and **Start over** stops counting finished rentals, so the whole limit
+  is available again. Both are the provider's own setup actions and need plugin
+  approval access.
+- **Running now**: each rented machine's model, where it stands, when it ends at
+  the latest, and **Release**.
+- **Waiting for your approval**: rentals the steward proposed, with the same
+  review and approval as **Plugins → Review proposals**.
+
+The burst routes answer only for the computer serving the dashboard, so a
+provider installed elsewhere shows its spending and rentals on that computer's
+own dashboard.
+
 ## Finish work and confirm cleanup
 
 For a cloud rental, prepare and review a release proposal, approve it, and follow

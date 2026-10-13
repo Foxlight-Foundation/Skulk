@@ -31,6 +31,8 @@ export type CapabilityActionItem =
       enabled: boolean;
     }
   | { kind: 'details'; id: string; title: string }
+  /** A burst provider's rented machines, offers waiting for approval, and spending. */
+  | { kind: 'rentals'; id: string; title: string }
   | {
       kind: 'manage-on-host';
       id: string;
@@ -58,6 +60,11 @@ export interface CapabilityActionContext {
    * host" links there; without one the entry stays a hint.
    */
   hostDashboardUrl?: string | null;
+  /**
+   * True when the node is a burst provider on the host serving this
+   * dashboard; the burst routes answer only there. Adds the Rentals entry.
+   */
+  burstProvider?: boolean;
   /** Translates a key with an English fallback. */
   t: (key: string, fallback: string, params?: Record<string, string | number>) => string;
 }
@@ -167,8 +174,9 @@ function resolveAction(
 /**
  * Builds the flyout's action list: every link surface, then the manifest
  * actions (surface actions that name a missing surface are dropped), then
- * the details entry, and finally "manage on host" when the dashboard is
- * connected to a different node than the one running the capability.
+ * Rentals for a burst provider on this dashboard's host, then the details
+ * entry, and finally "manage on host" when the dashboard is connected to a
+ * different node than the one running the capability.
  */
 export function buildCapabilityActions(
   summary: CapabilityNodeSummary,
@@ -196,6 +204,13 @@ export function buildCapabilityActions(
     if (resolved.kind === 'open-link' && seenUrls.has(resolved.url)) continue;
     if (resolved.kind === 'open-link') seenUrls.add(resolved.url);
     items.push(resolved);
+  }
+  if (context.burstProvider && context.isLocalHost) {
+    items.push({
+      kind: 'rentals',
+      id: 'rentals',
+      title: context.t('burst.rentals.action', 'Rentals'),
+    });
   }
   items.push({
     kind: 'details',

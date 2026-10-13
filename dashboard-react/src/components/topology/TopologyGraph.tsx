@@ -8,6 +8,7 @@ import { ClusterNode } from './ClusterNode';
 import { CapabilityFlyout } from './CapabilityFlyout';
 import { CAPABILITY_SATELLITES_ENABLED } from '../../featureFlags';
 import { tailnetAddress } from '../../utils/hostDashboard';
+import type { CapabilityPanelTab } from '../../store/slices/uiSlice';
 import {
   capabilityNodeKey,
   isCapabilityNodeVisible,
@@ -30,8 +31,10 @@ export interface TopologyGraphProps {
   capabilityNodes?: Record<string, CapabilityNodeSummary[]>;
   /** Node id the dashboard is served by; gates descriptor actions. */
   localNodeId?: string | null;
-  /** Opens the capability panel on one node of one host. */
-  onOpenCapabilityPanel?: (hostNodeId: string, key: string) => void;
+  /** Opens the capability panel on one node of one host, optionally on one tab. */
+  onOpenCapabilityPanel?: (hostNodeId: string, key: string, tab?: CapabilityPanelTab) => void;
+  /** Keys (`pluginId/nodeId`) of the burst providers on the host serving this dashboard. */
+  burstProviderKeys?: ReadonlySet<string>;
 }
 
 const Container = styled.div`
@@ -69,6 +72,7 @@ export function TopologyGraph({
   capabilityNodes = {},
   localNodeId = null,
   onOpenCapabilityPanel,
+  burstProviderKeys,
 }: TopologyGraphProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -285,9 +289,10 @@ export function TopologyGraph({
           hostNodeId={openFlyout.hostNodeId}
           localNodeId={localNodeId}
           onClose={closeFlyout}
-          onOpenPanel={(hostNodeId, key) => {
+          burstProviderKeys={burstProviderKeys}
+          onOpenPanel={(hostNodeId, key, tab) => {
             closeFlyout();
-            onOpenCapabilityPanel?.(hostNodeId, key);
+            onOpenCapabilityPanel?.(hostNodeId, key, tab);
           }}
           onSelectKey={(key) => setOpenFlyout((current) => (current ? { ...current, key } : current))}
           selectedKey={openFlyout.key}
