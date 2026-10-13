@@ -37,6 +37,8 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
     observed native kernel-launch failures at that canvas.
     SDXL Metal loads disable batched guidance to avoid blank outputs and enable
     Flash Attention to bound workspace at the default 1024-square canvas.
+    Qwen Vulkan VAE decoding uses bounded tiles to avoid the device's individual
+    buffer limit and the resulting expensive CPU retry at the default canvas.
     """
     profile = card.image
     if profile is None:
@@ -89,6 +91,12 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
         "qwen_image_21_turbo",
     ):
         arguments.append("--fa")
+    if backend == "stable_diffusion_cpp-vulkan" and profile.family in (
+        "qwen_image_21", "qwen_image_21_turbo",
+    ):
+        # Untiled 2K decoding exceeded the tested device's single-buffer limit;
+        # 512-pixel tiles completed on GPU without the unsafe host-memory retry.
+        arguments.extend(("--vae-tiling", "--vae-tile-size", "512", "--vae-tile-overlap", "0.25"))
     if backend == "stable_diffusion_cpp-metal" and profile.family == "sdxl":
         # The pinned Metal build produced white output with batched guidance;
         # separate conditional/unconditional forwards restored the reference.

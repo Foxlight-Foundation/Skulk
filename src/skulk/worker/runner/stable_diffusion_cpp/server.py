@@ -295,15 +295,19 @@ class NativeImageServer:
         process = self._process
         try:
             if process is not None:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGTERM)
+                # A failure observer may already have reaped the native process.
+                # Its former process group is no longer ours to signal.
+                if process.poll() is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGTERM)
                 try:
                     # Large BF16 CUDA contexts can take longer than five seconds
                     # to reclaim. Retain ownership until wait confirms exit.
                     process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
+                    if process.poll() is None:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=15)
                 self._process = None
         finally:

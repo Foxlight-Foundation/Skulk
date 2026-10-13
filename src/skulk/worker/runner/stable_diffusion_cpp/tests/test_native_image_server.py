@@ -28,6 +28,10 @@ class _ReapProcess(subprocess.Popen[bytes]):
         self.outcomes = outcomes
         self.waits: list[float | None] = []
 
+    def poll(self) -> int | None:
+        """Report only an exit already observed by this process fixture."""
+        return self.returncode
+
     def wait(self, timeout: float | None = None) -> int:
         self.waits.append(timeout)
         outcome = self.outcomes.pop(0)
@@ -63,6 +67,28 @@ def test_slow_native_reap_keeps_ownership_and_closes_log(
     producer.close()
     assert process.waits == [30, 15, 30]
     assert signals == [signal.SIGTERM, signal.SIGKILL, signal.SIGTERM]
+
+
+def test_reaped_native_process_is_not_signalled_again(
+    producer: NativeImageServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = _ReapProcess([0])
+    process.returncode = 0
+    log = io.BytesIO()
+
+    def refuse_signal(_pid: int, _sent: int) -> None:
+        raise AssertionError("a reaped process group no longer belongs to this runner")
+
+    monkeypatch.setattr(producer, "_process", process)
+    monkeypatch.setattr(producer, "_log", log)
+    monkeypatch.setattr(
+        "skulk.worker.runner.stable_diffusion_cpp.server.os.killpg", refuse_signal
+    )
+    producer.close()
+    assert process.waits == [30]
+    assert log.closed
+    producer.close()
+    assert process.waits == [30]
 
 
 @pytest.fixture

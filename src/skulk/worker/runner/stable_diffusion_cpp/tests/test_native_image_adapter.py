@@ -162,8 +162,8 @@ def test_invalid_reference_is_refused_without_native_decoding() -> None:
 @pytest.mark.parametrize(
     ("backend", "turbo", "runtime_flags"),
     [
-        ("stable_diffusion_cpp-vulkan", False, ["--fa"]),
-        ("stable_diffusion_cpp-vulkan", True, ["--fa"]),
+        ("stable_diffusion_cpp-vulkan", False, ["--fa", "--vae-tiling", "--vae-tile-size", "512", "--vae-tile-overlap", "0.25"]),
+        ("stable_diffusion_cpp-vulkan", True, ["--fa", "--vae-tiling", "--vae-tile-size", "512", "--vae-tile-overlap", "0.25"]),
         ("stable_diffusion_cpp-cuda", False, ["--fa"]),
         ("stable_diffusion_cpp-cuda", True, ["--fa"]),
         ("stable_diffusion_cpp-metal", True, []),
