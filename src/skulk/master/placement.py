@@ -564,12 +564,19 @@ def _card_platform_backends(
     compatible: set[str] = (
         set() if card.music is not None else set(card.placement.compatible_backends)
     )
+    # Legacy broad tags cannot grant support to a newly introduced exact-build engine.
+    if not card.qualification_only:
+        compatible = {tag for tag in compatible if engine_of(tag) != "stable_diffusion_cpp"}
     if node_resources is not None:
         compatible.update(
             registry_supported_backends_for_node(
                 card,
                 node_backends=node_resources.backends,
-                engine_builds=node_resources.engine_builds,
+                engine_builds={
+                    **{tag: build for tag, build in node_resources.installable_engine_builds.items()
+                       if tag in node_resources.on_demand_backends and engine_of(tag) == "stable_diffusion_cpp"},
+                    **node_resources.engine_builds,
+                },
                 hardware_classes=node_resources.hardware_classes,
             )
         )
@@ -579,6 +586,7 @@ def _card_platform_backends(
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
         card_serves_music=card.music is not None,
+        card_has_native_image_profile=card.image is not None,
         card_has_pinned_projector=(
             card.vision is not None and card.vision.has_pinned_projector
         ),
@@ -850,6 +858,8 @@ def place_instance(
     served_context_default: int | None = None,
     node_install_ids: Mapping[NodeId, UUID] | None = None,
 ) -> dict[InstanceId, Instance]:
+    if command.model_card.image is not None and command.min_nodes != 1:
+        raise PlacementError("Native image instances require exactly one node")
     if command.model_card.music is not None and command.min_nodes != 1:
         raise PlacementError("Music instances require exactly one node")
     if remote_code_approval_required(
@@ -859,7 +869,7 @@ def place_instance(
 
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
-    if command.model_card.music is not None:
+    if command.model_card.music is not None or command.model_card.image is not None:
         # audio.cpp runs one complete model on one host; a larger cycle could
         # otherwise be selected when no single node passes memory admission.
         candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
@@ -1464,11 +1474,14 @@ def place_instance(
         if resolved_backend is not None:
             shard = stamped_runner_to_shard[runner_id]
             updates: dict[str, str] = {"resolved_backend": resolved_backend}
-            if command.model_card.music is not None:
+            if command.model_card.music is not None or engine_of(resolved_backend) == "stable_diffusion_cpp":
                 assert resources is not None
-                build = resources.engine_builds.get(resolved_backend)
+                build = resources.engine_builds.get(resolved_backend) or (
+                    resources.installable_engine_builds.get(resolved_backend)
+                    if resolved_backend in resources.on_demand_backends else None
+                )
                 if build is None:
-                    raise PlacementError("Music placement lacks a verified engine build")
+                    raise PlacementError("Native placement lacks its exact engine build")
                 updates["resolved_engine_build"] = build
             stamped_runner_to_shard[runner_id] = shard.model_copy(
                 update=updates

@@ -334,6 +334,10 @@ class NodeResources(CamelCaseModel):
         default=None,
         description="Observed host CPU architecture for exact engine package selection.",
     )
+    installable_engine_builds: dict[str, str] = Field(
+        default_factory=dict,
+        description="Exact published builds eligible for on-demand preparation; not installed runtime evidence.",
+    )
     engine_builds: dict[str, str] = Field(
         default_factory=dict,
         description="Exact installed build identities keyed by engine and backend tag.",
@@ -464,6 +468,7 @@ class NodeResources(CamelCaseModel):
             on_demand_backends=derivation.on_demand_backends,
             architecture=platform.machine().lower(),
             engine_builds=engine_builds,
+            installable_engine_builds=dict(facts.stable_diffusion_cpp_installable_builds),
             llama_server_settings=(
                 resolve_llama_server_settings(os.environ)
                 if any(

@@ -51,6 +51,7 @@ from skulk.shared.constants import (
     offline_mode,
 )
 from skulk.shared.models.gguf_memory import GgufCacheGeometry, qwen35_cache_geometry
+from skulk.shared.models.image import ImageCardConfig
 from skulk.shared.models.registry import (
     EMBEDDED_REGISTRY_ROOT,
     RegistryAdvisory,
@@ -2882,6 +2883,8 @@ class ModelCard(CamelCaseModel):
     """Optional audio-video generation contract (modes, duration and frame
     grid, canvas rules, audio output, reference bounds, sampling defaults,
     pinned companions); ``None`` for models that do not generate video."""
+    image: ImageCardConfig | None = None
+    """Complete image components, geometry, reference limits and sampling contract."""
     license: LicenseCardConfig | None = None
     """Optional operator-facing license facts surfaced by the catalog and
     user interfaces; never enforced by download or placement."""
@@ -2921,6 +2924,23 @@ class ModelCard(CamelCaseModel):
             raise ValueError(
                 "tasks must list exactly the families implied by video.modes"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_image_artifact(self) -> "ModelCard":
+        """Keep native image capabilities and complete component admission coherent."""
+        profile = self.image
+        if profile is None:
+            return self
+        if ModelTask.TextToImage not in self.tasks:
+            raise ValueError("an image profile requires the TextToImage task")
+        if (ModelTask.ImageToImage in self.tasks) != (profile.max_reference_images > 0):
+            raise ValueError("image editing task and reference-image capability disagree")
+        if self.storage_size.in_bytes < profile.storage_bytes:
+            raise ValueError("image storage must account for every required component")
+        for component in profile.components:
+            if component.repository == str(self.artifact_repository) and component.revision != self.source_revision:
+                raise ValueError("image component revision differs from its primary artifact")
         return self
 
     @model_validator(mode="after")

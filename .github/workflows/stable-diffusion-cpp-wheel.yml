@@ -1,0 +1,67 @@
+# Candidate artifacts remain separate from hardware qualification and publication.
+name: stable-diffusion-cpp-wheel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SDCPP_REF: d637cfb935feb2254898a8f1524046c958f3df80
+
+jobs:
+  candidate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            variant: metal
+            tag: macosx_15_0_arm64
+          - runner: ubuntu-22.04
+            variant: vulkan
+            tag: manylinux_2_35_x86_64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential ninja-build libvulkan-dev glslc
+      - name: Fetch immutable source and carry recorded lifecycle patch
+        run: |
+          git clone --no-checkout https://github.com/leejet/stable-diffusion.cpp.git native-source
+          git -C native-source checkout "$SDCPP_REF"
+          git -C native-source submodule update --init --recursive
+          git -C native-source apply ../packaging/skulk-stable-diffusion-cpp/server-lifecycle.patch
+      - name: Configure portable GPU server
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          flags=(-DCMAKE_BUILD_TYPE=Release -DSD_BUILD_EXAMPLES=ON -DSD_SERVER_BUILD_FRONTEND=OFF -DSD_RPC=OFF -DSD_WEBM=OFF -DSD_WEBP=ON -DGGML_NATIVE=OFF -DGGML_STATIC=ON)
+          if [[ "$VARIANT" == metal ]]; then
+            flags+=(-DSD_METAL=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DGGML_CPU_ARM_ARCH=armv8.2-a+fp16)
+          else
+            flags+=(-DSD_VULKAN=ON)
+          fi
+          uv tool run --from cmake cmake -S native-source -B native-build "${flags[@]}"
+          uv tool run --from cmake cmake --build native-build --target sd-server --parallel 3
+      - name: Assemble unqualified immutable candidate
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PLATFORM_TAG: ${{ matrix.tag }}
+        run: |
+          uv run --no-project python scripts/build_stable_diffusion_cpp_wheel.py --source native-source --build native-build --output candidate-wheels --variant "$VARIANT" --platform-tag "$PLATFORM_TAG"
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: candidate-wheels/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-${{ matrix.variant }}-${{ matrix.tag }}
+          path: candidate-wheels/*
+          if-no-files-found: error

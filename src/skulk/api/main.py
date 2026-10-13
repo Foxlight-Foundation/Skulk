@@ -284,6 +284,7 @@ from skulk.api.types import (
     WebSearchToolResponse,
     normalize_image_size,
 )
+from skulk.api.types.api import LEGACY_IMAGE_SIZES
 from skulk.api.types.claude_api import (
     ClaudeMessagesRequest,
     ClaudeMessagesResponse,
@@ -412,6 +413,7 @@ from skulk.shared.election import ElectionMessage
 from skulk.shared.experimental import experimental_mode_enabled
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.image import validate_reference_images
 from skulk.shared.models.inference_assessment import (
     InferenceAssessment,
     InferenceWorkload,
@@ -7025,6 +7027,32 @@ class API:
             )
         return resolved_model
 
+    def _validate_image_request(self, model: ModelId, size: str, n: int, advanced: AdvancedImageParams | None, references: int = 0) -> bool:
+        """Validate the mounted image contract before admitting downloads or GPU work."""
+        card: ModelCard | None = None
+        for instance in self.state.instances.values():
+            if instance.shard_assignments.model_id == model:
+                card = self._model_card_for_instance(instance)
+                if card is not None:
+                    break
+        profile = card.image if card is not None else None
+        if profile is None:
+            if size not in LEGACY_IMAGE_SIZES or references > 1:
+                raise HTTPException(status_code=400, detail="This image engine does not support the requested canvas or reference count")
+            return False
+        try:
+            if not 1 <= n <= 4 or references > profile.max_reference_images:
+                raise ValueError("Image count or references exceed this model's limits")
+            width, height = (profile.default_width, profile.default_height) if size == "auto" else tuple(int(part) for part in size.split("x", 1))
+            profile.validate_canvas(width, height)
+            if profile.family == "qwen_image_21_turbo" and advanced is not None and (
+                advanced.num_inference_steps not in (None, 8) or advanced.guidance not in (None, 1.0) or advanced.negative_prompt
+            ):
+                raise ValueError("Turbo requires eight steps, CFG=1, and no negative prompt")
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return True
+
     async def _validate_embedding_model(self, model_id: ModelId) -> ModelId:
         """Validate an embedding model exists and is the right type.
 
@@ -9218,6 +9246,7 @@ class API:
             owner_node=self.node_id,
             task_params=payload,
         )
+        self._validate_image_request(ModelId(payload.model), payload.size, payload.n or 1, payload.advanced_params)
         await self._send(command)
 
         # Check if streaming is requested
@@ -9517,6 +9546,7 @@ class API:
             }
         )
 
+        self._validate_image_request(ModelId(payload.model), payload.size, payload.n or 1, payload.advanced_params)
         command = ImageGeneration(
             owner_node=self.node_id,
             task_params=payload,
@@ -9532,7 +9562,7 @@ class API:
 
     async def _send_image_edits_command(
         self,
-        image: UploadFile,
+        image: UploadFile | list[UploadFile],
         prompt: str,
         model: ModelId,
         n: int,
@@ -9550,20 +9580,34 @@ class API:
         resolved_model = await self._validate_image_model(model)
         advanced_params = _ensure_seed(advanced_params)
 
-        image_content = await image.read(_VISION_MEDIA_RAW_IMAGE_BYTES + 1)
-        if len(image_content) > _VISION_MEDIA_RAW_IMAGE_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail="Input image exceeds the per-request media limit",
-            )
-        image_data = base64.b64encode(image_content).decode("utf-8")
+        uploads = image if isinstance(image, list) else [image]
+        native = self._validate_image_request(resolved_model, size, n, advanced_params, len(uploads))
+        reference_data: list[bytes] = []
+        encoded_images: list[str] = []
+        input_bytes = 0
+        for upload in uploads:
+            image_content = await upload.read(_VISION_MEDIA_RAW_IMAGE_BYTES - input_bytes + 1)
+            input_bytes += len(image_content)
+            if input_bytes > _VISION_MEDIA_RAW_IMAGE_BYTES:
+                raise HTTPException(status_code=413, detail="Reference images exceed the aggregate media limit")
+            if not image_content:
+                raise HTTPException(status_code=400, detail="Reference images cannot be empty")
+            if native:
+                reference_data.append(image_content)
+            encoded_images.append(base64.b64encode(image_content).decode("ascii"))
+
+        if native:
+            try:
+                validate_reference_images(reference_data)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+        reference_data.clear()
 
         image_strength = 0.7 if input_fidelity == "high" else 0.3
 
-        data_chunks = [
-            image_data[i : i + SKULK_MAX_CHUNK_SIZE]
-            for i in range(0, len(image_data), SKULK_MAX_CHUNK_SIZE)
-        ]
+        data_chunks = [(slot, data[offset:offset + SKULK_MAX_CHUNK_SIZE])
+                       for slot, data in enumerate(encoded_images)
+                       for offset in range(0, len(data), SKULK_MAX_CHUNK_SIZE)]
         total_chunks = len(data_chunks)
 
         command = ImageEdits(
@@ -9571,6 +9615,7 @@ class API:
             task_params=ImageEditsTaskParams(
                 image_data="",
                 total_input_chunks=total_chunks,
+                input_image_count=len(uploads),
                 prompt=prompt,
                 model=resolved_model,
                 n=n,
@@ -9587,13 +9632,13 @@ class API:
         )
 
         logger.info(
-            f"Sending input image: {len(image_data)} bytes in {total_chunks} chunks"
+            f"Sending {len(uploads)} input images in {total_chunks} bounded chunks"
         )
         self._stage_vision_media(
             command.command_id,
             resolved_model,
-            [(0, chunk_data) for chunk_data in data_chunks],
-            1,
+            data_chunks,
+            len(uploads),
         )
         try:
             await self._send(command)
@@ -9607,7 +9652,7 @@ class API:
     async def image_edits(
         self,
         request: Request,
-        image: UploadFile = File(...),  # noqa: B008
+        image: UploadFile | None = File(None),  # noqa: B008
         prompt: str = Form(...),
         model: str = Form(...),
         n: int = Form(1),
@@ -9619,8 +9664,11 @@ class API:
         quality: Literal["high", "medium", "low"] = Form("medium"),
         output_format: Literal["png", "jpeg", "webp"] = Form("png"),
         advanced_params: str | None = Form(None),
+        images: list[UploadFile] | None = File(None, alias="image[]"),  # noqa: B008
     ) -> ImageGenerationResponse | StreamingResponse:
         """Handle image editing requests (img2img)."""
+        if (image is None) == (not images):
+            raise HTTPException(status_code=400, detail="Provide one image field or an ordered image[] array")
         # Parse string form values to proper types
         stream_bool = stream.lower() in ("true", "1", "yes")
         partial_images_int = int(partial_images) if partial_images.isdigit() else 0
@@ -9633,7 +9681,7 @@ class API:
                 )
 
         command = await self._send_image_edits_command(
-            image=image,
+            image=image if image is not None else images or [],
             prompt=prompt,
             model=ModelId(model),
             n=n,
@@ -10266,6 +10314,7 @@ class API:
             tooling=ToolingCapabilitySection.from_model_card(card),
             runtime=RuntimeCapabilitySection.from_model_card(card),
             video=VideoCapabilitySection.from_model_card(card),
+            image=card.image,
             license=LicenseSection.from_model_card(card),
             resolved_capabilities=ResolvedModelCapabilities.from_profile(
                 resolved_profile

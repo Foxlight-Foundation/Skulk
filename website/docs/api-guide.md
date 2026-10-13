@@ -1652,13 +1652,22 @@ Request fields:
 | `model` | string | Required placed image model id |
 | `prompt` | string | Required generation prompt |
 | `n` | integer | Number of images; default `1` |
-| `size` | string | `auto` (default), `512x512`, `768x768`, `1024x768`, `768x1024`, `1024x1024`, `1024x1536`, or `1536x1024` |
+| `size` | string | `auto` (default) uses the model canvas. Native image cards accept `WIDTHxHEIGHT`, with each dimension 64–4096 and model-specific alignment and area limits; eligible cards permit 2K canvases. Legacy MLX models retain their existing size list |
 | `quality` | string | `high`, `medium` (default), or `low` |
 | `output_format` | string | `png` (default), `jpeg`, or `webp` |
 | `response_format` | string | `b64_json` (default) returns inline base64 image data; `url` stores each image on this API node and returns a fetchable URL instead |
 | `stream` | boolean | With `partial_images > 0`, returns an SSE stream of partial and final images instead of one JSON response |
 | `partial_images` | integer | Number of intermediate previews per image when streaming; default `0` |
 | `advanced_params` | object | Optional `seed`, `num_inference_steps` (1-100), `guidance` (1.0-20.0), `negative_prompt`, and `num_sync_steps` (1-100). When `seed` is omitted, Skulk assigns one so multi-node generation stays deterministic |
+
+Native image cards admit `n` from 1 to 4 and expose geometry, reference count,
+RGBA support, and sampling defaults in `/v1/models` under `image`. Qwen Image
+2.1 Turbo requires its fixed eight-step schedule, guidance 1, and an empty
+negative prompt; incompatible overrides return **400** before dispatch.
+PNG and WebP preserve native alpha output; JPEG encoding discards alpha.
+Native producers run one image at a time and retain no terminal job after
+collection. Disconnect and cancellation stop the owned task. An unqualified
+engine/card pair is not eligible for normal placement.
 
 The non-streaming response is `{ "created": ..., "data": [...] }` with one
 `b64_json` or `url` entry per image.
@@ -1684,7 +1693,8 @@ Form fields mirror the generation fields (`n`, `size`, `quality`,
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `image` | file | Required input image, at most 24 MiB raw; larger uploads return **413 Request Entity Too Large** |
+| `image` | file | One input image. Supply this or `image[]`, never both |
+| `image[]` | repeated file | Ordered references for cards declaring multiple-image editing, up to the selected card limit. All inputs together are limited to 24 MiB raw (**413** when exceeded); native inputs must be valid PNG, JPEG or WebP and total at most 16,777,216 decoded pixels (**400** otherwise) |
 | `input_fidelity` | string | `low` (default) or `high`; controls how strongly the input image constrains the edit |
 
 The input image travels to the selected worker over the bounded vision media

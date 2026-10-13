@@ -58,6 +58,8 @@ def get_config_for_model(model_id: str) -> ImageModelConfig:
         ValueError: If no configuration found for model ID
     """
     model_id_lower = model_id.lower()
+    if "qwen-image-2.1" in model_id_lower:
+        raise ValueError("Qwen Image 2.1 requires its native image engine; the older Qwen adapter cannot load this architecture")
 
     for pattern, config in _CONFIG_REGISTRY.items():
         if pattern in model_id_lower:

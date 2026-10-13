@@ -463,6 +463,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
             card_serves_music=shard.model_card.music is not None,
+            card_has_native_image_profile=shard.model_card.image is not None,
             card_has_pinned_projector=(
                 shard.model_card.vision is not None
                 and shard.model_card.vision.has_pinned_projector
@@ -615,6 +616,17 @@ def entrypoint(
                 f"(resolved backend {resolved!r})"
             )
         if bound_instance.is_image_model:
+            from skulk.shared.backends import engine_of
+
+            if engine_of(shard.resolved_backend or "") == "stable_diffusion_cpp":
+                from skulk.worker.runner.stable_diffusion_cpp.runner import (
+                    Runner as NativeImageRunner,
+                )
+
+                NativeImageRunner(bound_instance, event_sender, task_receiver, cancel_receiver).main()
+                return
+            if shard.model_card.image is not None:
+                raise RuntimeError("no qualified native image engine serves this placement")
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner
 
             runner = ImageRunner(

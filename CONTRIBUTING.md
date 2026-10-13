@@ -579,3 +579,10 @@ For an operator-authorized screenshot of the generated QR screen, create a
 short-lived invitation, capture it, and immediately revoke that same invitation.
 Verify its revoked state before publishing the image and caption it as unusable
 for pairing. Do not publish an active pairing code.
+
+
+Native image wheel packaging lives in `packaging/skulk-stable-diffusion-cpp/`
+and is assembled by `scripts/build_stable_diffusion_cpp_wheel.py` from pinned
+source with the recorded lifecycle patch. Model placement never compiles native
+source. GPU qualification and append-only artifact publication are required
+before a package is added to the on-demand manifest.

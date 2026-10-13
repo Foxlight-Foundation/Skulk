@@ -349,8 +349,13 @@ def _model_files_incomplete_instance_failure_message(model_id: ModelId) -> str:
     )
 
 
-def _engine_install_failure_message(step: str | None) -> str:
+def _engine_install_failure_message(step: str | None, engine: EngineType = "comfy") -> str:
     """Return safe operator guidance for a failed on-demand engine install."""
+    if engine == "stable_diffusion_cpp":
+        return _instance_failure_message(
+            f"Could not prepare the native image engine: {step or 'the install'} failed. "
+            "Check GPU compatibility, network access, and free disk space, then place the model again."
+        )
     return _instance_failure_message(
         f"Could not install the video engine on this node: {step or 'the install'} "
         "failed. Check the node's internet connection and free disk space, then "
@@ -373,6 +378,8 @@ class _EngineInstallJob:
     """One on-demand engine install shared by every instance waiting for it."""
 
     engine: EngineType
+    resolved_backend: str | None = None
+    expected_build: str | None = None
     waiters: dict[InstanceId, TaskId] = field(default_factory=dict)
     finished: bool = False
     succeeded: bool = False
@@ -1335,7 +1342,7 @@ class Worker:
         # task each waiting instance was given, and one shared job per engine.
         self._on_demand_backends: frozenset[str] = frozenset()
         self._engine_install_tasks: dict[InstanceId, TaskId] = {}
-        self._engine_install_jobs: dict[EngineType, _EngineInstallJob] = {}
+        self._engine_install_jobs: dict[EngineType | tuple[EngineType, str | None, str | None], _EngineInstallJob] = {}
         self._stopped: anyio.Event = anyio.Event()
 
     async def _prepare_audio_cpp_engine(
@@ -2156,8 +2163,8 @@ class Worker:
                 and task.owner_node is not None
                 and completed.source_node == task.owner_node
                 and completed.total_chunks == task.task_params.total_input_chunks
-                and completed.image_count == 1
-                and image_indexes == {0}
+                and completed.image_count == task.task_params.input_image_count
+                and image_indexes == set(range(task.task_params.input_image_count))
             )
         else:
             cached_image_indexes = set(task.task_params.image_hashes)
@@ -3446,8 +3453,8 @@ class Worker:
                         or task.owner_node is None
                         or completed.source_node != task.owner_node
                         or completed.total_chunks != task.task_params.total_input_chunks
-                        or completed.image_count != 1
-                        or {chunk.image_index for chunk in chunks.values()} != {0}
+                        or completed.image_count != task.task_params.input_image_count
+                        or {chunk.image_index for chunk in chunks.values()} != set(range(task.task_params.input_image_count))
                     ):
                         self._clear_vision_media(cmd_id)
                         await self.event_sender.send(
@@ -3461,7 +3468,11 @@ class Worker:
                             )
                         )
                         continue
-                    assembled = "".join(chunks[i].data for i in range(len(chunks)))
+                    references = tuple(
+                        "".join(chunk.data for _, chunk in sorted(chunks.items()) if chunk.image_index == slot)
+                        for slot in range(task.task_params.input_image_count)
+                    )
+                    assembled = references[0]
                     logger.info(
                         f"Assembled input image from {len(chunks)} chunks, "
                         f"total size: {len(assembled)} bytes"
@@ -3473,6 +3484,10 @@ class Worker:
                     # field (notably owner_node for Zenoh routing - #279 Phase 2 /
                     # #310 review).
                     modified_task = _inject_assembled_image_edit(task, assembled)
+                    if len(references) > 1:
+                        modified_task = modified_task.model_copy(update={"task_params": modified_task.task_params.model_copy(
+                            update={"reference_image_data": references}
+                        )})
                     # Cleanup buffers
                     if cmd_id in self.input_chunk_buffer:
                         del self.input_chunk_buffer[cmd_id]
@@ -3730,15 +3745,16 @@ class Worker:
         await self.event_sender.send(
             TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Running)
         )
-        job = self._engine_install_jobs.get(task.engine)
+        key = (task.engine, task.resolved_backend, task.expected_build) if task.engine == "stable_diffusion_cpp" else task.engine
+        job = self._engine_install_jobs.get(key)
         if job is not None and job.finished and job.succeeded:
             await self.event_sender.send(
                 TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Complete)
             )
             return
         if job is None or job.finished:
-            job = _EngineInstallJob(engine=task.engine)
-            self._engine_install_jobs[task.engine] = job
+            job = _EngineInstallJob(engine=task.engine, resolved_backend=task.resolved_backend, expected_build=task.expected_build)
+            self._engine_install_jobs[key] = job
             self._tg.start_soon(self._run_engine_install, job)
         job.waiters[task.instance_id] = task.task_id
 
@@ -3753,6 +3769,7 @@ class Worker:
         from skulk.facts import (
             current_backend_derivation,
             current_node_facts,
+            hardware_class_inventory,
             refresh_node_facts,
         )
         from skulk.provisioning.comfy import (
@@ -3760,11 +3777,15 @@ class Worker:
             install_comfy_on_demand,
             stoppable_runner,
         )
+        from skulk.provisioning.stable_diffusion_cpp import (
+            ImageEngineInstallError,
+            install_native_image,
+        )
 
         failure_step: str | None = None
         stop = threading.Event()
         try:
-            if job.engine != "comfy":
+            if job.engine not in {"comfy", "stable_diffusion_cpp"}:
                 raise ComfyInstallError(
                     "the engine check", f"no on-demand installer for {job.engine}"
                 )
@@ -3775,14 +3796,19 @@ class Worker:
                 # in minutes: the thread is abandoned on cancellation and told
                 # to end its commands, and the next worker plans the install
                 # again for any instance still waiting.
-                await to_thread.run_sync(
-                    lambda: install_comfy_on_demand(
-                        facts,
-                        offline=self._offline,
-                        run=stoppable_runner(stop),
-                    ),
-                    abandon_on_cancel=True,
-                )
+                if job.engine == "stable_diffusion_cpp":
+                    backend, build = job.resolved_backend, job.expected_build
+                    if backend is None or build is None:
+                        raise ImageEngineInstallError("the placement check", "native image placement lacks backend/build identity")
+                    await to_thread.run_sync(
+                        lambda: install_native_image(backend, build, hardware_class_inventory(facts), offline=self._offline, stop=stop),
+                        abandon_on_cancel=True,
+                    )
+                else:
+                    await to_thread.run_sync(
+                        lambda: install_comfy_on_demand(facts, offline=self._offline, run=stoppable_runner(stop)),
+                        abandon_on_cancel=True,
+                    )
             except anyio.get_cancelled_exc_class():
                 stop.set()
                 raise
@@ -3802,12 +3828,12 @@ class Worker:
             self._on_demand_backends = derivation.on_demand_backends
             await self._publish_fresh_node_resources()
             job.succeeded = True
-        except ComfyInstallError as error:
+        except (ComfyInstallError, ImageEngineInstallError) as error:
             failure_step = error.step
-            logger.error(f"Video engine install failed at {error.step}: {error.detail}")
+            logger.error(f"Engine {job.engine} install failed at {error.step}: {error.detail}")
         except Exception as error:  # noqa: BLE001 - each waiter gets one explained failure
             failure_step = "the engine install"
-            logger.opt(exception=error).error("Video engine install failed")
+            logger.opt(exception=error).error("Engine install failed")
         job.finished = True
         waiters = dict(job.waiters)
         job.waiters.clear()
@@ -3823,7 +3849,7 @@ class Worker:
             if instance_id in self.state.instances:
                 await self._give_up_on_instance(
                     instance_id,
-                    _engine_install_failure_message(failure_step),
+                    _engine_install_failure_message(failure_step, job.engine),
                     error_code="engine_install_failed",
                 )
 

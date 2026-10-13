@@ -2899,3 +2899,23 @@ delivery. Queue overflow and incomplete flows invalidate the observation.
 - [Model Store](model-store): shared model artifact hosting
 
 Maintenance discipline for this doc and the [Architecture Reference](architecture-reference) lives in [AGENTS.md](https://github.com/Foxlight-Foundation/Skulk/blob/main/AGENTS.md). Architectural shape changes (new component, new event, new pubsub topic, new state field, new major API endpoint, new family adapter) update these docs in the same commit as the code.
+
+
+### Native image engine
+
+`stable_diffusion_cpp` serves typed `image` model profiles through one resident,
+headless, authenticated loopback subprocess per single-host, single-GPU instance.
+Its compute lanes are `metal`, `cuda`, `vulkan`, and `rocm`; CPU-only serving is
+excluded. Complete immutable component files are verified before load. Model
+placement can schedule an `InstallEngine` task for an exact published package;
+browsing does not acquire packages. `NodeResources.installable_engine_builds`
+records those candidates separately from measured `engine_builds`. Signed support
+claims, exact build identity, hardware match, and runner limits still gate normal
+placement. A candidate source build alone grants no support.
+
+The runner serializes image work with bounded admission, forwards previews and
+final PNG/JPEG/WebP through the existing image chunks, and cancels/deletes owned
+native jobs. The native watchdog exits on owner death. `SKULK_STABLE_DIFFUSION_CPP_BIN`
+selects a preprepared binary; package preparation obeys offline mode and
+`SKULK_NO_ENGINE_AUTOPROVISION`. Ordered reference edits use slot-indexed
+`VISION_MEDIA` frames and worker-local media, never replicated input bytes.

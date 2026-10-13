@@ -34,7 +34,7 @@ class BaseShardMetadata(TaggedModel):
     resolved_backend: str | None = None
     resolved_engine_build: str | None = Field(
         default=None,
-        description="Exact music engine build observed by placement and required at sidecar launch.",
+        description="Exact native engine build selected by placement and required at sidecar launch.",
     )
     llama_server_settings: LlamaServerSettings | None = Field(
         default=None,

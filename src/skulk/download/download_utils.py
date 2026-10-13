@@ -554,6 +554,17 @@ def companion_download_specs(
         )
 
     specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
+    if model_card.image is not None:
+        groups: dict[tuple[str, str], list[str]] = {}
+        for component in model_card.image.components:
+            paths = groups.setdefault((component.repository, component.revision), [])
+            for item in component.files:
+                if item.path not in paths:
+                    paths.append(item.path)
+        for (repository, revision), paths in groups.items():
+            if repository != str(model_card.artifact_repository):
+                gguf = next((path for path in paths if path.endswith(".gguf")), None)
+                specs.append((_bare_shard(repository, revision, gguf), paths, True))
     if model_card.vision and model_card.vision.weights_repo != str(
         model_card.artifact_repository
     ):
@@ -712,6 +723,13 @@ def model_companions_present_on_disk(
     model complete after ensure_shard returns, so the gate cannot loop
     within a session.
     """
+    if model_card.image is not None:
+        for component in model_card.image.components:
+            identifier, revision = companion_artifact_location(model_card, component.repository, component.revision)
+            for item in component.files:
+                path = build_sidecar_path(identifier, item.path, revision)
+                if path is None or path.stat().st_size != item.size_bytes:
+                    return False
     if model_card.vision and model_card.vision.weights_repo != str(
         model_card.artifact_repository
     ):

@@ -1,3 +1,4 @@
+import type { ImageCapabilityInfo } from '../../types/models';
 import { Select as DesignedSelect } from '../common/Select';
 import { useState } from 'react';
 import styled, { css } from 'styled-components';
@@ -8,10 +9,11 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
    Types
    ================================================================ */
 
+/** User-selected image request options, with null values using model defaults. */
 export interface ImageGenerationParams {
   size: string;
   quality: 'low' | 'medium' | 'high';
-  outputFormat: 'png' | 'jpeg';
+  outputFormat: 'png' | 'jpeg' | 'webp';
   numImages: number;
   stream: boolean;
   partialImages: number;
@@ -42,10 +44,12 @@ export const DEFAULT_IMAGE_PARAMS: ImageGenerationParams = {
 const SIZE_OPTIONS = ['auto', '512x512', '768x768', '1024x1024', '1024x768', '768x1024', '1024x1536', '1536x1024'];
 const QUALITY_OPTIONS: Array<'low' | 'medium' | 'high'> = ['low', 'medium', 'high'];
 
+/** Controlled image options with optional model-specific geometry and sampling. */
 export interface ImageParamsPanelProps {
   params: ImageGenerationParams;
   onChange: (params: ImageGenerationParams) => void;
   isEditMode?: boolean;
+  imageProfile?: ImageCapabilityInfo | null;
 }
 
 /* ================================================================
@@ -249,11 +253,26 @@ const ResetBtn = styled(Button)`
    Component
    ================================================================ */
 
-export function ImageParamsPanel({ params, onChange, isEditMode = false }: ImageParamsPanelProps) {
+/** Render options admitted by the selected model, including fixed distilled sampling. */
+export function ImageParamsPanel({ params, onChange, isEditMode = false, imageProfile }: ImageParamsPanelProps) {
   const { t } = useSkulkTranslation();
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  const update = (patch: Partial<ImageGenerationParams>) => onChange({ ...params, ...patch });
+  const fixedSampling = Boolean(imageProfile?.fixedSigmas.length);
+  const sizes = imageProfile
+    ? [...SIZE_OPTIONS, '2048x2048', '2400x1792', '1792x2400', '2752x1536', '1536x2752']
+      .filter((size) => {
+        if (size === 'auto') return true;
+        const [width, height] = size.split('x').map(Number);
+        return width % imageProfile.dimensionMultiple === 0
+          && height % imageProfile.dimensionMultiple === 0
+          && width * height <= imageProfile.maxPixels;
+      })
+    : SIZE_OPTIONS;
+  const update = (patch: Partial<ImageGenerationParams>) => onChange({
+    ...params, ...patch,
+    ...(fixedSampling ? { numInferenceSteps: null, guidance: null, negativePrompt: null } : {}),
+  });
 
   const hasAdvancedParams =
     params.seed !== null ||
@@ -268,7 +287,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
       <ParamGroup>
         <Label>{t('common.size', 'Size')}</Label>
         <Select aria-label={t('common.size', 'Size')} value={params.size} onValueChange={(selectedValue) => update({ size: selectedValue })}>
-          {SIZE_OPTIONS.map((s) => (
+          {sizes.map((s) => (
             <option key={s} value={s}>{s}</option>
           ))}
         </Select>
@@ -294,9 +313,9 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
       <ParamGroup>
         <Label>{t('imageParams.format', 'Format')}</Label>
         <ToggleGroup>
-          {(['png', 'jpeg'] as const).map((f) => (
-            <ToggleBtn key={f} $active={params.outputFormat === f} onClick={() => update({ outputFormat: f })}>
-              {f === 'png' ? t('imageParams.formatPng', 'png') : t('imageParams.formatJpeg', 'jpeg')}
+          {(['png', 'jpeg', 'webp'] as const).map((f) => (
+            <ToggleBtn key={f} aria-pressed={params.outputFormat === f} $active={params.outputFormat === f} onClick={() => update({ outputFormat: f })}>
+              {f}
             </ToggleBtn>
           ))}
         </ToggleGroup>
@@ -320,8 +339,9 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
           <NumberInput aria-label="Images"
             type="number"
             min={1}
+            max={imageProfile ? 4 : undefined}
             value={params.numImages}
-            onChange={(e) => update({ numImages: Math.max(1, parseInt(e.target.value) || 1) })}
+            onChange={(e) => update({ numImages: Math.min(imageProfile ? 4 : Infinity, Math.max(1, parseInt(e.target.value) || 1)) })}
           />
         </ParamGroup>
       )}
@@ -343,6 +363,13 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
             </>
           )}
         </ParamGroup>
+      )}
+
+      {imageProfile && (
+        <Label>{t('imageParams.referenceLimit', 'Up to {count} references', { count: imageProfile.maxReferenceImages })}
+          {imageProfile.supportsAlpha ? ` · ${t('imageParams.alpha', 'RGBA supported')}` : ''}
+          {fixedSampling ? ` · ${t('imageParams.fixedSampling', 'Fixed sampling')}` : ''}
+        </Label>
       )}
 
       {/* Advanced section */}
@@ -372,10 +399,11 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
             <SliderRow>
               <RangeInput aria-label="Steps"
                 type="range" min={1} max={100}
-                value={params.numInferenceSteps ?? 50}
+                disabled={fixedSampling}
+                value={fixedSampling ? imageProfile?.defaultSteps : params.numInferenceSteps ?? imageProfile?.defaultSteps ?? 50}
                 onChange={(e) => update({ numInferenceSteps: parseInt(e.target.value) })}
               />
-              <span>{params.numInferenceSteps ?? '—'}</span>
+              <span>{fixedSampling ? imageProfile?.defaultSteps : params.numInferenceSteps ?? '—'}</span>
               {params.numInferenceSteps !== null && (
                 <Button variant="ghost" size="sm" onClick={() => update({ numInferenceSteps: null })}>✕</Button>
               )}
@@ -388,10 +416,11 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
             <SliderRow>
               <RangeInput aria-label="Guidance"
                 type="range" min={1} max={20} step={0.5}
-                value={params.guidance ?? 7.5}
+                disabled={fixedSampling}
+                value={fixedSampling ? imageProfile?.defaultGuidance : params.guidance ?? imageProfile?.defaultGuidance ?? 7.5}
                 onChange={(e) => update({ guidance: parseFloat(e.target.value) })}
               />
-              <span>{params.guidance?.toFixed(1) ?? '—'}</span>
+              <span>{fixedSampling ? imageProfile?.defaultGuidance.toFixed(1) : params.guidance?.toFixed(1) ?? '—'}</span>
               {params.guidance !== null && (
                 <Button variant="ghost" size="sm" onClick={() => update({ guidance: null })}>✕</Button>
               )}
@@ -402,6 +431,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
           <div style={{ width: '100%' }}>
             <Label>{t('imageParams.negativePrompt', 'Negative prompt')}</Label>
             <TextArea
+              disabled={fixedSampling}
               rows={2}
               placeholder={t('imageParams.negativePromptPlaceholder', 'Things to avoid...')}
               value={params.negativePrompt ?? ''}

@@ -1,0 +1,438 @@
+"""Prepare immutable native image wheels only for accepted model placements."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import zipfile
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, Literal, cast, final
+
+import httpx
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
+from pydantic import Field
+
+from skulk.provisioning.llama_server import AUTOPROVISION_OPT_OUT_ENV
+from skulk.shared.constants import SKULK_ENGINES_DIR
+from skulk.utils.pydantic_ext import FrozenModel
+
+if TYPE_CHECKING:
+    from skulk.shared.types.node_facts import NodeFacts
+
+SOURCE_REVISION: Final = "d637cfb935feb2254898a8f1524046c958f3df80"
+SERVER_PATCH_SHA256: Final = (
+    "5c97917794372067d71ef6a49083f0c1afcfa3bbf46a368d08a7d0591691769b"
+)
+BINARY_ENV: Final = "SKULK_STABLE_DIFFUSION_CPP_BIN"
+ImageCompute = Literal["metal", "cuda", "vulkan", "rocm"]
+_INSTALL_LOCK = threading.Lock()
+_MAX_PACKAGE_BYTES = 1024 * 1024 * 1024
+_MAX_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
+_DEVICE_COMPUTES: Final[dict[str, ImageCompute]] = {
+    "MTL": "metal",
+    "CUDA": "cuda",
+    "VULKAN": "vulkan",
+    "HIP": "rocm",
+    "ROCM": "rocm",
+}
+
+
+@final
+class StableDiffusionCppWheel(FrozenModel):
+    """One published engine package, independently pinned before it is installable."""
+
+    filename: str = Field(
+        pattern=r"^skulk_stable_diffusion_cpp_(?:metal|cuda|vulkan|rocm)-[a-zA-Z0-9_.]+-py3-none-[a-zA-Z0-9_]+\.whl$",
+        description="Immutable wheel filename on the Foxlight engine index.",
+    )
+    sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$", description="Expected complete wheel digest."
+    )
+    binary_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$", description="Expected native executable digest."
+    )
+    compute: ImageCompute = Field(
+        description="Compiled GPU backend; CPU-only builds are not deliverable."
+    )
+    system: Literal["darwin", "linux"] = Field(
+        description="Supported host operating system."
+    )
+    architecture: Literal["arm64", "aarch64", "x86_64"] = Field(
+        description="Native host architecture."
+    )
+    hardware_classes: frozenset[str] = Field(
+        min_length=1, description="Hardware classes this exact package has qualified."
+    )
+
+    @property
+    def prefix(self) -> str:
+        """Return the wheel's fixed runtime payload directory."""
+        return f"skulk_stable_diffusion_cpp_{self.compute}/"
+
+    @property
+    def build_identity(self) -> str:
+        """Return executable-bound build truth, independent of user declarations."""
+        return f"stable_diffusion_cpp@sha256:{self.binary_sha256}"
+
+    @property
+    def url(self) -> str:
+        """Return the append-only package channel location."""
+        return f"https://wheels.foxlight.ai/wheels/{self.filename}"
+
+
+# Publication/qualification populates this table. A source build is not a published wheel.
+PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = ()
+
+
+@final
+class NativeImageProbe(FrozenModel):
+    """Executable identity and actual devices from the hardened native server."""
+
+    source_revision: str = Field(
+        description="Source revision reported by the executable."
+    )
+    binary_sha256: str = Field(description="Measured executable digest.")
+    devices: tuple[str, ...] = Field(
+        description="Native non-CPU device names, preserving runtime identifiers."
+    )
+    computes: tuple[ImageCompute, ...] = Field(
+        description="Observed usable GPU compute lanes."
+    )
+
+    @property
+    def build_identity(self) -> str:
+        """Return the identity registry support claims bind."""
+        return f"stable_diffusion_cpp@sha256:{self.binary_sha256}"
+
+
+class ImageEngineInstallError(RuntimeError):
+    """Fail a preparation at an operator-readable stage without advertising readiness."""
+
+    def __init__(self, step: str, detail: str) -> None:
+        """Retain the public stage and private diagnostic detail."""
+        super().__init__(f"{step}: {detail}")
+        self.step = step
+        self.detail = detail
+
+
+def file_sha256(path: Path) -> str:
+    """Hash a runtime file without holding its bytes in memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def probe_native_image(binary: Path) -> NativeImageProbe:
+    """Verify source identity and enumerate GPU devices; reject a CPU-only binary."""
+    completed = subprocess.run(
+        [str(binary), "--skulk-probe"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    raw = cast("object", json.loads(completed.stdout.strip()))
+    if not isinstance(raw, dict):
+        raise ValueError("native image probe is not an object")
+    record = cast("dict[str, object]", raw)
+    if record.get("protocol") != 1 or record.get("source_revision") != SOURCE_REVISION:
+        raise ValueError(
+            "native image probe reports an unrecognized protocol or source"
+        )
+    report = record.get("device_report")
+    if not isinstance(report, str):
+        raise ValueError("native image probe lacks a device report")
+    devices: list[str] = []
+    computes: list[ImageCompute] = []
+    for line in report.splitlines():
+        name = line.split("\t", 1)[0]
+        prefix = re.sub(r"\d+$", "", name).upper()
+        if (compute := _DEVICE_COMPUTES.get(prefix)) is not None:
+            devices.append(name)
+            if compute not in computes:
+                computes.append(compute)
+    if not devices:
+        raise ValueError("native image engine reports no GPU device")
+    return NativeImageProbe(
+        source_revision=SOURCE_REVISION,
+        binary_sha256=file_sha256(binary),
+        devices=tuple(devices),
+        computes=tuple(computes),
+    )
+
+
+def wheel_for_host(
+    backend: str, hardware_classes: frozenset[str]
+) -> StableDiffusionCppWheel | None:
+    """Find an exact published package matching this host and qualified GPU class."""
+    machine = platform.machine().lower()
+    system = platform.system().lower()
+    machine = (
+        {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+        if system == "linux"
+        else machine
+    )
+    return next(
+        (
+            wheel
+            for wheel in PUBLISHED_WHEELS
+            if wheel.system == system
+            and wheel.architecture == machine
+            and backend == f"stable_diffusion_cpp-{wheel.compute}"
+            and bool(wheel.hardware_classes & hardware_classes)
+        ),
+        None,
+    )
+
+
+def _root(wheel: StableDiffusionCppWheel) -> Path:
+    return SKULK_ENGINES_DIR / "stable_diffusion_cpp" / SOURCE_REVISION / wheel.sha256
+
+
+@contextmanager
+def _package_lock(root: Path, stop: threading.Event) -> Iterator[None]:
+    """Serialize independent worker/doctor processes while allowing cancellation."""
+    lock = FileLock(str(root) + ".lock")
+    while True:
+        if stop.is_set():
+            raise ImageEngineInstallError("the preparation", "installation cancelled")
+        try:
+            lock.acquire(timeout=0.25)
+            break
+        except FileLockTimeout:
+            continue
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def installable_image_builds(
+    facts: NodeFacts, hardware_classes: frozenset[str], *, offline: bool
+) -> dict[str, str]:
+    """Advertise only published packages an online participating node may acquire."""
+    if (
+        offline
+        or os.environ.get(AUTOPROVISION_OPT_OUT_ENV) == "1"
+        or (os.environ.get("SKULK_NODE_PARTICIPATION", "full") != "full")
+        or facts.stable_diffusion_cpp_binary.state != "not_configured"
+    ):
+        return {}
+    builds: dict[str, str] = {}
+    for compute in ("metal", "cuda", "rocm", "vulkan"):
+        backend = f"stable_diffusion_cpp-{compute}"
+        wheel = wheel_for_host(backend, hardware_classes)
+        if wheel is not None:
+            builds[backend] = wheel.build_identity
+    return builds
+
+
+def rehydrate_native_image(hardware_classes: frozenset[str]) -> Path | None:
+    """Wire a verified cached GPU package on restart without downloading."""
+    if os.environ.get(BINARY_ENV, "").strip():
+        return None
+    for compute in ("metal", "cuda", "rocm", "vulkan"):
+        wheel = wheel_for_host(f"stable_diffusion_cpp-{compute}", hardware_classes)
+        if wheel is None:
+            continue
+        binary = _verify_payload(_root(wheel), wheel)
+        if binary is not None:
+            os.environ[BINARY_ENV] = str(binary)
+            return binary
+    return None
+
+
+def _verify_payload(root: Path, wheel: StableDiffusionCppWheel) -> Path | None:
+    archive_path = root / wheel.filename
+    binary = root / wheel.prefix / "bin/sd-server"
+    if (
+        not archive_path.is_file()
+        or archive_path.stat().st_size > _MAX_PACKAGE_BYTES
+        or file_sha256(archive_path) != wheel.sha256
+    ):
+        return None
+    if (
+        not binary.is_file()
+        or not os.access(binary, os.X_OK)
+        or file_sha256(binary) != wheel.binary_sha256
+    ):
+        return None
+    # Revalidate every extracted runtime file against independently pinned archive bytes.
+    with zipfile.ZipFile(archive_path) as archive:
+        for item in archive.infolist():
+            if not item.filename.startswith(wheel.prefix) or item.is_dir():
+                continue
+            target = root / item.filename
+            if not target.is_file():
+                return None
+            with archive.open(item) as source:
+                digest = hashlib.sha256()
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+            if file_sha256(target) != digest.hexdigest():
+                return None
+    return binary
+
+
+def install_native_image(
+    backend: str,
+    expected_build: str,
+    hardware_classes: frozenset[str],
+    *,
+    offline: bool,
+    stop: threading.Event,
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """Prepare one pinned package, verify actual build/device, then wire the cache.
+
+    Runs off the worker loop. Concurrent requests share a serialized install;
+    interruption leaves no final cache. Offline mode only reuses verified bytes.
+    """
+    env = os.environ if environ is None else environ
+    if explicit := env.get(BINARY_ENV, "").strip():
+        binary = Path(explicit)
+        observed = probe_native_image(binary)
+        if (
+            observed.build_identity != expected_build
+            or len(observed.devices) != 1
+            or backend.removeprefix("stable_diffusion_cpp-") not in observed.computes
+        ):
+            raise ImageEngineInstallError(
+                "the engine check", "override build or GPU differs from placement"
+            )
+        return binary
+    wheel = wheel_for_host(backend, hardware_classes)
+    if wheel is None or wheel.build_identity != expected_build:
+        raise ImageEngineInstallError(
+            "the eligibility check",
+            "no exact published image engine matches this placement",
+        )
+    root = _root(wheel)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with _INSTALL_LOCK, _package_lock(root, stop):
+        if stop.is_set():
+            raise ImageEngineInstallError("the preparation", "installation cancelled")
+        binary = _verify_payload(root, wheel)
+        if binary is None:
+            if root.exists():
+                raise ImageEngineInstallError(
+                    "the integrity check",
+                    "cached image engine is corrupt; refusing to replace potentially active files",
+                )
+            if offline or env.get(AUTOPROVISION_OPT_OUT_ENV) == "1":
+                raise ImageEngineInstallError(
+                    "the download",
+                    "engine is not cached and automatic download is unavailable",
+                )
+            root.parent.mkdir(parents=True, exist_ok=True)
+            if shutil.disk_usage(root.parent).free < 2 * _MAX_PACKAGE_BYTES:
+                raise ImageEngineInstallError(
+                    "the disk-space check", "insufficient engine staging space"
+                )
+            with tempfile.TemporaryDirectory(
+                prefix=".image-engine-", dir=root.parent
+            ) as temporary:
+                staging = Path(temporary)
+                archive_path = staging / wheel.filename
+                digest = hashlib.sha256()
+                total = 0
+                with (
+                    httpx.Client(timeout=httpx.Timeout(60, read=30)) as client,
+                    client.stream("GET", wheel.url, follow_redirects=False) as response,
+                    archive_path.open("wb") as target,
+                ):
+                    response.raise_for_status()
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        if stop.is_set():
+                            raise ImageEngineInstallError(
+                                "the download", "installation cancelled"
+                            )
+                        total += len(chunk)
+                        if total > _MAX_PACKAGE_BYTES:
+                            raise ImageEngineInstallError(
+                                "the download",
+                                "package exceeds the bounded download size",
+                            )
+                        digest.update(chunk)
+                        target.write(chunk)
+                if digest.hexdigest() != wheel.sha256:
+                    raise ImageEngineInstallError(
+                        "the integrity check", "wheel digest differs from the pin"
+                    )
+                with zipfile.ZipFile(archive_path) as archive:
+                    entries = [
+                        item
+                        for item in archive.infolist()
+                        if item.filename.startswith(wheel.prefix)
+                    ]
+                    if sum(item.file_size for item in entries) > _MAX_EXPANDED_BYTES:
+                        raise ImageEngineInstallError(
+                            "the integrity check", "expanded package exceeds its bound"
+                        )
+                    for item in entries:
+                        if stop.is_set():
+                            raise ImageEngineInstallError(
+                                "the extraction", "installation cancelled"
+                            )
+                        relative = Path(item.filename)
+                        if (
+                            relative.is_absolute()
+                            or ".." in relative.parts
+                            or (item.external_attr >> 16) & 0o170000 == 0o120000
+                        ):
+                            raise ImageEngineInstallError(
+                                "the integrity check", "unsafe archive member"
+                            )
+                        destination = staging / relative
+                        if item.is_dir():
+                            destination.mkdir(parents=True, exist_ok=True)
+                        else:
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            with (
+                                archive.open(item) as source,
+                                destination.open("wb") as target,
+                            ):
+                                shutil.copyfileobj(source, target)
+                (staging / wheel.prefix / "bin/sd-server").chmod(0o755)
+                binary = _verify_payload(staging, wheel)
+                if binary is None:
+                    raise ImageEngineInstallError(
+                        "the integrity check",
+                        "extracted package differs from its pinned bytes",
+                    )
+                observed = probe_native_image(binary)
+                if (
+                    observed.build_identity != expected_build
+                    or len(observed.devices) != 1
+                    or wheel.compute not in observed.computes
+                    or stop.is_set()
+                ):
+                    raise ImageEngineInstallError(
+                        "the engine check",
+                        "prepared binary cannot serve the selected GPU",
+                    )
+                staging.rename(root)
+                binary = root / wheel.prefix / "bin/sd-server"
+        observed = probe_native_image(binary)
+        if (
+            observed.build_identity != expected_build
+            or len(observed.devices) != 1
+            or wheel.compute not in observed.computes
+        ):
+            raise ImageEngineInstallError(
+                "the engine check", "cached build/device no longer matches placement"
+            )
+        os.environ[BINARY_ENV] = str(binary)
+        return binary

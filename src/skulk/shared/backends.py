@@ -40,7 +40,7 @@ def _is_executable_file(path: str) -> bool:
 
 EngineType = Literal[
     "mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm", "test_video", "comfy",
-    "audio_cpp",
+    "audio_cpp", "stable_diffusion_cpp",
 ]
 """Inference runtime that loads and runs a model; selects the worker runner.
 
@@ -97,6 +97,7 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "test_video",
     "comfy",
     "audio_cpp",
+    "stable_diffusion_cpp",
 )
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
@@ -430,6 +431,7 @@ def platform_compatible_backends(
     card_serves_vision: bool,
     card_serves_speech: bool = False,
     card_serves_music: bool = False,
+    card_has_native_image_profile: bool = False,
     card_has_pinned_projector: bool = False,
     card_supports_tool_calling: bool = False,
     card_vllm_tool_call_parser: str | None = None,
@@ -465,7 +467,7 @@ def platform_compatible_backends(
     Returns:
         The subset of tags whose engine can serve everything the card declares.
     """
-    filtered = compatible_backends
+    filtered = frozenset(tag for tag in compatible_backends if engine_of(tag) != "stable_diffusion_cpp" or card_has_native_image_profile)
     if card_serves_vision:
         vision_engines = (
             _VISION_SERVING_ENGINES | frozenset({"llama_server"})

@@ -1731,3 +1731,11 @@ scope is the local API host, and installation, enablement, reachability and exac
 live readiness are distinct. Steward's optional installed-metadata reader is
 bound to the HTTP request and rechecks authority for each invocation. Provider
 approval/lifecycle and allocated compute remain separate from these declarations.
+
+
+Native image profiles use the single-host/single-GPU `stable_diffusion_cpp`
+runner, with verified component hashes and private native-job ownership.
+Published installable builds and installed measured builds remain separate in
+NodeResources. Candidate wheels grant no normal placement support; no CPU-only
+native image lane is delivered. See the architecture reference and
+`packaging/skulk-stable-diffusion-cpp/README.md` for preparation and build details.

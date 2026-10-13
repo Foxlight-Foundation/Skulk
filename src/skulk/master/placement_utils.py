@@ -89,7 +89,7 @@ class CycleMemoryDiagnostics(CamelCaseModel):
 # served llama-server engine launch with ``-ngl`` full-GPU offload; vLLM would
 # join here too. The bare CPU compute tag is excluded by the ``-cpu`` check.
 _GPU_OFFLOAD_ENGINE_PREFIXES: Final = (
-    "llama_cpp-", "llama_server-", "vllm-", "comfy-",
+    "llama_cpp-", "llama_server-", "vllm-", "comfy-", "stable_diffusion_cpp-",
 )
 _AUDIO_CPP_DISCRETE_LANES: Final = frozenset(
     {"audio_cpp-cuda", "audio_cpp-rocm", "audio_cpp-vulkan"}

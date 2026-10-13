@@ -1737,3 +1737,23 @@ Ordinary Chat also pins asynchronous user and assistant writes to their originat
 - `extensions/installed_capabilities.py`: `InstalledCapabilities` combines current local manager selections with separate owner reachability and exact live contract readiness. Readiness requires the selected bundle/version/digest-compatible descriptor and current manager/child admission. A ready provisioner does not prove acquired inference capacity.
 - `GET /v1/plugins/managed/capabilities` reads only this API host's configured manager. `GET /v1/plugins/managed/{plugin_id}/capabilities/{qualified_id}?revision=<digest>` reads one exact selected full descriptor, bounded to 64 KiB. Both require direct owner authority or `plugins:read`; neither attaches, repairs setup, enables children or invokes providers. Unknown metadata and retained uninstalled selections remain distinct from usable capacity.
 - Steward exposes `get_installed_capabilities` only through a request-bound authorized reader that checks `plugins:read` again on every invocation. No-argument reads give bounded installed summaries; an exact plugin/id@version/revision selection reads its schema. Oversized model results disclose omission and retain the authorized full-detail endpoint. Ordinary general Steward access grants no installation-read permission.
+
+
+### Native image engine
+
+`stable_diffusion_cpp` serves typed `image` model profiles through one resident,
+headless, authenticated loopback subprocess per single-host, single-GPU instance.
+Its compute lanes are `metal`, `cuda`, `vulkan`, and `rocm`; CPU-only serving is
+excluded. Complete immutable component files are verified before load. Model
+placement can schedule an `InstallEngine` task for an exact published package;
+browsing does not acquire packages. `NodeResources.installable_engine_builds`
+records those candidates separately from measured `engine_builds`. Signed support
+claims, exact build identity, hardware match, and runner limits still gate normal
+placement. A candidate source build alone grants no support.
+
+The runner serializes image work with bounded admission, forwards previews and
+final PNG/JPEG/WebP through the existing image chunks, and cancels/deletes owned
+native jobs. The native watchdog exits on owner death. `SKULK_STABLE_DIFFUSION_CPP_BIN`
+selects a preprepared binary; package preparation obeys offline mode and
+`SKULK_NO_ENGINE_AUTOPROVISION`. Ordered reference edits use slot-indexed
+`VISION_MEDIA` frames and worker-local media, never replicated input bytes.
