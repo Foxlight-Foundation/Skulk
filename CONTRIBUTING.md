@@ -600,3 +600,10 @@ ROCm candidate records runtime libraries plus gfx942 code objects. Builds retain
 component notices and nested payload hashes and remain unqualified until exact
 hardware/model, loader and lifecycle gates pass. See
 `packaging/skulk-stable-diffusion-cpp/README.md`.
+
+Managed native image build identities include the executable and bundled runtime
+file digests. Probes verify these bytes before execution and select the managed
+library/code-object paths rather than inherited SDK overrides. Wheel descriptors
+carry exact archive and expanded sizes, bounded at 3 GiB and 8 GiB respectively;
+installation checks staging space for both plus a 1 GiB reserve. Legacy candidate
+packages retain the earlier executable identity and conservative size defaults.

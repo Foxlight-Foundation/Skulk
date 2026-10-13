@@ -62,6 +62,18 @@ class StableDiffusionCppWheel(FrozenModel):
     binary_sha256: str = Field(
         pattern=r"^[0-9a-f]{64}$", description="Expected native executable digest."
     )
+    payload_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$",
+        description="Complete managed executable/runtime identity; absent for legacy candidates.",
+    )
+    size_bytes: int | None = Field(
+        default=None, ge=1, le=3 * 1024**3,
+        description="Exact bounded wheel size, including bundled GPU runtime libraries.",
+    )
+    expanded_size_bytes: int | None = Field(
+        default=None, ge=1, le=8 * 1024**3,
+        description="Exact bounded runtime payload size needed during installation.",
+    )
     compute: ImageCompute = Field(
         description="Compiled GPU backend; CPU-only builds are not deliverable."
     )
@@ -87,7 +99,7 @@ class StableDiffusionCppWheel(FrozenModel):
     @property
     def build_identity(self) -> str:
         """Return executable-bound build truth, independent of user declarations."""
-        return f"stable_diffusion_cpp@sha256:{self.binary_sha256}"
+        return f"stable_diffusion_cpp@sha256:{self.payload_sha256 or self.binary_sha256}"
 
     @property
     def url(self) -> str:
@@ -107,6 +119,9 @@ class NativeImageProbe(FrozenModel):
         description="Source revision reported by the executable."
     )
     binary_sha256: str = Field(description="Measured executable digest.")
+    payload_sha256: str | None = Field(
+        default=None, description="Verified managed runtime payload identity, when present."
+    )
     devices: tuple[str, ...] = Field(
         description="Native non-CPU device names, preserving runtime identifiers."
     )
@@ -117,7 +132,7 @@ class NativeImageProbe(FrozenModel):
     @property
     def build_identity(self) -> str:
         """Return the identity registry support claims bind."""
-        return f"stable_diffusion_cpp@sha256:{self.binary_sha256}"
+        return f"stable_diffusion_cpp@sha256:{self.payload_sha256 or self.binary_sha256}"
 
 
 class ImageEngineInstallError(RuntimeError):
@@ -150,6 +165,13 @@ class NativeCpuRequirements(FrozenModel):
         default=frozenset(),
         description="Required x86 helper instructions; empty for other CPU targets.",
     )
+    payload_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", description="Canonical member-digest mapping identity."
+    )
+    members: dict[str, str] = Field(
+        default_factory=dict, max_length=10000,
+        description="Managed file digests, including the executable and runtime code objects."
+    )
 
 
 def _host_cpu_features() -> frozenset[str]:
@@ -171,18 +193,34 @@ def _host_cpu_features() -> frozenset[str]:
 def probe_native_image(binary: Path) -> NativeImageProbe:
     """Verify compiled CPU requirements, source identity and a real GPU device."""
     metadata = binary.parent.parent / "build.json"
+    payload_digest: str | None = None
     if metadata.is_file():
         requirements = NativeCpuRequirements.model_validate_json(metadata.read_text())
         if requirements.required_cpu_features and not (
             requirements.required_cpu_features <= _host_cpu_features()
         ):
             raise ValueError("native image engine requires unavailable CPU instructions")
+        if requirements.payload_sha256 is not None:
+            encoded = json.dumps(requirements.members, sort_keys=True, separators=(",", ":")).encode()
+            if not requirements.members or hashlib.sha256(encoded).hexdigest() != requirements.payload_sha256:
+                raise ValueError("native image payload manifest identity differs")
+            for name, digest in requirements.members.items():
+                relative = Path(name)
+                if not relative.parts or relative.is_absolute() or ".." in relative.parts or relative.parts[0] != binary.parent.parent.name:
+                    raise ValueError("native image payload member is unsafe")
+                target = binary.parent.parent.parent / relative
+                if not target.is_file() or file_sha256(target) != digest:
+                    raise ValueError("native image payload member differs from its identity")
+            if requirements.members.get(f"{binary.parent.parent.name}/bin/sd-server") != file_sha256(binary):
+                raise ValueError("native image payload does not bind its executable")
+            payload_digest = requirements.payload_sha256
     completed = subprocess.run(
         [str(binary), "--skulk-probe"],
         capture_output=True,
         text=True,
         timeout=60,
         check=True,
+        env=native_image_environment(binary),
     )
     raw = cast("object", json.loads(completed.stdout.strip()))
     if not isinstance(raw, dict):
@@ -221,9 +259,32 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
     return NativeImageProbe(
         source_revision=SOURCE_REVISION,
         binary_sha256=file_sha256(binary),
+        payload_sha256=payload_digest,
         devices=tuple(devices),
         computes=tuple(computes),
     )
+
+
+def native_image_environment(binary: Path) -> dict[str, str]:
+    """Return an isolated managed-runtime environment without mutating the caller.
+
+    Legacy raw builds retain their operator environment. Managed payloads select
+    their verified libraries/code objects while system GPU drivers stay external.
+    """
+    environment = dict(os.environ)
+    metadata = binary.parent.parent / "build.json"
+    if not metadata.is_file() or NativeCpuRequirements.model_validate_json(metadata.read_text()).payload_sha256 is None:
+        return environment
+    libraries = binary.parent.parent / "lib"
+    for key in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "ROCBLAS_TENSILE_LIBPATH", "HIPBLASLT_TENSILE_LIBPATH"):
+        environment.pop(key, None)
+    if platform.system().lower() == "linux":
+        environment["LD_LIBRARY_PATH"] = str(libraries)
+    for key, component in (("ROCBLAS_TENSILE_LIBPATH", "rocblas"), ("HIPBLASLT_TENSILE_LIBPATH", "hipblaslt")):
+        directory = libraries / component / "library"
+        if directory.is_dir():
+            environment[key] = str(directory)
+    return environment
 
 
 def wheel_for_host(
@@ -331,7 +392,8 @@ def _verify_payload(root: Path, wheel: StableDiffusionCppWheel) -> Path | None:
     binary = root / wheel.prefix / "bin/sd-server"
     if (
         not archive_path.is_file()
-        or archive_path.stat().st_size > _MAX_PACKAGE_BYTES
+        or archive_path.stat().st_size > (wheel.size_bytes or _MAX_PACKAGE_BYTES)
+        or (wheel.size_bytes is not None and archive_path.stat().st_size != wheel.size_bytes)
         or file_sha256(archive_path) != wheel.sha256
     ):
         return None
@@ -409,7 +471,9 @@ def install_native_image(
                     "engine is not cached and automatic download is unavailable",
                 )
             root.parent.mkdir(parents=True, exist_ok=True)
-            if shutil.disk_usage(root.parent).free < 2 * _MAX_PACKAGE_BYTES:
+            package_limit = wheel.size_bytes or _MAX_PACKAGE_BYTES
+            expanded_limit = wheel.expanded_size_bytes or _MAX_EXPANDED_BYTES
+            if shutil.disk_usage(root.parent).free < package_limit + expanded_limit + 1024**3:
                 raise ImageEngineInstallError(
                     "the disk-space check", "insufficient engine staging space"
                 )
@@ -432,7 +496,7 @@ def install_native_image(
                                 "the download", "installation cancelled"
                             )
                         total += len(chunk)
-                        if total > _MAX_PACKAGE_BYTES:
+                        if total > package_limit:
                             raise ImageEngineInstallError(
                                 "the download",
                                 "package exceeds the bounded download size",
@@ -449,7 +513,8 @@ def install_native_image(
                         for item in archive.infolist()
                         if item.filename.startswith(wheel.prefix)
                     ]
-                    if sum(item.file_size for item in entries) > _MAX_EXPANDED_BYTES:
+                    expanded_size = sum(item.file_size for item in entries)
+                    if expanded_size > expanded_limit or (wheel.expanded_size_bytes is not None and expanded_size != expanded_limit):
                         raise ImageEngineInstallError(
                             "the integrity check", "expanded package exceeds its bound"
                         )

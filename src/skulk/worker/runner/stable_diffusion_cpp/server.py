@@ -20,7 +20,10 @@ import httpx
 import psutil
 from pydantic import ConfigDict, Field
 
-from skulk.provisioning.stable_diffusion_cpp import probe_native_image
+from skulk.provisioning.stable_diffusion_cpp import (
+    native_image_environment,
+    probe_native_image,
+)
 from skulk.utils.pydantic_ext import FrozenModel
 
 _MAX_RESPONSE_BYTES = 64 * 1024 * 1024
@@ -134,7 +137,7 @@ class NativeImageServer:
             lease.bind(("127.0.0.1", 0))
             port = cast("tuple[str, int]", lease.getsockname())[1]
         token = secrets.token_urlsafe(32)
-        environment = dict(os.environ)
+        environment = native_image_environment(binary)
         environment["SKULK_SDCPP_AUTH_TOKEN"] = token
         environment["SKULK_SDCPP_PARENT_PID"] = str(os.getpid())
         try:

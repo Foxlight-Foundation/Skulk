@@ -6,6 +6,7 @@ import subprocess
 import threading
 import zipfile
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -13,6 +14,58 @@ from skulk.facts.derive import derive_node_backends
 from skulk.facts.inventory import engine_build_inventory
 from skulk.provisioning import stable_diffusion_cpp as image_engine
 from skulk.shared.types.node_facts import NodeFacts, StableDiffusionCppProbe
+
+
+def test_managed_build_binds_runtime_and_isolates_inherited_libraries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "skulk_stable_diffusion_cpp_rocm"
+    binary = root / "bin/sd-server"
+    library = root / "lib/runtime.so"
+    binary.parent.mkdir(parents=True)
+    library.parent.mkdir(parents=True)
+    binary.write_bytes(b"native executable")
+    library.write_bytes(b"qualified runtime")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/unrelated/sdk")
+    monkeypatch.setenv("LD_PRELOAD", "/unrelated/injection.so")
+    monkeypatch.setattr(image_engine.platform, "system", lambda: "Linux")
+
+    def record_manifest() -> str:
+        members = {str(path.relative_to(tmp_path)): image_engine.file_sha256(path) for path in (binary, library)}
+        digest = hashlib.sha256(json.dumps(members, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        (root / "build.json").write_text(json.dumps({"payload_sha256": digest, "members": members}))
+        return digest
+
+    def run_probe(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        environment = cast("dict[str, str]", kwargs["env"])
+        assert environment["LD_LIBRARY_PATH"] == str(library.parent)
+        assert "LD_PRELOAD" not in environment
+        return subprocess.CompletedProcess([], 0, json.dumps({"protocol": 1, "source_revision": image_engine.SOURCE_REVISION, "device_report": "HIP0\tAMD GPU\n"}), "")
+
+    monkeypatch.setattr(image_engine.subprocess, "run", run_probe)
+    first_digest = record_manifest()
+    first = image_engine.probe_native_image(binary)
+    assert first.build_identity == f"stable_diffusion_cpp@sha256:{first_digest}"
+    library.write_bytes(b"different runtime")
+    with pytest.raises(ValueError, match="payload member differs"):
+        image_engine.probe_native_image(binary)
+    record_manifest()
+    second = image_engine.probe_native_image(binary)
+    assert second.binary_sha256 == first.binary_sha256
+    assert second.build_identity != first.build_identity
+
+
+def test_package_sizes_are_bounded_and_bind_descriptor_identity() -> None:
+    wheel = image_engine.StableDiffusionCppWheel(
+        filename="skulk_stable_diffusion_cpp_rocm-0.1.0-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="a" * 64, binary_sha256="b" * 64, payload_sha256="c" * 64,
+        compute="rocm", system="linux", architecture="x86_64",
+        hardware_classes=frozenset({"qualified-gpu"}),
+        size_bytes=2 * 1024**3, expanded_size_bytes=6 * 1024**3,
+    )
+    assert wheel.build_identity == "stable_diffusion_cpp@sha256:" + "c" * 64
+    with pytest.raises(ValueError):
+        image_engine.StableDiffusionCppWheel.model_validate({**wheel.model_dump(), "size_bytes": 3 * 1024**3 + 1})
 
 
 def test_spawned_runner_resolves_exact_prepared_cache_without_inherited_environment(

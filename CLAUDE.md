@@ -1770,3 +1770,10 @@ Native image runners revalidate the exact installed package at model load when
 their inherited environment predates installation. This cache lookup never
 downloads and keeps model/engine preparation parallel while preventing a first-use
 runner crash. Explicit binary overrides still take precedence.
+
+Managed native image build identities include the executable and bundled runtime
+file digests. Probes verify these bytes before execution and select the managed
+library/code-object paths rather than inherited SDK overrides. Wheel descriptors
+carry exact archive and expanded sizes, bounded at 3 GiB and 8 GiB respectively;
+installation checks staging space for both plus a 1 GiB reserve. Legacy candidate
+packages retain the earlier executable identity and conservative size defaults.

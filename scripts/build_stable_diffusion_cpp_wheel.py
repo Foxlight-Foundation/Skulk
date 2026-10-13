@@ -142,6 +142,9 @@ def assemble_wheel(
             for name, data in sorted(payload.items())
         },
     }
+    provenance["payload_sha256"] = hashlib.sha256(
+        json.dumps(provenance["members"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     payload[f"{module}/build.json"] = json.dumps(
         provenance, sort_keys=True, indent=2
     ).encode()
@@ -180,6 +183,9 @@ def assemble_wheel(
         "filename": destination.name,
         "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
         "binary_sha256": provenance["binary_sha256"],
+        "payload_sha256": provenance["payload_sha256"],
+        "size_bytes": destination.stat().st_size,
+        "expanded_size_bytes": sum(len(data) for name, data in payload.items() if name.startswith(module + "/")),
         "compute": variant,
         "system": system,
         "architecture": architecture,

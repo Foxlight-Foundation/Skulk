@@ -83,9 +83,12 @@ def test_native_package_records_compiled_cpu_requirements(
     )
     descriptor = json.loads(wheel.with_suffix(".json").read_text())
     assert descriptor["required_cpu_features"] == ["avx2", "f16c"]
+    assert descriptor["size_bytes"] == wheel.stat().st_size
+    assert descriptor["expanded_size_bytes"] > 0
     with zipfile.ZipFile(wheel) as archive:
         manifest = json.loads(archive.read("skulk_stable_diffusion_cpp_vulkan/build.json"))
         name = "skulk_stable_diffusion_cpp_vulkan/lib/rocblas/library/TensileLibrary_gfx942.dat"
         assert archive.read(name) == kernel.read_bytes()
         assert name in manifest["members"]
     assert manifest["required_cpu_features"] == descriptor["required_cpu_features"]
+    assert manifest["payload_sha256"] == descriptor["payload_sha256"]
