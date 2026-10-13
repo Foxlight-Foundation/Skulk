@@ -19,8 +19,11 @@ function retainedOperation(key: string): string {
   catch { return ''; }
 }
 
-/** Review immutable provider terms and explicitly approve once; reconnect only reads. */
-function ProposalControls({ pluginId, nodeId, actionsAvailable }: NodeAddress & { actionsAvailable: boolean }) {
+/**
+ * Review immutable provider terms and explicitly approve once; reconnect only
+ * reads. Exported so a burst provider's Rentals view shows the same review.
+ */
+export function ProposalControls({ pluginId, nodeId, actionsAvailable }: NodeAddress & { actionsAvailable: boolean }) {
   const { t } = useSkulkTranslation();
   const storageKey = `skulk-proposal-operation-v1:${encodeURIComponent(pluginId)}:${encodeURIComponent(nodeId)}`;
   const [operationId, setOperationId] = useState(() => retainedOperation(storageKey));

@@ -10,12 +10,12 @@ import {
   useRecommendBurstMutation,
   useReleaseBurstMutation,
   type BurstOperationAddress,
-  type BurstPhase,
   type BurstRecommendation,
 } from '../../store/endpoints/burst';
 import { pluginAccessRefused, pluginRefusalDetail, pluginRequestRefused, refusalSentence } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
 import { Button } from '../common/Button';
+import { burstPhaseLabels } from './burstPresentation';
 
 /** The model and workload a remote machine would be sized for. */
 export interface BurstOfferPanelProps {
@@ -148,20 +148,7 @@ export function BurstOfferPanel({ modelId, contextTokens, excludedNodeIds = [] }
     finally { submitting.current = false; }
   };
 
-  const phaseLabels: Record<BurstPhase, string> = {
-    approving: t('burst.phase.approving', 'Approving'),
-    refused: t('burst.phase.refused', 'Refused'),
-    attention: t('burst.phase.attention', 'Needs attention'),
-    uncertain: t('burst.phase.uncertain', 'Uncertain'),
-    starting: t('burst.phase.starting', 'Starting the machine'),
-    installing: t('burst.phase.installing', 'Installing Skulk'),
-    joining: t('burst.phase.joining', 'Joining the cluster'),
-    downloading: t('burst.phase.downloading', 'Downloading the model'),
-    loading: t('burst.phase.loading', 'Loading the model'),
-    ready: t('burst.phase.ready', 'Ready'),
-    releasing: t('burst.phase.releasing', 'Releasing'),
-    released: t('burst.phase.released', 'Released'),
-  };
+  const phaseLabels = burstPhaseLabels(t);
 
   const title = <h4>{t('burst.title', 'Remote capacity')}</h4>;
 

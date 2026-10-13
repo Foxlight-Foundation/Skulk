@@ -5,8 +5,11 @@ import type { ThemeName } from '../../theme';
 /** Tabs available inside the observability panel. */
 export type ObservabilityTab = 'live' | 'node' | 'traces' | 'performance';
 
-/** Tabs available inside the capability panel. */
-export type CapabilityPanelTab = 'overview' | 'surfaces' | 'actions';
+/**
+ * Tabs available inside the capability panel. `rentals` appears only for a
+ * burst provider on the host serving this dashboard.
+ */
+export type CapabilityPanelTab = 'overview' | 'surfaces' | 'actions' | 'rentals';
 
 /** Which capability node the capability panel shows. */
 export interface CapabilityPanelTarget {

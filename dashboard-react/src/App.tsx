@@ -38,6 +38,7 @@ import { OperatorPage } from './components/pages/OperatorPage';
 import { RightDrawer } from './components/common/RightDrawer';
 import { Button } from './components/common/Button';
 import { useGetBurstRentalsQuery, useReleaseBurstMutation } from './store/endpoints/burst';
+import { useLocalBurstProviderKeys } from './hooks/useLocalBurstProviders';
 import { useGetStewardStatusQuery } from './store/endpoints/steward';
 import { StewardClusterPrompt, StewardControllerProvider, STEWARD_MODEL_ID, StewardChatView } from './components/pages/StewardChatView';
 import { IntegrationsPage } from './components/pages/IntegrationsPage';
@@ -603,6 +604,10 @@ export function App() {
       .map((rental) => [rental.instanceId as string, rental]),
   ), [burstRentals.currentData]);
   const remoteInstanceIds = useMemo(() => new Set(rentalByInstance.keys()), [rentalByInstance]);
+  // Burst providers on this host get a spend line and a Rentals view on their
+  // satellite. Only a host that reports capability nodes is asked.
+  const hostsCapabilityNodes = localNodeId !== null && (capabilityNodes[localNodeId]?.length ?? 0) > 0;
+  const burstProviderKeys = useLocalBurstProviderKeys(hostsCapabilityNodes);
   const [releaseBurst] = useReleaseBurstMutation();
   const handleReleaseInstance = useCallback(async (instanceId: string) => {
     const rental = rentalByInstance.get(instanceId);
@@ -734,12 +739,13 @@ export function App() {
               <PluginsPage />
             ) : topology ? (
               <TopologyGraph
+                burstProviderKeys={burstProviderKeys}
                 capabilityNodes={capabilityNodes}
                 data={topology}
                 localNodeId={localNodeId}
                 onInspectNode={(nodeId) => openObservability('node', nodeId)}
-                onOpenCapabilityPanel={(hostNodeId, key) =>
-                  dispatch(uiActions.openCapabilityPanel({ target: { hostNodeId, key } }))
+                onOpenCapabilityPanel={(hostNodeId, key, tab) =>
+                  dispatch(uiActions.openCapabilityPanel({ target: { hostNodeId, key }, tab }))
                 }
               />
             ) : (

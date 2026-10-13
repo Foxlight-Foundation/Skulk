@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import styled, { useTheme } from 'styled-components';
-import { FiExternalLink, FiPlay, FiInfo, FiX } from 'react-icons/fi';
+import { FiExternalLink, FiPlay, FiInfo, FiServer, FiX } from 'react-icons/fi';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import type { CapabilityPanelTab } from '../../store/slices/uiSlice';
+import { BurstSpendLine } from '../capabilities/BurstSpendLine';
 import {
   capabilityNodeHealth,
   capabilityNodeKey,
@@ -41,8 +43,13 @@ export interface CapabilityFlyoutProps {
   canvasWidth: number;
   canvasHeight: number;
   onClose: () => void;
-  /** Opens the capability panel on this node. */
-  onOpenPanel: (hostNodeId: string, key: string) => void;
+  /** Opens the capability panel on this node, optionally on one tab. */
+  onOpenPanel: (hostNodeId: string, key: string, tab?: CapabilityPanelTab) => void;
+  /**
+   * Keys (`pluginId/nodeId`) of the burst providers on the host serving this
+   * dashboard. Such a node shows its spending and a Rentals entry.
+   */
+  burstProviderKeys?: ReadonlySet<string>;
 }
 
 const Card = styled.div`
@@ -247,6 +254,7 @@ export function CapabilityFlyout({
   canvasHeight,
   onClose,
   onOpenPanel,
+  burstProviderKeys,
 }: CapabilityFlyoutProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -291,11 +299,15 @@ export function CapabilityFlyout({
   const summary = summaries.find((candidate) => capabilityNodeKey(candidate) === selectedKey) ?? summaries[0];
   if (!summary) return null;
   const isLocalHost = localNodeId !== null && localNodeId === hostNodeId;
+  // The burst routes answer only for the host serving this dashboard, so a
+  // provider elsewhere shows no spending here; its own dashboard does.
+  const burstProvider = isLocalHost && (burstProviderKeys?.has(capabilityNodeKey(summary)) ?? false);
   const actions = buildCapabilityActions(summary, {
     isLocalHost,
     hostName,
     dashboardHostname: window.location.hostname,
     hostDashboardUrl: hostAddress ? dashboardUrlOn(hostAddress, pluginsPath(summary.pluginId)) : null,
+    burstProvider,
     t,
   });
   const level = capabilityNodeHealth(summary);
@@ -364,6 +376,7 @@ export function CapabilityFlyout({
                 })}`
               : ''}
           </StatusPill>
+          {burstProvider ? <BurstSpendLine nodeId={summary.nodeId} pluginId={summary.pluginId} /> : null}
         </TitleBlock>
         <CloseButton aria-label={t('topology.capability.closeFlyout', 'Close')} onClick={onClose} type="button">
           <FiX aria-hidden size={14} />
@@ -437,6 +450,14 @@ export function CapabilityFlyout({
                 type="button"
               >
                 <FiPlay aria-hidden size={14} />
+                <ActionText>{item.title}</ActionText>
+              </ActionButton>
+            );
+          }
+          if (item.kind === 'rentals') {
+            return (
+              <ActionButton key={item.id} onClick={() => onOpenPanel(hostNodeId, selectedKey, 'rentals')} type="button">
+                <FiServer aria-hidden size={14} />
                 <ActionText>{item.title}</ActionText>
               </ActionButton>
             );

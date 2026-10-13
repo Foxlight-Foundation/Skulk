@@ -70,6 +70,17 @@ describe('buildCapabilityActions', () => {
   });
 });
 
+describe('buildCapabilityActions for a burst provider', () => {
+  it('adds Rentals before details on the provider’s own host only', () => {
+    const local = buildCapabilityActions(summary({ surfaces: [], actions: [] }), { isLocalHost: true, hostName: 'local', burstProvider: true, t });
+    expect(local.map((item) => item.kind)).toEqual(['rentals', 'details']);
+    const remote = buildCapabilityActions(summary({ surfaces: [], actions: [] }), { isLocalHost: false, hostName: 'other', burstProvider: true, t });
+    expect(remote.map((item) => item.kind)).not.toContain('rentals');
+    const plain = buildCapabilityActions(summary({ surfaces: [], actions: [] }), { isLocalHost: true, hostName: 'local', t });
+    expect(plain.map((item) => item.kind)).toEqual(['details']);
+  });
+});
+
 describe('runDescriptorAction', () => {
   it('resolves the exact descriptor before posting the call envelope', async () => {
     const calls: Array<{ url: string; body?: unknown }> = [];

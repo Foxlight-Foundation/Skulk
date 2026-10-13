@@ -3,6 +3,7 @@ import { setupListeners } from '@reduxjs/toolkit/query';
 import { apiSlice } from './api';
 import { uiSliceReducer, subscribeUIPersistence } from './slices/uiSlice';
 import { chatSliceReducer, subscribeChatPersistence } from './slices/chatSlice';
+import { setupRunsSliceReducer } from './slices/setupRunsSlice';
 
 /**
  * Root Redux store for the Skulk dashboard.
@@ -22,6 +23,7 @@ export const store = configureStore({
   reducer: {
     ui: uiSliceReducer,
     chat: chatSliceReducer,
+    setupRuns: setupRunsSliceReducer,
     [apiSlice.reducerPath]: apiSlice.reducer,
   },
   middleware: (getDefaultMiddleware) =>

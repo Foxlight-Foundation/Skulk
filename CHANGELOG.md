@@ -60,7 +60,11 @@ This project records release notes here and mirrors public-facing notes in
   `/v1/burst` (providers, recommendations, operations and each provider's
   spending limit, `GET /v1/burst/budget`), under the plugin permissions:
   reading needs `plugins:read`, asking for an offer `plugins:manage`, and
-  renting or releasing `plugins:approve`.
+  renting or releasing `plugins:approve`. On the dashboard, a burst provider's
+  satellite shows what has been spent of its limit, and its **Rentals** view
+  lists the machines running now (with **Release**), the rentals waiting for
+  approval, and, where the provider allows it, **Change limit** and **Start
+  over**.
 - `GET /instance/{instance_id}/activity` reports requests in flight on an
   instance and when the last one started or finished.
 - Two installations of the same plugin on different computers in one cluster
