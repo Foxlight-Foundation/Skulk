@@ -44,6 +44,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- A plugin can now offer a guided setup: one short card that asks only for its
+  key and the few choices that matter, runs the setup in one step, and turns
+  the plugin on. RunPod uses it: add your RunPod API key, say how much to spend
+  at most, and select **Set up**. A plugin's other setup actions, setup files
+  and proposals now sit under **Advanced setup** on its card.
+
 - Remote capacity for a model the cluster cannot run. With a capability that
   provides remote machines installed (one that declares itself a burst
   provider), choosing a model that does not fit now offers a remote machine for
@@ -69,6 +75,16 @@ This project records release notes here and mirrors public-facing notes in
   peers running the same plugin along with the addresses this computer reaches
   them at. The exchange happens only on a cluster with its own private name:
   on the default public name any Skulk node could join and send one.
+- Plugin settings read more plainly. A plugin can mark settings most people
+  never need, such as ports and hosts, as advanced; they sit in a collapsed
+  **Advanced** section, which opens by itself when one of them still needs a
+  value. Money settings show a dollar sign and are edited to the cent, and
+  durations show "minutes" or "hours" beside them, so nothing asks for
+  millionths of a dollar or seconds.
+- When a plugin refuses to turn on, or refuses a remote-capacity request, it can
+  now say what to do next ("Add your RunPod API key under Credentials."), and
+  the dashboard shows that sentence instead of the host's generic reply. The
+  HTTP 409 `detail` of the plugin and burst routes carries it too.
 
 - Models now come back on their own after a reboot or a whole-cluster restart.
   Each machine keeps a small record of what the cluster was running. After a

@@ -3,7 +3,7 @@ import styled from 'styled-components';
 import { FiAlertCircle, FiCheckCircle } from 'react-icons/fi';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
-  pluginRefusalDetail, pluginRequestRefused, useConfigurePluginNodeMutation, useLazyGetNodeConfigurationQuery,
+  pluginRefusalDetail, pluginRequestRefused, refusalSentence, useConfigurePluginNodeMutation, useLazyGetNodeConfigurationQuery,
   useLazyGetNodePreflightQuery, type NodeAddress,
 } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
@@ -49,8 +49,10 @@ export function NodePreflightPanel({ pluginId, nodeId, runRequest = 0, offerStar
     } else if (outcome.kind === 'off') {
       setStartOutcome({ text: t('plugins.startAgainTurnedOff', 'It is turned off now, so it was left off. Turn it on from its settings to start it.'), problem: false });
     } else {
-      const { detail } = outcome.refusal;
-      setStartOutcome({ text: detail ? t('plugins.startAgainRefusedReason', 'It did not start. The host said: {reason}', { reason: detail })
+      // A plugin's own next step reads as its own sentence; core's generic
+      // refusal gives way to this panel's guidance.
+      const reason = refusalSentence(outcome.refusal.detail);
+      setStartOutcome({ text: reason ? `${t('plugins.startAgainNotStarted', 'It did not start.')} ${reason}`
         : t('plugins.startAgainRefused', 'It did not start. Run the checks again to see what is missing.'), problem: true });
     }
   };

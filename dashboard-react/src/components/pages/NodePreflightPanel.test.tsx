@@ -37,7 +37,7 @@ beforeEach(async () => {
       const configuration = { nodeId: 'node', revision: 7, schemaDigest: 'd'.repeat(64), enabled: nodeEnabled, values: {}, configurationSchema: { type: 'object', properties: {} } };
       if (request.method === 'GET') return json(configuration);
       mutations.push(await request.json());
-      return refuseEnable ? json({ detail: 'node preflight failed' }, 409) : json({ configuration: { ...configuration, revision: 8 }, validated: true });
+      return refuseEnable ? json({ detail: 'Place a video model before starting it' }, 409) : json({ configuration: { ...configuration, revision: 8 }, validated: true });
     }
     return new Response(JSON.stringify(failure ? {} : { nodeId: 'node', revision: 4, observedAt: 1800000000, checks: [
       { code: 'runtime', passed: true, correctiveAction: null },
@@ -123,7 +123,8 @@ it('shows the host\'s reason when it still does not start', async () => {
   await check();
   await contains('All 6 checks passed.');
   await act(async () => { button('Start it again')!.click(); });
-  await contains('It did not start. The host said: node preflight failed');
+  await contains('It did not start. Place a video model before starting it.');
+  expect(host.textContent).not.toContain('The host said');
 });
 
 it('leaves a node that is turned off by the time it is started again off', async () => {

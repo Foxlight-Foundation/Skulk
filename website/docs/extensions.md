@@ -659,6 +659,90 @@ enumerated and nested-object fields with local schema references. Unsupported
 forms are identified explicitly; server-side schema validation remains
 authoritative. See the [HTTP contract](api-guide.md#plugin-node-configuration).
 
+### Field hints
+
+Two optional keywords on a property shape how the dashboard shows it. They are
+plain JSON Schema annotations, so validators ignore them and older dashboards
+render the field as before.
+
+- `"x-skulk-advanced": true` moves the field into a collapsed **Advanced**
+  section after the ordinary fields. Use it for anything a person setting the
+  plugin up does not need: ports, hosts, keys, tuning. The section opens by
+  itself, and will not close, while any input in it fails the browser's own
+  checks, such as a required value left empty or a number out of bounds. The
+  plugin's schema validation still decides the rest: a required nested object
+  that is absent altogether has no input to fail, so saving reports the
+  plugin's refusal instead. A JSON Schema `default` does not fill a required
+  field (validators treat it as an annotation), so give an advanced field a
+  default and leave it out of `required` when it may be omitted.
+- `"x-skulk-unit"` names a number field's unit: `"usd"` (shown with a dollar
+  sign and edited to the cent), `"minutes"` or `"hours"` (the word follows the
+  control). Store the value in that unit; the dashboard never converts it. Ask
+  for dollars rather than millionths of a dollar, and minutes or hours rather
+  than seconds. A label made from the key leaves out a trailing word naming
+  the same unit (`spending_limit_usd` reads "Spending limit"). Unknown units
+  and units on non-number fields are ignored.
+
+With pydantic, add them through `json_schema_extra`:
+
+```python
+spending_limit_usd: float = Field(
+    default=10.0,
+    title="Spend no more than",
+    json_schema_extra={"x-skulk-unit": "usd"},
+)
+cleanup_port: int = Field(default=22, json_schema_extra={"x-skulk-advanced": True})
+```
+
+### Guided setup
+
+A managed plugin whose setup takes one action can ask the dashboard to present
+that action as a short guided card instead of its settings form. Set
+`"x-skulk-guided"` on the action's `parameters_schema`:
+
+```json
+{
+  "type": "object",
+  "required": ["spending_limit_usd"],
+  "properties": {
+    "spending_limit_usd": {"type": "number", "title": "Spend no more than", "x-skulk-unit": "usd"}
+  },
+  "x-skulk-guided": {"credentials": ["runpod-api-key"], "turn_on": true}
+}
+```
+
+While the plugin offers the action, the dashboard's setup page and the node's
+card on **Plugins** show it as the next step:
+
+1. Each credential named in `credentials` gets a password field, using the
+   credential input's own title and description. A value goes straight to the
+   node's credential store and never enters dashboard state.
+2. The action's ordinary fields follow, with `x-skulk-advanced` fields
+   collapsed.
+3. **Set up** saves the credentials, reads the setup fences again (a saved
+   credential moves them), starts the action, and follows it to the end.
+4. With `"turn_on": true`, the node is turned on once the action completes.
+
+A refusal or a failed operation shows the plugin's own next step. Offer the
+guided action only while it is the thing to do (RunPod offers it only on an
+unconfigured node). Once it is no longer offered, the card shows how setup
+ended, and the node's other setup actions stay under **Advanced setup**. An
+older dashboard ignores the keyword and lists the action with the others.
+
+### Refusing with a next step
+
+When `configure_node` refuses an operation, such as turning a node on before
+its setup is complete, raise `ManagedRefusalError` from `skulk.extensions` with a
+short plain sentence naming what to do next: `ManagedRefusalError("Add your RunPod
+API key under Credentials.")`. Skulk returns it as the HTTP 409 `detail`, and
+the dashboard shows it after "It was not turned on." instead of its generic
+guidance. It is shown to operators as written, so never put credentials,
+paths or internal identifiers in it. The message is trimmed and must be 1 to
+300 printable characters (no line breaks); anything else is dropped, and the
+refusal shows Skulk's generic sentence. Any other `ValueError` remains a refusal
+with Skulk's generic sentence. A separately supervised owner sends the same
+message in its refusal frame (see below).
+
 Credential entry is separate from ordinary settings. The Plugins dashboard uses
 masked single-line input by default; choose **Use multiline input** for keys or
 other credentials containing line breaks. Multiline drafts are visible while
@@ -697,6 +781,15 @@ negotiated contract and deadline, and are never replayed after a lost response.
 Management and call responses are bounded to 128 KiB; ordinary requests to 16 KiB
 and invocation requests to 64 KiB. The socket grants no remote operator scope or
 provider spending approval. The existing HTTP authorization boundary still applies.
+
+A response frame is either `{"result": {...}}` or a refusal: `{"error": ...}`,
+optionally with `"evidence_reference"` and with `"message"`, the plugin's plain
+next step for the operator. Skulk shows a message of 1 to 300 printable
+characters (after trimming) as the refusal's HTTP 409 `detail` on the plugin
+and burst routes; a missing, oversized or unprintable message is dropped and
+the refusal keeps Skulk's generic sentence. A refusal frame with any other
+member is an invalid response. Owners written before `message` existed are
+unaffected.
 
 `DynamicCapabilityProvider.dynamic_capabilities()` is an optional synchronous,
 cached descriptor snapshot covering unary and streaming modes. It performs no I/O. The loader consults current snapshots

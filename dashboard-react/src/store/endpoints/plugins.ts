@@ -318,6 +318,29 @@ export function pluginRefusalDetail(error: unknown): string | null {
   return typeof detail === 'string' && detail.length > 0 && detail.length <= 600 ? detail : null;
 }
 
+// Core's own 409 sentences when a plugin or burst provider refuses without
+// naming a next step. They are written for logs, not people, so the caller's
+// translated guidance replaces them.
+const GENERIC_REFUSALS = new Set([
+  'configuration refused; reload settings and validation',
+  'the burst provider refused this request; it may be busy with another one, so try again',
+]);
+
+/**
+ * A refusal reason ready to show as its own sentence after "It was not turned on."
+ *
+ * A plugin may refuse with its own plain next step ("Add your RunPod API
+ * key under Credentials."), which is shown as written, casing included (a
+ * step may begin with a name such as "npm"), with a closing full stop added
+ * when it has none. Core's generic refusal sentences return null, as does a
+ * missing reason, so the caller shows its own translated guidance.
+ */
+export function refusalSentence(detail: string | null | undefined): string | null {
+  const text = detail?.trim();
+  if (!text || GENERIC_REFUSALS.has(text)) return null;
+  return /[.!?…]$/.test(text) ? text : `${text}.`;
+}
+
 /**
  * Whether a failed plugin request was definitely answered with a refusal.
  *

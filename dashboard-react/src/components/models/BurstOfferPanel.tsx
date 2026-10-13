@@ -12,7 +12,7 @@ import {
   type BurstOperationAddress,
   type BurstRecommendation,
 } from '../../store/endpoints/burst';
-import { pluginAccessRefused } from '../../store/endpoints/plugins';
+import { pluginAccessRefused, pluginRefusalDetail, pluginRequestRefused, refusalSentence } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
 import { Button } from '../common/Button';
 import { burstPhaseLabels } from './burstPresentation';
@@ -111,8 +111,12 @@ export function BurstOfferPanel({ modelId, contextTokens, excludedNodeIds = [] }
     setRecommendation(null);
     try {
       setRecommendation(await recommend({ modelId, contextTokens, ...(excludedNodeIds.length ? { excludedNodeIds } : {}) }).unwrap());
-    } catch {
-      setNotice(t('burst.offerFailed', 'The burst provider could not answer. It may be busy; try again in a moment.'));
+    } catch (error) {
+      // A provider that names its own next step is shown as written; any
+      // other failure gets this panel's guidance.
+      const reason = pluginRequestRefused(error) === 409 ? refusalSentence(pluginRefusalDetail(error)) : null;
+      setNotice(reason ? `${t('burst.offerRefused', 'The burst provider made no offer.')} ${reason}`
+        : t('burst.offerFailed', 'The burst provider could not answer. It may be busy; try again in a moment.'));
     }
   };
 
@@ -136,7 +140,11 @@ export function BurstOfferPanel({ modelId, contextTokens, excludedNodeIds = [] }
     submitting.current = true;
     setNotice('');
     try { await release(address).unwrap(); void followed.refetch(); }
-    catch { setNotice(t('burst.releaseFailed', 'The release was not confirmed. The provider may be busy; try again. The rental still ends on its own at its latest end time.')); }
+    catch (error) {
+      const reason = pluginRequestRefused(error) === 409 ? refusalSentence(pluginRefusalDetail(error)) : null;
+      setNotice(reason ? `${t('burst.releaseRefused', 'The release was refused.')} ${reason} ${t('burst.releaseStillEnds', 'The rental still ends on its own at its latest end time.')}`
+        : t('burst.releaseFailed', 'The release was not confirmed. The provider may be busy; try again. The rental still ends on its own at its latest end time.'));
+    }
     finally { submitting.current = false; }
   };
 

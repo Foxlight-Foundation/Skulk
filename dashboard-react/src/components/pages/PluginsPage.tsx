@@ -3,8 +3,8 @@ import { useState, useSyncExternalStore, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 import {
-  installOperationIds, pluginAccessRefused, pluginRefusalDetail, useGetInstallOperationsQuery, useGetManagedRuntimesQuery, useGetPluginNodesQuery, useGetNodeConfigurationQuery,
-  useGetPluginServiceQuery, useConfigurePluginNodeMutation, type ConfigurableNode, type NodeConfiguration, type PluginNodes,
+  installOperationIds, pluginAccessRefused, pluginRefusalDetail, pluginRequestRefused, refusalSentence, useGetInstallOperationsQuery, useGetManagedRuntimesQuery, useGetPluginNodesQuery, useGetNodeConfigurationQuery,
+  useGetPluginServiceQuery, useConfigurePluginNodeMutation, useLazyGetNodeConfigurationQuery, type ConfigurableNode, type NodeConfiguration, type PluginNodes,
 } from '../../store/endpoints/plugins';
 import { RightDrawer } from '../common/RightDrawer';
 import { PluginSummaryCard } from '../common/PluginSummaryCard';
@@ -21,6 +21,8 @@ import { NodePreflightPanel } from './NodePreflightPanel';
 import { NodeSetupPanel } from './NodeSetupPanel';
 import { NodeSetupActionsPanel } from './NodeSetupActionsPanel';
 import { NodeProposalsPanel } from './NodeProposalsPanel';
+import { GuidedSetupCard } from './GuidedSetupCard';
+import { turnOnNodes } from './turnOnCapability';
 import { OperatorAccessPanel } from './OperatorAccessPanel';
 import { PluginCatalogBrowse, type BrowseRetryHandoff, type BrowseReviewHandoff } from './PluginCatalogBrowse';
 import type { RetryRequest } from './catalogJourney';
@@ -152,13 +154,15 @@ function NodeEditor({ pluginId, configuration, reload, onTurnOnRefused }: NodeEd
         disable: t('plugins.turnedOff', 'Turned off.'),
       }[operation], problem: false });
     } catch (error) {
-      const detail = pluginRefusalDetail(error);
+      // A plugin's own next step reads as its own sentence; core's generic
+      // refusal gives way to this page's guidance.
+      const reason = refusalSentence(pluginRefusalDetail(error));
       if (operation === 'enable') {
         // The plugin runs its setup checks before it starts; a refusal means one of them failed.
-        setNotice({ text: `${t('plugins.turnOnRefused', 'It was not turned on.')} ${detail ? t('plugins.hostSaid', 'The host said: {reason}', { reason: detail }) : t('plugins.turnOnRefusedGeneric', 'Check your access, then reload if another operator changed this node.')} ${t('plugins.turnOnSeeChecks', 'Setup checks show what is missing.')}`, problem: true });
+        setNotice({ text: `${t('plugins.turnOnRefused', 'It was not turned on.')} ${reason ?? `${t('plugins.turnOnRefusedGeneric', 'Check your access, then reload if another operator changed this node.')} ${t('plugins.turnOnSeeChecks', 'Setup checks show what is missing.')}`}`, problem: true });
         onTurnOnRefused?.();
       } else {
-        setNotice({ text: detail ? `${t('plugins.refusedShort', 'The change was refused.')} ${t('plugins.hostSaid', 'The host said: {reason}', { reason: detail })}`
+        setNotice({ text: reason ? `${t('plugins.refusedShort', 'The change was refused.')} ${reason}`
           : t('plugins.refused', 'The change was refused. Check your access and settings; reload if another operator changed this node.'), problem: true });
       }
     }
@@ -206,6 +210,18 @@ function NodeCard({ pluginId, node, title, defaultExpanded = false, collapsible 
   const [checkRequest, setCheckRequest] = useState(0);
   const query = useGetNodeConfigurationQuery({ pluginId, nodeId: node.nodeId }, { skip: !expanded || !node.configurable });
   const status = nodeStatus(node.status, t);
+  const [readConfiguration] = useLazyGetNodeConfigurationQuery();
+  const [configure] = useConfigurePluginNodeMutation();
+  const [guidedNotice, setGuidedNotice] = useState<string | null>(null);
+  // A guided setup asks to be turned on once it completes.
+  const turnOnAfterSetup = async () => {
+    const outcome = await turnOnNodes({ readConfiguration: (address) => readConfiguration(address, false), configure }, pluginId,
+      [node.nodeId], pluginRefusalDetail, pluginRequestRefused);
+    setGuidedNotice(outcome.refusal
+      ? refusalSentence(outcome.refusal.detail) ?? t('plugins.guided.notTurnedOn', 'Set up, but it was not turned on. Its setup checks below show why.')
+      : null);
+    if (outcome.refusal && node.preflightAvailable) setCheckRequest((count) => count + 1);
+  };
   return <PluginCard aria-label={title}>
     <CardHeader>
       <div>
@@ -214,6 +230,8 @@ function NodeCard({ pluginId, node, title, defaultExpanded = false, collapsible 
       </div>
       <StatusPill tone={status.tone}>{status.label}</StatusPill>
     </CardHeader>
+    {node.setupActionsAvailable ? <GuidedSetupCard address={{ pluginId, nodeId: node.nodeId }} onTurnOn={() => void turnOnAfterSetup()} /> : null}
+    {guidedNotice ? <Notice role="alert" $problem>{guidedNotice}</Notice> : null}
     <Section>
       <SectionHead>
         <h4>{t('plugins.settingsTitle', 'Settings')}</h4>
@@ -237,9 +255,15 @@ function NodeCard({ pluginId, node, title, defaultExpanded = false, collapsible 
       </SectionHead>
       {credentialsOpen ? <NodeCredentialsPanel pluginId={pluginId} nodeId={node.nodeId} /> : null}
     </Section> : null}
-    {node.setupActionsAvailable ? <Section><NodeSetupActionsPanel pluginId={pluginId} nodeId={node.nodeId} /></Section> : null}
-    {node.setupAvailable ? <Section><NodeSetupPanel pluginId={pluginId} nodeId={node.nodeId} /></Section> : null}
-    {node.proposalsAvailable ? <Section><NodeProposalsPanel pluginId={pluginId} nodeId={node.nodeId} actionsAvailable={node.proposalActionsAvailable === true} /></Section> : null}
+    {node.setupActionsAvailable || node.setupAvailable || node.proposalsAvailable ? <Section>
+      <AdvancedSetup>
+        <summary>{t('plugins.advancedSetup', 'Advanced setup')}</summary>
+        <Muted>{t('plugins.advancedSetupHelp', 'For troubleshooting or an unusual setup. Most people never need these.')}</Muted>
+        {node.setupActionsAvailable ? <NodeSetupActionsPanel pluginId={pluginId} nodeId={node.nodeId} /> : null}
+        {node.setupAvailable ? <NodeSetupPanel pluginId={pluginId} nodeId={node.nodeId} /> : null}
+        {node.proposalsAvailable ? <NodeProposalsPanel pluginId={pluginId} nodeId={node.nodeId} actionsAvailable={node.proposalActionsAvailable === true} /> : null}
+      </AdvancedSetup>
+    </Section> : null}
   </PluginCard>;
 }
 
@@ -411,3 +435,9 @@ const AccessDot = styled.span<{ $direct: boolean }>`width: 7px; height: 7px; bor
 
 const DrawerBody = styled.div`padding: 20px 24px 32px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; @media (max-width: 600px) { padding: 16px; }`;
 const Editor = styled.form`display: flex; flex-direction: column; gap: 16px; min-width: 0;`;
+
+const AdvancedSetup = styled.details`
+  display: flex; flex-direction: column; gap: 10px;
+  summary { cursor: pointer; font-weight: 600; color: ${({ theme }) => theme.colors.text}; }
+  &[open] > summary { margin-bottom: 8px; }
+`;
