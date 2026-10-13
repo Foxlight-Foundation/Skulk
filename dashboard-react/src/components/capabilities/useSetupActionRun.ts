@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { apiSlice } from '../../store/api';
-import { useAppDispatch } from '../../store/hooks';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import {
   pluginRefusalDetail,
   pluginRequestRefused,
@@ -9,6 +9,7 @@ import {
   type NodeAddress,
   type SetupAction,
 } from '../../store/endpoints/plugins';
+import { setupRunKey, setupRunOpen, setupRunsActions } from '../../store/slices/setupRunsSlice';
 import { randomHex32 } from '../../utils/randomIds';
 import { UNCONFIRMED_POLL_MS, UNCONFIRMED_WAIT_MS } from './setupRunTiming';
 
@@ -26,6 +27,8 @@ export interface SetupActionRun {
   detail: string | null;
   /** True once the provider's current setup forms are known, so a run can start. */
   ready: boolean;
+  /** The values the current run sent, or null with no run. */
+  values: Record<string, unknown> | null;
   /** The provider's current form for one action, once known, or null. */
   action: (actionId: string) => SetupAction | null;
   /** Runs the named action with these values, bound to the forms just read. */
@@ -36,13 +39,6 @@ export interface SetupActionRun {
    */
   reset: () => void;
 }
-
-/** How the request that started a run ended, before its operation is observed. */
-type Submission =
-  | { state: 'sent' }
-  | { state: 'refused'; detail: string | null }
-  | { state: 'unconfirmed'; gaveUp: boolean }
-  | { state: 'missing' };
 
 /**
  * Run one of a burst provider's setup actions, such as changing its spending
@@ -55,28 +51,38 @@ type Submission =
  * operation, and after a short wait reports the outcome as unconfirmed while
  * it keeps looking, so the same change is never submitted twice. A completed
  * or unconfirmed run refreshes the provider's spending limit.
+ *
+ * The run is kept in the store under the provider and `runName`, so a view
+ * that unmounts mid-run, as a closed drawer does, finds it again on return
+ * instead of offering a second submit.
  */
-export function useSetupActionRun(address: NodeAddress, active: boolean): SetupActionRun {
+export function useSetupActionRun(address: NodeAddress, runName: string, active: boolean): SetupActionRun {
   const dispatch = useAppDispatch();
-  const [operationId, setOperationId] = useState<string | null>(null);
-  const [submission, setSubmission] = useState<Submission>({ state: 'sent' });
+  const key = setupRunKey(address, runName);
+  const record = useAppSelector((state) => state.setupRuns[key]);
+  const operationId = record?.operationId ?? null;
+  const submission = record?.submission ?? null;
+  const open = setupRunOpen(record);
   const sending = useRef(false);
   const [startSetup] = useStartNodeSetupMutation();
   const forms = useGetNodeSetupActionsQuery(address, {
-    skip: !active && operationId === null,
+    skip: !active && !open,
     refetchOnMountOrArgChange: true,
   });
   const snapshot = forms.currentData;
-  const operation = operationId ? snapshot?.operations.find((item) => item.operationId === operationId) : undefined;
+  const operation = open && operationId ? snapshot?.operations.find((item) => item.operationId === operationId) : undefined;
 
   let phase: SetupActionRunPhase = 'running';
   let detail: string | null = null;
-  if (operationId === null) phase = 'idle';
+  if (submission === null) phase = 'idle';
   else if (submission.state === 'refused') {
     phase = 'failed';
     detail = submission.detail;
   } else if (submission.state === 'missing') phase = 'failed';
-  else if (operation?.phase === 'complete') phase = 'complete';
+  else if (submission.state === 'settled') {
+    phase = submission.outcome;
+    detail = submission.detail;
+  } else if (operation?.phase === 'complete') phase = 'complete';
   else if (operation?.phase === 'failed') {
     phase = 'failed';
     detail = operation.correctiveAction;
@@ -90,29 +96,41 @@ export function useSetupActionRun(address: NodeAddress, active: boolean): SetupA
     pollingInterval: phase === 'uncertain' ? UNCONFIRMED_POLL_MS : 2000,
   });
 
+  // The observed outcome is recorded, so it is still known once the provider
+  // stops listing the operation.
+  const observedPhase = operation?.phase === 'complete' || operation?.phase === 'failed' ? operation.phase : null;
+  const observedDetail = operation?.phase === 'failed' ? operation.correctiveAction : null;
+  useEffect(() => {
+    if (observedPhase === null || operationId === null) return;
+    dispatch(setupRunsActions.settled({ key, operationId, outcome: observedPhase, detail: observedDetail }));
+  }, [observedPhase, observedDetail, operationId, key, dispatch]);
+
   useEffect(() => {
     // An unconfirmed change may have landed, so the limit is read again too.
     if (phase === 'complete' || phase === 'uncertain') dispatch(apiSlice.util.invalidateTags(['BurstBudget']));
   }, [phase, dispatch]);
 
-  const waitingUnconfirmed = submission.state === 'unconfirmed' && !submission.gaveUp && operation === undefined;
+  // The wait is measured from the failed reply, so a view that returns
+  // mid-wait does not start it over.
+  const unconfirmedSince =
+    submission?.state === 'unconfirmed' && !submission.gaveUp && operation === undefined ? submission.since : null;
   useEffect(() => {
-    if (!waitingUnconfirmed) return;
-    const timer = window.setTimeout(() => setSubmission({ state: 'unconfirmed', gaveUp: true }), UNCONFIRMED_WAIT_MS);
+    if (unconfirmedSince === null || operationId === null) return;
+    const remaining = Math.max(0, UNCONFIRMED_WAIT_MS - (Date.now() - unconfirmedSince));
+    const timer = window.setTimeout(() => dispatch(setupRunsActions.gaveUp({ key, operationId })), remaining);
     return () => window.clearTimeout(timer);
-  }, [waitingUnconfirmed]);
+  }, [unconfirmedSince, operationId, key, dispatch]);
 
   const start = async (actionId: string, values: Record<string, unknown>) => {
     if (sending.current || !snapshot || phase === 'running' || phase === 'uncertain') return;
     const identity = randomHex32();
     const action = snapshot.actions.find((item) => item.actionId === actionId);
-    setOperationId(identity);
     if (!action) {
-      setSubmission({ state: 'missing' });
+      dispatch(setupRunsActions.started({ key, operationId: identity, values, submission: { state: 'missing' } }));
       return;
     }
     sending.current = true;
-    setSubmission({ state: 'sent' });
+    dispatch(setupRunsActions.started({ key, operationId: identity, values, submission: { state: 'sent' } }));
     try {
       await startSetup({
         ...address,
@@ -130,12 +148,15 @@ export function useSetupActionRun(address: NodeAddress, active: boolean): SetupA
       }).unwrap();
     } catch (error: unknown) {
       // A 4xx means the host decided and nothing changed; anything else may
-      // still have landed, so the run watches for its own operation.
-      setSubmission(
-        pluginRequestRefused(error) !== null
+      // still have landed, so the run watches for its own operation. The
+      // store records the reply even if the view closed meanwhile.
+      dispatch(setupRunsActions.requestEnded({
+        key,
+        operationId: identity,
+        submission: pluginRequestRefused(error) !== null
           ? { state: 'refused', detail: pluginRefusalDetail(error) }
-          : { state: 'unconfirmed', gaveUp: false },
-      );
+          : { state: 'unconfirmed', since: Date.now() },
+      }));
     } finally {
       sending.current = false;
     }
@@ -144,12 +165,11 @@ export function useSetupActionRun(address: NodeAddress, active: boolean): SetupA
   const reset = () => {
     // A run in flight, or one that may have landed, stays observable, so the
     // same change is never submitted a second time.
-    if (phase === 'running' || phase === 'uncertain') return;
-    setOperationId(null);
-    setSubmission({ state: 'sent' });
+    if (operationId === null || phase === 'running' || phase === 'uncertain') return;
+    dispatch(setupRunsActions.forgotten({ key, operationId }));
   };
 
   const action = (actionId: string) => snapshot?.actions.find((item) => item.actionId === actionId) ?? null;
 
-  return { phase, detail, ready: snapshot !== undefined, action, start, reset };
+  return { phase, detail, ready: snapshot !== undefined, values: record?.values ?? null, action, start, reset };
 }

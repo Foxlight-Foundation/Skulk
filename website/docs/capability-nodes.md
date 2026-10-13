@@ -354,7 +354,9 @@ what machines running now hold. **Rentals** opens the provider's Rentals view:
   Where the provider allows it from this computer, **Change limit** sets a new
   amount and **Start over** stops counting finished rentals, so the whole limit
   is available again. Both are the provider's own setup actions and need plugin
-  approval access.
+  approval access. A change is sent once: if you close the panel before the
+  provider answers, opening Rentals again shows that change and how it stands,
+  and a change the provider never confirmed is not offered a second time.
 - **Running now**: each rented machine's model, where it stands, when it ends at
   the latest, and **Release**.
 - **Waiting for your approval**: rentals the steward proposed, with the same

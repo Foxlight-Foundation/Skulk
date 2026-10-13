@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { apiSlice } from '../../store/api';
 import type { BurstBudget, BurstOperation } from '../../store/endpoints/burst';
 import type { SetupActions, SetupOperation } from '../../store/endpoints/plugins';
+import { setupRunsSliceReducer } from '../../store/slices/setupRunsSlice';
 import { darkTheme } from '../../theme/theme';
 import { BurstRentalsView } from './BurstRentalsView';
 
@@ -33,6 +34,8 @@ let refuseSetup: { status: number; detail: string } | null;
 let limitSchema: Record<string, unknown>;
 let startOverSchema: Record<string, unknown>;
 let loseReply: boolean;
+// While set, the host holds its reply to a setup submission until released.
+let heldReply: Promise<void> | null;
 
 /** The change-limit form RunPod's provider publishes. */
 const RUNPOD_LIMIT_SCHEMA = {
@@ -46,7 +49,7 @@ const RUNPOD_LIMIT_SCHEMA = {
 
 function makeStore() {
   return configureStore({
-    reducer: { [apiSlice.reducerPath]: apiSlice.reducer },
+    reducer: { setupRuns: setupRunsSliceReducer, [apiSlice.reducerPath]: apiSlice.reducer },
     middleware: (defaults) => defaults().concat(apiSlice.middleware),
   });
 }
@@ -128,16 +131,25 @@ async function click(text: string) {
   });
 }
 
-async function render() {
+async function render(store = makeStore()) {
   await act(async () => {
     root.render(
-      <Provider store={makeStore()}>
+      <Provider store={store}>
         <ThemeProvider theme={darkTheme}>
           <BurstRentalsView nodeId="gpu" pluginId="managed.runpod" />
         </ThemeProvider>
       </Provider>,
     );
   });
+  return store;
+}
+
+/** Closes the drawer, which unmounts the view, then opens it again on the same store. */
+async function closeAndReopen(store: ReturnType<typeof makeStore>) {
+  await act(async () => root.unmount());
+  expect(host.textContent).toBe('');
+  root = createRoot(host);
+  await render(store);
 }
 
 function setValue(input: HTMLInputElement, value: string) {
@@ -155,6 +167,7 @@ beforeEach(() => {
   limitSchema = RUNPOD_LIMIT_SCHEMA;
   startOverSchema = { type: 'object', properties: {}, additionalProperties: false };
   loseReply = false;
+  heldReply = null;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     const body = await request.text();
@@ -166,6 +179,7 @@ beforeEach(() => {
     if (url.pathname === '/v1/plugins') return json([{ pluginId: 'managed.runpod', available: true, nodes: [{ nodeId: 'gpu', bundleId: 'foxlight.runpod', version: '0.6.0', status: 'ready', configurable: true }] }]);
     if (url.pathname === SETUP_PATH) return json(snapshot());
     if (url.pathname === OPERATIONS_PATH) {
+      if (heldReply) await heldReply;
       if (refuseSetup) return json({ detail: refuseSetup.detail }, refuseSetup.status);
       // The reply is lost: the host may or may not have taken the change.
       if (loseReply) return json({ detail: 'upstream unavailable' }, 503);
@@ -340,4 +354,45 @@ it('says plainly when the provider’s limit form needs more than one amount', a
   await click('Change limit');
   await contains("This provider's limit can't be changed here.");
   expect(calls.some((call) => call.path === OPERATIONS_PATH)).toBe(false);
+});
+
+it('keeps a change still in flight when the drawer closes, and never sends it twice', async () => {
+  let releaseReply = () => {};
+  heldReply = new Promise((resolve) => {
+    releaseReply = resolve;
+  });
+  const store = await render();
+  await contains('$2.50 of $10.00 spent');
+  await click('Change limit');
+  await act(async () => setValue(host.querySelector<HTMLInputElement>('input')!, '20'));
+  await enabled('Save');
+  await click('Save');
+  await contains('Saving…');
+  await closeAndReopen(store);
+  // Reopened, the form shows the change under way, with the amount it sent.
+  await contains('Saving…');
+  expect(host.querySelector<HTMLInputElement>('input')?.value).toBe('20.00');
+  expect(button('Save').disabled).toBe(true);
+  await act(async () => releaseReply());
+  await contains('Your limit is now $20.00.');
+  expect(calls.filter((call) => call.path === OPERATIONS_PATH)).toHaveLength(1);
+  // Once the outcome is known, the form opens fresh next time.
+  await closeAndReopen(store);
+  await contains('$2.50 of $10.00 spent');
+  await click('Change limit');
+  await enabled('Save');
+  expect(host.textContent).not.toContain('Your limit is now');
+});
+
+it('keeps an unconfirmed start-over when the drawer closes, and never offers it again', async () => {
+  loseReply = true;
+  const store = await render();
+  await contains('$2.50 of $10.00 spent');
+  await click('Start over');
+  await enabled('Start over');
+  await click('Start over');
+  await closeAndReopen(store);
+  await contains('The provider did not confirm this change, so it may already have been made.');
+  expect(() => button('Start over')).toThrow();
+  expect(calls.filter((call) => call.path === OPERATIONS_PATH)).toHaveLength(1);
 });

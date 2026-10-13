@@ -5,6 +5,7 @@ import { Provider } from 'react-redux';
 import { ThemeProvider } from 'styled-components';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { apiSlice } from '../../store/api';
+import { setupRunsSliceReducer } from '../../store/slices/setupRunsSlice';
 import { uiActions, uiSliceReducer } from '../../store/slices/uiSlice';
 import type { CapabilityNodeSummary } from '../../types/capabilityNodes';
 import { darkTheme } from '../../theme/theme';
@@ -87,7 +88,7 @@ afterEach(async () => {
 
 async function render(key: string) {
   const store = configureStore({
-    reducer: { ui: uiSliceReducer, [apiSlice.reducerPath]: apiSlice.reducer },
+    reducer: { ui: uiSliceReducer, setupRuns: setupRunsSliceReducer, [apiSlice.reducerPath]: apiSlice.reducer },
     middleware: (defaults) => defaults().concat(apiSlice.middleware),
   });
   store.dispatch(uiActions.openCapabilityPanel({ target: { hostNodeId: 'node-host', key }, tab: 'rentals' }));

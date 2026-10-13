@@ -10,6 +10,8 @@ import {
   type BurstProviderAddress,
 } from '../../store/endpoints/burst';
 import { useGetPluginNodesQuery } from '../../store/endpoints/plugins';
+import { useAppSelector } from '../../store/hooks';
+import { setupRunKey, setupRunOpen } from '../../store/slices/setupRunsSlice';
 import { Button } from '../common/Button';
 import { burstPhaseLabels, formatCents, positiveUsd, spentOfLimit } from '../models/burstPresentation';
 import { ProposalControls } from '../pages/NodeProposalsPanel';
@@ -70,6 +72,12 @@ const whenDay = (seconds: number) => new Date(seconds * 1000).toLocaleDateString
 function editableAmount(value: string | null): string {
   if (value === null) return '';
   return formatCents(value, 'down').slice(1).replace(/,/g, '');
+}
+
+/** The one amount a limit run sent, as an editable amount, or null. */
+function submittedAmount(values: Record<string, unknown> | null): string | null {
+  const sent = values ? Object.values(values) : [];
+  return sent.length === 1 && typeof sent[0] === 'number' ? sent[0].toFixed(2) : null;
 }
 
 /** A typed amount in dollars and cents, or null when it is not a usable limit for this field. */
@@ -156,9 +164,15 @@ function SpendingSection({
   unavailable: boolean;
 }) {
   const { t } = useSkulkTranslation();
-  const [mode, setMode] = useState<'view' | 'limit' | 'startOver'>('view');
-  const limitRun = useSetupActionRun(address, mode === 'limit');
-  const startOverRun = useSetupActionRun(address, mode === 'startOver');
+  // A change still in flight, or never confirmed, when the drawer last closed
+  // reopens on its own form, so the operator sees how it stands.
+  const limitOpen = useAppSelector((state) => setupRunOpen(state.setupRuns[setupRunKey(address, 'limit')]));
+  const startOverOpen = useAppSelector((state) => setupRunOpen(state.setupRuns[setupRunKey(address, 'startOver')]));
+  const [mode, setMode] = useState<'view' | 'limit' | 'startOver'>(() =>
+    limitOpen ? 'limit' : startOverOpen ? 'startOver' : 'view',
+  );
+  const limitRun = useSetupActionRun(address, 'limit', mode === 'limit');
+  const startOverRun = useSetupActionRun(address, 'startOver', mode === 'startOver');
   const spent = spentOfLimit(budget, t);
   const title = <h4>{t('burst.rentals.spendingTitle', 'Spending')}</h4>;
 
@@ -188,6 +202,12 @@ function SpendingSection({
     startOverRun.reset();
     setMode('view');
   };
+  // A form opens fresh, unless its last run is still open, so an outcome
+  // left from before the drawer closed is not shown as new.
+  const openForm = (next: 'limit' | 'startOver') => {
+    (next === 'limit' ? limitRun : startOverRun).reset();
+    setMode(next);
+  };
 
   return (
     <Section aria-label={t('burst.rentals.spendingTitle', 'Spending')}>
@@ -215,12 +235,12 @@ function SpendingSection({
       {mode === 'view' ? (
         <Actions>
           {budget.changeLimitAction ? (
-            <Button onClick={() => setMode('limit')} type="button">
+            <Button onClick={() => openForm('limit')} type="button">
               {t('burst.rentals.changeLimit', 'Change limit')}
             </Button>
           ) : null}
           {budget.startOverAction ? (
-            <Button onClick={() => setMode('startOver')} type="button">
+            <Button onClick={() => openForm('startOver')} type="button">
               {t('burst.rentals.startOver', 'Start over')}
             </Button>
           ) : null}
@@ -285,7 +305,9 @@ function LimitForm({
   onClose: () => void;
 }) {
   const { t } = useSkulkTranslation();
-  const [text, setText] = useState(() => editableAmount(current));
+  // A form reopened on a run still under way shows the amount that run sent,
+  // not today's limit, so its outcome reads true.
+  const [text, setText] = useState(() => submittedAmount(run.values) ?? editableAmount(current));
   const field = run.ready ? limitField(run.action(actionId)?.parametersSchema) : null;
   const amount = parsedAmount(text, field);
   const submitting = run.phase === 'running';
