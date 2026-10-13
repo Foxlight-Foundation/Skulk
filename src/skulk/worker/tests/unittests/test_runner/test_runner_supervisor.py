@@ -315,6 +315,7 @@ class _ReapTrackingProcess:
 
     def __init__(self) -> None:
         self.joins = 0
+        self.join_timeouts: list[float | None] = []
         self.closed = False
         self._alive = True
 
@@ -326,6 +327,7 @@ class _ReapTrackingProcess:
 
     def join(self, _timeout: float | None = None) -> None:
         self.joins += 1
+        self.join_timeouts.append(_timeout)
         self._alive = False
 
     def terminate(self) -> None:
@@ -349,7 +351,12 @@ class _FailingRealtimeSender:
 
 
 @pytest.mark.asyncio
-async def test_teardown_reaps_runner_process_under_cancellation() -> None:
+@pytest.mark.parametrize(
+    ("backend", "expected_grace"), [(None, 5), ("stable_diffusion_cpp-cuda", 50)]
+)
+async def test_teardown_reaps_runner_process_under_cancellation(
+    backend: str | None, expected_grace: int
+) -> None:
     """The runner process must be reaped even when run() is cancelled.
 
     Regression: on a master-election transition the worker is torn down via
@@ -379,7 +386,9 @@ async def test_teardown_reaps_runner_process_under_cancellation() -> None:
 
     proc = _ReapTrackingProcess()
     supervisor = RunnerSupervisor(
-        shard_metadata=bound_instance.bound_shard,
+        shard_metadata=bound_instance.bound_shard.model_copy(
+            update={"resolved_backend": backend}
+        ),
         bound_instance=bound_instance,
         runner_process=cast("mp.Process", cast(object, proc)),
         initialize_timeout=400,
@@ -402,6 +411,7 @@ async def test_teardown_reaps_runner_process_under_cancellation() -> None:
     # despite the cancellation, the teardown must have reaped the process so its
     # GPU memory is reclaimed before the replacement worker admits a new runner.
     assert proc.joins >= 1, "process was not joined during cancelled teardown"
+    assert proc.join_timeouts[0] == expected_grace
     assert not proc.is_alive()
     assert proc.closed, "process.close() was skipped during cancelled teardown"
 

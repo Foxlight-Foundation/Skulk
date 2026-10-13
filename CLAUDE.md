@@ -1739,6 +1739,8 @@ Qwen Image 2.1 and Turbo Vulkan loads enable Flash Attention to reduce memory
 pressure at the default 2048-square canvas.
 Native CUDA wheel assembly requires `GGML_CUDA_NCCL=OFF` for the single-GPU
 image contract and to avoid an unnecessary host-library dependency.
+Native image teardown retains the producer handle through a 30-second graceful
+wait and 15-second forced reap; its supervisor allows 50 seconds for cleanup.
 Published installable builds and installed measured builds remain separate in
 NodeResources. Candidate wheels grant no normal placement support; no CPU-only
 native image lane is delivered. See the architecture reference and

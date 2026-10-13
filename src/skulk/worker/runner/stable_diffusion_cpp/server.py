@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -291,14 +292,19 @@ class NativeImageServer:
         client, self._client = self._client, None
         if client is not None:
             client.close()
-        process, self._process = self._process, None
-        if process is not None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=5)
-            except ProcessLookupError:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=5)
-        self._log.close()
+        process = self._process
+        try:
+            if process is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    # Large BF16 CUDA contexts can take longer than five seconds
+                    # to reclaim. Retain ownership until wait confirms exit.
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=15)
+                self._process = None
+        finally:
+            self._log.close()

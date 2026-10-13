@@ -1759,3 +1759,6 @@ selects a preprepared binary; package preparation obeys offline mode and
 `VISION_MEDIA` frames and worker-local media, never replicated input bytes.
 Qwen Image 2.1 and Turbo Vulkan instances enable Flash Attention at load time
 to reduce attention memory pressure at the default 2048-square canvas.
+Native shutdown retains process ownership through a bounded 30-second graceful
+wait and 15-second forced reap. Its supervisor allows 50 seconds for this cleanup,
+including large BF16 GPU contexts; failed reaping remains a visible failure.

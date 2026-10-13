@@ -2,6 +2,8 @@
 
 import io
 import json
+import signal
+import subprocess
 import threading
 from collections.abc import Iterator
 
@@ -14,6 +16,53 @@ from skulk.worker.runner.stable_diffusion_cpp.server import (
     NativePreview,
     NativeResult,
 )
+
+
+class _ReapProcess(subprocess.Popen[bytes]):
+    """Model delayed driver exit without creating an operating-system process."""
+
+    def __init__(self, outcomes: list[int | subprocess.TimeoutExpired]) -> None:
+        self.pid = 123
+        self.returncode = None
+        self._child_created = False
+        self.outcomes = outcomes
+        self.waits: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits.append(timeout)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, subprocess.TimeoutExpired):
+            raise outcome
+        self.returncode = outcome
+        return outcome
+
+
+def test_slow_native_reap_keeps_ownership_and_closes_log(
+    producer: NativeImageServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = _ReapProcess([
+        subprocess.TimeoutExpired("native", 30),
+        subprocess.TimeoutExpired("native", 15),
+        0,
+    ])
+    log = io.BytesIO()
+    signals: list[int] = []
+
+    def send_signal(_pid: int, sent: int) -> None:
+        signals.append(sent)
+
+    monkeypatch.setattr(producer, "_process", process)
+    monkeypatch.setattr(producer, "_log", log)
+    monkeypatch.setattr(
+        "skulk.worker.runner.stable_diffusion_cpp.server.os.killpg",
+        send_signal,
+    )
+    with pytest.raises(subprocess.TimeoutExpired):
+        producer.close()
+    assert log.closed
+    producer.close()
+    assert process.waits == [30, 15, 30]
+    assert signals == [signal.SIGTERM, signal.SIGKILL, signal.SIGTERM]
 
 
 @pytest.fixture

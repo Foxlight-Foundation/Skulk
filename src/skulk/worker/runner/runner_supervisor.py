@@ -516,7 +516,13 @@ class RunnerSupervisor:
                 with contextlib.suppress(ClosedResourceError):
                     self._cancel_sender.close()
 
-                await to_thread.run_sync(self.runner_process.join, 5)
+                backend = self.shard_metadata.resolved_backend or ""
+                # Native image cleanup owns a separate GPU process and may need
+                # 30 seconds plus a 15-second forced reap for large BF16 contexts.
+                shutdown_grace = (
+                    50 if backend.partition("-")[0] == "stable_diffusion_cpp" else 5
+                )
+                await to_thread.run_sync(self.runner_process.join, shutdown_grace)
 
                 if self.runner_process.is_alive():
                     logger.warning(

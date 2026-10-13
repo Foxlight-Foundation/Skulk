@@ -118,9 +118,10 @@ class Runner(ServedConcurrentDispatch):
         self.run_dispatch_loop()
 
     def _teardown_server(self) -> None:
-        server, self.server = self.server, None
+        server = self.server
         if server is not None:
             server.close()
+            self.server = None
 
     def _ensure_server_alive(self) -> None:
         if self.server is not None:
