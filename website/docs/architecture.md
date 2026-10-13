@@ -2524,7 +2524,12 @@ through the ordinary instance delete before the provider signs the machine's
 release. `GET /v1/burst/operations` (`plugins:read`) lists every rental the
 providers on this API host approved and have not yet confirmed gone, through
 the optional `NodeBurstRentals` facet and the provider's `burst-list` owner
-operation, so any dashboard can mark a burst instance and release it. The
+operation, so any dashboard can mark a burst instance and release it.
+`GET /v1/burst/budget` (`plugins:read`) reads one provider node's spending
+limit through the optional `NodeBurstBudget` facet and the `burst-budget` owner
+operation: the limit, what finished rentals used, what running ones hold and
+what is left, in dollars, plus the provider's own setup actions that change the
+limit or start the count over where that can happen from this computer. The
 provider also releases a ready rental after five idle minutes, read from core's
 per-instance activity. In the dashboard, the placement dialog's capacity
 estimate shows a remote offer (`BurstOfferPanel`) when the verdict is

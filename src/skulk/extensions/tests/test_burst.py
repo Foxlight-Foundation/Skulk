@@ -277,3 +277,36 @@ async def test_exclusions_are_sent_only_when_present(tmp_path: Path) -> None:
     await fixture.owner.burst_offer("gpu", "example/large", 8192, ("node-a",))
     assert "excluded_node_ids" not in fixture.sent[0]
     assert fixture.sent[1]["excluded_node_ids"] == ["node-a"]
+
+
+async def test_the_budget_is_read_from_the_exact_provider_node(tmp_path: Path) -> None:
+    fixture = _Owner(tmp_path, node("gpu"), node("other", None))
+    fixture.replies = [
+        {
+            "state": "available",
+            "limit_usd": "10.000000",
+            "spent_usd": "1.250000",
+            "held_usd": "2.250000",
+            "left_usd": "6.500000",
+            "rentals": 2,
+            "counting_since": 1_800_000_000,
+            "change_limit_action": "campaign-limits",
+            "start_over_action": "start-over",
+        }
+    ]
+    budget = await fixture.owner.burst_budget("gpu")
+    assert (budget.limit_usd, budget.spent_usd, budget.left_usd) == (
+        "10.000000",
+        "1.250000",
+        "6.500000",
+    )
+    assert budget.start_over_action == "start-over"
+    assert fixture.sent == [
+        {"operation": "burst-budget", "plugin_id": "managed.fixture", "node_id": "gpu"}
+    ]
+    with pytest.raises(LookupError):
+        await fixture.owner.burst_budget("other")
+    # An answer outside the contract is refused rather than shown.
+    fixture.replies = [{"state": "available", "limit_usd": "ten dollars"}]
+    with pytest.raises(ValueError):
+        await fixture.owner.burst_budget("gpu")

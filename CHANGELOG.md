@@ -51,9 +51,10 @@ This project records release notes here and mirrors public-facing notes in
   the machine, which joins the cluster and serves the model like any other.
   Releasing it stops the model and then the machine, and a machine whose model
   has been idle for five minutes is released on its own. The API is
-  `/v1/burst` (providers, recommendations and operations), under the plugin
-  permissions: reading needs `plugins:read`, asking for an offer
-  `plugins:manage`, and renting or releasing `plugins:approve`.
+  `/v1/burst` (providers, recommendations, operations and each provider's
+  spending limit, `GET /v1/burst/budget`), under the plugin permissions:
+  reading needs `plugins:read`, asking for an offer `plugins:manage`, and
+  renting or releasing `plugins:approve`.
 - `GET /instance/{instance_id}/activity` reports requests in flight on an
   instance and when the last one started or finished.
 - Two installations of the same plugin on different computers in one cluster
