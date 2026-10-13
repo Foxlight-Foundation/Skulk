@@ -122,6 +122,9 @@ it('keeps the section open for a cleared required text field and an invalid nest
   await type(input('Tunnel host'), 'cleanup');
   await act(async () => { advancedSection()!.querySelector('summary')!.click(); });
   await act(async () => { await vi.waitFor(() => expect(advancedSection()!.open).toBe(false)); });
+  // Saved settings whose nested group lacks a required value open it from the start.
+  await render(schema, { account: 'owner', tunnel: {} });
+  expect(advancedSection()!.open).toBe(true);
 });
 
 it('steps dollars by the cent unless a stored amount is finer', async () => {

@@ -1,5 +1,5 @@
 import { Select as DesignedSelect } from '../common/Select';
-import { useId, useState, type ComponentProps } from 'react';
+import { useId, useLayoutEffect, useRef, useState, type ComponentProps } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { Button } from '../common/Button';
@@ -92,7 +92,8 @@ function FormattedNumberInput({ value, format, onNumber, ...props }: FormattedNu
  *
  * Two optional field hints come from the plugin's schema. `"x-skulk-advanced":
  * true` moves a field into a collapsed Advanced section after the others,
- * which opens by itself when one of its required fields has no value.
+ * which opens by itself, and will not close, while any control in it is
+ * invalid, such as a required field with no value.
  * `"x-skulk-unit"` (`usd`, `minutes` or `hours`) shows a number field's unit
  * beside its control; the value is stored in that unit and never converted.
  */
@@ -105,13 +106,16 @@ export function PluginConfigurationFields({ schema, rootSchema = schema, values,
   const ordinary = fields.filter((field) => !isAdvancedField(field.schema));
   const advanced = fields.filter((field) => isAdvancedField(field.schema));
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  // A required advanced field with no value must never hide behind a closed
-  // section: reloaded settings, a changed schema or a cleared value can all
-  // leave one empty, and the browser cannot point at a hidden invalid input.
-  // A cleared text input holds an empty string, which counts as no value.
-  const advancedNeedsValue = advanced.some(({ name, schema: field }) =>
-    required.includes(name) && (values[name] === undefined || values[name] === null || values[name] === '')
-    && (field.default === undefined || field.default === null));
+  const advancedSection = useRef<HTMLDetailsElement>(null);
+  // An invalid control must never hide behind a closed section: the browser
+  // blocks saving the form on it but cannot point at a hidden input. The
+  // browser's own validity is the test, so a missing required value at any
+  // depth, a cleared text field or an out-of-bounds number all count, after
+  // saved settings load, after a reload, or after an edit.
+  useLayoutEffect(() => {
+    const section = advancedSection.current;
+    if (section && !section.open && section.querySelector(':invalid') !== null) section.open = true;
+  });
   const unitText = (unit: SettingsUnit) => ({
     usd: t('plugins.unit.usd', '$'),
     minutes: t('plugins.unit.minutes', 'minutes'),
@@ -195,13 +199,10 @@ export function PluginConfigurationFields({ schema, rootSchema = schema, values,
   };
   return <Fields>
     {ordinary.map(renderField)}
-    {advanced.length > 0 ? <Advanced open={advancedOpen || advancedNeedsValue} onToggle={(event) => {
+    {advanced.length > 0 ? <Advanced ref={advancedSection} open={advancedOpen} onToggle={(event) => {
       const section = event.currentTarget;
-      // React leaves an unchanged `open` prop alone, so closing the section
-      // while it holds a missing or otherwise invalid control (a cleared
-      // required value, one inside a nested group, a value out of bounds) is
-      // undone here rather than by a render.
-      if (!section.open && (advancedNeedsValue || section.querySelector(':invalid') !== null)) section.open = true;
+      // Closing the section while it still holds an invalid control is undone.
+      if (!section.open && section.querySelector(':invalid') !== null) section.open = true;
       else setAdvancedOpen(section.open);
     }}>
       <summary>{t('plugins.advanced', 'Advanced')}</summary>
