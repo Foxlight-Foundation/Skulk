@@ -28,6 +28,17 @@ let budget: BurstBudget;
 let rentals: BurstOperation[];
 let operations: SetupOperation[];
 let refuseSetup: { status: number; detail: string } | null;
+let limitSchema: Record<string, unknown>;
+
+/** The change-limit form RunPod's provider publishes. */
+const RUNPOD_LIMIT_SCHEMA = {
+  type: 'object',
+  required: ['spending_limit_usd'],
+  properties: {
+    spending_limit_usd: { type: 'number', exclusiveMinimum: 0, maximum: 1000, 'x-skulk-unit': 'usd' },
+    maximum_rentals: { type: 'integer', minimum: 1, 'x-skulk-advanced': true },
+  },
+};
 
 function makeStore() {
   return configureStore({
@@ -79,7 +90,7 @@ function snapshot(): SetupActions {
     credentialRevision: 4,
     credentialSchemaDigest: 'd'.repeat(64),
     actions: [
-      { actionId: 'campaign-limits', title: 'Change spending limit', description: '', parametersSchema: {}, schemaDigest: 'e'.repeat(64), requiresApproval: true },
+      { actionId: 'campaign-limits', title: 'Change spending limit', description: '', parametersSchema: limitSchema, schemaDigest: 'e'.repeat(64), requiresApproval: true },
       { actionId: 'start-over', title: 'Start over', description: '', parametersSchema: {}, schemaDigest: 'f'.repeat(64), requiresApproval: true },
     ],
     operations,
@@ -137,6 +148,7 @@ beforeEach(() => {
   rentals = [rental(), rental({ pluginId: 'managed.other', operationId: '2'.repeat(32), modelId: 'example/elsewhere' })];
   operations = [];
   refuseSetup = null;
+  limitSchema = RUNPOD_LIMIT_SCHEMA;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), location.href), init);
     const body = await request.text();
@@ -256,4 +268,38 @@ it('says when no machines are running', async () => {
   rentals = [];
   await render();
   await contains('No rented machines are running.');
+});
+
+it('sends the amount as the field the provider’s own form names, within its bounds', async () => {
+  limitSchema = {
+    type: 'object',
+    required: ['budget'],
+    properties: { budget: { type: 'number', minimum: 5, maximum: 50, 'x-skulk-unit': 'usd' } },
+  };
+  await render();
+  await contains('$2.50 of $10.00 spent');
+  await click('Change limit');
+  const input = host.querySelector<HTMLInputElement>('input')!;
+  await act(async () => setValue(input, '80'));
+  await contains('Enter an amount of at least $5.00 and at most $50.00.');
+  expect(button('Save').disabled).toBe(true);
+  await act(async () => setValue(input, '30'));
+  await enabled('Save');
+  await click('Save');
+  await contains('Your limit is now $30.00.');
+  const submitted = calls.find((call) => call.path === OPERATIONS_PATH);
+  expect((JSON.parse(submitted!.body) as { values: unknown }).values).toEqual({ budget: 30 });
+});
+
+it('says plainly when the provider’s limit form needs more than one amount', async () => {
+  limitSchema = {
+    type: 'object',
+    required: ['amount', 'reason'],
+    properties: { amount: { type: 'number' }, reason: { type: 'string' } },
+  };
+  await render();
+  await contains('$2.50 of $10.00 spent');
+  await click('Change limit');
+  await contains("This provider's limit can't be changed here.");
+  expect(calls.some((call) => call.path === OPERATIONS_PATH)).toBe(false);
 });

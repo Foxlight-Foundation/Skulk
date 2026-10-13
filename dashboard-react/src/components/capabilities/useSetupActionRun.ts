@@ -7,6 +7,7 @@ import {
   useGetNodeSetupActionsQuery,
   useStartNodeSetupMutation,
   type NodeAddress,
+  type SetupAction,
 } from '../../store/endpoints/plugins';
 import { randomHex32 } from '../../utils/randomIds';
 
@@ -20,6 +21,8 @@ export interface SetupActionRun {
   detail: string | null;
   /** True once the provider's current setup forms are known, so a run can start. */
   ready: boolean;
+  /** The provider's current form for one action, once known, or null. */
+  action: (actionId: string) => SetupAction | null;
   /** Runs the named action with these values, bound to the forms just read. */
   start: (actionId: string, values: Record<string, unknown>) => Promise<void>;
   /** Forgets the last outcome. */
@@ -132,5 +135,7 @@ export function useSetupActionRun(address: NodeAddress, active: boolean): SetupA
     setSubmission({ state: 'sent' });
   };
 
-  return { phase, detail, ready: snapshot !== undefined, start, reset };
+  const action = (actionId: string) => snapshot?.actions.find((item) => item.actionId === actionId) ?? null;
+
+  return { phase, detail, ready: snapshot !== undefined, action, start, reset };
 }

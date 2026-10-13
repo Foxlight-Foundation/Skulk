@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import styled from 'styled-components';
-import { useSkulkTranslation } from '../../i18n/tolgee';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 import {
   useGetBurstBudgetQuery,
   useGetBurstRentalsQuery,
@@ -13,13 +13,11 @@ import { useGetPluginNodesQuery } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
 import { burstPhaseLabels, formatCents, positiveUsd, spentOfLimit } from '../models/burstPresentation';
 import { ProposalControls } from '../pages/NodeProposalsPanel';
+import { amountFits, limitField, type LimitField } from './limitField';
 import { useSetupActionRun, type SetupActionRun } from './useSetupActionRun';
 
 /** How often the view reads spending and rentals again while open. */
 const VIEW_POLL_MS = 15_000;
-
-/** The largest spending limit a provider accepts, in dollars. */
-const MAXIMUM_LIMIT_USD = 1000;
 
 const View = styled.div`
   display: flex;
@@ -74,12 +72,15 @@ function editableAmount(value: string | null): string {
   return formatCents(value, 'down').slice(1).replace(/,/g, '');
 }
 
-/** A typed amount as dollars, or null when it is not a usable limit. */
-function parsedAmount(text: string): number | null {
-  if (!/^\d+(\.\d{1,2})?$/.test(text.trim())) return null;
+/** A typed amount in dollars and cents, or null when it is not a usable limit for this field. */
+function parsedAmount(text: string, field: LimitField | null): number | null {
+  if (field === null || !/^\d+(\.\d{1,2})?$/.test(text.trim())) return null;
   const amount = Number(text);
-  return amount > 0 && amount <= MAXIMUM_LIMIT_USD ? amount : null;
+  return amountFits(field, amount) ? amount : null;
 }
+
+/** Dollars for a bound in the range message. */
+const boundText = (value: number) => `$${value.toFixed(2)}`;
 
 /** Props for the Rentals view of one burst provider node. */
 export type BurstRentalsViewProps = BurstProviderAddress;
@@ -244,7 +245,24 @@ function RunOutcome({ run, done }: { run: SetupActionRun; done: string }) {
   return null;
 }
 
-/** One dollar field, prefilled with today's limit. */
+/** The range a limit must fall in, in plain words, from the provider's own form. */
+function rangeMessage(field: LimitField, t: SkulkTranslate): string {
+  const low =
+    field.minimum !== null && field.minimum > 0
+      ? t('burst.rentals.limitAtLeast', 'at least {amount}', { amount: boundText(field.minimum) })
+      : t('burst.rentals.limitMoreThan', 'more than {amount}', { amount: boundText(field.exclusiveMinimum ?? 0) });
+  return field.maximum !== null
+    ? t('burst.rentals.limitRangeBounded', 'Enter an amount of {low} and at most {high}.', {
+        low,
+        high: boundText(field.maximum),
+      })
+    : t('burst.rentals.limitRangeOpen', 'Enter an amount of {low}.', { low });
+}
+
+/**
+ * One dollar field, prefilled with today's limit. The field's name and bounds
+ * come from the provider's own form, so the dashboard assumes neither.
+ */
 function LimitForm({
   actionId,
   current,
@@ -258,15 +276,35 @@ function LimitForm({
 }) {
   const { t } = useSkulkTranslation();
   const [text, setText] = useState(() => editableAmount(current));
-  const amount = parsedAmount(text);
+  const field = run.ready ? limitField(run.action(actionId)?.parametersSchema) : null;
+  const amount = parsedAmount(text, field);
   const submitting = run.phase === 'running';
   const finished = run.phase === 'complete';
+  if (run.ready && field === null && run.phase === 'idle') {
+    return (
+      <Card>
+        <p role="alert">
+          {t(
+            'burst.rentals.limitFormUnavailable',
+            "This provider's limit can't be changed here. Change it in the provider's own setup.",
+          )}
+        </p>
+        <Actions>
+          <Button onClick={onClose} type="button">
+            {t('burst.rentals.cancel', 'Cancel')}
+          </Button>
+        </Actions>
+      </Card>
+    );
+  }
   return (
     <Card>
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (amount !== null && run.ready && !submitting) void run.start(actionId, { spending_limit_usd: amount });
+          if (amount !== null && field !== null && run.ready && !submitting) {
+            void run.start(actionId, { [field.name]: amount });
+          }
         }}
       >
         <label>
@@ -285,9 +323,7 @@ function LimitForm({
             'The most all your rentals together may cost, counting what they have already used.',
           )}
         </Muted>
-        {text.trim() !== '' && amount === null ? (
-          <p role="alert">{t('burst.rentals.limitRange', 'Enter an amount of more than $0 and at most $1,000.')}</p>
-        ) : null}
+        {field !== null && text.trim() !== '' && amount === null ? <p role="alert">{rangeMessage(field, t)}</p> : null}
         <RunOutcome
           done={t('burst.rentals.limitChanged', 'Your limit is now {limit}.', {
             limit: amount !== null ? `$${amount.toFixed(2)}` : '',
@@ -296,7 +332,7 @@ function LimitForm({
         />
         <Actions>
           {!finished ? (
-            <Button disabled={amount === null || !run.ready || submitting} type="submit">
+            <Button disabled={amount === null || field === null || submitting} type="submit">
               {t('burst.rentals.save', 'Save')}
             </Button>
           ) : null}
