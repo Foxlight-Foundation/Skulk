@@ -4,8 +4,9 @@ import type { BurstBudget, BurstPhase } from '../../store/endpoints/burst';
 /**
  * Show an exact six-decimal dollar string as dollars and cents.
  *
- * Spending rounds up, so nothing reads as cheaper than it could be; what is
- * left rounds down, so it never promises more than the provider allows.
+ * Spending rounds up, so nothing reads as cheaper than it could be; the limit
+ * and what is left round down, so they never promise more than the provider
+ * allows.
  */
 export function formatCents(value: string, rounding: 'up' | 'down' = 'up'): string {
   const [wholeText, fractionText = ''] = value.split('.');
@@ -29,7 +30,7 @@ export function spentOfLimit(budget: BurstBudget | undefined, t: SkulkTranslate)
   if (!budget || budget.state !== 'available' || budget.spentUsd === null || budget.limitUsd === null) return null;
   return t('burst.rentals.spentOfLimit', '{spent} of {limit} spent', {
     spent: formatCents(budget.spentUsd),
-    limit: formatCents(budget.limitUsd),
+    limit: formatCents(budget.limitUsd, 'down'),
   });
 }
 

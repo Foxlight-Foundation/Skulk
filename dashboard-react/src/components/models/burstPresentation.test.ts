@@ -1,5 +1,7 @@
 import { expect, it } from 'vitest';
-import { formatCents, positiveUsd } from './burstPresentation';
+import type { SkulkTranslate } from '../../i18n/tolgee';
+import type { BurstBudget } from '../../store/endpoints/burst';
+import { formatCents, positiveUsd, spentOfLimit } from './burstPresentation';
 
 it('shows spending in dollars and cents, never cheaper than it could be', () => {
   expect(formatCents('2.500000')).toBe('$2.50');
@@ -12,6 +14,26 @@ it('shows spending in dollars and cents, never cheaper than it could be', () => 
 it('shows what is left rounded down, so it never promises more', () => {
   expect(formatCents('7.499999', 'down')).toBe('$7.49');
   expect(formatCents('7.500000', 'down')).toBe('$7.50');
+});
+
+it('says spending of the limit with the limit rounded down and spending rounded up', () => {
+  const t = ((_key: string, fallback: string, params?: Record<string, unknown>) =>
+    fallback.replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? `{${name}}`))) as unknown as SkulkTranslate;
+  const budget: BurstBudget = {
+    pluginId: 'managed.runpod',
+    nodeId: 'gpu',
+    state: 'available',
+    message: null,
+    limitUsd: '10.000001',
+    spentUsd: '2.500001',
+    heldUsd: null,
+    leftUsd: '7.500000',
+    rentals: 1,
+    countingSince: null,
+    changeLimitAction: null,
+    startOverAction: null,
+  };
+  expect(spentOfLimit(budget, t)).toBe('$2.51 of $10.00 spent');
 });
 
 it('tells a positive amount from zero', () => {
