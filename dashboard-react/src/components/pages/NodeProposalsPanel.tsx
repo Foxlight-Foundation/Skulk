@@ -26,7 +26,7 @@ function proposalState(t: SkulkTranslate, state: ProposalSummary['state']): stri
   switch (state) {
     case 'pending_approval': return t('plugins.proposalStatePending', 'Waiting for your approval');
     case 'approved': return t('plugins.proposalStateApproved', 'Approved');
-    case 'execution_recorded': return t('plugins.proposalStateStarted', 'Started');
+    case 'execution_recorded': return t('plugins.proposalStateSent', 'Approved and sent');
     case 'expired': return t('plugins.proposalStateExpired', 'Expired, nothing was done');
     case 'unavailable': return t('plugins.proposalStateUnavailable', 'Cannot be read right now');
   }
@@ -37,8 +37,10 @@ function operationPhase(t: SkulkTranslate, phase: ProposalOperation['phase']): s
     case 'accepted': return t('plugins.proposalPhaseAccepted', 'Approval received');
     case 'approving': return t('plugins.proposalPhaseApproving', 'Approving');
     case 'approved': return t('plugins.proposalPhaseApproved', 'Approved');
-    case 'dispatching': return t('plugins.proposalPhaseDispatching', 'Starting');
-    case 'acknowledged': return t('plugins.proposalPhaseAcknowledged', 'Started');
+    case 'dispatching': return t('plugins.proposalPhaseDispatching', 'Sending the request');
+    // Acknowledged means the request was durably accepted; the provider may
+    // not have begun, so the wording waits for the cleanup service's view.
+    case 'acknowledged': return t('plugins.proposalPhaseAcknowledged', 'Request accepted');
     case 'succeeded': return t('plugins.proposalPhaseSucceeded', 'Done');
     case 'refused': return t('plugins.proposalPhaseRefused', 'Not done: the plugin refused it');
     case 'approval_interrupted': return t('plugins.proposalPhaseInterrupted', 'The approval was interrupted');

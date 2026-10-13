@@ -104,7 +104,7 @@ it('keeps uncertain submission visible beside confirmed absence and stale cleanu
 it('observes controller acknowledgement without offering to replay it', async () => {
   operation = { operationId: 'f'.repeat(32), reference: review.proposal.reference, phase: 'acknowledged', updatedAt: 102, code: null, correctiveAction: null, reconciliation: { state: 'pending', observedAt: 101, stale: false, code: null } };
   localStorage.setItem(storageKey, operation.operationId);
-  await click('Review proposals'); await contains('Started');
+  await click('Review proposals'); await contains('Request accepted');
   expect(host.textContent).toContain('The cleanup service has not seen it yet');
   expect(host.textContent).not.toContain('Continue the approval');
   expect(calls.every((call) => call.method === 'GET')).toBe(true);
