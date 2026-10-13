@@ -1784,3 +1784,8 @@ offload. Metal SDXL and Z-Image Turbo additionally use Flash Attention and
 512-pixel VAE tiles with 25% overlap; SDXL uses separate guidance passes.
 The tested Q8 SDXL and Z-Image default workflows stayed below kernel warning
 pressure on a 16 GiB Apple host.
+
+Native image wheel publication promotes selected qualified artifacts from a
+successful candidate workflow run. The dispatch requires a filename/digest map,
+verifies the originating workflow and source commit attestation, and publishes
+those exact bytes without rebuilding; model/device claims remain separately gated.

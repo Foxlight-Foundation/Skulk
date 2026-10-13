@@ -3,6 +3,19 @@ name: stable-diffusion-cpp-wheel
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Promote already qualified artifacts without rebuilding
+        type: boolean
+        default: false
+      publish_run_id:
+        description: Successful candidate workflow run containing qualified bytes
+        type: string
+        default: ""
+      publish_sha256:
+        description: JSON map of selected wheel filenames to qualified SHA-256 digests
+        type: string
+        default: ""
   push:
     branches: ["initiative/**", dev]
     paths:
@@ -19,6 +32,7 @@ env:
 
 jobs:
   candidate:
+    if: github.event_name != 'workflow_dispatch' || !inputs.publish
     strategy:
       fail-fast: false
       matrix:
@@ -97,3 +111,58 @@ jobs:
           name: unqualified-${{ matrix.variant }}-${{ matrix.tag }}
           path: candidate-wheels/*
           if-no-files-found: error
+
+  publish-index:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    concurrency:
+      group: foxlight-engine-wheel-index-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check source build identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.path')" = .github/workflows/stable-diffusion-cpp-wheel.yml
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha' > source-head.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unqualified-*
+          merge-multiple: true
+          path: dist
+          run-id: ${{ inputs.publish_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify explicitly qualified artifacts and attested source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
+        run: |
+          set -euo pipefail
+          python -m scripts.verify_stable_diffusion_cpp_promotion dist "$EXPECTED_SHA256" > verified-wheels.txt
+          while IFS= read -r wheel; do
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/stable-diffusion-cpp-wheel.yml" \
+              --source-digest "$(cat source-head.txt)" --deny-self-hosted-runners > /dev/null
+          done < verified-wheels.txt
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish the exact selected wheels to the Foxlight index
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < verified-wheels.txt
+          test "${#wheels[@]}" -gt 0
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py "${wheels[@]}"

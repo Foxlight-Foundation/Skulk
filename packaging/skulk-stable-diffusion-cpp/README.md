@@ -32,3 +32,10 @@ candidate assembly includes resolved runtime libraries and the selected gfx942
 code objects; exact loader/model tests remain required before publication.
 Component license notices accompany the runtime files. Nested runtime data is
 included in the same immutable payload digest manifest as the executable.
+
+Promotion uses a successful candidate run and an explicit filename-to-SHA-256
+map, verifies build provenance against the original workflow/commit, and uploads
+only the selected qualified bytes without rebuilding. A successful build or
+publication does not create model/device support claims. Publish remains a
+manual workflow dispatch; record its immutable wheel identities in the private
+engine ledger after each verified publication.

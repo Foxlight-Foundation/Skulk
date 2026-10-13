@@ -607,3 +607,10 @@ library/code-object paths rather than inherited SDK overrides. Wheel descriptors
 carry exact archive and expanded sizes, bounded at 3 GiB and 8 GiB respectively;
 installation checks staging space for both plus a 1 GiB reserve. Legacy candidate
 packages retain the earlier executable identity and conservative size defaults.
+
+Native image engine candidates are built by `stable-diffusion-cpp-wheel`.
+After hardware qualification, its manual publication dispatch selects exact
+filename/SHA-256 pairs from a successful build run and verifies their provenance
+before uploading them to the append-only Foxlight index. Publication does not
+establish model/device support; maintain the separate qualification evidence and
+private engine ledger. The promotion verifier's tests live under `scripts/tests/`.
