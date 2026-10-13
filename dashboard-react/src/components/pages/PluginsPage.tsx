@@ -253,7 +253,7 @@ function NodeCard({ pluginId, node, title, defaultExpanded = false, collapsible 
         <h4>{t('plugins.credentialsTitle', 'Credentials')}</h4>
         <Button type="button" variant="outline" size="sm" aria-expanded={credentialsOpen} onClick={() => setCredentialsOpen(!credentialsOpen)}>{credentialsOpen ? t('plugins.closeCredentials', 'Close credentials') : t('plugins.manageCredentials', 'Manage credentials')}</Button>
       </SectionHead>
-      {credentialsOpen ? <NodeCredentialsPanel pluginId={pluginId} nodeId={node.nodeId} /> : null}
+      {credentialsOpen ? <NodeCredentialsPanel pluginId={pluginId} nodeId={node.nodeId} configurable={node.configurable} /> : null}
     </Section> : null}
     {node.setupActionsAvailable || node.setupAvailable || node.proposalsAvailable ? <Section>
       <AdvancedSetup>
