@@ -87,6 +87,10 @@ def assemble_wheel(
     }
     if variant == "metal" and cache_values.get("CMAKE_OSX_DEPLOYMENT_TARGET") != "15.0":
         raise ValueError("Metal wheel deployment target differs from its wheel tag")
+    # A developer image can silently add NCCL when its headers are present.
+    # Single-GPU image serving must not inherit that extra loader dependency.
+    if variant == "cuda" and cache_values.get("GGML_CUDA_NCCL") != "OFF":
+        raise ValueError("single-GPU CUDA wheels require NCCL explicitly disabled")
     module = f"skulk_stable_diffusion_cpp_{variant}"
     distribution = f"{module}-{VERSION}.dist-info"
     payload: dict[str, bytes] = {f"{module}/bin/sd-server": binary.read_bytes()}

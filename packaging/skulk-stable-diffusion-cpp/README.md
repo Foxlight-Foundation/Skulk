@@ -13,6 +13,9 @@ its owning runner dies. These changes are carried in `server-lifecycle.patch`.
 Use portable compilation (`GGML_NATIVE=OFF`); Metal requires deployment target
 15.0 and an explicit portable ARM instruction baseline. GPU builds still have
 their internal CPU helper kernels, but Skulk does not advertise CPU serving.
+CUDA builds must set `GGML_CUDA_NCCL=OFF`: each image instance uses one GPU, so
+the wheel must not acquire a collective-communication library dependency from
+the build host. The assembler rejects CUDA builds without this explicit flag.
 
 Candidate descriptors are **unqualified**. They cannot enter the installable
 manifest until loader/device, generation, failure/lifecycle, memory, and fresh
