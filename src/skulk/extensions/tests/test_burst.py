@@ -320,6 +320,15 @@ async def test_the_budget_is_read_from_the_exact_provider_node(tmp_path: Path) -
         # Unavailable without saying why, or with amounts beside it.
         {"state": "unavailable"},
         {"state": "unavailable", "message": "Not now.", "limit_usd": "1.000000"},
+        # Available, with no way to change the limit and no word on where to.
+        {
+            "state": "available",
+            "limit_usd": "10.000000",
+            "spent_usd": "0.000000",
+            "held_usd": "0.000000",
+            "left_usd": "10.000000",
+            "rentals": 0,
+        },
     )
     for reply in malformed:
         fixture.replies = [reply]

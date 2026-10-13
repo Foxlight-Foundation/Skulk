@@ -372,6 +372,12 @@ class BurstNodeBudget(FrozenModel):
                 raise ValueError(
                     "an available budget carries every amount and the rental count"
                 )
+            # Start over alone may be missing (cleanup that cannot settle), but
+            # a limit that cannot change here must say where it can.
+            if self.change_limit_action is None and self.message is None:
+                raise ValueError(
+                    "a budget whose limit cannot change here says where it can"
+                )
         elif (
             self.message is None
             or any(amount is not None for amount in amounts)

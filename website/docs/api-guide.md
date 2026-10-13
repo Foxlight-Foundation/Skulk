@@ -4536,8 +4536,9 @@ To rent, approve, follow and release with the burst operations:
   `changeLimitAction` and `startOverAction` name the provider node's setup
   actions that do it, run through the ordinary setup operations, which need
   `plugins:manage` and, because these actions require approval, also
-  `plugins:approve`; otherwise they are null and `message` says where to change
-  it. `state` is `unavailable`, with a plain `message` and no amounts, when the
+  `plugins:approve`; otherwise `changeLimitAction` is null and `message` says
+  where to change it. `startOverAction` alone may be null when the provider's
+  cleanup cannot start the count over. `state` is `unavailable`, with a plain `message` and no amounts, when the
   provider cannot read its limit now, or is a release that predates this read;
   a provider reply of any other shape is refused. An unknown provider returns
   404.
