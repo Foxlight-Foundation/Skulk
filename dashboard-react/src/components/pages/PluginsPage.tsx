@@ -3,7 +3,7 @@ import { useState, useSyncExternalStore, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 import {
-  installOperationIds, pluginAccessRefused, pluginRefusalDetail, useGetInstallOperationsQuery, useGetManagedRuntimesQuery, useGetPluginNodesQuery, useGetNodeConfigurationQuery,
+  installOperationIds, pluginAccessRefused, pluginRefusalDetail, refusalSentence, useGetInstallOperationsQuery, useGetManagedRuntimesQuery, useGetPluginNodesQuery, useGetNodeConfigurationQuery,
   useGetPluginServiceQuery, useConfigurePluginNodeMutation, type ConfigurableNode, type NodeConfiguration, type PluginNodes,
 } from '../../store/endpoints/plugins';
 import { RightDrawer } from '../common/RightDrawer';
@@ -152,13 +152,15 @@ function NodeEditor({ pluginId, configuration, reload, onTurnOnRefused }: NodeEd
         disable: t('plugins.turnedOff', 'Turned off.'),
       }[operation], problem: false });
     } catch (error) {
-      const detail = pluginRefusalDetail(error);
+      // A plugin's own next step reads as its own sentence; core's generic
+      // refusal gives way to this page's guidance.
+      const reason = refusalSentence(pluginRefusalDetail(error));
       if (operation === 'enable') {
         // The plugin runs its setup checks before it starts; a refusal means one of them failed.
-        setNotice({ text: `${t('plugins.turnOnRefused', 'It was not turned on.')} ${detail ? t('plugins.hostSaid', 'The host said: {reason}', { reason: detail }) : t('plugins.turnOnRefusedGeneric', 'Check your access, then reload if another operator changed this node.')} ${t('plugins.turnOnSeeChecks', 'Setup checks show what is missing.')}`, problem: true });
+        setNotice({ text: `${t('plugins.turnOnRefused', 'It was not turned on.')} ${reason ?? `${t('plugins.turnOnRefusedGeneric', 'Check your access, then reload if another operator changed this node.')} ${t('plugins.turnOnSeeChecks', 'Setup checks show what is missing.')}`}`, problem: true });
         onTurnOnRefused?.();
       } else {
-        setNotice({ text: detail ? `${t('plugins.refusedShort', 'The change was refused.')} ${t('plugins.hostSaid', 'The host said: {reason}', { reason: detail })}`
+        setNotice({ text: reason ? `${t('plugins.refusedShort', 'The change was refused.')} ${reason}`
           : t('plugins.refused', 'The change was refused. Check your access and settings; reload if another operator changed this node.'), problem: true });
       }
     }

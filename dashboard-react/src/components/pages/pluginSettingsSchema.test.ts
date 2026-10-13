@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { exampleStudioSettingsSchema } from './exampleStudioSettings.fixture';
-import { fieldLabel, humanizeKey, settingsField, supportedConfigurationSchema } from './pluginSettingsSchema';
+import {
+  fieldLabel, formatUsdAmount, humanizeKey, isAdvancedField, isWholeCents, settingsField, settingsUnit, supportedConfigurationSchema,
+} from './pluginSettingsSchema';
 
 describe('supportedConfigurationSchema', () => {
   it('accepts the optional fields pydantic writes as a scalar or null', () => {
@@ -56,5 +58,56 @@ describe('field labels', () => {
   it('humanizes check codes the same way', () => {
     expect(humanizeKey('placed_video_model')).toBe('Placed video model');
     expect(humanizeKey('engine')).toBe('Engine');
+  });
+});
+
+describe('field hints', () => {
+  it('reads a known unit only on a number field', () => {
+    expect(settingsUnit({ type: 'number', 'x-skulk-unit': 'usd' })).toBe('usd');
+    expect(settingsUnit({ type: 'integer', 'x-skulk-unit': 'minutes' })).toBe('minutes');
+    expect(settingsUnit({ type: ['integer', 'null'], 'x-skulk-unit': 'hours' })).toBe('hours');
+    expect(settingsUnit({ type: 'number', 'x-skulk-unit': 'seconds' })).toBeNull();
+    expect(settingsUnit({ type: 'string', 'x-skulk-unit': 'usd' })).toBeNull();
+    expect(settingsUnit({ type: 'number' })).toBeNull();
+  });
+
+  it('marks a field advanced only when it says so exactly', () => {
+    expect(isAdvancedField({ 'x-skulk-advanced': true })).toBe(true);
+    expect(isAdvancedField({ 'x-skulk-advanced': 'true' })).toBe(false);
+    expect(isAdvancedField({})).toBe(false);
+  });
+
+  it('keeps both hints through a nullable value and a local reference', () => {
+    const nullable = settingsField({ anyOf: [{ type: 'number' }, { type: 'null' }], 'x-skulk-unit': 'usd', 'x-skulk-advanced': true }, {});
+    expect(settingsUnit(nullable.schema)).toBe('usd');
+    expect(isAdvancedField(nullable.schema)).toBe(true);
+    const root = { $defs: { Limit: { type: 'number', 'x-skulk-unit': 'usd' } } };
+    const referenced = settingsField({ $ref: '#/$defs/Limit', 'x-skulk-advanced': true }, root);
+    expect(settingsUnit(referenced.schema)).toBe('usd');
+    expect(isAdvancedField(referenced.schema)).toBe(true);
+  });
+
+  it('tells whole cents from finer amounts without floating-point noise', () => {
+    expect(isWholeCents(0.29)).toBe(true);
+    expect(isWholeCents(10)).toBe(true);
+    expect(isWholeCents(0.005)).toBe(false);
+  });
+
+  it('shows dollars as cents, and finer amounts in full', () => {
+    expect(formatUsdAmount(10)).toBe('10.00');
+    expect(formatUsdAmount(0.5)).toBe('0.50');
+    expect(formatUsdAmount(0.29)).toBe('0.29');
+    expect(formatUsdAmount(0.123456)).toBe('0.123456');
+  });
+
+  it('does not repeat a declared unit in a label made from the key', () => {
+    expect(fieldLabel('spending_limit_usd', undefined, 'usd')).toBe('Spending limit');
+    expect(fieldLabel('idle_minutes', 'Idle Minutes', 'minutes')).toBe('Idle');
+    expect(fieldLabel('rental_lifetime_hours', undefined, 'hours')).toBe('Rental lifetime');
+    // Without the hint a key reads exactly as it did before hints existed.
+    expect(humanizeKey('spending_limit_usd')).toBe('Spending limit usd');
+    expect(humanizeKey('idle_minutes')).toBe('Idle (minutes)');
+    // An author's own title is kept as written.
+    expect(fieldLabel('spending_limit_usd', 'Spend no more than', 'usd')).toBe('Spend no more than');
   });
 });

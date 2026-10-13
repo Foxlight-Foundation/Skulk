@@ -4269,7 +4269,16 @@ Unknown providers or nodes return `404`. Revision/schema conflicts and provider
 validation refusals return `409`; callers must reload before retrying a stale
 edit. Malformed actions return `422`, saturated management returns `429`, and
 unavailable/timed-out providers return `503`/`504`. Provider exception text is
-never returned. Ordinary configuration responses are bounded to 128 KiB;
+never returned. The one exception is a plugin's own refusal message: when the
+plugin refuses with a plain next step for the operator (for example, "Add your
+RunPod API key under Credentials." when turning a node on), the `409` `detail`
+is that sentence, at most 300 printable characters. Without one, `detail` is
+`configuration refused; reload settings and validation`.
+
+`configurationSchema` may carry two field hints the dashboard reads:
+`"x-skulk-advanced": true` places a field in a collapsed Advanced section, and
+`"x-skulk-unit"` (`usd`, `minutes` or `hours`) shows a number field's unit
+beside it. Values are stored in that unit; the hints never change validation. Ordinary configuration responses are bounded to 128 KiB;
 password/write-only schemas are refused. Inventory is bounded to 32 providers
 and 128 nodes per provider. Configuration dispatch has an eight-request
 concurrency limit and a cooperative thirty-second deadline. In-process
@@ -4555,10 +4564,12 @@ A provider releases a `ready` rental on its own once its model has had no
 request in flight for five minutes (see `GET /instance/{instance_id}/activity`),
 under the approval that rented it. The rental's signed expiry is the backstop.
 
-A provider that refuses the request without an outcome (most often because it
-is busy with another request) returns 409; retry. A timeout returns 504, an
-unavailable provider 503, and a burst of concurrent requests 429. Errors carry
-no provider text.
+A provider that refuses the request without an outcome returns 409. When the
+provider names its own next step, the `detail` is that plain sentence (at most
+300 printable characters); otherwise it is the generic advice to try again,
+since the usual cause is a provider busy with another request. A timeout
+returns 504, an unavailable provider 503, and a burst of concurrent requests
+429. Apart from a provider's own refusal message, errors carry no provider text.
 
 ### Managed plugin HTTP lifecycle
 
