@@ -192,6 +192,35 @@ Notes:
 - Set `SKULK_TEST_CAPABILITY_NODE=<url>` on a host to publish one stand-in
   node with a single link surface and see the satellite without a plugin.
 
+### Pairing with the same plugin on another host (handshakes)
+
+Some plugins need a second host: a cleanup computer, a backup target, a
+render node. Two installations of the same plugin can hand each other the
+setup codes an operator would otherwise copy between machines.
+
+- A summary may carry up to two `handshakes`, each a `CapabilityNodeHandshake`
+  with a `recipient` (the peer host's node id), a plugin-defined `kind`, and
+  `content` of at most 2,048 printable ASCII characters. It rides the summary
+  on the telemetry plane to every node, so it is public: identities and public
+  keys only, never a credential.
+- `context.read_capability_peers()` returns a `CapabilityPeerView` per peer
+  host with a fresh reading: its `friendly_name`, the `addresses` this host's
+  own probes reach it at (session-only edges excluded), and the summaries it
+  publishes, handshakes included.
+- `context.private_fabric()` reports whether the cluster runs on an
+  operator-chosen namespace. Gossip authenticates a sender only then, so a
+  handshake is trustworthy only on a private fabric; on the public default
+  name, fall back to manual setup.
+
+A managed plugin owner does not call these itself. Its host sends it a
+`handshakes` control request on every refresh, but only on a private fabric:
+the peers running the owner's own bundles, each with only the handshakes
+addressed to this host. The owner answers with the handshakes its nodes
+address to peers, and the host publishes them on their summaries. An owner
+that predates handshakes refuses the request and publishes none, and a host
+that predates them never asks, so neither side needs to know the other's
+version.
+
 ## Serving a capability (providers)
 
 Beyond observing chat traffic, an extension can be a **provider**: a plugin
