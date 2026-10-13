@@ -2,9 +2,10 @@ import { useRef, useState } from 'react';
 import styled from 'styled-components';
 import { operatorSession } from '../../auth/operatorSession';
 import { useSkulkTranslation } from '../../i18n/tolgee';
-import { useGetNodeCredentialsQuery, type NodeAddress, type NodeCredentials } from '../../store/endpoints/plugins';
+import { useGetNodeConfigurationQuery, useGetNodeCredentialsQuery, type NodeAddress, type NodeCredentials } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
 import { randomHex32 } from '../../utils/randomIds';
+import { setupFilledCredentials } from './pluginSettingsSchema';
 
 const Field = styled.fieldset`
   min-width: 0; margin: 12px 0; padding: 14px; border: 1px solid ${({ theme }) => theme.colors.border};
@@ -14,9 +15,13 @@ const Field = styled.fieldset`
   textarea { resize: vertical; }
 `;
 const Actions = styled.div`display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;`;
+const FilledBySetup = styled.details`
+  margin: 12px 0;
+  summary { cursor: pointer; font-weight: 600; }
+`;
 
 /** Keep drafts outside state/cache and require a fresh review after concurrent or uncertain writes. */
-function CredentialEditor({ address, current, reload, unavailable }: { address: NodeAddress; current: NodeCredentials; reload: () => Promise<NodeCredentials>; unavailable: boolean }) {
+function CredentialEditor({ address, current, reload, unavailable, filledBySetup }: { address: NodeAddress; current: NodeCredentials; reload: () => Promise<NodeCredentials>; unavailable: boolean; filledBySetup: ReadonlySet<string> }) {
   const { t } = useSkulkTranslation();
   const [baseline, setBaseline] = useState(current);
   const inputs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
@@ -80,34 +85,48 @@ function CredentialEditor({ address, current, reload, unavailable }: { address: 
       void reload().catch(() => undefined);
     } finally { value = ''; setBusy(false); }
   };
+  const field = (credential: NodeCredentials['credentials'][number]) => <Field key={credential.credentialId} disabled={busy || changed || uncertain || unavailable}>
+    <legend>{credential.title}</legend>
+    <p>{credential.description}</p>
+    <p>{credential.required ? t('plugins.credentialRequired', 'Required') : t('plugins.credentialOptional', 'Optional')} · {current.credentials.find((item) => item.credentialId === credential.credentialId)?.ready ? t('plugins.credentialReady', 'Ready') : t('plugins.credentialNotReady', 'Not ready')}</p>
+    <Button type="button" onClick={() => switchInput(credential.credentialId)}>{multiline.has(credential.credentialId) ? t('plugins.singleLineCredential', 'Use single-line input') : t('plugins.multilineCredential', 'Use multiline input')}</Button>
+    {multiline.has(credential.credentialId) ? <p>{t('plugins.multilineCredentialVisible', 'Multiline credentials are visible while editing. Switching input mode clears the draft.')}</p> : null}
+    <label>{t('plugins.replacementCredential', 'Replacement value')}{multiline.has(credential.credentialId)
+      ? <textarea ref={(element) => { inputs.current[credential.credentialId] = element; }} rows={4} autoComplete="off" autoCapitalize="off" spellCheck={false} maxLength={4096} />
+      : <input ref={(element) => { inputs.current[credential.credentialId] = element; }} type="password" autoComplete="new-password" maxLength={4096} />}</label>
+    <Actions>
+      <Button type="button" onClick={() => void change(credential.credentialId, 'replace')}>{t('plugins.replaceCredential', 'Replace credential')}</Button>
+      <Button type="button" onClick={() => void change(credential.credentialId, 'retire')}>{t('plugins.retireCredential', 'Retire future use')}</Button>
+    </Actions>
+    </Field>;
+  const entered = baseline.credentials.filter((credential) => !filledBySetup.has(credential.credentialId));
+  const filled = baseline.credentials.filter((credential) => filledBySetup.has(credential.credentialId));
   return <section>
     {changed ? <p role="status">{t('plugins.credentialsChanged', 'Credentials changed elsewhere. Refresh status before replacing a value.')}</p> : null}
-    {baseline.credentials.map((credential) => <Field key={credential.credentialId} disabled={busy || changed || uncertain || unavailable}>
-      <legend>{credential.title}</legend>
-      <p>{credential.description}</p>
-      <p>{credential.required ? t('plugins.credentialRequired', 'Required') : t('plugins.credentialOptional', 'Optional')} · {current.credentials.find((item) => item.credentialId === credential.credentialId)?.ready ? t('plugins.credentialReady', 'Ready') : t('plugins.credentialNotReady', 'Not ready')}</p>
-      <Button type="button" onClick={() => switchInput(credential.credentialId)}>{multiline.has(credential.credentialId) ? t('plugins.singleLineCredential', 'Use single-line input') : t('plugins.multilineCredential', 'Use multiline input')}</Button>
-      {multiline.has(credential.credentialId) ? <p>{t('plugins.multilineCredentialVisible', 'Multiline credentials are visible while editing. Switching input mode clears the draft.')}</p> : null}
-      <label>{t('plugins.replacementCredential', 'Replacement value')}{multiline.has(credential.credentialId)
-        ? <textarea ref={(element) => { inputs.current[credential.credentialId] = element; }} rows={4} autoComplete="off" autoCapitalize="off" spellCheck={false} maxLength={4096} />
-        : <input ref={(element) => { inputs.current[credential.credentialId] = element; }} type="password" autoComplete="new-password" maxLength={4096} />}</label>
-      <Actions>
-        <Button type="button" onClick={() => void change(credential.credentialId, 'replace')}>{t('plugins.replaceCredential', 'Replace credential')}</Button>
-        <Button type="button" onClick={() => void change(credential.credentialId, 'retire')}>{t('plugins.retireCredential', 'Retire future use')}</Button>
-      </Actions>
-    </Field>)}
+    {entered.map(field)}
+    {filled.length > 0 ? <FilledBySetup>
+      <summary>{t('plugins.credentialsFilledBySetup', 'Filled in by setup')}</summary>
+      <p>{t('plugins.credentialsFilledBySetupHelp', 'Setup creates and stores these itself. Change one only when its description says to.')}</p>
+      {filled.map(field)}
+    </FilledBySetup> : null}
     <Button type="button" disabled={busy} onClick={() => void refresh()}>{t('plugins.refreshCredentials', 'Refresh credential status')}</Button>
     {notice ? <p role="status">{notice}</p> : null}
     <p>{t('plugins.credentialCleanupHistory', 'Retirement blocks future credential use. Historical versions needed by cleanup remain protected. Credential changes do not approve spending.')}</p>
   </section>;
 }
 
-/** Render only plugin-declared credential inputs, independently of ordinary configuration. */
-export function NodeCredentialsPanel(address: NodeAddress) {
+/**
+ * Render only plugin-declared credential inputs, independently of ordinary
+ * configuration. A configurable node's schema may name the credentials its
+ * setup fills in; those are folded away below the ones the owner enters.
+ */
+export function NodeCredentialsPanel({ configurable = false, ...address }: NodeAddress & { configurable?: boolean }) {
   const { t } = useSkulkTranslation();
   const query = useGetNodeCredentialsQuery(address, { refetchOnMountOrArgChange: true });
+  const configuration = useGetNodeConfigurationQuery(address, { skip: !configurable });
+  const filledBySetup = setupFilledCredentials(configuration.currentData?.configurationSchema);
   return <section aria-label={t('plugins.nodeCredentials', 'Node credentials')}>
     {query.error ? <p role="status">{t('plugins.credentialsUnavailable', 'Credential status is unavailable. No change has been repeated.')}</p> : null}
-    {query.currentData ? <CredentialEditor address={address} current={query.currentData} unavailable={!!query.error} reload={() => query.refetch().unwrap()} /> : <Button type="button" disabled={query.isFetching} onClick={() => void query.refetch()}>{t('plugins.refreshCredentials', 'Refresh credential status')}</Button>}
+    {query.currentData ? <CredentialEditor address={address} current={query.currentData} unavailable={!!query.error} reload={() => query.refetch().unwrap()} filledBySetup={filledBySetup} /> : <Button type="button" disabled={query.isFetching} onClick={() => void query.refetch()}>{t('plugins.refreshCredentials', 'Refresh credential status')}</Button>}
   </section>;
 }

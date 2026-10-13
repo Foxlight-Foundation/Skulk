@@ -107,6 +107,21 @@ export function settingsUnit(schema: Record<string, unknown>): SettingsUnit | nu
   return SETTINGS_UNITS.find((unit) => unit === schema['x-skulk-unit']) ?? null;
 }
 
+/**
+ * The credentials a node's configuration schema says its setup fills in, with
+ * `"x-skulk-setup-credentials"` at the schema's top level. Manage credentials
+ * folds them away so the owner sees the keys they enter first. The hint is
+ * advisory: anything malformed reads as none, which lists every credential.
+ */
+export function setupFilledCredentials(schema: Record<string, unknown> | undefined): ReadonlySet<string> {
+  const raw: unknown = schema?.['x-skulk-setup-credentials'];
+  // Fold nothing unless the whole list is valid: a plugin's typo must not
+  // hide a credential the owner may need.
+  if (!Array.isArray(raw) || raw.length > 32) return new Set();
+  const names = raw.filter((item): item is string => typeof item === 'string' && item.length > 0 && item.length <= 128);
+  return names.length === raw.length ? new Set(names) : new Set();
+}
+
 /** Whether a field asks, with `"x-skulk-advanced": true`, to sit in the collapsed Advanced section. */
 export function isAdvancedField(schema: Record<string, unknown>): boolean {
   return schema['x-skulk-advanced'] === true;

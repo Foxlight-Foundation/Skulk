@@ -4278,7 +4278,11 @@ is that sentence, at most 300 printable characters. Without one, `detail` is
 `configurationSchema` may carry two field hints the dashboard reads:
 `"x-skulk-advanced": true` places a field in a collapsed Advanced section, and
 `"x-skulk-unit"` (`usd`, `minutes` or `hours`) shows a number field's unit
-beside it. Values are stored in that unit; the hints never change validation. Ordinary configuration responses are bounded to 128 KiB;
+beside it. Values are stored in that unit; the hints never change validation.
+At the schema's top level, `"x-skulk-setup-credentials"` lists credential IDs
+the plugin's setup creates itself (at most 32 strings of 1 to 128 characters);
+the dashboard's credential panel folds those under **Filled in by setup**. Any
+invalid entry voids the whole list, so every credential is listed. Ordinary configuration responses are bounded to 128 KiB;
 password/write-only schemas are refused. Inventory is bounded to 32 providers
 and 128 nodes per provider. Configuration dispatch has an eight-request
 concurrency limit and a cooperative thirty-second deadline. In-process
