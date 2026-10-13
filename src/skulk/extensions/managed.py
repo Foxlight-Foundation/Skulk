@@ -94,29 +94,37 @@ def _fit_handshake_peers(
 ) -> list[JsonValue]:
     """Choose peers, and their nodes, that fit in ``budget`` serialized bytes.
 
-    Peers with a handshake for this host come first, and within a peer so do
-    its nodes carrying one, so the one exchange that matters is the last to be
-    left out. A peer goes in with as many of its nodes as fit; one with none
-    left over is skipped, and a smaller peer after it may still fit.
+    Every node carrying a handshake for this host is placed before any node
+    that does not, across all peers, so the exchanges that matter are the last
+    to be left out. Within each pass, peers with a handshake for this host come
+    first. A peer appears with the nodes that fit; one with none is left out,
+    and a smaller node or peer after it may still fit.
     """
     ordered = sorted(candidates, key=lambda item: not item[0])
-    chosen: list[JsonValue] = []
+    chosen: dict[int, list[JsonValue]] = {}
     remaining = budget
-    for _, base, nodes in ordered:
-        if len(chosen) >= MAX_HANDSHAKE_PEERS:
-            break
-        # The separator before this entry, and the peer without nodes.
-        cost = (2 if chosen else 0) + _serialized_size({**base, "nodes": []})
-        kept: list[JsonValue] = []
-        for _, node in sorted(nodes, key=lambda item: not item[0]):
-            node_cost = (2 if kept else 0) + _serialized_size(node)
-            if cost + node_cost <= remaining:
-                kept.append(node)
-                cost += node_cost
-        if kept:
-            chosen.append({**base, "nodes": kept})
-            remaining -= cost
-    return chosen
+    for addressed_pass in (True, False):
+        for index, (_, base, nodes) in enumerate(ordered):
+            for addressed, node in nodes:
+                if addressed != addressed_pass:
+                    continue
+                kept = chosen.get(index)
+                if kept is None:
+                    if len(chosen) >= MAX_HANDSHAKE_PEERS:
+                        break
+                    # The separator before this peer, the peer without nodes,
+                    # then its first node.
+                    cost = (
+                        (2 if chosen else 0)
+                        + _serialized_size({**base, "nodes": []})
+                        + _serialized_size(node)
+                    )
+                else:
+                    cost = 2 + _serialized_size(node)
+                if cost <= remaining:
+                    chosen.setdefault(index, []).append(node)
+                    remaining -= cost
+    return [{**ordered[index][1], "nodes": chosen[index]} for index in sorted(chosen)]
 
 
 _SUMMARY_STATUS: dict[str, CapabilityNodeStatus] = {

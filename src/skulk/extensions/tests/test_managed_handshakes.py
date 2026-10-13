@@ -275,6 +275,34 @@ def test_addressed_nodes_and_peers_win_the_budget(tmp_path: Path) -> None:
     assert len(lead["handshakes"]) == 2  # pyright: ignore[reportArgumentType]
 
 
+def test_every_addressed_node_wins_over_other_peers_ordinary_nodes(
+    tmp_path: Path,
+) -> None:
+    """Ordinary nodes of earlier peers never crowd out a later peer's handshake."""
+    crowded = tuple(
+        peer(
+            summary("foxlight.runpod", _largest(), _largest(), node="addressed"),
+            *(
+                summary("foxlight.runpod", node=f"ordinary-{index}")
+                for index in range(MAX_CAPABILITY_NODES_PER_HOST - 1)
+            ),
+            node_id=f"peer-{number}",
+        )
+        for number in range(7)
+    )
+    managed = owner(tmp_path, private=True, peers=crowded)
+    request = managed._handshake_request()  # pyright: ignore[reportPrivateUsage]
+    assert _frame_size(request) <= HANDSHAKE_REQUEST_BUDGET + 1
+    peers = request["peers"]
+    assert isinstance(peers, list) and len(peers) == 7
+    for entry in peers:
+        assert isinstance(entry, dict)
+        nodes = entry["nodes"]
+        assert isinstance(nodes, list)
+        lead = nodes[0]
+        assert isinstance(lead, dict) and lead["node_id"] == "addressed"
+
+
 def test_a_public_fabric_neither_delivers_nor_publishes_handshakes(
     tmp_path: Path,
 ) -> None:
