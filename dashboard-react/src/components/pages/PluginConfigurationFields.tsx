@@ -92,8 +92,10 @@ function FormattedNumberInput({ value, format, onNumber, ...props }: FormattedNu
  *
  * Two optional field hints come from the plugin's schema. `"x-skulk-advanced":
  * true` moves a field into a collapsed Advanced section after the others,
- * which opens by itself, and will not close, while any control in it is
- * invalid, such as a required field with no value.
+ * which opens by itself, and will not close, while any control in it fails
+ * the browser's own validity checks, such as a required value left empty.
+ * Schema rules no control represents (a required object absent altogether)
+ * stay with the plugin's validation, which refuses the save visibly.
  * `"x-skulk-unit"` (`usd`, `minutes` or `hours`) shows a number field's unit
  * beside its control; the value is stored in that unit and never converted.
  */
