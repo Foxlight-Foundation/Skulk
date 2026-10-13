@@ -100,7 +100,11 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
     if backend == "stable_diffusion_cpp-metal" and profile.family == "sdxl":
         # The pinned Metal build produced white output with batched guidance;
         # separate conditional/unconditional forwards restored the reference.
-        arguments.extend(("--batched-cfg", "off", "--fa", "--vae-tiling", "--vae-tile-size", "512", "--vae-tile-overlap", "0.25"))
+        arguments.extend(("--batched-cfg", "off"))
+    if backend == "stable_diffusion_cpp-metal" and profile.family in ("sdxl", "z_image_turbo"):
+        # Full attention or untiled decoding reached warning pressure on the
+        # tested 16 GiB host; this combination completed both default canvases.
+        arguments.extend(("--fa", "--vae-tiling", "--vae-tile-size", "512", "--vae-tile-overlap", "0.25"))
     return arguments
 
 

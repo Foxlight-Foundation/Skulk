@@ -1797,6 +1797,7 @@ packages retain the earlier executable identity and conservative size defaults.
 
 Metal native image instances keep parameters on their verified GPU to avoid
 duplicated residency in unified memory. CUDA/Vulkan/ROCm retain CPU parameter
-offload. Metal SDXL additionally uses 512-pixel VAE tiles with 25% overlap;
-separate guidance and Flash Attention remain enabled. The tested Q8 default
-workflow stayed below kernel warning pressure on a 16 GiB Apple host.
+offload. Metal SDXL and Z-Image Turbo additionally use Flash Attention and
+512-pixel VAE tiles with 25% overlap; SDXL uses separate guidance passes.
+The tested Q8 SDXL and Z-Image default workflows stayed below kernel warning
+pressure on a 16 GiB Apple host.

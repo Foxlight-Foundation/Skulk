@@ -243,6 +243,28 @@ def test_sdxl_guidance_workaround_is_limited_to_metal(
     assert arguments == ["--model", str(tmp_path / component.entry_file), *runtime_flags]
 
 
+def test_z_image_metal_default_uses_bounded_attention_and_decoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = _card()
+    assert card.image is not None
+    card = card.model_copy(update={"image": ImageCardConfig(
+        family="z_image_turbo", components=card.image.components, default_steps=9,
+    )})
+    assert card.image is not None
+    for component in card.image.components:
+        (tmp_path / component.entry_file).write_bytes(b"abc")
+
+    def locate(_identifier: ModelId, entry: str, _revision: str | None = None) -> Path:
+        return tmp_path / entry
+
+    monkeypatch.setattr(adapter, "build_sidecar_path", locate)
+    arguments = adapter.native_component_arguments(card, backend="stable_diffusion_cpp-metal")
+    assert arguments[8:] == ["--fa", "--vae-tiling", "--vae-tile-size", "512", "--vae-tile-overlap", "0.25"]
+    assert "--batched-cfg" not in arguments
+    assert adapter.native_component_arguments(card, backend="stable_diffusion_cpp-cuda")[8:] == []
+
+
 def test_ephemeral_reference_bytes_are_excluded_from_state_and_logs() -> None:
     params = ImageEditsTaskParams(
         model="owner/model",
