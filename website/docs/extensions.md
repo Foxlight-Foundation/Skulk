@@ -639,7 +639,10 @@ render the field as before.
 - `"x-skulk-advanced": true` moves the field into a collapsed **Advanced**
   section after the ordinary fields. Use it for anything a person setting the
   plugin up does not need: ports, hosts, keys, tuning. The section opens by
-  itself when one of its required fields has no value and no default.
+  itself, and will not close, while any field in it is invalid, such as a
+  required field with no value. A JSON Schema `default` does not fill a
+  required field (validators treat it as an annotation), so give an advanced
+  field a default and leave it out of `required` when it may be omitted.
 - `"x-skulk-unit"` names a number field's unit: `"usd"` (shown with a dollar
   sign and edited to the cent), `"minutes"` or `"hours"` (the word follows the
   control). Store the value in that unit; the dashboard never converts it. Ask
