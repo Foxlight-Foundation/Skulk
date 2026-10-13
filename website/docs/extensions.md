@@ -667,7 +667,9 @@ short plain sentence naming what to do next: `ManagedRefusalError("Add your RunP
 API key under Credentials.")`. Skulk returns it as the HTTP 409 `detail`, and
 the dashboard shows it after "It was not turned on." instead of its generic
 guidance. It is shown to operators as written, so never put credentials,
-paths or internal identifiers in it. Any other `ValueError` remains a refusal
+paths or internal identifiers in it. The message is trimmed and must be 1 to
+300 printable characters (no line breaks); anything else is dropped, and the
+refusal shows Skulk's generic sentence. Any other `ValueError` remains a refusal
 with Skulk's generic sentence. A separately supervised owner sends the same
 message in its refusal frame (see below).
 

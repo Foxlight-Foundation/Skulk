@@ -113,11 +113,20 @@ export function isAdvancedField(schema: Record<string, unknown>): boolean {
 }
 
 /**
+ * Whether a dollar amount is a whole number of cents. Amounts are compared at
+ * millionths of a dollar, the finest unit plugins hold exactly, so binary
+ * floating-point noise such as 0.29 never reads as finer than a cent.
+ */
+export function isWholeCents(value: number): boolean {
+  return Number.isInteger(Math.round(value * 1e6) / 1e4);
+}
+
+/**
  * A dollar amount as a person reads it: two decimals ("10.00", "0.50"), or
  * every decimal it has when it is finer than a cent, so nothing is hidden.
  */
 export function formatUsdAmount(value: number): string {
-  return Number.isInteger(Math.round(value * 1e6) / 1e4) ? value.toFixed(2) : String(value);
+  return isWholeCents(value) ? value.toFixed(2) : String(value);
 }
 
 // Short words a mechanical title would write as "Api" or "Url".

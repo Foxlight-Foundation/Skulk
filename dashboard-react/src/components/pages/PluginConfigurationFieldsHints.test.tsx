@@ -81,6 +81,27 @@ it('opens the section by itself when a required advanced field has no value', as
   expect(advancedSection()!.open).toBe(true);
 });
 
+it('reopens the section, and keeps it open, while a required advanced field is emptied', async () => {
+  await render(hintedSchema, { authority_port: 4100 });
+  expect(advancedSection()!.open).toBe(false);
+  await act(async () => { advancedSection()!.querySelector('summary')!.click(); });
+  await type(input('Authority port'), '');
+  expect(changes.at(-1)).toEqual({});
+  expect(advancedSection()!.open).toBe(true);
+  // Closing it while the value is still missing does not hide the field.
+  await act(async () => { advancedSection()!.querySelector('summary')!.click(); });
+  await act(async () => { await vi.waitFor(() => expect(advancedSection()!.open).toBe(true)); });
+});
+
+it('steps dollars by the cent unless a stored amount is finer', async () => {
+  await render(hintedSchema, { spending_limit_usd: 1.005, authority_port: 4100 });
+  const limit = input('Spending limit');
+  expect(limit.value).toBe('1.005');
+  // A cent step would make the saved amount invalid and block saving the form.
+  expect(limit.step).toBe('any');
+  expect(limit.validity.valid).toBe(true);
+});
+
 it('keeps every field collapsed when all of them are advanced', async () => {
   await render({ type: 'object', properties: { cleanup_host: cleanupHost } });
   expect(advancedSection()!.open).toBe(false);

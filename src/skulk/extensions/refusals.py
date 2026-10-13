@@ -38,13 +38,15 @@ class ManagedRefusalError(ValueError):
 
     It is a ``ValueError`` so every existing caller keeps treating it as an
     ordinary refusal (HTTP 409). ``message`` is the plugin's own next step for
-    the operator, already validated by ``refusal_message``; None means the
-    owner gave none and the caller's generic sentence applies.
+    the operator. The constructor applies ``refusal_message`` itself, so an
+    in-process provider raising this directly gets the same bounds as a
+    managed owner's frame: an unusable message becomes None, and the caller's
+    generic sentence applies.
     """
 
     def __init__(self, message: str | None) -> None:
         super().__init__("managed operation refused")
-        self.message = message
+        self.message = refusal_message(message)
 
 
 def refusal_detail(error: ValueError, fallback: str) -> str:

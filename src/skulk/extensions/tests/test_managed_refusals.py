@@ -88,6 +88,14 @@ def test_any_other_frame_is_an_invalid_response_not_a_refusal(
     assert str(raised.value) == "invalid managed response"
 
 
+def test_an_in_process_refusal_gets_the_same_bounds() -> None:
+    assert ManagedRefusalError("  Add a key.  ").message == "Add a key."
+    assert ManagedRefusalError("Turn it off\nthen on").message is None
+    too_long = "x" * (MAX_REFUSAL_MESSAGE_CHARACTERS + 1)
+    assert ManagedRefusalError(too_long).message is None
+    assert ManagedRefusalError(None).message is None
+
+
 def test_the_detail_is_the_message_or_the_callers_own_sentence() -> None:
     fallback = "configuration refused; reload settings and validation"
     assert refusal_detail(ManagedRefusalError("Add a key."), fallback) == "Add a key."

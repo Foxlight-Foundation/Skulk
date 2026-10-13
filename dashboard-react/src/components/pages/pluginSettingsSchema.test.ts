@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { exampleStudioSettingsSchema } from './exampleStudioSettings.fixture';
 import {
-  fieldLabel, formatUsdAmount, humanizeKey, isAdvancedField, settingsField, settingsUnit, supportedConfigurationSchema,
+  fieldLabel, formatUsdAmount, humanizeKey, isAdvancedField, isWholeCents, settingsField, settingsUnit, supportedConfigurationSchema,
 } from './pluginSettingsSchema';
 
 describe('supportedConfigurationSchema', () => {
@@ -85,6 +85,12 @@ describe('field hints', () => {
     const referenced = settingsField({ $ref: '#/$defs/Limit', 'x-skulk-advanced': true }, root);
     expect(settingsUnit(referenced.schema)).toBe('usd');
     expect(isAdvancedField(referenced.schema)).toBe(true);
+  });
+
+  it('tells whole cents from finer amounts without floating-point noise', () => {
+    expect(isWholeCents(0.29)).toBe(true);
+    expect(isWholeCents(10)).toBe(true);
+    expect(isWholeCents(0.005)).toBe(false);
   });
 
   it('shows dollars as cents, and finer amounts in full', () => {

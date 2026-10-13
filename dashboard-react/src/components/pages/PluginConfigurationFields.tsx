@@ -4,7 +4,7 @@ import styled from 'styled-components';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { Button } from '../common/Button';
 import {
-  fieldLabel, formatUsdAmount, isAdvancedField, resolveSchema, schemaKind, schemaRecord, settingsField, settingsUnit, type SettingsField, type SettingsUnit,
+  fieldLabel, formatUsdAmount, isAdvancedField, isWholeCents, resolveSchema, schemaKind, schemaRecord, settingsField, settingsUnit, type SettingsField, type SettingsUnit,
 } from './pluginSettingsSchema';
 
 const Fields = styled.div`display: grid; gap: 20px; min-width: 0;`;
@@ -104,9 +104,12 @@ export function PluginConfigurationFields({ schema, rootSchema = schema, values,
   const fields = Object.entries(schemaRecord(resolved.properties)).map(([name, raw]) => ({ name, ...settingsField(schemaRecord(raw), rootSchema) }));
   const ordinary = fields.filter((field) => !isAdvancedField(field.schema));
   const advanced = fields.filter((field) => isAdvancedField(field.schema));
-  // A required advanced field nobody has filled in must not hide behind a closed section.
-  const [advancedOpen, setAdvancedOpen] = useState(() => advanced.some(({ name, schema: field }) =>
-    required.includes(name) && (values[name] === undefined || values[name] === null) && (field.default === undefined || field.default === null)));
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // A required advanced field with no value must never hide behind a closed
+  // section: reloaded settings, a changed schema or a cleared value can all
+  // leave one empty, and the browser cannot point at a hidden invalid input.
+  const advancedNeedsValue = advanced.some(({ name, schema: field }) =>
+    required.includes(name) && (values[name] === undefined || values[name] === null) && (field.default === undefined || field.default === null));
   const unitText = (unit: SettingsUnit) => ({
     usd: t('plugins.unit.usd', '$'),
     minutes: t('plugins.unit.minutes', 'minutes'),
@@ -148,6 +151,10 @@ export function PluginConfigurationFields({ schema, rootSchema = schema, values,
     const bounds = {
       min: typeof field.minimum === 'number' ? field.minimum : undefined, max: typeof field.maximum === 'number' ? field.maximum : undefined,
     };
+    // Dollars step by the cent, unless a stored amount or the minimum (the
+    // step's base) is finer: a cent step would then mark the saved value
+    // invalid and block saving any other setting in the form.
+    const centStep = [value, bounds.min].every((amount) => typeof amount !== 'number' || isWholeCents(amount));
     const control = Array.isArray(field.enum)
       ? <Select id={fieldId} aria-describedby={describedBy} value={value === undefined || value === null ? '' : JSON.stringify(value)} disabled={disabled} required={isRequired}
         onValueChange={(selectedValue) => update(selectedValue === '' ? cleared : JSON.parse(selectedValue))}>
@@ -161,7 +168,7 @@ export function PluginConfigurationFields({ schema, rootSchema = schema, values,
         </Select>
         : unit === 'usd'
           ? <FormattedNumberInput id={fieldId} aria-describedby={describedBy} value={value} format={formatUsdAmount} disabled={disabled}
-            required={isRequired} step={type === 'integer' ? 1 : 0.01} placeholder={placeholder} {...bounds}
+            required={isRequired} step={type === 'integer' ? 1 : centStep ? 0.01 : 'any'} placeholder={placeholder} {...bounds}
             onNumber={(next) => update(next ?? cleared)} />
           : <Input id={fieldId} aria-describedby={describedBy} type={type === 'string' ? 'text' : 'number'} value={typeof value === 'string' || typeof value === 'number' ? value : ''} disabled={disabled}
             required={isRequired} step={type === 'integer' ? 1 : 'any'} placeholder={placeholder} {...bounds}
@@ -186,7 +193,13 @@ export function PluginConfigurationFields({ schema, rootSchema = schema, values,
   };
   return <Fields>
     {ordinary.map(renderField)}
-    {advanced.length > 0 ? <Advanced open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
+    {advanced.length > 0 ? <Advanced open={advancedOpen || advancedNeedsValue} onToggle={(event) => {
+      const section = event.currentTarget;
+      // React leaves an unchanged `open` prop alone, so closing the section
+      // while a required field is empty is undone here rather than by a render.
+      if (advancedNeedsValue && !section.open) section.open = true;
+      else setAdvancedOpen(section.open);
+    }}>
       <summary>{t('plugins.advanced', 'Advanced')}</summary>
       <Fields>{advanced.map(renderField)}</Fields>
     </Advanced> : null}
