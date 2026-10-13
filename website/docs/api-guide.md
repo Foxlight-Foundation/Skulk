@@ -4538,8 +4538,9 @@ To rent, approve, follow and release with the burst operations:
   `plugins:manage` and, because these actions require approval, also
   `plugins:approve`; otherwise they are null and `message` says where to change
   it. `state` is `unavailable`, with a plain `message` and no amounts, when the
-  provider cannot read its limit now; a provider reply of any other shape is
-  refused. An unknown provider returns 404.
+  provider cannot read its limit now, or is a release that predates this read;
+  a provider reply of any other shape is refused. An unknown provider returns
+  404.
 
 Each operation route above (all but `GET /v1/burst/budget`) returns
 `pluginId`, `nodeId`, `operationId`, `phase`, a plain-text

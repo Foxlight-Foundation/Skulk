@@ -7,7 +7,13 @@ from pydantic import JsonValue
 
 from skulk.extensions.burst import BurstNodeOffer, burst_memory_pools
 from skulk.extensions.capabilities import CapabilityDescriptor
-from skulk.extensions.managed import ManagedConnection, ManagedNode, ManagedOwner
+from skulk.extensions.managed import (
+    BUDGET_UNAVAILABLE,
+    ManagedConnection,
+    ManagedNode,
+    ManagedOwner,
+)
+from skulk.extensions.refusals import ManagedRefusalError
 
 PROVIDER = {"skulk.burst.provider": "1", "skulk.burst.memory_pools": "vram"}
 
@@ -319,6 +325,10 @@ async def test_the_budget_is_read_from_the_exact_provider_node(tmp_path: Path) -
         fixture.replies = [reply]
         with pytest.raises(ValueError):
             await fixture.owner.burst_budget("gpu")
+    # A provider released before budget reads refuses the operation.
+    fixture.replies = [ManagedRefusalError(None)]
+    older = await fixture.owner.burst_budget("gpu")
+    assert older.state == "unavailable" and older.message == BUDGET_UNAVAILABLE
     fixture.replies = [
         {"state": "unavailable", "message": "The cleanup service did not answer."}
     ]

@@ -238,6 +238,13 @@ class _WireModel(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
 
+BUDGET_UNAVAILABLE = (
+    "This burst provider cannot report its spending limit. Update it from the "
+    "store if this stays."
+)
+"""Said when a provider refuses a budget read without its own next step."""
+
+
 class ManagedConnection(_WireModel):
     """Owner-local setup record; never accepted through management HTTP requests."""
 
@@ -1114,10 +1121,22 @@ class ManagedOwner:
         node = self._node(node_id)
         if not any(burst_memory_pools(d) is not None for d in node.descriptors):
             raise LookupError("installed node is not a burst provider")
-        result = await self._request(
-            {"operation": "burst-budget", "plugin_id": self.name, "node_id": node_id},
-            timeout=5,
-        )
+        try:
+            result = await self._request(
+                {
+                    "operation": "burst-budget",
+                    "plugin_id": self.name,
+                    "node_id": node_id,
+                },
+                timeout=5,
+            )
+        except ManagedRefusalError as refusal:
+            # A provider released before budget reads refuses the operation;
+            # it is a provider that cannot report its limit, not a busy one.
+            return BurstNodeBudget(
+                state="unavailable",
+                message=refusal.message or BUDGET_UNAVAILABLE,
+            )
         return BurstNodeBudget.model_validate_json(json.dumps(result))
 
     async def burst_release(
