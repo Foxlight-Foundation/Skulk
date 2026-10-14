@@ -2916,6 +2916,14 @@ managed-binary probing checks these prerequisites before execution.
 Signed support claims, exact build identity, hardware match, and runner limits still gate normal
 placement. A candidate source build alone grants no support.
 
+Image downloads select every pinned file in the owning card's repository/revision
+group, including a same-repository VAE. External groups retain the durable
+`image_component` artifact role and the complete owning card; store approval
+checks that exact source group. Store transfers verify declared sizes and object
+identities, recover missing component files from partial caches, and exclude
+unrelated quants/projectors. Direct-Hub fallback carries the same exact file
+bundle, so store unavailability does not widen the download.
+
 The runner serializes image work with bounded admission, forwards previews and
 final PNG/JPEG/WebP through the existing image chunks, and cancels/deletes owned
 native jobs. The native watchdog exits on owner death. `SKULK_STABLE_DIFFUSION_CPP_BIN`

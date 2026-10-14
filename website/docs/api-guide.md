@@ -3355,8 +3355,10 @@ The optional JSON body accepts the following fields:
 - `owner_registry_card_id`: immutable signed identity of that owning base card.
   Omit it only for installed or custom owner cards without a registry identity.
 - `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
-  `served_draft`, `vllm_draft`, or `video_companion` (a video card's externally
-  hosted companion, such as guide preprocessor weights); defaults to `base`.
+  `served_draft`, `vllm_draft`, `video_companion` (a video card's externally
+  hosted companion, such as guide preprocessor weights), or `image_component`
+  (an image card's external component repository/revision group); defaults to
+  `base`.
 
 A complete companion request names the companion repository and immutable
 revision, its role, and its owning card:
@@ -3396,6 +3398,15 @@ require the repository, revision, selected file, and `artifact_role` to match
 that owning card's signed companion declaration. A mismatched alias, role, or
 artifact selection returns `409 Conflict`; malformed identifiers and roles
 return `400 Bad Request`.
+
+For a typed image card, the store derives the exact component selection from
+its independently verified complete card. The base transaction includes every
+primary-repository component, including the VAE. An `image_component` request
+omits `gguf_file` and selects every declared file in its pinned external source
+group, including both text and vision encoders when declared. Missing files,
+listing-size conflicts, or failed object verification fail the transaction;
+unrelated quants and projectors are excluded. A cached base GGUF alone does not
+mark the group complete: missing components trigger recovery.
 
 The response reports `modelId`, nullable `sourceRevision`, `status`, and
 `progress`; transport or store rejection additionally reports `error`. The

@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import hashlib
+import json
 import os
 import shutil
 import socket
@@ -35,7 +37,12 @@ from skulk.download.huggingface_utils import (
     resolve_hf_token_source,
 )
 from skulk.shared.constants import SKULK_MODELS_DIR
-from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.model_cards import (
+    ArtifactBundleConfig,
+    ArtifactBundleFile,
+    ModelCard,
+    ModelTask,
+)
 from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
@@ -528,6 +535,7 @@ def companion_download_specs(
         repo: str,
         source_revision: str | None,
         gguf_file: str | None = None,
+        artifact_bundle: ArtifactBundleConfig | None = None,
     ) -> PipelineShardMetadata:
         companion_model_id, effective_revision = companion_artifact_location(
             model_card,
@@ -540,6 +548,7 @@ def companion_download_specs(
                 source_repository=ModelId(repo),
                 source_revision=effective_revision,
                 gguf_file=gguf_file,
+                artifact_bundle=artifact_bundle,
                 storage_size=Memory.from_bytes(0),
                 n_layers=1,
                 hidden_size=1,
@@ -563,8 +572,45 @@ def companion_download_specs(
                     paths.append(item.path)
         for (repository, revision), paths in groups.items():
             if repository != str(model_card.artifact_repository):
-                gguf = next((path for path in paths if path.endswith(".gguf")), None)
-                specs.append((_bare_shard(repository, revision, gguf), paths, True))
+                # The owning image manifest selects the whole repository group,
+                # including direct-Hub fallback when a model store is unavailable.
+                files = tuple(
+                    ArtifactBundleFile(
+                        path=item.path,
+                        size_bytes=item.size_bytes,
+                        object_id=item.object_id,
+                    )
+                    for item in sorted(
+                        model_card.image.files_for_source(repository, revision),
+                        key=lambda item: item.path,
+                    )
+                )
+                manifest = [
+                    {
+                        "relative_path": item.path,
+                        "size_bytes": item.size_bytes,
+                        "object_id": item.object_id,
+                    }
+                    for item in files
+                ]
+                digest = hashlib.sha256(
+                    json.dumps(
+                        manifest, allow_nan=False, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).digest()
+                bundle = ArtifactBundleConfig(
+                    bundle_id="bundle_"
+                    + base64.b32encode(digest).decode().rstrip("=").lower(),
+                    files=files,
+                    download_size=sum(item.size_bytes for item in files),
+                )
+                specs.append(
+                    (
+                        _bare_shard(repository, revision, artifact_bundle=bundle),
+                        paths,
+                        True,
+                    )
+                )
     if model_card.vision and model_card.vision.weights_repo != str(
         model_card.artifact_repository
     ):
@@ -725,7 +771,9 @@ def model_companions_present_on_disk(
     """
     if model_card.image is not None:
         for component in model_card.image.components:
-            identifier, revision = companion_artifact_location(model_card, component.repository, component.revision)
+            identifier, revision = companion_artifact_location(
+                model_card, component.repository, component.revision
+            )
             for item in component.files:
                 path = build_sidecar_path(identifier, item.path, revision)
                 if path is None or path.stat().st_size != item.size_bytes:
@@ -771,7 +819,9 @@ def model_companions_present_on_disk(
         # Preprocessor weights are load-bearing: a card that advertises a
         # guide it cannot derive would fail the render, not degrade it.
         for item in model_card.video.companions:
-            if item.repo is None or str(item.repo) == str(model_card.artifact_repository):
+            if item.repo is None or str(item.repo) == str(
+                model_card.artifact_repository
+            ):
                 continue
             if build_sidecar_path(ModelId(item.repo), item.path, item.revision) is None:
                 return False
@@ -835,16 +885,17 @@ def _apply_artifact_root(model_directory: Path, artifact_root: str | None) -> Pa
         return model_directory
     resolved_directory = model_directory.resolve()
     resolved_root = (resolved_directory / artifact_root).resolve()
-    if not resolved_root.is_relative_to(resolved_directory) or not resolved_root.is_dir():
+    if (
+        not resolved_root.is_relative_to(resolved_directory)
+        or not resolved_root.is_dir()
+    ):
         raise FileNotFoundError(
             f"Artifact root {artifact_root!r} is absent beneath {model_directory}"
         )
     return resolved_root
 
 
-def artifact_install_directory(
-    load_directory: Path, artifact_root: str | None
-) -> Path:
+def artifact_install_directory(load_directory: Path, artifact_root: str | None) -> Path:
     """Recover the staged generation root from its bundle loader directory.
 
     Args:
@@ -940,7 +991,9 @@ def build_model_path(
     # must be accepted here or a bare GGUF model that downloaded fine would fail
     # to load with FileNotFoundError (#327).
     default = SKULK_MODELS_DIR / model_id.normalize()
-    default_load_root = default / artifact_root if artifact_root is not None else default
+    default_load_root = (
+        default / artifact_root if artifact_root is not None else default
+    )
     if (
         default.is_dir()
         and default_load_root.is_dir()
@@ -2123,9 +2176,8 @@ async def download_shard(
 
     async def download_with_semaphore(file: FileListEntry) -> None:
         async with semaphore:
-            def progress(
-                curr_bytes: int, total_bytes: int, is_renamed: bool
-            ) -> None:
+
+            def progress(curr_bytes: int, total_bytes: int, is_renamed: bool) -> None:
                 schedule_progress(file, curr_bytes, total_bytes, is_renamed)
 
             if bundle is None:

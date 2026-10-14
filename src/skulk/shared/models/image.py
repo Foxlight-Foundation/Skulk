@@ -218,6 +218,22 @@ class ImageCardConfig(FrozenModel):
                 "image canvas exceeds this model's area or alignment limits"
             )
 
+    def files_for_source(
+        self, repository: str, revision: str | None
+    ) -> tuple[ImageComponentFile, ...]:
+        """Return deduplicated pinned files from one repository/revision transaction.
+
+        The store uses this exact selection for base and companion artifacts;
+        another quant or an unrelated projector never joins the transaction.
+        """
+        files = {
+            item.path: item
+            for component in self.components
+            if component.repository == repository and component.revision == revision
+            for item in component.files
+        }
+        return tuple(files.values())
+
     @property
     def storage_bytes(self) -> int:
         """Return complete component storage, deduplicating shared immutable files."""

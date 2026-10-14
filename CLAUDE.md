@@ -1803,3 +1803,11 @@ its VAE/encoders, while companions in other repositories use their own pinned
 transactions. Dashboard native image requests own SSE responses so Stop closes
 the stream and cancels the underlying command rather than only aborting an
 unobserved non-streaming fetch.
+
+Image downloads select every pinned file in the owning card's repository/revision
+group, including a same-repository VAE. External groups retain the durable
+`image_component` artifact role and the complete owning card; store approval
+checks that exact source group. Store transfers verify declared sizes and object
+identities, recover missing component files from partial caches, and exclude
+unrelated quants/projectors. Direct-Hub fallback carries the same exact file
+bundle, so store unavailability does not widen the download.
