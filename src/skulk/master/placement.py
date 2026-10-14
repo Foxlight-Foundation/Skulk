@@ -858,8 +858,10 @@ def place_instance(
     served_context_default: int | None = None,
     node_install_ids: Mapping[NodeId, UUID] | None = None,
 ) -> dict[InstanceId, Instance]:
-    if command.model_card.image is not None and command.min_nodes != 1:
-        raise PlacementError("Native image instances require exactly one node")
+    if command.model_card.image is not None and (
+        command.min_nodes != 1 or command.sharding != Sharding.Pipeline
+    ):
+        raise PlacementError("Native image instances require single-node pipeline sharding")
     if command.model_card.music is not None and command.min_nodes != 1:
         raise PlacementError("Music instances require exactly one node")
     if remote_code_approval_required(

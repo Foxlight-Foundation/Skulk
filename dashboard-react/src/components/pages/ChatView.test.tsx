@@ -445,7 +445,7 @@ describe('ChatView native images', () => {
       }] }), { status: 200 });
       if (url === '/v1/images/generations') {
         captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        return new Response(JSON.stringify({ data: [{ b64_json: 'aW1hZ2U=' }] }), { status: 200 });
+        return new Response('data: {"type":"final","image_index":0,"data":{"b64_json":"aW1hZ2U="}}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
       }
       throw new Error(`unexpected request: ${url}`);
     }));
@@ -458,7 +458,7 @@ describe('ChatView native images', () => {
       await userEvent.click(send);
     });
     await waitFor(() => Object.values(store.getState().chat.conversations).some(conversation => conversation.messages.some(item => item.generatedImages?.length === 1)), 'generated image was not retained');
-    expect(captured).toMatchObject({ prompt: 'A fox beside a blue cup', n: 1, size: 'auto', advanced_params: {}, stream: false });
+    expect(captured).toMatchObject({ prompt: 'A fox beside a blue cup', n: 1, size: 'auto', advanced_params: {}, stream: true });
     expect(container?.querySelector<HTMLImageElement>('img[alt="Generated {index}"]')?.src).toBe('data:image/png;base64,aW1hZ2U=');
   });
 });

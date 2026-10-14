@@ -1795,3 +1795,11 @@ the passively observed chip class (for example `apple:apple-m4`) when macOS
 reports it. Missing chip observations add no exact class. Native image package
 eligibility and signed support claims can therefore select measured Apple
 hardware without broadening qualification to every Metal device.
+
+Native image placement requires one pipeline rank and one observed GPU; tensor
+sharding or ambiguous multi-device install offers are rejected before preparation.
+Base image downloads select every pinned primary-repository component, including
+its VAE/encoders, while companions in other repositories use their own pinned
+transactions. Dashboard native image requests own SSE responses so Stop closes
+the stream and cancels the underlying command rather than only aborting an
+unobserved non-streaming fetch.

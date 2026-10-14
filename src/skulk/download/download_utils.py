@@ -1822,6 +1822,17 @@ async def get_weight_map(model_id: ModelId, revision: str = "main") -> dict[str,
 
 async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
     bundle = shard.model_card.artifact_bundle
+    if shard.model_card.image is not None:
+        # Primary-repository companions belong to the base transaction; the
+        # companion downloader handles only the other pinned repositories.
+        paths = [item.path for item in bundle.files] if bundle is not None else []
+        paths.extend(
+            item.path
+            for component in shard.model_card.image.components
+            if component.repository == str(shard.model_card.artifact_repository)
+            for item in component.files
+        )
+        return list(dict.fromkeys(paths))
     if bundle is not None:
         # A v2 signed card is an exact immutable file transaction. Broad config
         # or tokenizer globs would recreate the repository-wide ambiguity this

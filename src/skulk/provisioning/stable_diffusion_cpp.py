@@ -414,6 +414,9 @@ def installable_image_builds(
         or os.environ.get(AUTOPROVISION_OPT_OUT_ENV) == "1"
         or (os.environ.get("SKULK_NODE_PARTICIPATION", "full") != "full")
         or facts.stable_diffusion_cpp_binary.state != "not_configured"
+        # No device-visibility selector is qualified yet. Reject ambiguous
+        # hosts before offering an install that the native probe must reject.
+        or len(facts.gpus) != 1
     ):
         return {}
     builds: dict[str, str] = {}

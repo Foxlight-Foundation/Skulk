@@ -342,3 +342,18 @@ def test_native_image_profile_cannot_be_placed_on_a_legacy_loader() -> None:
     assert platform_compatible_backends(candidates, card_serves_vision=False,
         card_has_native_image_profile=True) == frozenset({"stable_diffusion_cpp-metal"})
     assert platform_compatible_backends(candidates, card_serves_vision=False) == frozenset({"mlx", "mlx-metal"})
+
+
+@pytest.mark.parametrize("device_count", [0, 1, 2])
+def test_install_offer_requires_one_observed_device(device_count: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject a multi-GPU host before a download the native loader will reject."""
+    from skulk.shared.types.node_facts import EngineBinaryFact, GpuDeviceFact
+
+    monkeypatch.setattr(image_engine.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(image_engine.platform, "machine", lambda: "arm64")
+    monkeypatch.delenv(image_engine.AUTOPROVISION_OPT_OUT_ENV, raising=False)
+    monkeypatch.delenv("SKULK_NODE_PARTICIPATION", raising=False)
+    missing = EngineBinaryFact(env_var="unset")
+    facts = NodeFacts(platform="darwin", llama_server_binary=missing, vllm_binary=missing, rpc_server_binary=missing, gpus=tuple(GpuDeviceFact(vendor="apple", name="Apple M4", index=index, detection_source="apple_platform") for index in range(device_count)))
+    builds = image_engine.installable_image_builds(facts, frozenset({"apple:apple-m4"}), offline=False)
+    assert bool(builds) == (device_count == 1)

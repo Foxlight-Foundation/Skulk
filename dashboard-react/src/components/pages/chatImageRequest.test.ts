@@ -19,7 +19,7 @@ describe('Native image request ownership', () => {
       expect(url).toBe('/v1/images/edits');
       expect(init?.body).toBeInstanceOf(FormData);
       form = init?.body as FormData;
-      return new Response(JSON.stringify({ data: [{ b64_json: 'aW1hZ2U=' }] }), { status: 200 });
+      return new Response('data: {"type":"final","image_index":0,"data":{"b64_json":"aW1hZ2U="}}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
     }));
     const output = await requestDashboardImages('model', 'literal', {
       ...DEFAULT_IMAGE_PARAMS, seed: 42, numInferenceSteps: 20, guidance: 6, negativePrompt: 'bad', outputFormat: 'webp',
@@ -36,4 +36,38 @@ describe('Native image request ownership', () => {
     await expect(requestDashboardImages('model', 'literal', DEFAULT_IMAGE_PARAMS, profile, ['a', 'b', 'c'], new AbortController().signal)).rejects.toThrow('at most 2');
     expect(fetch).not.toHaveBeenCalled();
   });
+  it('collects fragmented final events in output order and surfaces terminal errors', async () => {
+    const wire = 'data: {"type":"final","image_index":1,"data":{"b64_json":"second"}}\r\n\r\ndata: {"type":"final","image_index":0,"data":{"b64_json":"first"}}\r\n\r\ndata: [DONE]\r\n\r\n';
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body)).stream).toBe(true);
+      const encoded = new TextEncoder().encode(wire);
+      return new Response(new ReadableStream({ start(controller) {
+        for (let index = 0; index < encoded.length; index += 7) controller.enqueue(encoded.slice(index, index + 7));
+        controller.close();
+      } }));
+    }));
+    expect(await requestDashboardImages('model', 'literal', { ...DEFAULT_IMAGE_PARAMS, numImages: 2 }, profile, [], new AbortController().signal)).toEqual(['data:image/png;base64,first', 'data:image/png;base64,second']);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('data: {"error":{"message":"native producer failed"}}\n\ndata: [DONE]\n\n')));
+    await expect(requestDashboardImages('model', 'literal', DEFAULT_IMAGE_PARAMS, profile, [], new AbortController().signal)).rejects.toThrow('native producer failed');
+  });
+  it('cancels the owned streaming response when Stop aborts an active render', async () => {
+    const controller = new AbortController();
+    const cancelled = vi.fn();
+    let started: (() => void) | undefined;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.signal).toBe(controller.signal);
+      expect(JSON.parse(String(init?.body)).stream).toBe(true);
+      return new Response(new ReadableStream({ start() { started?.(); }, cancel: cancelled }));
+    }));
+    const request = requestDashboardImages('model', 'literal', DEFAULT_IMAGE_PARAMS, profile, [], controller.signal);
+    const rejected = expect(request).rejects.toThrow();
+    await ready;
+    // Let fetch deliver its response so the body owner is waiting for a frame.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    controller.abort();
+    await rejected;
+    expect(cancelled).toHaveBeenCalledOnce();
+  });
+
 });
