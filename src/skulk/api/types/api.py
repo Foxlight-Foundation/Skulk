@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from skulk.shared.backends import engine_of
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
 from skulk.shared.models.image import ImageCardConfig
 from skulk.shared.models.memory_estimate import (
@@ -195,13 +196,13 @@ class ModelRequirements(BaseModel):
         description="Declared backend tags; live platform and runner constraints still apply."
     )
     required_capabilities: tuple[str, ...] = Field(
-        description="Complete positively evidenced capability set required for signed engine support; an empty set cannot authorize matrix-only admission."
+        description="Positively evidenced intrinsic capability identifiers for reporting; missing qualification does not revoke declared engine compatibility."
     )
     engine_support: tuple[RegistryEngineSupportClaim, ...] = Field(
-        description="Matching signed engine claims; status, exact build and hardware constraints remain authoritative."
+        description="Matching upstream compatibility mappings and scoped qualification evidence; observed build/hardware provenance is not an eligibility list."
     )
     incomplete_capabilities: tuple[str, ...] = Field(
-        description="Artifact capabilities explicitly marked incomplete; these block admission."
+        description="Artifact capabilities with missing components; a missing dependency applies to the affected operation."
     )
     estimate_only: Literal[True] = Field(
         default=True,
@@ -992,10 +993,12 @@ class VideoCapabilitySection(BaseModel):
         limits = config.reference_limits
         guides = _guide_sections(config)
         ltx = model_card.family == "ltx-2.5"
+        native_only = ltx and {engine_of(backend) for backend in model_card.placement.compatible_backends} == {"mlx_video"}
         def companion_modes(kind: VideoCompanionKind, name: str) -> list[VideoModeName]:
             return cast("list[VideoModeName]", [mode.value for mode in config.modes if mode in (VideoMode.TextToAudioVideo, VideoMode.FramesToAudioVideo) and any(item.kind is kind and item.name == name and item.supports_mode(mode) for item in config.companions)])
 
-        spatial_modes: list[VideoModeName] = companion_modes(VideoCompanionKind.LatentUpscaler, "spatial_x2") if ltx else []
+        prerequisites = ltx and config.audio_output and config.frame_grid_multiple == 8 and config.frame_grid_offset == 1
+        spatial_modes: list[VideoModeName] = companion_modes(VideoCompanionKind.LatentUpscaler, "spatial_x2") if prerequisites else []
         distilled_modes: list[VideoModeName] = spatial_modes if config.transformer_variant == "distilled" else []
         dev_modes: list[VideoModeName] = [mode for mode in spatial_modes if mode in companion_modes(VideoCompanionKind.Lora, "distilled_refinement")] if config.transformer_variant == "dev" else []
         ltx_distilled, ltx_dev = bool(distilled_modes), bool(dev_modes)
@@ -1005,6 +1008,8 @@ class VideoCapabilitySection(BaseModel):
             pipeline_modes["distilled_two_stage"] = distilled_modes
         if dev_modes:
             pipeline_modes["dev_two_stage"] = dev_modes
+            if any(engine_of(backend) == "mlx_video" for backend in model_card.placement.compatible_backends):
+                pipeline_modes["hq_two_stage"] = dev_modes
         served_modes: list[VideoModeName] = distilled_modes or dev_modes
         decoder_modes: dict[VideoDecoder, list[VideoModeName]] = {}
         if served_modes:
@@ -1018,6 +1023,7 @@ class VideoCapabilitySection(BaseModel):
             transformer_variant=config.transformer_variant,
             pipelines=list(pipeline_modes),
             pipeline_modes=pipeline_modes,
+            codecs=["h264"] if native_only else list(VIDEO_CODECS),
             decoders=list(decoder_modes),
             decoder_modes=decoder_modes,
             generated_keyframes=ltx_available and config.generated_keyframes,
@@ -1039,14 +1045,14 @@ class VideoCapabilitySection(BaseModel):
             audio_channels=config.audio_channels,
             default_steps=config.default_steps,
             sampling_stage_steps=[8, 3] if ltx_distilled else [],
-            samplers=(["euler_ancestral"] if ltx_distilled else ["euler"] if ltx_dev else [])
+            samplers=[] if native_only else (["euler_ancestral"] if ltx_distilled else ["euler"] if ltx_dev else [])
             if ltx
             else list(VIDEO_SAMPLERS),
             default_sampler="euler_ancestral"
             if ltx_distilled
             else ("euler" if ltx_dev else "unsupported" if ltx else VIDEO_DEFAULT_SAMPLER),
             schedulers=[] if ltx else list(VIDEO_SCHEDULERS),
-            default_scheduler=("manual" if ltx_distilled else "ltx" if ltx_dev else "unsupported")
+            default_scheduler=("ltx" if native_only else "manual" if ltx_distilled else "ltx" if ltx_dev else "unsupported")
             if ltx
             else VIDEO_DEFAULT_SCHEDULER,
             shift_bounds=[] if ltx else list(VIDEO_SHIFT_BOUNDS),
@@ -2278,6 +2284,10 @@ class PlacementPreview(BaseModel):
         pattern=r"^[a-f0-9]{64}$",
         description="Canonical authorized-card content digest used to construct a launchable preview; compare with approved model requirements before submitting the exact instance. Null when no instance is present.",
     )
+    memory_estimate_notes: list[str] = Field(
+        default_factory=list,
+        description="Effective cache accounting, allocation assumptions and conservative unknown-layout fallback; scoped to this serving configuration.",
+    )
     model_id: ModelId
     sharding: Sharding
     instance_meta: InstanceMeta
@@ -2344,11 +2354,11 @@ class PlacementPreview(BaseModel):
     )
     compatibility_source: Literal["card", "signed_engine_support"] | None = Field(
         default=None,
-        description="Truth source that admitted the selected backend, or null on error.",
+        description="Declared card or upstream architecture/engine compatibility source, or null on error; qualification is separate evidence.",
     )
     support_claim_ids: list[str] = Field(
         default_factory=list,
-        description="Active signed support claims applicable to this placement.",
+        description="Upstream architecture/engine mapping identifiers used by this placement; empirical qualification does not grant permission.",
     )
     compatibility_detail: str | None = Field(
         default=None,

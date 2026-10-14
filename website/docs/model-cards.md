@@ -21,6 +21,14 @@ They are how Skulk knows things like:
 
 Model cards sit at the boundary between static metadata and runtime behavior.
 
+The [model/engine compatibility contract](engine-compatibility.md) separates
+artifact/model facts, actual engine requirements and scoped qualification evidence.
+Compatible untested hardware remains eligible. Cards supply selected artifact
+sizes and cache geometry; the actual engine, effective weight/cache quantization,
+workload and live resources determine a configuration's memory fit. A reference
+measurement is not a universal minimum. Weight and cache quantization are separate
+settings, and placement/worker estimates must agree on the settings actually used.
+
 They drive:
 
 - placement and memory calculations
@@ -276,11 +284,11 @@ is also valid vocabulary: nodes advertise it alongside their compound tags, so a
 card written against the original `{"mlx"}` set keeps matching.
 
 - `compatible_backends`
-  - the declared backend set, combined with exact supported matches from the signed engine-support matrix and then filtered by live node and runner support. The planner excludes nodes that match no effective backend. The default is `{"mlx"}` (so an unannotated card stays on MLX nodes); a GGUF card lists the llama.cpp tags. This keeps MLX artifacts on nodes with MLX support and GGUF artifacts on a compatible GGUF engine; the artifact format does not by itself exclude a Mac.
+  - the declared engines/backends, optionally expanded by upstream architecture/engine compatibility mappings, then filtered by actual node/package and runner requirements. Qualification coverage does not restrict this set. The planner excludes nodes that match no effective backend. The default is `{"mlx"}` (so an unannotated card stays on MLX nodes); a GGUF card lists the llama.cpp tags. This keeps MLX artifacts on nodes with MLX support and GGUF artifacts on a compatible GGUF engine; the artifact format does not by itself exclude a Mac.
 - `backend_preference`
   - the soft score: an ordered list of preferred tags. When several compatible nodes qualify, the planner prefers the node whose backend ranks earliest, with graceful fallback to the rest. This lets a card say "fastest on Vulkan, but ROCm is fine."
 - `min_vram_gib`
-  - optional minimum accelerator memory a node must have to be eligible.
+  - legacy reference accelerator-memory figure; actual engine/workload estimates determine fit, rather than a universal eligibility minimum.
 - `max_context_tokens`
   - optional cap on the admission context for this model, independent of the model's trained context length.
 - `max_pipeline_split_layer`
@@ -396,18 +404,15 @@ and [ACE-Step Turbo BF16](https://github.com/Foxlight-Foundation/foxlight-model-
 cards for exact component identities and sizes. Each other quant or selected
 variant requires its own card.
 
-Both initial music cards set `placement.compatible_backends = []`. That means
-they do not claim legacy backend compatibility. A signed `supported` claim
-must match the exact card, audio.cpp build, `music.generate` capability,
-architecture, and applicable hardware class after load and generation
-qualification. The node must also report that same ready build before Skulk
-will place it. Installing the audio.cpp package alone grants no model support.
-Music placement resolves a concrete `audio_cpp-cpu`, `audio_cpp-metal`,
-`audio_cpp-vulkan`, `audio_cpp-cuda`, or `audio_cpp-rocm` lane. The bare
-`audio_cpp` tag reports engine availability but cannot select a music runner.
-The [Strix Vulkan qualification record](audio-cpp-strix-qualification.md)
-documents the exact build, hardware class, and initial card results behind
-that lane's claims.
+Music cards declare `placement.compatible_backends = ["audio_cpp"]`. Placement
+resolves an available concrete `audio_cpp-cpu`, `audio_cpp-metal`,
+`audio_cpp-vulkan`, `audio_cpp-cuda` or `audio_cpp-rocm` lane. First-use preparation
+can install a compatible engine; its ready probe and actual package requirements
+establish runtime availability. Managed CUDA packages retain their compiled SM
+requirements and current single-device binding limitation. Qualification records
+are scoped observations, not prerequisites for loading or publication. The
+[Strix Vulkan qualification record](audio-cpp-strix-qualification.md) reports one
+tested configuration without excluding other compatible hardware.
 
 ### `[video]`
 

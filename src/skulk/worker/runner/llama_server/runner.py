@@ -188,6 +188,7 @@ def _effective_server_parallel(card: Any) -> int:
         return 1
     return _llama_server_parallel()
 
+
 # Card ``served_spec_type`` value -> the ``llama-server --spec-type`` token.
 # ``draft_mtp`` usually uses the model's own built-in MTP heads; a separate
 # draft is optional (Gemma 4 supplies its assistant as one).
@@ -516,7 +517,6 @@ def reasoning_request_overrides(
     if effort is not None and effort != "none":
         overrides["reasoning_effort"] = effort
     return overrides
-
 
 
 # How long to wait for the server to finish loading the model and report healthy.
@@ -954,6 +954,7 @@ class Runner(ServedConcurrentDispatch):
         # deterministic command line.
         if self._rpc_donor_endpoints:
             cmd += ["--rpc", ",".join(sorted(self._rpc_donor_endpoints.values()))]
+        cmd += ["--cache-type-k", "f16", "--cache-type-v", "f16"]
         cmd += _projector_server_args(
             projector_path,
             self.shard_metadata.resolved_backend,

@@ -221,6 +221,8 @@ def engine_build_inventory(
             build = _binary_build("llama.cpp", facts.llama_server_binary)
         elif engine == "stable_diffusion_cpp":
             build = facts.stable_diffusion_cpp_probe.build_identity
+        elif engine == "mlx_video":
+            build = facts.mlx_video_build_identity
         elif engine == "vllm":
             # vLLM normally lives in its own managed virtual environment, so
             # the Skulk environment's package metadata is not its build truth.
@@ -241,6 +243,8 @@ def engine_build_inventory(
         # executable digest when registry support is exact-build bound.
         if engine == "stable_diffusion_cpp":
             build = facts.stable_diffusion_cpp_probe.build_identity
+        elif engine == "mlx_video":
+            build = facts.mlx_video_build_identity
         elif engine == "audio_cpp":
             binary = facts.audio_cpp_binary
             if (
@@ -288,6 +292,8 @@ def hardware_class_inventory(facts: NodeFacts) -> frozenset[str]:
             classes.add(f"{vendor}:{name}")
         if gpu.pci_device_id is not None:
             classes.add(f"{vendor}:pci-{gpu.pci_device_id.replace(':', '-')}")
+        if vendor == "amd" and gpu.gpu_architecture is not None:
+            classes.add(f"amd:{gpu.gpu_architecture}")
         if vendor == "nvidia":
             # Preserve uncertainty when another NVIDIA device has a known SM;
             # otherwise aggregate classes could hide an unqualified device.

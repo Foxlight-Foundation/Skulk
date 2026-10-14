@@ -100,7 +100,7 @@ def _hardware_supports(compute: str, facts: NodeFacts) -> bool:
     if compute == "rocm":
         return amd
     if compute == "vulkan":
-        return nvidia or amd
+        return nvidia or amd or any(gpu.vendor == "intel" for gpu in facts.gpus)
     return True
 
 
@@ -671,21 +671,42 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         conflicts.extend(engine_conflicts)
         notes.extend(engine_notes)
 
+    if facts.platform == "darwin" and facts.gpus_of("apple") and facts.mlx_video_build_identity is not None:
+        tags.update({"mlx_video", "mlx_video-metal"})
+
     native_image = facts.stable_diffusion_cpp_probe
     if native_image.outcome == "ready" and len(native_image.devices) == 1:
-        tags.update(f"stable_diffusion_cpp-{compute}" for compute in native_image.computes)
+        from skulk.facts.inventory import hardware_class_inventory
+        from skulk.provisioning.stable_diffusion_cpp import (
+            native_image_build_hardware_matches,
+        )
+
+        if (
+            native_image.build_identity is not None
+            and native_image_build_hardware_matches(
+                native_image.build_identity, hardware_class_inventory(facts)
+            )
+        ):
+            tags.update(
+                f"stable_diffusion_cpp-{compute}" for compute in native_image.computes
+            )
     elif facts.stable_diffusion_cpp_binary.state != "not_configured":
-        conflicts.append(CapabilityConflict(
-            code="invalid_engine_binary",
-            message="The configured native image engine did not verify its source and GPU.",
-            remediation="Use a compatible pinned GPU image engine and refresh node resources.",
-        ))
+        conflicts.append(
+            CapabilityConflict(
+                code="invalid_engine_binary",
+                message="The configured native image engine did not verify its source and GPU.",
+                remediation="Use a compatible pinned GPU image engine and refresh node resources.",
+            )
+        )
 
     # A node that can install the video engine advertises it before the
     # install, so placement can choose it; the worker installs the engine the
     # first time a video model lands here. A configured or wired install
     # already derived its tags above and leaves no install eligibility.
     on_demand: set[str] = set()
+    if facts.mlx_video_build_identity is None:
+        on_demand.update(facts.mlx_video_installable_builds)
+        tags.update(facts.mlx_video_installable_builds)
     if (
         facts.comfy_on_demand_variants
         and facts.comfy_binary.state == "not_configured"

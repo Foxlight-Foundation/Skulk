@@ -1,0 +1,190 @@
+# Exact converted-pack candidate; no empirical memory profile or production publication.
+model_id = "dgrauet/LTX-2.5-distilled-mlx-q4"
+source_repository = "dgrauet/ltx-2.5-mlx-q4"
+source_revision = "e9a20add8c5937fcab635fb8e7a52926487a5776"
+n_layers = 48
+hidden_size = 4096
+supports_tensor = false
+tasks = ["TextToVideo", "ImageToVideo"]
+family = "ltx-2.5"
+quantization = "int4"
+base_model = "Lightricks/LTX-2.5"
+capabilities = ["video_gen"]
+trust_remote_code = false
+
+[storage_size]
+in_bytes = 28764337610
+
+[license]
+name = "LTX-2.x Community License Agreement"
+url = "https://github.com/Lightricks/LTX-2/blob/9ec55f9f22798a3198d9c923856824821bc3317e/LICENSE-2_x"
+display_name = "LTX-2.5"
+notice = "Read the LTX-2.x Community License before downloading. Commercial use by entities with annual revenue of at least USD 10 million requires a paid agreement, subject to its noncommercial exception. Preserve required license and transparency notices."
+
+[placement]
+compatible_backends = ["mlx_video-metal"]
+backend_preference = ["mlx_video-metal"]
+
+[video]
+transformer_variant = "distilled"
+generated_keyframes = true
+modes = ["t2va", "fl2va"]
+min_seconds = 1
+max_seconds = 20
+fps = 24
+frame_grid_multiple = 8
+frame_grid_offset = 1
+canvas_multiple = 32
+default_short_edge = 512
+audio_output = true
+audio_sample_rate = 48000
+audio_channels = 2
+default_steps = 8
+
+[[video.companions]]
+kind = "latent_upscaler"
+name = "spatial_x2"
+path = "spatial_upscaler_x2_v1_0.safetensors"
+size_bytes = 995745333
+
+[[video.companions]]
+kind = "duration_head"
+name = "duration_head"
+path = "duration_head.safetensors"
+size_bytes = 3808462
+
+[[components]]
+component_name = "transformer"
+component_path = "transformer-distilled.safetensors"
+can_shard = false
+
+[components.storage_size]
+in_bytes = 11320034990
+
+[[components]]
+component_name = "text_encoder"
+component_path = "text_encoder.safetensors"
+can_shard = false
+
+[components.storage_size]
+in_bytes = 14595453751
+
+[[components]]
+component_name = "video_vae"
+component_path = "vae_decoder_conv.safetensors"
+can_shard = false
+
+[components.storage_size]
+in_bytes = 1452238202
+
+[[components]]
+component_name = "audio_vae"
+component_path = "audio_vae.safetensors"
+can_shard = false
+
+[components.storage_size]
+in_bytes = 364826545
+
+[artifact_bundle]
+bundle_id = "bundle_ccrnwcgqrd3lhddjuryik63lmn6vofzubyy6y4tyf4ghecf2huta"
+download_size = 28764337610
+
+[[artifact_bundle.files]]
+path = "LICENSE"
+size_bytes = 30399
+object_id = "git-sha1:e982a921c3d2f19bf66a2d60efa6fc0d6ae72283"
+
+[[artifact_bundle.files]]
+path = "audio_vae.safetensors"
+size_bytes = 106510725
+object_id = "sha256:b91400bd1cd52ba3f4df54dc6214526b1b01de1bf5bf21544d29738a926dcc7a"
+
+[[artifact_bundle.files]]
+path = "chat_template.jinja"
+size_bytes = 17466
+object_id = "git-sha1:e61bbfe9a31db79ea1e4e557b046f895ad7899d0"
+
+[[artifact_bundle.files]]
+path = "connector.safetensors"
+size_bytes = 4032375032
+object_id = "sha256:ad25a36abf03315a7adf1d1f7340c538efe85bb35fa7ee3130661d56020ba461"
+
+[[artifact_bundle.files]]
+path = "duration_head.safetensors"
+size_bytes = 3808462
+object_id = "sha256:e3ec9ff07d9aadd6e3073af63a7d66612c029b6e46ecb21f2d5ee5f43cd53c29"
+
+[[artifact_bundle.files]]
+path = "embedded_config.json"
+size_bytes = 2557
+object_id = "git-sha1:62f78f1aba7b1d3bdf47c8bc1557cd6bafdedae8"
+
+[[artifact_bundle.files]]
+path = "generation_config.json"
+size_bytes = 255
+object_id = "git-sha1:2528bb46703f6abf6489b1bd15e6a724ab4525d7"
+
+[[artifact_bundle.files]]
+path = "processor_config.json"
+size_bytes = 1382
+object_id = "git-sha1:b889adcd78015bf5a0139438c5fb0b7067529a61"
+
+[[artifact_bundle.files]]
+path = "quantize_config.json"
+size_bytes = 213
+object_id = "git-sha1:04977ce0d45583a52659348ef232ca61588dc42d"
+
+[[artifact_bundle.files]]
+path = "spatial_upscaler_x2_v1_0.safetensors"
+size_bytes = 995745333
+object_id = "sha256:df7de2dc9e32815113d8ba876dcd1e8a4a91c0ea1530b840430bf3220de90294"
+
+[[artifact_bundle.files]]
+path = "spatial_upscaler_x2_v1_0_config.json"
+size_bytes = 275
+object_id = "git-sha1:b36a7304dd0e3cbc4afc3bad766ab5a897759238"
+
+[[artifact_bundle.files]]
+path = "split_model.json"
+size_bytes = 1028
+object_id = "git-sha1:ede1d9025d09164ca9cf479cf36efca90d322a98"
+
+[[artifact_bundle.files]]
+path = "text_encoder.safetensors"
+size_bytes = 10563078719
+object_id = "sha256:687a14a73d93814da5942dd55d1cf095b549c8cec31553bbaf280797492049d1"
+
+[[artifact_bundle.files]]
+path = "text_encoder_config.json"
+size_bytes = 4377
+object_id = "git-sha1:c6148a703195fd3dec6646b6c7db738d8d18295a"
+
+[[artifact_bundle.files]]
+path = "tokenizer.json"
+size_bytes = 32169626
+object_id = "sha256:cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+
+[[artifact_bundle.files]]
+path = "tokenizer_config.json"
+size_bytes = 2749
+object_id = "git-sha1:df4afd629c3e51c2a7ef4e72b967a3f17acbffe1"
+
+[[artifact_bundle.files]]
+path = "transformer-distilled.safetensors"
+size_bytes = 11320034990
+object_id = "sha256:413479747a7ecd39c71460c3b0e4c872399c64fdaff85f4ef2a28c435a45f21d"
+
+[[artifact_bundle.files]]
+path = "vae_decoder_conv.safetensors"
+size_bytes = 814351176
+object_id = "sha256:fd250ca3bdeb4ce67b5343d62a45883924faf5314aa60a870eb7c575f5519c80"
+
+[[artifact_bundle.files]]
+path = "vae_encoder_conv.safetensors"
+size_bytes = 637887026
+object_id = "sha256:34625a28efc2c447071221b9855849d9d4a90e19d5363c7347c00896f8409502"
+
+[[artifact_bundle.files]]
+path = "vocoder.safetensors"
+size_bytes = 258315820
+object_id = "sha256:86fd7336e7fe23e04c0eacd3d1949de1f38bb7c8ff8241042e8166769c2cd28b"

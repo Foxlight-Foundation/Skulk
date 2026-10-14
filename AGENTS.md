@@ -224,20 +224,50 @@ TTS cards may declare `audio.voices`, optional bundled `reference_profile`
 identifiers, plus a validated `audio.default_voice`, which the API applies only
 when callers omit `voice`.
 
-**Four compatibility truth layers:** signed registry capability claims describe
-intrinsic model behavior and selected-artifact completeness; signed engine
-support claims establish compatibility for one exact architecture, artifact,
-quantization, capability, engine build, and optional hardware class;
-`NodeResources.engine_builds` / `hardware_classes` prove the live node match;
-and `platform_compatible_backends` applies Skulk runner limitations last.
-Empirical load/feature claims also bind the immutable card tested, and an
-artifact-scoped `incomplete` capability claim blocks matrix admission.
-Legacy card `compatible_backends` remain valid and are unioned with exact active
-`supported` matrix matches. Experimental, unsupported, stale-build, and
-hardware-mismatched claims never expand placement. The master stamps the
-resolved backend; the worker repeats the matrix check only for unstamped
-fallback. When a runner gains a capability, flip the code table; do not shrink
-model capability truth.
+**Compatible untested hardware remains eligible. We test to ensure, not to exclude.**
+
+**Runtime compatibility and qualification:** model cards describe exact artifacts,
+intrinsic capabilities and compatible engine runtimes. They must not encode a
+list of the GPU models Foxlight has tested. Engine packages own genuine technical
+requirements: OS/CPU ABI, helper instructions, compiled accelerator targets,
+driver/runtime protocols and implemented operations. Nodes report actual runtime
+and resource availability; placement matches those requirements with local
+capacity and operator policy.
+
+Qualification is append-only evidence about a tested artifact, engine build,
+hardware, operation and workload. Missing, failed, stale-build or hardware-mismatched
+qualification does not revoke otherwise valid engine compatibility. A positive
+qualification does not assert that other hardware is incompatible. Qualification
+may inform confidence and preference, never become a hardware permission list.
+Every empirical record retains its original tested identities; unchanged
+artifact/runtime inputs may reuse that evidence through an explicit provenance
+association without inventing a new physical run.
+
+Complete, structurally valid cards with accurate engine requirements can be
+published independently of runtime qualification. Artifact integrity, repository
+code trust and genuine missing dependencies remain separate checks. Missing
+qualification for one capability must not prevent loading the model or serving
+another implemented operation. When a runner gains an operation, update runtime
+capability truth; never shrink intrinsic model truth to match test coverage.
+
+Every engine change must preserve regression coverage for compatible untested
+hardware, unqualified published cards, scoped failed qualifications and genuine
+package/operation incompatibilities. Special native-engine paths must follow the
+same compatibility rule as the general placer.
+
+**Memory fit is configuration-specific.** The placer, reservations, context sizing
+and worker guard must use the same resolved actual engine and effective weight/cache
+quantization settings. The card supplies exact artifact sizes and model/cache
+geometry; it does not prescribe a universal memory requirement. Stored weight
+quantization and runtime cache quantization are independent. Account for actual
+resident representations, mixed-precision layers, quantization metadata, peak
+workspace, workload/context/concurrency, offloading and live usable memory. An
+available optimization contributes savings only when the runner actually uses it.
+Bind the resolved policy to the placement and reassess settings drift before load.
+Report assumptions/unknowns and scope a memory refusal to the assessed configuration.
+Do not silently change user context/quality/concurrency or turn a conservative
+fallback into a permanent model/hardware restriction. See
+[the normative contract](website/docs/engine-compatibility.md), including conservative unknown-layout fallbacks and effective-policy binding.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:

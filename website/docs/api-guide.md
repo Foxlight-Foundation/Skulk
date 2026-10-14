@@ -1835,7 +1835,7 @@ Request fields (JSON keys or form fields):
 | `duration` | string | `fixed` (default) or LTX `auto`. Automatic prediction requires an exact `duration_head` companion and bounds the allocation before sampling. `seconds` is its maximum; omitted uses the card maximum. Actual container frames and duration are verified using PyAV from the isolated engine and recorded in the output |
 | `duration_min_seconds` | integer | LTX automatic-duration lower bound, otherwise refused. Omitted uses the card minimum; both bounds must lie within card limits and contain a complete 8n+1 grid. Timed keyframes must precede this lower bound |
 
-| `sampler` | string | Engine tier. LTX-2.5 distilled accepts `euler_ancestral` only (also its default). H3 omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
+| `sampler` | string | Engine tier. LTX-2.5 distilled accepts `euler_ancestral` only (also its default). Native HQ selects Res2s through its pipeline and requires sampler overrides to be omitted. H3 omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
 | `scheduler` | string | Engine tier. H3 accepts `simple` (default), `normal`, `sgm_uniform`, `beta`, `kl_optimal`, `linear_quadratic`, `karras`, `exponential`, or `ddim_uniform`. LTX-2.5 distilled uses fixed manual sigma tables and requires this field to be omitted |
 | `video_shift` | number | Engine tier. Video sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's |
 | `audio_shift` | number | Engine tier. Audio sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's. The audio schedule rides the video one scaled by `video_shift / audio_shift` |
@@ -1904,6 +1904,8 @@ to the event log or replicated state.
 The response is the video object with `status: "queued"`. One API node
 accepts 32 live jobs; beyond that the route returns **503** until one
 finishes.
+
+Native Apple LTX cards select `mlx_video-metal` and use the same video job endpoints and bounded reference/output contracts. Native `hq_two_stage` implements the pinned Res2s pipeline, while the pinned Comfy engine refuses that pipeline. Native metadata offers no selectable Comfy samplers/schedulers and currently lists H.264 output only; explicit incompatible controls fail the job rather than being ignored. Generated keyframe intervals are resolved after bounded automatic duration prediction, so internal positions stay inside the actual clip. Missing exact converted-pack components fail before rendering, and the engine does not fetch alternate weights. Backend compatibility remains independent of retained hardware benchmarks; ordinary resource admission still applies.
 
 ### Poll a job
 
@@ -2288,9 +2290,12 @@ placement guarantee.
   usable discrete-VRAM and Apple RAM working-set fractions. Compare the
   estimated footprint to usable capacity; summing device memory does not prove
   that the engine supports the required sharding.
-- `compatible_backends` contains declared tags; `engine_support` contains matching
-  signed claims whose status, exact build and hardware restrictions still apply.
-  `incomplete_capabilities` reports artifact evidence that blocks admission.
+- `compatible_backends` contains declared artifact/engine compatibility tags.
+  `required_capabilities` reports positively evidenced intrinsic capabilities;
+  `engine_support` reports matching compatibility mappings and scoped qualification
+  evidence. Tested build/hardware provenance is not an eligibility list. Missing
+  qualification does not revoke declared compatibility.
+  `incomplete_capabilities` reports missing components for the affected operation.
 - `estimate_only` is always true. No resource reservation, spending approval,
   download or placement occurs.
 
@@ -2824,14 +2829,16 @@ or backend/build support. Controllers must obtain a fresh target-specific previe
 verify live node support before submission, and continue checking support and
 readiness afterward; an accepted command alone is not proof of usable capacity.
 
-The requirements response also includes `required_capabilities`, the complete
-positively evidenced intrinsic capability set used by core's signed-engine
-resolver. Matrix-only compatibility requires a nonempty set and supported claims
-covering every member for the proposed backend/engine, exact engine build and
-applicable hardware classes. `incomplete_capabilities` remains an independent
-artifact blocker. One positive claim alone is insufficient. Declared compatible
-backends retain their existing behavior; actual platform/runner admission still
-applies after a node joins.
+The requirements response's `required_capabilities` and scoped qualification
+claims are reporting evidence. Controllers must not require a retained benchmark,
+a complete qualification matrix, or a tested build/hardware tuple before accepting
+otherwise compatible capacity. Untested compatible hardware remains eligible.
+Use those claims to describe observed results and recommended workloads; verify
+the live advertised backend and its actual architecture, ABI, compiled-target,
+dependency and resource requirements separately. Missing artifact components or
+an unimplemented operation still block that operation. Actual platform/runner
+admission and exact selected-runtime integrity checks remain in force after a node
+joins; qualification evidence cannot substitute for live readiness.
 
 A controller also checks the preview's `contextTokenLimit` against its approved
 per-sequence context budget and verifies the live accepted instance after
@@ -3610,7 +3617,18 @@ for its `GET` routes.
 | `DELETE /models/{model_id}` | Model ID only. Removes the stored model and returns `modelId` and `deleted: true`; an absent model returns `404`. |
 | `POST /imports` | Loopback-only JSON `record`, `source_base_url`, `capability_token`, and `target_node_id`. Uses the capability-bound import and verification contract under [Internal cache export](#internal-cache-export). |
 
-## Models Endpoint
+## Models
+
+Model cards identify artifacts and compatible engines. Qualification records are
+scoped evidence, not hardware eligibility lists. Placement previews resolve the
+actual engine/cache configuration and expose `memory_estimate_notes` for storage,
+workspace and conservative unknown-layout assumptions. Their instances carry
+per-shard `memory_settings`; node resources expose `engine_memory_settings`. Weight
+and cache quantization are independent. The worker rejects settings drift before
+load so its guard, reservations and context sizing agree with placement. A memory
+refusal applies to the assessed configuration and workload, not permanent model/
+hardware compatibility. See [the compatibility contract](engine-compatibility.md).
+ Endpoint
 
 ### List models
 

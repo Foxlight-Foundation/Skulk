@@ -36,7 +36,8 @@ GpuVendor = Literal["nvidia", "amd", "apple", "intel"]
 GpuDetectionSource = Literal[
     "nvml",
     "nvidia_device_node",
-    "amdgpu_sysfs", "intel_drm_sysfs",
+    "amdgpu_sysfs",
+    "intel_drm_sysfs",
     "apple_platform",
 ]
 """How a GPU was observed.
@@ -77,7 +78,12 @@ class GpuDeviceFact(CamelCaseModel):
     compute_capability: str | None = None
     """NVIDIA SM level as ``"<major>.<minor>"``; ``None`` for other vendors."""
 
-    pci_device_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{4}:[0-9a-f]{4}$")
+    gpu_architecture: str | None = Field(default=None, pattern=r"^gfx[0-9a-f]+$")
+    """AMD ISA target reported by KFD topology, independent of PCI/marketing names."""
+
+    pci_device_id: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{4}:[0-9a-f]{4}$"
+    )
     """Observed PCI vendor and device IDs, when sysfs exposes both values."""
 
 
@@ -313,6 +319,9 @@ class NodeFacts(CamelCaseModel):
     """Executable-bound identity and actual GPU devices."""
     stable_diffusion_cpp_installable_builds: dict[str, str] = Field(default_factory=dict)
     """Published GPU packages this host may acquire; distinct from installed inventory."""
+
+    mlx_video_build_identity: str | None = Field(default=None, description="Verified published native video runtime identity after an actual Metal probe.")
+    mlx_video_installable_builds: dict[str, str] = Field(default_factory=dict, description="Published compatible native video builds available on demand; never installed proof.")
 
     audio_cpp_probe: AudioCppProbe = AudioCppProbe()
     """The binary's own version and device report, required for readiness."""

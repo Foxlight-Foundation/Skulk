@@ -3,6 +3,7 @@ import hashlib
 import io
 import ipaddress
 import mimetypes
+import os
 import shutil
 import sys
 import threading
@@ -53,6 +54,7 @@ from skulk.shared.constants import (
     SKULK_VIDEO_OUTPUT_DIR,
 )
 from skulk.shared.log_summaries import summarize_task_for_log
+from skulk.shared.models.engine_memory_settings import observe_engine_memory_settings
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     LOAD_FIT_TOLERANCE,
@@ -351,6 +353,11 @@ def _model_files_incomplete_instance_failure_message(model_id: ModelId) -> str:
 
 def _engine_install_failure_message(step: str | None, engine: EngineType = "comfy") -> str:
     """Return safe operator guidance for a failed on-demand engine install."""
+    if engine == "mlx_video":
+        return _instance_failure_message(
+            f"Could not prepare the Apple video engine: {step or 'the install'} failed. "
+            "Check Metal compatibility, network access, and free disk space, then place the model again."
+        )
     if engine == "stable_diffusion_cpp":
         return _instance_failure_message(
             f"Could not prepare the native image engine: {step or 'the install'} failed. "
@@ -368,8 +375,7 @@ def _engine_unavailable_instance_failure_message(model_id: ModelId) -> str:
     """Return safe operator guidance for a runner that found no engine installed."""
     return _instance_failure_message(
         f"runner for {model_id} started without its video engine installed on "
-        "this node; not retrying. Place the model again to install the engine, "
-        "or run `skulk doctor --fix` on this node."
+        "this node; not retrying. Place the model again to install the engine."
     )
 
 
@@ -1469,6 +1475,17 @@ class Worker:
         instance). MLX grows KV lazily (no up-front window), so the budget floor is
         the correct estimate there, capped by a smaller enforced serving window.
         """
+        if shard.memory_settings is not None and shard.resolved_backend is not None:
+            actual = observe_engine_memory_settings(
+                os.environ,
+                engine=shard.resolved_backend.split("-", 1)[0]
+                if "TextGeneration" in shard.model_card.tasks
+                else "non_text",
+            )
+            if actual.configuration_error is not None:
+                return f"Engine cache configuration is invalid: {actual.configuration_error}"
+            if actual != shard.memory_settings:
+                return "Engine/cache settings changed since placement; refresh node resources and retry this configuration"
         kv_context = shard_admission_context_tokens(shard, context_token_limit)
         footprint = estimate_shard_footprint(
             shard.model_card,
@@ -1476,6 +1493,8 @@ class Worker:
             context_budget=kv_context,
             resolved_backend=shard.resolved_backend,
             llama_server_settings=shard.llama_server_settings,
+            memory_settings=shard.memory_settings,
+            cache_layer_count=shard.end_layer - shard.start_layer,
         )
         # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
         # so size the guard against local usable VRAM or it would falsely refuse
@@ -3745,7 +3764,7 @@ class Worker:
         await self.event_sender.send(
             TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Running)
         )
-        key = (task.engine, task.resolved_backend, task.expected_build) if task.engine == "stable_diffusion_cpp" else task.engine
+        key = (task.engine, task.resolved_backend, task.expected_build) if task.engine in {"stable_diffusion_cpp", "mlx_video"} else task.engine
         job = self._engine_install_jobs.get(key)
         if job is not None and job.finished and job.succeeded:
             await self.event_sender.send(
@@ -3777,6 +3796,7 @@ class Worker:
             install_comfy_on_demand,
             stoppable_runner,
         )
+        from skulk.provisioning.mlx_video import MlxVideoInstallError, install_mlx_video
         from skulk.provisioning.stable_diffusion_cpp import (
             ImageEngineInstallError,
             install_native_image,
@@ -3785,7 +3805,7 @@ class Worker:
         failure_step: str | None = None
         stop = threading.Event()
         try:
-            if job.engine not in {"comfy", "stable_diffusion_cpp"}:
+            if job.engine not in {"comfy", "stable_diffusion_cpp", "mlx_video"}:
                 raise ComfyInstallError(
                     "the engine check", f"no on-demand installer for {job.engine}"
                 )
@@ -3796,7 +3816,15 @@ class Worker:
                 # in minutes: the thread is abandoned on cancellation and told
                 # to end its commands, and the next worker plans the install
                 # again for any instance still waiting.
-                if job.engine == "stable_diffusion_cpp":
+                if job.engine == "mlx_video":
+                    backend, build = job.resolved_backend, job.expected_build
+                    if backend is None or build is None:
+                        raise MlxVideoInstallError("the placement check", "native video placement lacks backend/build identity")
+                    await to_thread.run_sync(
+                        lambda: install_mlx_video(backend, build, offline=self._offline, stop=stop),
+                        abandon_on_cancel=True,
+                    )
+                elif job.engine == "stable_diffusion_cpp":
                     backend, build = job.resolved_backend, job.expected_build
                     if backend is None or build is None:
                         raise ImageEngineInstallError("the placement check", "native image placement lacks backend/build identity")
@@ -3812,7 +3840,7 @@ class Worker:
             except anyio.get_cancelled_exc_class():
                 stop.set()
                 raise
-            await to_thread.run_sync(refresh_node_facts)
+            refreshed_facts = await to_thread.run_sync(refresh_node_facts)
             derivation = await to_thread.run_sync(current_backend_derivation)
             still_on_demand = any(
                 engine_of(tag) == job.engine for tag in derivation.on_demand_backends
@@ -3825,10 +3853,12 @@ class Worker:
                     "the engine check",
                     "the installed engine does not report as usable on this node",
                 )
+            if job.engine == "mlx_video" and refreshed_facts.mlx_video_build_identity != job.expected_build:
+                raise MlxVideoInstallError("the engine check", "installed video build differs from the exact placement identity")
             self._on_demand_backends = derivation.on_demand_backends
             await self._publish_fresh_node_resources()
             job.succeeded = True
-        except (ComfyInstallError, ImageEngineInstallError) as error:
+        except (ComfyInstallError, ImageEngineInstallError, MlxVideoInstallError) as error:
             failure_step = error.step
             logger.error(f"Engine {job.engine} install failed at {error.step}: {error.detail}")
         except Exception as error:  # noqa: BLE001 - each waiter gets one explained failure
