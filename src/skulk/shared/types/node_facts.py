@@ -36,7 +36,8 @@ GpuVendor = Literal["nvidia", "amd", "apple", "intel"]
 GpuDetectionSource = Literal[
     "nvml",
     "nvidia_device_node",
-    "amdgpu_sysfs", "intel_drm_sysfs",
+    "amdgpu_sysfs",
+    "intel_drm_sysfs",
     "apple_platform",
 ]
 """How a GPU was observed.
@@ -77,7 +78,12 @@ class GpuDeviceFact(CamelCaseModel):
     compute_capability: str | None = None
     """NVIDIA SM level as ``"<major>.<minor>"``; ``None`` for other vendors."""
 
-    pci_device_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{4}:[0-9a-f]{4}$")
+    gpu_architecture: str | None = Field(default=None, pattern=r"^gfx[0-9a-f]+$")
+    """AMD ISA target reported by KFD topology, independent of PCI/marketing names."""
+
+    pci_device_id: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{4}:[0-9a-f]{4}$"
+    )
     """Observed PCI vendor and device IDs, when sysfs exposes both values."""
 
 

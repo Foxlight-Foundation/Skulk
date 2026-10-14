@@ -288,6 +288,8 @@ def hardware_class_inventory(facts: NodeFacts) -> frozenset[str]:
             classes.add(f"{vendor}:{name}")
         if gpu.pci_device_id is not None:
             classes.add(f"{vendor}:pci-{gpu.pci_device_id.replace(':', '-')}")
+        if vendor == "amd" and gpu.gpu_architecture is not None:
+            classes.add(f"amd:{gpu.gpu_architecture}")
         if vendor == "nvidia":
             # Preserve uncertainty when another NVIDIA device has a known SM;
             # otherwise aggregate classes could hide an unqualified device.

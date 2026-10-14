@@ -377,7 +377,7 @@ async def test_explicit_download_rejects_forged_same_alias_card(
     ]
 
 
-async def test_preview_exposes_exact_signed_engine_support(
+async def test_preview_exposes_upstream_engine_compatibility(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Operators can distinguish matrix-admitted placements from legacy cards."""
@@ -430,10 +430,10 @@ async def test_preview_exposes_exact_signed_engine_support(
             "engine_build": "vllm@9.9.9",
             "architecture": "future_architecture_v1",
             "artifact_format": "safetensors",
-            "artifact_card_id": "card_" + "a" * 52,
+            "artifact_card_id": None,
             "capability_id": "text.generate",
             "status": "supported",
-            "evidence_kind": "load_qualification",
+            "evidence_kind": "upstream_compatibility",
             "evidence_trust": "foxlight_observed",
             "source_url": "https://evidence.example/load",
             "source_sha256": "c" * 64,
@@ -451,9 +451,7 @@ async def test_preview_exposes_exact_signed_engine_support(
     def _fake_placements(
         _command: PlaceInstance, **_kwargs: object
     ) -> dict[InstanceId, MlxRingInstance]:
-        instance = _single_node_instance(
-            str(node_id), resolved_backend="vllm-cuda"
-        )
+        instance = _single_node_instance(str(node_id), resolved_backend="vllm-cuda")
         return {instance.instance_id: instance}
 
     def _support_for_card(_card: ModelCard) -> tuple[RegistryEngineSupportClaim, ...]:
@@ -474,8 +472,7 @@ async def test_preview_exposes_exact_signed_engine_support(
         for preview in successful
     )
     assert all(
-        preview["support_claim_ids"] == [support.claim_id]
-        for preview in successful
+        preview["support_claim_ids"] == [support.claim_id] for preview in successful
     )
     assert all(preview["trust_requirement"] is None for preview in successful)
 
@@ -810,4 +807,3 @@ def test_quick_launch_documents_its_response_in_openapi() -> None:
     assert '"#/components/schemas/CreateInstanceResponse"' in json.dumps(responses["200"])
     schemas = cast(dict[str, object], schema["components"]["schemas"])
     assert '"engine_install"' in json.dumps(schemas["CreateInstanceResponse"])
-

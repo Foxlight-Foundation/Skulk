@@ -23,8 +23,13 @@ def compatible_wheel_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(image_engine, "platform_tags", lambda: iter(tags))
 
 
-@pytest.mark.parametrize("wheel", [wheel for wheel in image_engine.PUBLISHED_WHEELS if wheel.system == "linux"])
-@pytest.mark.parametrize("host_abi", ["glibc-old", "musl", "unknown", "glibc-supported"])
+@pytest.mark.parametrize(
+    "wheel",
+    [wheel for wheel in image_engine.PUBLISHED_WHEELS if wheel.system == "linux"],
+)
+@pytest.mark.parametrize(
+    "host_abi", ["glibc-old", "musl", "unknown", "glibc-supported"]
+)
 def test_linux_abi_gates_install_offers_and_prevents_package_acquisition(
     wheel: image_engine.StableDiffusionCppWheel,
     host_abi: str,
@@ -35,32 +40,68 @@ def test_linux_abi_gates_install_offers_and_prevents_package_acquisition(
 
     monkeypatch.setattr(image_engine.platform, "system", lambda: "Linux")
     monkeypatch.setattr(image_engine.platform, "machine", lambda: wheel.architecture)
-    monkeypatch.setattr(image_engine, "_host_cpu_features", lambda: wheel.required_cpu_features)
+    monkeypatch.setattr(
+        image_engine, "_host_cpu_features", lambda: wheel.required_cpu_features
+    )
     monkeypatch.setattr(image_engine, "PUBLISHED_WHEELS", (wheel,))
     monkeypatch.delenv(image_engine.AUTOPROVISION_OPT_OUT_ENV, raising=False)
     monkeypatch.delenv("SKULK_NODE_PARTICIPATION", raising=False)
     tags = {
-        "glibc-old": (f"manylinux_2_34_{wheel.architecture}", f"linux_{wheel.architecture}"),
+        "glibc-old": (
+            f"manylinux_2_34_{wheel.architecture}",
+            f"linux_{wheel.architecture}",
+        ),
         "musl": (f"musllinux_1_2_{wheel.architecture}", f"linux_{wheel.architecture}"),
         "unknown": (),
-        "glibc-supported": (f"manylinux_2_36_{wheel.architecture}", f"manylinux_2_35_{wheel.architecture}"),
+        "glibc-supported": (
+            f"manylinux_2_36_{wheel.architecture}",
+            f"manylinux_2_35_{wheel.architecture}",
+        ),
     }[host_abi]
     monkeypatch.setattr(image_engine, "platform_tags", lambda: iter(tags))
-    classes = wheel.hardware_classes
+    classes = wheel.qualified_hardware_classes
     backend = f"stable_diffusion_cpp-{wheel.compute}"
     missing = EngineBinaryFact(env_var="unset")
-    facts = NodeFacts(platform="linux", llama_server_binary=missing, vllm_binary=missing, rpc_server_binary=missing,
-        gpus=(GpuDeviceFact(vendor="nvidia" if wheel.compute == "cuda" else "amd", name="qualified GPU", index=0, detection_source="nvml" if wheel.compute == "cuda" else "amdgpu_sysfs"),))
+    facts = NodeFacts(
+        platform="linux",
+        llama_server_binary=missing,
+        vllm_binary=missing,
+        rpc_server_binary=missing,
+        gpus=(
+            GpuDeviceFact(
+                vendor="nvidia" if wheel.compute == "cuda" else "amd",
+                name="qualified GPU",
+                index=0,
+                detection_source="nvml" if wheel.compute == "cuda" else "amdgpu_sysfs",
+            ),
+        ),
+    )
     eligible = host_abi == "glibc-supported"
-    assert image_engine.wheel_for_host(backend, classes) == (wheel if eligible else None)
-    assert image_engine.installable_image_builds(facts, classes, offline=False) == ({backend: wheel.build_identity} if eligible else {})
+    assert image_engine.wheel_for_host(backend, classes) == (
+        wheel if eligible else None
+    )
+    assert image_engine.installable_image_builds(facts, classes, offline=False) == (
+        {backend: wheel.build_identity} if eligible else {}
+    )
     if not eligible:
+
         def refuse_cache(_wheel: image_engine.StableDiffusionCppWheel) -> Path:
-            raise AssertionError("ABI-incompatible hosts must fail before package/cache acquisition")
+            raise AssertionError(
+                "ABI-incompatible hosts must fail before package/cache acquisition"
+            )
 
         monkeypatch.setattr(image_engine, "_root", refuse_cache)
-        with pytest.raises(image_engine.ImageEngineInstallError, match="eligibility check"):
-            image_engine.install_native_image(backend, wheel.build_identity, classes, offline=False, stop=threading.Event(), environ={})
+        with pytest.raises(
+            image_engine.ImageEngineInstallError, match="eligibility check"
+        ):
+            image_engine.install_native_image(
+                backend,
+                wheel.build_identity,
+                classes,
+                offline=False,
+                stop=threading.Event(),
+                environ={},
+            )
 
 
 def test_managed_build_binds_runtime_and_isolates_inherited_libraries(
@@ -105,14 +146,21 @@ def test_managed_build_binds_runtime_and_isolates_inherited_libraries(
 def test_package_sizes_are_bounded_and_bind_descriptor_identity() -> None:
     wheel = image_engine.StableDiffusionCppWheel(
         filename="skulk_stable_diffusion_cpp_rocm-0.1.0-py3-none-manylinux_2_35_x86_64.whl",
-        sha256="a" * 64, binary_sha256="b" * 64, payload_sha256="c" * 64,
-        compute="rocm", system="linux", architecture="x86_64",
-        hardware_classes=frozenset({"qualified-gpu"}),
-        size_bytes=2 * 1024**3, expanded_size_bytes=6 * 1024**3,
+        sha256="a" * 64,
+        binary_sha256="b" * 64,
+        payload_sha256="c" * 64,
+        compute="rocm",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset({"qualified-gpu"}),
+        size_bytes=2 * 1024**3,
+        expanded_size_bytes=6 * 1024**3,
     )
     assert wheel.build_identity == "stable_diffusion_cpp@sha256:" + "c" * 64
     with pytest.raises(ValueError):
-        image_engine.StableDiffusionCppWheel.model_validate({**wheel.model_dump(), "size_bytes": 3 * 1024**3 + 1})
+        image_engine.StableDiffusionCppWheel.model_validate(
+            {**wheel.model_dump(), "size_bytes": 3 * 1024**3 + 1}
+        )
 
 
 def test_spawned_runner_resolves_exact_prepared_cache_without_inherited_environment(
@@ -120,7 +168,9 @@ def test_spawned_runner_resolves_exact_prepared_cache_without_inherited_environm
 ) -> None:
     root = tmp_path / "prepared"
     prefix = "skulk_stable_diffusion_cpp_vulkan"
-    filename = "skulk_stable_diffusion_cpp_vulkan-0.1.0-py3-none-manylinux_2_35_x86_64.whl"
+    filename = (
+        "skulk_stable_diffusion_cpp_vulkan-0.1.0-py3-none-manylinux_2_35_x86_64.whl"
+    )
     payload = {
         f"{prefix}/bin/sd-server": b"verified executable",
         f"{prefix}/lib/runtime.txt": b"verified runtime",
@@ -138,23 +188,48 @@ def test_spawned_runner_resolves_exact_prepared_cache_without_inherited_environm
         filename=filename,
         sha256=hashlib.sha256((root / filename).read_bytes()).hexdigest(),
         binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
-        compute="vulkan", system="linux", architecture="x86_64",
-        hardware_classes=frozenset({"qualified-gpu"}),
+        compute="vulkan",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset({"qualified-gpu"}),
     )
     monkeypatch.setattr(image_engine, "PUBLISHED_WHEELS", (wheel,))
     monkeypatch.setattr(image_engine.platform, "system", lambda: "Linux")
     monkeypatch.setattr(image_engine.platform, "machine", lambda: "x86_64")
+
     def prepared_root(_wheel: image_engine.StableDiffusionCppWheel) -> Path:
         return root
 
     monkeypatch.setattr(image_engine, "_root", prepared_root)
     monkeypatch.delenv(image_engine.BINARY_ENV, raising=False)
     classes = frozenset({"qualified-gpu"})
-    assert image_engine.prepared_native_image("stable_diffusion_cpp-vulkan", wheel.build_identity, classes) == binary
-    assert image_engine.prepared_native_image("stable_diffusion_cpp-vulkan", "another-build", classes) is None
-    assert image_engine.prepared_native_image("stable_diffusion_cpp-vulkan", wheel.build_identity, frozenset({"another-gpu"})) is None
+    assert (
+        image_engine.prepared_native_image(
+            "stable_diffusion_cpp-vulkan", wheel.build_identity, classes
+        )
+        == binary
+    )
+    assert (
+        image_engine.prepared_native_image(
+            "stable_diffusion_cpp-vulkan", "another-build", classes
+        )
+        is None
+    )
+    assert (
+        image_engine.prepared_native_image(
+            "stable_diffusion_cpp-vulkan",
+            wheel.build_identity,
+            frozenset({"another-gpu"}),
+        )
+        == binary
+    )
     (root / prefix / "lib/runtime.txt").write_bytes(b"corrupt runtime")
-    assert image_engine.prepared_native_image("stable_diffusion_cpp-vulkan", wheel.build_identity, classes) is None
+    assert (
+        image_engine.prepared_native_image(
+            "stable_diffusion_cpp-vulkan", wheel.build_identity, classes
+        )
+        is None
+    )
 
 
 def test_native_probe_rejects_cpu_only_devices(
@@ -215,7 +290,10 @@ def test_native_probe_binds_build_to_executable_bytes(
     assert first.build_identity != second.build_identity
 
 
-def test_unpublished_package_is_not_installable() -> None:
+def test_unpublished_package_is_not_installable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(image_engine, "PUBLISHED_WHEELS", ())
     assert (
         image_engine.wheel_for_host("stable_diffusion_cpp-metal", frozenset({"apple"}))
         is None
@@ -234,35 +312,56 @@ def test_unpublished_package_is_not_installable() -> None:
 
 
 @pytest.mark.parametrize(
-    ("system", "machine", "backend", "qualified", "unqualified"),
+    ("system", "machine", "backend", "qualified", "untested", "compatible"),
     [
-        ("Darwin", "arm64", "metal", "apple:apple-m4", "apple:apple-m5"),
-        ("Linux", "aarch64", "cuda", "nvidia:nvidia-gb10", "nvidia:sm-12.0"),
-        ("Linux", "x86_64", "cuda", "nvidia:nvidia-a100-sxm4-80gb", "nvidia:sm-9.0"),
-        ("Linux", "x86_64", "cuda", "nvidia:nvidia-geforce-rtx-4090", "nvidia:sm-8.6"),
-        ("Linux", "x86_64", "vulkan", "amd:pci-1002-1586", "intel"),
-        ("Linux", "x86_64", "rocm", "amd:pci-1002-74b9", "amd:pci-1002-74a1"),
+        ("Darwin", "arm64", "metal", "apple:apple-m4", "apple:apple-m5", True),
+        ("Linux", "aarch64", "cuda", "nvidia:nvidia-gb10", "nvidia:sm-12.0", False),
+        (
+            "Linux",
+            "x86_64",
+            "cuda",
+            "nvidia:nvidia-a100-sxm4-80gb",
+            "nvidia:sm-9.0",
+            True,
+        ),
+        (
+            "Linux",
+            "x86_64",
+            "cuda",
+            "nvidia:nvidia-geforce-rtx-4090",
+            "nvidia:sm-8.6",
+            True,
+        ),
+        ("Linux", "x86_64", "vulkan", "amd:pci-1002-1586", "intel", True),
+        ("Linux", "x86_64", "rocm", "amd:pci-1002-74b9", "amd:pci-1002-74a1", True),
     ],
 )
-def test_published_packages_do_not_expand_untested_hardware_admission(
+def test_published_packages_accept_compatible_untested_hardware(
     monkeypatch: pytest.MonkeyPatch,
     system: str,
     machine: str,
     backend: str,
     qualified: str,
-    unqualified: str,
+    untested: str,
+    compatible: bool,
 ) -> None:
-    """Use the shipping manifest and reject nearby unmeasured device classes."""
+    """Shipping packages admit untested devices unless compiled requirements disagree."""
     monkeypatch.setattr(image_engine.platform, "system", lambda: system)
     monkeypatch.setattr(image_engine.platform, "machine", lambda: machine)
-    monkeypatch.setattr(image_engine, "_host_cpu_features", lambda: frozenset({"avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"}))
+    monkeypatch.setattr(
+        image_engine,
+        "_host_cpu_features",
+        lambda: frozenset({"avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"}),
+    )
     tag = f"stable_diffusion_cpp-{backend}"
     wheel = image_engine.wheel_for_host(tag, frozenset({qualified}))
     assert wheel is not None
     assert wheel.payload_sha256 is not None
     assert wheel.size_bytes is not None
     assert wheel.expanded_size_bytes is not None
-    assert image_engine.wheel_for_host(tag, frozenset({unqualified})) is None
+    assert (
+        image_engine.wheel_for_host(tag, frozenset({untested})) is not None
+    ) == compatible
 
 
 def test_package_selection_requires_compiled_cpu_instructions(
@@ -275,16 +374,28 @@ def test_package_selection_requires_compiled_cpu_instructions(
         compute="vulkan",
         system="linux",
         architecture="x86_64",
-        hardware_classes=frozenset({"qualified-gpu"}),
+        qualified_hardware_classes=frozenset({"qualified-gpu"}),
         required_cpu_features=frozenset({"avx2", "f16c"}),
     )
     monkeypatch.setattr(image_engine, "PUBLISHED_WHEELS", (wheel,))
     monkeypatch.setattr(image_engine.platform, "system", lambda: "Linux")
     monkeypatch.setattr(image_engine.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(image_engine, "_host_cpu_features", lambda: frozenset({"avx2"}))
-    assert image_engine.wheel_for_host("stable_diffusion_cpp-vulkan", frozenset({"qualified-gpu"})) is None
-    monkeypatch.setattr(image_engine, "_host_cpu_features", lambda: frozenset({"avx2", "f16c"}))
-    assert image_engine.wheel_for_host("stable_diffusion_cpp-vulkan", frozenset({"qualified-gpu"})) == wheel
+    assert (
+        image_engine.wheel_for_host(
+            "stable_diffusion_cpp-vulkan", frozenset({"qualified-gpu"})
+        )
+        is None
+    )
+    monkeypatch.setattr(
+        image_engine, "_host_cpu_features", lambda: frozenset({"avx2", "f16c"})
+    )
+    assert (
+        image_engine.wheel_for_host(
+            "stable_diffusion_cpp-vulkan", frozenset({"qualified-gpu"})
+        )
+        == wheel
+    )
 
 
 def test_native_probe_refuses_missing_cpu_instructions_before_execution(
@@ -404,3 +515,27 @@ def test_install_offer_requires_one_observed_device(device_count: int, monkeypat
     facts = NodeFacts(platform="darwin", llama_server_binary=missing, vllm_binary=missing, rpc_server_binary=missing, gpus=tuple(GpuDeviceFact(vendor="apple", name="Apple M4", index=index, detection_source="apple_platform") for index in range(device_count)))
     builds = image_engine.installable_image_builds(facts, frozenset({"apple:apple-m4"}), offline=False)
     assert bool(builds) == (device_count == 1)
+
+
+def test_compiled_targets_remain_real_requirements_not_qualification() -> None:
+    """Known code-object mismatches reject the package while compatible targets pass."""
+    cuda = next(
+        wheel
+        for wheel in image_engine.PUBLISHED_WHEELS
+        if wheel.compute == "cuda" and wheel.architecture == "x86_64"
+    )
+    hip = next(
+        wheel for wheel in image_engine.PUBLISHED_WHEELS if wheel.compute == "rocm"
+    )
+    assert image_engine.native_image_build_hardware_matches(
+        cuda.build_identity, frozenset({"nvidia", "nvidia:sm-12.0"})
+    )
+    assert not image_engine.native_image_build_hardware_matches(
+        cuda.build_identity, frozenset({"nvidia", "nvidia:sm-7.5"})
+    )
+    assert image_engine.native_image_build_hardware_matches(
+        hip.build_identity, frozenset({"amd", "amd:gfx942"})
+    )
+    assert not image_engine.native_image_build_hardware_matches(
+        hip.build_identity, frozenset({"amd", "amd:gfx1151"})
+    )

@@ -8,6 +8,9 @@ from skulk.shared.constants import (
     MAX_OUTPUT_TOKENS,
     preferred_env_value,
 )
+from skulk.shared.models.engine_memory_settings import observe_engine_memory_settings
+
+ENGINE_MEMORY_SETTINGS = observe_engine_memory_settings(os.environ)
 
 # TODO: Do we want so many constants?
 #  I think we want a lot of these as parameters?
@@ -24,7 +27,9 @@ KEEP_KV_SIZE: int | None = 1600
 QUANTIZE_MODEL_MODE: str | None = "affine"
 CACHE_GROUP_SIZE: int = 64
 KV_CACHE_BITS: int | None = (
-    int(os.environ["SKULK_KV_CACHE_BITS"]) if "SKULK_KV_CACHE_BITS" in os.environ else None
+    ENGINE_MEMORY_SETTINGS.key_bits
+    if ENGINE_MEMORY_SETTINGS.cache_backend == "mlx_quantized"
+    else None
 )
 KVCacheBackend = Literal[
     "default",
@@ -50,20 +55,32 @@ KV_CACHE_BACKEND: KVCacheBackend = cast(
     _kv_cache_backend_value if _kv_cache_backend_value else DEFAULT_KV_CACHE_BACKEND,
 )
 TURBOQUANT_K_BITS: int | None = (
-    int(os.environ.get("SKULK_TQ_K_BITS", os.environ.get("SKULK_TQ_K_BITS", "")))
-    if os.environ.get("SKULK_TQ_K_BITS", os.environ.get("SKULK_TQ_K_BITS"))
+    ENGINE_MEMORY_SETTINGS.key_bits
+    if ENGINE_MEMORY_SETTINGS.cache_backend in ("turboquant", "turboquant_adaptive")
     else None
 )
 TURBOQUANT_V_BITS: int | None = (
-    int(os.environ.get("SKULK_TQ_V_BITS", os.environ.get("SKULK_TQ_V_BITS", "")))
-    if os.environ.get("SKULK_TQ_V_BITS", os.environ.get("SKULK_TQ_V_BITS"))
+    ENGINE_MEMORY_SETTINGS.value_bits
+    if ENGINE_MEMORY_SETTINGS.cache_backend in ("turboquant", "turboquant_adaptive")
     else None
 )
-TURBOQUANT_FP16_LAYERS: int = int(os.environ.get("SKULK_TQ_FP16_LAYERS", "4"))
+TURBOQUANT_FP16_LAYERS: int = (
+    ENGINE_MEMORY_SETTINGS.fp16_edge_layers
+    if ENGINE_MEMORY_SETTINGS.cache_backend == "turboquant_adaptive"
+    else 4
+)
 DEFAULT_TURBOQUANT_K_BITS: int = 3
 DEFAULT_TURBOQUANT_V_BITS: int = 4
-OPTIQ_BITS: int = int(os.environ.get("SKULK_OPTIQ_BITS", "4"))
-OPTIQ_FP16_LAYERS: int = int(os.environ.get("SKULK_OPTIQ_FP16_LAYERS", "4"))
+OPTIQ_BITS: int = (
+    ENGINE_MEMORY_SETTINGS.key_bits
+    if ENGINE_MEMORY_SETTINGS.cache_backend == "optiq"
+    else 4
+)
+OPTIQ_FP16_LAYERS: int = (
+    ENGINE_MEMORY_SETTINGS.fp16_edge_layers
+    if ENGINE_MEMORY_SETTINGS.cache_backend == "optiq"
+    else 4
+)
 
 DEFAULT_TOP_LOGPROBS: int = 5
 
