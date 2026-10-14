@@ -55,9 +55,17 @@ class MlxVideoWheel(FrozenModel):
         return f"https://wheels.foxlight.ai/wheels/{self.filename}"
 
 
-# Add a descriptor only after attested candidate bytes are promoted and read back.
-# Candidate source or a locally built wheel never advertises installable capacity.
-PUBLISHED_WHEELS: Final[tuple[MlxVideoWheel, ...]] = ()
+# Candidate run 38631488818 was attested at initiative commit 48e11c3d,
+# promoted without rebuilding by run 38631848725, and read back from the
+# owned channel. Only these published bytes advertise installable capacity.
+PUBLISHED_WHEELS: Final[tuple[MlxVideoWheel, ...]] = (
+    MlxVideoWheel(
+        filename="skulk_mlx_video-0.1.0-cp313-cp313-macosx_15_0_arm64.whl",
+        sha256="e2ced0b7c5b176c9285b047eb908c5a63b1322c22b0ce5d8a07e504bf02bfdee",
+        payload_sha256="839dcad5cb57cc6cf1a4215cd3dbd9422d97a2b2d21963dbbc1bf7d8bf14bc89",
+        size_bytes=119949758,
+    ),
+)
 
 
 class _BuildMetadata(FrozenModel):
