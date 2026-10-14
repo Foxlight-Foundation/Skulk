@@ -2290,9 +2290,12 @@ placement guarantee.
   usable discrete-VRAM and Apple RAM working-set fractions. Compare the
   estimated footprint to usable capacity; summing device memory does not prove
   that the engine supports the required sharding.
-- `compatible_backends` contains declared tags; `engine_support` contains matching
-  signed claims whose status, exact build and hardware restrictions still apply.
-  `incomplete_capabilities` reports artifact evidence that blocks admission.
+- `compatible_backends` contains declared artifact/engine compatibility tags.
+  `required_capabilities` reports positively evidenced intrinsic capabilities;
+  `engine_support` reports matching compatibility mappings and scoped qualification
+  evidence. Tested build/hardware provenance is not an eligibility list. Missing
+  qualification does not revoke declared compatibility.
+  `incomplete_capabilities` reports missing components for the affected operation.
 - `estimate_only` is always true. No resource reservation, spending approval,
   download or placement occurs.
 
@@ -2826,14 +2829,16 @@ or backend/build support. Controllers must obtain a fresh target-specific previe
 verify live node support before submission, and continue checking support and
 readiness afterward; an accepted command alone is not proof of usable capacity.
 
-The requirements response also includes `required_capabilities`, the complete
-positively evidenced intrinsic capability set used by core's signed-engine
-resolver. Matrix-only compatibility requires a nonempty set and supported claims
-covering every member for the proposed backend/engine, exact engine build and
-applicable hardware classes. `incomplete_capabilities` remains an independent
-artifact blocker. One positive claim alone is insufficient. Declared compatible
-backends retain their existing behavior; actual platform/runner admission still
-applies after a node joins.
+The requirements response's `required_capabilities` and scoped qualification
+claims are reporting evidence. Controllers must not require a retained benchmark,
+a complete qualification matrix, or a tested build/hardware tuple before accepting
+otherwise compatible capacity. Untested compatible hardware remains eligible.
+Use those claims to describe observed results and recommended workloads; verify
+the live advertised backend and its actual architecture, ABI, compiled-target,
+dependency and resource requirements separately. Missing artifact components or
+an unimplemented operation still block that operation. Actual platform/runner
+admission and exact selected-runtime integrity checks remain in force after a node
+joins; qualification evidence cannot substitute for live readiness.
 
 A controller also checks the preview's `contextTokenLimit` against its approved
 per-sequence context budget and verifies the live accepted instance after
