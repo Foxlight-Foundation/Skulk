@@ -1474,6 +1474,9 @@ class VideoCompanionKind(str, Enum):
     ordinary clip inside the render (a pose estimator, the person detector
     it crops with, a depth estimator); ``role`` says which."""
 
+    LatentUpscaler = "latent_upscaler"
+    """Model weights that refine video latents between generation stages."""
+
 
 class VideoPreprocessorRole(str, Enum):
     """What a preprocessor companion's weights do in deriving a guide video."""
@@ -1657,6 +1660,9 @@ class VideoCardConfig(CamelCaseModel):
 
     modes: tuple[VideoMode, ...]
     """Generation modes this artifact serves; each implies a ``ModelTask``."""
+    transformer_variant: Literal["distilled", "dev"] | None = None
+    """Selected transformer's training variant, when the family distinguishes
+    distilled and guided checkpoints. It does not select an execution engine."""
     min_seconds: PositiveInt = 4
     """Shortest output duration the model supports."""
     max_seconds: PositiveInt = 15

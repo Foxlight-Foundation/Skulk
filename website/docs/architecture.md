@@ -809,6 +809,25 @@ never supply it.
 
 ### Video jobs
 
+The ComfyUI graph builder dispatches by model family. LTX-2.5 distilled
+generation uses its own Gemma 4 encoder, joint audio/video latents, fixed
+eight-step base and three-step refinement schedules, and a pinned
+`latent_upscaler` companion. Image anchors are reapplied after upscaling;
+appended guide tokens are cropped before upscaling and final decoding.
+Both stages contribute to progress and timing. A silent container still
+samples the joint audio branch and omits audio only at muxing. Its two-stage
+renderer requires a 64-pixel output grid with edges of at least 128 pixels,
+while the model's intrinsic grid remains 32 pixels. The card declares the
+selected transformer's `distilled` variant; a dev or undeclared checkpoint
+cannot silently use distilled sampling. Unsupported H3 controls are refused
+before dispatch.
+
+Backend compatibility and retained hardware qualification are separate.
+A declared compatible backend does not require a benchmark for the exact
+GPU; live engine availability, actual runner restrictions, complete artifacts
+and resource admission still apply. Support claims attest tested tuples and
+can extend compatibility without making missing benchmark evidence a denial.
+
 Renders take minutes, so the API exposes them as jobs rather than a held
 request: `POST /v1/videos` validates the request against the card (mode,
 duration range, canvas grid, reference limits), stages any attachments for

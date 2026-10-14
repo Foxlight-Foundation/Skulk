@@ -572,7 +572,13 @@ A model card's `placement.compatible_backends` selects which engine serves it
   checkout) point at a hand-built install instead. The runner spawns ComfyUI headless (loopback
   port, custom and API nodes disabled, Skulk-owned input/output/temp/user
   directories, an `extra_model_paths.yaml` exposing the staged artifact),
-  binds the card and request onto ComfyUI's own MiniMax H3 node graph
+  dispatches graphs by the card's family: H3 retains its existing node graph,
+  while `ltx-2.5` uses the LTX encoder, audio/video VAEs and joint latents,
+  fixed 8+3 two-stage sampling and a pinned `latent_upscaler` companion.
+  LTX image guides are reapplied at full resolution and cropped before
+  upscaling/decoding. Multi-stage progress counts each sampler independently.
+  Cards retain broad compatible GPU backends; benchmark qualification is not
+  a hardware allowlist. The H3 path binds onto its MiniMax H3 node graph
   (`graph.py`, the official workflow templates node for node; a request's
   `control`, `mask`, and `source` attachments, the `VIDEO_STRUCTURAL_ROLES`,
   never decide the mode, never count against the card's reference limits,

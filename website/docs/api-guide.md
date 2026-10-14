@@ -1827,8 +1827,8 @@ Request fields (JSON keys or form fields):
 | `lora` | string | Name of a card companion adapter, for example a turbo LoRA |
 | `lora_strength` | number | 0.0 to 2.0 |
 | `audio` | boolean | Default `true`; the job fails at settlement if the render carries no audio track |
-| `sampler` | string | Engine tier. Omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
-| `scheduler` | string | Engine tier. `simple` (default), `normal`, `sgm_uniform`, `beta`, `kl_optimal`, `linear_quadratic`, `karras`, `exponential`, or `ddim_uniform` |
+| `sampler` | string | Engine tier. LTX-2.5 distilled accepts `euler_ancestral` only (also its default). H3 omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
+| `scheduler` | string | Engine tier. H3 accepts `simple` (default), `normal`, `sgm_uniform`, `beta`, `kl_optimal`, `linear_quadratic`, `karras`, `exponential`, or `ddim_uniform`. LTX-2.5 distilled uses fixed manual sigma tables and requires this field to be omitted |
 | `video_shift` | number | Engine tier. Video sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's |
 | `audio_shift` | number | Engine tier. Audio sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's. The audio schedule rides the video one scaled by `video_shift / audio_shift` |
 | `reference_fidelity` | string | `ref2va` only: `match` (default) sizes reference images to the canvas; `max` keeps them at full resolution for stronger likeness at a much higher cost. Refused for other modes |
@@ -1838,6 +1838,25 @@ Request fields (JSON keys or form fields):
 | `control_start` | number | Fraction of the sampling schedule, 0 to 1, at which the ControlNet starts to steer; default 0 |
 | `control_end` | number | Fraction at which it stops, above `control_start`; default 1. Any control setting without a `control` or `mask` part is refused |
 | `control_kind` | string | What the render derives from the `control` clip: `pose` (default), `depth`, or `edges`. Only with a `control` part; a kind the card has no weights for is refused with **400** naming the kinds it derives (see the card's `video.guides`) |
+
+For a card with family `ltx-2.5` and `video.transformer_variant = "distilled"`,
+the distilled renderer uses two stages: eight base sampling intervals at half
+resolution, a required `spatial_x2` latent-upscaler companion, and three
+refinement intervals. A dev or undeclared transformer is refused by this
+renderer. `steps`, when supplied, must be `8`; `stats.steps` and
+`stats.engine.steps` report the total `11`. `/v1/models` exposes
+`transformer_variant`, `sampling_stage_steps: [8, 3]`,
+`default_scheduler: "manual"`, an empty scheduler override list, and the
+effective output grid of 64 pixels with `min_short_edge: 128`. Explicit sizes
+outside those constraints are refused. Seeds must fit an unsigned 64-bit
+integer.
+
+LTX accepts text and first/last/timed image keyframes, and rejects H3 sigma
+shifts, adapters, style embeddings and ControlNet controls. `audio=false`
+omits the output audio track while retaining joint audio/video sampling.
+Backend compatibility remains available to untested compatible GPUs;
+qualification evidence is separate. Each render runs on one GPU host;
+memory on other hosts is not pooled for video generation.
 
 File parts (multipart only), in slot order:
 

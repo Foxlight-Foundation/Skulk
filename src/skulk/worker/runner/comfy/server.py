@@ -25,7 +25,7 @@ import socket
 import subprocess
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO, Final, Literal, cast
@@ -180,7 +180,10 @@ class ComfyServer:
             try:
                 self._await_health()
             except RuntimeError as error:
-                lost_race = _ADDRESS_IN_USE_MARKER in str(error).lower() and attempt < _PORT_COLLISION_ATTEMPTS
+                lost_race = (
+                    _ADDRESS_IN_USE_MARKER in str(error).lower()
+                    and attempt < _PORT_COLLISION_ATTEMPTS
+                )
                 if not lost_race:
                     self.teardown()
                     raise
@@ -194,7 +197,12 @@ class ComfyServer:
     def _spawn(self) -> None:
         port = pick_free_port()
         self.base_url = f"http://127.0.0.1:{port}"
-        for directory in (self.input_dir, self.output_dir, self.temp_dir, self.user_dir):
+        for directory in (
+            self.input_dir,
+            self.output_dir,
+            self.temp_dir,
+            self.user_dir,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
         args = server_args(
             self.interpreter,
@@ -296,10 +304,19 @@ class RenderResult:
 class _RenderSession:
     """State for one prompt while its events stream in."""
 
-    def __init__(self, prompt_id: str, on_progress: ProgressCallback, total_steps: int) -> None:
+    def __init__(
+        self,
+        prompt_id: str,
+        on_progress: ProgressCallback,
+        total_steps: int,
+        sampler_steps: Mapping[str, int] | None = None,
+    ) -> None:
         self.prompt_id = prompt_id
         self.on_progress = on_progress
         self.total_steps = total_steps
+        self.sampler_steps = dict(sampler_steps or {NODE_SAMPLER: total_steps})
+        self.steps_by_node: dict[str, int] = {}
+        self.last_fraction = 0.0
         self.stage: VideoStage = "queued"
         self.sampling_started_at: float | None = None
         self.last_step_at: float | None = None
@@ -310,7 +327,13 @@ class _RenderSession:
 
     def _report(self, stage: VideoStage, step: int | None, fraction: float) -> None:
         self.stage = stage
-        self.on_progress(stage, step, self.total_steps if step is not None else None, fraction)
+        self.last_fraction = max(self.last_fraction, fraction)
+        self.on_progress(
+            stage,
+            step,
+            self.total_steps if step is not None else None,
+            self.last_fraction,
+        )
 
     def handle(self, message: dict[str, Any]) -> None:
         """Apply one WebSocket event; events for other prompts are ignored."""
@@ -322,36 +345,55 @@ class _RenderSession:
             node = data.get("node")
             if node is None:
                 return
-            if node == NODE_SAMPLER and self.sampling_started_at is None:
+            if node in self.sampler_steps and self.sampling_started_at is None:
                 # The sampler node starting is the sampling clock's zero;
                 # progress events mark completed steps, so timing from the
                 # first of them would drop one step's worth of work.
                 self.sampling_started_at = time.monotonic()
             stage = stage_for_node(_as_str(node) or "")
             if stage is not None and stage != self.stage and stage != "sampling":
-                fraction = {"encoding": 0.05, "decoding": _SAMPLING_SHARE[1], "muxing": 0.95}.get(stage, 0.0)
+                fraction = {
+                    "encoding": 0.05,
+                    "decoding": _SAMPLING_SHARE[1],
+                    "muxing": 0.95,
+                }.get(stage, 0.0)
                 self._report(stage, None, fraction)
         elif kind == "progress_state":
             if data.get("prompt_id") != self.prompt_id:
                 return
             nodes = cast("dict[str, object]", data.get("nodes") or {})
-            sampler = nodes.get(NODE_SAMPLER)
-            if not isinstance(sampler, dict):
+            changed = False
+            for node, expected in self.sampler_steps.items():
+                sampler = nodes.get(node)
+                if not isinstance(sampler, dict):
+                    continue
+                progress = cast("dict[str, object]", sampler)
+                value = progress.get("value")
+                maximum = progress.get("max")
+                if (
+                    not isinstance(value, (int, float))
+                    or not isinstance(maximum, (int, float))
+                    or maximum <= 0
+                ):
+                    continue
+                step = max(0, min(expected, int(value)))
+                prior = self.steps_by_node.get(node, 0)
+                if step > prior:
+                    self.steps_by_node[node] = step
+                    changed = True
+            if not changed:
                 return
-            progress = cast("dict[str, object]", sampler)
-            value = progress.get("value")
-            maximum = progress.get("max")
-            if not isinstance(value, (int, float)) or not isinstance(maximum, (int, float)) or maximum <= 0:
-                return
-            step = int(value)
             now = time.monotonic()
-            if step >= 1:
-                if self.sampling_started_at is None:
-                    self.sampling_started_at = now
-                self.last_step_at = now
-                self.steps_seen = max(self.steps_seen, step)
+            if self.sampling_started_at is None:
+                self.sampling_started_at = now
+            self.last_step_at = now
+            self.steps_seen = sum(self.steps_by_node.values())
             low, high = _SAMPLING_SHARE
-            self._report("sampling", step, low + (high - low) * min(1.0, value / maximum))
+            self._report(
+                "sampling",
+                self.steps_seen,
+                low + (high - low) * min(1.0, self.steps_seen / self.total_steps),
+            )
         elif kind == "execution_success":
             if data.get("prompt_id") == self.prompt_id:
                 self.terminal = "success"
@@ -388,16 +430,21 @@ def _node_error_summary(node: str, info: object) -> str:
     return f"{node}: {', '.join(messages)}" if messages else node
 
 
-async def _submit(session: aiohttp.ClientSession, prompt: ComfyPrompt, client_id: str) -> str:
+async def _submit(
+    session: aiohttp.ClientSession, prompt: ComfyPrompt, client_id: str
+) -> str:
     prompt_id = str(uuid.uuid4())
     async with session.post(
-        "/prompt", json={"prompt": prompt, "client_id": client_id, "prompt_id": prompt_id}
+        "/prompt",
+        json={"prompt": prompt, "client_id": client_id, "prompt_id": prompt_id},
     ) as response:
         body = cast("dict[str, Any]", await response.json(content_type=None))
         if response.status != 200:
             error = cast("dict[str, Any]", body.get("error") or {})
             node_errors = cast("dict[str, object]", body.get("node_errors") or {})
-            details = "; ".join(_node_error_summary(node, info) for node, info in node_errors.items())
+            details = "; ".join(
+                _node_error_summary(node, info) for node, info in node_errors.items()
+            )
             raise ComfyRenderError(
                 f"ComfyUI rejected the graph: {error.get('message', response.status)}"
                 + (f" ({details})" if details else "")
@@ -405,7 +452,9 @@ async def _submit(session: aiohttp.ClientSession, prompt: ComfyPrompt, client_id
         return _as_str(body.get("prompt_id")) or prompt_id
 
 
-async def _job_status(session: aiohttp.ClientSession, prompt_id: str) -> tuple[str | None, str | None]:
+async def _job_status(
+    session: aiohttp.ClientSession, prompt_id: str
+) -> tuple[str | None, str | None]:
     """The job's status and error text from the jobs endpoint, if it knows it."""
     try:
         async with session.get(f"/api/jobs/{prompt_id}") as response:
@@ -422,7 +471,9 @@ async def _job_status(session: aiohttp.ClientSession, prompt_id: str) -> tuple[s
     return _as_str(job.get("status")), message
 
 
-async def _history_outputs(session: aiohttp.ClientSession, prompt_id: str, server_alive: Callable[[], bool]) -> dict[str, Any]:
+async def _history_outputs(
+    session: aiohttp.ClientSession, prompt_id: str, server_alive: Callable[[], bool]
+) -> dict[str, Any]:
     """The prompt's recorded outputs, waiting for the history entry to land.
 
     Success is signalled over the socket before the entry exists, so the
@@ -438,9 +489,13 @@ async def _history_outputs(session: aiohttp.ClientSession, prompt_id: str, serve
         if entry is not None:
             return cast("dict[str, Any]", entry.get("outputs") or {})
         if not server_alive():
-            raise RuntimeError(f"ComfyUI exited before recording the history entry for {prompt_id}")
+            raise RuntimeError(
+                f"ComfyUI exited before recording the history entry for {prompt_id}"
+            )
         if time.monotonic() >= deadline:
-            raise RuntimeError(f"ComfyUI reported success for {prompt_id} but has no history entry")
+            raise RuntimeError(
+                f"ComfyUI reported success for {prompt_id} but has no history entry"
+            )
         await asyncio.sleep(_HISTORY_POLL_SECONDS)
 
 
@@ -465,6 +520,7 @@ async def run_prompt(
     on_progress: ProgressCallback,
     is_cancelled: Callable[[], bool],
     server_alive: Callable[[], bool],
+    sampler_steps: Mapping[str, int] | None = None,
 ) -> RenderResult:
     """Submit one prompt and follow it to completion, cancellation, or failure.
 
@@ -479,22 +535,30 @@ async def run_prompt(
         session.ws_connect(f"/ws?clientId={client_id}", heartbeat=30) as socket_,
     ):
         prompt_id = await _submit(session, prompt, client_id)
-        state = _RenderSession(prompt_id, on_progress, total_steps)
+        state = _RenderSession(prompt_id, on_progress, total_steps, sampler_steps)
         cancel_sent_at: float | None = None
         last_poll = time.monotonic()
         while state.terminal is None:
             try:
-                message = await asyncio.wait_for(socket_.receive(), timeout=_SOCKET_WAIT_SECONDS)
+                message = await asyncio.wait_for(
+                    socket_.receive(), timeout=_SOCKET_WAIT_SECONDS
+                )
             except asyncio.TimeoutError:
                 message = None
             if message is not None:
                 if message.type == aiohttp.WSMsgType.TEXT:
                     try:
-                        payload = cast("dict[str, Any]", json.loads(cast("str", message.data)))
+                        payload = cast(
+                            "dict[str, Any]", json.loads(cast("str", message.data))
+                        )
                     except json.JSONDecodeError:
                         payload = {}
                     state.handle(payload)
-                elif message.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                elif message.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.ERROR,
+                ):
                     raise RuntimeError("ComfyUI closed the progress socket mid-render")
                 # Binary frames are previews; the runner asked for none.
             # Cancellation and liveness are checked on every pass, not only
@@ -509,7 +573,10 @@ async def run_prompt(
                     # Nothing to interrupt: the prompt already reached a
                     # terminal state the socket has not told us about yet.
                     last_poll = 0.0
-            elif cancel_sent_at is not None and now - cancel_sent_at > _CANCEL_GRACE_SECONDS:
+            elif (
+                cancel_sent_at is not None
+                and now - cancel_sent_at > _CANCEL_GRACE_SECONDS
+            ):
                 raise RuntimeError("ComfyUI did not stop the render after cancellation")
             if now - last_poll >= _JOB_POLL_SECONDS:
                 last_poll = now
@@ -524,6 +591,10 @@ async def run_prompt(
         if state.terminal == "error":
             raise ComfyRenderError(f"ComfyUI failed the render ({state.error})")
         if state.terminal == "interrupted":
-            return RenderResult("cancelled", {}, state.sampling_seconds, state.steps_seen)
+            return RenderResult(
+                "cancelled", {}, state.sampling_seconds, state.steps_seen
+            )
         outputs = await _history_outputs(session, prompt_id, server_alive)
-        return RenderResult("completed", outputs, state.sampling_seconds, state.steps_seen)
+        return RenderResult(
+            "completed", outputs, state.sampling_seconds, state.steps_seen
+        )
