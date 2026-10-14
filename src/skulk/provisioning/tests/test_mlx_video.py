@@ -139,6 +139,15 @@ def test_runtime_environment_blocks_independent_downloads_and_injection() -> Non
     assert environment["HF_HUB_OFFLINE"] == "1" and environment["TRANSFORMERS_OFFLINE"] == "1"
 
 
+@pytest.mark.parametrize("version,accepted", [("3.13", True), ("3.13.13", True), ("3.12.13", False), ("3.14.0", False), ("broken", False)])
+def test_uv_version_record_uses_actual_major_minor(tmp_path: Path, version: str, accepted: bool) -> None:
+    root = tmp_path / "cache"
+    wheel = _cache(root)
+    configuration = root / "venv/pyvenv.cfg"
+    configuration.write_text(configuration.read_text().replace("version_info = 3.13", f"version_info = {version}"))
+    assert (mlx_video.verified_interpreter(root, wheel) is not None) == accepted
+
+
 def test_corrupt_download_never_promotes_or_executes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wheel = _cache(tmp_path / "trusted")
     _host(monkeypatch, wheel)

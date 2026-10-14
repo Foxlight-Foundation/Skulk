@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Final, final
 import httpx
 from filelock import FileLock, Timeout
 from packaging.tags import sys_tags
+from packaging.version import Version
 from pydantic import Field
 
 from skulk.provisioning.comfy import stoppable_runner
@@ -153,7 +154,7 @@ def verified_interpreter(root: Path, wheel: MlxVideoWheel) -> Path | None:
         return None
     try:
         configuration = dict(line.split(" = ", 1) for line in (root / "venv/pyvenv.cfg").read_text().splitlines() if " = " in line)
-        if interpreter.resolve() != Path(sys.executable).resolve() or configuration.get("include-system-site-packages") != "false" or configuration.get("implementation") != "CPython" or configuration.get("version_info") != "3.13":
+        if interpreter.resolve() != Path(sys.executable).resolve() or configuration.get("include-system-site-packages") != "false" or configuration.get("implementation") != "CPython" or Version(configuration.get("version_info", "")).release[:2] != (3, 13):
             return None
         if Path(configuration.get("home", "")).resolve() != Path(sys.executable).resolve().parent:
             return None

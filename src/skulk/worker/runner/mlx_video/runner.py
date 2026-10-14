@@ -192,5 +192,6 @@ class Runner(ServedConcurrentDispatch):
             self._mark_generation_failed(task.task_id)
             self.event_sender.send(ChunkGenerated(command_id=task.command_id, chunk=ErrorChunk(model=self.model_id, finish_reason="error", error_message=str(error))))
         except Exception:
+            self._mark_generation_failed(task.task_id)
             shutil.rmtree(output, ignore_errors=True)
             raise
