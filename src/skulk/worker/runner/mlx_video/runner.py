@@ -7,7 +7,12 @@ import shutil
 from pathlib import Path
 from typing import final
 
-from skulk.provisioning.mlx_video import prepared_runtime, probe_runtime
+from skulk.provisioning.mlx_video import (
+    NativeVideoFeature,
+    prepared_runtime,
+    probe_runtime,
+    video_features_for_build,
+)
 from skulk.shared.backends import ENGINE_UNAVAILABLE_FAILURE_MARKER
 from skulk.shared.constants import (
     SKULK_CACHE_HOME,
@@ -51,9 +56,12 @@ from skulk.shared.types.worker.runners import (
     RunnerWarmingUp,
 )
 from skulk.utils.channels import MpReceiver, MpSender
+from skulk.worker.runner.comfy.graph import bind_references
 from skulk.worker.runner.mlx_video.plan import plan_native_job, selected_model_view
 from skulk.worker.runner.mlx_video.process import NativeProgress, run_native_job
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
+from skulk.worker.runner.video_input import MediaInputRequest
+from skulk.worker.runner.video_input_process import prepare_media_input
 from skulk.worker.runner.video_probe import probe_video_output
 
 
@@ -166,8 +174,38 @@ class Runner(ServedConcurrentDispatch):
             if build is None or prepared_runtime(build) != self.interpreter:
                 raise RuntimeError("native video runtime failed its integrity check")
             job, plan = plan_native_job(task.task_params, self.card, self.model_dir, output, SKULK_VIDEO_INPUT_DIR)
+            needed: set[NativeVideoFeature] = set()
+            if job.audio_conditioning is not None:
+                needed.add("audio_conditioning")
+            if job.editing is not None:
+                needed.add(job.editing.operation)
+            if job.prompt_relay is not None:
+                needed.add("prompt_relay")
+            if not needed <= video_features_for_build(build):
+                raise ValueError("the placed native engine build does not implement these controls; install the published advanced engine and recreate this placement")
+            output.mkdir(parents=True, exist_ok=True)
+            if job.audio_conditioning is not None or job.editing is not None:
+                source = next(binding for binding in bind_references(task.task_params.references, SKULK_VIDEO_INPUT_DIR) if binding.spec.kind != "image")
+                request = MediaInputRequest(
+                    operation="audio" if job.audio_conditioning is not None else "video",
+                    source=str(SKULK_VIDEO_INPUT_DIR / source.input_name),
+                    destination=str(output / "_source.wav") if job.audio_conditioning is not None else None,
+                    start_seconds=job.audio_conditioning.start_seconds if job.audio_conditioning is not None else 0.0,
+                    duration_seconds=plan.frame_count / plan.fps,
+                    width=plan.width, height=plan.height, fps=plan.fps,
+                    maximum_frames=plan.frame_count,
+                    exact_frames=job.pipeline == "retake",
+                    require_audio=job.audio and job.editing is not None and not job.editing.regenerate_audio,
+                )
+                prepared = prepare_media_input(self.interpreter, request, output, is_cancelled=lambda: self._is_cancelled(task.task_id), native=True)
+                if prepared is None:
+                    shutil.rmtree(output, ignore_errors=True)
+                    return
+                if job.pipeline == "extend" and (prepared.frames >= job.frame_count or (job.transformer_variant == "distilled" and prepared.frames < 25)):
+                    raise ValueError("extension needs a shorter source clip, with at least 25 source frames for the distilled workflow")
+                job = job.model_copy(update={"source_media": prepared})
             base_steps = job.base_steps
-            planned_steps = base_steps + 3
+            planned_steps = base_steps if job.pipeline == "retake" or (job.pipeline == "extend" and job.transformer_variant == "dev") else base_steps + 3
 
             def progress(message: NativeProgress) -> None:
                 completed = (base_steps if message.sampling_stage == 2 else 0) + (message.step or 0)
@@ -184,8 +222,10 @@ class Runner(ServedConcurrentDispatch):
             identity, size = _file_identity(output / VIDEO_OUTPUT_FILENAME)
             thumbnail_identity, thumbnail_size = _file_identity(output / VIDEO_THUMBNAIL_FILENAME)
             manifest = VideoOutputManifest(sha256=identity, size_bytes=size, width=plan.width, height=plan.height, frame_count=actual.frame_count, fps=plan.fps, seconds=actual.seconds, audio_sample_rate=plan.sample_rate if plan.audio else None, audio_channels=plan.channels if plan.audio else None, thumbnail_sha256=thumbnail_identity, thumbnail_size_bytes=thumbnail_size)
-            stats = VideoGenerationStats(steps=result.steps, seconds_per_step=result.sampling_seconds / result.steps, total_generation_time=result.total_generation_time, peak_memory_bytes=result.peak_memory_bytes, engine=VideoEngineSettings(sampler="res_2s" if job.pipeline == "hq_two_stage" else "euler_ancestral" if job.pipeline == "distilled_two_stage" else "euler", scheduler="ltx-2.5", steps=result.steps, seed=plan.seed, pipeline=job.pipeline, decoder=task.task_params.decoder or "convolutional", guidance=job.guidance, generated_keyframe_interval=job.generated_keyframe_interval, duration=task.task_params.duration, adapter="distilled_refinement" if job.pipeline != "distilled_two_stage" else None, adapter_strength=job.refinement_strength if job.pipeline != "distilled_two_stage" else None, width=plan.width, height=plan.height, frame_count=actual.frame_count, codec=job.codec))
+            refined_dev = job.pipeline in ("dev_two_stage", "hq_two_stage")
+            stats = VideoGenerationStats(steps=result.steps, seconds_per_step=result.sampling_seconds / result.steps, total_generation_time=result.total_generation_time, peak_memory_bytes=result.peak_memory_bytes, engine=VideoEngineSettings(sampler="res_2s" if job.pipeline == "hq_two_stage" else "euler_ancestral" if job.pipeline == "distilled_two_stage" or (job.pipeline == "extend" and job.transformer_variant == "distilled") else "euler", scheduler="ltx-2.5", steps=result.steps, seed=plan.seed, pipeline=job.pipeline, decoder=task.task_params.decoder or "convolutional", guidance=job.guidance, generated_keyframe_interval=job.generated_keyframe_interval, duration=task.task_params.duration, audio_conditioning=job.audio_conditioning, editing=job.editing, prompt_relay=job.prompt_relay, adapter="distilled_refinement" if refined_dev else None, adapter_strength=job.refinement_strength if refined_dev else None, width=plan.width, height=plan.height, frame_count=actual.frame_count, codec=job.codec))
             (output / "result.json").unlink()
+            (output / "_source.wav").unlink(missing_ok=True)
             self.event_sender.send(ChunkGenerated(command_id=task.command_id, chunk=VideoChunk(model=self.model_id, stage="muxing", progress=1.0, output=manifest, stats=stats, finish_reason="stop")))
         except ValueError as error:
             shutil.rmtree(output, ignore_errors=True)

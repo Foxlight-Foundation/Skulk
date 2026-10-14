@@ -67,7 +67,9 @@ def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable
     output = Path(job.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     request = output / "job.json"
-    request.write_text(job.model_dump_json())
+    # Optional v2 controls stay absent on baseline jobs, preserving the strict
+    # published v1 protocol while a newer owned wheel is being prepared.
+    request.write_text(job.model_dump_json(exclude_defaults=True))
     messages: queue.Queue[str] = queue.Queue(maxsize=64)
     errors: deque[str] = deque(maxlen=24)
     process = subprocess.Popen([str(interpreter), "-I", "-B", "-m", "skulk_mlx_video", "--job", str(request), "--parent-pid", str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=runtime_environment(), start_new_session=True)

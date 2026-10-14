@@ -1079,6 +1079,49 @@ def test_multipart_openapi_schema_is_one_flat_object() -> None:
     assert schema.get("additionalProperties") is False
 
 
+def test_ltx_audio_source_preserves_explicit_segment_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Source audio uses the existing bounded attachment plane and typed controls."""
+    api = _make_api(monkeypatch)
+    card = asyncio.run(load_fixture_card(ModelId("Lightricks/LTX-2.5-distilled-comfy-int8")))
+    assert card is not None
+    async def load(_model_id: ModelId) -> ModelCard:
+        return card
+    monkeypatch.setattr(ModelCard, "load", staticmethod(load))
+    response = TestClient(api.app).post("/v1/videos", data={"model": str(card.model_id), "prompt": "fox", "seconds": "2", "audio_conditioning": '{"start_seconds":0.5}'}, files=[("audio_source", ("voice.wav", b"RIFF source", "audio/wav"))])
+    assert response.status_code == 200, response.text
+    command = _sent_command(api)
+    assert command.task_params.audio_conditioning is not None
+    assert command.task_params.audio_conditioning.start_seconds == 0.5
+    assert command.task_params.implied_mode() is VideoMode.ReferenceToAudioVideo
+    assert len(command.task_params.references) == 1 and command.task_params.references[0].kind == "audio"
+    assert api._video_upload_inflight_bytes == 0
+
+
+def test_ltx_retake_source_does_not_require_an_h3_controlnet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit LTX timeline source has different semantics from an H3 mask."""
+    api = _make_api(monkeypatch)
+    card = asyncio.run(load_fixture_card(ModelId("dgrauet/LTX-2.5-distilled-mlx-q4")))
+    assert card is not None
+    async def load(_model_id: ModelId) -> ModelCard:
+        return card
+    monkeypatch.setattr(ModelCard, "load", staticmethod(load))
+    response = TestClient(api.app).post("/v1/videos", data={"model": str(card.model_id), "prompt": "fox", "seconds": "2", "size": "768x512", "editing": '{"operation":"retake","start_seconds":0.0,"end_seconds":1.0,"regenerate_audio":false}'}, files=[("source_video", ("source.mp4", b"source", "video/mp4"))])
+    assert response.status_code == 200, response.text
+    command = _sent_command(api)
+    assert command.task_params.editing is not None and not command.task_params.editing.regenerate_audio
+    assert command.task_params.references[0].role == "source"
+
+
+@pytest.mark.parametrize("controls,media_type", [({}, "audio/wav"), ({"audio_conditioning": "{}"}, "video/mp4")])
+def test_audio_source_refusal_releases_upload_admission(monkeypatch: pytest.MonkeyPatch, controls: dict[str, str], media_type: str) -> None:
+    """A mislabeled source or omitted conditioning cannot turn into another workflow."""
+    api = _make_api(monkeypatch)
+    response = TestClient(api.app).post("/v1/videos", data={"model": str(MODEL), "prompt": "fox", **controls}, files=[("audio_source", ("source", b"bytes", media_type))])
+    assert response.status_code == 400
+    api._send.assert_not_called()
+    assert api._video_upload_inflight_bytes == 0
+
+
 def test_create_multipart_pairs_keyframes_with_their_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

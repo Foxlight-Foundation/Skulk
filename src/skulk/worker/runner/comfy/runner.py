@@ -18,6 +18,7 @@ import os
 import shutil
 import time
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, cast, final
 
@@ -94,6 +95,8 @@ from skulk.worker.runner.comfy.server import (
     run_prompt,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
+from skulk.worker.runner.video_input import MediaInputRequest
+from skulk.worker.runner.video_input_process import prepare_media_input
 
 _HASH_CHUNK: Final = 1 << 20
 _THUMBNAIL_QUALITY: Final = 85
@@ -428,6 +431,7 @@ class Runner(ServedConcurrentDispatch):
         except ValueError as error:
             # The request or the plan was refused (ComfyRenderError included):
             # the task fails with its reason and the runner lives on.
+            self._mark_generation_failed(task.task_id)
             self.event_sender.send(
                 ChunkGenerated(
                     command_id=command_id,
@@ -441,9 +445,12 @@ class Runner(ServedConcurrentDispatch):
             # keeps the loop alive past this thread, so the server goes here
             # and the loop's next liveness check, on the next task or the idle
             # poll, ends the runner for the supervisor to restart.
+            self._mark_generation_failed(task.task_id)
             shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
             self._teardown_server()
             raise
+        finally:
+            (SKULK_VIDEO_INPUT_DIR / f"_prepared_{command_id}.wav").unlink(missing_ok=True)
 
     # --- model load -----------------------------------------------------------
 
@@ -491,9 +498,21 @@ class Runner(ServedConcurrentDispatch):
         started = time.monotonic()
         render = plan_comfy_render(params, self.card)
         bindings = bind_references(params.references, SKULK_VIDEO_INPUT_DIR)
-        prompt = build_prompt(render, params, bindings, str(command_id))
         output_dir = SKULK_VIDEO_OUTPUT_DIR / str(command_id)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if params.audio_conditioning is not None:
+            source = next(binding for binding in bindings if binding.spec.kind == "audio")
+            destination = SKULK_VIDEO_INPUT_DIR / f"_prepared_{command_id}.wav"
+            prepared = prepare_media_input(server.interpreter, MediaInputRequest(
+                operation="audio", source=str(SKULK_VIDEO_INPUT_DIR / source.input_name),
+                destination=str(destination), start_seconds=params.audio_conditioning.start_seconds,
+                duration_seconds=render.plan.frame_count / render.plan.fps,
+            ), output_dir, is_cancelled=lambda: self._is_cancelled(task_id))
+            if prepared is None:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return
+            bindings = tuple(replace(binding, input_name=destination.name) if binding is source else binding for binding in bindings)
+        prompt = build_prompt(render, params, bindings, str(command_id))
         logger.info(
             f"comfy engine rendering {render.mode.value} {render.plan.frame_count} frames at "
             f"{render.plan.width}x{render.plan.height} over {render.plan.steps} steps for {command_id}"

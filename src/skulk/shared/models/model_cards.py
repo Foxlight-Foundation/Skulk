@@ -1722,6 +1722,12 @@ class VideoCardConfig(CamelCaseModel):
     distilled and guided checkpoints. It does not select an execution engine."""
     generated_keyframes: bool = False
     """Whether the selected transformer was trained with generated keyframe tokens."""
+    audio_conditioning: bool = False
+    """Whether the complete selected audio VAE can encode frozen source-audio context."""
+    editing: tuple[Literal["retake", "extend"], ...] = ()
+    """Source-video operations provided by the selected transformer and encoder/decoder components."""
+    prompt_relay: bool = False
+    """Whether local scene prompts can be temporally gated alongside the global prompt."""
     min_seconds: PositiveInt = 4
     """Shortest output duration the model supports."""
     max_seconds: PositiveInt = 15
@@ -1809,6 +1815,11 @@ class VideoCardConfig(CamelCaseModel):
             for item in cast("Iterable[object]", value)
         )
 
+    @field_validator("editing", mode="before")
+    @classmethod
+    def _coerce_editing(cls, value: object) -> object:
+        return tuple(cast("list[object]", value)) if isinstance(value, list) else value
+
     @model_validator(mode="after")
     def _validate_contract(self) -> "VideoCardConfig":
         if self.min_seconds > self.max_seconds:
@@ -1828,6 +1839,14 @@ class VideoCardConfig(CamelCaseModel):
             and self.reference_limits is None
         ):
             raise ValueError("ref2va requires reference_limits")
+        if (self.audio_conditioning or self.editing) and VideoMode.ReferenceToAudioVideo not in self.modes:
+            raise ValueError("source audio and editing require the ref2va mode and reference limits")
+        if self.audio_conditioning and (not self.audio_output or self.reference_limits is None or self.reference_limits.max_audio_clips < 1):
+            raise ValueError("audio conditioning requires a complete audio VAE and at least one audio reference")
+        if self.editing and (self.reference_limits is None or self.reference_limits.max_videos < 1):
+            raise ValueError("editing requires at least one source video in the reference limits")
+        if len(set(self.editing)) != len(self.editing):
+            raise ValueError("editing operations must be unique")
         keys = [(item.kind, item.name) for item in self.companions]
         if len(set(keys)) != len(keys):
             raise ValueError("companions must be unique per kind and name")

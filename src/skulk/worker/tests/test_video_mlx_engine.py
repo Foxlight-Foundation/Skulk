@@ -28,6 +28,7 @@ from skulk.shared.types.worker.instances import (
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import mp_channel
+from skulk.worker.runner.comfy import runner as comfy_runner_module
 from skulk.worker.runner.mlx_video import runner as runner_module
 from skulk.worker.runner.mlx_video.plan import plan_native_job, selected_model_view
 from skulk.worker.runner.mlx_video.process import NativeProgress, run_native_job
@@ -81,6 +82,40 @@ def test_unexpected_native_failure_publishes_failed_task(tmp_path: Path, monkeyp
     def missing(_build: str) -> None:
         return None
     monkeypatch.setattr(runner_module, "prepared_runtime", missing)
+    task = VideoGeneration(instance_id=instance.instance_id, command_id=CommandId("native-render"), task_params=_params())
+    try:
+        runner._dispatch_permits.acquire()
+        runner._remember_task_id(task.task_id)
+        runner._note_generation_started()
+        runner._run_one_generation(task)
+        finished: Future[None] = Future()
+        finished.set_result(None)
+        runner._finish_generation(task, finished)
+        output = received.receive_at_least(3)
+        assert any(isinstance(event, ChunkGenerated) and isinstance(event.chunk, ErrorChunk) for event in output)
+        terminal = [event.task_status for event in output if isinstance(event, TaskStatusUpdated)]
+        assert terminal == [TaskStatus.Failed]
+    finally:
+        events.close()
+        tasks.close()
+        cancels.close()
+        received.close()
+        task_receiver.close()
+        cancel_receiver.close()
+
+
+def test_rejected_comfy_source_publishes_failed_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    card = _card()
+    identifier, node = RunnerId("native-test-runner"), NodeId("node")
+    shard = PipelineShardMetadata(model_card=card, device_rank=0, world_size=1, start_layer=0, end_layer=card.n_layers, n_layers=card.n_layers, resolved_backend="mlx_video-metal", resolved_engine_build="tested-build")
+    instance = MlxRingInstance(instance_id=InstanceId("native-test-instance"), shard_assignments=ShardAssignments(model_id=card.model_id, node_to_runner={node: identifier}, runner_to_shard={identifier: shard}), hosts_by_node={}, ephemeral_port=50000)
+    events, received = mp_channel[Event]()
+    tasks, task_receiver = mp_channel[Task]()
+    cancels, cancel_receiver = mp_channel[TaskId]()
+    runner = comfy_runner_module.Runner(BoundInstance(instance=instance, bound_runner_id=identifier, bound_node_id=node), events, task_receiver, cancel_receiver)
+    def rejected(_task: TaskId, _command: CommandId, _params: VideoGenerationTaskParams) -> None:
+        raise ValueError("source preparation refused malformed audio")
+    monkeypatch.setattr(runner, "_render", rejected)
     task = VideoGeneration(instance_id=instance.instance_id, command_id=CommandId("native-render"), task_params=_params())
     try:
         runner._dispatch_permits.acquire()

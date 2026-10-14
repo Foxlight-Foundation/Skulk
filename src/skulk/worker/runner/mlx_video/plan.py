@@ -11,14 +11,18 @@ from skulk.download.download_utils import artifact_install_directory, build_mode
 from skulk.shared.models.model_cards import ModelCard, VideoCompanionKind
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.video import (
+    VideoAudioConditioning,
     VideoCodecName,
     VideoDecoder,
+    VideoEditing,
     VideoGenerationTaskParams,
     VideoGuidance,
     VideoPipeline,
+    VideoPromptRelay,
 )
 from skulk.utils.pydantic_ext import FrozenModel
 from skulk.worker.runner.comfy.graph import bind_references
+from skulk.worker.runner.video_input import VerifiedMediaInput
 from skulk.worker.runner.video_plan import RenderPlan, plan_render
 
 
@@ -55,6 +59,11 @@ class NativeVideoJob(FrozenModel):
     maximum_seconds: int = Field(description="Upper requested allocation/duration bound before frame-grid alignment.")
     refinement_strength: float = Field(description="Exact selected distilled-refinement companion strength for guided pipelines.")
     images: tuple[NativeImageAnchor, ...] = Field(description="Verified worker-local first, last and timed frame anchors.")
+    audio_conditioning: VideoAudioConditioning | None = Field(default=None, description="Source waveform conditioning controls.")
+    editing: VideoEditing | None = Field(default=None, description="Source clip editing controls.")
+    prompt_relay: VideoPromptRelay | None = Field(default=None, description="Relative timed local scene prompts.")
+    source_media: VerifiedMediaInput | None = Field(default=None, description="Bounded decoder facts supplied by worker preparation.")
+    transformer_variant: Literal["distilled", "dev"] | None = Field(default=None, description="Editing transformer choice; absent on the immutable baseline protocol.")
 
 
 def selected_model_view(card: ModelCard, destination: Path) -> Path:
@@ -95,7 +104,7 @@ def plan_native_job(params: VideoGenerationTaskParams, card: ModelCard, model_di
     params.validate_family(card.family, video)
     if params.implied_mode() not in video.modes:
         raise ValueError("the selected native artifact does not implement this mode")
-    pipeline = params.pipeline or ("distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+    pipeline = params.pipeline or (params.editing.operation if params.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
     if pipeline == "dfr":
         raise ValueError("DFR needs an exact LTX-2.5 detailing adapter; this build does not implement it")
     if pipeline == "hq_two_stage" and params.sampler is not None:
@@ -106,9 +115,11 @@ def plan_native_job(params: VideoGenerationTaskParams, card: ModelCard, model_di
     render = plan_render(params, video.model_copy(update={"canvas_multiple": 64}))
     if min(render.width, render.height) < 128:
         raise ValueError("LTX two-stage generation requires edges of at least 128 pixels")
-    base_steps = params.steps or (8 if pipeline == "distilled_two_stage" else 15 if pipeline == "hq_two_stage" else 30)
+    base_steps = params.steps or (8 if video.transformer_variant == "distilled" else 15 if pipeline == "hq_two_stage" else 30)
     anchors: list[NativeImageAnchor] = []
     for binding in bind_references(params.references, input_dir):
+        if binding.spec.kind != "image":
+            continue
         role = binding.spec.role
         frame = -1 if role == "last_frame" else round((binding.spec.at_seconds or 0) * video.fps) if role == "keyframe" else 0
         anchors.append(NativeImageAnchor(path=str(input_dir / binding.input_name), frame=frame))
@@ -118,8 +129,11 @@ def plan_native_job(params: VideoGenerationTaskParams, card: ModelCard, model_di
         width=render.width, height=render.height, fps=render.fps, frame_count=render.frame_count,
         seed=render.seed, audio=render.audio, pipeline=pipeline, decoder=params.decoder or "convolutional",
         codec=codec, base_steps=base_steps, negative_prompt=params.negative_prompt,
-        guidance=(params.guidance or VideoGuidance()) if pipeline != "distilled_two_stage" else None,
+        guidance=(params.guidance or VideoGuidance()) if pipeline in ("dev_two_stage", "hq_two_stage") else None,
         generated_keyframe_interval=params.generated_keyframe_interval, duration=params.duration,
         minimum_seconds=params.duration_min_seconds or video.min_seconds, maximum_seconds=params.seconds,
         refinement_strength=refinement_strength, images=tuple(anchors),
+        audio_conditioning=params.audio_conditioning, editing=params.editing,
+        prompt_relay=params.prompt_relay,
+        transformer_variant=video.transformer_variant if params.editing is not None else None,
     ), render

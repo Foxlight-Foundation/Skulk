@@ -36,6 +36,7 @@ from skulk.shared.types.video import (
     VIDEO_OUTPUT_FILENAME,
     VIDEO_STRUCTURAL_ROLES,
     VIDEO_THUMBNAIL_FILENAME,
+    VideoAudioConditioning,
     VideoDecoder,
     VideoEngineSettings,
     VideoGenerationTaskParams,
@@ -499,6 +500,7 @@ class ComfyRenderPlan:
     minimum_frames: int | None = None
     duration_min_seconds: int | None = None
     duration_max_seconds: int | None = None
+    audio_conditioning: VideoAudioConditioning | None = None
 
     @property
     def steps(self) -> int:
@@ -538,6 +540,7 @@ class ComfyRenderPlan:
             guidance=self.guidance,
             generated_keyframe_interval=self.generated_keyframe_interval,
             duration=self.duration,
+            audio_conditioning=self.audio_conditioning,
             video_shift=self.video_shift,
             audio_shift=self.audio_shift,
             adapter=None if self.adapter is None else self.adapter.name,
@@ -581,6 +584,10 @@ def plan_comfy_render(
         from skulk.worker.runner.comfy.ltx import validate_ltx_request
 
         validate_ltx_request(params, card)
+        if params.editing is not None:
+            raise ValueError("the pinned Comfy core nodes do not implement the required temporal video/audio retake or extension masks")
+        if params.prompt_relay is not None:
+            raise ValueError("the pinned Comfy core nodes do not implement temporal prompt-relay cross-attention masks")
         pipeline = params.pipeline or ("distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
         if pipeline == "hq_two_stage":
             raise ValueError("LTX-2.5 HQ requires the exact Res2s sampler, unavailable in the pinned Comfy core engine")
@@ -604,6 +611,7 @@ def plan_comfy_render(
             guidance=(params.guidance or VideoGuidance()) if pipeline == "dev_two_stage" else None,
             generated_keyframe_interval=params.generated_keyframe_interval,
             duration=params.duration,
+            audio_conditioning=params.audio_conditioning,
             minimum_frames=video.frame_count_for_seconds(minimum) if params.duration == "auto" else None,
             duration_min_seconds=minimum if params.duration == "auto" else None,
             duration_max_seconds=params.seconds if params.duration == "auto" else None,
