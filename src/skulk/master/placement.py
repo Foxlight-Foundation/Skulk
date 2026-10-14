@@ -23,14 +23,17 @@ from skulk.shared.backends import (
     describe_backend_hardware,
     engine_of,
     engine_supports_multi_node,
+    expand_engine_backends,
     platform_compatible_backends,
     resolve_node_backend,
+    runtime_backends_for_builds,
 )
 from skulk.shared.data_plane_health import zenoh_isolated_nodes
 from skulk.shared.models.capabilities import (
     family_predates_in_process_llama_cpp,
     resolve_model_capability_profile,
 )
+from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS,
     MAX_REQUESTED_CONTEXT_TOKENS,
@@ -46,7 +49,8 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
     card_serves_speech,
-    registry_supported_backends_for_node,
+    model_engine_requirements,
+    registry_compatible_backends_for_node,
     same_authorized_model_card,
 )
 from skulk.shared.models.remote_code_approval import (
@@ -250,10 +254,7 @@ def add_instance_to_placements(
         shard.model_card.music is not None
         for shard in assignments.runner_to_shard.values()
     )
-    if (
-        len(assignments.node_to_runner) != 1
-        and music_instance
-    ):
+    if len(assignments.node_to_runner) != 1 and music_instance:
         raise PlacementError("Music instances require exactly one node")
     if music_instance and isinstance(command.instance, LlamaRpcInstance):
         raise PlacementError("Music instances cannot use llama.cpp RPC placement")
@@ -270,7 +271,9 @@ def add_instance_to_placements(
             resources = (node_resources or {}).get(node_id)
             if shard.model_card.music is not None:
                 if resources is None:
-                    raise PlacementError("Ready audio.cpp backend telemetry is required for exact music placement")
+                    raise PlacementError(
+                        "Ready audio.cpp backend telemetry is required for exact music placement"
+                    )
                 supported = _card_platform_backends(shard.model_card, resources)
                 if not supported or (
                     shard.resolved_backend is not None
@@ -284,7 +287,9 @@ def add_instance_to_placements(
                     assert resources is not None
                     build = resources.engine_builds.get(shard.resolved_backend)
                     if build is None:
-                        raise PlacementError("Exact music placement lacks a verified engine build")
+                        raise PlacementError(
+                            "Exact music placement lacks a verified engine build"
+                        )
                     resolved_shards[runner_id] = shard.model_copy(
                         update={"resolved_engine_build": build}
                     )
@@ -311,7 +316,9 @@ def add_instance_to_placements(
             if shard.model_card.music is not None:
                 build = resources.engine_builds.get(backend)
                 if build is None:
-                    raise PlacementError("Exact music placement lacks a verified engine build")
+                    raise PlacementError(
+                        "Exact music placement lacks a verified engine build"
+                    )
                 updates["resolved_engine_build"] = build
             resolved_shards[runner_id] = shard.model_copy(update=updates)
         assignments = assignments.model_copy(
@@ -322,9 +329,7 @@ def add_instance_to_placements(
     first_shard = next(iter(assignments.runner_to_shard.values()), None)
     if first_shard is not None:
         card = first_shard.model_card
-        projector_size = (
-            card.vision.projector_size if card.vision is not None else None
-        )
+        projector_size = card.vision.projector_size if card.vision is not None else None
         if projector_size is not None:
             projector_memory = Memory.from_bytes(projector_size)
             if isinstance(command.instance, LlamaRpcInstance):
@@ -408,6 +413,8 @@ def add_instance_to_placements(
                 else KV_CONTEXT_BUDGET_TOKENS,
                 resolved_backend=shard.resolved_backend,
                 llama_server_settings=shard.llama_server_settings,
+                memory_settings=shard.memory_settings,
+                cache_layer_count=shard.end_layer - shard.start_layer,
             )
             if ceiling == 0 or footprint > available:
                 pool = "GPU memory" if uses_vram else "system memory"
@@ -424,6 +431,20 @@ def _stamp_llama_server_settings(
     )
     for node_id, runner_id in assignments.node_to_runner.items():
         shard = shards[runner_id]
+        resources = resources_by_node.get(node_id)
+        engine = engine_of(shard.resolved_backend or "")
+        if engine is not None:
+            settings = (
+                resources.engine_memory_settings.get(engine, EngineMemorySettings())
+                if resources is not None
+                else EngineMemorySettings()
+            )
+            if "TextGeneration" not in shard.model_card.tasks:
+                settings = EngineMemorySettings()
+            if shard.memory_settings is not None and shard.memory_settings != settings:
+                raise PlacementError("Engine/cache settings changed since this exact placement; refresh resources and retry")
+            shard = shard.model_copy(update={"memory_settings": settings})
+            shards[runner_id] = shard
         if isinstance(shard, RpcDonorShardMetadata):
             # Donors provide memory to the driver's one context; they do not
             # launch a served instance with their own parallel-slot controls.
@@ -559,29 +580,16 @@ def _card_platform_backends(
     ``compatible_backends`` goes through this helper so eligibility, the
     common-engine cycle rule, and backend stamping all agree.
     """
-    # Music is admitted only by an exact signed build/hardware claim, even if
-    # an old embedded card carries a legacy compatible_backends declaration.
-    compatible: set[str] = (
-        set() if card.music is not None else set(card.placement.compatible_backends)
-    )
-    # Legacy broad tags cannot grant support to a newly introduced exact-build engine.
-    if not card.qualification_only:
-        compatible = {tag for tag in compatible if engine_of(tag) != "stable_diffusion_cpp"}
+    compatible = set(expand_engine_backends(model_engine_requirements(card)))
     if node_resources is not None:
         compatible.update(
-            registry_supported_backends_for_node(
+            registry_compatible_backends_for_node(
                 card,
                 node_backends=node_resources.backends,
-                engine_builds={
-                    **{tag: build for tag, build in node_resources.installable_engine_builds.items()
-                       if tag in node_resources.on_demand_backends and engine_of(tag) == "stable_diffusion_cpp"},
-                    **node_resources.engine_builds,
-                },
-                hardware_classes=node_resources.hardware_classes,
             )
         )
     profile = resolve_model_capability_profile(card.model_id, model_card=card)
-    return platform_compatible_backends(
+    filtered = platform_compatible_backends(
         frozenset(compatible),
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
@@ -598,12 +606,39 @@ def _card_platform_backends(
             family_predates_in_process_llama_cpp(card)
         ),
     )
+    if node_resources is not None:
+        filtered = frozenset(
+            tag
+            for tag in filtered
+            if "TextGeneration" not in card.tasks
+            or (
+                policy := node_resources.engine_memory_settings.get(
+                    engine_of(tag) or ""
+                )
+            )
+            is None
+            or policy.configuration_error is None
+        )
+    return (
+        filtered
+        if node_resources is None
+        else runtime_backends_for_builds(
+            filtered,
+            {
+                **node_resources.installable_engine_builds,
+                **node_resources.engine_builds,
+            },
+            node_resources.hardware_classes,
+        )
+    )
 
 
-def model_platform_backends(card: ModelCard, resources: NodeResources) -> frozenset[str]:
-    """Return evidenced backends supported by core for this artifact on a node.
+def model_platform_backends(
+    card: ModelCard, resources: NodeResources
+) -> frozenset[str]:
+    """Return runtime-compatible backends for this artifact on a node.
 
-    Shares normal placement's signed-build, hardware and runner restrictions
+    Shares normal placement's engine, package and implemented-runner requirements
     with read-only workload consumers. This grants no placement authority.
     """
     return _card_platform_backends(card, resources) & resources.backends
@@ -861,7 +896,9 @@ def place_instance(
     if command.model_card.image is not None and (
         command.min_nodes != 1 or command.sharding != Sharding.Pipeline
     ):
-        raise PlacementError("Native image instances require single-node pipeline sharding")
+        raise PlacementError(
+            "Native image instances require single-node pipeline sharding"
+        )
     if command.model_card.music is not None and command.min_nodes != 1:
         raise PlacementError("Music instances require exactly one node")
     if remote_code_approval_required(
@@ -877,7 +914,9 @@ def place_instance(
         candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
     if not candidate_cycles:
         if command.model_card.music is not None:
-            raise PlacementError("No single-node placement is available for this music model")
+            raise PlacementError(
+                "No single-node placement is available for this music model"
+            )
         known_nodes = sum(1 for _ in topology.list_nodes())
         if known_nodes >= command.min_nodes:
             # Enough nodes exist for this placement — they just aren't
@@ -963,8 +1002,8 @@ def place_instance(
     # advertised backends do not intersect the card's compatible_backends.
     # Nodes with no resources entry yet (gossip still warming up) retain the
     # legacy optimistic behavior only when the card has a static projection.
-    # A matrix-only card needs exact build/hardware evidence and therefore waits
-    # rather than falling through to an unproven default engine.
+    # A card without a declared engine needs node resources to resolve its
+    # upstream compatibility mapping instead of guessing a default engine.
     resolved_node_resources = node_resources or {}
     matrix_only = not command.model_card.placement.compatible_backends
     pending_matrix_nodes: set[NodeId] = set()
@@ -1007,8 +1046,8 @@ def place_instance(
         if not candidate_cycles:
             if pending_matrix_nodes:
                 raise PlacementInfoPendingError(
-                    "Exact engine-build and hardware info has not been gossiped "
-                    "for a matrix-only model. Retry shortly."
+                    "Runtime availability has not been gossiped for a model "
+                    "without a declared engine. Retry shortly."
                 )
             # Name the hardware only when every node has reported and none
             # could be the machine the model needs.
@@ -1121,9 +1160,7 @@ def place_instance(
         vision_rpc_candidates = [
             cycle
             for cycle in candidate_cycles
-            if _is_llama_rpc_cycle(
-                cycle, command.model_card, resolved_node_resources
-            )
+            if _is_llama_rpc_cycle(cycle, command.model_card, resolved_node_resources)
         ]
         candidate_cycles = [
             cycle
@@ -1164,9 +1201,7 @@ def place_instance(
     standard_candidates = [
         cycle
         for cycle in candidate_cycles
-        if not _is_llama_rpc_cycle(
-            cycle, command.model_card, resolved_node_resources
-        )
+        if not _is_llama_rpc_cycle(cycle, command.model_card, resolved_node_resources)
     ]
     rpc_candidates = [
         cycle
@@ -1200,6 +1235,10 @@ def place_instance(
                 )
                 for node_id in standard_cycle.node_ids
                 if (resources := resolved_node_resources.get(node_id)) is not None
+            },
+            engine_memory_settings={
+                node_id: resources.engine_memory_settings
+                for node_id, resources in resolved_node_resources.items()
             },
             llama_server_settings={
                 node_id: resources.llama_server_settings
@@ -1252,21 +1291,24 @@ def place_instance(
                 ),
             )
             rpc_fixed = (
-                {driver: projector_memory}
-                if projector_memory.in_bytes > 0
-                else {}
+                {driver: projector_memory} if projector_memory.in_bytes > 0 else {}
             )
             rpc_fit, rpc_diagnostics = filter_cycles_by_memory(
                 [rpc_cycle],
                 node_memory,
                 command.model_card,
                 Sharding.Pipeline,
-                context_budget=command.requested_context_tokens or KV_CONTEXT_BUDGET_TOKENS,
+                context_budget=command.requested_context_tokens
+                or KV_CONTEXT_BUDGET_TOKENS,
                 node_vram=rpc_vram_map,
                 exact_pipeline_layers=False,
                 fixed_memory_by_node=rpc_fixed,
                 resolved_backends={
                     node_id: "llama_server" for node_id in rpc_cycle.node_ids
+                },
+                engine_memory_settings={
+                    node_id: resources.engine_memory_settings
+                    for node_id, resources in resolved_node_resources.items()
                 },
                 llama_server_settings={
                     node_id: (
@@ -1476,18 +1518,22 @@ def place_instance(
         if resolved_backend is not None:
             shard = stamped_runner_to_shard[runner_id]
             updates: dict[str, str] = {"resolved_backend": resolved_backend}
-            if command.model_card.music is not None or engine_of(resolved_backend) == "stable_diffusion_cpp":
+            if (
+                command.model_card.music is not None
+                or engine_of(resolved_backend) in {"stable_diffusion_cpp", "mlx_video"}
+            ):
                 assert resources is not None
                 build = resources.engine_builds.get(resolved_backend) or (
                     resources.installable_engine_builds.get(resolved_backend)
-                    if resolved_backend in resources.on_demand_backends else None
+                    if resolved_backend in resources.on_demand_backends
+                    else None
                 )
                 if build is None:
-                    raise PlacementError("Native placement lacks its exact engine build")
+                    raise PlacementError(
+                        "Native placement lacks its exact engine build"
+                    )
                 updates["resolved_engine_build"] = build
-            stamped_runner_to_shard[runner_id] = shard.model_copy(
-                update=updates
-            )
+            stamped_runner_to_shard[runner_id] = shard.model_copy(update=updates)
     shard_assignments = ShardAssignments(
         model_id=shard_assignments.model_id,
         runner_to_shard=stamped_runner_to_shard,

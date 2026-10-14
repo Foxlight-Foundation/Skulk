@@ -1265,7 +1265,48 @@ display/preferred-language metadata, optional checksummed bundled
 `reference_profile` identifiers, and a validated `audio.default_voice`, which
 the API applies only when callers omit `voice`.
 
-**Four compatibility truth layers:** signed registry capability claims describe intrinsic model behavior and artifact completeness; signed engine-support claims establish exact architecture/artifact/quant/capability compatibility for one engine build; `NodeResources.engine_builds` (the comfy engine's is `comfy@<checkout commit>/torch@<torch version>`, so the same checkout on another torch is another build) and `hardware_classes` prove the live node match; `platform_compatible_backends` applies Skulk runner limitations last. Empirical load/feature claims also bind the immutable card tested, and artifact-scoped `incomplete` evidence blocks matrix admission. Legacy card `compatible_backends` remain a valid projection and are unioned with exact active `supported` matrix matches. Experimental, unsupported, stale-build, and hardware-mismatched claims never expand placement. The master stamps the resolved backend; the worker repeats the matrix check only for unstamped fallback. `SKULK_ENGINE_BUILDS` is an open JSON engine/tag-to-build override for canonical upstream identities. When a runner gains a capability, flip the code table; do NOT shrink model capability truth.
+**Compatible untested hardware remains eligible. We test to ensure, not to exclude.**
+
+**Runtime compatibility and qualification:** model cards describe exact artifacts,
+intrinsic capabilities and compatible engine runtimes. They must not encode a
+list of the GPU models Foxlight has tested. Engine packages own genuine technical
+requirements: OS/CPU ABI, helper instructions, compiled accelerator targets,
+driver/runtime protocols and implemented operations. Nodes report actual runtime
+and resource availability; placement matches those requirements with local
+capacity and operator policy.
+
+Qualification is append-only evidence about a tested artifact, engine build,
+hardware, operation and workload. Missing, failed, stale-build or hardware-mismatched
+qualification does not revoke otherwise valid engine compatibility. A positive
+qualification does not assert that other hardware is incompatible. Qualification
+may inform confidence and preference, never become a hardware permission list.
+Every empirical record retains its original tested identities; unchanged
+artifact/runtime inputs may reuse that evidence through an explicit provenance
+association without inventing a new physical run.
+
+Complete, structurally valid cards with accurate engine requirements can be
+published independently of runtime qualification. Artifact integrity, repository
+code trust and genuine missing dependencies remain separate checks. Missing
+qualification for one capability must not prevent loading the model or serving
+another implemented operation. When a runner gains an operation, update runtime
+capability truth; never shrink intrinsic model truth to match test coverage.
+
+Every engine change must preserve regression coverage for compatible untested
+hardware, unqualified published cards, scoped failed qualifications and genuine
+package/operation incompatibilities. Special native-engine paths must follow the
+same compatibility rule as the general placer.
+
+**Memory fit is configuration-specific.** Placement, reservations, context sizing
+and the worker guard must use the same resolved actual engine and effective
+weight/cache quantization settings. A card supplies artifact sizes and model/cache
+geometry; stored weight quantization does not imply cache quantization or exact
+resident allocation. Include mixed-precision layers, compression metadata, peak
+workspace, context/concurrency, supported offloading and live usable memory. Count
+optimization savings only when actually enabled. Bind the effective policy to the
+placement; settings drift requires reassessment before load. A refusal describes
+the assessed configuration and uncertainty, not permanent model/device eligibility.
+Do not silently change the user's context/quality/concurrency constraints. See
+[the normative contract](website/docs/engine-compatibility.md); effective-policy propagation and conservative unknown-layout fallbacks are documented there.
 
 Model-specific sharding truth also lives on the card:
 `placement.max_pipeline_split_layer` caps pipeline boundaries for architectures
@@ -1808,13 +1849,13 @@ pressure on a 16 GiB Apple host.
 Native image wheel publication promotes selected qualified artifacts from a
 successful candidate workflow run. The dispatch requires a filename/digest map,
 verifies the originating workflow and source commit attestation, and publishes
-those exact bytes without rebuilding; model/device claims remain separately gated.
+those exact bytes without rebuilding; model/device qualifications remain separate scoped evidence.
 
 Apple hardware inventory retains the generic `apple:apple-gpu` class and adds
 the passively observed chip class (for example `apple:apple-m4`) when macOS
-reports it. Missing chip observations add no exact class. Native image package
-eligibility and signed support claims can therefore select measured Apple
-hardware without broadening qualification to every Metal device.
+reports it. Missing chip observations add no exact class. Those classes preserve
+tested provenance; native image package eligibility depends on actual OS/ABI and
+compiled requirements. Compatible untested Metal devices remain eligible.
 
 Native image placement requires one pipeline rank and one observed GPU; tensor
 sharding or ambiguous multi-device install offers are rejected before preparation.
@@ -1837,3 +1878,7 @@ before download/cache acquisition, alongside architecture, CPU instructions and
 qualified hardware. The published Linux wheels require glibc 2.35 or newer; musl
 and older glibc do not receive install offers. macOS minimums come from the same
 platform-tag check. Manual extraction never bypasses the ABI eligibility gate.
+
+### Native MLX video runner
+
+`mlx_video-metal` uses `worker/runner/mlx_video` and the existing serial served-dispatch loop. Each job runs in a separate process group with bounded JSON progress, cancellation and parent-death reaping. The `InstallEngine` worker binds an exact published build from `provisioning/mlx_video.py`, installs all locked binary dependencies offline in a versioned runtime, verifies installed code against trusted archive bytes and probes Metal before publishing resources. Engine wheels live in `packaging/skulk-mlx-video`; candidate attestation and exact-byte promotion use `.github/workflows/mlx-video-wheel.yml`. Weights remain separate immutable selected packs, exposed through a local member-only view; missing Gemma 4/projections/tokenizer/quantization/VAEs fail before loading, with Hub access disabled. Native HQ uses the pinned Res2s pipeline; Comfy sampler overrides are refused. No tested-hardware allowlist is introduced. Video remains single-host, and measured model fit/phase profiles are separate acceptance requirements; the common memory guard is preserved.

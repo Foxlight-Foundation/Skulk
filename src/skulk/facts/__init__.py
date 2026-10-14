@@ -88,6 +88,7 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
     probe, which tests drive with an injected environment.
     """
     from skulk.provisioning.comfy import comfy_on_demand_variants
+    from skulk.provisioning.mlx_video import installable_video_builds
     from skulk.provisioning.stable_diffusion_cpp import (
         installable_image_builds,
         rehydrate_native_image,
@@ -106,6 +107,7 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
     return facts.model_copy(update={
         "comfy_on_demand_variants": variants,
         "stable_diffusion_cpp_installable_builds": image_builds,
+        "mlx_video_installable_builds": installable_video_builds(facts, offline=offline_mode()),
     })
 
 

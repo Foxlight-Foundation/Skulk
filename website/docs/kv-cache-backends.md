@@ -24,6 +24,17 @@ for using the dashboard selector.
 
 ## Current Status
 
+Cache settings are runtime inputs to the
+[configuration-specific memory contract](engine-compatibility.md). Weight
+quantization does not imply cache quantization. The placer and worker must use
+the same effective cache policy, including uncompressed layers and allocation
+overhead; an available but disabled mode supplies no memory savings. Nodes advertise effective settings and placements stamp them for the shared
+estimator and worker guard. Known standard cache layouts include storage, metadata,
+allocation padding and temporary workspace; unknown layouts and Optiq fallback
+retain a visible conservative FP16 estimate. TurboQuant currently stores byte
+codes, so a 3-bit codebook does not imply 3-bit packed storage. Settings drift
+requires a refreshed placement rather than allocating a differently sized cache.
+
 - `default`: existing behavior (no cache quantization)
 - `mlx_quantized`: MLX LM built-in `QuantizedKVCache`
 - `turboquant`: correctness-first TurboQuant-inspired KV cache for standard `KVCache` layers

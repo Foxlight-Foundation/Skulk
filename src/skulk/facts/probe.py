@@ -44,6 +44,7 @@ class _MemoryInfoLike:
 
 
 _DRM_ROOT = Path("/sys/class/drm")
+_KFD_ROOT = Path("/sys/class/kfd/kfd/topology/nodes")
 
 # Filesystem markers that an NVIDIA device is present even when NVML is not
 # importable: the kernel driver's proc node, the device nodes udev creates, and
@@ -245,7 +246,47 @@ def _amd_pci_device_id(device: Path) -> str | None:
     return f"{vendor:04x}:{chip:04x}"
 
 
-def _amd_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
+def _amd_gpu_architecture(device: Path, kfd_root: Path) -> str | None:
+    """Read an unambiguous kernel ISA target for this PCI chip without a vendor SDK.
+
+    KFD's gfx_target_version describes instruction compatibility; graphics IP
+    revision and marketing names do not. Missing/ambiguous facts stay unknown.
+    """
+    identity = _amd_pci_device_id(device)
+    if identity is None:
+        return None
+    chip = int(identity.split(":")[1], 16)
+    targets: set[str] = set()
+    try:
+        properties_paths = sorted(kfd_root.glob("[0-9]*/properties"))
+    except OSError:
+        return None
+    for properties in properties_paths:
+        try:
+            values = {
+                parts[0]: int(parts[1], 0)
+                for line in properties.read_text().splitlines()
+                if len(parts := line.split()) == 2
+            }
+        except (OSError, ValueError):
+            continue
+        version = values.get("gfx_target_version", 0)
+        if (
+            values.get("vendor_id") != 0x1002
+            or values.get("device_id") != chip
+            or version <= 0
+        ):
+            continue
+        major, remainder = divmod(version, 10000)
+        minor, stepping = divmod(remainder, 100)
+        if 0 < major < 100 and minor < 16 and stepping < 16:
+            targets.add(f"gfx{major}{minor:x}{stepping:x}")
+    return next(iter(targets)) if len(targets) == 1 else None
+
+
+def _amd_gpu_facts(
+    drm_root: Path, kfd_root: Path = _KFD_ROOT
+) -> tuple[GpuDeviceFact, ...]:
     """Observe every amdgpu render device under ``drm_root`` (passive sysfs)."""
     try:
         candidates = sorted(drm_root.glob("card[0-9]*/device"))
@@ -266,17 +307,17 @@ def _amd_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
                 vram_total_bytes=_read_sysfs_int(device / "mem_info_vram_total"),
                 gtt_total_bytes=_read_sysfs_int(device / "mem_info_gtt_total"),
                 pci_device_id=_amd_pci_device_id(device),
+                gpu_architecture=_amd_gpu_architecture(device, kfd_root),
             )
         )
     return tuple(facts)
 
 
-
 def _intel_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
     """Observe Intel DRM devices without inferring unmeasured GPU memory.
 
-    Both discrete and integrated GPUs enumerate here. The signed hardware
-    qualification and a live native Vulkan probe decide whether they can serve.
+    Both discrete and integrated GPUs enumerate here. Actual package requirements
+    and the native Vulkan device probe determine engine availability.
     """
     facts: list[GpuDeviceFact] = []
     for device in sorted(drm_root.glob("card[0-9]*/device")):
@@ -287,10 +328,15 @@ def _intel_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
             continue
         if vendor != "0x8086" or not 0 <= chip <= 0xFFFF:
             continue
-        facts.append(GpuDeviceFact(
-            vendor="intel", name="Intel GPU", index=len(facts),
-            detection_source="intel_drm_sysfs", pci_device_id=f"8086:{chip:04x}",
-        ))
+        facts.append(
+            GpuDeviceFact(
+                vendor="intel",
+                name="Intel GPU",
+                index=len(facts),
+                detection_source="intel_drm_sysfs",
+                pci_device_id=f"8086:{chip:04x}",
+            )
+        )
     return tuple(facts)
 
 
@@ -380,6 +426,7 @@ def gather_node_facts(
     env: Mapping[str, str] | None = None,
     nvml: NvmlLike | None = None,
     drm_root: Path = _DRM_ROOT,
+    kfd_root: Path = _KFD_ROOT,
     platform: str | None = None,
     nvidia_presence: bool | None = None,
 ) -> NodeFacts:
@@ -390,6 +437,7 @@ def gather_node_facts(
             defaults to the process environment).
         nvml: An initialized NVML surface, or ``None`` to load the real one.
         drm_root: The drm sysfs root to scan for amdgpu devices.
+        kfd_root: Passive KFD topology root for observed AMD ISA requirements.
         platform: ``sys.platform`` override for tests.
         nvidia_presence: Override for the NVML-less NVIDIA presence check
             (injected in tests; defaults to probing the real filesystem).
@@ -435,7 +483,9 @@ def gather_node_facts(
     if platform == "darwin":
         gpus.append(
             GpuDeviceFact(
-                vendor="apple", name=observe_apple_chip() or "Apple GPU", detection_source="apple_platform"
+                vendor="apple",
+                name=observe_apple_chip() or "Apple GPU",
+                detection_source="apple_platform",
             )
         )
     else:
@@ -453,7 +503,7 @@ def gather_node_facts(
                 GpuDeviceFact(vendor="nvidia", detection_source="nvidia_device_node"),
             )
         gpus.extend(nvidia)
-        gpus.extend(_amd_gpu_facts(drm_root))
+        gpus.extend(_amd_gpu_facts(drm_root, kfd_root))
         gpus.extend(_intel_gpu_facts(drm_root))
 
     llama_cpp_importable = False
@@ -488,6 +538,16 @@ def gather_node_facts(
     declared_llama_server = env.get(LLAMA_SERVER_BACKENDS_ENV)
     declared_vllm = env.get(VLLM_BACKENDS_ENV)
     comfy_binary = _binary_fact(COMFY_BIN_ENV, env)
+    from skulk.provisioning.mlx_video import installed_video_runtime
+
+    video_build: str | None = None
+    if platform == "darwin":
+        try:
+            installed_video = installed_video_runtime()
+            if installed_video is not None:
+                video_build = installed_video[1]
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            logger.debug(f"native video runtime is unavailable: {error}")
     from skulk.provisioning.stable_diffusion_cpp import BINARY_ENV, probe_native_image
 
     native_image_binary = _binary_fact(BINARY_ENV, env)
@@ -497,11 +557,15 @@ def gather_node_facts(
         try:
             observed = probe_native_image(Path(native_image_binary.configured_path))
             native_image_probe = StableDiffusionCppProbe(
-                outcome="ready", build_identity=observed.build_identity,
-                devices=observed.devices, computes=observed.computes,
+                outcome="ready",
+                build_identity=observed.build_identity,
+                devices=observed.devices,
+                computes=observed.computes,
             )
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            native_image_probe = StableDiffusionCppProbe(outcome="failed", detail=str(error)[:400])
+            native_image_probe = StableDiffusionCppProbe(
+                outcome="failed", detail=str(error)[:400]
+            )
     comfy_root = env.get(COMFY_ROOT_ENV, "").strip() or None
     comfy_root_state: Literal["not_configured", "missing", "ok"] = "not_configured"
     if comfy_root is not None:
@@ -518,14 +582,20 @@ def gather_node_facts(
             from skulk.provisioning.audio_cpp import audio_cpp_model_specs
 
             try:
-                audio_cpp_model_specs(Path(audio_cpp_binary.configured_path), environ=env)
+                audio_cpp_model_specs(
+                    Path(audio_cpp_binary.configured_path), environ=env
+                )
             except (OSError, RuntimeError) as error:
-                audio_cpp_probe = AudioCppProbe(outcome="failed", detail=str(error)[:400])
+                audio_cpp_probe = AudioCppProbe(
+                    outcome="failed", detail=str(error)[:400]
+                )
     audio_cpp_vulkan_binary = _binary_fact(AUDIO_CPP_VULKAN_BIN_ENV, env)
     audio_cpp_vulkan_probe = AudioCppProbe()
     if audio_cpp_vulkan_binary.state == "ok":
         assert audio_cpp_vulkan_binary.configured_path is not None
-        audio_cpp_vulkan_probe = probe_audio_cpp(audio_cpp_vulkan_binary.configured_path)
+        audio_cpp_vulkan_probe = probe_audio_cpp(
+            audio_cpp_vulkan_binary.configured_path
+        )
         if audio_cpp_vulkan_probe.outcome == "ready":
             from skulk.provisioning.audio_cpp import audio_cpp_model_specs
 
@@ -553,7 +623,12 @@ def gather_node_facts(
                 audio_cpp_cuda_probe = AudioCppProbe(
                     outcome="failed", detail=str(error)[:400]
                 )
-    test_video_engine = (env.get(TEST_VIDEO_ENGINE_ENV, "").strip().lower() in ("1", "true", "yes", "on"))
+    test_video_engine = env.get(TEST_VIDEO_ENGINE_ENV, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
     # Probe the binary's own device list only when there is a usable binary
     # and no SERVER-specific declaration answers the question. A llama.cpp
@@ -583,6 +658,7 @@ def gather_node_facts(
         declared_vllm_backends=declared_vllm,
         test_video_engine=test_video_engine,
         comfy_binary=comfy_binary,
+        mlx_video_build_identity=video_build,
         stable_diffusion_cpp_binary=native_image_binary,
         stable_diffusion_cpp_probe=native_image_probe,
         comfy_root=comfy_root,

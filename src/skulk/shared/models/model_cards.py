@@ -36,6 +36,7 @@ from skulk.shared.backends import (
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
     audio_cpp_cuda_hardware_matches,
     engine_of,
+    expand_engine_backends,
 )
 from skulk.shared.constants import (
     SKULK_CUSTOM_MODEL_CARDS_DIR,
@@ -911,6 +912,44 @@ def get_model_required_capabilities(model_card: "ModelCard") -> frozenset[str]:
     )
 
 
+def model_engine_requirements(model_card: "ModelCard") -> frozenset[str]:
+    """Read engine requirements, including legacy typed native artifact profiles.
+
+    Early music/image cards left backends empty to defer to qualification. Their
+    validated GGUF component profiles already identify the implemented native
+    runtime; preserve that knowledge without inventing a hardware permission list
+    or changing the immutable signed card bytes.
+    """
+    declared = model_card.placement.compatible_backends
+    if declared:
+        return declared
+    if model_card.music is not None:
+        return frozenset({"audio_cpp"})
+    if model_card.image is not None:
+        return frozenset({"stable_diffusion_cpp"})
+    return declared
+
+
+def registry_compatible_backends_for_node(
+    model_card: "ModelCard", *, node_backends: AbstractSet[str]
+) -> frozenset[str]:
+    """Resolve architecture-to-engine compatibility independently of test coverage.
+
+    Upstream compatibility identifies an engine that implements the model's
+    architecture/artifact. Build and hardware recorded with that evidence are
+    provenance, not an exclusive permission list. Empirical qualifications are
+    retained separately and cannot admit, prohibit or revoke a compute lane.
+    Local package requirements and implemented runner operations still apply.
+    """
+    engines = frozenset(
+        claim.engine
+        for claim in get_model_engine_support(model_card)
+        if claim.status == "supported"
+        and claim.evidence_kind == "upstream_compatibility"
+    )
+    return expand_engine_backends(engines) & node_backends
+
+
 def registry_supported_backends_for_node(
     model_card: "ModelCard",
     *,
@@ -918,7 +957,11 @@ def registry_supported_backends_for_node(
     engine_builds: Mapping[str, str],
     hardware_classes: AbstractSet[str],
 ) -> frozenset[str]:
-    """Resolve signed positive support against one node's live engine inventory."""
+    """Find fully qualified node lanes for reporting, never launch eligibility.
+
+    Exact build/hardware matches preserve the scope of an observed result.
+    Their absence must not restrict independently declared engine compatibility.
+    """
     required_capabilities = get_model_required_capabilities(model_card)
     if not required_capabilities:
         return frozenset()
@@ -940,7 +983,9 @@ def registry_supported_backends_for_node(
                 backend == "audio_cpp-cuda"
                 and required_cuda_class is not None
                 and (
-                    not audio_cpp_cuda_hardware_matches(required_cuda_class, hardware_classes)
+                    not audio_cpp_cuda_hardware_matches(
+                        required_cuda_class, hardware_classes
+                    )
                     or required_cuda_class not in claim.hardware_classes
                 )
             ):
@@ -2414,8 +2459,12 @@ class PlacementCardConfig(CamelCaseModel):
     this set. Making the implicit ``{"mlx"}`` explicit is what enables future
     heterogeneous (llama_cpp / rocm / cuda) routing."""
 
-    min_vram_gib: float | None = None
-    """Hard constraint: planner gates on node available memory when set."""
+    min_vram_gib: float | None = Field(
+        default=None,
+        deprecated=True,
+        description="Legacy reference memory figure; actual engine/workload estimates determine placement. This is not a universal hardware eligibility floor.",
+    )
+    """Legacy reference figure, not a universal configuration-independent minimum."""
 
     max_context_tokens: int | None = None
     """Soft: caps the placement-time KV budget check (see #145) when set."""

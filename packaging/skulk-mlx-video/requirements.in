@@ -1,0 +1,14 @@
+mlx==0.32.2
+mlx-metal==0.32.2
+mlx-lm==0.32.0
+mlx-arsenal==0.2.4
+safetensors==0.8.0
+huggingface-hub==1.8.0
+numpy==2.4.1
+pillow==12.3.0
+tqdm==4.67.1
+transformers==5.16.1
+av==18.0.0
+imageio-ffmpeg==0.6.0
+psutil==7.2.1
+pydantic==2.12.5

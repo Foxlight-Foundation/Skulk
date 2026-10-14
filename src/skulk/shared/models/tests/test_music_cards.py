@@ -256,15 +256,29 @@ def test_music_bounds_and_minimax_lyrics_are_validated() -> None:
 
 
 def test_music_platform_gate_accepts_only_audio_cpp() -> None:
-    available = frozenset({
-        "audio_cpp", "audio_cpp-cuda", "audio_cpp-cpu", "mlx_audio-metal", "llama_cpp-cpu",
-    })
+    available = frozenset(
+        {
+            "audio_cpp",
+            "audio_cpp-cuda",
+            "audio_cpp-cpu",
+            "mlx_audio-metal",
+            "llama_cpp-cpu",
+        }
+    )
     compatible = platform_compatible_backends(
         available,
         card_serves_vision=False,
         card_serves_music=True,
     )
-    assert compatible == frozenset({"audio_cpp-cuda", "audio_cpp-cpu"})
+    assert compatible == frozenset(
+        {
+            "audio_cpp-cuda",
+            "audio_cpp-cpu",
+            "audio_cpp-metal",
+            "audio_cpp-vulkan",
+            "audio_cpp-rocm",
+        }
+    )
     assert resolve_node_backend(compatible, (), available) == "audio_cpp-cuda"
 
 

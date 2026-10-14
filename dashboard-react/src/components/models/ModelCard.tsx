@@ -441,7 +441,7 @@ export function ModelCard({
             'modelCard.runtime.signedEngineSupportTooltip',
             'This backend was admitted by an exact signed engine-build support claim.',
           )}>
-            {t('modelCard.runtime.signedEngineSupport', 'Signed engine support')}
+            {t('modelCard.runtime.engineCompatibility', 'Engine compatibility')}
           </Badge>
         )}
         {isGguf ? (

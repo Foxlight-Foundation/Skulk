@@ -138,6 +138,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
             "engineBuilds": {},
             "installableEngineBuilds": {},
             "llamaServerSettings": None,
+            "engineMemorySettings": {},
             "hardwareClasses": [],
             "participation": "management",
             "apiAvailable": True,
@@ -152,6 +153,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
             "engineBuilds": {},
             "installableEngineBuilds": {},
             "llamaServerSettings": None,
+            "engineMemorySettings": {},
             "hardwareClasses": [],
             "participation": "full",
             "apiAvailable": True,
@@ -169,8 +171,7 @@ async def test_state_surfaces_split_data_transport_health() -> None:
         reasons = cast("list[dict[str, object]]", summary["reasons"])
         assert isinstance(reasons, list)
         assert any(
-            reason.get("code") == "data_transport_mismatch"
-            for reason in reasons
+            reason.get("code") == "data_transport_mismatch" for reason in reasons
         )
 
 
