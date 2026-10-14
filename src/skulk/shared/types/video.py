@@ -172,7 +172,7 @@ class VideoEditing(BaseModel):
 
     operation: Literal["retake", "extend"] = Field(description="Retake regenerates a region; extend appends to the source to reach the requested total duration.")
     start_seconds: float | None = Field(default=None, ge=0.0, le=120.0, description="Inclusive retake-region start, snapped to the causal latent grid.")
-    end_seconds: float | None = Field(default=None, gt=0.0, le=120.0, description="Exclusive retake-region end, snapped to the causal latent grid.")
+    end_seconds: float | None = Field(default=None, gt=0.0, le=121.0, description="Exclusive retake-region end, including the complete aligned clip duration, snapped to the causal latent grid.")
     regenerate_audio: bool = Field(default=True, description="Retake also regenerates its audio region; false preserves the source track. Extension generates new audio.")
 
     @model_validator(mode="after")
@@ -686,7 +686,8 @@ class VideoGenerationTaskParams(BaseModel):
                 raise ValueError("the selected artifact does not declare this video editing operation")
             if len(self.references) != 1 or self.references[0].kind != "video" or self.references[0].role != "source":
                 raise ValueError("editing requires exactly one source_video attachment")
-            if self.editing.end_seconds is not None and self.editing.end_seconds > self.seconds:
+            aligned_seconds = video.frame_count_for_seconds(self.seconds) / video.fps
+            if self.editing.end_seconds is not None and self.editing.end_seconds > aligned_seconds:
                 raise ValueError("the retake region exceeds the requested output duration")
             if self.width_height is None or self.aspect_ratio is not None:
                 raise ValueError("editing requires an explicit source-matching size")

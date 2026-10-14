@@ -142,3 +142,16 @@ def test_guided_protocol_keeps_required_default_fields(tmp_path: Path, pipeline:
     job, _ = plan_native_job(params, card, tmp_path, tmp_path, tmp_path)
     expected = {"video_cfg": guidance.get("video_cfg", 3.0), "audio_cfg": 7.0, "stg_scale": 0.0, "modality_scale": 1.0}
     assert f'"guidance":{json.dumps(expected, separators=(",", ":"))}' in serialize_native_job(job)
+
+
+@pytest.mark.parametrize("seconds", [1, 20, 120])
+def test_retake_can_select_the_complete_aligned_clip(seconds: int) -> None:
+    card = _card()
+    assert card.video is not None
+    video = card.video.model_copy(update={"max_seconds": 120})
+    actual_seconds = video.frame_count_for_seconds(seconds) / video.fps
+    params = _params(seconds=seconds, editing={"operation": "retake", "start_seconds": 0.0, "end_seconds": actual_seconds}, references=(_reference("video"),), reference_bytes=1, total_input_chunks=1)
+    params.validate_family(card.family, video)
+    assert params.editing is not None and params.editing.end_seconds == actual_seconds
+    with pytest.raises(ValueError, match="exceeds"):
+        _params(seconds=seconds, editing={"operation": "retake", "start_seconds": 0.0, "end_seconds": actual_seconds + 0.01}, references=(_reference("video"),), reference_bytes=1, total_input_chunks=1).validate_family(card.family, video)
