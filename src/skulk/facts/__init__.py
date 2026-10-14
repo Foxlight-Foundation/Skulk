@@ -88,6 +88,10 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
     probe, which tests drive with an injected environment.
     """
     from skulk.provisioning.comfy import comfy_on_demand_variants
+    from skulk.provisioning.stable_diffusion_cpp import (
+        installable_image_builds,
+        rehydrate_native_image,
+    )
     from skulk.shared.constants import offline_mode
 
     variants = tuple(
@@ -95,9 +99,14 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
         for variant in comfy_on_demand_variants(facts, offline=offline_mode())
         if variant == "cuda" or variant == "rocm"
     )
-    if not variants:
-        return facts
-    return facts.model_copy(update={"comfy_on_demand_variants": variants})
+    classes = hardware_class_inventory(facts)
+    if rehydrate_native_image(classes) is not None:
+        facts = gather_node_facts()
+    image_builds = installable_image_builds(facts, classes, offline=offline_mode())
+    return facts.model_copy(update={
+        "comfy_on_demand_variants": variants,
+        "stable_diffusion_cpp_installable_builds": image_builds,
+    })
 
 
 def current_node_facts() -> NodeFacts:

@@ -1,11 +1,13 @@
+import re
 import time
 from collections.abc import Generator
-from typing import Annotated, Any, Literal, cast, final, get_args
+from typing import Annotated, Any, Literal, cast, final
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
+from skulk.shared.models.image import ImageCardConfig
 from skulk.shared.models.memory_estimate import (
     MAX_REQUESTED_CONTEXT_TOKENS,
     MIN_REQUESTED_CONTEXT_TOKENS,
@@ -399,6 +401,7 @@ class ModelListModel(BaseModel):
             "Present only on video model cards."
         ),
     )
+    image: ImageCardConfig | None = Field(default=None, description="Declared image geometry, references, RGBA and sampling contract.")
     license: "LicenseSection | None" = Field(
         default=None,
         description=(
@@ -1458,6 +1461,9 @@ class GenerationStats(BaseModel):
 
 
 class ImageGenerationStats(BaseModel):
+    """Observed render timing and memory, with an explicit measurement scope."""
+
+    memory_scope: Literal["engine", "native_process_rss"] = Field(default="engine", description="Native RSS is sampled resident host memory; it does not claim GPU allocation measurements.")
     seconds_per_step: float
     total_generation_time: float
 
@@ -2417,7 +2423,7 @@ class AudioVoiceList(BaseModel, frozen=True):
     data: tuple[AudioVoice, ...] = ()
 
 
-ImageSize = Literal[
+LEGACY_IMAGE_SIZES = frozenset([
     "auto",
     "512x512",
     "768x768",
@@ -2426,16 +2432,21 @@ ImageSize = Literal[
     "1024x1024",
     "1024x1536",
     "1536x1024",
-]
+])
+ImageSize = Annotated[str, Field(pattern=r"^(auto|[1-9][0-9]{1,3}x[1-9][0-9]{1,3})$", description="auto or an explicit WIDTHxHEIGHT canvas; the selected model validates area and alignment.")]
 
 
 def normalize_image_size(v: object) -> ImageSize:
     """Shared validator for ImageSize fields: maps None → "auto" and rejects invalid values."""
     if v is None:
         return "auto"
-    if v not in get_args(ImageSize):
-        raise ValueError(f"Invalid size: {v!r}. Must be one of {get_args(ImageSize)}")
-    return v  # pyright: ignore[reportReturnType]
+    if not isinstance(v, str) or re.fullmatch(r"auto|[1-9][0-9]{1,3}x[1-9][0-9]{1,3}", v) is None:
+        raise ValueError("Image size must be auto or WIDTHxHEIGHT")
+    if v != "auto":
+        width, height = (int(part) for part in v.split("x", 1))
+        if not (64 <= width <= 4096 and 64 <= height <= 4096):
+            raise ValueError("Image canvas dimensions must be between 64 and 4096")
+    return v
 
 
 class AdvancedImageParams(BaseModel):
@@ -2480,6 +2491,8 @@ class ImageEditsTaskParams(BaseModel):
 
     image_data: str = ""  # Base64-encoded image (empty when using chunked transfer)
     total_input_chunks: int = 0
+    input_image_count: int = Field(default=1, ge=1, le=10, description="Ordered reference slots admitted by the API.")
+    reference_image_data: tuple[str, ...] = Field(default=(), exclude=True, description="Worker-local verified media; never serialized into cluster state.")
     prompt: str
     model: str
     n: int | None = 1
@@ -2500,7 +2513,7 @@ class ImageEditsTaskParams(BaseModel):
 
     def __repr_args__(self) -> Generator[tuple[str, Any], None, None]:
         for name, value in super().__repr_args__():  # pyright: ignore[reportAny]
-            if name == "image_data":
+            if name in {"image_data", "reference_image_data"}:
                 yield name, f"<{len(self.image_data)} chars>"
             elif name is not None:
                 yield name, value

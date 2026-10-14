@@ -30,13 +30,13 @@ from pydantic import ConfigDict, Field
 
 from skulk.utils.pydantic_ext import CamelCaseModel
 
-GpuVendor = Literal["nvidia", "amd", "apple"]
+GpuVendor = Literal["nvidia", "amd", "apple", "intel"]
 """Vendor of an observed GPU device."""
 
 GpuDetectionSource = Literal[
     "nvml",
     "nvidia_device_node",
-    "amdgpu_sysfs",
+    "amdgpu_sysfs", "intel_drm_sysfs",
     "apple_platform",
 ]
 """How a GPU was observed.
@@ -150,6 +150,23 @@ class AudioCppProbe(CamelCaseModel):
     outcome: Literal["not_run", "ready", "failed"] = "not_run"
     computes: tuple[str, ...] = ()
     detail: str = ""
+
+
+@final
+class StableDiffusionCppProbe(CamelCaseModel):
+    """Verified native image executable identity and observed GPU devices."""
+
+    model_config = ConfigDict(frozen=True)
+    outcome: Literal["not_run", "ready", "failed"] = "not_run"
+    """Whether the executable answered its source and GPU probe."""
+    build_identity: str | None = None
+    """Measured executable digest, never an operator-supplied build declaration."""
+    devices: tuple[str, ...] = ()
+    """Exact device names accepted by the native backend selector."""
+    computes: tuple[str, ...] = ()
+    """GPU compute lanes the binary reports; CPU is deliberately excluded."""
+    detail: str = ""
+    """Bounded private probe diagnostics for an unusable executable."""
 
 
 CapabilityConflictCode = Literal[
@@ -287,6 +304,15 @@ class NodeFacts(CamelCaseModel):
         default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_BIN")
     )
     """Only the prepared or explicit audio.cpp executable, never an installable wheel."""
+
+    stable_diffusion_cpp_binary: EngineBinaryFact = Field(
+        default_factory=lambda: EngineBinaryFact(env_var="SKULK_STABLE_DIFFUSION_CPP_BIN")
+    )
+    """State of the prepared native image executable."""
+    stable_diffusion_cpp_probe: StableDiffusionCppProbe = StableDiffusionCppProbe()
+    """Executable-bound identity and actual GPU devices."""
+    stable_diffusion_cpp_installable_builds: dict[str, str] = Field(default_factory=dict)
+    """Published GPU packages this host may acquire; distinct from installed inventory."""
 
     audio_cpp_probe: AudioCppProbe = AudioCppProbe()
     """The binary's own version and device report, required for readiness."""

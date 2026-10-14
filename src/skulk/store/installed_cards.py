@@ -75,6 +75,7 @@ InstalledArtifactRole = Literal[
     "served_draft",
     "vllm_draft",
     "video_companion",
+    "image_component",
 ]
 
 
@@ -468,6 +469,10 @@ def companion_artifact_role(
 
     if owner_card.vision is not None and owner_card.vision.weights_repo == repository:
         return "vision_weights"
+    if owner_card.image is not None and repository != str(owner_card.artifact_repository) and any(
+        component.repository == repository for component in owner_card.image.components
+    ):
+        return "image_component"
     runtime = owner_card.runtime
     if runtime is not None:
         if runtime.mtp_sidecar_repo == repository:
@@ -997,6 +1002,8 @@ def refresh_registry_installed_card_if_same_artifact(
         required_files.extend(
             (item.path, item.size_bytes) for item in model_card.artifact_bundle.files
         )
+    if model_card.image is not None:
+        required_files.extend((item.path, item.size_bytes) for item in model_card.image.files_for_source(str(model_card.artifact_repository), model_card.source_revision))
     if model_card.gguf_file is not None:
         required_files.append((model_card.gguf_file, None))
     if model_card.vision is not None and model_card.vision.projector_file is not None:
@@ -1254,6 +1261,11 @@ def _legacy_companion_artifact_is_complete(
             candidate.is_file() and candidate.stat().st_size > 0
             for candidate in model_directory.rglob("*.safetensors")
         )
+    if artifact_role == "image_component":
+        expected = [item for component in (card.image.components if card.image is not None else ())
+            if _artifact_directory_matches(model_directory.name, ModelId(component.repository), component.revision)
+            for item in component.files]
+        return bool(expected) and all((model_directory / item.path).is_file() and (model_directory / item.path).stat().st_size == item.size_bytes for item in expected)
     if artifact_role == "video_companion":
         # A video companion repository is staged as exactly the files the
         # card names from it, not as a model directory.

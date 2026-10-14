@@ -491,12 +491,15 @@ def _declared_companion_files(
     owner_card: ModelCard | None,
     artifact_role: InstalledArtifactRole,
 ) -> tuple[tuple[str, int | None], ...]:
-    """The exact files, with sizes when known, an owner names from a video companion.
+    """The exact files, with sizes when known, an owner names from an image or video artifact.
 
-    A video companion repository is staged as the files its owning card names
-    from it, not as a model directory, so the ordinary layout probes cannot
-    tell it is complete. Empty for every other artifact.
+    Image and video files are selected by their owning card, so an ordinary
+    model-layout probe cannot prove their completeness. Other artifacts return
+    no additional manifest files.
     """
+    image_card = owner_card or shard.model_card
+    if image_card.image is not None and artifact_role in ("base", "image_component"):
+        return tuple((item.path, item.size_bytes) for item in image_card.image.files_for_source(str(shard.model_card.artifact_repository), shard.model_card.source_revision))
     if (
         artifact_role != "video_companion"
         or owner_card is None

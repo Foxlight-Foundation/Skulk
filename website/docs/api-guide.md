@@ -1652,13 +1652,32 @@ Request fields:
 | `model` | string | Required placed image model id |
 | `prompt` | string | Required generation prompt |
 | `n` | integer | Number of images; default `1` |
-| `size` | string | `auto` (default), `512x512`, `768x768`, `1024x768`, `768x1024`, `1024x1024`, `1024x1536`, or `1536x1024` |
+| `size` | string | `auto` (default) uses the model canvas. Native image cards accept `WIDTHxHEIGHT`, with each dimension 64–4096 and model-specific alignment and area limits; eligible cards permit 2K canvases. Legacy MLX models retain their existing size list |
 | `quality` | string | `high`, `medium` (default), or `low` |
 | `output_format` | string | `png` (default), `jpeg`, or `webp` |
 | `response_format` | string | `b64_json` (default) returns inline base64 image data; `url` stores each image on this API node and returns a fetchable URL instead |
-| `stream` | boolean | With `partial_images > 0`, returns an SSE stream of partial and final images instead of one JSON response |
+| `stream` | boolean | For native profiles, true returns SSE final-image events and `[DONE]`; positive `partial_images` additionally requests previews. Legacy models require positive previews for SSE |
 | `partial_images` | integer | Number of intermediate previews per image when streaming; default `0` |
 | `advanced_params` | object | Optional `seed`, `num_inference_steps` (1-100), `guidance` (1.0-20.0), `negative_prompt`, and `num_sync_steps` (1-100). When `seed` is omitted, Skulk assigns one so multi-node generation stays deterministic |
+
+Native image generation and editing honor `stream=true` even with
+`partial_images=0`: the response is terminal-only SSE, and closing it cancels the
+command. Legacy image models retain their positive-preview streaming contract.
+
+Native image cards admit `n` from 1 to 4 and expose geometry, reference count,
+RGBA support, and sampling defaults in `/v1/models` under `image`. Native prompts
+and negative prompts are each bounded to 32,768 UTF-8 bytes.
+Seeds must fit the signed 64-bit range, including successive seeds for `n` images.
+Blank or corrupt terminal outputs fail the task. Native benchmark memory uses
+sampled host process RSS (`memory_scope: native_process_rss`); GPU allocation
+measurements require separate hardware telemetry.
+
+Qwen Image 2.1 Turbo requires its fixed eight-step schedule, guidance 1, and an empty
+negative prompt; incompatible overrides return **400** before dispatch.
+PNG and WebP preserve native alpha output; JPEG encoding discards alpha.
+Native producers run one image at a time and retain no terminal job after
+collection. Disconnect and cancellation stop the owned task. An unqualified
+engine/card pair is not eligible for normal placement.
 
 The non-streaming response is `{ "created": ..., "data": [...] }` with one
 `b64_json` or `url` entry per image.
@@ -1684,8 +1703,13 @@ Form fields mirror the generation fields (`n`, `size`, `quality`,
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `image` | file | Required input image, at most 24 MiB raw; larger uploads return **413 Request Entity Too Large** |
+| `image` | file | One input image. Supply this or `image[]`, never both |
+| `image[]` | repeated file | Ordered references for cards declaring multiple-image editing, up to the selected card limit. All inputs together are limited to 24 MiB raw (**413** when exceeded); native inputs must be valid PNG, JPEG or WebP and total at most 16,777,216 decoded pixels (**400** otherwise) |
 | `input_fidelity` | string | `low` (default) or `high`; controls how strongly the input image constrains the edit |
+
+The native SDXL runner accepts one initialization image; extra references return
+**400** before media dispatch even if the intrinsic profile declares a broader
+reference limit.
 
 The input image travels to the selected worker over the bounded vision media
 path described under chat image inputs; it is never written to the event log
@@ -3331,8 +3355,10 @@ The optional JSON body accepts the following fields:
 - `owner_registry_card_id`: immutable signed identity of that owning base card.
   Omit it only for installed or custom owner cards without a registry identity.
 - `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
-  `served_draft`, `vllm_draft`, or `video_companion` (a video card's externally
-  hosted companion, such as guide preprocessor weights); defaults to `base`.
+  `served_draft`, `vllm_draft`, `video_companion` (a video card's externally
+  hosted companion, such as guide preprocessor weights), or `image_component`
+  (an image card's external component repository/revision group); defaults to
+  `base`.
 
 A complete companion request names the companion repository and immutable
 revision, its role, and its owning card:
@@ -3372,6 +3398,15 @@ require the repository, revision, selected file, and `artifact_role` to match
 that owning card's signed companion declaration. A mismatched alias, role, or
 artifact selection returns `409 Conflict`; malformed identifiers and roles
 return `400 Bad Request`.
+
+For a typed image card, the store derives the exact component selection from
+its independently verified complete card. The base transaction includes every
+primary-repository component, including the VAE. An `image_component` request
+omits `gguf_file` and selects every declared file in its pinned external source
+group, including both text and vision encoders when declared. Missing files,
+listing-size conflicts, or failed object verification fail the transaction;
+unrelated quants and projectors are excluded. A cached base GGUF alone does not
+mark the group complete: missing components trigger recovery.
 
 The response reports `modelId`, nullable `sourceRevision`, `status`, and
 `progress`; transport or store rejection additionally reports `error`. The

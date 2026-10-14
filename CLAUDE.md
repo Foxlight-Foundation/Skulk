@@ -1731,3 +1731,89 @@ scope is the local API host, and installation, enablement, reachability and exac
 live readiness are distinct. Steward's optional installed-metadata reader is
 bound to the HTTP request and rechecks authority for each invocation. Provider
 approval/lifecycle and allocated compute remain separate from these declarations.
+
+
+Native image profiles use the single-host/single-GPU `stable_diffusion_cpp`
+runner, with verified component hashes and private native-job ownership.
+Qwen Image 2.1 and Turbo CUDA/Vulkan loads enable Flash Attention to reduce memory
+pressure at the default 2048-square canvas. ROCm loads also enable it to avoid
+observed native kernel-launch failures at that canvas.
+SDXL Metal loads disable batched classifier-free guidance to avoid blank
+outputs and enable Flash Attention at the default 1024-square canvas.
+Native CUDA wheel assembly requires `GGML_CUDA_NCCL=OFF` for the single-GPU
+image contract and to avoid an unnecessary host-library dependency.
+The portable Vulkan workflow pins and hashes the LunarG 1.4.350.0 shader SDK,
+records the compiled CPU instruction requirements, and bundles the Vulkan loader
+with its copyright notice. Package discovery and managed-binary probing reject
+hosts lacking required CPU instructions. GPU drivers remain host dependencies.
+Native image teardown retains the producer handle through a 30-second graceful
+wait and 15-second forced reap; its supervisor allows 50 seconds for cleanup.
+Published installable builds and installed measured builds remain separate in
+NodeResources. Candidate wheels grant no normal placement support; no CPU-only
+native image lane is delivered. See the architecture reference and
+`packaging/skulk-stable-diffusion-cpp/README.md` for preparation and build details.
+
+The native image candidate build workflow covers Metal ARM64, CUDA ARM64/x86_64,
+Vulkan x86_64 and ROCm x86_64. Linux compiler images are digest-pinned; CUDA
+embeds runtime/BLAS with an external driver, Vulkan bundles its loader, and the
+ROCm candidate records runtime libraries plus gfx942 code objects. Builds retain
+component notices and nested payload hashes and remain unqualified until exact
+hardware/model, loader and lifecycle gates pass. See
+`packaging/skulk-stable-diffusion-cpp/README.md`.
+
+Qwen Image 2.1 Vulkan loads also select 512-pixel VAE tiles with 25% overlap.
+This avoids the tested device single-buffer limit at 2K and its expensive CPU
+decode retry. Native teardown checks for an already-reaped process before
+signalling its former group; the runner retains ownership until exit is confirmed.
+
+Native image runners revalidate the exact installed package at model load when
+their inherited environment predates installation. This cache lookup never
+downloads and keeps model/engine preparation parallel while preventing a first-use
+runner crash. Explicit binary overrides still take precedence.
+
+Managed native image build identities include the executable and bundled runtime
+file digests. Probes verify these bytes before execution and select the managed
+library/code-object paths rather than inherited SDK overrides. Wheel descriptors
+carry exact archive and expanded sizes, bounded at 3 GiB and 8 GiB respectively;
+installation checks staging space for both plus a 1 GiB reserve. Legacy candidate
+packages retain the earlier executable identity and conservative size defaults.
+
+Metal native image instances keep parameters on their verified GPU to avoid
+duplicated residency in unified memory. CUDA/Vulkan/ROCm retain CPU parameter
+offload. Metal SDXL and Z-Image Turbo additionally use Flash Attention and
+512-pixel VAE tiles with 25% overlap; SDXL uses separate guidance passes.
+The tested Q8 SDXL and Z-Image default workflows stayed below kernel warning
+pressure on a 16 GiB Apple host.
+
+Native image wheel publication promotes selected qualified artifacts from a
+successful candidate workflow run. The dispatch requires a filename/digest map,
+verifies the originating workflow and source commit attestation, and publishes
+those exact bytes without rebuilding; model/device claims remain separately gated.
+
+Apple hardware inventory retains the generic `apple:apple-gpu` class and adds
+the passively observed chip class (for example `apple:apple-m4`) when macOS
+reports it. Missing chip observations add no exact class. Native image package
+eligibility and signed support claims can therefore select measured Apple
+hardware without broadening qualification to every Metal device.
+
+Native image placement requires one pipeline rank and one observed GPU; tensor
+sharding or ambiguous multi-device install offers are rejected before preparation.
+Base image downloads select every pinned primary-repository component, including
+its VAE/encoders, while companions in other repositories use their own pinned
+transactions. Dashboard native image requests own SSE responses so Stop closes
+the stream and cancels the underlying command rather than only aborting an
+unobserved non-streaming fetch.
+
+Image downloads select every pinned file in the owning card's repository/revision
+group, including a same-repository VAE. External groups retain the durable
+`image_component` artifact role and the complete owning card; store approval
+checks that exact source group. Store transfers verify declared sizes and object
+identities, recover missing component files from partial caches, and exclude
+unrelated quants/projectors. Direct-Hub fallback carries the same exact file
+bundle, so store unavailability does not widen the download.
+
+Native image package eligibility uses standard interpreter wheel-platform tags
+before download/cache acquisition, alongside architecture, CPU instructions and
+qualified hardware. The published Linux wheels require glibc 2.35 or newer; musl
+and older glibc do not receive install offers. macOS minimums come from the same
+platform-tag check. Manual extraction never bypasses the ABI eligibility gate.

@@ -26,12 +26,14 @@ from skulk.shared.types.node_facts import (
     GpuDeviceFact,
     LlamaServerDeviceProbe,
     NodeFacts,
+    StableDiffusionCppProbe,
 )
 
 # Import lazily-safe helpers from the existing collectors rather than growing
 # sibling probe logic (#614: nobody probes ad hoc; existing gatherers become
 # sources for this one record).
 from skulk.utils.info_gatherer.nvidia_gpu import NvmlLike, load_nvml
+from skulk.utils.info_gatherer.system_info import observe_apple_chip
 
 
 @final
@@ -269,6 +271,29 @@ def _amd_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
     return tuple(facts)
 
 
+
+def _intel_gpu_facts(drm_root: Path) -> tuple[GpuDeviceFact, ...]:
+    """Observe Intel DRM devices without inferring unmeasured GPU memory.
+
+    Both discrete and integrated GPUs enumerate here. The signed hardware
+    qualification and a live native Vulkan probe decide whether they can serve.
+    """
+    facts: list[GpuDeviceFact] = []
+    for device in sorted(drm_root.glob("card[0-9]*/device")):
+        try:
+            vendor = (device / "vendor").read_text().strip().lower()
+            chip = int((device / "device").read_text().strip(), 16)
+        except (OSError, ValueError):
+            continue
+        if vendor != "0x8086" or not 0 <= chip <= 0xFFFF:
+            continue
+        facts.append(GpuDeviceFact(
+            vendor="intel", name="Intel GPU", index=len(facts),
+            detection_source="intel_drm_sysfs", pci_device_id=f"8086:{chip:04x}",
+        ))
+    return tuple(facts)
+
+
 def _binary_fact(env_var: str, env: Mapping[str, str]) -> EngineBinaryFact:
     """Classify one engine-binary declaration into an :class:`EngineBinaryFact`."""
     configured = env.get(env_var, "").strip()
@@ -410,7 +435,7 @@ def gather_node_facts(
     if platform == "darwin":
         gpus.append(
             GpuDeviceFact(
-                vendor="apple", name="Apple GPU", detection_source="apple_platform"
+                vendor="apple", name=observe_apple_chip() or "Apple GPU", detection_source="apple_platform"
             )
         )
     else:
@@ -429,6 +454,7 @@ def gather_node_facts(
             )
         gpus.extend(nvidia)
         gpus.extend(_amd_gpu_facts(drm_root))
+        gpus.extend(_intel_gpu_facts(drm_root))
 
     llama_cpp_importable = False
     llama_cpp_gpu_offload: bool | None = None
@@ -462,6 +488,20 @@ def gather_node_facts(
     declared_llama_server = env.get(LLAMA_SERVER_BACKENDS_ENV)
     declared_vllm = env.get(VLLM_BACKENDS_ENV)
     comfy_binary = _binary_fact(COMFY_BIN_ENV, env)
+    from skulk.provisioning.stable_diffusion_cpp import BINARY_ENV, probe_native_image
+
+    native_image_binary = _binary_fact(BINARY_ENV, env)
+    native_image_probe = StableDiffusionCppProbe()
+    if native_image_binary.state == "ok":
+        assert native_image_binary.configured_path is not None
+        try:
+            observed = probe_native_image(Path(native_image_binary.configured_path))
+            native_image_probe = StableDiffusionCppProbe(
+                outcome="ready", build_identity=observed.build_identity,
+                devices=observed.devices, computes=observed.computes,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            native_image_probe = StableDiffusionCppProbe(outcome="failed", detail=str(error)[:400])
     comfy_root = env.get(COMFY_ROOT_ENV, "").strip() or None
     comfy_root_state: Literal["not_configured", "missing", "ok"] = "not_configured"
     if comfy_root is not None:
@@ -543,6 +583,8 @@ def gather_node_facts(
         declared_vllm_backends=declared_vllm,
         test_video_engine=test_video_engine,
         comfy_binary=comfy_binary,
+        stable_diffusion_cpp_binary=native_image_binary,
+        stable_diffusion_cpp_probe=native_image_probe,
         comfy_root=comfy_root,
         comfy_root_state=comfy_root_state,
         declared_comfy_backends=declared_comfy,

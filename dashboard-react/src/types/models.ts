@@ -101,6 +101,21 @@ export interface RegistryEngineSupportClaim {
   supersedes_claim_id?: string | null;
 }
 
+/** Image geometry and sampling contract returned by the model catalog. */
+export interface ImageCapabilityInfo {
+  /** Exact native image checkpoint family. */
+  family: 'qwen_image_21' | 'qwen_image_21_turbo' | 'flux_2_klein_4b' | 'z_image_turbo' | 'sdxl';
+  defaultWidth: number;
+  defaultHeight: number;
+  dimensionMultiple: number;
+  maxPixels: number;
+  maxReferenceImages: number;
+  supportsAlpha: boolean;
+  defaultSteps: number;
+  defaultGuidance: number;
+  fixedSigmas: readonly number[];
+}
+
 /** Complete dashboard-facing model metadata entry returned by the model catalog. */
 export interface ModelInfo {
   id: string;
@@ -138,6 +153,7 @@ export interface ModelInfo {
   reasoning?: ReasoningCapabilityInfo;
   modalities?: ModalitiesCapabilityInfo;
   audio?: AudioCapabilityInfo;
+  image?: ImageCapabilityInfo | null;
   tooling?: ToolingCapabilityInfo;
   runtime?: RuntimeCapabilityInfo;
   resolved_capabilities?: ResolvedModelCapabilities;

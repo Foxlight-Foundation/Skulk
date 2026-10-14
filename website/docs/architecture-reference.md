@@ -1737,3 +1737,91 @@ Ordinary Chat also pins asynchronous user and assistant writes to their originat
 - `extensions/installed_capabilities.py`: `InstalledCapabilities` combines current local manager selections with separate owner reachability and exact live contract readiness. Readiness requires the selected bundle/version/digest-compatible descriptor and current manager/child admission. A ready provisioner does not prove acquired inference capacity.
 - `GET /v1/plugins/managed/capabilities` reads only this API host's configured manager. `GET /v1/plugins/managed/{plugin_id}/capabilities/{qualified_id}?revision=<digest>` reads one exact selected full descriptor, bounded to 64 KiB. Both require direct owner authority or `plugins:read`; neither attaches, repairs setup, enables children or invokes providers. Unknown metadata and retained uninstalled selections remain distinct from usable capacity.
 - Steward exposes `get_installed_capabilities` only through a request-bound authorized reader that checks `plugins:read` again on every invocation. No-argument reads give bounded installed summaries; an exact plugin/id@version/revision selection reads its schema. Oversized model results disclose omission and retain the authorized full-detail endpoint. Ordinary general Steward access grants no installation-read permission.
+
+
+### Native image engine
+
+`stable_diffusion_cpp` serves typed `image` model profiles through one resident,
+headless, authenticated loopback subprocess per single-host, single-GPU instance.
+Its compute lanes are `metal`, `cuda`, `vulkan`, and `rocm`; CPU-only serving is
+excluded. Complete immutable component files are verified before load. Model
+placement can schedule an `InstallEngine` task for an exact published package;
+browsing does not acquire packages. `NodeResources.installable_engine_builds`
+records those candidates separately from measured `engine_builds`.
+Native package descriptors and build manifests additionally declare compiled
+CPU helper instructions. Package discovery also matches the interpreter's
+standard wheel-platform tags, rejecting older glibc, musl and older macOS before
+acquisition. Package discovery refuses incompatible hosts, and
+managed-binary probing checks these prerequisites before execution.
+Signed support claims, exact build identity, hardware match, and runner limits still gate normal
+placement. A candidate source build alone grants no support.
+
+Image downloads select every pinned file in the owning card's repository/revision
+group, including a same-repository VAE. External groups retain the durable
+`image_component` artifact role and the complete owning card; store approval
+checks that exact source group. Store transfers verify declared sizes and object
+identities, recover missing component files from partial caches, and exclude
+unrelated quants/projectors. Direct-Hub fallback carries the same exact file
+bundle, so store unavailability does not widen the download.
+
+The runner serializes image work with bounded admission, forwards previews and
+final PNG/JPEG/WebP through the existing image chunks, and cancels/deletes owned
+native jobs. The native watchdog exits on owner death. `SKULK_STABLE_DIFFUSION_CPP_BIN`
+selects a preprepared binary; package preparation obeys offline mode and
+`SKULK_NO_ENGINE_AUTOPROVISION`. Ordered reference edits use slot-indexed
+`VISION_MEDIA` frames and worker-local media, never replicated input bytes.
+Qwen Image 2.1 and Turbo CUDA/Vulkan instances enable Flash Attention at load time
+to reduce attention memory pressure at the default 2048-square canvas. ROCm
+instances also enable it to avoid observed native kernel-launch failures at
+that canvas.
+SDXL Metal loads disable batched classifier-free guidance to avoid blank
+outputs and enable Flash Attention at the default 1024-square canvas.
+Native shutdown retains process ownership through a bounded 30-second graceful
+wait and 15-second forced reap. Its supervisor allows 50 seconds for this cleanup,
+including large BF16 GPU contexts; failed reaping remains a visible failure.
+
+The native image candidate build workflow covers Metal ARM64, CUDA ARM64/x86_64,
+Vulkan x86_64 and ROCm x86_64. Linux compiler images are digest-pinned; CUDA
+embeds runtime/BLAS with an external driver, Vulkan bundles its loader, and the
+ROCm candidate records runtime libraries plus gfx942 code objects. Builds retain
+component notices and nested payload hashes and remain unqualified until exact
+hardware/model, loader and lifecycle gates pass. See
+`packaging/skulk-stable-diffusion-cpp/README.md`.
+
+Qwen Image 2.1 Vulkan loads also select 512-pixel VAE tiles with 25% overlap.
+This avoids the tested device single-buffer limit at 2K and its expensive CPU
+decode retry. Native teardown checks for an already-reaped process before
+signalling its former group; the runner retains ownership until exit is confirmed.
+
+Native image runners revalidate the exact installed package at model load when
+their inherited environment predates installation. This cache lookup never
+downloads and keeps model/engine preparation parallel while preventing a first-use
+runner crash. Explicit binary overrides still take precedence.
+
+Managed native image build identities include the executable and bundled runtime
+file digests. Probes verify these bytes before execution and select the managed
+library/code-object paths rather than inherited SDK overrides. Wheel descriptors
+carry exact archive and expanded sizes, bounded at 3 GiB and 8 GiB respectively;
+installation checks staging space for both plus a 1 GiB reserve. Legacy candidate
+packages retain the earlier executable identity and conservative size defaults.
+
+Metal native image instances keep parameters on their verified GPU to avoid
+duplicated residency in unified memory. CUDA/Vulkan/ROCm retain CPU parameter
+offload. Metal SDXL and Z-Image Turbo additionally use Flash Attention and
+512-pixel VAE tiles with 25% overlap; SDXL uses separate guidance passes.
+The tested Q8 SDXL and Z-Image default workflows stayed below kernel warning
+pressure on a 16 GiB Apple host.
+
+Apple hardware inventory retains the generic `apple:apple-gpu` class and adds
+the passively observed chip class (for example `apple:apple-m4`) when macOS
+reports it. Missing chip observations add no exact class. Native image package
+eligibility and signed support claims can therefore select measured Apple
+hardware without broadening qualification to every Metal device.
+
+Native image placement requires one pipeline rank and one observed GPU; tensor
+sharding or ambiguous multi-device install offers are rejected before preparation.
+Base image downloads select every pinned primary-repository component, including
+its VAE/encoders, while companions in other repositories use their own pinned
+transactions. Dashboard native image requests own SSE responses so Stop closes
+the stream and cancels the underlying command rather than only aborting an
+unobserved non-streaming fetch.
