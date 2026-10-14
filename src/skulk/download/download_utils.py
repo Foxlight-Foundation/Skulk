@@ -2033,31 +2033,41 @@ async def download_shard(
         filter_repo_objects(
             file_list,
             allow_patterns=allow_patterns,
-            ignore_patterns=["original/*", "metal/*"],
+            ignore_patterns=[] if shard.model_card.image is not None else ["original/*", "metal/*"],
             key=lambda x: x.path,
         )
     )
     bundle = shard.model_card.artifact_bundle
-    if bundle is not None:
+    expected_files = {item.path: (item.size_bytes, item.object_id) for item in bundle.files} if bundle is not None else {}
+    if shard.model_card.image is not None:
+        # A primary bundle does not replace same-repository component sources.
+        # Their exact manifest outranks the legacy MLX layout exclusions.
+        for item in shard.model_card.image.files_for_source(str(shard.model_card.artifact_repository), revision):
+            previous = expected_files.get(item.path)
+            if previous is not None and (previous[0] != item.size_bytes or (previous[1] is not None and previous[1] != item.object_id)):
+                raise ValueError(f"Image component conflicts with artifact bundle: {item.path}")
+            expected_files[item.path] = (item.size_bytes, item.object_id)
+    if expected_files:
+        manifest_label = "Image component" if shard.model_card.image is not None else "Signed artifact bundle"
         listed_by_path = {item.path: item for item in filtered_file_list}
         exact_files: list[FileListEntry] = []
-        for expected in bundle.files:
-            observed = listed_by_path.get(expected.path)
+        for path, (size, _object_id) in expected_files.items():
+            observed = listed_by_path.get(path)
             if observed is None:
                 raise FileNotFoundError(
-                    f"Signed artifact bundle file is absent: {expected.path}"
+                    f"{manifest_label} file is absent: {path}"
                 )
-            if observed.size != expected.size_bytes:
+            if observed.size != size:
                 raise ValueError(
-                    f"Signed artifact bundle size mismatch for {expected.path}: "
-                    f"expected {expected.size_bytes}, listing reports {observed.size}"
+                    f"{manifest_label} size mismatch for {path}: "
+                    f"expected {size}, listing reports {observed.size}"
                 )
             exact_files.append(observed)
         filtered_file_list = exact_files
 
     # For image models, skip root-level safetensors files since weights
     # are stored in component subdirectories (e.g., transformer/, vae/)
-    if bundle is None and is_image_model(shard):
+    if bundle is None and shard.model_card.image is None and is_image_model(shard):
         filtered_file_list = [
             f
             for f in filtered_file_list
@@ -2180,7 +2190,7 @@ async def download_shard(
             def progress(curr_bytes: int, total_bytes: int, is_renamed: bool) -> None:
                 schedule_progress(file, curr_bytes, total_bytes, is_renamed)
 
-            if bundle is None:
+            if not expected_files:
                 await download_file_with_retry(
                     shard.model_card.artifact_repository,
                     revision,
@@ -2191,7 +2201,7 @@ async def download_shard(
                     skip_internet=skip_internet,
                 )
                 return
-            expected = next(item for item in bundle.files if item.path == file.path)
+            expected_size, expected_object_id = expected_files[file.path]
             await download_file_with_retry(
                 shard.model_card.artifact_repository,
                 revision,
@@ -2200,8 +2210,8 @@ async def download_shard(
                 progress,
                 on_connection_lost=on_connection_lost,
                 skip_internet=skip_internet,
-                expected_size=expected.size_bytes,
-                expected_object_id=expected.object_id,
+                expected_size=expected_size,
+                expected_object_id=expected_object_id,
             )
 
     download_cancelled = False

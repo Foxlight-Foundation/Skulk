@@ -2,7 +2,10 @@
 """Native image store transactions retain every pinned source-group component."""
 
 import asyncio
+import base64
 import hashlib
+import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -15,9 +18,16 @@ from skulk.shared.models.image import (
     ImageComponentFile,
     ImageComponentRole,
 )
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ArtifactBundleConfig,
+    ArtifactBundleFile,
+    ModelCard,
+    ModelId,
+    ModelTask,
+)
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.worker.downloads import FileListEntry
+from skulk.shared.types.worker.downloads import FileListEntry, RepoDownloadProgress
+from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from skulk.store import model_store_server as server_module
 from skulk.store.installed_cards import companion_artifact_role
 from skulk.store.model_store import ModelStore, select_store_image_files
@@ -31,10 +41,10 @@ DATA = b"abcdefg"
 IDENTITY = "sha256:" + hashlib.sha256(DATA).hexdigest()
 
 
-def _owner() -> ModelCard:
+def _owner(primary_file: str = "diffusion.gguf") -> ModelCard:
     """Return a synthetic complete card with base and grouped encoder artifacts."""
     sources: list[tuple[ImageComponentRole, str, str, str]] = [
-        ("diffusion", "owner/base", "a" * 40, "diffusion.gguf"),
+        ("diffusion", "owner/base", "a" * 40, primary_file),
         ("vae", "owner/base", "a" * 40, "vae.safetensors"),
         ("text_encoder", "owner/encoders", "b" * 40, "encoder.gguf"),
         ("text_encoder_vision", "owner/encoders", "b" * 40, "mmproj-BF16.gguf"),
@@ -43,7 +53,7 @@ def _owner() -> ModelCard:
         model_id=ModelId("test/image"),
         source_repository=ModelId("owner/base"),
         source_revision="a" * 40,
-        gguf_file="diffusion.gguf",
+        gguf_file=primary_file if primary_file.endswith(".gguf") else None,
         storage_size=Memory.from_bytes(28),
         n_layers=1,
         hidden_size=1,
@@ -68,6 +78,52 @@ def _owner() -> ModelCard:
             ),
         ),
     )
+
+
+@pytest.mark.parametrize("primary_file", ["diffusion.gguf", "diffusion.safetensors"])
+@pytest.mark.parametrize("has_primary_bundle", [False, True])
+async def test_direct_native_image_transfer_retains_root_components(
+    primary_file: str, has_primary_bundle: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exact primary/VAE files survive downstream MLX filters, with or without a bundle."""
+    owner = _owner(primary_file)
+    if has_primary_bundle:
+        manifest = [{"relative_path": primary_file, "size_bytes": 7, "object_id": IDENTITY}]
+        digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).digest()
+        owner = owner.model_copy(update={"artifact_bundle": ArtifactBundleConfig(
+            bundle_id="bundle_" + base64.b32encode(digest).decode().rstrip("=").lower(),
+            files=(ArtifactBundleFile(path=primary_file, size_bytes=7, object_id=IDENTITY),), download_size=7,
+        )})
+    shard = PipelineShardMetadata(model_card=owner, device_rank=0, world_size=1, start_layer=0, end_layer=1, n_layers=1)
+    fetched: list[str] = []
+    seen: list[RepoDownloadProgress] = []
+
+    async def listing(repository: ModelId, revision: str, **_kwargs: object) -> list[FileListEntry]:
+        assert str(repository) == "owner/base" and revision == "a" * 40
+        return [FileListEntry(type="file", path=path, size=7) for path in (primary_file, "vae.safetensors", "unselected.safetensors", "unselected.gguf")]
+
+    async def download(repository: ModelId, revision: str, path: str, target_dir: Path,
+        on_progress: Callable[[int, int, bool], None], expected_size: int | None = None,
+        expected_object_id: str | None = None, **_kwargs: object) -> Path:
+        assert expected_size == 7 and expected_object_id == IDENTITY
+        fetched.append(path)
+        target = target_dir / path
+        target.write_bytes(DATA)
+        on_progress(7, 7, True)
+        return target
+
+    async def progress(_shard: ShardMetadata, value: RepoDownloadProgress) -> None:
+        seen.append(value)
+
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", listing)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", download)
+    result, terminal = await download_utils.download_shard(shard, progress)
+    assert fetched == [primary_file, "vae.safetensors"]
+    assert terminal.status == "complete" and terminal.total_files == 2
+    assert seen[-1].status == "complete"
+    root = result.parent if result.is_file() else result
+    assert (root / primary_file).read_bytes() == DATA and (root / "vae.safetensors").read_bytes() == DATA
 
 
 @pytest.mark.parametrize(
