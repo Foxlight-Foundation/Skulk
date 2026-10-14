@@ -11968,6 +11968,11 @@ class API:
                     scheduler=engine.scheduler,
                     steps=engine.steps,
                     seed=engine.seed,
+                    pipeline=engine.pipeline,
+                    decoder=engine.decoder,
+                    guidance=engine.guidance,
+                    generated_keyframe_interval=engine.generated_keyframe_interval,
+                    duration=engine.duration,
                     video_shift=engine.video_shift,
                     audio_shift=engine.audio_shift,
                     adapter=engine.adapter,
@@ -12280,7 +12285,7 @@ class API:
                 status_code=400, detail=f"{create.model} is not a video model"
             )
         seconds = (
-            create.seconds if create.seconds is not None else card.video.min_seconds
+            create.seconds if create.seconds is not None else card.video.max_seconds if create.duration == "auto" else card.video.min_seconds
         )
         try:
             params = VideoGenerationTaskParams(
@@ -12295,6 +12300,13 @@ class API:
                 lora=create.lora,
                 lora_strength=create.lora_strength,
                 audio=create.audio,
+                pipeline=create.pipeline,
+                decoder=create.decoder,
+                negative_prompt=create.negative_prompt,
+                guidance=create.guidance,
+                generated_keyframe_interval=create.generated_keyframe_interval,
+                duration=create.duration,
+                duration_min_seconds=create.duration_min_seconds,
                 sampler=create.sampler,
                 scheduler=create.scheduler,
                 video_shift=create.video_shift,

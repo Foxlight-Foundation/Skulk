@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -36,8 +36,11 @@ from skulk.shared.types.video import (
     VIDEO_OUTPUT_FILENAME,
     VIDEO_STRUCTURAL_ROLES,
     VIDEO_THUMBNAIL_FILENAME,
+    VideoDecoder,
     VideoEngineSettings,
     VideoGenerationTaskParams,
+    VideoGuidance,
+    VideoPipeline,
     VideoReferenceSpec,
     VideoStage,
     derivable_guides,
@@ -156,6 +159,10 @@ class ComfyModelFiles:
     video_vae: str
     audio_vae: str | None
     spatial_upscaler: str | None = None
+    duration_head: str | None = None
+    diffusion_decoder: str | None = None
+    refinement_lora: str | None = None
+    refinement_strength: float = 1.0
 
 
 def _bundle_paths(card: ModelCard) -> tuple[PurePosixPath, ...]:
@@ -187,7 +194,10 @@ def _component_file(
             )
         return None
     directory = PurePosixPath(component.component_path.rstrip("/"))
-    candidates = [path for path in _bundle_paths(card) if path.parent == directory]
+    # Alternative decoders share the VAE folder but have an explicit companion
+    # role. They must not make the primary conditioning VAE ambiguous.
+    auxiliary_paths: set[PurePosixPath] = {PurePosixPath(item.path) for item in card.video.companions if item.repo is None} if card.video is not None else set()
+    candidates = [path for path in _bundle_paths(card) if path.parent == directory and path not in auxiliary_paths]
     if len(candidates) > 1:
         qualifiers = [
             token
@@ -209,8 +219,12 @@ def _component_file(
     return candidates[0].relative_to(directory).as_posix()
 
 
-def resolve_model_files(card: ModelCard) -> ComfyModelFiles:
-    """Resolve the loader file names from the card's components and bundle."""
+def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> ComfyModelFiles:
+    """Resolve exact component and companion files permitted by the request mode.
+
+    An omitted mode inventories the selected bundle during runner startup;
+    render planning always supplies its authoritative requested mode.
+    """
     video = card.video
     diffusion = _component_file(card, _COMPONENT_TRANSFORMER)
     text_encoder = _component_file(card, _COMPONENT_TEXT_ENCODER)
@@ -223,18 +237,26 @@ def resolve_model_files(card: ModelCard) -> ComfyModelFiles:
         tuple(
             item
             for item in video.companions
-            if item.kind is VideoCompanionKind.LatentUpscaler
+            if item.kind is VideoCompanionKind.LatentUpscaler and (mode is None or item.supports_mode(mode))
         )
         if video is not None
         else ()
     )
     spatial = next((item for item in upscalers if item.name == "spatial_x2"), None)
+    refinement = next((item for item in video.companions if item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" and (mode is None or item.supports_mode(mode))), None) if video is not None else None
+    def selected(kind: VideoCompanionKind, name: str) -> str | None:
+        companion = next((item for item in video.companions if item.kind is kind and item.name == name and (mode is None or item.supports_mode(mode))), None) if video is not None else None
+        return None if companion is None else companion_file(companion)
     return ComfyModelFiles(
         diffusion_model=diffusion,
         text_encoder=text_encoder,
         video_vae=video_vae,
         audio_vae=audio_vae,
         spatial_upscaler=None if spatial is None else companion_file(spatial),
+        duration_head=selected(VideoCompanionKind.DurationHead, "duration_head"),
+        diffusion_decoder=selected(VideoCompanionKind.VideoDecoder, "diffusion_decoder"),
+        refinement_lora=selected(VideoCompanionKind.Lora, "distilled_refinement"),
+        refinement_strength=1.0 if refinement is None or refinement.strength is None else refinement.strength,
     )
 
 
@@ -257,6 +279,8 @@ def companion_file(companion: VideoCompanionConfig) -> str:
             VideoCompanionKind.ModelPatch: "model_patches",
             VideoCompanionKind.Embedding: "embeddings",
             VideoCompanionKind.LatentUpscaler: "latent_upscale_models",
+            VideoCompanionKind.DurationHead: "model_patches",
+            VideoCompanionKind.VideoDecoder: "vae",
         }.get(companion.kind)
     )
     if folder is None or not path.parts or path.parts[0] != folder:
@@ -467,6 +491,14 @@ class ComfyRenderPlan:
     """The ControlNet this render applies, when the request attached a control input."""
     family: str | None = None
     """Model family selecting the graph implementation; legacy cards retain H3."""
+    pipeline: VideoPipeline | None = None
+    decoder: VideoDecoder | None = None
+    guidance: VideoGuidance | None = None
+    generated_keyframe_interval: int | None = None
+    duration: Literal["fixed", "auto"] = "fixed"
+    minimum_frames: int | None = None
+    duration_min_seconds: int | None = None
+    duration_max_seconds: int | None = None
 
     @property
     def steps(self) -> int:
@@ -483,7 +515,7 @@ class ComfyRenderPlan:
             )
 
             return {
-                "ltx_base_sampler": len(DISTILLED_SIGMAS.split(",")) - 1,
+                "ltx_base_sampler": len(DISTILLED_SIGMAS.split(",")) - 1 if self.pipeline == "distilled_two_stage" else self.plan.steps,
                 "ltx_refine_sampler": len(REFINEMENT_SIGMAS.split(",")) - 1,
             }
         return {NODE_SAMPLER: self.plan.steps}
@@ -501,6 +533,11 @@ class ComfyRenderPlan:
             scheduler=self.scheduler,
             steps=self.steps,
             seed=self.plan.seed,
+            pipeline=self.pipeline,
+            decoder=self.decoder,
+            guidance=self.guidance,
+            generated_keyframe_interval=self.generated_keyframe_interval,
+            duration=self.duration,
             video_shift=self.video_shift,
             audio_shift=self.audio_shift,
             adapter=None if self.adapter is None else self.adapter.name,
@@ -544,18 +581,34 @@ def plan_comfy_render(
         from skulk.worker.runner.comfy.ltx import validate_ltx_request
 
         validate_ltx_request(params, card)
+        pipeline = params.pipeline or ("distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        if pipeline == "hq_two_stage":
+            raise ValueError("LTX-2.5 HQ requires the exact Res2s sampler, unavailable in the pinned Comfy core engine")
+        if pipeline == "dfr":
+            raise ValueError("LTX-2.5 DFR temporal refinement is not implemented by this pinned Comfy graph")
+        minimum = params.duration_min_seconds or video.min_seconds
+        files = resolve_model_files(card, mode)
         return ComfyRenderPlan(
             plan=plan_render(params, video.model_copy(update={"canvas_multiple": 64})),
             mode=mode,
-            files=resolve_model_files(card),
-            adapter=None,
+            files=files,
+            adapter=None if pipeline != "dev_two_stage" or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=files.refinement_strength, steps=None),
             video_shift=None,
             audio_shift=None,
-            sampler="euler_ancestral",
-            scheduler="manual",
+            sampler="euler_ancestral" if pipeline == "distilled_two_stage" else "euler",
+            scheduler="manual" if pipeline == "distilled_two_stage" else "ltx",
             codec=params.codec or CODEC_DEFAULT,
             family=card.family,
+            pipeline=pipeline,
+            decoder=params.decoder or "convolutional",
+            guidance=(params.guidance or VideoGuidance()) if pipeline == "dev_two_stage" else None,
+            generated_keyframe_interval=params.generated_keyframe_interval,
+            duration=params.duration,
+            minimum_frames=video.frame_count_for_seconds(minimum) if params.duration == "auto" else None,
+            duration_min_seconds=minimum if params.duration == "auto" else None,
+            duration_max_seconds=params.seconds if params.duration == "auto" else None,
         )
+    params.validate_family(card.family, video)
     companion = select_adapter(params, card, mode)
     adapter = None
     video_shift = video.video_shift

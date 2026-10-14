@@ -1476,6 +1476,10 @@ class VideoCompanionKind(str, Enum):
 
     LatentUpscaler = "latent_upscaler"
     """Model weights that refine video latents between generation stages."""
+    DurationHead = "duration_head"
+    """Prompt-conditioned duration predictor, pinned independently of the transformer."""
+    VideoDecoder = "video_decoder"
+    """An alternative decoder; the base video VAE remains available for conditioning."""
 
 
 class VideoPreprocessorRole(str, Enum):
@@ -1578,6 +1582,14 @@ class VideoCompanionConfig(CamelCaseModel):
     def _serialize_modes(self, value: tuple[VideoMode, ...]) -> list[str]:
         return [item.value for item in value]
 
+    def supports_mode(self, mode: VideoMode) -> bool:
+        """Return whether this selected asset permits the requested mode.
+
+        An empty mode declaration applies to every mode on the owning card.
+        This checks artifact scope, independently of hardware qualification.
+        """
+        return not self.modes or mode in self.modes
+
     @field_validator("license")
     @classmethod
     def _validate_license(cls, value: str | None) -> str | None:
@@ -1663,6 +1675,8 @@ class VideoCardConfig(CamelCaseModel):
     transformer_variant: Literal["distilled", "dev"] | None = None
     """Selected transformer's training variant, when the family distinguishes
     distilled and guided checkpoints. It does not select an execution engine."""
+    generated_keyframes: bool = False
+    """Whether the selected transformer was trained with generated keyframe tokens."""
     min_seconds: PositiveInt = 4
     """Shortest output duration the model supports."""
     max_seconds: PositiveInt = 15
