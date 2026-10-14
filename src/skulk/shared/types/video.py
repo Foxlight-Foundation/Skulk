@@ -137,6 +137,23 @@ slower by the node's own account)."""
 VideoCodecName = Literal["h264", "av1"]
 """Video codecs the pinned ComfyUI's ``SaveVideo`` writes into MP4."""
 
+VideoPipeline = Literal["distilled_two_stage", "dev_two_stage", "hq_two_stage", "dfr"]
+"""Family-specific execution workflow; engines must refuse unavailable workflows."""
+
+VideoDecoder = Literal["convolutional", "diffusion"]
+"""Explicit decoder choice, independently bound to selected artifact files."""
+
+
+class VideoGuidance(BaseModel):
+    """Explicit LTX guidance scales; applied to the guided base stage only."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    video_cfg: float = Field(default=3.0, ge=1.0, le=100.0, description="Video classifier-free guidance scale.")
+    audio_cfg: float = Field(default=7.0, ge=1.0, le=100.0, description="Audio classifier-free guidance scale.")
+    stg_scale: float = Field(default=0.0, ge=0.0, le=10.0, description="Joint spatiotemporal guidance on trained block 28.")
+    modality_scale: float = Field(default=1.0, ge=1.0, le=10.0, description="Joint audio/video cross-attention guidance scale.")
+
 MAX_VIDEO_STYLES = 4
 """Style embeddings one request may apply."""
 
@@ -322,6 +339,20 @@ class VideoGenerationTaskParams(BaseModel):
     """Adapter strength override."""
     audio: bool = True
     """Whether the output must carry the model's synchronized audio track."""
+    pipeline: VideoPipeline | None = None
+    """Explicit family workflow; omitted selects the card's transformer variant."""
+    decoder: VideoDecoder | None = None
+    """LTX decoder choice; omitted selects convolutional decoding."""
+    negative_prompt: str | None = Field(default=None, max_length=MAX_VIDEO_PROMPT_CHARS)
+    """Negative conditioning for guided LTX generation."""
+    guidance: VideoGuidance | None = None
+    """Guided LTX base-stage controls; distilled stages always use unity CFG."""
+    generated_keyframe_interval: int | None = Field(default=None, ge=1, le=1024)
+    """Generate an internal detailing keyframe every this many pixel frames."""
+    duration: Literal["fixed", "auto"] = "fixed"
+    """Automatic prediction treats ``seconds`` as a maximum before allocation."""
+    duration_min_seconds: int | None = Field(default=None, ge=1, le=120)
+    """Lower bound for automatic prediction; omitted uses the card minimum."""
     sampler: str | None = None
     """Sampler name; ``None`` keeps the engine default (``res_multistep``)."""
     scheduler: VideoSchedulerName | None = None
@@ -494,13 +525,23 @@ class VideoGenerationTaskParams(BaseModel):
             ValueError: Requested controls cannot be honored by this family.
         """
         if family != "ltx-2.5":
+            if (self.pipeline is not None or self.decoder is not None
+                or self.negative_prompt is not None or self.guidance is not None
+                or self.generated_keyframe_interval is not None
+                or self.duration != "fixed" or self.duration_min_seconds is not None):
+                raise ValueError("LTX pipeline controls require an LTX-2.5 model")
             return
-        if video.transformer_variant != "distilled":
+        if video.transformer_variant is None:
             raise ValueError(
-                "LTX-2.5 distilled rendering requires a declared distilled transformer"
+                "LTX-2.5 requires a declared distilled transformer or dev transformer"
             )
+        pipeline = self.pipeline or ("distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        if (pipeline in ("distilled_two_stage", "dfr")) != (video.transformer_variant == "distilled"):
+            raise ValueError("LTX-2.5 pipeline does not match the declared transformer variant")
         if not video.audio_output:
             raise ValueError("LTX-2.5 requires its audio VAE even for silent output")
+        if video.frame_grid_multiple != 8 or video.frame_grid_offset != 1:
+            raise ValueError("LTX-2.5 requires its trained 8n+1 frame grid")
         if self.implied_mode() not in (
             VideoMode.TextToAudioVideo,
             VideoMode.FramesToAudioVideo,
@@ -508,14 +549,35 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError(
                 "LTX-2.5 distilled rendering accepts text and image keyframes"
             )
-        if self.steps not in (None, 8) or video.default_steps != 8:
+        if video.transformer_variant == "distilled" and (self.steps not in (None, 8) or video.default_steps != 8):
             raise ValueError(
                 "LTX-2.5 distilled rendering uses a fixed 8-step base schedule"
             )
-        if self.sampler not in (None, "euler_ancestral") or self.scheduler is not None:
+        expected_sampler = "euler_ancestral" if video.transformer_variant == "distilled" else "euler"
+        if self.sampler not in (None, expected_sampler) or self.scheduler is not None:
             raise ValueError(
-                "LTX-2.5 distilled rendering uses fixed ancestral Euler schedules"
+                f"LTX-2.5 {pipeline} uses its fixed {expected_sampler} sampler and family schedule"
             )
+        if video.transformer_variant == "distilled" and (self.guidance is not None or self.negative_prompt is not None):
+            raise ValueError("LTX-2.5 distilled stages do not accept guided negative conditioning")
+        if video.transformer_variant == "dev" and not any(item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" for item in video.companions):
+            raise ValueError("LTX-2.5 dev two-stage rendering requires its distilled_refinement LoRA")
+        if self.generated_keyframe_interval is not None and not video.generated_keyframes:
+            raise ValueError("LTX-2.5 selected transformer does not declare generated keyframe support")
+        if self.decoder == "diffusion" and not any(item.kind is VideoCompanionKind.VideoDecoder and item.name == "diffusion_decoder" for item in video.companions):
+            raise ValueError("LTX-2.5 diffusion decoding requires its exact diffusion_decoder companion")
+        if self.duration == "auto":
+            minimum = self.duration_min_seconds or video.min_seconds
+            if not video.min_seconds <= minimum <= self.seconds <= video.max_seconds:
+                raise ValueError("LTX-2.5 automatic duration bounds must lie within card limits")
+            if video.frame_count_for_seconds(minimum) > self.seconds * video.fps:
+                raise ValueError("LTX-2.5 automatic duration bounds contain no complete trained frame grid")
+            if not any(item.kind is VideoCompanionKind.DurationHead and item.name == "duration_head" for item in video.companions):
+                raise ValueError("LTX-2.5 automatic duration requires its exact duration_head companion")
+            if any(item.at_seconds is not None and item.at_seconds >= minimum for item in self.references):
+                raise ValueError("LTX-2.5 timed keyframes must precede the automatic duration lower bound")
+        elif self.duration_min_seconds is not None:
+            raise ValueError("duration_min_seconds requires automatic duration")
         if (
             self.lora is not None
             or self.lora_strength is not None
@@ -631,6 +693,16 @@ class VideoEngineSettings(CamelCaseModel):
     """Sampling steps the schedule ran."""
     seed: int | None = Field(default=None, ge=0)
     """The noise seed the render drew from, resolved when the request gave none."""
+    pipeline: VideoPipeline | None = None
+    """Executed family workflow, when applicable."""
+    decoder: VideoDecoder | None = None
+    """Decoder applied to the final video latent."""
+    guidance: VideoGuidance | None = None
+    """Guidance applied to the guided base stage."""
+    generated_keyframe_interval: int | None = None
+    """Internal detailing keyframe spacing, when used."""
+    duration: Literal["fixed", "auto"] = "fixed"
+    """Whether a bounded predictor selected the actual frame count."""
     video_shift: float | None = None
     """Video sigma shift applied; ``None`` leaves the loader default."""
     audio_shift: float | None = None

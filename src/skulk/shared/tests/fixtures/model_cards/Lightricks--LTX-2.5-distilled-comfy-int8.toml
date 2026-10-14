@@ -28,6 +28,7 @@ backend_preference = ["comfy-cuda", "comfy-rocm"]
 
 [video]
 transformer_variant = "distilled"
+generated_keyframes = true
 modes = ["t2va", "fl2va"]
 min_seconds = 1
 max_seconds = 20

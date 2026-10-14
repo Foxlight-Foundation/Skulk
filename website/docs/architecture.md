@@ -822,6 +822,18 @@ selected transformer's `distilled` variant; a dev or undeclared checkpoint
 cannot silently use distilled sampling. Unsupported H3 controls are refused
 before dispatch.
 
+LTX request contracts also carry explicit pipeline/decoder selection, guided
+negative conditioning and base-stage CFG/STG/modality scales, internal
+keyframe spacing, and bounded automatic duration. Dev two-stage graphs bind
+an exact distilled-refinement LoRA and freeze base audio during refinement.
+Alternative decoders and duration heads are separately pinned `video_decoder`
+and `duration_head` companions; primary component resolution excludes these
+auxiliary files. Generated keyframe tokens are stripped before upscaling.
+Duration prediction feeds the same bounded frame count into video and audio
+allocation; `video_probe.py` verifies actual dynamic container facts before
+publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
+absent) and DFR temporal refinement rather than silently approximating them.
+
 Backend compatibility and retained hardware qualification are separate.
 A declared compatible backend does not require a benchmark for the exact
 GPU; live engine availability, actual runner restrictions, complete artifacts

@@ -86,8 +86,8 @@ def test_a_dev_or_undeclared_transformer_cannot_silently_run_as_distilled(
     card = card.model_copy(
         update={"video": card.video.model_copy(update={"transformer_variant": variant})}
     )
-    with pytest.raises(ValueError, match="declared distilled transformer"):
-        plan_comfy_render(_params(), card)
+    with pytest.raises(ValueError, match="declared distilled transformer|does not match"):
+        plan_comfy_render(_params(pipeline="distilled_two_stage"), card)
     metadata = VideoCapabilitySection.from_model_card(card)
     assert metadata is not None and not metadata.samplers
 
@@ -159,6 +159,99 @@ def test_model_metadata_does_not_offer_h3_engine_controls() -> None:
     assert metadata.schedulers == [] and metadata.default_scheduler == "manual"
     assert metadata.shift_bounds == []
     assert metadata.sampling_stage_steps == [8, 3]
+
+
+def _dev_card() -> ModelCard:
+    card = asyncio.run(load_fixture_card(ModelId("Lightricks/LTX-2.5-dev-comfy-int8")))
+    assert card is not None
+    return card
+
+
+def test_dev_guidance_and_refinement_are_separate_models() -> None:
+    params = _params(steps=20, negative_prompt="flicker", guidance={"video_cfg": 4.0, "audio_cfg": 6.0, "stg_scale": 1.0, "modality_scale": 3.0})
+    render = plan_comfy_render(params, _dev_card())
+    graph = build_prompt(render, params, (), "command")
+    assert render.sampler_steps == {"ltx_base_sampler": 20, "ltx_refine_sampler": 3}
+    assert graph["ltx_negative"]["inputs"]["text"] == "flicker"
+    assert graph["ltx_base_sigmas"]["class_type"] == "LTXVScheduler"
+    assert graph["ltx_base_guider"]["inputs"]["model"] == ["ltx_modality", 0]
+    assert graph["ltx_base_guider"]["inputs"]["video_cfg"] == 4.0
+    assert graph["ltx_base_guider"]["inputs"]["audio_cfg"] == 6.0
+    assert graph["ltx_modality"]["inputs"]["model"] == ["ltx_stg", 0]
+    assert graph["ltx_stg"]["inputs"]["blocks"] == "28"
+    assert graph["ltx_refinement_lora"]["inputs"]["model"] == ["unet", 0]
+    assert graph["ltx_refine_guider"]["inputs"]["model"] == ["ltx_refinement_lora", 0]
+    assert graph["ltx_refine_guider"]["inputs"]["video_cfg"] == 1.0
+    assert graph["ltx_refine_av"]["inputs"]["audio_latent"] == ["ltx_frozen_audio", 0]
+    assert graph["decode_audio"]["inputs"]["samples"] == ["ltx_base_split", 1]
+    assert render.engine_settings().guidance == params.guidance
+    assert render.engine_settings().adapter == "distilled_refinement"
+    assert render.engine_settings().adapter_strength == 1.0
+
+
+def test_generated_tokens_are_removed_before_upscaling() -> None:
+    params = _params(generated_keyframe_interval=24)
+    render = plan_comfy_render(params, _card())
+    graph = build_prompt(render, params, (), "command")
+    assert graph["ltx_generated_keyframes"]["inputs"]["interval_frames"] == 24
+    assert graph["ltx_base_av"]["inputs"]["video_latent"] == ["ltx_generated_keyframes", 2]
+    assert graph["ltx_strip_generated"]["inputs"]["latent"] == ["ltx_base_split", 0]
+    assert graph["ltx_spatial_upscale"]["inputs"]["samples"] == ["ltx_strip_generated", 2]
+    assert graph["decode_video"]["inputs"]["samples"] == ["ltx_refine_split", 0]
+
+
+def test_alternate_decoder_does_not_replace_conditioning_vae() -> None:
+    params = _params(decoder="diffusion")
+    graph = build_prompt(plan_comfy_render(params, _dev_card()), params, (), "command")
+    assert graph["video_vae"]["inputs"]["vae_name"] == "ltx-2.5-video-vae-conv-bf16.safetensors"
+    assert graph["ltx_spatial_upscale"]["inputs"]["vae"] == ["video_vae", 0]
+    assert graph["ltx_diffusion_decoder"]["inputs"]["vae_name"] == "ltx-2.5-video-vae-bf16.safetensors"
+    assert graph["decode_video"]["inputs"]["vae"] == ["ltx_diffusion_decoder", 0]
+
+
+def test_duration_is_bounded_before_audio_and_video_allocation() -> None:
+    params = _params(duration="auto", duration_min_seconds=2)
+    render = plan_comfy_render(params, _dev_card())
+    graph = build_prompt(render, params, (), "command")
+    assert graph["ltx_duration"]["inputs"]["min_seconds"] == 2.0
+    assert graph["ltx_duration"]["inputs"]["max_seconds"] == 5.0
+    assert graph["ltx_video_latent"]["inputs"]["length"] == ["ltx_duration", 0]
+    assert graph["ltx_audio_latent"]["inputs"]["frames_number"] == ["ltx_duration", 0]
+    assert render.minimum_frames == 49 and render.plan.frame_count == 121
+
+
+@pytest.mark.parametrize("controls", [{"decoder": "diffusion"}, {"duration": "auto"}, {"negative_prompt": "blur"}, {"guidance": {"video_cfg": 2.0}}])
+def test_missing_or_inapplicable_selected_features_are_refused(controls: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="LTX-2.5"):
+        plan_comfy_render(_params(**controls), _card())
+
+
+@pytest.mark.parametrize("pipeline", ["hq_two_stage", "dfr"])
+def test_comfy_does_not_approximate_an_unimplemented_pipeline(pipeline: str) -> None:
+    with pytest.raises(ValueError, match="Res2s|DFR temporal"):
+        plan_comfy_render(_params(pipeline=pipeline), _card() if pipeline == "dfr" else _dev_card())
+
+
+def test_duration_metadata_and_wire_roundtrip() -> None:
+    from skulk.api.types.api import VideoCreateRequest
+    from skulk.shared.types.video import VideoEngineSettings
+
+    create = VideoCreateRequest.model_validate({"model": str(MODEL), "prompt": "A fox", "guidance": '{"video_cfg": 4.0}', "duration": "auto"})
+    assert create.guidance is not None and create.guidance.video_cfg == 4.0
+    params = _params(duration="auto", guidance=create.guidance)
+    settings = plan_comfy_render(params, _dev_card()).engine_settings()
+    assert VideoEngineSettings.model_validate_json(settings.model_dump_json()) == settings
+    metadata = VideoCapabilitySection.from_model_card(_dev_card())
+    assert metadata is not None
+    assert metadata.pipelines == ["dev_two_stage"]
+    assert metadata.decoders == ["convolutional", "diffusion"]
+    assert metadata.automatic_duration and metadata.guidance is not None
+
+
+@pytest.mark.parametrize("controls", [{"duration": "auto", "duration_min_seconds": 5}, {"duration_min_seconds": 2}, {"duration": "auto", "duration_min_seconds": 6}])
+def test_automatic_duration_refuses_empty_or_inverted_grid(controls: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="duration"):
+        plan_comfy_render(_params(**controls), _dev_card())
 
 
 @pytest.mark.parametrize("backend", ["comfy-cuda", "comfy-rocm"])

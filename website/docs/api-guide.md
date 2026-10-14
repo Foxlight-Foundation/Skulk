@@ -1818,7 +1818,7 @@ Request fields (JSON keys or form fields):
 |-------|------|-------|
 | `model` | string | Required placed video model id |
 | `prompt` | string | Required; up to 8000 characters, structured prompts pass through verbatim |
-| `seconds` | integer | Clip length; any integer inside the card's supported range (MiniMax H3: 4 to 15). Omitted means the card's shortest clip. A string such as `"8"` is accepted for OpenAI SDK compatibility |
+| `seconds` | integer | Clip length; any integer inside the card's supported range (MiniMax H3: 4 to 15). Omitted means the card's shortest clip, or its maximum with `duration=auto`. A string such as `"8"` is accepted for OpenAI SDK compatibility |
 | `size` | string | `WIDTHxHEIGHT`; must be a multiple of the card's canvas grid and inside its pixel budget. Omitted lets the engine pick the trained canvas |
 | `aspect_ratio` | string | Advisory `W:H` used when `size` is omitted. With neither, a `first_frame` (else `last_frame`, else the earliest timed `keyframe`) image sets the shape: the canvas follows the keyframe, snapped to the card's grid and pixel budget, so the frame keeps its framing (`input_reference` is the OpenAI name for the first frame). The shape is the displayed one: a JPEG's EXIF orientation is honored, and PNG, JPEG, WebP, GIF, HEIC, HEIF, and AVIF are read. A plain `reference` never decides the canvas |
 | `mode` | string | `t2va`, `fl2va`, or `ref2va`; omitted derives it from the attachments |
@@ -1827,6 +1827,14 @@ Request fields (JSON keys or form fields):
 | `lora` | string | Name of a card companion adapter, for example a turbo LoRA |
 | `lora_strength` | number | 0.0 to 2.0 |
 | `audio` | boolean | Default `true`; the job fails at settlement if the render carries no audio track |
+| `pipeline` | string | LTX workflow: `distilled_two_stage` or `dev_two_stage`, matching the declared transformer. HQ (`hq_two_stage`) and DFR (`dfr`) requests currently fail on the pinned Comfy core engine; it does not approximate them |
+| `decoder` | string | LTX `convolutional` (default) or `diffusion`; the latter requires the exact `video_decoder` companion named `diffusion_decoder`. The convolutional VAE still conditions images and upscales latents |
+| `negative_prompt` | string | Up to 8000 characters, guided LTX only; encoded verbatim. Distilled generation refuses it |
+| `guidance` | object | Guided LTX base stage only: `video_cfg` (default 3), `audio_cfg` (7), `stg_scale` (0, block 28), `modality_scale` (1). CFG ranges 1–100; STG 0–10; modality 1–10. Multipart supplies this object as JSON. Refinement uses unity CFG and preserves base audio |
+| `generated_keyframe_interval` | integer | LTX internal detailing keyframe spacing in pixel frames, 1–1024. Requires a transformer declaring `generated_keyframes`; these tokens are removed before upscaling and never become extra output frames |
+| `duration` | string | `fixed` (default) or LTX `auto`. Automatic prediction requires an exact `duration_head` companion and bounds the allocation before sampling. `seconds` is its maximum; omitted uses the card maximum. Actual container frames and duration are verified using PyAV from the isolated engine and recorded in the output |
+| `duration_min_seconds` | integer | LTX automatic-duration lower bound, otherwise refused. Omitted uses the card minimum; both bounds must lie within card limits and contain a complete 8n+1 grid. Timed keyframes must precede this lower bound |
+
 | `sampler` | string | Engine tier. LTX-2.5 distilled accepts `euler_ancestral` only (also its default). H3 omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
 | `scheduler` | string | Engine tier. H3 accepts `simple` (default), `normal`, `sgm_uniform`, `beta`, `kl_optimal`, `linear_quadratic`, `karras`, `exponential`, or `ddim_uniform`. LTX-2.5 distilled uses fixed manual sigma tables and requires this field to be omitted |
 | `video_shift` | number | Engine tier. Video sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's |
@@ -1842,14 +1850,23 @@ Request fields (JSON keys or form fields):
 For a card with family `ltx-2.5` and `video.transformer_variant = "distilled"`,
 the distilled renderer uses two stages: eight base sampling intervals at half
 resolution, a required `spatial_x2` latent-upscaler companion, and three
-refinement intervals. A dev or undeclared transformer is refused by this
-renderer. `steps`, when supplied, must be `8`; `stats.steps` and
+refinement intervals. A guided dev transformer uses `dev_two_stage` and requires its exact
+`distilled_refinement` LoRA. Its base stage uses the LTX Euler schedule and
+requested guidance; refinement uses three intervals with unity guidance
+and frozen base audio. Undeclared transformers and mismatched pipelines
+are refused. `steps`, when supplied, must be `8`; `stats.steps` and
 `stats.engine.steps` report the total `11`. `/v1/models` exposes
 `transformer_variant`, `sampling_stage_steps: [8, 3]`,
 `default_scheduler: "manual"`, an empty scheduler override list, and the
 effective output grid of 64 pixels with `min_short_edge: 128`. Explicit sizes
 outside those constraints are refused. Seeds must fit an unsigned 64-bit
 integer.
+
+The model video metadata additionally exposes `pipelines`, `decoders`,
+`generated_keyframes`, `automatic_duration` and guided defaults. Missing
+selected components disable their controls, independently of hardware
+qualification. Pipeline, decoder, guidance and duration choices also persist
+in `stats.engine`; its frame count is the verified actual count.
 
 LTX accepts text and first/last/timed image keyframes, and rejects H3 sigma
 shifts, adapters, style embeddings and ControlNet controls. `audio=false`

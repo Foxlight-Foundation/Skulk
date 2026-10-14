@@ -577,6 +577,18 @@ A model card's `placement.compatible_backends` selects which engine serves it
   fixed 8+3 two-stage sampling and a pinned `latent_upscaler` companion.
   LTX image guides are reapplied at full resolution and cropped before
   upscaling/decoding. Multi-stage progress counts each sampler independently.
+  LTX request contracts also carry explicit pipeline/decoder selection, guided
+  negative conditioning and base-stage CFG/STG/modality scales, internal
+  keyframe spacing, and bounded automatic duration. Dev two-stage graphs bind
+  an exact distilled-refinement LoRA and freeze base audio during refinement.
+  Alternative decoders and duration heads are separately pinned `video_decoder`
+  and `duration_head` companions; primary component resolution excludes these
+  auxiliary files. Generated keyframe tokens are stripped before upscaling.
+  Duration prediction feeds the same bounded frame count into video and audio
+  allocation; `video_probe.py` verifies actual dynamic container facts before
+  publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
+  absent) and DFR temporal refinement rather than silently approximating them.
+
   Cards retain broad compatible GPU backends; benchmark qualification is not
   a hardware allowlist. The H3 path binds onto its MiniMax H3 node graph
   (`graph.py`, the official workflow templates node for node; a request's

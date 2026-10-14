@@ -46,8 +46,11 @@ from skulk.shared.types.video import (
     VIDEO_SCHEDULERS,
     VIDEO_SHIFT_BOUNDS,
     VideoCodecName,
+    VideoDecoder,
+    VideoGuidance,
     VideoGuideKind,
     VideoJobStatus,
+    VideoPipeline,
     VideoReferenceFidelity,
     VideoSchedulerName,
     derivable_guides,
@@ -849,6 +852,11 @@ class VideoCapabilitySection(BaseModel):
         default=None,
         description="Selected transformer's training variant when declared.",
     )
+    pipelines: list[VideoPipeline] = Field(default_factory=list, description="Implemented baseline family pipelines available with this selected artifact.")
+    decoders: list[VideoDecoder] = Field(default_factory=list, description="Selectable decoders whose exact components are present.")
+    generated_keyframes: bool = Field(default=False, description="Whether internal detailing keyframe tokens are supported by this artifact.")
+    automatic_duration: bool = Field(default=False, description="Whether an exact duration head is selected.")
+    guidance: VideoGuidance | None = Field(default=None, description="Default guided LTX base-stage scales; null for distilled or other families.")
     min_seconds: int = Field(description="Shortest clip length accepted.")
     max_seconds: int = Field(description="Longest clip length accepted.")
     fps: int = Field(description="Output frame rate.")
@@ -982,9 +990,16 @@ class VideoCapabilitySection(BaseModel):
         guides = _guide_sections(config)
         ltx = model_card.family == "ltx-2.5"
         ltx_distilled = ltx and config.transformer_variant == "distilled"
+        ltx_dev = ltx and config.transformer_variant == "dev" and any(item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" for item in config.companions)
+        ltx_available = ltx_distilled or ltx_dev
         return cls(
             modes=cast("list[VideoModeName]", [mode.value for mode in config.modes]),
             transformer_variant=config.transformer_variant,
+            pipelines=(["distilled_two_stage"] if ltx_distilled else ["dev_two_stage"] if ltx_dev else []),
+            decoders=(["convolutional", "diffusion"] if any(item.kind is VideoCompanionKind.VideoDecoder and item.name == "diffusion_decoder" for item in config.companions) else ["convolutional"]) if ltx_available else [],
+            generated_keyframes=ltx_available and config.generated_keyframes,
+            automatic_duration=ltx_available and any(item.kind is VideoCompanionKind.DurationHead and item.name == "duration_head" for item in config.companions),
+            guidance=VideoGuidance() if ltx_dev else None,
             min_seconds=config.min_seconds,
             max_seconds=config.max_seconds,
             fps=config.fps,
@@ -1000,14 +1015,14 @@ class VideoCapabilitySection(BaseModel):
             audio_channels=config.audio_channels,
             default_steps=config.default_steps,
             sampling_stage_steps=[8, 3] if ltx_distilled else [],
-            samplers=(["euler_ancestral"] if ltx_distilled else [])
+            samplers=(["euler_ancestral"] if ltx_distilled else ["euler"] if ltx_dev else [])
             if ltx
             else list(VIDEO_SAMPLERS),
             default_sampler="euler_ancestral"
             if ltx_distilled
-            else ("unsupported" if ltx else VIDEO_DEFAULT_SAMPLER),
+            else ("euler" if ltx_dev else "unsupported" if ltx else VIDEO_DEFAULT_SAMPLER),
             schedulers=[] if ltx else list(VIDEO_SCHEDULERS),
-            default_scheduler=("manual" if ltx_distilled else "unsupported")
+            default_scheduler=("manual" if ltx_distilled else "ltx" if ltx_dev else "unsupported")
             if ltx
             else VIDEO_DEFAULT_SCHEDULER,
             shift_bounds=[] if ltx else list(VIDEO_SHIFT_BOUNDS),
@@ -1048,7 +1063,7 @@ class VideoCapabilitySection(BaseModel):
                     audio_shift=companion.audio_shift,
                 )
                 for companion in config.companions
-                if companion.kind == VideoCompanionKind.Lora
+                if companion.kind == VideoCompanionKind.Lora and not ltx
             ],
             styles=[
                 VideoStyleSection(
@@ -2740,6 +2755,27 @@ class VideoCreateRequest(BaseModel):
     """Adapter strength override."""
     audio: bool = True
     """Whether the output must carry the model's synchronized audio track."""
+    pipeline: VideoPipeline | None = None
+    """Family execution workflow; omitted selects the declared transformer variant."""
+    decoder: VideoDecoder | None = None
+    """LTX decoder choice; omitted selects convolutional decoding."""
+    negative_prompt: str | None = Field(default=None, max_length=MAX_VIDEO_PROMPT_CHARS)
+    """Guided LTX negative conditioning, encoded verbatim."""
+    guidance: VideoGuidance | None = None
+    """LTX base-stage guidance; a multipart form supplies a JSON object."""
+    generated_keyframe_interval: int | None = Field(default=None, ge=1, le=1024)
+    """Internal detailing keyframe spacing in pixel frames."""
+    duration: Literal["fixed", "auto"] = "fixed"
+    """Automatic duration uses ``seconds`` as its upper bound, or the card maximum."""
+    duration_min_seconds: int | None = Field(default=None, ge=1, le=120)
+    """Automatic duration lower bound; omitted uses the card minimum."""
+
+    @field_validator("guidance", mode="before")
+    @classmethod
+    def _parse_guidance(cls, value: object) -> object:
+        if isinstance(value, str):
+            return VideoGuidance.model_validate_json(value)
+        return value
     sampler: str | None = None
     """Sampler name from the engine's list; omitted keeps ``res_multistep``.
     Samplers that cannot serve distilled H3 are refused by name."""
@@ -2831,6 +2867,16 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Sampling steps the schedule ran."""
     seed: int | None = None
     """The noise seed the render drew from, resolved when the request gave none."""
+    pipeline: VideoPipeline | None = None
+    """Executed family workflow, when applicable."""
+    decoder: VideoDecoder | None = None
+    """Selected decoder, when applicable."""
+    guidance: VideoGuidance | None = None
+    """Guidance applied to the base stage."""
+    generated_keyframe_interval: int | None = None
+    """Internal generated keyframe spacing, when used."""
+    duration: Literal["fixed", "auto"] = "fixed"
+    """How the actual frame count was determined."""
     video_shift: float | None
     """Video sigma shift applied; null leaves the loader default."""
     audio_shift: float | None

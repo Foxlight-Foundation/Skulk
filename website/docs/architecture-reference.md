@@ -73,6 +73,18 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### ComfyUI engine provisioning
 
+LTX request contracts also carry explicit pipeline/decoder selection, guided
+negative conditioning and base-stage CFG/STG/modality scales, internal
+keyframe spacing, and bounded automatic duration. Dev two-stage graphs bind
+an exact distilled-refinement LoRA and freeze base audio during refinement.
+Alternative decoders and duration heads are separately pinned `video_decoder`
+and `duration_head` companions; primary component resolution excludes these
+auxiliary files. Generated keyframe tokens are stripped before upscaling.
+Duration prediction feeds the same bounded frame count into video and audio
+allocation; `video_probe.py` verifies actual dynamic container facts before
+publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
+absent) and DFR temporal refinement rather than silently approximating them.
+
 Family graph dispatch: `worker/runner/comfy/graph.py` retains H3 graphs and
 dispatches `family = "ltx-2.5"` to `comfy/ltx.py`. The distilled graph uses
 `CLIPLoader(type="ltxv")`, separate VAEs, joined audio/video latents,

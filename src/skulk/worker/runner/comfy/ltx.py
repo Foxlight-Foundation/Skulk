@@ -1,4 +1,4 @@
-"""LTX-2.5 distilled graphs for the pinned core-node ComfyUI runtime.
+"""LTX-2.5 two-stage graphs for the pinned core-node ComfyUI runtime.
 
 The fixed tables and stage wiring follow workflow templates 0.11.57. Audio
 latents participate in both stages even when the caller asks for a silent
@@ -125,6 +125,8 @@ def _sampling_stage(
     negative: list[str | int],
     video: list[str | int],
     audio: list[str | int],
+    render: ComfyRenderPlan,
+    model: list[str | int],
 ) -> list[str | int]:
     prompt[f"ltx_{name}_av"] = _node(
         "LTXVConcatAVLatent",
@@ -133,17 +135,25 @@ def _sampling_stage(
         audio_latent=audio,
     )
     prompt[f"ltx_{name}_noise"] = _node("RandomNoise", "Noise", noise_seed=seed)
-    prompt[f"ltx_{name}_sigmas"] = _node(
-        "ManualSigmas", "Distilled schedule", sigmas=sigmas
-    )
+    if name == "base" and render.pipeline == "dev_two_stage":
+        prompt[f"ltx_{name}_sigmas"] = _node(
+            "LTXVScheduler", "Guided base schedule", steps=render.plan.steps,
+            max_shift=2.05, base_shift=0.95, stretch=True, terminal=0.1,
+            latent=video,
+        )
+    else:
+        prompt[f"ltx_{name}_sigmas"] = _node(
+            "ManualSigmas", "Distilled schedule", sigmas=sigmas
+        )
+    guidance = render.guidance if name == "base" else None
     prompt[f"ltx_{name}_guider"] = _node(
         "LTXVDualCFGGuider",
         "Distilled guidance",
-        model=_link("unet"),
+        model=model,
         positive=positive,
         negative=negative,
-        video_cfg=1.0,
-        audio_cfg=1.0,
+        video_cfg=1.0 if guidance is None else guidance.video_cfg,
+        audio_cfg=1.0 if guidance is None else guidance.audio_cfg,
     )
     sampler = f"ltx_{name}_sampler"
     prompt[sampler] = _node(
@@ -182,7 +192,7 @@ def build_ltx_prompt(
     references: tuple[ReferenceBinding, ...],
     output_subdir: str,
 ) -> ComfyPrompt:
-    """Build one distilled two-stage audio-video graph using core nodes only.
+    """Build a selected two-stage audio-video graph using pinned core nodes.
 
     Args:
         render: Resolved output geometry, seed and exact model filenames.
@@ -217,7 +227,7 @@ def build_ltx_prompt(
             "CLIPTextEncode", "Encode prompt", text=params.prompt, clip=_link("clip")
         ),
         "ltx_negative": _node(
-            "CLIPTextEncode", "Empty negative", text="", clip=_link("clip")
+            "CLIPTextEncode", "Negative conditioning", text=params.negative_prompt or "", clip=_link("clip")
         ),
         "condition": _node(
             "LTXVConditioning",
@@ -243,7 +253,7 @@ def build_ltx_prompt(
             audio_vae=_link("audio_vae"),
         ),
         "sampler_select": _node(
-            "KSamplerSelect", "Ancestral Euler", sampler_name="euler_ancestral"
+            "KSamplerSelect", "LTX sampler", sampler_name=render.sampler
         ),
         "ltx_spatial_model": _node(
             "LatentUpscaleModelLoader",
@@ -251,6 +261,28 @@ def build_ltx_prompt(
             model_name=files.spatial_upscaler,
         ),
     }
+    frame_count: int | list[str | int] = plan.frame_count
+    if render.duration == "auto":
+        if files.duration_head is None:
+            raise ValueError("LTX-2.5 automatic duration requires a selected duration head")
+        prompt["ltx_duration_head"] = _node("ModelPatchLoader", "Duration head", name=files.duration_head)
+        prompt["ltx_duration"] = _node(
+            "LTXVDurationPredictor", "Bounded shot duration", model=_link("unet"),
+            positive=_link("ltx_positive"), duration_head=_link("ltx_duration_head"),
+            frame_rate=float(plan.fps), min_seconds=float(render.duration_min_seconds or 1),
+            max_seconds=float(render.duration_max_seconds or params.seconds),
+        )
+        frame_count = _link("ltx_duration")
+    prompt["ltx_video_latent"]["inputs"]["length"] = frame_count
+    prompt["ltx_audio_latent"]["inputs"]["frames_number"] = frame_count
+    base_model = _link("unet")
+    if render.guidance is not None:
+        if render.guidance.stg_scale:
+            prompt["ltx_stg"] = _node("LTXVSpatioTemporalGuidance", "Spatiotemporal guidance", model=base_model, scale=render.guidance.stg_scale, blocks="28", start_percent=0.0, end_percent=1.0)
+            base_model = _link("ltx_stg")
+        if render.guidance.modality_scale != 1.0:
+            prompt["ltx_modality"] = _node("LTXVModalityGuidance", "Audio/video guidance", model=base_model, modality_scale=render.guidance.modality_scale, start_percent=0.0, end_percent=1.0)
+            base_model = _link("ltx_modality")
     positive, negative, video, guided = _condition_images(
         prompt,
         references,
@@ -261,6 +293,13 @@ def build_ltx_prompt(
         fps=plan.fps,
         refinement=False,
     )
+    if render.generated_keyframe_interval is not None:
+        prompt["ltx_generated_keyframes"] = _node(
+            "LTXVAddGeneratedKeyframes", "Internal detailing keyframes",
+            positive=positive, negative=negative, vae=_link("video_vae"),
+            latent=video, interval_frames=render.generated_keyframe_interval,
+        )
+        positive, negative, video = (_link("ltx_generated_keyframes", 0), _link("ltx_generated_keyframes", 1), _link("ltx_generated_keyframes", 2))
     first = _sampling_stage(
         prompt,
         "base",
@@ -270,11 +309,18 @@ def build_ltx_prompt(
         negative=negative,
         video=video,
         audio=_link("ltx_audio_latent"),
+        render=render,
+        model=base_model,
     )
     prompt["ltx_base_split"] = _node(
         "LTXVSeparateAVLatent", "Separate base latents", av_latent=first
     )
     base_video = _link("ltx_base_split", 0)
+    if render.generated_keyframe_interval is not None:
+        # Internal detailing tokens are not output frames. Strip them before
+        # image-guide cropping and upscaling, retaining the ordinary guides.
+        prompt["ltx_strip_generated"] = _node("LTXVSeparateGeneratedKeyframes", "Strip internal keyframes", positive=positive, negative=negative, latent=base_video, keyframes_to_batch=False)
+        positive, negative, base_video = (_link("ltx_strip_generated", 0), _link("ltx_strip_generated", 1), _link("ltx_strip_generated", 2))
     if guided:
         # Appended image guides must be removed before upscaling, then added
         # again at the new resolution; otherwise they become output frames.
@@ -296,15 +342,28 @@ def build_ltx_prompt(
         fps=plan.fps,
         refinement=True,
     )
+    refinement_model = _link("unet")
+    refinement_audio = _link("ltx_base_split", 1)
+    if render.pipeline == "dev_two_stage":
+        if files.refinement_lora is None:
+            raise ValueError("LTX-2.5 guided refinement requires its exact distilled LoRA")
+        prompt["ltx_refinement_lora"] = _node("LoraLoaderModelOnly", "Distilled refinement model", model=refinement_model, lora_name=files.refinement_lora, strength_model=files.refinement_strength)
+        refinement_model = _link("ltx_refinement_lora")
+        # Guided upstream refinement keeps stage-one audio clean; it is
+        # cross-attention context rather than a second audio generation.
+        prompt["ltx_frozen_audio"] = _node("LTXVFreezeLatent", "Keep base audio", latent=refinement_audio)
+        refinement_audio = _link("ltx_frozen_audio")
     second = _sampling_stage(
         prompt,
         "refine",
         seed=(plan.seed + 1) % (2**64),
-        sigmas=REFINEMENT_SIGMAS,
+        sigmas=REFINEMENT_SIGMAS if render.pipeline == "distilled_two_stage" else "0.909375, 0.725, 0.421875, 0.0",
         positive=positive,
         negative=negative,
         video=video,
-        audio=_link("ltx_base_split", 1),
+        audio=refinement_audio,
+        render=render,
+        model=refinement_model,
     )
     prompt["ltx_refine_split"] = _node(
         "LTXVSeparateAVLatent", "Separate refined latents", av_latent=second
@@ -312,11 +371,17 @@ def build_ltx_prompt(
     final_video = _link("ltx_refine_split", 0)
     if guided:
         final_video = _crop_guides(prompt, "refine", positive, negative, final_video)
+    decoder = _link("video_vae")
+    if render.decoder == "diffusion":
+        if files.diffusion_decoder is None:
+            raise ValueError("LTX-2.5 diffusion decoding requires an exact selected decoder")
+        prompt["ltx_diffusion_decoder"] = _node("VAELoader", "Diffusion decoder", vae_name=files.diffusion_decoder)
+        decoder = _link("ltx_diffusion_decoder")
     prompt["decode_video"] = _node(
         "VAEDecodeTiled",
         "Decode video",
         samples=final_video,
-        vae=_link("video_vae"),
+        vae=decoder,
         tile_size=512,
         overlap=64,
         temporal_size=64,
@@ -330,7 +395,7 @@ def build_ltx_prompt(
         prompt["decode_audio"] = _node(
             "LTXVAudioVAEDecode",
             "Decode audio",
-            samples=_link("ltx_refine_split", 1),
+            samples=_link("ltx_refine_split", 1) if render.pipeline == "distilled_two_stage" else _link("ltx_base_split", 1),
             audio_vae=_link("audio_vae"),
         )
         create["audio"] = _link("decode_audio")

@@ -530,7 +530,7 @@ class Runner(ServedConcurrentDispatch):
             steps=render.steps,
             seconds_per_step=result.sampling_seconds / max(1, steps_done),
             total_generation_time=time.monotonic() - started,
-            engine=render.engine_settings(),
+            engine=render.engine_settings().model_copy(update={"frame_count": manifest.frame_count}),
         )
         self.event_sender.send(
             ChunkGenerated(
@@ -559,14 +559,22 @@ class Runner(ServedConcurrentDispatch):
         frame.unlink(missing_ok=True)
         thumbnail_sha256, thumbnail_size = _sha256_and_size(thumbnail)
         plan = render.plan
+        actual_frames, actual_seconds = plan.frame_count, plan.seconds
+        if render.duration == "auto":
+            from skulk.worker.runner.video_probe import probe_video_output
+
+            server = self.server
+            assert server is not None
+            actual = probe_video_output(final, plan, codec=render.codec, interpreter=server.interpreter, minimum_frames=render.minimum_frames)
+            actual_frames, actual_seconds = actual.frame_count, actual.seconds
         return VideoOutputManifest(
             sha256=sha256,
             size_bytes=size,
             width=plan.width,
             height=plan.height,
-            frame_count=plan.frame_count,
+            frame_count=actual_frames,
             fps=plan.fps,
-            seconds=plan.seconds,
+            seconds=actual_seconds,
             audio_sample_rate=plan.sample_rate if plan.audio else None,
             audio_channels=plan.channels if plan.audio else None,
             thumbnail_sha256=thumbnail_sha256,
