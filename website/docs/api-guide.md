@@ -1621,9 +1621,10 @@ Availability note: these routes are always registered, but they return
 **404 No instance found** until an instance of the requested image model is
 placed and running. Image model cards appear in the model catalog
 (`GET /v1/models`, placement previews, and the dashboard) by default; an
-operator can hide them on a node with `SKULK_ENABLE_IMAGE_MODELS=false`. The
-image engine runs on Apple Silicon Macs, so on a cluster without one the
-placement preview's `compatibility_detail` says that the model needs one.
+operator can hide them on a node with `SKULK_ENABLE_IMAGE_MODELS=false`. Legacy MLX image cards use Apple Silicon. Native image cards select
+`stable_diffusion_cpp` on compatible Metal, CUDA, Vulkan or ROCm runtimes;
+placement applies real package requirements and configuration-specific memory fit.
+Missing representative qualification does not exclude otherwise compatible hardware.
 
 ### Generate images
 
@@ -1676,8 +1677,10 @@ Qwen Image 2.1 Turbo requires its fixed eight-step schedule, guidance 1, and an 
 negative prompt; incompatible overrides return **400** before dispatch.
 PNG and WebP preserve native alpha output; JPEG encoding discards alpha.
 Native producers run one image at a time and retain no terminal job after
-collection. Disconnect and cancellation stop the owned task. An unqualified
-engine/card pair is not eligible for normal placement.
+collection. Disconnect and cancellation stop the owned task. Compatible untested
+hardware remains eligible; qualification records describe only observed results.
+See [Native image models](native-image-models.md) for model aliases, first-use engine
+installation, platform requirements and the supported request flow.
 
 The non-streaming response is `{ "created": ..., "data": [...] }` with one
 `b64_json` or `url` entry per image.
@@ -2144,15 +2147,16 @@ Each entry also separates discovery truth from runtime truth:
 - `engine_support` reports the active signed engine/build decisions matching
   that exact architecture, artifact format, quantization, capability, and any
   required immutable card identity. These may include experimental or
-  unsupported history; placement expands only from exact `supported` claims
-  whose build and hardware constraints match a node. Load and feature
-  qualification always names the exact card tested, and known-incomplete
-  artifact capability evidence blocks expansion.
+  unsupported history. Active supported `upstream_compatibility` mappings may
+  identify additional compatible engines. Empirical load/feature qualifications
+  retain their exact tested card, build, hardware and workload for reporting;
+  missing or differently scoped results do not revoke declared compatibility.
+  Known-incomplete artifact capability evidence remains distinct from test coverage.
 
 Installed sidecars retain the intrinsic architecture and capability claims for
 air-gapped use. A hash-bound support matrix that was previously TUF-verified is
 also usable offline; it never converts an experimental or negative decision
-into placement permission.
+into an upstream compatibility mapping; empirical results are reporting evidence.
 
 ### Assess local fit and external capacity
 
@@ -2682,17 +2686,24 @@ exclusions and request a fresh preview. Alternatives are omitted when
 Every preview additionally reports `compatibility_source` (`card` or
 `signed_engine_support`), the exact `support_claim_ids` used when a signed
 matrix expanded placement, and an operator-readable `compatibility_detail` on
-engine/build, hardware, or incomplete-artifact gaps. A positive matrix claim
-must match the node's advertised exact build and hardware class. Missing,
-stale, experimental, or unsupported claims do not widen placement; legacy
-`compatible_backends` remain valid for existing cards.
+engine/package, resource or incomplete-artifact gaps. The claim IDs identify
+upstream compatibility mappings used by this preview, not an empirical GPU permit
+list. Declared compatible engines remain valid without qualification. Real
+compiled-target, ABI, implemented-operation and live capacity requirements still apply.
+
+Each preview also exposes `memory_estimate_notes`, an array describing effective
+cache storage, allocation padding/workspace and conservative unknown-layout
+fallbacks. Its returned instance carries `memorySettings` in each shard
+metadata object. Preserve those settings when submitting an exact placement: a
+changed effective cache policy requires a fresh preview. Weight quantization is
+independent of cache quantization, and estimates describe this serving configuration.
 
 A preview whose placement would install an engine first carries
-`engine_install`; otherwise the field is null. Today that is the video engine:
-a Linux node with an NVIDIA GPU or an AMD Strix Halo GPU installs it the first
-time a video model is placed there, beside the model download, so that first
-placement takes longer. The object holds `engine` (`comfy`), `node_ids` (the
-nodes that would install it), `approximate_download_bytes`, and `detail`, a
+`engine_install`; otherwise the field is null. Video cards can install `comfy`,
+and native image cards can install `stable_diffusion_cpp` on an eligible node
+before their first load. This happens beside the model download, so first use
+takes longer. The object holds `engine`, `node_ids` (the nodes that would install
+it), `approximate_download_bytes`, and `detail`, a
 sentence to show the operator before placing ("The video engine (about 7 GB)
 will be installed with this model, so placement will take longer."). Among
 otherwise equal candidates, placement prefers a node whose engine is already
@@ -3576,12 +3587,11 @@ Model cards identify artifacts and compatible engines. Qualification records are
 scoped evidence, not hardware eligibility lists. Placement previews resolve the
 actual engine/cache configuration and expose `memory_estimate_notes` for storage,
 workspace and conservative unknown-layout assumptions. Their instances carry
-per-shard `memory_settings`; node resources expose `engine_memory_settings`. Weight
+per-shard `memorySettings`; node resources expose `engineMemorySettings`. Weight
 and cache quantization are independent. The worker rejects settings drift before
 load so its guard, reservations and context sizing agree with placement. A memory
 refusal applies to the assessed configuration and workload, not permanent model/
 hardware compatibility. See [the compatibility contract](engine-compatibility.md).
- Endpoint
 
 ### List models
 
@@ -3631,7 +3641,8 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or the earlier Skulk release that shipped an installed card, for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
-| `music` | object or null | Text-to-music family, lyric requirement, qualified duration bounds, and WAV output format; null for non-music cards |
+| `music` | object or null | Text-to-music family, lyric requirement, declared duration bounds, and WAV output format; null for non-music cards |
+| `image` | object or null | Native image family, immutable `components`, optional SDXL `unetStructure`, default canvas/steps/guidance, dimension and area limits, reference-image limit, alpha support and optional fixed sigma schedule; null for legacy or non-image cards |
 | `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, and the `video_shift`/`audio_shift` a render with the adapter uses when the request sets none, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), and every engine setting the job accepts with its default: `samplers` and `default_sampler`, `schedulers` and `default_scheduler`, the card's trained `video_shift`/`audio_shift` (null keeps the model's built-in value) with `shift_bounds`, `reference_fidelities` and `default_reference_fidelity` (empty and null unless the card serves `ref2va`), `codecs` and `default_codec`, `guides` (each guide the card derives from a `control` clip: `kind`, the `modes` it applies to, and the preprocessor `weights` it loads with their `repository` and `license`; empty without a ControlNet), `default_guide` (the guide a `control` clip gives when `control_kind` is omitted), and the ControlNet's own settings: `control_strength_bounds`, `default_control_strength` (the card's ControlNet's strength, else 1; null without a ControlNet), and `default_control_window` (the `control_start`/`control_end` a render takes when omitted). The lists are the engine's own, not a recommendation. Null for non-video cards |
 | `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
@@ -3852,6 +3863,16 @@ source commits, every topology entry receives the warning-level
 all nodes converge. Operational visibility remains available, but events,
 commands, state, and inference are not cross-version-compatible; finish the
 deployment before starting new inference work.
+
+`nodeResources[node_id].engineMemorySettings` maps engine names to observed
+cache controls: `cacheBackend`, `keyBits`, `valueBits`, `groupSize`,
+`fp16EdgeLayers`, and nullable `configurationError`. These are runtime observations,
+not a request to enable compression. Placement captures them on shard
+`memorySettings`; the worker verifies them before allocation. Invalid active
+cache controls affect that engine configuration and leave unrelated engines
+available. Missing geometry or an unknown cache layout remains visibly uncertain
+or uses the shared conservative budget. Stored artifact sizes already reflect
+weight quantization; they do not determine cache precision.
 
 The response also carries a `capabilityNodes` map (keyed by host node id)
 describing the managed capability nodes each live host runs: extension-owned
@@ -5464,3 +5485,14 @@ The following routes support direct dashboard integrations:
 - [Model store guide](model-store)
 - [Architecture overview](architecture)
 - [API Reference](/api/skulk-api)
+
+
+### Native SDXL metadata
+
+`GET /v1/models` entries for native SDXL additionally expose
+`image.unetStructure`: `inputBlockChannels`, `middleBlockChannels` and
+`outputBlockChannels` arrays, plus `inputChannels` and `outputChannels`.
+They describe the selected checkpoint's nonuniform UNet module outputs and
+boundary convolutions. This is intrinsic geometry, independent of GPU test
+coverage. Generic card dimensions count those modules and use their maximum
+output width; they do not imply a uniform transformer or text-cache layout.

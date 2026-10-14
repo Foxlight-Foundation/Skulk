@@ -81,15 +81,16 @@ A model's intrinsic capability and the ability to serve it on this cluster are
 separate facts. The ecosystem combines four layers:
 
 1. The signed model card and capability claims describe the exact artifact.
-2. The signed engine-support matrix can add compatibility for an exact engine
-   build, artifact format, architecture, capability, and hardware class.
+2. Supported upstream architecture/artifact-to-engine mappings can add compatible
+   engines; empirical qualifications retain their exact tested scope as evidence.
 3. Live node resources advertise the installed engine builds and hardware.
 4. Skulk's runner support applies the final platform limitations.
 
-Declared card backends remain valid alongside exact supported matrix matches.
-Experimental, unsupported, stale-build, and hardware-mismatched claims do not
-expand placement. An explicit incomplete-artifact claim blocks matrix admission
-for that capability. A capability badge therefore does not guarantee that every
+Declared card engines remain valid without qualification. Missing, stale or
+differently scoped empirical results do not remove compatible hardware from
+placement. Real ABI, compiled-target, implemented-operation and resource
+requirements remain enforced; incomplete artifact metadata remains a distinct
+problem. Experimental or unsupported upstream mappings do not add compatibility. A capability badge therefore does not guarantee that every
 node, engine, or placement can execute it.
 
 See [Model cards](model-cards.md) for the metadata contract and

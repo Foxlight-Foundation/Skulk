@@ -21,7 +21,7 @@ automatically compatible with every model or workload.
 | Speech recognition and translation | `/v1/audio/transcriptions`, `/v1/audio/translations` | A placed STT card; translation requires declared translation support. |
 | Realtime speech | `/v1/realtime` WebSocket and Fabric speech chain | Ready realtime STT capacity; optional VAD, chat and TTS compose the voice loop. |
 | Video with optional synchronized audio | `/v1/videos` jobs | Video models enabled, a compatible video card and ComfyUI capacity. |
-| Text-to-music | `/v1/music` jobs | A mounted `TextToMusic` card, a verified audio.cpp engine build, and an exact signed support claim for its hardware class. |
+| Text-to-music | `/v1/music` jobs | A mounted `TextToMusic` card, a ready compatible audio.cpp engine and sufficient live resources. Qualification coverage does not restrict otherwise compatible hardware. |
 
 See the [API guide](api-guide.md) for request schemas, streaming events, limits and
 examples. Compatibility adapters expose supported subsets of their upstream APIs;
@@ -136,8 +136,8 @@ only when a signed claim covers the exact card, engine build, and hardware class
 The pinned CPU/Metal package is `0.8.2.post2`; its MiniMax depth sampler starts
 a fresh random stream for each audio frame. The Linux Vulkan and native CUDA
 pins remain `0.8.2.post4` and `0.8.2.post1`, respectively. Registry support
-matches the executable digest, so claims for an older CPU/Metal build do not
-authorize the new package.
+matches the executable digest. Qualification for an older build retains its
+original scope; real package compatibility determines the new package's eligibility.
 The CUDA packages require CUDA 12 runtime, cuBLAS, and NCCL libraries in
 the host loader path; its probe reports missing libraries before the lane can
 be advertised. The package contains the server, model specs, and licenses;
@@ -148,16 +148,17 @@ node serving its other workloads. `SKULK_AUDIO_CPP_BIN`,
 separate operator-installed builds, each of which must pass the same source
 and device probes. Preparing a GPU wheel does not replace another music
 instance's executable or build identity.
-Managed CUDA preparation requires the package's compiled GPU class in both
-live node facts and the signed support claim: `nvidia:sm-8.9` for Linux
+Managed CUDA preparation requires the package's actual compiled GPU class in
+live node facts: `nvidia:sm-8.9` for Linux
 `amd64`, or `nvidia:sm-12.1` for Linux `arm64`. These describe compute
 architectures shared by matching GPUs, independent of node identity. A cached
 package or a generic NVIDIA claim cannot widen a managed build's target.
-The claim must also name the selected platform's exact managed executable.
+The selected managed executable's identity is verified independently of qualification.
 Managed packages require one observed NVIDIA device with a known matching
 compute class. Multiple devices, mixed classes, and unknown classes are rejected
 until the runner can bind execution and memory accounting to a selected device.
-Operator-provided primary CUDA binaries can use their own build claims. If a
+Operator-provided primary CUDA binaries use their own measured build identities
+and runtime probes. If a
 dedicated CUDA wheel is already cached, set `SKULK_AUDIO_CPP_CUDA_BIN` to the
 operator binary as well; startup cache rehydration otherwise prefers that
 dedicated build over a primary-only override.

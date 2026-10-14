@@ -3241,7 +3241,7 @@ class API:
             "/state",
             tags=["State & Tracing"],
             summary="Get cluster state",
-            description="Return the current cluster state as seen by this API node, including topology, instances, node capabilities, and live telemetry (per-node memory and system profile).",
+            description="Return the current cluster state as seen by this API node, including topology, instances, node capabilities, and live telemetry. Node resources expose effective engine/cache settings under engineMemorySettings; shard metadata carries the captured memorySettings used for admission.",
         )(self.get_cluster_state)
         self.app.get(
             "/events",

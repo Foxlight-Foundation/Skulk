@@ -2822,10 +2822,12 @@ class ModelCard(CamelCaseModel):
     selected quant's shard group, not every quant the repo hosts). The planner
     uses this for memory-fit and placement-width decisions."""
     n_layers: PositiveInt
-    """Number of transformer layers. Drives pipeline sharding (how layers split
-    across nodes) and KV-cache sizing."""
+    """Backbone transformer layers, or explicit SDXL UNet module count. Text
+    models use it for pipeline sharding and KV sizing; an image module count
+    does not establish image sharding or text-cache geometry."""
     hidden_size: PositiveInt
-    """Model hidden dimension, used in memory/KV-cache estimates."""
+    """Backbone hidden width; SDXL reports maximum UNet module output channels.
+    Text models use their hidden dimension in memory/cache estimates."""
     supports_tensor: bool
     """Whether the model may be served with tensor parallelism (``Sharding.Tensor``).
     GGUF/llama.cpp cards set this ``False`` (single-node engine)."""
@@ -2982,6 +2984,12 @@ class ModelCard(CamelCaseModel):
         profile = self.image
         if profile is None:
             return self
+        structure = profile.unet_structure
+        if structure is not None and (
+            self.n_layers != structure.block_count
+            or self.hidden_size != structure.maximum_channels
+        ):
+            raise ValueError("SDXL card dimensions must match its UNet modules")
         primary_role = "model" if profile.family == "sdxl" else "diffusion"
         primary = next(component for component in profile.components if component.role == primary_role)
         if primary.repository != str(self.artifact_repository):
