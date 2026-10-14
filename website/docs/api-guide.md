@@ -3570,7 +3570,18 @@ for its `GET` routes.
 | `DELETE /models/{model_id}` | Model ID only. Removes the stored model and returns `modelId` and `deleted: true`; an absent model returns `404`. |
 | `POST /imports` | Loopback-only JSON `record`, `source_base_url`, `capability_token`, and `target_node_id`. Uses the capability-bound import and verification contract under [Internal cache export](#internal-cache-export). |
 
-## Models Endpoint
+## Models
+
+Model cards identify artifacts and compatible engines. Qualification records are
+scoped evidence, not hardware eligibility lists. Placement previews resolve the
+actual engine/cache configuration and expose `memory_estimate_notes` for storage,
+workspace and conservative unknown-layout assumptions. Their instances carry
+per-shard `memory_settings`; node resources expose `engine_memory_settings`. Weight
+and cache quantization are independent. The worker rejects settings drift before
+load so its guard, reservations and context sizing agree with placement. A memory
+refusal applies to the assessed configuration and workload, not permanent model/
+hardware compatibility. See [the compatibility contract](engine-compatibility.md).
+ Endpoint
 
 ### List models
 

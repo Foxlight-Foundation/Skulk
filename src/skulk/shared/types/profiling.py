@@ -11,6 +11,10 @@ import psutil
 from anyio import to_thread
 from pydantic import UUID4, BaseModel, Field, field_serializer, field_validator
 
+from skulk.shared.models.engine_memory_settings import (
+    EngineMemorySettings,
+    observe_engine_memory_settings,
+)
 from skulk.shared.models.llama_server_settings import (
     LlamaServerSettings,
     resolve_llama_server_settings,
@@ -342,6 +346,10 @@ class NodeResources(CamelCaseModel):
         default_factory=dict,
         description="Exact installed build identities keyed by engine and backend tag.",
     )
+    engine_memory_settings: dict[str, EngineMemorySettings] = Field(
+        default_factory=dict,
+        description="Effective engine/cache controls, independent of artifact weight quantization, used by placement and runner guards.",
+    )
     llama_server_settings: LlamaServerSettings | None = Field(
         default=None,
         description="Observed serving controls needed to budget per-slot recurrent state.",
@@ -468,7 +476,9 @@ class NodeResources(CamelCaseModel):
             on_demand_backends=derivation.on_demand_backends,
             architecture=platform.machine().lower(),
             engine_builds=engine_builds,
-            installable_engine_builds=dict(facts.stable_diffusion_cpp_installable_builds),
+            installable_engine_builds=dict(
+                facts.stable_diffusion_cpp_installable_builds
+            ),
             llama_server_settings=(
                 resolve_llama_server_settings(os.environ)
                 if any(
@@ -477,6 +487,12 @@ class NodeResources(CamelCaseModel):
                 )
                 else None
             ),
+            engine_memory_settings={
+                engine: observe_engine_memory_settings(os.environ, engine=engine)
+                for engine in {
+                    backend.split("-", 1)[0] for backend in derivation.backends
+                }
+            },
             hardware_classes=hardware_class_inventory(facts),
             participation=participation,
             api_available=api_available,

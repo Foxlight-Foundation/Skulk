@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from typing import Final
 
+from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.llama_server_settings import (
     LLAMA_SERVER_DEFAULT_DRAFT_DEPTH,
     LlamaServerSettings,
@@ -109,6 +110,7 @@ def gb10_unified_memory_pool(
         )
     )
 
+
 LLAMA_CPP_MEMORY_OVERHEAD_FACTOR: float = 1.10
 """``MEMORY_OVERHEAD_FACTOR`` for the llama.cpp (GGUF) engine. The 1.30 default
 covers MLX's buffer cache + Python/MLX runtime, which the C++ llama.cpp runtime
@@ -182,7 +184,9 @@ _MINIMAX_METAL_WORKSPACE: Final = Memory.from_bytes(5 * 1024**3)
 """Reserve above weights covering the qualified 11.83 GiB Metal process peak."""
 
 
-def memory_overhead_factor(model_card: ModelCard) -> float:
+def memory_overhead_factor(
+    model_card: ModelCard, *, resolved_backend: str | None = None
+) -> float:
     """Engine-appropriate weight-overhead multiplier for a model.
 
     Returns ``LLAMA_CPP_MEMORY_OVERHEAD_FACTOR`` for a GGUF model (the card
@@ -193,13 +197,46 @@ def memory_overhead_factor(model_card: ModelCard) -> float:
     compute buffer. Applying the 1.30 MLX factor to a GGUF over-refuses models
     that fit (a 58.5 GB gpt-oss-120B looked like ~76 GB).
     """
-    if model_card.gguf_file:
+    if (
+        resolved_backend is not None
+        and resolved_backend.startswith(
+            ("llama_cpp", "llama_server", "audio_cpp", "stable_diffusion_cpp")
+        )
+    ) or (resolved_backend is None and model_card.gguf_file):
         return LLAMA_CPP_MEMORY_OVERHEAD_FACTOR
     return MEMORY_OVERHEAD_FACTOR
 
 
+def cache_allocation_tokens(
+    context_tokens: int,
+    *,
+    resolved_backend: str | None,
+    memory_settings: EngineMemorySettings | None,
+) -> int:
+    """Reserve compressed cache allocation blocks and one growth block.
+
+    Actual retained prefixes consume measured live memory. Do not discount them
+    based on reuse; reserve the new active cache independently of existing pages.
+    """
+    if (
+        context_tokens > 0
+        and memory_settings is not None
+        and memory_settings.cache_backend != "default"
+        and (resolved_backend or "").startswith("mlx")
+    ):
+        return ((context_tokens + 255) // 256) * 256 + 256
+    return max(0, context_tokens)
+
+
 def estimate_kv_cache_bytes(
-    model_card: ModelCard, n_layers: int, context_tokens: int
+    model_card: ModelCard,
+    n_layers: int,
+    context_tokens: int,
+    *,
+    resolved_backend: str | None = None,
+    memory_settings: EngineMemorySettings | None = None,
+    llama_server_settings: LlamaServerSettings | None = None,
+    cache_layer_count: int | None = None,
 ) -> Memory:
     """Estimate KV-cache bytes for ``n_layers`` layers at ``context_tokens``.
 
@@ -220,9 +257,19 @@ def estimate_kv_cache_bytes(
     if context_tokens <= 0 or n_layers <= 0:
         return Memory()
     kv_bytes = (
-        per_token_kv_bytes(model_card)
+        per_token_kv_bytes(
+            model_card,
+            resolved_backend=resolved_backend,
+            memory_settings=memory_settings,
+            llama_server_settings=llama_server_settings,
+            cache_layer_count=cache_layer_count,
+        )
         * n_layers
-        * context_tokens
+        * cache_allocation_tokens(
+            context_tokens,
+            resolved_backend=resolved_backend,
+            memory_settings=memory_settings,
+        )
         // model_card.n_layers
     )
     return Memory.from_bytes(kv_bytes)
@@ -263,6 +310,8 @@ def estimate_shard_footprint(
     *,
     resolved_backend: str | None = None,
     llama_server_settings: LlamaServerSettings | None = None,
+    memory_settings: EngineMemorySettings | None = None,
+    cache_layer_count: int | None = None,
 ) -> Memory:
     """Estimate resident memory for a shard holding ``shard_fraction`` of a model.
 
@@ -289,12 +338,19 @@ def estimate_shard_footprint(
             model_card,
             resolved_backend=resolved_backend,
             llama_server_settings=llama_server_settings,
+            memory_settings=memory_settings,
+            cache_layer_count=cache_layer_count,
         )
-        * max(0, context_budget)
+        * cache_allocation_tokens(
+            context_budget,
+            resolved_backend=resolved_backend,
+            memory_settings=memory_settings,
+        )
     )
     kv_share = full_kv * shard_fraction
     footprint = (
-        weights_share * memory_overhead_factor(model_card)
+        weights_share
+        * memory_overhead_factor(model_card, resolved_backend=resolved_backend)
         + kv_share
         + estimate_recurrent_cache_bytes(
             model_card,
@@ -497,6 +553,8 @@ def per_token_kv_bytes(
     *,
     resolved_backend: str | None = None,
     llama_server_settings: LlamaServerSettings | None = None,
+    memory_settings: EngineMemorySettings | None = None,
+    cache_layer_count: int | None = None,
 ) -> int:
     """Whole-model KV-cache bytes consumed by ONE token of context.
 
@@ -520,7 +578,106 @@ def per_token_kv_bytes(
     if kv_heads is None or model_card.n_layers <= 0:
         return 0
     head_dim = model_card.attention_head_dim or KV_HEAD_DIM_FALLBACK
-    return 2 * model_card.n_layers * kv_heads * head_dim * KV_DTYPE_BYTES
+    full_precision = 2 * model_card.n_layers * kv_heads * head_dim * KV_DTYPE_BYTES
+    policy = memory_settings or EngineMemorySettings()
+    if (
+        "TextGeneration" not in model_card.tasks
+        or not (resolved_backend or "").startswith("mlx")
+        or policy.cache_backend == "default"
+    ):
+        return full_precision
+    # Model-native rotating/recurrent caches are not automatically converted.
+    # Only known standard cache layouts can justify a pre-load storage discount.
+    family = model_card.family.lower().replace("-", "_")
+    if (
+        family not in {"llama", "qwen2", "qwen3", "qwen2_moe", "qwen3_moe"}
+        or policy.cache_backend == "optiq"
+    ):
+        return full_precision
+    active_layers = cache_layer_count or model_card.n_layers
+    full_layers = min(active_layers, 2 * policy.fp16_edge_layers)
+    compressed_layers = active_layers - full_layers
+    if policy.cache_backend == "mlx_quantized":
+        if head_dim % policy.group_size or (head_dim // (32 // policy.key_bits)) != (
+            (head_dim * policy.key_bits + 31) // 32
+        ):
+            return full_precision
+        # MLX affine storage packs codes into uint32 and retains two FP16
+        # scale/bias arrays per K/V group. Round up packed words for odd widths.
+        key = ((head_dim * policy.key_bits + 31) // 32) * 4 + (
+            head_dim // policy.group_size
+        ) * 4
+        value = ((head_dim * policy.value_bits + 31) // 32) * 4 + (
+            head_dim // policy.group_size
+        ) * 4
+        workspace = 2 * head_dim * KV_DTYPE_BYTES * kv_heads if compressed_layers else 0
+    else:
+        # TurboQuant currently stores uint8 indices, irrespective of codebook
+        # bit width, plus one FP32 norm per vector. Its attention path expands
+        # the current layer to FP16; include that peak rather than ideal packing.
+        key = head_dim + 4
+        value = head_dim + 4
+        workspace = 2 * head_dim * KV_DTYPE_BYTES * kv_heads if compressed_layers else 0
+    rank_bytes = (
+        full_layers * 2 * head_dim * KV_DTYPE_BYTES * kv_heads
+        + compressed_layers * (key + value) * kv_heads
+        + workspace
+    )
+    return (rank_bytes * model_card.n_layers + active_layers - 1) // active_layers
+
+
+def memory_estimate_notes(
+    model_card: ModelCard,
+    *,
+    resolved_backend: str | None,
+    memory_settings: EngineMemorySettings | None,
+) -> tuple[str, ...]:
+    """Explain effective cache accounting and conservative unknown-layout fallback."""
+    if model_card.image is not None:
+        return (
+            "Native image auto-fit may stream parameters from RAM; stored weights and runtime margin are budgeted in system memory while the native engine fits GPU buffers.",
+        )
+    if (
+        model_card.num_key_value_heads is None
+        and model_card.gguf_cache_geometry is None
+    ):
+        return (
+            "Cache geometry is unknown; cache cost is covered only by the estimated runtime margin.",
+        )
+    policy = memory_settings or EngineMemorySettings()
+    if policy.cache_backend == "default" or not (resolved_backend or "").startswith(
+        "mlx"
+    ):
+        return (
+            "Attention-cache estimate uses two-byte elements for the selected engine.",
+        )
+    family = model_card.family.lower().replace("-", "_")
+    if policy.cache_backend == "optiq" or family not in {
+        "llama",
+        "qwen2",
+        "qwen3",
+        "qwen2_moe",
+        "qwen3_moe",
+    }:
+        return (
+            f"Selected {policy.cache_backend} layout is not established before load; using a conservative FP16 cache budget.",
+        )
+    if policy.cache_backend == "mlx_quantized":
+        dimension = model_card.attention_head_dim or KV_HEAD_DIM_FALLBACK
+        if (
+            dimension % policy.group_size
+            or dimension // (32 // policy.key_bits)
+            != (dimension * policy.key_bits + 31) // 32
+        ):
+            return (
+                "Selected affine cache layout is not supported by the known geometry; using a conservative FP16 budget.",
+            )
+        return (
+            f"Cache uses {policy.key_bits}-bit affine storage, group metadata, allocation padding and temporary attention workspace.",
+        )
+    return (
+        "TurboQuant cache uses byte-sized codes, FP32 norms, full-precision edge layers where configured, and temporary FP16 workspace.",
+    )
 
 
 def shard_fraction_of_model(shard: ShardMetadata) -> float | None:
@@ -606,13 +763,17 @@ def _node_window_tokens(
         model_card,
         resolved_backend=shard.resolved_backend,
         llama_server_settings=shard.llama_server_settings,
+        memory_settings=shard.memory_settings,
+        cache_layer_count=shard.end_layer - shard.start_layer,
     )
     fraction = shard_fraction_of_model(shard)
     if fraction is None or fraction <= 0.0 or whole_model_token_bytes <= 0:
         return None
     kv_budget = (
         working_set
-        - model_card.storage_size * fraction * memory_overhead_factor(model_card)
+        - model_card.storage_size
+        * fraction
+        * memory_overhead_factor(model_card, resolved_backend=shard.resolved_backend)
         - MEMORY_OVERHEAD_FLOOR
         - estimate_recurrent_cache_bytes(
             model_card,
@@ -622,7 +783,14 @@ def _node_window_tokens(
         * fraction
         - fixed_memory
     )
-    return max(0, int(kv_budget.in_bytes / (whole_model_token_bytes * fraction)))
+    tokens = max(0, int(kv_budget.in_bytes / (whole_model_token_bytes * fraction)))
+    if (
+        shard.memory_settings is not None
+        and shard.memory_settings.cache_backend != "default"
+        and (shard.resolved_backend or "").startswith("mlx")
+    ):
+        tokens = max(0, (tokens // 256 - 1) * 256)
+    return tokens
 
 
 def instance_context_token_limit(

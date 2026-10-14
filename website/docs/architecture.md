@@ -10,6 +10,16 @@ This is the long-form mental model for how Skulk is put together end to end. Rea
 
 ## What Skulk is
 
+The [model/engine compatibility contract](engine-compatibility.md) separates
+intrinsic model/artifact facts, actual engine requirements and representative
+qualification evidence. Compatible untested hardware remains eligible. Memory
+fit belongs to a concrete serving configuration: the placer and worker must use
+the same actual engine and effective weight/cache quantization settings, workload
+and live capacity. Stored weight size is not the whole resident/peak footprint.
+Effective engine/cache controls are advertised, stamped on shards and shared
+by admission, reservations, context sizing and worker checks. Known compressed
+layouts use their actual storage; unknown layouts retain an explicit fallback.
+
 Skulk is an interconnect fabric for multi-node AI compute: it connects Apple Silicon and Linux GPU or CPU nodes into one cluster and moves work across them. Its headline use is distributed inference, where models are sharded across nodes, any node's API can serve cluster-wide requests, and the cluster keeps running through node arrivals, departures, and master failures. One Python binary (`uv run skulk`) is everything you need on each node: the same process is router, worker, master-eligible coordinator, election participant, API server, and, when its built assets are present, dashboard host. A headless node (for example a Linux worker with no built dashboard) runs as a full node and serves the API without the UI.
 
 The design choices that shape almost everything else:
@@ -545,18 +555,15 @@ deliberately separate from the memory/topology axes above:
   allocation may move boundaries left, but never beyond this limit; the usual
   per-node memory check then validates the adjusted shards before launch.
 
-The signed registry adds an adaptive path without rewriting cards. Intrinsic
-capability claims describe what the model or selected artifact can do. A
-separate signed engine-support matrix records whether one exact engine build can
-serve one architecture, artifact format, quantization, and capability, with
-optional hardware constraints and auditable evidence. Placement unions active
-`supported` matches with the card's legacy `compatible_backends`; experimental,
-unsupported, stale-build, hardware-mismatched, other-artifact, and explicitly
-incomplete claims add nothing. Empirical load and feature qualification is
-bound to the immutable card tested; cited upstream engine compatibility may be
-architecture-scoped. Existing cards therefore keep working while a new
-architecture can become placeable as soon as independently signed support
-evidence exists.
+The signed registry adds upstream architecture/engine compatibility mappings
+without rewriting cards. Placement expands declared engines to the node's actual
+compute lanes and may add independently signed upstream mappings. Implemented
+runner operations, real package ABI/compiled targets and live resource availability
+are checked locally. Load/feature qualification records preserve their exact
+artifact, build, hardware and workload provenance for reporting; missing, stale,
+differently scoped or failed qualifications do not restrict otherwise compatible
+hardware. Artifact completeness remains a dependency of the affected operation,
+not a requirement to physically qualify every capability before model loading.
 
 The engine axis (which runtime) remains orthogonal to the node axis (which
 machine). The master resolves and stamps the concrete backend selected for each

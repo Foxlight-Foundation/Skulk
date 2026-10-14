@@ -192,13 +192,13 @@ class ModelRequirements(BaseModel):
         description="Declared backend tags; live platform and runner constraints still apply."
     )
     required_capabilities: tuple[str, ...] = Field(
-        description="Complete positively evidenced capability set required for signed engine support; an empty set cannot authorize matrix-only admission."
+        description="Positively evidenced intrinsic capability identifiers for reporting; missing qualification does not revoke declared engine compatibility."
     )
     engine_support: tuple[RegistryEngineSupportClaim, ...] = Field(
-        description="Matching signed engine claims; status, exact build and hardware constraints remain authoritative."
+        description="Matching upstream compatibility mappings and scoped qualification evidence; observed build/hardware provenance is not an eligibility list."
     )
     incomplete_capabilities: tuple[str, ...] = Field(
-        description="Artifact capabilities explicitly marked incomplete; these block admission."
+        description="Artifact capabilities with missing components; a missing dependency applies to the affected operation."
     )
     estimate_only: Literal[True] = Field(
         default=True,
@@ -2137,6 +2137,10 @@ class PlacementPreview(BaseModel):
         pattern=r"^[a-f0-9]{64}$",
         description="Canonical authorized-card content digest used to construct a launchable preview; compare with approved model requirements before submitting the exact instance. Null when no instance is present.",
     )
+    memory_estimate_notes: list[str] = Field(
+        default_factory=list,
+        description="Effective cache accounting, allocation assumptions and conservative unknown-layout fallback; scoped to this serving configuration.",
+    )
     model_id: ModelId
     sharding: Sharding
     instance_meta: InstanceMeta
@@ -2176,12 +2180,15 @@ class PlacementPreview(BaseModel):
         ),
     )
     error: str | None = None
-    error_code: Literal[
-        "no_valid_placement",
-        "placement_info_pending",
-        "model_code_approval_required",
-        "model_card_identity_mismatch",
-    ] | None = Field(
+    error_code: (
+        Literal[
+            "no_valid_placement",
+            "placement_info_pending",
+            "model_code_approval_required",
+            "model_card_identity_mismatch",
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
             "Stable placement failure category, or null for a launchable preview. "
@@ -2200,11 +2207,11 @@ class PlacementPreview(BaseModel):
     )
     compatibility_source: Literal["card", "signed_engine_support"] | None = Field(
         default=None,
-        description="Truth source that admitted the selected backend, or null on error.",
+        description="Declared card or upstream architecture/engine compatibility source, or null on error; qualification is separate evidence.",
     )
     support_claim_ids: list[str] = Field(
         default_factory=list,
-        description="Active signed support claims applicable to this placement.",
+        description="Upstream architecture/engine mapping identifiers used by this placement; empirical qualification does not grant permission.",
     )
     compatibility_detail: str | None = Field(
         default=None,
@@ -2423,17 +2430,25 @@ class AudioVoiceList(BaseModel, frozen=True):
     data: tuple[AudioVoice, ...] = ()
 
 
-LEGACY_IMAGE_SIZES = frozenset([
-    "auto",
-    "512x512",
-    "768x768",
-    "1024x768",
-    "768x1024",
-    "1024x1024",
-    "1024x1536",
-    "1536x1024",
-])
-ImageSize = Annotated[str, Field(pattern=r"^(auto|[1-9][0-9]{1,3}x[1-9][0-9]{1,3})$", description="auto or an explicit WIDTHxHEIGHT canvas; the selected model validates area and alignment.")]
+LEGACY_IMAGE_SIZES = frozenset(
+    [
+        "auto",
+        "512x512",
+        "768x768",
+        "1024x768",
+        "768x1024",
+        "1024x1024",
+        "1024x1536",
+        "1536x1024",
+    ]
+)
+ImageSize = Annotated[
+    str,
+    Field(
+        pattern=r"^(auto|[1-9][0-9]{1,3}x[1-9][0-9]{1,3})$",
+        description="auto or an explicit WIDTHxHEIGHT canvas; the selected model validates area and alignment.",
+    ),
+]
 
 
 def normalize_image_size(v: object) -> ImageSize:

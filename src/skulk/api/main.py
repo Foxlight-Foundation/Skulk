@@ -357,6 +357,7 @@ from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
     PlacementNoCapableMachineError,
+    model_platform_backends,
     require_instance_model_card_identity,
     require_instance_model_code_approval,
     served_context_window,
@@ -385,7 +386,6 @@ from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.backends import (
     AUDIO_CPP_COMPUTE_BACKENDS,
-    AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
     ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
@@ -393,6 +393,7 @@ from skulk.shared.backends import (
     audio_cpp_cuda_hardware_matches,
     engine_install_notice,
     engine_of,
+    expand_engine_backends,
 )
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -454,10 +455,11 @@ from skulk.shared.models.model_cards import (
     get_model_cards,
     get_model_engine_support,
     get_model_required_capabilities,
+    model_engine_requirements,
     preserve_generated_card_constraints,
     record_custom_card_mutation_applied,
     register_installed_card_record,
-    registry_supported_backends_for_node,
+    registry_compatible_backends_for_node,
     same_authorized_model_card,
 )
 from skulk.shared.models.registry import RegistryAdvisory
@@ -1629,7 +1631,6 @@ async def _read_request_json_object(request: Request) -> JsonObject:
     return _coerce_json_object(cast(dict[object, object], payload))
 
 
-
 def _model_store_defaults() -> dict[str, object]:
     """Return the store a fresh node starts with, for Settings to pre-fill.
 
@@ -1643,6 +1644,7 @@ def _model_store_defaults() -> dict[str, object]:
         "store_http_host": store.store_http_host,
         "store_path": store.store_path,
     }
+
 
 def _load_yaml_object(path: Path) -> JsonObject:
     """Read one YAML document from disk as a string-keyed object."""
@@ -1799,6 +1801,7 @@ class _PreviewContextFields(TypedDict):
     default_context_tokens: int | None
     reserves_context_at_load: bool
     kv_bytes_per_token: int | None
+    memory_estimate_notes: list[str]
 
 
 DASHBOARD_SHELL_CACHE_CONTROL: Final = "no-cache"
@@ -3846,15 +3849,21 @@ class API:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     async def _prepare_music_engine_for_mount(
-        self, card: ModelCard, excluded_nodes: set[NodeId],
-        *, required_nodes: set[NodeId] | None = None,
+        self,
+        card: ModelCard,
+        excluded_nodes: set[NodeId],
+        *,
+        required_nodes: set[NodeId] | None = None,
         requested_backend: str | None = None,
     ) -> tuple[NodeId, NodeResources] | None:
         """Prepare an eligible node and return its ordered verified resources."""
 
         if ModelTask.TextToMusic not in card.tasks:
             return
-        if requested_backend is not None and requested_backend not in AUDIO_CPP_COMPUTE_BACKENDS:
+        if (
+            requested_backend is not None
+            and requested_backend not in AUDIO_CPP_COMPUTE_BACKENDS
+        ):
             raise HTTPException(
                 status_code=400,
                 detail=f"Music instance requested an invalid audio.cpp backend: {requested_backend}",
@@ -3876,7 +3885,7 @@ class API:
         )
 
         def supports_with_capacity(node_id: NodeId, backends: frozenset[str]) -> bool:
-            """Check signed lanes against the pool their runner actually allocates."""
+            """Check compatible lanes against the pool their runner actually allocates."""
             memory = node_ram[node_id]
             vram = node_vram.get(node_id)
             for backend in backends:
@@ -3888,46 +3897,44 @@ class API:
                         gpu_working_set_ceiling(memory.ram_total),
                     )
                 )
-                if pool is not None and estimate_shard_footprint(
-                    card, 1.0, resolved_backend=backend,
-                ) <= pool:
+                if (
+                    pool is not None
+                    and estimate_shard_footprint(
+                        card,
+                        1.0,
+                        resolved_backend=backend,
+                    )
+                    <= pool
+                ):
                     return True
             return False
 
-        claims = tuple(
-            claim for claim in get_model_engine_support(card)
-            if claim.status == "supported"
-        )
-
-        def claim_matches(lane: str, classes: frozenset[str]) -> bool:
-            """Limit preparation to lanes supported by signed hardware claims."""
-            return any(
-                claim.engine in {lane, "audio_cpp"}
-                and (
-                    not claim.hardware_classes
-                    or bool(set(claim.hardware_classes) & classes)
-                )
-                for claim in claims
+        def runtime_matches(lane: str, _classes: frozenset[str]) -> bool:
+            """Match the declared engine, independently of qualification hardware."""
+            return lane in expand_engine_backends(
+                model_engine_requirements(card)
+            ) or lane in registry_compatible_backends_for_node(
+                card, node_backends=frozenset({lane})
             )
 
-        def cuda_wheel_claim_matches(
-            architecture: str, classes: frozenset[str]
-        ) -> bool:
-            """Require the compiled SM in both live facts and the signed claim."""
+        def cuda_wheel_matches(architecture: str, classes: frozenset[str]) -> bool:
+            """Require the package's actual compiled SM, not a signed test result."""
             required_class = AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE.get(architecture)
-            return required_class is not None and audio_cpp_cuda_hardware_matches(required_class, classes) and any(
-                claim.engine in {"audio_cpp-cuda", "audio_cpp"}
-                and claim.engine_build == AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE[architecture]
-                and required_class in claim.hardware_classes
-                for claim in claims
+            return required_class is not None and audio_cpp_cuda_hardware_matches(
+                required_class, classes
             )
 
         variant_lanes: dict[Literal["cpu", "vulkan", "cuda"], frozenset[str]] = {
             # Primary-binary overrides can expose CUDA or ROCm through the
             # CPU preparation path; the dedicated CUDA wheel is independent.
-            "cpu": frozenset({
-                "audio_cpp-cpu", "audio_cpp-metal", "audio_cpp-cuda", "audio_cpp-rocm",
-            }),
+            "cpu": frozenset(
+                {
+                    "audio_cpp-cpu",
+                    "audio_cpp-metal",
+                    "audio_cpp-cuda",
+                    "audio_cpp-rocm",
+                }
+            ),
             "vulkan": frozenset({"audio_cpp-vulkan"}),
             "cuda": frozenset({"audio_cpp-cuda"}),
         }
@@ -3935,22 +3942,16 @@ class API:
         def candidate_lanes(
             variant: Literal["cpu", "vulkan", "cuda"], resources: NodeResources
         ) -> frozenset[str]:
-            """Keep known dedicated CUDA wheels out of primary CPU preparation."""
+            """Keep dedicated CUDA payloads separate from the primary preparation."""
             lanes = variant_lanes[variant]
-            if (
-                variant == "cpu"
-                and (
-                    resources.engine_builds.get("audio_cpp-cuda")
-                    in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
-                    or not any(
-                        claim.engine in {"audio_cpp-cuda", "audio_cpp"}
-                        and claim.engine_build not in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
-                        for claim in claims
-                    )
-                )
+            if variant == "cpu" and (
+                "audio_cpp-cuda" not in resources.backends
+                or resources.engine_builds.get("audio_cpp-cuda")
+                in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
             ):
-                return lanes - {"audio_cpp-cuda"}
+                lanes -= {"audio_cpp-cuda"}
             return lanes
+
         candidates: list[
             tuple[int, bool, int, NodeId, Literal["cpu", "vulkan", "cuda"]]
         ] = []
@@ -3964,7 +3965,9 @@ class API:
             if resources is None or memory is None or resources.participation != "full":
                 continue
             available = max(
-                min(memory.ram_available, gpu_working_set_ceiling(memory.ram_total)).in_bytes,
+                min(
+                    memory.ram_available, gpu_working_set_ceiling(memory.ram_total)
+                ).in_bytes,
                 node_vram[node_id].in_bytes if node_id in node_vram else 0,
             )
             if available < estimate_shard_footprint(card, 1.0).in_bytes:
@@ -3983,18 +3986,17 @@ class API:
             if (
                 "platform:linux" in platform_classes
                 and "nvidia" in platform_classes
-                and cuda_wheel_claim_matches(architecture, platform_classes)
+                and cuda_wheel_matches(architecture, platform_classes)
             ):
                 variants.append("cuda")
             if (
                 "platform:linux" in platform_classes
                 and architecture in {"x86_64", "amd64"}
-                and claim_matches("audio_cpp-vulkan", platform_classes)
+                and runtime_matches("audio_cpp-vulkan", platform_classes)
             ):
                 variants.append("vulkan")
             if any(
-                claim_matches(lane, platform_classes)
-                for lane in variant_lanes["cpu"]
+                runtime_matches(lane, platform_classes) for lane in variant_lanes["cpu"]
             ):
                 variants.append("cpu")
             for variant in variants:
@@ -4002,7 +4004,7 @@ class API:
                 if requested_backend is not None:
                     lanes &= {requested_backend}
                 if not lanes or not any(
-                    claim_matches(lane, platform_classes) for lane in lanes
+                    runtime_matches(lane, platform_classes) for lane in lanes
                 ):
                     continue
                 ready = any(
@@ -4010,8 +4012,16 @@ class API:
                     for backend in resources.backends & lanes
                 )
                 priority = {"cuda": 3, "vulkan": 2, "cpu": 1}[variant]
+                if (
+                    variant == "cpu"
+                    and ready
+                    and resources.backends & {"audio_cpp-cuda", "audio_cpp-rocm"}
+                ):
+                    priority = 4
                 candidates.append((priority, ready, available, node_id, variant))
-        candidates.sort(key=lambda item: (item[0], item[1], item[2], str(item[3])), reverse=True)
+        candidates.sort(
+            key=lambda item: (item[0], item[1], item[2], str(item[3])), reverse=True
+        )
         if not candidates:
             raise HTTPException(
                 status_code=503,
@@ -4033,31 +4043,36 @@ class API:
                 resources = self._telemetry_view.node_resources.get(node_id)
                 supported: frozenset[str] = frozenset()
                 if resources is not None:
-                    supported = registry_supported_backends_for_node(
-                        card,
-                        node_backends=resources.backends,
-                        engine_builds=resources.engine_builds,
-                        hardware_classes=resources.hardware_classes,
-                    ) & lanes
+                    supported = model_platform_backends(card, resources) & lanes
                 if not supported:
-                    errors.append(f"{node_id}: no supported signed music claim matches its ready engine build and hardware")
+                    errors.append(
+                        f"{node_id}: no compatible implemented music runtime is ready"
+                    )
                     continue
                 if not supports_with_capacity(node_id, supported):
-                    errors.append(f"{node_id}: supported music backend lacks available model memory")
+                    errors.append(
+                        f"{node_id}: supported music backend lacks available model memory"
+                    )
                     continue
             request_id = CommandId()
             waiter = anyio.Event()
             self._audio_cpp_prepare_events[request_id] = waiter
             try:
-                await self._send(PrepareAudioCpp(
-                    command_id=request_id, target_node=node_id,
-                    owner_node=self.node_id, variant=variant,
-                ))
+                await self._send(
+                    PrepareAudioCpp(
+                        command_id=request_id,
+                        target_node=node_id,
+                        owner_node=self.node_id,
+                        variant=variant,
+                    )
+                )
                 with anyio.move_on_after(300):
                     await waiter.wait()
                 result = self._audio_cpp_prepare_results.pop(request_id, None)
                 if result is None:
-                    errors.append(f"{node_id}: preparation timed out or the API session reset")
+                    errors.append(
+                        f"{node_id}: preparation timed out or the API session reset"
+                    )
                     continue
                 if not result.success:
                     errors.append(f"{node_id}: {result.error or 'preparation failed'}")
@@ -4067,30 +4082,36 @@ class API:
                     lanes = candidate_lanes(variant, fresh)
                     if requested_backend is not None:
                         lanes &= {requested_backend}
-                if result.target_node != node_id or fresh is None or not any(
-                    backend in fresh.engine_builds
-                    for backend in fresh.backends & lanes
+                if (
+                    result.target_node != node_id
+                    or fresh is None
+                    or not any(
+                        backend in fresh.engine_builds
+                        for backend in fresh.backends & lanes
+                    )
                 ):
-                    errors.append(f"{node_id}: preparation returned no verified ready resources")
+                    errors.append(
+                        f"{node_id}: preparation returned no verified ready resources"
+                    )
                     continue
-                supported = registry_supported_backends_for_node(
-                    card,
-                    node_backends=fresh.backends,
-                    engine_builds=fresh.engine_builds,
-                    hardware_classes=fresh.hardware_classes,
-                ) & lanes
+                supported = model_platform_backends(card, fresh) & lanes
                 if not supported:
-                    errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
+                    errors.append(
+                        f"{node_id}: no compatible implemented music runtime is ready after preparation"
+                    )
                     continue
                 if supports_with_capacity(node_id, supported):
                     return node_id, fresh
-                errors.append(f"{node_id}: supported music backend lacks available model memory")
+                errors.append(
+                    f"{node_id}: supported music backend lacks available model memory"
+                )
             finally:
                 self._audio_cpp_prepare_events.pop(request_id, None)
                 self._audio_cpp_prepare_results.pop(request_id, None)
         raise HTTPException(
             status_code=503,
-            detail="audio.cpp could not be prepared on an eligible node: " + "; ".join(errors),
+            detail="audio.cpp could not be prepared on an eligible node: "
+            + "; ".join(errors),
         )
 
     async def place_instance(
@@ -4369,13 +4390,25 @@ class API:
             requested=None,
             served_default=self._served_context_default(),
         )
+        from skulk.shared.models.memory_estimate import memory_estimate_notes
+
+        notes: set[str] = set()
         kv_bytes = 0
         for shard in shards:
+            notes.update(
+                memory_estimate_notes(
+                    shard.model_card,
+                    resolved_backend=shard.resolved_backend,
+                    memory_settings=shard.memory_settings,
+                )
+            )
             fraction = shard_fraction_of_model(shard)
             per_token = per_token_kv_bytes(
                 shard.model_card,
                 resolved_backend=shard.resolved_backend,
                 llama_server_settings=shard.llama_server_settings,
+                memory_settings=shard.memory_settings,
+                cache_layer_count=shard.end_layer - shard.start_layer,
             )
             if fraction is None or per_token <= 0:
                 kv_bytes = 0
@@ -4388,6 +4421,7 @@ class API:
                 shard_preallocates_kv_upfront(shard) for shard in shards
             ),
             kv_bytes_per_token=kv_bytes or None,
+            memory_estimate_notes=sorted(notes),
         )
 
     async def get_placement_previews(
@@ -4429,12 +4463,10 @@ class API:
             + ", ".join(incomplete_capabilities)
             if incomplete_capabilities
             else (
-                "Signed engine support matches this artifact, but no node advertises "
-                "the exact supported engine build and hardware constraint."
+                "No available engine currently matches this model and its runtime requirements."
                 if supported_claim_ids
                 else (
-                    "Model or artifact capabilities are known, but no active signed "
-                    "supported engine claim matches this architecture and artifact."
+                    "No compatible engine mapping is declared for this architecture and artifact."
                     if model_card.registry_capability_claims
                     and not model_card.placement.compatible_backends
                     else None
@@ -4445,14 +4477,15 @@ class API:
         def compatibility_for_instance(
             instance: Instance,
         ) -> tuple[Literal["card", "signed_engine_support"], list[str]]:
-            """Identify whether immutable card or signed support admitted a backend."""
+            """Identify the declared or upstream architecture/engine compatibility source."""
             resolved_backends = {
                 shard.resolved_backend
                 for shard in instance.shard_assignments.runner_to_shard.values()
                 if shard.resolved_backend is not None
             }
             uses_matrix = bool(
-                resolved_backends - model_card.placement.compatible_backends
+                resolved_backends
+                - expand_engine_backends(model_engine_requirements(model_card))
             )
             applicable_claim_ids: set[str] = set()
             if uses_matrix:
@@ -4467,19 +4500,11 @@ class API:
                     if backend is None or resources is None:
                         continue
                     engine = engine_of(backend)
-                    build = resources.engine_builds.get(
-                        backend,
-                        resources.engine_builds.get(engine) if engine else None,
-                    )
                     for claim in matching_engine_support:
-                        hardware_matches = not claim.hardware_classes or bool(
-                            set(claim.hardware_classes) & resources.hardware_classes
-                        )
                         if (
                             claim.status == "supported"
+                            and claim.evidence_kind == "upstream_compatibility"
                             and claim.engine in {backend, engine}
-                            and claim.engine_build == build
-                            and hardware_matches
                         ):
                             applicable_claim_ids.add(claim.claim_id)
             return (

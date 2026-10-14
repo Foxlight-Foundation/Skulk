@@ -3,6 +3,7 @@ import hashlib
 import io
 import ipaddress
 import mimetypes
+import os
 import shutil
 import sys
 import threading
@@ -53,6 +54,7 @@ from skulk.shared.constants import (
     SKULK_VIDEO_OUTPUT_DIR,
 )
 from skulk.shared.log_summaries import summarize_task_for_log
+from skulk.shared.models.engine_memory_settings import observe_engine_memory_settings
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     LOAD_FIT_TOLERANCE,
@@ -1469,6 +1471,17 @@ class Worker:
         instance). MLX grows KV lazily (no up-front window), so the budget floor is
         the correct estimate there, capped by a smaller enforced serving window.
         """
+        if shard.memory_settings is not None and shard.resolved_backend is not None:
+            actual = observe_engine_memory_settings(
+                os.environ,
+                engine=shard.resolved_backend.split("-", 1)[0]
+                if "TextGeneration" in shard.model_card.tasks
+                else "non_text",
+            )
+            if actual.configuration_error is not None:
+                return f"Engine cache configuration is invalid: {actual.configuration_error}"
+            if actual != shard.memory_settings:
+                return "Engine/cache settings changed since placement; refresh node resources and retry this configuration"
         kv_context = shard_admission_context_tokens(shard, context_token_limit)
         footprint = estimate_shard_footprint(
             shard.model_card,
@@ -1476,6 +1489,8 @@ class Worker:
             context_budget=kv_context,
             resolved_backend=shard.resolved_backend,
             llama_server_settings=shard.llama_server_settings,
+            memory_settings=shard.memory_settings,
+            cache_layer_count=shard.end_layer - shard.start_layer,
         )
         # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
         # so size the guard against local usable VRAM or it would falsely refuse
