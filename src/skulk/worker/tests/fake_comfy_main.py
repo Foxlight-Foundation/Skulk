@@ -42,6 +42,8 @@ NODE_ORDER = (
     "audio_vae",
     "condition",
     "sampler",
+    "ltx_base_sampler",
+    "ltx_refine_sampler",
     "decode_video",
     "decode_audio",
     "create_video",
@@ -219,8 +221,14 @@ class FakeComfy:
                 )
                 if self.fail_node == node_id:
                     raise RuntimeError(f"fake failure at {node_id}")
-                if node_id == "sampler":
-                    for step in range(1, steps + 1):
+                if graph[node_id]["class_type"] == "SamplerCustomAdvanced":
+                    node_steps = steps
+                    sigma_link = graph[node_id]["inputs"].get("sigmas")
+                    if isinstance(sigma_link, list):
+                        sigma_node = graph.get(sigma_link[0], {})
+                        if sigma_node.get("class_type") == "ManualSigmas":
+                            node_steps = len(sigma_node["inputs"]["sigmas"].split(",")) - 1
+                    for step in range(1, node_steps + 1):
                         await asyncio.sleep(self.step_seconds)
                         if self.interrupt:
                             raise InterruptedError
@@ -229,11 +237,11 @@ class FakeComfy:
                             {
                                 "prompt_id": prompt_id,
                                 "nodes": {
-                                    "sampler": {
+                                    node_id: {
                                         "value": step,
-                                        "max": steps,
+                                        "max": node_steps,
                                         "state": "running",
-                                        "node_id": "sampler",
+                                        "node_id": node_id,
                                         "prompt_id": prompt_id,
                                     }
                                 },

@@ -10,6 +10,7 @@ responses, and that every terminal path releases what it held.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import tempfile
 import time
@@ -35,6 +36,7 @@ from skulk.shared.models.model_cards import (
     VideoCompanionKind,
     VideoMode,
 )
+from skulk.shared.tests.model_card_fixtures import load_fixture_card
 from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.commands import TaskCancelled, VideoGeneration
 from skulk.shared.types.common import CommandId, ModelId, NodeId
@@ -225,6 +227,44 @@ def test_create_json_text_to_video(monkeypatch: pytest.MonkeyPatch) -> None:
     assert command.task_params.seconds == 6 and command.task_params.mode is not None
     assert str(command.command_id) == body["id"]
     assert body["id"] in {str(key) for key in api._video_generation_queues}
+
+
+@pytest.mark.parametrize(
+    "controls",
+    [
+        {"steps": 20},
+        {"scheduler": "simple"},
+        {"size": "960x544"},
+        {"lora_strength": 0.5},
+    ],
+)
+def test_ltx_refuses_unhonored_controls_before_job_admission(
+    monkeypatch: pytest.MonkeyPatch, controls: dict[str, object]
+) -> None:
+    """An invalid LTX request must never reserve a job or dispatch GPU work."""
+    api = _make_api(monkeypatch)
+    card = asyncio.run(
+        load_fixture_card(ModelId("Lightricks/LTX-2.5-distilled-comfy-int8"))
+    )
+    assert card is not None
+
+    async def load(_model_id: ModelId) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(load))
+    response = TestClient(api.app).post(
+        "/v1/videos",
+        json={
+            "model": str(card.model_id),
+            "prompt": "A fox walking",
+            "seconds": 5,
+            **controls,
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "LTX-2.5" in response.text
+    api._send.assert_not_called()
+    assert not api._video_jobs.list(limit=10)
 
 
 def test_create_defaults_seconds_to_the_card_minimum(
@@ -894,7 +934,12 @@ def test_a_control_clip_derives_the_guide_the_caller_names(
     client = TestClient(api.app)
     response = client.post(
         "/v1/videos",
-        data={"model": str(MODEL), "prompt": "trace the edges", "seconds": "5", "control_kind": "edges"},
+        data={
+            "model": str(MODEL),
+            "prompt": "trace the edges",
+            "seconds": "5",
+            "control_kind": "edges",
+        },
         files=[("control", ("clip.mp4", b"\x00clip", "video/mp4"))],
     )
     assert response.status_code == 200, response.text
@@ -908,11 +953,19 @@ def test_create_refuses_a_guide_the_card_has_no_weights_for(
     client = TestClient(api.app)
     response = client.post(
         "/v1/videos",
-        data={"model": str(MODEL), "prompt": "x", "seconds": "5", "control_kind": "depth"},
+        data={
+            "model": str(MODEL),
+            "prompt": "x",
+            "seconds": "5",
+            "control_kind": "depth",
+        },
         files=[("control", ("clip.mp4", b"\x00clip", "video/mp4"))],
     )
     assert response.status_code == 400
-    assert "cannot derive a depth guide for t2va; it derives pose, edges" in response.json()["error"]["message"]
+    assert (
+        "cannot derive a depth guide for t2va; it derives pose, edges"
+        in response.json()["error"]["message"]
+    )
     api._send.assert_not_called()
 
 
@@ -976,7 +1029,12 @@ def test_create_refuses_control_settings_without_a_control_input(
     client = TestClient(api.app)
     response = client.post(
         "/v1/videos",
-        json={"model": str(MODEL), "prompt": "x", "seconds": 5, "control_strength": 0.5},
+        json={
+            "model": str(MODEL),
+            "prompt": "x",
+            "seconds": 5,
+            "control_strength": 0.5,
+        },
     )
     assert response.status_code == 400
     assert "control or mask" in response.json()["error"]["message"]
@@ -1109,7 +1167,6 @@ def test_create_multipart_requires_a_declared_length(
     api._send.assert_not_called()
 
 
-
 def test_create_forwards_engine_settings_from_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1130,7 +1187,11 @@ def test_create_forwards_engine_settings_from_json(
     )
     assert response.status_code == 200, response.text
     params = _sent_command(api).task_params
-    assert (params.sampler, params.scheduler, params.codec) == ("dpmpp_2m", "beta", "av1")
+    assert (params.sampler, params.scheduler, params.codec) == (
+        "dpmpp_2m",
+        "beta",
+        "av1",
+    )
     assert (params.video_shift, params.audio_shift) == (9.0, 2.5)
     assert params.styles == ("bullet_time", "dark_magic")
 

@@ -12804,6 +12804,10 @@ class API:
             raise HTTPException(
                 status_code=400, detail=f"{params.model} is not a video model"
             )
+        try:
+            params.validate_family(card.family, card.video)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         mode = params.implied_mode()
         if mode not in card.video.modes:
             raise HTTPException(

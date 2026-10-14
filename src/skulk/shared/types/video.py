@@ -180,12 +180,15 @@ def derivable_guides(video: VideoCardConfig, mode: VideoMode) -> tuple[str, ...]
     )
     if not has_controlnet:
         return ()
-    roles = {companion.role for companion in video.companions if companion.role is not None}
+    roles = {
+        companion.role for companion in video.companions if companion.role is not None
+    }
     return tuple(
         kind
         for kind in VIDEO_GUIDE_KINDS
         if all(role in roles for role in VIDEO_GUIDE_PREPROCESSORS[kind])
     )
+
 
 VIDEO_DEFAULT_SAMPLER: Final = "res_multistep"
 """Sampler a render uses when the request names none."""
@@ -221,6 +224,8 @@ def video_sampler_refusal(name: str) -> str | None:
     if name not in VIDEO_SAMPLERS:
         return f"sampler {name!r} is not offered by the pinned engine"
     return None
+
+
 """Prompt length ceiling; structured H3 prompts run to several thousand chars."""
 
 
@@ -477,6 +482,89 @@ class VideoGenerationTaskParams(BaseModel):
         if roles & {"first_frame", "last_frame", "keyframe"}:
             return VideoMode.FramesToAudioVideo
         return VideoMode.TextToAudioVideo
+
+    def validate_family(self, family: str | None, video: VideoCardConfig) -> None:
+        """Validate controls against an implemented family-specific graph.
+
+        Args:
+            family: Exact card family selecting the runner implementation.
+            video: Card's declarative video contract and required companions.
+
+        Raises:
+            ValueError: Requested controls cannot be honored by this family.
+        """
+        if family != "ltx-2.5":
+            return
+        if video.transformer_variant != "distilled":
+            raise ValueError(
+                "LTX-2.5 distilled rendering requires a declared distilled transformer"
+            )
+        if not video.audio_output:
+            raise ValueError("LTX-2.5 requires its audio VAE even for silent output")
+        if self.implied_mode() not in (
+            VideoMode.TextToAudioVideo,
+            VideoMode.FramesToAudioVideo,
+        ):
+            raise ValueError(
+                "LTX-2.5 distilled rendering accepts text and image keyframes"
+            )
+        if self.steps not in (None, 8) or video.default_steps != 8:
+            raise ValueError(
+                "LTX-2.5 distilled rendering uses a fixed 8-step base schedule"
+            )
+        if self.sampler not in (None, "euler_ancestral") or self.scheduler is not None:
+            raise ValueError(
+                "LTX-2.5 distilled rendering uses fixed ancestral Euler schedules"
+            )
+        if (
+            self.lora is not None
+            or self.lora_strength is not None
+            or self.video_shift is not None
+            or self.audio_shift is not None
+        ):
+            raise ValueError(
+                "LTX-2.5 distilled rendering does not accept H3 adapters or sigma shifts"
+            )
+        if (
+            self.styles
+            or self.control_kind is not None
+            or self.control_strength is not None
+        ):
+            raise ValueError(
+                "LTX-2.5 distilled rendering does not accept H3 styles or ControlNet controls"
+            )
+        if self.reference_fidelity is not None:
+            raise ValueError(
+                "reference_fidelity applies only to reference-to-video rendering"
+            )
+        if any(
+            item.kind != "image"
+            or item.role not in ("first_frame", "last_frame", "keyframe")
+            for item in self.references
+        ):
+            raise ValueError("LTX-2.5 distilled rendering accepts image keyframes only")
+        if self.width_height is not None and any(
+            edge % 64 for edge in self.width_height
+        ):
+            # Each stage's latent grid is 32 pixels; the half-resolution first
+            # stage makes the output grid 64. Refuse rather than mislabel a
+            # silently floored output as the caller's exact requested size.
+            raise ValueError(
+                "LTX-2.5 two-stage output dimensions must be divisible by 64"
+            )
+        if self.width_height is not None and min(self.width_height) < 128:
+            raise ValueError(
+                "LTX-2.5 two-stage output dimensions must be at least 128 pixels"
+            )
+        if self.seed is not None and self.seed >= 2**64:
+            raise ValueError("LTX-2.5 noise seeds must fit an unsigned 64-bit integer")
+        if not any(
+            item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2"
+            for item in video.companions
+        ):
+            raise ValueError(
+                "LTX-2.5 two-stage rendering requires its spatial_x2 latent upscaler"
+            )
 
 
 class VideoOutputManifest(CamelCaseModel):

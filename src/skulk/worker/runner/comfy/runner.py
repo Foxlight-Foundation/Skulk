@@ -513,7 +513,8 @@ class Runner(ServedConcurrentDispatch):
             run_prompt(
                 server.base_url,
                 prompt,
-                total_steps=render.plan.steps,
+                total_steps=render.steps,
+                sampler_steps=render.sampler_steps,
                 on_progress=progress,
                 is_cancelled=lambda: self._is_cancelled(task_id),
                 server_alive=server.alive,
@@ -524,9 +525,9 @@ class Runner(ServedConcurrentDispatch):
             shutil.rmtree(output_dir, ignore_errors=True)
             return
         manifest = self._collect_output(result, render, output_dir)
-        steps_done = result.steps_observed or render.plan.steps
+        steps_done = result.steps_observed or render.steps
         stats = VideoGenerationStats(
-            steps=render.plan.steps,
+            steps=render.steps,
             seconds_per_step=result.sampling_seconds / max(1, steps_done),
             total_generation_time=time.monotonic() - started,
             engine=render.engine_settings(),

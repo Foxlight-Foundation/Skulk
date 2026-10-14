@@ -112,6 +112,7 @@ MODEL_FOLDERS: Final[tuple[str, ...]] = (
     "model_patches",
     "checkpoints",
     "geometry_estimation",
+    "latent_upscale_models",
 )
 """ComfyUI folder keys the engine exposes from a staged artifact directory.
 
@@ -134,6 +135,10 @@ def stage_for_node(node_id: str) -> VideoStage | None:
         return _STAGE_BY_NODE[node_id]
     if node_id.startswith(("ref_", "load_", "guide_", "derive_")):
         return "encoding"
+    if node_id.startswith("ltx_"):
+        if node_id.endswith("_sampler"):
+            return "sampling"
+        return "encoding"
     return None
 
 
@@ -150,6 +155,7 @@ class ComfyModelFiles:
     text_encoder: str
     video_vae: str
     audio_vae: str | None
+    spatial_upscaler: str | None = None
 
 
 def _bundle_paths(card: ModelCard) -> tuple[PurePosixPath, ...]:
@@ -213,11 +219,22 @@ def resolve_model_files(card: ModelCard) -> ComfyModelFiles:
         card, _COMPONENT_AUDIO_VAE, required=video is not None and video.audio_output
     )
     assert diffusion is not None and text_encoder is not None and video_vae is not None
+    upscalers = (
+        tuple(
+            item
+            for item in video.companions
+            if item.kind is VideoCompanionKind.LatentUpscaler
+        )
+        if video is not None
+        else ()
+    )
+    spatial = next((item for item in upscalers if item.name == "spatial_x2"), None)
     return ComfyModelFiles(
         diffusion_model=diffusion,
         text_encoder=text_encoder,
         video_vae=video_vae,
         audio_vae=audio_vae,
+        spatial_upscaler=None if spatial is None else companion_file(spatial),
     )
 
 
@@ -239,6 +256,7 @@ def companion_file(companion: VideoCompanionConfig) -> str:
             VideoCompanionKind.Lora: "loras",
             VideoCompanionKind.ModelPatch: "model_patches",
             VideoCompanionKind.Embedding: "embeddings",
+            VideoCompanionKind.LatentUpscaler: "latent_upscale_models",
         }.get(companion.kind)
     )
     if folder is None or not path.parts or path.parts[0] != folder:
@@ -280,7 +298,8 @@ def style_tokens(params: VideoGenerationTaskParams, card: ModelCard) -> tuple[st
         if companion is None:
             raise ValueError(f"{card.model_id} has no style embedding named {name!r}")
         tokens.append(
-            "embedding:" + PurePosixPath(companion_file(companion)).with_suffix("").as_posix()
+            "embedding:"
+            + PurePosixPath(companion_file(companion)).with_suffix("").as_posix()
         )
     return tuple(tokens)
 
@@ -446,11 +465,28 @@ class ComfyRenderPlan:
     codec: str = CODEC_DEFAULT
     control: ControlChoice | None = None
     """The ControlNet this render applies, when the request attached a control input."""
+    family: str | None = None
+    """Model family selecting the graph implementation; legacy cards retain H3."""
 
     @property
     def steps(self) -> int:
         """Sampling steps for this render."""
-        return self.plan.steps
+        return sum(self.sampler_steps.values())
+
+    @property
+    def sampler_steps(self) -> dict[str, int]:
+        """Sampling node identities and interval counts across every stage."""
+        if self.family == "ltx-2.5":
+            from skulk.worker.runner.comfy.ltx import (
+                DISTILLED_SIGMAS,
+                REFINEMENT_SIGMAS,
+            )
+
+            return {
+                "ltx_base_sampler": len(DISTILLED_SIGMAS.split(",")) - 1,
+                "ltx_refine_sampler": len(REFINEMENT_SIGMAS.split(",")) - 1,
+            }
+        return {NODE_SAMPLER: self.plan.steps}
 
     def prompt_text(self, prompt: str) -> str:
         """The prompt the text encoder reads: the style tokens, then the prompt."""
@@ -463,7 +499,7 @@ class ComfyRenderPlan:
         return VideoEngineSettings(
             sampler=self.sampler,
             scheduler=self.scheduler,
-            steps=self.plan.steps,
+            steps=self.steps,
             seed=self.plan.seed,
             video_shift=self.video_shift,
             audio_shift=self.audio_shift,
@@ -504,6 +540,22 @@ def plan_comfy_render(
     mode = params.implied_mode()
     if mode not in video.modes:
         raise ValueError(f"{card.model_id} does not serve mode {mode.value}")
+    if card.family == "ltx-2.5":
+        from skulk.worker.runner.comfy.ltx import validate_ltx_request
+
+        validate_ltx_request(params, card)
+        return ComfyRenderPlan(
+            plan=plan_render(params, video.model_copy(update={"canvas_multiple": 64})),
+            mode=mode,
+            files=resolve_model_files(card),
+            adapter=None,
+            video_shift=None,
+            audio_shift=None,
+            sampler="euler_ancestral",
+            scheduler="manual",
+            codec=params.codec or CODEC_DEFAULT,
+            family=card.family,
+        )
     companion = select_adapter(params, card, mode)
     adapter = None
     video_shift = video.video_shift
@@ -557,7 +609,9 @@ def plan_comfy_render(
     )
 
 
-def _frames(prompt: ComfyPrompt, name: str, title: str, binding: ReferenceBinding) -> list[Any]:
+def _frames(
+    prompt: ComfyPrompt, name: str, title: str, binding: ReferenceBinding
+) -> list[Any]:
     """Load one structural attachment as an IMAGE batch: a still, or a clip's frames."""
     if binding.spec.kind == "image":
         prompt[f"{name}_load"] = _node("LoadImage", title, image=binding.input_name)
@@ -611,7 +665,9 @@ def _add_control(
     return _link(NODE_CONTROL)
 
 
-def _derive_guide(prompt: ComfyPrompt, guide: GuideChoice, frames: list[Any]) -> list[Any]:
+def _derive_guide(
+    prompt: ComfyPrompt, guide: GuideChoice, frames: list[Any]
+) -> list[Any]:
     """Turn the control clip's frames into the guide the ControlNet follows.
 
     Each chain is ComfyUI's own: the pose one is its H3 ControlNet template's
@@ -760,6 +816,10 @@ def build_prompt(
     ``SaveVideo`` and ``SaveImage`` nodes write into (the command id), so the
     runner can find the container and thumbnail without a lookup.
     """
+    if render.family == "ltx-2.5":
+        from skulk.worker.runner.comfy.ltx import build_ltx_prompt
+
+        return build_ltx_prompt(render, params, references, output_subdir)
     plan = render.plan
     files = render.files
     prompt: ComfyPrompt = {}

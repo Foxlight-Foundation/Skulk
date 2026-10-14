@@ -613,8 +613,10 @@ def fake_comfy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _runner(sender: _Sender, cancels: _Cancels, backend: str = "comfy-cuda") -> Runner:
-    card = _card(FL2VA_ID)
+def _runner(
+    sender: _Sender, cancels: _Cancels, backend: str = "comfy-cuda", card: ModelCard | None = None,
+) -> Runner:
+    card = card or _card(FL2VA_ID)
     bound = _bound_instance(card, RunnerId("comfy-runner"), NodeId("n"), backend)
     return Runner(bound, cast("Any", sender), cast("Any", None), cast("Any", cancels))
 
@@ -696,6 +698,45 @@ def test_runner_renders_through_a_comfy_server(
     finally:
         runner._teardown_server()
     assert runner.server is None
+
+
+def test_ltx_runner_executes_both_stages_and_retains_the_output_contract(
+    fake_comfy: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise LTX through the managed server/job/output lifecycle without weights."""
+    model_id = ModelId("Lightricks/LTX-2.5-distilled-comfy-int8")
+    card = _card(model_id)
+    assert card.artifact_bundle is not None
+    for item in card.artifact_bundle.files:
+        path = fake_comfy / "model" / item.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+    sender = _Sender()
+    runner = _runner(sender, _Cancels(), card=card)
+    instance = runner.bound_instance.instance.instance_id
+    try:
+        runner.handle_task(LoadModel(instance_id=instance))
+        runner.handle_task(StartWarmup(instance_id=instance))
+        runner._generate(VideoGeneration(
+            command_id=CommandId("ltx-render"), instance_id=instance,
+            task_params=_params(model_id, size="768x512"), owner_node=NodeId("n"),
+        ))
+        chunks = _video_chunks(sender)
+        sampling = [chunk for chunk in chunks if chunk.stage == "sampling"]
+        assert [chunk.step for chunk in sampling] == list(range(1, 12))
+        assert sampling[-1].total_steps == 11
+        terminal = chunks[-1]
+        assert terminal.finish_reason == "stop" and terminal.output is not None
+        assert terminal.stats is not None and terminal.stats.steps == 11
+        assert terminal.stats.engine is not None
+        assert terminal.stats.engine.scheduler == "manual"
+        assert (terminal.output.width, terminal.output.height, terminal.output.frame_count) == (768, 512, 121)
+        assert terminal.output.audio_sample_rate == 48000
+        assert terminal.output.thumbnail_sha256 is not None
+        config = fake_comfy / "cache" / "comfy" / "comfy-runner" / "extra_model_paths.yaml"
+        assert "latent_upscale_models:" in config.read_text()
+    finally:
+        runner._teardown_server()
 
 
 def test_runner_cancel_interrupts_the_server_and_keeps_serving(
