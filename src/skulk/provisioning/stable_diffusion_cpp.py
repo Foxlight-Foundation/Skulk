@@ -107,8 +107,76 @@ class StableDiffusionCppWheel(FrozenModel):
         return f"https://wheels.foxlight.ai/wheels/{self.filename}"
 
 
-# Publication/qualification populates this table. A source build is not a published wheel.
-PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = ()
+# These exact bytes were promoted from an attested build and qualified on the
+# observed hardware classes below. Compiled kernel targets alone do not qualify
+# another GPU; model feature support remains separately bound by registry claims.
+PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
+    StableDiffusionCppWheel(
+        filename='skulk_stable_diffusion_cpp_metal-0.1.0.post1-py3-none-macosx_15_0_arm64.whl',
+        sha256='d84428a1073f21a4f40e8eec7610eb44eae86dd45170047473d18a4c568ca939',
+        binary_sha256='f0e876810448d30fe1a263bd8053f66b8b97ff20735f6aee9592492c2712abda',
+        payload_sha256='201af2888ceeeaaa86a7523023610b91e6ef7644f6b63b3af740c145ff4ace5d',
+        size_bytes=16435084,
+        expanded_size_bytes=42336264,
+        compute='metal',
+        system='darwin',
+        architecture='arm64',
+        hardware_classes=frozenset(['apple:apple-m4']),
+        required_cpu_features=frozenset([]),
+    ),
+    StableDiffusionCppWheel(
+        filename='skulk_stable_diffusion_cpp_cuda-0.1.0.post1-py3-none-manylinux_2_35_aarch64.whl',
+        sha256='e4f68af1b4bca2041cf40e93ccb40868ea4cf92a660497aa57120e08393f8cfd',
+        binary_sha256='d569fe99973f3c4c3b3b6a0bd54593a21c60ec9338d5f62ffc06dc3376720b69',
+        payload_sha256='4ecf8709af95fd6429dc64d8f32ef43165b71b4ccd48a571222c56173510c1e9',
+        size_bytes=543371268,
+        expanded_size_bytes=748018484,
+        compute='cuda',
+        system='linux',
+        architecture='aarch64',
+        hardware_classes=frozenset(['nvidia:nvidia-gb10']),
+        required_cpu_features=frozenset([]),
+    ),
+    StableDiffusionCppWheel(
+        filename='skulk_stable_diffusion_cpp_cuda-0.1.0.post1-py3-none-manylinux_2_35_x86_64.whl',
+        sha256='6a055d454b7dd90edf2d74e948a4398df123e74129564f51ebd6b4d35a3610ad',
+        binary_sha256='56c6f97815b103f6c0477d998ecbcc95f3dda60ef3965969ef9fffd59dbdd9c7',
+        payload_sha256='0dcd9be9a5e5607f1edc1b3218e55b7b045ef8fe608dd93341d64a1fefdda4ab',
+        size_bytes=613420003,
+        expanded_size_bytes=926212077,
+        compute='cuda',
+        system='linux',
+        architecture='x86_64',
+        hardware_classes=frozenset(['nvidia:nvidia-a100-sxm4-80gb', 'nvidia:nvidia-geforce-rtx-4090']),
+        required_cpu_features=frozenset(['avx', 'avx2', 'bmi2', 'f16c', 'fma', 'sse4_2']),
+    ),
+    StableDiffusionCppWheel(
+        filename='skulk_stable_diffusion_cpp_vulkan-0.1.0.post1-py3-none-manylinux_2_35_x86_64.whl',
+        sha256='dbbb89980b894a6ac00e7188f563e10bd01d7d10c9d9a00f88aaa1e57fd6fc96',
+        binary_sha256='23d7cf1efeb5d6c966813e15cee4a1b2fbb5c145fd77abbe9b6a8a1f778b273a',
+        payload_sha256='9b9984949802fbd0f2b33aa22044bc728c05f252b46ba21da471c4e86c550732',
+        size_bytes=30791307,
+        expanded_size_bytes=86390804,
+        compute='vulkan',
+        system='linux',
+        architecture='x86_64',
+        hardware_classes=frozenset(['amd:pci-1002-1586']),
+        required_cpu_features=frozenset(['avx', 'avx2', 'bmi2', 'f16c', 'fma', 'sse4_2']),
+    ),
+    StableDiffusionCppWheel(
+        filename='skulk_stable_diffusion_cpp_rocm-0.1.0.post1-py3-none-manylinux_2_35_x86_64.whl',
+        sha256='45bec6e5e4df083cbf44eeb81d5f09be5214c323994a4800ae918129e3bb44ff',
+        binary_sha256='67122895591407c0f1656bd9d8eb91c1e358e0ad6fe6ea77a154b0834e8ee3c4',
+        payload_sha256='46bfe6624f77b43f24bcef1ee2df6ffb2cb461b6ff4fc5bedda4a302998b2759',
+        size_bytes=2170695534,
+        expanded_size_bytes=4644443682,
+        compute='rocm',
+        system='linux',
+        architecture='x86_64',
+        hardware_classes=frozenset(['amd:pci-1002-74b9']),
+        required_cpu_features=frozenset(['avx', 'avx2', 'bmi2', 'f16c', 'fma', 'sse4_2']),
+    ),
+)
 
 
 @final

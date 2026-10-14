@@ -186,6 +186,38 @@ def test_unpublished_package_is_not_installable() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("system", "machine", "backend", "qualified", "unqualified"),
+    [
+        ("Darwin", "arm64", "metal", "apple:apple-m4", "apple:apple-m5"),
+        ("Linux", "aarch64", "cuda", "nvidia:nvidia-gb10", "nvidia:sm-12.0"),
+        ("Linux", "x86_64", "cuda", "nvidia:nvidia-a100-sxm4-80gb", "nvidia:sm-9.0"),
+        ("Linux", "x86_64", "cuda", "nvidia:nvidia-geforce-rtx-4090", "nvidia:sm-8.6"),
+        ("Linux", "x86_64", "vulkan", "amd:pci-1002-1586", "intel"),
+        ("Linux", "x86_64", "rocm", "amd:pci-1002-74b9", "amd:pci-1002-74a1"),
+    ],
+)
+def test_published_packages_do_not_expand_untested_hardware_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    system: str,
+    machine: str,
+    backend: str,
+    qualified: str,
+    unqualified: str,
+) -> None:
+    """Use the shipping manifest and reject nearby unmeasured device classes."""
+    monkeypatch.setattr(image_engine.platform, "system", lambda: system)
+    monkeypatch.setattr(image_engine.platform, "machine", lambda: machine)
+    monkeypatch.setattr(image_engine, "_host_cpu_features", lambda: frozenset({"avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"}))
+    tag = f"stable_diffusion_cpp-{backend}"
+    wheel = image_engine.wheel_for_host(tag, frozenset({qualified}))
+    assert wheel is not None
+    assert wheel.payload_sha256 is not None
+    assert wheel.size_bytes is not None
+    assert wheel.expanded_size_bytes is not None
+    assert image_engine.wheel_for_host(tag, frozenset({unqualified})) is None
+
+
 def test_package_selection_requires_compiled_cpu_instructions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
