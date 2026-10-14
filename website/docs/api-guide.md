@@ -1863,7 +1863,11 @@ outside those constraints are refused. Seeds must fit an unsigned 64-bit
 integer.
 
 The model video metadata additionally exposes `pipelines`, `decoders`,
-`generated_keyframes`, `automatic_duration` and guided defaults. Missing
+`generated_keyframes`, `automatic_duration` and guided defaults.
+`pipeline_modes` and `decoder_modes` map each offered choice to its permitted
+modes; `automatic_duration_modes` lists the modes allowed by the selected
+head. Companion mode limits are enforced before graph dispatch, including
+the required spatial upscaler and dev refinement LoRA. Missing
 selected components disable their controls, independently of hardware
 qualification. Pipeline, decoder, guidance and duration choices also persist
 in `stats.engine`; its frame count is the verified actual count.

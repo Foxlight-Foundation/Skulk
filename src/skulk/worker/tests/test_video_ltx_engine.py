@@ -12,7 +12,12 @@ from skulk.api.types.api import VideoCapabilitySection
 from skulk.master.placement import _card_platform_backends
 from skulk.shared.backends import resolve_node_backend
 from skulk.shared.models import model_cards
-from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    VideoCompanionKind,
+    VideoMode,
+)
 from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
     RegistryEngineSupportClaim,
@@ -24,6 +29,7 @@ from skulk.worker.runner.comfy.graph import (
     ReferenceBinding,
     build_prompt,
     plan_comfy_render,
+    resolve_model_files,
 )
 from skulk.worker.runner.comfy.ltx import DISTILLED_SIGMAS, REFINEMENT_SIGMAS
 from skulk.worker.runner.comfy.server import _RenderSession
@@ -246,6 +252,36 @@ def test_duration_metadata_and_wire_roundtrip() -> None:
     assert metadata.pipelines == ["dev_two_stage"]
     assert metadata.decoders == ["convolutional", "diffusion"]
     assert metadata.automatic_duration and metadata.guidance is not None
+
+
+@pytest.mark.parametrize("kind,controls", [
+    (VideoCompanionKind.DurationHead, {"duration": "auto"}),
+    (VideoCompanionKind.VideoDecoder, {"decoder": "diffusion"}),
+    (VideoCompanionKind.Lora, {}),
+    (VideoCompanionKind.LatentUpscaler, {}),
+])
+def test_scoped_companions_refuse_a_forbidden_mode_before_graph_dispatch(kind: VideoCompanionKind, controls: dict[str, object]) -> None:
+    card = _dev_card()
+    assert card.video is not None
+    companions = tuple(item.model_copy(update={"modes": (VideoMode.FramesToAudioVideo,)}) if item.kind is kind else item for item in card.video.companions)
+    card = card.model_copy(update={"video": card.video.model_copy(update={"companions": companions})})
+    with pytest.raises(ValueError, match="requires"):
+        plan_comfy_render(_params(**controls), card)
+    first = VideoReferenceSpec(slot=0, kind="image", role="first_frame", media_type="image/png", size_bytes=1, sha256="0" * 64)
+    params = _params(**controls, references=(first,), reference_bytes=1, total_input_chunks=1)
+    render = plan_comfy_render(params, card)
+    graph = build_prompt(render, params, (ReferenceBinding(spec=first, input_name="frame.png"),), "command")
+    assert graph["ltx_base_sampler"]["class_type"] == "SamplerCustomAdvanced"
+    metadata = VideoCapabilitySection.from_model_card(card)
+    assert metadata is not None
+    if kind is VideoCompanionKind.DurationHead:
+        assert resolve_model_files(card, VideoMode.TextToAudioVideo).duration_head is None
+        assert metadata.automatic_duration_modes == ["fl2va"]
+    elif kind is VideoCompanionKind.VideoDecoder:
+        assert resolve_model_files(card, VideoMode.TextToAudioVideo).diffusion_decoder is None
+        assert metadata.decoder_modes["diffusion"] == ["fl2va"]
+    else:
+        assert metadata.pipeline_modes == {"dev_two_stage": ["fl2va"]}
 
 
 @pytest.mark.parametrize("controls", [{"duration": "auto", "duration_min_seconds": 5}, {"duration_min_seconds": 2}, {"duration": "auto", "duration_min_seconds": 6}])

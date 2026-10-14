@@ -826,6 +826,8 @@ LTX request contracts also carry explicit pipeline/decoder selection, guided
 negative conditioning and base-stage CFG/STG/modality scales, internal
 keyframe spacing, and bounded automatic duration. Dev two-stage graphs bind
 an exact distilled-refinement LoRA and freeze base audio during refinement.
+Companion mode limits are enforced in request validation and file selection,
+and projected as pipeline/decoder mode maps and duration-head mode lists.
 Alternative decoders and duration heads are separately pinned `video_decoder`
 and `duration_head` companions; primary component resolution excludes these
 auxiliary files. Generated keyframe tokens are stripped before upscaling.

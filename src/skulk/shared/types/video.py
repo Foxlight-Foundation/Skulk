@@ -560,11 +560,11 @@ class VideoGenerationTaskParams(BaseModel):
             )
         if video.transformer_variant == "distilled" and (self.guidance is not None or self.negative_prompt is not None):
             raise ValueError("LTX-2.5 distilled stages do not accept guided negative conditioning")
-        if video.transformer_variant == "dev" and not any(item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" for item in video.companions):
+        if video.transformer_variant == "dev" and not any(item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" and item.supports_mode(self.implied_mode()) for item in video.companions):
             raise ValueError("LTX-2.5 dev two-stage rendering requires its distilled_refinement LoRA")
         if self.generated_keyframe_interval is not None and not video.generated_keyframes:
             raise ValueError("LTX-2.5 selected transformer does not declare generated keyframe support")
-        if self.decoder == "diffusion" and not any(item.kind is VideoCompanionKind.VideoDecoder and item.name == "diffusion_decoder" for item in video.companions):
+        if self.decoder == "diffusion" and not any(item.kind is VideoCompanionKind.VideoDecoder and item.name == "diffusion_decoder" and item.supports_mode(self.implied_mode()) for item in video.companions):
             raise ValueError("LTX-2.5 diffusion decoding requires its exact diffusion_decoder companion")
         if self.duration == "auto":
             minimum = self.duration_min_seconds or video.min_seconds
@@ -572,7 +572,7 @@ class VideoGenerationTaskParams(BaseModel):
                 raise ValueError("LTX-2.5 automatic duration bounds must lie within card limits")
             if video.frame_count_for_seconds(minimum) > self.seconds * video.fps:
                 raise ValueError("LTX-2.5 automatic duration bounds contain no complete trained frame grid")
-            if not any(item.kind is VideoCompanionKind.DurationHead and item.name == "duration_head" for item in video.companions):
+            if not any(item.kind is VideoCompanionKind.DurationHead and item.name == "duration_head" and item.supports_mode(self.implied_mode()) for item in video.companions):
                 raise ValueError("LTX-2.5 automatic duration requires its exact duration_head companion")
             if any(item.at_seconds is not None and item.at_seconds >= minimum for item in self.references):
                 raise ValueError("LTX-2.5 timed keyframes must precede the automatic duration lower bound")
@@ -621,7 +621,7 @@ class VideoGenerationTaskParams(BaseModel):
         if self.seed is not None and self.seed >= 2**64:
             raise ValueError("LTX-2.5 noise seeds must fit an unsigned 64-bit integer")
         if not any(
-            item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2"
+            item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(self.implied_mode())
             for item in video.companions
         ):
             raise ValueError(

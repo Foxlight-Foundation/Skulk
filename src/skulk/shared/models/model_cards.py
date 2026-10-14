@@ -1582,6 +1582,14 @@ class VideoCompanionConfig(CamelCaseModel):
     def _serialize_modes(self, value: tuple[VideoMode, ...]) -> list[str]:
         return [item.value for item in value]
 
+    def supports_mode(self, mode: VideoMode) -> bool:
+        """Return whether this selected asset permits the requested mode.
+
+        An empty mode declaration applies to every mode on the owning card.
+        This checks artifact scope, independently of hardware qualification.
+        """
+        return not self.modes or mode in self.modes
+
     @field_validator("license")
     @classmethod
     def _validate_license(cls, value: str | None) -> str | None:

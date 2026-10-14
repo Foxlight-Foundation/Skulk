@@ -219,8 +219,12 @@ def _component_file(
     return candidates[0].relative_to(directory).as_posix()
 
 
-def resolve_model_files(card: ModelCard) -> ComfyModelFiles:
-    """Resolve the loader file names from the card's components and bundle."""
+def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> ComfyModelFiles:
+    """Resolve exact component and companion files permitted by the request mode.
+
+    An omitted mode inventories the selected bundle during runner startup;
+    render planning always supplies its authoritative requested mode.
+    """
     video = card.video
     diffusion = _component_file(card, _COMPONENT_TRANSFORMER)
     text_encoder = _component_file(card, _COMPONENT_TEXT_ENCODER)
@@ -233,15 +237,15 @@ def resolve_model_files(card: ModelCard) -> ComfyModelFiles:
         tuple(
             item
             for item in video.companions
-            if item.kind is VideoCompanionKind.LatentUpscaler
+            if item.kind is VideoCompanionKind.LatentUpscaler and (mode is None or item.supports_mode(mode))
         )
         if video is not None
         else ()
     )
     spatial = next((item for item in upscalers if item.name == "spatial_x2"), None)
-    refinement = next((item for item in video.companions if item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement"), None) if video is not None else None
+    refinement = next((item for item in video.companions if item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" and (mode is None or item.supports_mode(mode))), None) if video is not None else None
     def selected(kind: VideoCompanionKind, name: str) -> str | None:
-        companion = next((item for item in video.companions if item.kind is kind and item.name == name), None) if video is not None else None
+        companion = next((item for item in video.companions if item.kind is kind and item.name == name and (mode is None or item.supports_mode(mode))), None) if video is not None else None
         return None if companion is None else companion_file(companion)
     return ComfyModelFiles(
         diffusion_model=diffusion,
@@ -583,7 +587,7 @@ def plan_comfy_render(
         if pipeline == "dfr":
             raise ValueError("LTX-2.5 DFR temporal refinement is not implemented by this pinned Comfy graph")
         minimum = params.duration_min_seconds or video.min_seconds
-        files = resolve_model_files(card)
+        files = resolve_model_files(card, mode)
         return ComfyRenderPlan(
             plan=plan_render(params, video.model_copy(update={"canvas_multiple": 64})),
             mode=mode,

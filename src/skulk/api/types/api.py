@@ -853,9 +853,12 @@ class VideoCapabilitySection(BaseModel):
         description="Selected transformer's training variant when declared.",
     )
     pipelines: list[VideoPipeline] = Field(default_factory=list, description="Implemented baseline family pipelines available with this selected artifact.")
+    pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by every required asset of each implemented pipeline.")
     decoders: list[VideoDecoder] = Field(default_factory=list, description="Selectable decoders whose exact components are present.")
+    decoder_modes: dict[VideoDecoder, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by each selected decoder and its pipeline assets.")
     generated_keyframes: bool = Field(default=False, description="Whether internal detailing keyframe tokens are supported by this artifact.")
     automatic_duration: bool = Field(default=False, description="Whether an exact duration head is selected.")
+    automatic_duration_modes: list[VideoModeName] = Field(default_factory=list, description="Implemented modes permitted by the selected duration head.")
     guidance: VideoGuidance | None = Field(default=None, description="Default guided LTX base-stage scales; null for distilled or other families.")
     min_seconds: int = Field(description="Shortest clip length accepted.")
     max_seconds: int = Field(description="Longest clip length accepted.")
@@ -989,16 +992,37 @@ class VideoCapabilitySection(BaseModel):
         limits = config.reference_limits
         guides = _guide_sections(config)
         ltx = model_card.family == "ltx-2.5"
-        ltx_distilled = ltx and config.transformer_variant == "distilled"
-        ltx_dev = ltx and config.transformer_variant == "dev" and any(item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" for item in config.companions)
+        def companion_modes(kind: VideoCompanionKind, name: str) -> list[VideoModeName]:
+            return cast("list[VideoModeName]", [mode.value for mode in config.modes if mode in (VideoMode.TextToAudioVideo, VideoMode.FramesToAudioVideo) and any(item.kind is kind and item.name == name and item.supports_mode(mode) for item in config.companions)])
+
+        spatial_modes: list[VideoModeName] = companion_modes(VideoCompanionKind.LatentUpscaler, "spatial_x2") if ltx else []
+        distilled_modes: list[VideoModeName] = spatial_modes if config.transformer_variant == "distilled" else []
+        dev_modes: list[VideoModeName] = [mode for mode in spatial_modes if mode in companion_modes(VideoCompanionKind.Lora, "distilled_refinement")] if config.transformer_variant == "dev" else []
+        ltx_distilled, ltx_dev = bool(distilled_modes), bool(dev_modes)
         ltx_available = ltx_distilled or ltx_dev
+        pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = {}
+        if distilled_modes:
+            pipeline_modes["distilled_two_stage"] = distilled_modes
+        if dev_modes:
+            pipeline_modes["dev_two_stage"] = dev_modes
+        served_modes: list[VideoModeName] = distilled_modes or dev_modes
+        decoder_modes: dict[VideoDecoder, list[VideoModeName]] = {}
+        if served_modes:
+            decoder_modes["convolutional"] = served_modes
+        diffusion_modes: list[VideoModeName] = [mode for mode in served_modes if mode in companion_modes(VideoCompanionKind.VideoDecoder, "diffusion_decoder")]
+        if diffusion_modes:
+            decoder_modes["diffusion"] = diffusion_modes
+        duration_modes: list[VideoModeName] = [mode for mode in served_modes if mode in companion_modes(VideoCompanionKind.DurationHead, "duration_head")]
         return cls(
             modes=cast("list[VideoModeName]", [mode.value for mode in config.modes]),
             transformer_variant=config.transformer_variant,
-            pipelines=(["distilled_two_stage"] if ltx_distilled else ["dev_two_stage"] if ltx_dev else []),
-            decoders=(["convolutional", "diffusion"] if any(item.kind is VideoCompanionKind.VideoDecoder and item.name == "diffusion_decoder" for item in config.companions) else ["convolutional"]) if ltx_available else [],
+            pipelines=list(pipeline_modes),
+            pipeline_modes=pipeline_modes,
+            decoders=list(decoder_modes),
+            decoder_modes=decoder_modes,
             generated_keyframes=ltx_available and config.generated_keyframes,
-            automatic_duration=ltx_available and any(item.kind is VideoCompanionKind.DurationHead and item.name == "duration_head" for item in config.companions),
+            automatic_duration=bool(duration_modes),
+            automatic_duration_modes=duration_modes,
             guidance=VideoGuidance() if ltx_dev else None,
             min_seconds=config.min_seconds,
             max_seconds=config.max_seconds,
