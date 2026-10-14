@@ -5,7 +5,7 @@ source_revision = "e9a20add8c5937fcab635fb8e7a52926487a5776"
 n_layers = 48
 hidden_size = 4096
 supports_tensor = false
-tasks = ["TextToVideo", "ImageToVideo"]
+tasks = ["TextToVideo", "ImageToVideo", "ReferenceToVideo"]
 family = "ltx-2.5"
 quantization = "int4"
 base_model = "Lightricks/LTX-2.5"
@@ -28,7 +28,10 @@ backend_preference = ["mlx_video-metal"]
 [video]
 transformer_variant = "distilled"
 generated_keyframes = true
-modes = ["t2va", "fl2va"]
+audio_conditioning = true
+editing = ["retake", "extend"]
+prompt_relay = true
+modes = ["t2va", "fl2va", "ref2va"]
 min_seconds = 1
 max_seconds = 20
 fps = 24
@@ -40,6 +43,12 @@ audio_output = true
 audio_sample_rate = 48000
 audio_channels = 2
 default_steps = 8
+
+[video.reference_limits]
+max_images = 8
+max_videos = 1
+max_audio_clips = 1
+max_files = 9
 
 [[video.companions]]
 kind = "latent_upscaler"

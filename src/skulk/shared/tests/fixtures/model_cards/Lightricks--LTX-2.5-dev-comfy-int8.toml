@@ -5,7 +5,7 @@ source_revision = "49b093a39c19169a8a81721dcc541e07e945232f"
 n_layers = 48
 hidden_size = 4096
 supports_tensor = false
-tasks = ["TextToVideo", "ImageToVideo"]
+tasks = ["TextToVideo", "ImageToVideo", "ReferenceToVideo"]
 family = "ltx-2.5"
 quantization = "int8_convrot"
 base_model = "Lightricks/LTX-2.5"
@@ -27,7 +27,10 @@ backend_preference = ["comfy-cuda", "comfy-rocm"]
 
 [video]
 transformer_variant = "dev"
-modes = ["t2va", "fl2va"]
+audio_conditioning = true
+editing = ["retake", "extend"]
+prompt_relay = true
+modes = ["t2va", "fl2va", "ref2va"]
 min_seconds = 1
 max_seconds = 20
 fps = 24
@@ -39,6 +42,12 @@ audio_output = true
 audio_sample_rate = 48000
 audio_channels = 2
 default_steps = 30
+
+[video.reference_limits]
+max_images = 8
+max_videos = 1
+max_audio_clips = 1
+max_files = 9
 
 [[video.companions]]
 kind = "latent_upscaler"

@@ -21,6 +21,7 @@ from skulk_mlx_video.schema import BuildMetadata, Job
 if TYPE_CHECKING:
     import mlx.core as mx
     from ltx_core_mlx.components.guiders import MultiModalGuiderParams
+    from ltx_core_mlx.conditioning.prompt_relay import PromptRelayInput
     from ltx_pipelines_mlx._base import OnStep
     from ltx_pipelines_mlx.utils.args import ImageConditioningInput
 
@@ -37,6 +38,7 @@ class GenerateOptions(TypedDict, total=False):
     negative_prompt: str | None
     video_guider_params: MultiModalGuiderParams
     audio_guider_params: MultiModalGuiderParams
+    prompt_relay: PromptRelayInput
 
 
 class Arguments(argparse.Namespace):
@@ -47,7 +49,7 @@ class Arguments(argparse.Namespace):
     parent_pid: int | None
 
 
-def emit(record: Mapping[str, str | int | float | bool], *, stream: TextIO | None = None) -> None:
+def emit(record: Mapping[str, str | int | float | bool | tuple[str, ...]], *, stream: TextIO | None = None) -> None:
     """Send one small JSON record on the private subprocess protocol."""
     print(json.dumps(record, separators=(",", ":")), file=stream or sys.stdout, flush=True)
 
@@ -76,10 +78,11 @@ def preflight(model: Path, job: Job) -> None:
         "text_encoder.safetensors", "text_encoder_config.json", "connector.safetensors",
         "tokenizer.json", "tokenizer_config.json", "embedded_config.json",
         "chat_template.jinja", "quantize_config.json", "vae_encoder_conv.safetensors",
-        "vae_decoder_conv.safetensors", "spatial_upscaler_x2_v1_0.safetensors",
-        "spatial_upscaler_x2_v1_0_config.json", "audio_vae.safetensors",
-        "vocoder.safetensors", "transformer-distilled.safetensors",
+        "vae_decoder_conv.safetensors", "audio_vae.safetensors", "vocoder.safetensors",
     }
+    required.add("transformer-dev.safetensors" if job.transformer_variant == "dev" or job.pipeline in {"dev_two_stage", "hq_two_stage"} else "transformer-distilled.safetensors")
+    if job.pipeline != "retake" and not (job.pipeline == "extend" and job.transformer_variant == "dev"):
+        required.update({"spatial_upscaler_x2_v1_0.safetensors", "spatial_upscaler_x2_v1_0_config.json"})
     if job.pipeline in {"dev_two_stage", "hq_two_stage"}:
         required.update({"transformer-dev.safetensors", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"})
     if job.decoder == "diffusion":
@@ -104,12 +107,19 @@ def render(job: Job) -> None:
     import imageio_ffmpeg
     import mlx.core as mx
     from ltx_core_mlx.components.guiders import MultiModalGuiderParams
+    from ltx_core_mlx.conditioning.prompt_relay import PromptRelayInput
     from ltx_pipelines_mlx._base import BasePipeline
     from ltx_pipelines_mlx.distilled import DistilledPipeline
     from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
     from ltx_pipelines_mlx.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
     from ltx_pipelines_mlx.utils.args import ImageConditioningInput
     from ltx_pipelines_mlx.utils.types import AutoDuration
+
+    from skulk_mlx_video.advanced import (
+        create_source_pipeline,
+        relay_lengths,
+        render_source_job,
+    )
 
     model = Path(job.model_dir)
     preflight(model, job)
@@ -146,7 +156,9 @@ def render(job: Job) -> None:
     emit({"stage": "encoding"})
     pipeline: BasePipeline
     with contextlib.redirect_stdout(sys.stderr):
-        if job.pipeline == "distilled_two_stage":
+        if job.audio_conditioning is not None or job.editing is not None:
+            pipeline = create_source_pipeline(job)
+        elif job.pipeline == "distilled_two_stage":
             pipeline = DistilledPipeline(str(model), gemma_model_id=str(model), low_memory=True, low_ram_streaming=True)
         else:
             selected = TI2VidTwoStagesHQPipeline if job.pipeline == "hq_two_stage" else TI2VidTwoStagesPipeline
@@ -157,6 +169,11 @@ def render(job: Job) -> None:
     pipeline.verbose = False
     pipeline.generate_audio = job.audio
     pipeline.video_decoder = "conv" if job.decoder == "convolutional" else "diffusion"
+    original_load_decoders = pipeline._load_decoders
+    def load_decoders() -> None:
+        emit({"stage": "decoding"}, stream=protocol_stdout)
+        original_load_decoders()
+    pipeline._load_decoders = load_decoders
     frames: int | AutoDuration = job.frame_count
     if job.duration == "auto":
         frames = AutoDuration(min_seconds=float(job.minimum_seconds), max_seconds=float(job.maximum_seconds))
@@ -173,7 +190,9 @@ def render(job: Job) -> None:
             return actual
         pipeline._resolve_num_frames = resolve_frames
     options: GenerateOptions = {"frame_rate": float(job.fps), "seed": job.seed, "images": images or None, "generated_keyframes": generated, "enable_teacache": False}
-    if job.pipeline != "distilled_two_stage":
+    if job.prompt_relay is not None:
+        options["prompt_relay"] = PromptRelayInput(local_prompts=[item.prompt for item in job.prompt_relay.segments], segment_lengths=[length for length in relay_lengths(tuple(item.length for item in job.prompt_relay.segments), (job.frame_count - 1) // 8 + 1)])
+    if job.pipeline in ("dev_two_stage", "hq_two_stage"):
         guidance = job.guidance
         if guidance is None:
             raise ValueError("guided native generation requires resolved guidance")
@@ -181,10 +200,11 @@ def render(job: Job) -> None:
             video_guider_params=MultiModalGuiderParams(cfg_scale=guidance.video_cfg, stg_scale=guidance.stg_scale, stg_blocks=[28], modality_scale=guidance.modality_scale, rescale_scale=0.45 if job.pipeline == "hq_two_stage" else 0.0),
             audio_guider_params=MultiModalGuiderParams(cfg_scale=guidance.audio_cfg, stg_scale=guidance.stg_scale, stg_blocks=[28], modality_scale=guidance.modality_scale, rescale_scale=1.0 if job.pipeline == "hq_two_stage" else 0.0))
     with contextlib.redirect_stdout(sys.stderr):
-        video_latent, audio_latent = pipeline.generate_two_stage(job.prompt, job.height, job.width, frames, **options)
-    emit({"stage": "decoding"})
-    with contextlib.redirect_stdout(sys.stderr):
-        pipeline._decode_and_save_video(video_latent, audio_latent, str(output / "output.mp4"), frame_rate=float(job.fps), seed=job.seed)
+        if job.audio_conditioning is not None or job.editing is not None:
+            render_source_job(pipeline, job, ffmpeg)
+        else:
+            video_latent, audio_latent = pipeline.generate_two_stage(job.prompt, job.height, job.width, frames, **options)
+            pipeline._decode_and_save_video(video_latent, audio_latent, str(output / "output.mp4"), frame_rate=float(job.fps), seed=job.seed)
     emit({"stage": "muxing"})
     subprocess.run([str(ffmpeg), "-v", "error", "-i", str(output / "output.mp4"), "-frames:v", "1", "-q:v", "3", str(output / "thumbnail.jpg")], check=True, timeout=30)
     (output / "result.json").write_text(json.dumps({"steps": steps_observed, "sampling_seconds": sampling_seconds, "total_generation_time": time.monotonic() - started, "peak_memory_bytes": mx.get_peak_memory()}))
@@ -209,7 +229,8 @@ def main() -> None:
         threading.Thread(target=reap, daemon=True).start()
     build = gpu_probe()
     if arguments.probe:
-        emit({"build_identity": build, "compute": "metal", "ready": True})
+        metadata = BuildMetadata.model_validate_json((Path(__file__).parent / "build.json").read_bytes())
+        emit({"build_identity": build, "compute": "metal", "ready": True, "features": metadata.features})
         return
     if arguments.job is None or arguments.job.stat().st_size > 128 * 1024:
         raise ValueError("a bounded local job is required")

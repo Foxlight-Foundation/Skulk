@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from scripts.build_mlx_video_wheel import FILENAME, SOURCE_REVISION
+from scripts.build_mlx_video_wheel import FEATURES, FILENAME, SOURCE_REVISION
 
 
 def verify_artifact(directory: Path, expected_sha256: str) -> Path:
@@ -24,6 +24,8 @@ def verify_artifact(directory: Path, expected_sha256: str) -> Path:
         raise ValueError("candidate bytes or source differ from the selected descriptor")
     if not 0 < wheel.stat().st_size <= 512 * 1024**2:
         raise ValueError("candidate exceeds the installation bound")
+    if descriptor.get("features") != list(FEATURES):
+        raise ValueError("candidate does not implement the selected advanced protocol")
     return wheel
 
 

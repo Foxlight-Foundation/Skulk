@@ -66,6 +66,8 @@ def _condition_images(
     guided = False
     for binding in references:
         reference = binding.spec
+        if reference.kind != "image":
+            continue
         load = f"load_ltx_{reference.slot}"
         preprocess = f"ltx_image_{reference.slot}"
         prompt[load] = _node("LoadImage", "Load keyframe", image=binding.input_name)
@@ -275,6 +277,13 @@ def build_ltx_prompt(
         frame_count = _link("ltx_duration")
     prompt["ltx_video_latent"]["inputs"]["length"] = frame_count
     prompt["ltx_audio_latent"]["inputs"]["frames_number"] = frame_count
+    audio_latent = _link("ltx_audio_latent")
+    if params.audio_conditioning is not None:
+        source = next(binding for binding in references if binding.spec.kind == "audio")
+        prompt["ltx_source_audio"] = _node("LoadAudio", "Load prepared source audio", audio=source.input_name)
+        prompt["ltx_encoded_source_audio"] = _node("LTXVAudioVAEEncode", "Encode source audio", audio=_link("ltx_source_audio"), audio_vae=_link("audio_vae"))
+        prompt["ltx_frozen_source_audio"] = _node("LTXVFreezeLatent", "Freeze source audio", latent=_link("ltx_encoded_source_audio"))
+        audio_latent = _link("ltx_frozen_source_audio")
     base_model = _link("unet")
     if render.guidance is not None:
         if render.guidance.stg_scale:
@@ -308,7 +317,7 @@ def build_ltx_prompt(
         positive=positive,
         negative=negative,
         video=video,
-        audio=_link("ltx_audio_latent"),
+        audio=audio_latent,
         render=render,
         model=base_model,
     )
@@ -343,7 +352,7 @@ def build_ltx_prompt(
         refinement=True,
     )
     refinement_model = _link("unet")
-    refinement_audio = _link("ltx_base_split", 1)
+    refinement_audio = audio_latent if params.audio_conditioning is not None else _link("ltx_base_split", 1)
     if render.pipeline == "dev_two_stage":
         if files.refinement_lora is None:
             raise ValueError("LTX-2.5 guided refinement requires its exact distilled LoRA")
@@ -391,7 +400,11 @@ def build_ltx_prompt(
         "images": _link("decode_video"),
         "fps": float(plan.fps),
     }
-    if plan.audio:
+    if plan.audio and params.audio_conditioning is not None:
+        # Preserve the normalized source waveform, rather than round-tripping
+        # it through the VAE decoder after using it as frozen context.
+        create["audio"] = _link("ltx_source_audio")
+    elif plan.audio:
         prompt["decode_audio"] = _node(
             "LTXVAudioVAEDecode",
             "Decode audio",

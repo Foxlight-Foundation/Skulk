@@ -13,7 +13,7 @@ API keeps it in its video store until it expires.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Final, Literal, cast, get_args
+from typing import Annotated, Final, Literal, cast, final, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -137,7 +137,7 @@ slower by the node's own account)."""
 VideoCodecName = Literal["h264", "av1"]
 """Video codecs the pinned ComfyUI's ``SaveVideo`` writes into MP4."""
 
-VideoPipeline = Literal["distilled_two_stage", "dev_two_stage", "hq_two_stage", "dfr"]
+VideoPipeline = Literal["distilled_two_stage", "dev_two_stage", "hq_two_stage", "dfr", "retake", "extend"]
 """Family-specific execution workflow; engines must refuse unavailable workflows."""
 
 VideoDecoder = Literal["convolutional", "diffusion"]
@@ -153,6 +153,62 @@ class VideoGuidance(BaseModel):
     audio_cfg: float = Field(default=7.0, ge=1.0, le=100.0, description="Audio classifier-free guidance scale.")
     stg_scale: float = Field(default=0.0, ge=0.0, le=10.0, description="Joint spatiotemporal guidance on trained block 28.")
     modality_scale: float = Field(default=1.0, ge=1.0, le=10.0, description="Joint audio/video cross-attention guidance scale.")
+
+
+@final
+class VideoAudioConditioning(BaseModel):
+    """Freeze one uploaded audio segment as context in both video stages."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    start_seconds: float = Field(default=0.0, ge=0.0, le=120.0, description="Start of the source audio segment; the output duration determines its length.")
+
+
+@final
+class VideoEditing(BaseModel):
+    """Edit a temporal region or append video to one verified source clip."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    operation: Literal["retake", "extend"] = Field(description="Retake regenerates a region; extend appends to the source to reach the requested total duration.")
+    start_seconds: float | None = Field(default=None, ge=0.0, le=120.0, description="Inclusive retake-region start, snapped to the causal latent grid.")
+    end_seconds: float | None = Field(default=None, gt=0.0, le=121.0, description="Exclusive retake-region end, including the complete aligned clip duration, snapped to the causal latent grid.")
+    regenerate_audio: bool = Field(default=True, description="Retake also regenerates its audio region; false preserves the source track. Extension generates new audio.")
+
+    @model_validator(mode="after")
+    def validate_region(self) -> VideoEditing:
+        """Require a retake interval and reject unused extension controls."""
+        if self.operation == "retake":
+            if self.start_seconds is None or self.end_seconds is None or self.start_seconds >= self.end_seconds:
+                raise ValueError("retake requires start_seconds before end_seconds")
+        elif self.start_seconds is not None or self.end_seconds is not None or not self.regenerate_audio:
+            raise ValueError("extend appends new audio/video and does not accept retake-region controls")
+        return self
+
+
+@final
+class VideoPromptSegment(BaseModel):
+    """One local scene prompt occupying a specified fraction of the timeline."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    prompt: str = Field(min_length=1, max_length=MAX_VIDEO_PROMPT_CHARS, description="Local scene description, encoded alongside the global prompt.")
+    length: int = Field(ge=1, le=120, description="Relative timeline length; segments share the actual clip in this ratio.")
+
+
+@final
+class VideoPromptRelay(BaseModel):
+    """Gate ordered scene prompts onto bounded portions of a generated clip."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    segments: tuple[VideoPromptSegment, ...] = Field(min_length=2, max_length=8, description="Ordered local prompts with relative scene lengths; each must occupy a complete latent frame.")
+
+    @field_validator("segments", mode="before")
+    @classmethod
+    def coerce_segments(cls, value: object) -> object:
+        """Accept JSON/form arrays while retaining an immutable scene tuple."""
+        return tuple(cast("list[object]", value)) if isinstance(value, list) else value
 
 MAX_VIDEO_STYLES = 4
 """Style embeddings one request may apply."""
@@ -339,6 +395,12 @@ class VideoGenerationTaskParams(BaseModel):
     """Adapter strength override."""
     audio: bool = True
     """Whether the output must carry the model's synchronized audio track."""
+    audio_conditioning: VideoAudioConditioning | None = None
+    """Freeze one uploaded audio segment as context; output muting remains independent."""
+    editing: VideoEditing | None = None
+    """Retake or extend a source clip, with seconds describing total output duration."""
+    prompt_relay: VideoPromptRelay | None = None
+    """Ordered scene prompts applied to successive portions of a generated clip."""
     pipeline: VideoPipeline | None = None
     """Explicit family workflow; omitted selects the card's transformer variant."""
     decoder: VideoDecoder | None = None
@@ -474,8 +536,10 @@ class VideoGenerationTaskParams(BaseModel):
         for role in VIDEO_STRUCTURAL_ROLES:
             if roles.count(role) > 1:
                 raise ValueError(f"at most one {role} attachment is allowed")
-        if "source" in roles and "mask" not in roles:
+        if "source" in roles and "mask" not in roles and self.editing is None:
             raise ValueError("a source clip is read only behind a mask")
+        if self.prompt_relay is not None and len(self.prompt) + sum(len(segment.prompt) for segment in self.prompt_relay.segments) > MAX_VIDEO_PROMPT_CHARS:
+            raise ValueError("the global and local scene prompts exceed the combined prompt limit")
         steered = "control" in roles or "mask" in roles
         if not steered and (
             self.control_strength is not None
@@ -507,6 +571,8 @@ class VideoGenerationTaskParams(BaseModel):
         """Derive the generation mode from the attachments."""
         if self.mode is not None:
             return self.mode
+        if self.editing is not None or self.audio_conditioning is not None:
+            return VideoMode.ReferenceToAudioVideo
         roles = {item.role for item in self.references}
         if "reference" in roles:
             return VideoMode.ReferenceToAudioVideo
@@ -528,6 +594,8 @@ class VideoGenerationTaskParams(BaseModel):
             if (self.pipeline is not None or self.decoder is not None
                 or self.negative_prompt is not None or self.guidance is not None
                 or self.generated_keyframe_interval is not None
+                or self.audio_conditioning is not None or self.editing is not None
+                or self.prompt_relay is not None
                 or self.duration != "fixed" or self.duration_min_seconds is not None):
                 raise ValueError("LTX pipeline controls require an LTX-2.5 model")
             return
@@ -535,8 +603,13 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError(
                 "LTX-2.5 requires a declared distilled transformer or dev transformer"
             )
-        pipeline = self.pipeline or ("distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
-        if (pipeline in ("distilled_two_stage", "dfr")) != (video.transformer_variant == "distilled"):
+        pipeline = self.pipeline or (self.editing.operation if self.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        if pipeline in ("retake", "extend"):
+            if self.editing is None or self.editing.operation != pipeline:
+                raise ValueError("an editing pipeline requires matching editing controls and a source clip")
+        elif self.editing is not None:
+            raise ValueError("editing cannot select a generation pipeline")
+        elif (pipeline in ("distilled_two_stage", "dfr")) != (video.transformer_variant == "distilled"):
             raise ValueError("LTX-2.5 pipeline does not match the declared transformer variant")
         if not video.audio_output:
             raise ValueError("LTX-2.5 requires its audio VAE even for silent output")
@@ -545,22 +618,25 @@ class VideoGenerationTaskParams(BaseModel):
         if self.implied_mode() not in (
             VideoMode.TextToAudioVideo,
             VideoMode.FramesToAudioVideo,
+            VideoMode.ReferenceToAudioVideo,
         ):
             raise ValueError(
                 "LTX-2.5 distilled rendering accepts text and image keyframes"
             )
+        if self.implied_mode() is VideoMode.ReferenceToAudioVideo and self.audio_conditioning is None and self.editing is None:
+            raise ValueError("LTX-2.5 reference mode requires explicit source audio or video editing controls")
         if video.transformer_variant == "distilled" and (self.steps not in (None, 8) or video.default_steps != 8):
             raise ValueError(
                 "LTX-2.5 distilled rendering uses a fixed 8-step base schedule"
             )
-        expected_sampler = "euler_ancestral" if video.transformer_variant == "distilled" else "euler"
+        expected_sampler = "euler_ancestral" if video.transformer_variant == "distilled" and pipeline != "retake" else "euler"
         if self.sampler not in (None, expected_sampler) or self.scheduler is not None:
             raise ValueError(
                 f"LTX-2.5 {pipeline} uses its fixed {expected_sampler} sampler and family schedule"
             )
         if video.transformer_variant == "distilled" and (self.guidance is not None or self.negative_prompt is not None):
             raise ValueError("LTX-2.5 distilled stages do not accept guided negative conditioning")
-        if video.transformer_variant == "dev" and not any(item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" and item.supports_mode(self.implied_mode()) for item in video.companions):
+        if video.transformer_variant == "dev" and self.editing is None and not any(item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" and item.supports_mode(self.implied_mode()) for item in video.companions):
             raise ValueError("LTX-2.5 dev two-stage rendering requires its distilled_refinement LoRA")
         if self.generated_keyframe_interval is not None and not video.generated_keyframes:
             raise ValueError("LTX-2.5 selected transformer does not declare generated keyframe support")
@@ -599,12 +675,36 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError(
                 "reference_fidelity applies only to reference-to-video rendering"
             )
-        if any(
-            item.kind != "image"
-            or item.role not in ("first_frame", "last_frame", "keyframe")
-            for item in self.references
-        ):
-            raise ValueError("LTX-2.5 distilled rendering accepts image keyframes only")
+        if self.audio_conditioning is not None:
+            if not video.audio_conditioning or pipeline != "distilled_two_stage":
+                raise ValueError("source audio requires a selected audio-conditioning artifact and distilled two-stage pipeline")
+            audio_sources = [item for item in self.references if item.kind == "audio" and item.role == "reference"]
+            if len(audio_sources) != 1 or any(item not in audio_sources and (item.kind != "image" or item.role not in ("first_frame", "last_frame", "keyframe")) for item in self.references):
+                raise ValueError("audio conditioning requires exactly one audio reference plus optional image anchors")
+        elif self.editing is not None:
+            if self.editing.operation not in video.editing:
+                raise ValueError("the selected artifact does not declare this video editing operation")
+            if len(self.references) != 1 or self.references[0].kind != "video" or self.references[0].role != "source":
+                raise ValueError("editing requires exactly one source_video attachment")
+            aligned_seconds = video.frame_count_for_seconds(self.seconds) / video.fps
+            if self.editing.end_seconds is not None and self.editing.end_seconds > aligned_seconds:
+                raise ValueError("the retake region exceeds the requested output duration")
+            if self.width_height is None or self.aspect_ratio is not None:
+                raise ValueError("editing requires an explicit source-matching size")
+            if self.guidance is not None:
+                raise ValueError("this editing workflow uses its fixed single CFG/STG defaults, not two-stage per-modality guidance")
+        elif any(item.kind != "image" or item.role not in ("first_frame", "last_frame", "keyframe") for item in self.references):
+            raise ValueError("LTX-2.5 generation accepts image anchors; audio/video references require explicit conditioning or editing controls")
+        if self.audio_conditioning is not None or self.editing is not None:
+            if self.duration != "fixed" or self.generated_keyframe_interval is not None or self.prompt_relay is not None:
+                raise ValueError("source conditioning/editing does not combine with automatic duration, generated keyframes or prompt relay")
+            if self.audio_conditioning is not None and self.editing is not None:
+                raise ValueError("audio conditioning and source video editing are separate workflows")
+        if self.prompt_relay is not None:
+            if not video.prompt_relay or self.duration != "fixed":
+                raise ValueError("prompt relay requires a declared artifact and fixed duration")
+            if len(self.prompt_relay.segments) > (video.frame_count_for_seconds(self.seconds) - 1) // 8 + 1:
+                raise ValueError("each local scene must occupy at least one complete latent frame")
         if self.width_height is not None and any(
             edge % 64 for edge in self.width_height
         ):
@@ -620,7 +720,8 @@ class VideoGenerationTaskParams(BaseModel):
             )
         if self.seed is not None and self.seed >= 2**64:
             raise ValueError("LTX-2.5 noise seeds must fit an unsigned 64-bit integer")
-        if not any(
+        requires_upscaler = pipeline != "retake" and not (pipeline == "extend" and video.transformer_variant == "dev")
+        if requires_upscaler and not any(
             item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(self.implied_mode())
             for item in video.companions
         ):
@@ -703,6 +804,12 @@ class VideoEngineSettings(CamelCaseModel):
     """Internal detailing keyframe spacing, when used."""
     duration: Literal["fixed", "auto"] = "fixed"
     """Whether a bounded predictor selected the actual frame count."""
+    audio_conditioning: VideoAudioConditioning | None = None
+    """Source waveform offset actually used as frozen audio context."""
+    editing: VideoEditing | None = None
+    """Source operation and requested interval, quantized on the latent grid."""
+    prompt_relay: VideoPromptRelay | None = None
+    """Local prompts and relative lengths actually used by temporal attention."""
     video_shift: float | None = None
     """Video sigma shift applied; ``None`` leaves the loader default."""
     audio_shift: float | None = None

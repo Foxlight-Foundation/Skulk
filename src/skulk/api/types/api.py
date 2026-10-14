@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from skulk.provisioning.mlx_video import NativeVideoFeature, published_video_features
 from skulk.shared.backends import engine_of
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
 from skulk.shared.models.image import ImageCardConfig
@@ -46,12 +47,15 @@ from skulk.shared.types.video import (
     VIDEO_SAMPLERS,
     VIDEO_SCHEDULERS,
     VIDEO_SHIFT_BOUNDS,
+    VideoAudioConditioning,
     VideoCodecName,
     VideoDecoder,
+    VideoEditing,
     VideoGuidance,
     VideoGuideKind,
     VideoJobStatus,
     VideoPipeline,
+    VideoPromptRelay,
     VideoReferenceFidelity,
     VideoSchedulerName,
     derivable_guides,
@@ -860,6 +864,9 @@ class VideoCapabilitySection(BaseModel):
     generated_keyframes: bool = Field(default=False, description="Whether internal detailing keyframe tokens are supported by this artifact.")
     automatic_duration: bool = Field(default=False, description="Whether an exact duration head is selected.")
     automatic_duration_modes: list[VideoModeName] = Field(default_factory=list, description="Implemented modes permitted by the selected duration head.")
+    audio_conditioning: bool = Field(default=False, description="A selected artifact and available engine can freeze prepared source audio in both sampling stages.")
+    editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an available owned native engine.")
+    prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an available owned native engine.")
     guidance: VideoGuidance | None = Field(default=None, description="Default guided LTX base-stage scales; null for distilled or other families.")
     min_seconds: int = Field(description="Shortest clip length accepted.")
     max_seconds: int = Field(description="Longest clip length accepted.")
@@ -993,7 +1000,9 @@ class VideoCapabilitySection(BaseModel):
         limits = config.reference_limits
         guides = _guide_sections(config)
         ltx = model_card.family == "ltx-2.5"
-        native_only = ltx and {engine_of(backend) for backend in model_card.placement.compatible_backends} == {"mlx_video"}
+        engines = {engine_of(backend) for backend in model_card.placement.compatible_backends}
+        native_only = ltx and engines == {"mlx_video"}
+        native_features = published_video_features() if "mlx_video" in engines else frozenset[NativeVideoFeature]()
         def companion_modes(kind: VideoCompanionKind, name: str) -> list[VideoModeName]:
             return cast("list[VideoModeName]", [mode.value for mode in config.modes if mode in (VideoMode.TextToAudioVideo, VideoMode.FramesToAudioVideo) and any(item.kind is kind and item.name == name and item.supports_mode(mode) for item in config.companions)])
 
@@ -1011,6 +1020,16 @@ class VideoCapabilitySection(BaseModel):
             if any(engine_of(backend) == "mlx_video" for backend in model_card.placement.compatible_backends):
                 pipeline_modes["hq_two_stage"] = dev_modes
         served_modes: list[VideoModeName] = distilled_modes or dev_modes
+        reference_mode: list[VideoModeName] = ["ref2va"] if prerequisites and VideoMode.ReferenceToAudioVideo in config.modes else []
+        spatial_reference = any(item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(VideoMode.ReferenceToAudioVideo) for item in config.companions)
+        audio_conditioning = bool(reference_mode) and spatial_reference and config.transformer_variant == "distilled" and config.audio_conditioning and ("comfy" in engines or "audio_conditioning" in native_features)
+        editing: list[Literal["retake", "extend"]] = [operation for operation in config.editing if reference_mode and operation in native_features and (operation == "retake" or config.transformer_variant == "dev" or spatial_reference)]
+        if audio_conditioning:
+            pipeline_modes["distilled_two_stage"] = [*distilled_modes, *reference_mode]
+        for operation in editing:
+            pipeline_modes[operation] = reference_mode
+        if audio_conditioning or editing:
+            served_modes = [*served_modes, *reference_mode]
         decoder_modes: dict[VideoDecoder, list[VideoModeName]] = {}
         if served_modes:
             decoder_modes["convolutional"] = served_modes
@@ -1029,6 +1048,9 @@ class VideoCapabilitySection(BaseModel):
             generated_keyframes=ltx_available and config.generated_keyframes,
             automatic_duration=bool(duration_modes),
             automatic_duration_modes=duration_modes,
+            audio_conditioning=audio_conditioning,
+            editing=editing,
+            prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in native_features,
             guidance=VideoGuidance() if ltx_dev else None,
             min_seconds=config.min_seconds,
             max_seconds=config.max_seconds,
@@ -1060,12 +1082,12 @@ class VideoCapabilitySection(BaseModel):
             audio_shift=config.audio_shift,
             reference_fidelities=(
                 list(VIDEO_REFERENCE_FIDELITIES)
-                if VideoMode.ReferenceToAudioVideo in config.modes
+                if not ltx and VideoMode.ReferenceToAudioVideo in config.modes
                 else []
             ),
             default_reference_fidelity=(
                 VIDEO_DEFAULT_REFERENCE_FIDELITY
-                if VideoMode.ReferenceToAudioVideo in config.modes
+                if not ltx and VideoMode.ReferenceToAudioVideo in config.modes
                 else None
             ),
             reference_limits=(
@@ -2789,6 +2811,12 @@ class VideoCreateRequest(BaseModel):
     """Adapter strength override."""
     audio: bool = True
     """Whether the output must carry the model's synchronized audio track."""
+    audio_conditioning: VideoAudioConditioning | None = None
+    """Freeze one uploaded audio segment; multipart forms supply a JSON object."""
+    editing: VideoEditing | None = None
+    """Retake or extend source_video; seconds always describes total output length."""
+    prompt_relay: VideoPromptRelay | None = None
+    """Ordered local scene prompts; multipart forms supply a JSON object."""
     pipeline: VideoPipeline | None = None
     """Family execution workflow; omitted selects the declared transformer variant."""
     decoder: VideoDecoder | None = None
@@ -2810,6 +2838,21 @@ class VideoCreateRequest(BaseModel):
         if isinstance(value, str):
             return VideoGuidance.model_validate_json(value)
         return value
+
+    @field_validator("audio_conditioning", mode="before")
+    @classmethod
+    def _parse_audio_conditioning(cls, value: object) -> object:
+        return VideoAudioConditioning.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("editing", mode="before")
+    @classmethod
+    def _parse_editing(cls, value: object) -> object:
+        return VideoEditing.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("prompt_relay", mode="before")
+    @classmethod
+    def _parse_prompt_relay(cls, value: object) -> object:
+        return VideoPromptRelay.model_validate_json(value) if isinstance(value, str) else value
     sampler: str | None = None
     """Sampler name from the engine's list; omitted keeps ``res_multistep``.
     Samplers that cannot serve distilled H3 are refused by name."""
@@ -2911,6 +2954,12 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Internal generated keyframe spacing, when used."""
     duration: Literal["fixed", "auto"] = "fixed"
     """How the actual frame count was determined."""
+    audio_conditioning: VideoAudioConditioning | None = None
+    """Source waveform offset used as frozen context."""
+    editing: VideoEditing | None = None
+    """Executed source operation and requested retake interval."""
+    prompt_relay: VideoPromptRelay | None = None
+    """Executed local prompts and relative timeline lengths."""
     video_shift: float | None
     """Video sigma shift applied; null leaves the loader default."""
     audio_shift: float | None

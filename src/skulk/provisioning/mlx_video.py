@@ -15,7 +15,7 @@ import time
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Final, final
+from typing import TYPE_CHECKING, Final, Literal, final
 
 import httpx
 from filelock import FileLock, Timeout
@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 
 SOURCE_REVISION: Final = "9e4a1a54194460547a103334b5e06382724fbba6"
 _MAX_EXPANDED_BYTES: Final = 1024**3
+NativeVideoFeature = Literal["audio_conditioning", "retake", "extend", "prompt_relay"]
+"""Advanced protocols bound to an exact published native engine build."""
 
 
 @final
@@ -43,6 +45,7 @@ class MlxVideoWheel(FrozenModel):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$", description="Complete package digest.")
     payload_sha256: str = Field(pattern=r"^[a-f0-9]{64}$", description="Canonical package member identity.")
     size_bytes: int = Field(ge=1, le=512 * 1024**2, description="Exact bounded download size.")
+    features: tuple[NativeVideoFeature, ...] = Field(default=(), description="Advanced local-job controls implemented by these exact owned bytes.")
 
     @property
     def build_identity(self) -> str:
@@ -72,12 +75,24 @@ class _BuildMetadata(FrozenModel):
     source_revision: str
     payload_sha256: str
     members: dict[str, str]
+    features: tuple[NativeVideoFeature, ...] = ()
 
 
 class _ProbeResult(FrozenModel):
     build_identity: str
     compute: str
     ready: bool
+    features: tuple[NativeVideoFeature, ...] = ()
+
+
+def published_video_features() -> frozenset[NativeVideoFeature]:
+    """Return features provided by owned published builds, independent of this API host."""
+    return frozenset(feature for wheel in PUBLISHED_WHEELS for feature in wheel.features)
+
+
+def video_features_for_build(build: str | None) -> frozenset[NativeVideoFeature]:
+    """Resolve one placed build's protocol without treating qualification as compatibility."""
+    return next((frozenset(wheel.features) for wheel in PUBLISHED_WHEELS if wheel.build_identity == build), frozenset[NativeVideoFeature]())
 
 
 class MlxVideoInstallError(RuntimeError):
@@ -169,7 +184,7 @@ def verified_interpreter(root: Path, wheel: MlxVideoWheel) -> Path | None:
         with zipfile.ZipFile(package) as archive:
             _safe_members(archive)
             metadata = _BuildMetadata.model_validate_json(archive.read("skulk_mlx_video/build.json"))
-            if metadata.source_revision != SOURCE_REVISION or metadata.payload_sha256 != wheel.payload_sha256:
+            if metadata.source_revision != SOURCE_REVISION or metadata.payload_sha256 != wheel.payload_sha256 or metadata.features != wheel.features:
                 return None
             members = metadata.members
             if hashlib.sha256(json.dumps(members, sort_keys=True, separators=(",", ":")).encode()).hexdigest() != wheel.payload_sha256:
@@ -211,7 +226,8 @@ def verified_interpreter(root: Path, wheel: MlxVideoWheel) -> Path | None:
 def probe_runtime(interpreter: Path, expected_build: str) -> None:
     """Run a weightless Metal operation and bind the isolated engine to its build."""
     result = subprocess.run([str(interpreter), "-I", "-B", "-m", "skulk_mlx_video", "--probe"], capture_output=True, timeout=30, check=True, env=runtime_environment())
-    if len(result.stdout) > 4096 or _ProbeResult.model_validate_json(result.stdout) != _ProbeResult(build_identity=expected_build, compute="metal", ready=True):
+    expected_features = next((wheel.features for wheel in PUBLISHED_WHEELS if wheel.build_identity == expected_build), None)
+    if expected_features is None or len(result.stdout) > 4096 or _ProbeResult.model_validate_json(result.stdout) != _ProbeResult(build_identity=expected_build, compute="metal", ready=True, features=expected_features):
         raise ValueError("native video probe did not verify its build and GPU")
 
 

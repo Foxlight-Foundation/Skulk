@@ -12,7 +12,8 @@ import zipfile
 from pathlib import Path
 
 SOURCE_REVISION = "9e4a1a54194460547a103334b5e06382724fbba6"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
+FEATURES = ("audio_conditioning", "retake", "extend", "prompt_relay")
 PLATFORM_TAG = "macosx_15_0_arm64"
 FILENAME = f"skulk_mlx_video-{VERSION}-cp313-cp313-{PLATFORM_TAG}.whl"
 
@@ -57,6 +58,7 @@ def assemble_wheel(source: Path, wrapper: Path, wheelhouse: Path, lock: Path, ou
     for path in sorted(wrapper.rglob("*")):
         if path.is_file() and "__pycache__" not in path.parts:
             payload[f"skulk_mlx_video/{path.relative_to(wrapper).as_posix()}"] = path.read_bytes()
+    payload["skulk_mlx_video/media.py"] = (Path(__file__).resolve().parents[1] / "src/skulk/worker/runner/video_input.py").read_bytes()
     seen: set[str] = set()
     for path in sorted(wheelhouse.iterdir()):
         if path.suffix != ".whl":
@@ -77,7 +79,7 @@ def assemble_wheel(source: Path, wrapper: Path, wheelhouse: Path, lock: Path, ou
     payload["skulk_mlx_video/licenses/FOXLight_APACHE_LICENSE.txt"] = (Path(__file__).resolve().parents[1] / "LICENSE").read_bytes()
     members = {name: hashlib.sha256(data).hexdigest() for name, data in sorted(payload.items())}
     identity = hashlib.sha256(json.dumps(members, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    payload["skulk_mlx_video/build.json"] = json.dumps({"source_revision": revision, "payload_sha256": identity, "members": members}, sort_keys=True, indent=2).encode()
+    payload["skulk_mlx_video/build.json"] = json.dumps({"source_revision": revision, "payload_sha256": identity, "members": members, "features": FEATURES}, sort_keys=True, indent=2).encode()
     distribution = f"skulk_mlx_video-{VERSION}.dist-info"
     payload[f"{distribution}/METADATA"] = (f"Metadata-Version: 2.4\nName: skulk-mlx-video\nVersion: {VERSION}\nRequires-Python: >=3.13,<3.14\nSummary: Offline GPU video runtime for Skulk\nLicense: See bundled component license notices\n\n").encode()
     payload[f"{distribution}/WHEEL"] = f"Wheel-Version: 1.0\nGenerator: foxlight-mlx-video\nRoot-Is-Purelib: false\nTag: cp313-cp313-{PLATFORM_TAG}\n".encode()
@@ -97,7 +99,7 @@ def assemble_wheel(source: Path, wrapper: Path, wheelhouse: Path, lock: Path, ou
             item.compress_type = zipfile.ZIP_DEFLATED
             item.external_attr = 0o100644 << 16
             archive.writestr(item, data)
-    destination.with_suffix(".json").write_text(json.dumps({"filename": FILENAME, "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(), "payload_sha256": identity, "size_bytes": destination.stat().st_size, "source_revision": revision}, sort_keys=True, indent=2) + "\n")
+    destination.with_suffix(".json").write_text(json.dumps({"filename": FILENAME, "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(), "payload_sha256": identity, "size_bytes": destination.stat().st_size, "source_revision": revision, "features": FEATURES}, sort_keys=True, indent=2) + "\n")
     return destination
 
 

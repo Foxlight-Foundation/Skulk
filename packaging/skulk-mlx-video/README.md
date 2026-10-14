@@ -31,3 +31,5 @@ does not establish that a native video job fits.
 Dependency updates require regenerating `requirements.lock` with the macOS 15
 deployment target and CPython 3.13, then verifying a complete binary wheelhouse.
 Increment the immutable wheel version whenever any packaged bytes change.
+
+Advanced source workflows use a new immutable wheel version. The descriptor and probe carry exact `audio_conditioning`, `retake`, `extend` and `prompt_relay` features. The builder bundles `worker/runner/video_input.py` as `skulk_mlx_video.media` without importing Skulk into the engine. Source preparation streams bounded PyAV decode and never loads model weights. The advanced adapter binds upstream ffprobe calls to verified worker source facts, preserves the requested waveform for retake, and removes audio for silent A2V output. Timed scenes receive deterministic latent-grid allocation. These implementation controls remain distinct from model fit and feature qualification.

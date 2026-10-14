@@ -1827,7 +1827,10 @@ Request fields (JSON keys or form fields):
 | `lora` | string | Name of a card companion adapter, for example a turbo LoRA |
 | `lora_strength` | number | 0.0 to 2.0 |
 | `audio` | boolean | Default `true`; the job fails at settlement if the render carries no audio track |
-| `pipeline` | string | LTX workflow: `distilled_two_stage` or `dev_two_stage`, matching the declared transformer. HQ (`hq_two_stage`) and DFR (`dfr`) requests currently fail on the pinned Comfy core engine; it does not approximate them |
+| `pipeline` | string | LTX workflow: `distilled_two_stage` or `dev_two_stage`, matching the declared transformer; `retake` or `extend` requires matching `editing` controls. HQ (`hq_two_stage`) and DFR (`dfr`) requests currently fail on the pinned Comfy core engine; it does not approximate them |
+| `audio_conditioning` | object | LTX distilled source-audio workflow: `start_seconds` (0–120, default 0) selects an uploaded `audio_source` segment covering the full aligned clip. Audio is frozen in both stages. Multipart supplies this object as JSON |
+| `editing` | object | Native LTX source-video workflow: `operation` is `retake` or `extend`. Retake requires inclusive `start_seconds` and exclusive `end_seconds`; `regenerate_audio` defaults true, false preserves the source waveform. The region may cover the complete aligned frame duration, which can exceed nominal `seconds` (for example 25 frames at 24 fps is 25/24 seconds). Region boundaries round outward onto the 8-frame latent grid. Extend appends to reach `seconds`, the total output length, and refuses retake-region controls. Requires `source_video` and an explicit source-matching `size` |
+| `prompt_relay` | object | Native LTX timed local prompts: `segments` contains 2–8 objects with `prompt` and positive relative `length` (1–120). Each scene receives at least one latent frame; remaining frames share the length ratio with deterministic rounding. Global plus local prompts total at most 8000 characters. Multipart supplies JSON |
 | `decoder` | string | LTX `convolutional` (default) or `diffusion`; the latter requires the exact `video_decoder` companion named `diffusion_decoder`. The convolutional VAE still conditions images and upscales latents |
 | `negative_prompt` | string | Up to 8000 characters, guided LTX only; encoded verbatim. Distilled generation refuses it |
 | `guidance` | object | Guided LTX base stage only: `video_cfg` (default 3), `audio_cfg` (7), `stg_scale` (0, block 28), `modality_scale` (1). CFG ranges 1–100; STG 0–10; modality 1–10. Multipart supplies this object as JSON. Refinement uses unity CFG and preserves base audio |
@@ -1848,7 +1851,7 @@ Request fields (JSON keys or form fields):
 | `control_kind` | string | What the render derives from the `control` clip: `pose` (default), `depth`, or `edges`. Only with a `control` part; a kind the card has no weights for is refused with **400** naming the kinds it derives (see the card's `video.guides`) |
 
 For a card with family `ltx-2.5` and `video.transformer_variant = "distilled"`,
-the distilled renderer uses two stages: eight base sampling intervals at half
+the baseline distilled renderer uses two stages: eight base sampling intervals at half
 resolution, a required `spatial_x2` latent-upscaler companion, and three
 refinement intervals. A guided dev transformer uses `dev_two_stage` and requires its exact
 `distilled_refinement` LoRA. Its base stage uses the LTX Euler schedule and
@@ -1863,7 +1866,7 @@ outside those constraints are refused. Seeds must fit an unsigned 64-bit
 integer.
 
 The model video metadata additionally exposes `pipelines`, `decoders`,
-`generated_keyframes`, `automatic_duration` and guided defaults.
+`generated_keyframes`, `automatic_duration`, `audio_conditioning`, `editing`, `prompt_relay` and guided defaults.
 `pipeline_modes` and `decoder_modes` map each offered choice to its permitted
 modes; `automatic_duration_modes` lists the modes allowed by the selected
 head. Companion mode limits are enforced before graph dispatch, including
@@ -1872,12 +1875,16 @@ selected components disable their controls, independently of hardware
 qualification. Pipeline, decoder, guidance and duration choices also persist
 in `stats.engine`; its frame count is the verified actual count.
 
-LTX accepts text and first/last/timed image keyframes, and rejects H3 sigma
+LTX accepts text, first/last/timed image keyframes, and explicit supported source workflows. It rejects H3 sigma
 shifts, adapters, style embeddings and ControlNet controls. `audio=false`
 omits the output audio track while retaining joint audio/video sampling.
 Backend compatibility remains available to untested compatible GPUs;
 qualification evidence is separate. Each render runs on one GPU host;
 memory on other hosts is not pooled for video generation.
+
+Source audio is decoded in an isolated engine helper to an exact 48 kHz stereo PCM segment, then used as frozen conditioning. Audible output carries that waveform; `audio=false` produces a silent container. Editing fully decodes a constant-rate source on the 8n+1 grid before any model loads. A retake requires the requested frame count; extension requires a shorter source, with at least 25 frames for the distilled workflow. Source geometry and frame rate must match the request/card. Decoding has a 60-second deadline, a 512 MiB resident-memory watchdog, a 64 MiB file ceiling, and cancellation/parent-death reaping. Source video also has a 128 MiB per-frame and 2 GiB total fp32 pixel-volume bound before encoder allocation. Invalid, truncated, non-finite, oversized or unsupported tracks fail the job with cleanup.
+
+Distilled retake uses one deterministic Euler stage with eight intervals, so its step total is eight. Dev retake and extension use one guided Euler stage (30 intervals by default), with fixed CFG 3 and STG 1 rather than per-modality two-stage guidance. Distilled extension and source-audio generation use the eight-plus-three ancestral workflow. Source workflows do not combine with automatic duration, generated keyframes or prompt relay. The pinned Comfy core engine implements source-audio conditioning, but lacks the exact temporal masks for retake, extension and prompt relay; it refuses those choices. Native advanced controls require an exact published wheel that declares the corresponding feature. Routing chooses an instance with that build support; no capable mounted instance yields a terminal failure. DFR and structural LTX control require exact 2.5 adapters and remain unavailable. Engine availability and artifact completeness determine offered controls; tested hardware is not an execution allowlist.
 
 File parts (multipart only), in slot order:
 
@@ -1886,17 +1893,17 @@ File parts (multipart only), in slot order:
 | `input_reference` | first frame | OpenAI's name for the keyframe image; `first_frame` is the same thing |
 | `last_frame` | last frame | Image |
 | `keyframe` | keyframe | Repeatable image anchored at a time into the clip; pair every part with one `keyframe_at` form value (seconds, zero or more, in the same order). At most 8, at distinct times, none past the clip's end. Alone they imply `fl2va`; beside `reference` parts they anchor a `ref2va` render. The engine snaps each to the nearest frame |
+| `audio_source` | reference | One audio file paired with explicit `audio_conditioning`; an omitted object or non-audio type is refused before staging |
 | `reference` | reference | Repeatable; images, video clips, or audio in the order given |
 | `control` | control | One ordinary clip (or a still) whose motion or structure the render follows. The render derives the guide from it (`control_kind`): whole-body pose (people detected with RT-DETR, keypoints from SDPose), depth (Depth Anything 3), or Canny edges, as ComfyUI's own H3 ControlNet template does. The engine holds the guide's last frame when it is short, cuts it when it is long, and scales and centre-crops each frame to the canvas |
 | `mask` | mask | One image or clip for the ControlNet, read from its red channel; white marks what to regenerate |
-| `source_video` | source | One clip behind the mask, read only with a `mask` part; without it the masked region is generated into an empty frame |
+| `source_video` | source | One source clip paired with LTX `editing`, or an H3 clip behind a `mask`. LTX editing counts it against reference video limits; ordinary H3 structural inputs do not |
 
 Each part must carry an `image/*`, `video/*`, or `audio/*` content type. At
 most 16 attachments and 256 MiB per request; larger uploads return
 **413**. Keyframe roles allow one first and one last frame. The card's
 `reference_limits` bound the counts per kind; `control`, `mask`, and
-`source_video` steer the ControlNet, never decide the mode, and are not
-counted against those limits. A `control` or `mask` part on a card with no
+`source_video` steer H3 ControlNet and do not count against those limits. An LTX editing source implies `ref2va` and counts against the selected artifact's video limits. A `control` or `mask` part on a card with no
 ControlNet (a `model_patch` companion) for the mode is refused with **400**. Attachments travel to the
 selected worker over the bounded vision media path; they are never written
 to the event log or replicated state.
