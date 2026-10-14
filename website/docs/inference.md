@@ -131,8 +131,9 @@ the pinned engine package, then waits for fresh node resources before ordinary
 placement. Apple Silicon macOS, Linux `amd64`, and Linux `arm64` have CPU-capable
 packages. Linux `amd64` has separate Vulkan and CUDA packages; its CUDA
 package targets NVIDIA compute 8.9. Linux `arm64` has a CUDA package compiled
-for NVIDIA GB10 compute 12.1. A GPU package is selected
-only when a signed claim covers the exact card, engine build, and hardware class.
+for NVIDIA GB10 compute 12.1. GPU selection uses declared engine compatibility,
+actual package/compute requirements and observed runtime availability. Missing
+representative qualification does not prohibit compatible hardware.
 The pinned CPU/Metal package is `0.8.2.post2`; its MiniMax depth sampler starts
 a fresh random stream for each audio frame. The Linux Vulkan and native CUDA
 pins remain `0.8.2.post4` and `0.8.2.post1`, respectively. Registry support
