@@ -58,6 +58,21 @@ def _terminate(process: subprocess.Popen[str]) -> None:
             os.killpg(process.pid, signal.SIGKILL)
 
 
+def serialize_native_job(job: NativeVideoJob) -> str:
+    """Omit absent v2 fields while retaining every required nested v1 field."""
+    optional_controls = {
+        "audio_conditioning": job.audio_conditioning,
+        "editing": job.editing,
+        "prompt_relay": job.prompt_relay,
+        "source_media": job.source_media,
+        "transformer_variant": job.transformer_variant,
+    }
+    # Recursive default omission would erase required Guidance values from
+    # both wheel versions. Only these absent top-level additions are unknown
+    # to the immutable v1 protocol; existing nested models stay complete.
+    return job.model_dump_json(exclude={name for name, value in optional_controls.items() if value is None})
+
+
 def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable[[NativeProgress], None], is_cancelled: Callable[[], bool]) -> NativeResult | None:
     """Run one local job, cancelling its whole group and retaining bounded diagnostics.
 
@@ -67,9 +82,7 @@ def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable
     output = Path(job.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     request = output / "job.json"
-    # Optional v2 controls stay absent on baseline jobs, preserving the strict
-    # published v1 protocol while a newer owned wheel is being prepared.
-    request.write_text(job.model_dump_json(exclude_defaults=True))
+    request.write_text(serialize_native_job(job))
     messages: queue.Queue[str] = queue.Queue(maxsize=64)
     errors: deque[str] = deque(maxlen=24)
     process = subprocess.Popen([str(interpreter), "-I", "-B", "-m", "skulk_mlx_video", "--job", str(request), "--parent-pid", str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=runtime_environment(), start_new_session=True)

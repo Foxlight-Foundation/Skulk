@@ -1,6 +1,7 @@
 """Advanced requests retain exact source behavior and installed-build routing."""
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -19,6 +20,7 @@ from skulk.worker.runner.comfy.graph import (
     plan_comfy_render,
 )
 from skulk.worker.runner.mlx_video.plan import plan_native_job
+from skulk.worker.runner.mlx_video.process import serialize_native_job
 
 
 def _card(native: bool = True) -> ModelCard:
@@ -108,8 +110,8 @@ def test_advanced_metadata_tracks_published_builds_without_hardware_claims(monke
 
 def test_old_native_protocol_keeps_new_optional_fields_absent(tmp_path: Path) -> None:
     job, _ = plan_native_job(_params(), _card(), tmp_path, tmp_path, tmp_path)
-    message = job.model_dump(exclude_defaults=True)
-    assert not {"audio_conditioning", "editing", "prompt_relay", "source_media", "transformer_variant"} & message.keys()
+    message = serialize_native_job(job)
+    assert all(f'"{name}"' not in message for name in ("audio_conditioning", "editing", "prompt_relay", "source_media", "transformer_variant"))
 
 
 def test_multipart_scene_controls_use_strict_json_objects() -> None:
@@ -129,3 +131,14 @@ def test_comfy_runner_limit_does_not_shrink_intrinsic_model_truth() -> None:
     params = _params(editing={"operation": "extend"}, references=(source,), reference_bytes=1, total_input_chunks=1)
     with pytest.raises(ValueError, match="temporal"):
         plan_comfy_render(params, card)
+
+
+@pytest.mark.parametrize("pipeline", ["dev_two_stage", "hq_two_stage"])
+@pytest.mark.parametrize("guidance", [{}, {"video_cfg": 4.0}])
+def test_guided_protocol_keeps_required_default_fields(tmp_path: Path, pipeline: str, guidance: dict[str, float]) -> None:
+    card = asyncio.run(load_fixture_card(ModelId("Lightricks/LTX-2.5-dev-comfy-int8")))
+    assert card is not None
+    params = _params(pipeline=pipeline, guidance=guidance)
+    job, _ = plan_native_job(params, card, tmp_path, tmp_path, tmp_path)
+    expected = {"video_cfg": guidance.get("video_cfg", 3.0), "audio_cfg": 7.0, "stg_scale": 0.0, "modality_scale": 1.0}
+    assert f'"guidance":{json.dumps(expected, separators=(",", ":"))}' in serialize_native_job(job)
