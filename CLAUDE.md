@@ -317,7 +317,8 @@ lanes retain their existing estimates.
 `NodeResources.engine_builds` hashes the executable for each concrete lane.
 `TextToMusic` is the sole
 task on a music card. The cards have
-their own `[music]` section and require exact signed support claims. The
+their own `[music]` section and declare compatible audio.cpp engine requirements;
+representative signed qualification is evidence, not hardware eligibility. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
 Silicon macOS and Linux amd64/arm64 plus separate Linux amd64 Vulkan and Linux
 amd64/arm64 CUDA packages from the pinned source. To promote already tested
@@ -328,30 +329,30 @@ A plain GPU digest is accepted only when the source run contains one GPU wheel.
 The verifier rejects missing, ambiguous, mixed-version, or digest-mismatched
 selections before attestation checks and publishes only verified paths.
 `PrepareAudioCpp` carries the
-selected package variant; the API chooses CUDA or Vulkan only when a matching
-signed support claim applies to the node's hardware, and can try a separately
-claimed CPU fallback. An explicit primary-binary override may probe as CUDA
+selected package variant; the API chooses a compatible CUDA, Vulkan or CPU
+package from actual node facts and runtime availability. Representative signed
+qualification remains reporting evidence. An explicit primary-binary override may probe as CUDA
 or ROCm; exact instance creation filters preparation to the requested compute
 lane. A standalone primary Vulkan override remains eligible when its pinned
 revision, specs, and device probe pass. AMD sysfs PCI IDs produce stable
 chip-class identifiers
-(`amd:pci-1002-1586` on Strix Halo) for claim selection before preparation.
+(`amd:pci-1002-1586` on Strix Halo) for observations and real package requirements.
 Music model weights are separate immutable downloads. Managed CUDA wheels target
 SM 8.9 on amd64 and GB10 SM 12.1 on arm64. Preparation requires the platform's
-exact managed executable build and compute class in the signed claim, plus one
+verified executable identity and its actual compiled compute class, plus one
 observed NVIDIA device with that class. Mixed GPU vendors, unknown classes, and multiple NVIDIA
 devices are rejected because the runner cannot yet bind execution and memory
-admission to a selected physical device. A qualified operator-provided primary
-CUDA binary uses its own exact claim through primary preparation. If a dedicated
+admission to a selected physical device. An operator-provided primary
+CUDA binary uses its own observed identity and runtime probe through preparation. If a dedicated
 CUDA wheel is already cached, set `SKULK_AUDIO_CPP_CUDA_BIN` to the operator
 binary as well: startup cache rehydration can otherwise prefer that managed
 build over a primary-only override.
 CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries
 must be on the host loader path; the binary probe reports missing libraries
-before advertising the lane. Signed support resolution also requires the
-exact class for this build after cache restore; CPU preparation does not
+before advertising the lane. Managed package compatibility still requires its
+actual compiled compute class after cache restore; CPU preparation does not
 reuse the dedicated CUDA wheel as a primary override.
-The bare `audio_cpp` tag reports availability; music support claims and runner
+The bare `audio_cpp` tag reports availability; engine requirements and runner
 placement select a concrete compute lane so memory and device choice agree.
 Runner Metal memory diagnostics and shutdown cleanup are inert outside macOS;
 Linux music runners do not import an unused MLX extension during teardown.
@@ -1612,7 +1613,7 @@ or signing authority, and omitted callbacks fail closed.
 
 
 External workload binding: `GET /models/requirements.required_capabilities`
-exports the complete set used by core signed-engine admission through
+exports the complete set used by core intrinsic capability resolution through
 `get_model_required_capabilities`. Launchable `/instance/previews` entries expose
 `card_digest` matching requirements canonicalization. Neither field replaces
 API/master card checks or the final resource-derived `context_token_limit`.
@@ -1855,6 +1856,13 @@ bundle, so store unavailability does not widen the download.
 
 Native image package eligibility uses standard interpreter wheel-platform tags
 before download/cache acquisition, alongside architecture, CPU instructions and
-qualified hardware. The published Linux wheels require glibc 2.35 or newer; musl
+actual compiled GPU targets. Tested hardware is informational. The published
+Linux wheels require glibc 2.35 or newer; musl
 and older glibc do not receive install offers. macOS minimums come from the same
 platform-tag check. Manual extraction never bypasses the ABI eligibility gate.
+
+
+Native SDXL image cards expose `image.unet_structure` (API `unetStructure`) for
+nonuniform module output channels and boundary convolutions. Generic dimensions
+are their module count and maximum output width; no text KV or image splitting
+is inferred. Registry publication rejects missing/provisional SDXL geometry.

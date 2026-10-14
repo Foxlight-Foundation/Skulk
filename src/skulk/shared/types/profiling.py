@@ -356,7 +356,7 @@ class NodeResources(CamelCaseModel):
     )
     hardware_classes: frozenset[str] = Field(
         default_factory=frozenset,
-        description="Open observed hardware identifiers for support constraints.",
+        description="Observed hardware identifiers for evidence grouping and actual compiled package requirements.",
     )
     participation: NodeParticipation = "full"
     api_available: bool = True

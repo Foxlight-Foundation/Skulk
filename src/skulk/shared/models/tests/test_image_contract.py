@@ -126,7 +126,64 @@ def test_image_card_cannot_load_another_artifact_under_selected_gguf_identity() 
 
     profile = ImageCardConfig.model_validate(_document())
     with pytest.raises(ValidationError, match="selected GGUF"):
-        ModelCard(model_id=ModelId("owner/model"), source_revision="a" * 40,
-            gguf_file="different.gguf", storage_size=Memory.from_bytes(28),
-            n_layers=1, hidden_size=1, supports_tensor=False,
-            tasks=[ModelTask.TextToImage, ModelTask.ImageToImage], image=profile)
+        ModelCard(
+            model_id=ModelId("owner/model"),
+            source_revision="a" * 40,
+            gguf_file="different.gguf",
+            storage_size=Memory.from_bytes(28),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextToImage, ModelTask.ImageToImage],
+            image=profile,
+        )
+
+
+def test_sdxl_unet_geometry_is_nonuniform_and_matches_card_dimensions() -> None:
+    """Explicit SDXL modules bind generic dimensions without implying text KV."""
+    from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+    from skulk.shared.types.memory import Memory
+
+    profile = ImageCardConfig.model_validate(
+        {
+            "family": "sdxl",
+            "default_steps": 20,
+            "components": [_component("model", "model.gguf")],
+            "unet_structure": {
+                "input_block_channels": [320, 640],
+                "middle_block_channels": [1280],
+                "output_block_channels": [640, 320],
+                "input_channels": 4,
+                "output_channels": 4,
+            },
+        }
+    )
+    structure = profile.unet_structure
+    assert structure is not None
+    assert structure.block_count == 5 and structure.maximum_channels == 1280
+    assert ImageCardConfig.model_validate_json(profile.model_dump_json()) == profile
+
+    def make_card(layers: int, width: int) -> ModelCard:
+        """Construct a typed native card for one declared UNet structure."""
+        return ModelCard(
+            model_id=ModelId("owner/model"),
+            source_revision="a" * 40,
+            gguf_file="model.gguf",
+            storage_size=Memory.from_bytes(7),
+            n_layers=layers,
+            hidden_size=width,
+            supports_tensor=False,
+            tasks=[ModelTask.TextToImage],
+            image=profile,
+        )
+
+    for layers, width in [(5, 1280), (1, 1280), (5, 1)]:
+        if layers == 5 and width == 1280:
+            assert make_card(layers, width).image == profile
+        else:
+            with pytest.raises(ValidationError, match="UNet modules"):
+                make_card(layers, width)
+    wrong_family = profile.model_dump()
+    wrong_family["family"] = "flux_2_klein_4b"
+    with pytest.raises(ValidationError, match="only to an SDXL"):
+        ImageCardConfig.model_validate(wrong_family)

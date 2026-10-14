@@ -1761,7 +1761,12 @@ Ordinary Chat also pins asynchronous user and assistant writes to their originat
 `stable_diffusion_cpp` serves typed `image` model profiles through one resident,
 headless, authenticated loopback subprocess per single-host, single-GPU instance.
 Its compute lanes are `metal`, `cuda`, `vulkan`, and `rocm`; CPU-only serving is
-excluded. Complete immutable component files are verified before load. Model
+excluded. SDXL's `image.unet_structure` describes nonuniform input, middle
+and output module channels and first/final convolution channels. Its generic
+layer count is the module sum and hidden width is the maximum module output
+width; these fields do not imply text KV geometry or image splitting.
+`/v1/models.image.unetStructure` exposes that intrinsic structure; signed
+publication rejects provisional or inconsistent SDXL dimensions. Complete immutable component files are verified before load. Model
 placement can schedule an `InstallEngine` task for an exact published package;
 browsing does not acquire packages. `NodeResources.installable_engine_builds`
 records those candidates separately from measured `engine_builds`.
@@ -1770,8 +1775,11 @@ CPU helper instructions. Package discovery also matches the interpreter's
 standard wheel-platform tags, rejecting older glibc, musl and older macOS before
 acquisition. Package discovery refuses incompatible hosts, and
 managed-binary probing checks these prerequisites before execution.
-Signed support claims, exact build identity, hardware match, and runner limits still gate normal
-placement. A candidate source build alone grants no support.
+Declared engine compatibility, actual package ABI/compiled targets, implemented
+runner operations and live resource fit govern placement. Exact build identity
+verifies the selected executable. Empirical qualification is scoped reporting
+evidence and never a hardware permission list. A source build alone does not
+prove installed or ready runtime capacity.
 
 Image downloads select every pinned file in the owning card's repository/revision
 group, including a same-repository VAE. External groups retain the durable
