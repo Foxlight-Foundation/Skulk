@@ -1656,9 +1656,13 @@ Request fields:
 | `quality` | string | `high`, `medium` (default), or `low` |
 | `output_format` | string | `png` (default), `jpeg`, or `webp` |
 | `response_format` | string | `b64_json` (default) returns inline base64 image data; `url` stores each image on this API node and returns a fetchable URL instead |
-| `stream` | boolean | With `partial_images > 0`, returns an SSE stream of partial and final images instead of one JSON response |
+| `stream` | boolean | For native profiles, true returns SSE final-image events and `[DONE]`; positive `partial_images` additionally requests previews. Legacy models require positive previews for SSE |
 | `partial_images` | integer | Number of intermediate previews per image when streaming; default `0` |
 | `advanced_params` | object | Optional `seed`, `num_inference_steps` (1-100), `guidance` (1.0-20.0), `negative_prompt`, and `num_sync_steps` (1-100). When `seed` is omitted, Skulk assigns one so multi-node generation stays deterministic |
+
+Native image generation and editing honor `stream=true` even with
+`partial_images=0`: the response is terminal-only SSE, and closing it cancels the
+command. Legacy image models retain their positive-preview streaming contract.
 
 Native image cards admit `n` from 1 to 4 and expose geometry, reference count,
 RGBA support, and sampling defaults in `/v1/models` under `image`. Native prompts
@@ -1702,6 +1706,10 @@ Form fields mirror the generation fields (`n`, `size`, `quality`,
 | `image` | file | One input image. Supply this or `image[]`, never both |
 | `image[]` | repeated file | Ordered references for cards declaring multiple-image editing, up to the selected card limit. All inputs together are limited to 24 MiB raw (**413** when exceeded); native inputs must be valid PNG, JPEG or WebP and total at most 16,777,216 decoded pixels (**400** otherwise) |
 | `input_fidelity` | string | `low` (default) or `high`; controls how strongly the input image constrains the edit |
+
+The native SDXL runner accepts one initialization image; extra references return
+**400** before media dispatch even if the intrinsic profile declares a broader
+reference limit.
 
 The input image travels to the selected worker over the bounded vision media
 path described under chat image inputs; it is never written to the event log

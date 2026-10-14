@@ -2957,7 +2957,8 @@ class API:
             summary="Generate images",
             description=(
                 "Generate images with an already-cataloged, placed image model. "
-                "Unknown or unplaced models return 404."
+                "Unknown or unplaced models return 404. Native profiles with stream=true return "
+                "SSE finals even with zero partial_images; legacy models require positive previews."
             ),
         )(self.image_generations)
         self.app.post(
@@ -2971,7 +2972,7 @@ class API:
             response_model=None,
             tags=["Images"],
             summary="Edit images",
-            description="Edit a placed model using one image or ordered image[] references. The selected image card validates geometry, sampling and input limits before dispatch; oversized aggregate uploads return 413.",
+            description="Edit a placed model using one image or ordered image[] references. The selected image card validates geometry, sampling and input limits before dispatch; oversized aggregate uploads return 413. Native profiles with stream=true return SSE finals even when partial_images=0; legacy models require positive previews. Disconnect cancels streaming commands.",
         )(self.image_edits)
         self.app.post(
             "/bench/images/edits",
@@ -7049,6 +7050,8 @@ class API:
                 raise ValueError("Native image seed exceeds the signed 64-bit range for this image count")
             if not 1 <= n <= 4 or references > profile.max_reference_images:
                 raise ValueError("Image count or references exceed this model's limits")
+            if profile.family == "sdxl" and references > 1:
+                raise ValueError("The native SDXL runner accepts one initialization image")
             width, height = (profile.default_width, profile.default_height) if size == "auto" else tuple(int(part) for part in size.split("x", 1))
             profile.validate_canvas(width, height)
             if profile.family == "qwen_image_21_turbo" and advanced is not None and (
@@ -9238,8 +9241,8 @@ class API:
     ) -> ImageGenerationResponse | StreamingResponse:
         """Handle image generation requests.
 
-        When stream=True and partial_images > 0, returns a StreamingResponse
-        with SSE-formatted events for partial and final images.
+        Native image profiles return SSE finals when stream=True, including with
+        zero previews. Legacy models retain their positive-preview requirement.
         """
         payload = payload.model_copy(
             update={
@@ -9252,11 +9255,11 @@ class API:
             owner_node=self.node_id,
             task_params=payload,
         )
-        self._validate_image_request(ModelId(payload.model), payload.size, 1 if payload.n is None else payload.n, payload.advanced_params, prompt=payload.prompt)
+        native = self._validate_image_request(ModelId(payload.model), payload.size, 1 if payload.n is None else payload.n, payload.advanced_params, prompt=payload.prompt)
         await self._send(command)
 
         # Check if streaming is requested
-        if payload.stream and payload.partial_images and payload.partial_images > 0:
+        if payload.stream and (native or (payload.partial_images or 0) > 0):
             return StreamingResponse(
                 self._generate_image_stream(
                     request=request,
@@ -9702,7 +9705,8 @@ class API:
             advanced_params=parsed_advanced_params,
         )
 
-        if stream_bool and partial_images_int > 0:
+        native = self._validate_image_request(ModelId(command.task_params.model), command.task_params.size, n, command.task_params.advanced_params, command.task_params.input_image_count, prompt=prompt)
+        if stream_bool and (native or partial_images_int > 0):
             return StreamingResponse(
                 self._generate_image_stream(
                     request=request,

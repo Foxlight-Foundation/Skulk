@@ -294,3 +294,27 @@ def test_final_output_must_match_admitted_canvas() -> None:
         adapter.validate_native_output(
             encoded, "png", profile, (512, 512), partial=False
         )
+
+
+def _sdxl_card() -> ModelCard:
+    """Return an intrinsic multi-reference fixture the current producer cannot honor."""
+    card = _card()
+    profile = card.image
+    assert profile is not None
+    selected = profile.components[0].model_copy(update={"role": "model"})
+    modified = card.model_copy(update={
+        "image": ImageCardConfig(family="sdxl", components=(selected,), max_reference_images=2, default_steps=20, default_guidance=7.5),
+        "storage_size": Memory.from_bytes(3),
+    })
+    return ModelCard.model_validate_json(modified.model_dump_json())
+
+
+def test_sdxl_does_not_silently_discard_extra_reference_input() -> None:
+    """Reject the second valid image even under a profile declaring two references."""
+    card = _sdxl_card()
+    params = ImageEditsTaskParams(model="owner/model", prompt="fox", size="512x512")
+    first = _image("red")
+    body = adapter.native_image_request(card, params, 42, (first,))
+    assert body["init_image"] == base64.b64encode(first).decode()
+    with pytest.raises(ValueError, match="initialization image"):
+        adapter.native_image_request(card, params, 42, (first, _image("blue")))

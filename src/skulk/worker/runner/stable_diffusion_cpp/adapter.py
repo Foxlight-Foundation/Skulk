@@ -133,6 +133,10 @@ def native_image_request(
         or sum(map(len, references)) > 24 * 1024 * 1024
     ):
         raise ValueError("image reference input exceeds the model or media limit")
+    if profile.family == "sdxl" and len(references) > 1:
+        # The producer has one init_image slot. Do not silently discard input
+        # even when a broader intrinsic card profile declares more references.
+        raise ValueError("The native SDXL runner accepts one initialization image")
     validate_reference_images(references)
     advanced = params.advanced_params
     steps = (
