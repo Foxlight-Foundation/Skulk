@@ -16,6 +16,53 @@ from skulk.provisioning import stable_diffusion_cpp as image_engine
 from skulk.shared.types.node_facts import NodeFacts, StableDiffusionCppProbe
 
 
+@pytest.fixture(autouse=True)
+def compatible_wheel_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep simulated hardware tests independent from the test runner's own ABI."""
+    tags = tuple(wheel.filename.rsplit("-", 1)[1].removesuffix(".whl") for wheel in image_engine.PUBLISHED_WHEELS)
+    monkeypatch.setattr(image_engine, "platform_tags", lambda: iter(tags))
+
+
+@pytest.mark.parametrize("wheel", [wheel for wheel in image_engine.PUBLISHED_WHEELS if wheel.system == "linux"])
+@pytest.mark.parametrize("host_abi", ["glibc-old", "musl", "unknown", "glibc-supported"])
+def test_linux_abi_gates_install_offers_and_prevents_package_acquisition(
+    wheel: image_engine.StableDiffusionCppWheel,
+    host_abi: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Qualified GPUs on old/non-glibc hosts never advertise or acquire a wheel."""
+    from skulk.shared.types.node_facts import EngineBinaryFact, GpuDeviceFact
+
+    monkeypatch.setattr(image_engine.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(image_engine.platform, "machine", lambda: wheel.architecture)
+    monkeypatch.setattr(image_engine, "_host_cpu_features", lambda: wheel.required_cpu_features)
+    monkeypatch.setattr(image_engine, "PUBLISHED_WHEELS", (wheel,))
+    monkeypatch.delenv(image_engine.AUTOPROVISION_OPT_OUT_ENV, raising=False)
+    monkeypatch.delenv("SKULK_NODE_PARTICIPATION", raising=False)
+    tags = {
+        "glibc-old": (f"manylinux_2_34_{wheel.architecture}", f"linux_{wheel.architecture}"),
+        "musl": (f"musllinux_1_2_{wheel.architecture}", f"linux_{wheel.architecture}"),
+        "unknown": (),
+        "glibc-supported": (f"manylinux_2_36_{wheel.architecture}", f"manylinux_2_35_{wheel.architecture}"),
+    }[host_abi]
+    monkeypatch.setattr(image_engine, "platform_tags", lambda: iter(tags))
+    classes = wheel.hardware_classes
+    backend = f"stable_diffusion_cpp-{wheel.compute}"
+    missing = EngineBinaryFact(env_var="unset")
+    facts = NodeFacts(platform="linux", llama_server_binary=missing, vllm_binary=missing, rpc_server_binary=missing,
+        gpus=(GpuDeviceFact(vendor="nvidia" if wheel.compute == "cuda" else "amd", name="qualified GPU", index=0, detection_source="nvml" if wheel.compute == "cuda" else "amdgpu_sysfs"),))
+    eligible = host_abi == "glibc-supported"
+    assert image_engine.wheel_for_host(backend, classes) == (wheel if eligible else None)
+    assert image_engine.installable_image_builds(facts, classes, offline=False) == ({backend: wheel.build_identity} if eligible else {})
+    if not eligible:
+        def refuse_cache(_wheel: image_engine.StableDiffusionCppWheel) -> Path:
+            raise AssertionError("ABI-incompatible hosts must fail before package/cache acquisition")
+
+        monkeypatch.setattr(image_engine, "_root", refuse_cache)
+        with pytest.raises(image_engine.ImageEngineInstallError, match="eligibility check"):
+            image_engine.install_native_image(backend, wheel.build_identity, classes, offline=False, stop=threading.Event(), environ={})
+
+
 def test_managed_build_binds_runtime_and_isolates_inherited_libraries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

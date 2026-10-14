@@ -1811,3 +1811,9 @@ checks that exact source group. Store transfers verify declared sizes and object
 identities, recover missing component files from partial caches, and exclude
 unrelated quants/projectors. Direct-Hub fallback carries the same exact file
 bundle, so store unavailability does not widen the download.
+
+Native image package eligibility uses standard interpreter wheel-platform tags
+before download/cache acquisition, alongside architecture, CPU instructions and
+qualified hardware. The published Linux wheels require glibc 2.35 or newer; musl
+and older glibc do not receive install offers. macOS minimums come from the same
+platform-tag check. Manual extraction never bypasses the ABI eligibility gate.

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast, final
 import httpx
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
+from packaging.tags import platform_tags
 from pydantic import ConfigDict, Field
 
 from skulk.provisioning.llama_server import AUTOPROVISION_OPT_OUT_ENV
@@ -358,7 +359,7 @@ def native_image_environment(binary: Path) -> dict[str, str]:
 def wheel_for_host(
     backend: str, hardware_classes: frozenset[str]
 ) -> StableDiffusionCppWheel | None:
-    """Find an exact published package matching this host and qualified GPU class."""
+    """Match the host's wheel ABI, architecture, helpers and qualified GPU class."""
     machine = platform.machine().lower()
     system = platform.system().lower()
     machine = (
@@ -366,12 +367,17 @@ def wheel_for_host(
         if system == "linux"
         else machine
     )
+    # Manual extraction bypasses pip's compatibility check. Use its standard
+    # platform tags so older glibc, musl and older macOS cannot acquire a binary
+    # that the host loader cannot start.
+    host_platforms = frozenset(platform_tags())
     return next(
         (
             wheel
             for wheel in PUBLISHED_WHEELS
             if wheel.system == system
             and wheel.architecture == machine
+            and wheel.filename.rsplit("-", 1)[1].removesuffix(".whl") in host_platforms
             and backend == f"stable_diffusion_cpp-{wheel.compute}"
             and bool(wheel.hardware_classes & hardware_classes)
             and (

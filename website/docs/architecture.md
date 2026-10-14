@@ -2911,7 +2911,9 @@ placement can schedule an `InstallEngine` task for an exact published package;
 browsing does not acquire packages. `NodeResources.installable_engine_builds`
 records those candidates separately from measured `engine_builds`.
 Native package descriptors and build manifests additionally declare compiled
-CPU helper instructions. Package discovery refuses incompatible hosts, and
+CPU helper instructions. Package discovery also matches the interpreter's
+standard wheel-platform tags, rejecting older glibc, musl and older macOS before
+acquisition. Package discovery refuses incompatible hosts, and
 managed-binary probing checks these prerequisites before execution.
 Signed support claims, exact build identity, hardware match, and runner limits still gate normal
 placement. A candidate source build alone grants no support.
