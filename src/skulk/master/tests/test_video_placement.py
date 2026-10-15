@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import anyio
+import pytest
 
 from skulk.master.main import Master
 from skulk.routing.router import get_node_id_keypair
 from skulk.shared.models.model_cards import ModelCard, ModelTask, VideoCardConfig
+from skulk.shared.tests.model_card_fixtures import load_fixture_card
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
@@ -25,7 +27,7 @@ from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.tasks import TaskStatus
 from skulk.shared.types.tasks import VideoGeneration as VideoGenerationTask
-from skulk.shared.types.video import VideoGenerationTaskParams
+from skulk.shared.types.video import VideoCodecName, VideoGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
 from skulk.shared.types.worker.runners import (
     RunnerFailed,
@@ -175,3 +177,49 @@ async def test_multi_rank_instance_is_not_a_video_placement() -> None:
     failure = events[1]
     assert isinstance(failure, TaskFailed)
     assert failure.error_type == "video_mode_unavailable"
+
+
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("codec", [None, "h264", "av1"])
+async def test_ltx_codec_is_matched_before_task_dispatch(
+    native: bool, codec: VideoCodecName | None
+) -> None:
+    """Native rejects AV1 before dispatch while Comfy retains both codecs."""
+    card = await load_fixture_card(ModelId(
+        "dgrauet/LTX-2.5-distilled-mlx-q4" if native
+        else "Lightricks/LTX-2.5-distilled-comfy-int8"
+    ))
+    assert card is not None
+    runner_id = RunnerId("runner-ltx")
+    instance = MlxRingInstance(
+        instance_id=InstanceId("ltx"),
+        shard_assignments=ShardAssignments(
+            model_id=card.model_id,
+            node_to_runner={NodeId("node-a"): runner_id},
+            runner_to_shard={runner_id: PipelineShardMetadata(
+                model_card=card, device_rank=0, world_size=1,
+                start_layer=0, end_layer=card.n_layers, n_layers=card.n_layers,
+                resolved_backend="mlx_video-metal" if native else "comfy-cuda",
+            )},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+    )
+    state = State(instances={instance.instance_id: instance}, runners={runner_id: RunnerReady()})
+    params = VideoGenerationTaskParams(
+        prompt="a fox", model=str(card.model_id), seconds=2,
+        size="768x512", codec=codec,
+    )
+    refused = native and codec == "av1"
+    events = await _dispatch(state, params, 2 if refused else 1)
+    created = events[0]
+    assert isinstance(created, TaskCreated)
+    assert isinstance(created.task, VideoGenerationTask)
+    assert created.task.task_status == (TaskStatus.Failed if refused else TaskStatus.Pending)
+    if refused:
+        failure = events[1]
+        assert isinstance(failure, TaskFailed)
+        assert failure.error_type == "video_mode_unavailable"
+    else:
+        assert created.task.instance_id == instance.instance_id
+        assert created.task.task_params.codec == codec
