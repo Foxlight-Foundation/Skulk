@@ -1845,6 +1845,12 @@ class VideoCardConfig(CamelCaseModel):
             raise ValueError("audio conditioning requires a complete audio VAE and at least one audio reference")
         if self.editing and (self.reference_limits is None or self.reference_limits.max_videos < 1):
             raise ValueError("editing requires at least one source video in the reference limits")
+        if (
+            (self.audio_conditioning or self.editing)
+            and self.reference_limits is not None
+            and self.reference_limits.max_files == 0
+        ):
+            raise ValueError("source conditioning requires max_files to permit at least one reference file")
         if len(set(self.editing)) != len(self.editing):
             raise ValueError("editing operations must be unique")
         keys = [(item.kind, item.name) for item in self.companions]
@@ -3080,16 +3086,36 @@ class ModelCard(CamelCaseModel):
 
     @model_validator(mode="after")
     def _require_bundle_revision_and_selected_file(self) -> "ModelCard":
-        """Bind a bundle manifest to one immutable upstream repository state."""
+        """Bind selected files and local pipeline companions to immutable bundle bytes."""
 
         bundle = self.artifact_bundle
         if bundle is None:
             return self
         if self.source_revision is None:
             raise ValueError("an artifact bundle requires source_revision")
-        paths = {item.path for item in bundle.files}
-        if self.gguf_file is not None and self.gguf_file not in paths:
+        files = {item.path: item for item in bundle.files}
+        if self.gguf_file is not None and self.gguf_file not in files:
             raise ValueError("artifact bundle must contain the selected GGUF")
+        if self.video is not None:
+            for companion in self.video.companions:
+                if companion.kind not in {
+                    VideoCompanionKind.LatentUpscaler,
+                    VideoCompanionKind.DurationHead,
+                    VideoCompanionKind.VideoDecoder,
+                } or (
+                    companion.repo is not None
+                    and companion.repo != self.artifact_repository
+                ):
+                    continue
+                # These selected local pipeline weights are fetched through the
+                # base bundle, unlike independently downloaded external packs.
+                selected = files.get(companion.path)
+                if selected is None:
+                    raise ValueError(f"artifact bundle must contain local video companion {companion.name!r}")
+                if companion.size_bytes is not None and companion.size_bytes != selected.size_bytes:
+                    raise ValueError(f"local video companion {companion.name!r} size must match the artifact bundle")
+                if companion.revision is not None and companion.revision != self.source_revision:
+                    raise ValueError(f"local video companion {companion.name!r} revision must match source_revision")
         return self
 
     registry_card_id: Annotated[str, Field(pattern=r"^card_[a-z2-7]{52}$")] | None = (

@@ -22,6 +22,8 @@ from pydantic import ValidationError
 from skulk.shared.models import model_cards
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import (
+    ArtifactBundleConfig,
+    ArtifactBundleFile,
     LicenseCardConfig,
     ModelCard,
     ModelId,
@@ -42,6 +44,12 @@ TEST_ENGINE_DIRECTORY = (
     Path(__file__).resolve().parents[3] / "worker" / "runner" / "test_video"
 )
 REVISION = "a" * 40
+
+PIPELINE_COMPANION_KINDS = (
+    VideoCompanionKind.LatentUpscaler,
+    VideoCompanionKind.DurationHead,
+    VideoCompanionKind.VideoDecoder,
+)
 
 
 def _video(**overrides: object) -> VideoCardConfig:
@@ -94,6 +102,129 @@ def test_reference_mode_requires_limits() -> None:
         reference_limits=VideoReferenceLimits(max_images=9, max_videos=3),
     )
     assert video.tasks == {ModelTask.ReferenceToVideo}
+
+
+@pytest.mark.parametrize("feature", ["audio", "retake", "extend"])
+@pytest.mark.parametrize("max_files", [None, 0, 1])
+def test_source_features_require_an_available_aggregate_reference_slot(
+    feature: str, max_files: int | None,
+) -> None:
+    """Per-media limits cannot override an aggregate prohibition on all files."""
+    payload: dict[str, object] = {
+        "modes": ["ref2va"],
+        "audio_conditioning": feature == "audio",
+        "editing": [] if feature == "audio" else [feature],
+        "reference_limits": VideoReferenceLimits(
+            max_audio_clips=1, max_videos=1, max_files=max_files,
+        ),
+    }
+    if max_files == 0:
+        with pytest.raises(ValidationError, match="max_files to permit at least one"):
+            _video(**payload)
+    else:
+        video = _video(**payload)
+        assert video.reference_limits is not None
+        assert video.reference_limits.max_files == max_files
+
+
+def test_no_source_feature_can_keep_a_zero_aggregate_reference_limit() -> None:
+    """A text-capable card need not reserve input files it never requires."""
+    video = _video(reference_limits=VideoReferenceLimits(max_files=0))
+    assert video.reference_limits is not None and video.reference_limits.max_files == 0
+
+
+def _bundled_companion_card(
+    kind: VideoCompanionKind,
+    *,
+    path: str = "weights/pipeline.safetensors",
+    companion_bytes: int | None = 13,
+    repository: ModelId | None = None,
+    revision: str | None = None,
+    root: str | None = None,
+) -> ModelCard:
+    companion = VideoCompanionConfig(
+        kind=kind, name="selected", path=path, size_bytes=companion_bytes,
+        repo=repository, revision=revision,
+    )
+    bundle = ArtifactBundleConfig(
+        bundle_id="bundle_" + "a" * 52, root=root,
+        files=(ArtifactBundleFile(path="weights/pipeline.safetensors", size_bytes=13),),
+        download_size=13,
+    )
+    return _card(
+        source_repository=ModelId("example/upstream"), source_revision=REVISION,
+        storage_size=Memory.from_bytes(13), artifact_bundle=bundle,
+        video=_video(companions=[companion]),
+    )
+
+
+@pytest.mark.parametrize("kind", PIPELINE_COMPANION_KINDS)
+@pytest.mark.parametrize("repository", [None, ModelId("example/upstream")])
+def test_selected_local_pipeline_companions_must_be_in_the_bundle(
+    kind: VideoCompanionKind, repository: ModelId | None,
+) -> None:
+    """Implicit and explicit base-repository aliases share one exact transaction."""
+    with pytest.raises(ValidationError, match="must contain local video companion"):
+        _bundled_companion_card(kind, path="weights/omitted.safetensors", repository=repository, revision=REVISION)
+
+
+@pytest.mark.parametrize("kind", PIPELINE_COMPANION_KINDS)
+def test_selected_local_pipeline_companion_sizes_must_match_manifest(
+    kind: VideoCompanionKind,
+) -> None:
+    """A signed companion size cannot contradict the file actually installed."""
+    with pytest.raises(ValidationError, match="size must match the artifact bundle"):
+        _bundled_companion_card(kind, companion_bytes=14)
+
+
+@pytest.mark.parametrize("kind", PIPELINE_COMPANION_KINDS)
+@pytest.mark.parametrize("companion_bytes", [None, 13])
+@pytest.mark.parametrize("repository", [None, ModelId("example/upstream")])
+def test_complete_pipeline_companions_preserve_the_card_projection(
+    kind: VideoCompanionKind, companion_bytes: int | None, repository: ModelId | None,
+) -> None:
+    """Exact manifest bytes suffice when optional companion size is omitted."""
+    card = _bundled_companion_card(
+        kind, companion_bytes=companion_bytes, root="weights", repository=repository,
+        revision=REVISION if repository is not None else None,
+    )
+    wire = card.model_dump_json()
+    assert ModelCard.model_validate_json(wire).model_dump_json() == wire
+    assert card.video is not None
+    assert card.video.companions[0].size_bytes == companion_bytes
+
+
+@pytest.mark.parametrize("kind", PIPELINE_COMPANION_KINDS)
+def test_independently_pinned_external_pipeline_weights_need_no_base_bundle_entry(
+    kind: VideoCompanionKind,
+) -> None:
+    """Separate repositories keep their separate pinned download transactions."""
+    card = _bundled_companion_card(
+        kind, path="weights/external.safetensors", companion_bytes=99,
+        repository=ModelId("other/pipeline"), revision="b" * 40,
+    )
+    assert card.external_video_companions() == (("other/pipeline", "b" * 40),)
+
+
+@pytest.mark.parametrize("kind", PIPELINE_COMPANION_KINDS)
+def test_repository_wide_legacy_cards_do_not_require_a_selected_bundle(
+    kind: VideoCompanionKind,
+) -> None:
+    """Legacy whole-repository downloads keep their existing companion contract."""
+    card = _card(
+        source_revision=REVISION,
+        video=_video(companions=[VideoCompanionConfig(kind=kind, name="legacy", path="pipeline.safetensors")]),
+    )
+    assert card.artifact_bundle is None
+
+
+@pytest.mark.parametrize("repository", [None, ModelId("example/upstream")])
+def test_local_pipeline_companion_cannot_claim_a_different_download_revision(
+    repository: ModelId | None,
+) -> None:
+    """The base transaction cannot install another revision's local companion."""
+    with pytest.raises(ValidationError, match="revision must match source_revision"):
+        _bundled_companion_card(VideoCompanionKind.LatentUpscaler, repository=repository, revision="b" * 40)
 
 
 def test_frame_grid_alignment_matches_trained_grid() -> None:
