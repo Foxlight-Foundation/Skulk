@@ -253,6 +253,7 @@ _ARTIFACT_ROLES: frozenset[str] = frozenset(
         "served_draft",
         "vllm_draft",
         "video_companion",
+        "image_component",
     }
 )
 

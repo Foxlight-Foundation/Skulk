@@ -3414,7 +3414,9 @@ For a typed image card, the store derives the exact component selection from
 its independently verified complete card. The base transaction includes every
 primary-repository component, including the VAE. An `image_component` request
 omits `gguf_file` and selects every declared file in its pinned external source
-group, including both text and vision encoders when declared. Missing files,
+group, including both text and vision encoders when declared. The store HTTP
+download endpoint accepts this role and verifies its owning card before starting
+the component transfer; an undeclared source revision returns 409. Missing files,
 listing-size conflicts, or failed object verification fail the transaction;
 unrelated quants and projectors are excluded. A cached base GGUF alone does not
 mark the group complete: missing components trigger recovery.

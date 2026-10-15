@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 from skulk.download import download_utils
 from skulk.shared.models.image import (
@@ -253,6 +254,73 @@ async def test_store_verifies_image_companion_owner_and_revision(
                     owner_model_id=str(owner.model_id),
                     artifact_role="image_component",
                 )
+
+
+@pytest.mark.parametrize("revision,expected_status", [("b" * 40, 200), ("c" * 40, 409)])
+async def test_image_component_http_download_preserves_owner_and_manifest(
+    revision: str,
+    expected_status: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wire parser admits pinned image groups before verified store transfer."""
+    owner = _owner().model_copy(update={
+        "is_custom": False,
+        "registry_card_id": "card_" + "a" * 52,
+        "registry_snapshot_id": "snapshot_test",
+        "registry_provenance": "foxlight",
+    })
+    fetched: list[str] = []
+
+    async def cards() -> list[ModelCard]:
+        return [owner]
+
+    async def listing(
+        repository: ModelId, source_revision: str, recursive: bool
+    ) -> list[FileListEntry]:
+        assert str(repository) == "owner/encoders" and source_revision == "b" * 40 and recursive
+        return [FileListEntry(type="file", path=path, size=7)
+            for path in ("encoder.gguf", "mmproj-BF16.gguf", "unselected.gguf")]
+
+    async def download(
+        repository: ModelId, source_revision: str, path: str, target_dir: Path,
+        *_args: object, expected_size: int | None = None,
+        expected_object_id: str | None = None, **_kwargs: object,
+    ) -> Path:
+        assert str(repository) == "owner/encoders" and source_revision == "b" * 40
+        assert expected_size == 7 and expected_object_id == IDENTITY
+        fetched.append(path)
+        target = target_dir / path
+        target.write_bytes(DATA)
+        return target
+
+    monkeypatch.setattr(server_module, "get_all_model_cards", cards)
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", listing)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", download)
+    store = ModelStore(tmp_path)
+    server = ModelStoreServer(store, host="127.0.0.1", port=0)
+    async with TestClient(TestServer(server._app)) as client:
+        response = await client.post("/models/owner%2Fencoders/download", json={
+            "source_repository": "owner/encoders", "source_revision": revision,
+            "owner_model_id": str(owner.model_id), "owner_registry_card_id": owner.registry_card_id,
+            "artifact_role": "image_component",
+        })
+        assert response.status == expected_status, await response.text()
+        if expected_status != 200:
+            assert not fetched and store.get_download_status("owner/encoders") is None
+            return
+        status = store.get_download_status("owner/encoders")
+        assert status is not None
+        for _ in range(200):
+            if status.status in ("complete", "failed", "cancelled"):
+                break
+            await asyncio.sleep(0.01)
+        assert status.status == "complete", status.error
+    assert fetched == ["encoder.gguf", "mmproj-BF16.gguf"]
+    installed = store.get_store_path("owner/encoders")
+    assert installed is not None
+    assert (installed / "encoder.gguf").read_bytes() == DATA
+    assert (installed / "mmproj-BF16.gguf").read_bytes() == DATA
 
 
 def test_staging_requires_all_image_files_even_after_a_base_gguf_exists(
