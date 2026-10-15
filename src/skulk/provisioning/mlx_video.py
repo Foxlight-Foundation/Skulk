@@ -128,6 +128,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _member_sha256(archive: zipfile.ZipFile, member: str | zipfile.ZipInfo) -> str:
+    digest = hashlib.sha256()
+    with archive.open(member) as stream:
+        while chunk := stream.read(1024**2):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def wheel_for_host(expected_build: str | None = None) -> MlxVideoWheel | None:
     """Match actual macOS/ARM64/interpreter ABI, without a tested-GPU allowlist."""
     if sys.platform != "darwin" or platform.machine().lower() != "arm64":
@@ -205,25 +213,34 @@ def verified_interpreter(root: Path, wheel: MlxVideoWheel) -> Path | None:
             if hashlib.sha256(json.dumps(members, sort_keys=True, separators=(",", ":")).encode()).hexdigest() != wheel.payload_sha256:
                 return None
             for name, digest in members.items():
-                if hashlib.sha256(archive.read(name)).hexdigest() != digest:
+                if _member_sha256(archive, name) != digest:
                     return None
-            expected: dict[str, bytes] = {}
+            # Retaining expanded libraries here leaves hundreds of megabytes in
+            # the parent allocator before rendering. Only trusted digests need
+            # to survive verification, even when the runtime is already cached.
+            expected: dict[str, str] = {}
             for entry in _safe_members(archive):
                 name = _installed_name(entry.filename)
                 if name is not None:
-                    expected[name] = archive.read(entry)
+                    expected[name] = _member_sha256(archive, entry)
             for name in members:
                 if name.startswith("skulk_mlx_video/wheels/"):
-                    with archive.open(name) as stream, zipfile.ZipFile(stream) as dependency:
-                        for entry in _safe_members(dependency):
-                            installed = _installed_name(entry.filename)
-                            if installed is not None:
-                                if installed in expected:
-                                    raise ValueError("overlapping runtime package members")
-                                expected[installed] = dependency.read(entry)
-        for name, data in expected.items():
+                    # Seeking a nested ZipExtFile can decompress an entire wheel
+                    # into one allocation. A temporary file keeps both the copy
+                    # and nested-member hashing bounded without relaxing trust.
+                    with archive.open(name) as stream, tempfile.TemporaryFile() as copied:
+                        shutil.copyfileobj(stream, copied, length=1024**2)
+                        _ = copied.seek(0)
+                        with zipfile.ZipFile(copied) as dependency:
+                            for entry in _safe_members(dependency):
+                                installed = _installed_name(entry.filename)
+                                if installed is not None:
+                                    if installed in expected:
+                                        raise ValueError("overlapping runtime package members")
+                                    expected[installed] = _member_sha256(dependency, entry)
+        for name, digest in expected.items():
             path = libraries / name
-            if path.is_symlink() or not path.is_file() or _sha256(path) != hashlib.sha256(data).hexdigest():
+            if path.is_symlink() or not path.is_file() or _sha256(path) != digest:
                 return None
         for path in libraries.rglob("*"):
             relative = path.relative_to(libraries)

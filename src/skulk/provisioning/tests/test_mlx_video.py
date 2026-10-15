@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import shutil
 import sys
@@ -20,8 +21,14 @@ from skulk.facts.testing import APPLE_GPU, make_facts
 from skulk.provisioning import mlx_video
 
 
-def _cache(root: Path, *, version: str = "0.1.0") -> mlx_video.MlxVideoWheel:
+def _cache(root: Path, *, version: str = "0.1.0", dependency_payload: dict[str, bytes] | None = None) -> mlx_video.MlxVideoWheel:
     payload = {"skulk_mlx_video/__init__.py": f'"""Test engine {version}."""\n'.encode()}
+    if dependency_payload is not None:
+        with io.BytesIO() as stream:
+            with zipfile.ZipFile(stream, "w") as dependency:
+                for member, data in dependency_payload.items():
+                    dependency.writestr(member, data)
+            payload["skulk_mlx_video/wheels/dependency.whl"] = stream.getvalue()
     members = {name: hashlib.sha256(data).hexdigest() for name, data in payload.items()}
     identity = hashlib.sha256(json.dumps(members, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     payload["skulk_mlx_video/build.json"] = json.dumps({"source_revision": mlx_video.SOURCE_REVISION, "payload_sha256": identity, "members": members}).encode()
@@ -33,6 +40,10 @@ def _cache(root: Path, *, version: str = "0.1.0") -> mlx_video.MlxVideoWheel:
             archive.writestr(member, data)
     libraries = root / "venv/lib/python3.13/site-packages"
     for member, data in payload.items():
+        target = libraries / member
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    for member, data in (dependency_payload or {}).items():
         target = libraries / member
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
@@ -139,6 +150,49 @@ def test_cache_integrity_uses_trusted_package_bytes(tmp_path: Path, corruption: 
         path = libraries / "skulk_mlx_video/__init__.py"
         path.unlink()
         path.symlink_to(__file__)
+    assert mlx_video.verified_interpreter(root, wheel) is None
+
+
+def test_nested_runtime_verification_bounds_archive_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Large bundled libraries must not consume the renderer's memory headroom."""
+    root = tmp_path / "cache"
+    wheel = _cache(root, dependency_payload={"dependency/library.bin": b"x" * (3 * 1024**2)})
+    original_read = zipfile.ZipExtFile.read
+    requests: list[int] = []
+    def bounded_read(stream: zipfile.ZipExtFile, n: int = -1) -> bytes:
+        if stream.name != "skulk_mlx_video/build.json":
+            assert 0 <= n <= 1024**2
+            requests.append(n)
+        return original_read(stream, n)
+    monkeypatch.setattr(zipfile.ZipExtFile, "read", bounded_read)
+    assert mlx_video.verified_interpreter(root, wheel) is not None
+    assert len(requests) > 6 and max(requests) == 1024**2
+
+
+@pytest.mark.parametrize("corruption", ["library", "missing", "extra", "symlink"])
+def test_streamed_dependency_verification_preserves_integrity(tmp_path: Path, corruption: str) -> None:
+    """Streaming still rejects changed dependencies and injected installed code."""
+    root = tmp_path / "cache"
+    wheel = _cache(root, dependency_payload={"dependency/library.bin": b"trusted dependency"})
+    assert mlx_video.verified_interpreter(root, wheel) is not None
+    libraries = root / "venv/lib/python3.13/site-packages"
+    target = libraries / "dependency/library.bin"
+    if corruption == "library":
+        target.write_bytes(b"changed dependency")
+    elif corruption == "missing":
+        target.unlink()
+    elif corruption == "extra":
+        (libraries / "dependency/extra.py").write_text("raise RuntimeError('injected')")
+    else:
+        target.unlink()
+        target.symlink_to(__file__)
+    assert mlx_video.verified_interpreter(root, wheel) is None
+
+
+def test_streamed_dependency_verification_rejects_overlapping_packages(tmp_path: Path) -> None:
+    """A bundled dependency cannot replace the verified engine's own module."""
+    root = tmp_path / "cache"
+    wheel = _cache(root, dependency_payload={"skulk_mlx_video/__init__.py": b"conflicting dependency"})
     assert mlx_video.verified_interpreter(root, wheel) is None
 
 

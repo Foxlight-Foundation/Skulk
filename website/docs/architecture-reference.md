@@ -1883,7 +1883,7 @@ unobserved non-streaming fetch.
 
 - Backend: `mlx_video-metal`, GPU-only, single host per job. Engine build identity binds the complete owned wheel payload.
 - Packaging: `packaging/skulk-mlx-video`, `scripts/build_mlx_video_wheel.py`, `.github/workflows/mlx-video-wheel.yml`; promotion verifies selected attested bytes without rebuilding.
-- Provisioning: `provisioning/mlx_video.py`; locked offline dependencies, cancellable download/commands, cross-process lock, integrity checks, atomic promotion, offline reuse and restart Metal probe. Only published descriptors establish installable capacity.
+- Provisioning: `provisioning/mlx_video.py`; locked offline dependencies, cancellable download/commands, cross-process lock, integrity checks, atomic promotion, offline reuse and restart Metal probe. Integrity hashing uses bounded chunks/digest storage and temporary files for nested ZIP seeks, preserving parent memory headroom. Only published descriptors establish installable capacity.
 - Facts: installed build proof and installable builds are separate. No benchmark/GPU-name allowlist; actual OS, ARM64, CPython ABI, Metal and memory requirements apply.
 - Runner: `worker/runner/mlx_video/{plan,process,runner}.py`; common serial dispatch, bounded JSON progress, process-group cancellation and parent-death reaping. Uses existing video references/output media/retention.
 - Model pack: exact local Gemma 4 and projections, transformer, VAEs, upscaler, tokenizer and quantization configuration. Independent downloads and older-model fallback are refused. Native HQ uses Res2s; DFR remains unavailable without an exact supported detailing adapter.
