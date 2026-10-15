@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 from hashlib import sha256
-from typing import Final, Literal, cast
+from typing import Annotated, Final, Literal, cast
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
@@ -172,7 +172,10 @@ class BaseInstance(TaggedModel):
             "empty for instances replayed from older event logs."
         ),
     )
-    excluded_install_ids: list[UUID] = Field(
+    # FastAPI validates decoded JSON as Python data, where strict UUID fields
+    # otherwise reject their own serialized string representation. Only UUID
+    # members accept this representation; the enclosing model stays strict.
+    excluded_install_ids: list[Annotated[UUID, Field(strict=False)]] = Field(
         default_factory=list,
         description=(
             "Machines the caller excluded that were not connected when this "
