@@ -2290,7 +2290,7 @@ class CreateInstanceParams(BaseModel):
 class PlacementEngineInstall(BaseModel):
     """An engine a placement installs on its node before the model can load."""
 
-    engine: str = Field(description="Engine that installs on demand, such as comfy.")
+    engine: str = Field(description="Engine that installs on demand, such as comfy or stable_diffusion_cpp.")
     node_ids: list[str] = Field(
         description="Nodes in this placement that install the engine first."
     )

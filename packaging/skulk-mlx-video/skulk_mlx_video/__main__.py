@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO, TypedDict
 
 from skulk_mlx_video.schema import BuildMetadata, Job
+from skulk_mlx_video.telemetry import observe_video_decode
 
 if TYPE_CHECKING:
     import mlx.core as mx
@@ -169,11 +170,19 @@ def render(job: Job) -> None:
     pipeline.verbose = False
     pipeline.generate_audio = job.audio
     pipeline.video_decoder = "conv" if job.decoder == "convolutional" else "diffusion"
-    original_load_decoders = pipeline._load_decoders
-    def load_decoders() -> None:
-        emit({"stage": "decoding"}, stream=protocol_stdout)
-        original_load_decoders()
-    pipeline._load_decoders = load_decoders
+    pipeline._decode_and_save_video = observe_video_decode(
+        pipeline.video_decoder_block,
+        pipeline._decode_and_save_video,
+        lambda: emit({"stage": "decoding"}, stream=protocol_stdout),
+    )
+    if job.audio_conditioning is not None:
+        # A2V muxes the frozen waveform through a separate source-audio writer,
+        # bypassing decode/save. Its decoder load is the actual phase boundary.
+        original_load_decoders = pipeline._load_decoders
+        def load_audio_conditioned_decoders() -> None:
+            emit({"stage": "decoding"}, stream=protocol_stdout)
+            original_load_decoders()
+        pipeline._load_decoders = load_audio_conditioned_decoders
     frames: int | AutoDuration = job.frame_count
     if job.duration == "auto":
         frames = AutoDuration(min_seconds=float(job.minimum_seconds), max_seconds=float(job.maximum_seconds))
