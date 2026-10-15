@@ -109,9 +109,9 @@ ROCM_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--bf16-vae",)
 the transformer. Weights are memory-mapped (below ``ROCM_MMAP_CEILING_BYTES``)
 and models stay resident between renders under ComfyUI's RAM-pressure cache,
 with the headroom from ``ROCM_CACHE_RAM_HEADROOM_FRACTION`` added at launch.
-No attention flag: ComfyUI's default SDPA path already selects the wheel
-set's flash-class kernel on gfx1151 (measured against the math path on the
-hardware).
+H3 keeps ComfyUI's default SDPA path, which already selects the wheel set's
+flash-class kernel on gfx1151. Family-specific attention policy is added
+separately by ``launch_flags``.
 """
 
 
@@ -191,7 +191,9 @@ def launch_flags(
     lane, CUDA, adds ``CUDA_LAUNCH_FLAGS``. An ``ltx-2.5`` family CUDA server
     also uses disk-backed dynamic loading so CPU weight staging competes less
     with GPU allocations on unified-memory systems. It still executes on the
-    GPU and retains ordinary memory admission. No files or settings are changed.
+    GPU and retains ordinary memory admission. LTX on ROCm instead selects the
+    engine's split attention path to preserve prompt subject adherence. This
+    also executes on the GPU. No files or settings are changed.
     """
     if not _is_rocm_lane(resolved_backend):
         if model_family == "ltx-2.5":
@@ -204,6 +206,11 @@ def launch_flags(
     ram = total_ram_bytes if total_ram_bytes is not None else psutil.virtual_memory().total
     headroom_gib = max(1, int(ram * ROCM_CACHE_RAM_HEADROOM_FRACTION / 1024**3))
     flags = (*ROCM_LAUNCH_FLAGS, "--cache-ram", str(headroom_gib))
+    if model_family == "ltx-2.5":
+        # The pinned ROCm default produced unrelated subjects in matched LTX
+        # renders; split attention recovered the requested subjects with the
+        # same weights, graph and seed while keeping inference on the GPU.
+        flags = (*flags, "--use-split-cross-attention")
     if any(path.stat().st_size > ROCM_MMAP_CEILING_BYTES for path in weight_files):
         return (*flags, "--disable-mmap")
     return flags
