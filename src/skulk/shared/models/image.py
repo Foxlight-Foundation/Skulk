@@ -98,6 +98,62 @@ class ImageComponent(FrozenModel):
 
 
 @final
+class ImageUnetStructureConfig(FrozenModel):
+    """Nonuniform UNet module geometry, independent of text-cache assumptions."""
+
+    input_block_channels: tuple[Annotated[int, Field(gt=0)], ...] = Field(
+        min_length=1,
+        max_length=128,
+        description="Input-module output channels in checkpoint order.",
+    )
+    middle_block_channels: tuple[Annotated[int, Field(gt=0)], ...] = Field(
+        min_length=1,
+        max_length=128,
+        description="Middle-module output channels, including attention projections.",
+    )
+    output_block_channels: tuple[Annotated[int, Field(gt=0)], ...] = Field(
+        min_length=1,
+        max_length=128,
+        description="Output-module output channels in checkpoint order.",
+    )
+    input_channels: int = Field(
+        gt=0, description="Input channels of the UNet's first convolution."
+    )
+    output_channels: int = Field(
+        gt=0, description="Output channels of the UNet's final convolution."
+    )
+
+    @field_validator(
+        "input_block_channels",
+        "middle_block_channels",
+        "output_block_channels",
+        mode="before",
+    )
+    @classmethod
+    def wire_channels(cls, value: object) -> object:
+        """Restore JSON/TOML arrays without weakening channel validation."""
+        return tuple(cast("list[object]", value)) if isinstance(value, list) else value
+
+    @property
+    def block_count(self) -> int:
+        """Return the number of top-level modules, not transformer layers."""
+        return (
+            len(self.input_block_channels)
+            + len(self.middle_block_channels)
+            + len(self.output_block_channels)
+        )
+
+    @property
+    def maximum_channels(self) -> int:
+        """Return the largest module output width, excluding concatenated inputs."""
+        return max(
+            *self.input_block_channels,
+            *self.middle_block_channels,
+            *self.output_block_channels,
+        )
+
+
+@final
 class ImageCardConfig(FrozenModel):
     """Image geometry, component completeness, sampling, and input/output truth."""
 
@@ -106,6 +162,10 @@ class ImageCardConfig(FrozenModel):
     )
     components: tuple[ImageComponent, ...] = Field(
         min_length=1, description="Complete immutable component sources."
+    )
+    unet_structure: ImageUnetStructureConfig | None = Field(
+        default=None,
+        description="Mixed SDXL modules; card dimensions use count and max width.",
     )
     default_width: int = Field(
         default=1024, ge=64, le=4096, description="Width used for size=auto."
@@ -123,7 +183,7 @@ class ImageCardConfig(FrozenModel):
         default=4_400_000,
         ge=4096,
         le=16_777_216,
-        description="Maximum qualified canvas area.",
+        description="Declared maximum canvas area.",
     )
     max_reference_images: int = Field(
         default=0,
@@ -157,6 +217,8 @@ class ImageCardConfig(FrozenModel):
     @model_validator(mode="after")
     def validate_contract(self) -> ImageCardConfig:
         """Keep component roles, geometry, and distilled sampling mutually consistent."""
+        if self.unet_structure is not None and self.family != "sdxl":
+            raise ValueError("UNet structure belongs only to an SDXL image profile")
         roles = [component.role for component in self.components]
         if len(roles) != len(set(roles)):
             raise ValueError("image component roles must be unique")

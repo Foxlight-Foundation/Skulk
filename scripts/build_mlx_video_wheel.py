@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path
 
 SOURCE_REVISION = "9e4a1a54194460547a103334b5e06382724fbba6"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 FEATURES = ("audio_conditioning", "retake", "extend", "prompt_relay")
 PLATFORM_TAG = "macosx_15_0_arm64"
 FILENAME = f"skulk_mlx_video-{VERSION}-cp313-cp313-{PLATFORM_TAG}.whl"
@@ -59,6 +59,7 @@ def assemble_wheel(source: Path, wrapper: Path, wheelhouse: Path, lock: Path, ou
         if path.is_file() and "__pycache__" not in path.parts:
             payload[f"skulk_mlx_video/{path.relative_to(wrapper).as_posix()}"] = path.read_bytes()
     payload["skulk_mlx_video/media.py"] = (Path(__file__).resolve().parents[1] / "src/skulk/worker/runner/video_input.py").read_bytes()
+    payload["skulk_mlx_video/telemetry.py"] = (Path(__file__).resolve().parents[1] / "src/skulk/worker/runner/video_observability.py").read_bytes()
     seen: set[str] = set()
     for path in sorted(wheelhouse.iterdir()):
         if path.suffix != ".whl":

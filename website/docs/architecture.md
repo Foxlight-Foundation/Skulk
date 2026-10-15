@@ -2946,7 +2946,12 @@ Maintenance discipline for this doc and the [Architecture Reference](architectur
 `stable_diffusion_cpp` serves typed `image` model profiles through one resident,
 headless, authenticated loopback subprocess per single-host, single-GPU instance.
 Its compute lanes are `metal`, `cuda`, `vulkan`, and `rocm`; CPU-only serving is
-excluded. Complete immutable component files are verified before load. Model
+excluded. SDXL's `image.unet_structure` describes nonuniform input, middle
+and output module channels and first/final convolution channels. Its generic
+layer count is the module sum and hidden width is the maximum module output
+width; these fields do not imply text KV geometry or image splitting.
+`/v1/models.image.unetStructure` exposes that intrinsic structure; signed
+publication rejects provisional or inconsistent SDXL dimensions. Complete immutable component files are verified before load. Model
 placement can schedule an `InstallEngine` task for an exact published package;
 browsing does not acquire packages. `NodeResources.installable_engine_builds`
 records those candidates separately from measured `engine_builds`.
@@ -2955,8 +2960,11 @@ CPU helper instructions. Package discovery also matches the interpreter's
 standard wheel-platform tags, rejecting older glibc, musl and older macOS before
 acquisition. Package discovery refuses incompatible hosts, and
 managed-binary probing checks these prerequisites before execution.
-Signed support claims, exact build identity, hardware match, and runner limits still gate normal
-placement. A candidate source build alone grants no support.
+Declared engine compatibility, actual package ABI/compiled targets, implemented
+runner operations and live resource fit govern placement. Exact build identity
+verifies the selected executable. Empirical qualification is scoped reporting
+evidence and never a hardware permission list. A source build alone does not
+prove installed or ready runtime capacity.
 
 Image downloads select every pinned file in the owning card's repository/revision
 group, including a same-repository VAE. External groups retain the durable
@@ -3035,3 +3043,5 @@ The `mlx_video-metal` runner executes LTX-2.5 through a Foxlight-owned wheel con
 Each job uses one supervised process group and a bounded progress channel, with parent-death cleanup, cancellation and bundled media encoding. Only card-selected local pack members are exposed. Missing Gemma 4, projection, VAE, tokenizer or quantization files fail before upstream fallback loading; Hub access stays offline. Distilled, dev and native HQ pipelines use their pinned schedules; unsupported explicit controls fail. Transformer streaming and staged decode do not pool cluster memory or prove single-Mac fit. The shared admission guard remains in force, and model qualification/memory profiles are separate from a weightless engine probe.
 
 LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. The pinned Comfy core nodes lack the exact temporal retake/extension and prompt-relay masks.
+
+Native video engine v0.2.1 marks decoding at the actual decode-and-save call. The headless decoder's private verbose profiler is disabled so its counter reset cannot erase earlier encoder/sampling memory peaks. The reported Metal peak covers the complete render; it is distinct from host RSS and the two counters must not be added.

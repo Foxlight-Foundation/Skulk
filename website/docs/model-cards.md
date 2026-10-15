@@ -682,6 +682,21 @@ New strict fields require compatible registry and Skulk readers before publicati
 
 Skulk verifies component revisions, sizes and immutable object IDs before native
 load. Browsing a card does not install an engine: accepted placement selects an
-eligible published package and its exact support claim, then preparation installs
-and probes it in an isolated cache. The runner repeats verification at load.
+eligible published package using actual ABI, CPU and compiled GPU requirements,
+then preparation installs and probes it in an isolated cache. Qualification is
+representative evidence and is not an installation or publication prerequisite. The runner repeats verification at load.
 Operator-facing license metadata continues to describe the model's terms.
+
+
+### SDXL UNet structure
+
+Native SDXL cards declare `[image.unet_structure]`, with positive
+`input_block_channels`, `middle_block_channels`, `output_block_channels` arrays
+in checkpoint order and `input_channels`/`output_channels` for the boundary
+convolutions. The selected SDXL base artifacts have nine input modules, three
+middle modules and nine output modules, with maximum module output width 1280.
+Their generic `n_layers` is 21 and `hidden_size` is 1280. These describe the
+mixed UNet rather than a uniform transformer. The reader rejects declared
+structure that disagrees with the generic dimensions; registry publication
+additionally requires the explicit structure for SDXL. No text KV layout or
+multi-node image support follows from this metadata.
