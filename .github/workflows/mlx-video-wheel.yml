@@ -23,6 +23,7 @@ on:
       - "scripts/build_mlx_video_wheel.py"
       - "scripts/verify_mlx_video_promotion.py"
       - "src/skulk/worker/runner/video_input.py"
+      - "src/skulk/worker/runner/video_observability.py"
 
 permissions:
   contents: read
