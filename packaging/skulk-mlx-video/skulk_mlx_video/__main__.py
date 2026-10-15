@@ -175,6 +175,14 @@ def render(job: Job) -> None:
         pipeline._decode_and_save_video,
         lambda: emit({"stage": "decoding"}, stream=protocol_stdout),
     )
+    if job.audio_conditioning is not None:
+        # A2V muxes the frozen waveform through a separate source-audio writer,
+        # bypassing decode/save. Its decoder load is the actual phase boundary.
+        original_load_decoders = pipeline._load_decoders
+        def load_audio_conditioned_decoders() -> None:
+            emit({"stage": "decoding"}, stream=protocol_stdout)
+            original_load_decoders()
+        pipeline._load_decoders = load_audio_conditioned_decoders
     frames: int | AutoDuration = job.frame_count
     if job.duration == "auto":
         frames = AutoDuration(min_seconds=float(job.minimum_seconds), max_seconds=float(job.maximum_seconds))
