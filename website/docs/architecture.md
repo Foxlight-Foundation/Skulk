@@ -3002,3 +3002,5 @@ its VAE/encoders, while companions in other repositories use their own pinned
 transactions. Dashboard native image requests own SSE responses so Stop closes
 the stream and cancels the underlying command rather than only aborting an
 unobserved non-streaming fetch.
+
+Exact image qualification uses `POST /v1/instances/{instance_id}/images/generations`. The API verifies every rank against a persistent installation allowlist and dispatches `ImageGeneration.target_instance_id`; the master fails an unavailable target without selecting another replica. Both JSON and SSE return the selected instance identity.

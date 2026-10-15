@@ -2515,6 +2515,21 @@ class ImageGenerationTaskParams(BaseModel):
         return normalize_image_size(v)
 
 
+class InstanceImageGenerationRequest(ImageGenerationTaskParams):
+    """Image generation bound to one instance and persistent installation scope."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    allowed_node_install_ids: list[Annotated[UUID4, Field(strict=False)]] = Field(
+        min_length=1,
+        max_length=1000,
+        description=(
+            "Persistent installation identities allowed to execute this request. "
+            "Every selected instance rank must match; this grants no placement authority."
+        ),
+    )
+
+
 class BenchImageGenerationTaskParams(ImageGenerationTaskParams):
     bench: bool = True
 

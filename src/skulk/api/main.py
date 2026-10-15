@@ -230,6 +230,7 @@ from skulk.api.types import (
     ImageListResponse,
     ImageSize,
     InstanceChatCompletionRequest,
+    InstanceImageGenerationRequest,
     LicenseSection,
     ModalitiesCapabilitySection,
     ModelList,
@@ -2982,6 +2983,19 @@ class API:
                 "SSE finals even with zero partial_images; legacy models require positive previews."
             ),
         )(self.image_generations)
+        self.app.post(
+            "/v1/instances/{instance_id}/images/generations",
+            response_model=None,
+            tags=["Images"],
+            summary="Generate images on one scoped instance",
+            description=(
+                "Generate on an existing exact image instance whose every rank belongs "
+                "to the supplied persistent installation allowlist. Missing instances "
+                "return 404; model, capability, or installation mismatches return 409 "
+                "before dispatch. No replica fallback or placement is performed. "
+                "The response identifies the selected instance in X-Skulk-Instance-Id."
+            ),
+        )(self.instance_image_generations)
         self.app.post(
             "/bench/images/generations",
             tags=["Images"],
@@ -7133,10 +7147,12 @@ class API:
             )
         return resolved_model
 
-    def _validate_image_request(self, model: ModelId, size: str, n: int, advanced: AdvancedImageParams | None, references: int = 0, *, prompt: str = "") -> bool:
+    def _validate_image_request(self, model: ModelId, size: str, n: int, advanced: AdvancedImageParams | None, references: int = 0, *, prompt: str = "", target_instance_id: InstanceId | None = None) -> bool:
         """Validate the mounted image contract before admitting downloads or GPU work."""
         card: ModelCard | None = None
         for instance in self.state.instances.values():
+            if target_instance_id is not None and instance.instance_id != target_instance_id:
+                continue
             if instance.shard_assignments.model_id == model:
                 card = self._model_card_for_instance(instance)
                 if card is not None:
@@ -9342,6 +9358,12 @@ class API:
     async def image_generations(
         self, request: Request, payload: ImageGenerationTaskParams
     ) -> ImageGenerationResponse | StreamingResponse:
+        """Generate images using the normal least-loaded model placement."""
+        return await self._image_generations(request, payload)
+
+    async def _image_generations(
+        self, request: Request, payload: ImageGenerationTaskParams, *, target_instance_id: InstanceId | None = None
+    ) -> ImageGenerationResponse | StreamingResponse:
         """Handle image generation requests.
 
         Native image profiles return SSE finals when stream=True, including with
@@ -9357,8 +9379,9 @@ class API:
         command = ImageGeneration(
             owner_node=self.node_id,
             task_params=payload,
+            target_instance_id=target_instance_id,
         )
-        native = self._validate_image_request(ModelId(payload.model), payload.size, 1 if payload.n is None else payload.n, payload.advanced_params, prompt=payload.prompt)
+        native = self._validate_image_request(ModelId(payload.model), payload.size, 1 if payload.n is None else payload.n, payload.advanced_params, prompt=payload.prompt, target_instance_id=target_instance_id)
         await self._send(command)
 
         # Check if streaming is requested
@@ -9380,6 +9403,45 @@ class API:
             num_images=payload.n or 1,
             response_format=payload.response_format or "b64_json",
         )
+
+    async def instance_image_generations(
+        self,
+        request: Request,
+        response: Response,
+        instance_id: InstanceId,
+        payload: InstanceImageGenerationRequest,
+    ) -> ImageGenerationResponse | StreamingResponse:
+        """Generate on an exact scoped instance, preserving normal output and cancellation.
+
+        All ranks must have known persistent identities within the caller's
+        allowlist. The selected card supplies capability and canvas validation;
+        another replica at the same model alias cannot satisfy the request.
+        """
+        instance = self.state.instances.get(instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="Requested instance not found")
+        if instance.shard_assignments.model_id != payload.model:
+            raise HTTPException(status_code=409, detail="Instance does not serve the requested model")
+        allowed = set(payload.allowed_node_install_ids)
+        nodes = instance.shard_assignments.node_to_runner
+        if not nodes or any(
+            (identity := self._telemetry_view.node_identities.get(node_id)) is None
+            or identity.node_install_id is None
+            or identity.node_install_id not in allowed
+            for node_id in nodes
+        ):
+            raise HTTPException(status_code=409, detail="Instance is outside the allowed node installation scope")
+        card = self._model_card_for_instance(instance)
+        if card is None or ModelTask.TextToImage not in card.tasks:
+            raise HTTPException(status_code=409, detail="Instance does not support text-to-image generation")
+        generation = ImageGenerationTaskParams.model_validate(
+            payload.model_dump(exclude={"allowed_node_install_ids"})
+        )
+        result = await self._image_generations(request, generation, target_instance_id=instance_id)
+        response.headers["X-Skulk-Instance-Id"] = str(instance_id)
+        if isinstance(result, StreamingResponse):
+            result.headers["X-Skulk-Instance-Id"] = str(instance_id)
+        return result
 
     async def _generate_image_stream(
         self,
