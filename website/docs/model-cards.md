@@ -448,6 +448,8 @@ Declares tool-calling behavior:
 
 Declares runtime integration preferences:
 
+- `video_memory_budget_bytes`
+  - optional per-instance `mlx_video-metal` working-set reservation in bytes; raises, never lowers, the staged artifact estimate. Use a larger reservation for larger canvases or timelines, then recreate the placement. Both placement and the worker require live capacity for it, and the renderer checks request workspace against it. This is a resource setting, independent of GPU qualification. Omitting it preserves existing card authorization bytes and the automatic estimate.
 - `prompt_renderer`
   - prompt renderer to use, such as `tokenizer`, `gemma4`, or `dsml`
 - `output_parser`

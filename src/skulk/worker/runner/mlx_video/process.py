@@ -19,6 +19,7 @@ from pydantic import Field
 from skulk.provisioning.mlx_video import runtime_environment
 from skulk.shared.types.video import VideoStage
 from skulk.utils.pydantic_ext import FrozenModel
+from skulk.worker.runner.mlx_video.memory import NativeMemoryPlan
 from skulk.worker.runner.mlx_video.plan import NativeVideoJob
 
 
@@ -73,7 +74,7 @@ def serialize_native_job(job: NativeVideoJob) -> str:
     return job.model_dump_json(exclude={name for name, value in optional_controls.items() if value is None})
 
 
-def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable[[NativeProgress], None], is_cancelled: Callable[[], bool]) -> NativeResult | None:
+def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable[[NativeProgress], None], is_cancelled: Callable[[], bool], memory_plan: NativeMemoryPlan | None = None, resource_guard: Callable[[int], str | None] | None = None) -> NativeResult | None:
     """Run one local job, cancelling its whole group and retaining bounded diagnostics.
 
     The child independently reaps itself and FFmpeg when its runner parent dies.
@@ -85,7 +86,12 @@ def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable
     request.write_text(serialize_native_job(job))
     messages: queue.Queue[str] = queue.Queue(maxsize=64)
     errors: deque[str] = deque(maxlen=24)
-    process = subprocess.Popen([str(interpreter), "-I", "-B", "-m", "skulk_mlx_video", "--job", str(request), "--parent-pid", str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=runtime_environment(), start_new_session=True)
+    environment = runtime_environment()
+    if memory_plan is not None:
+        # Ignore inherited upstream tuning. Only the owned, checked plan may
+        # select this existing pinned-runtime control; JSON stays v1-compatible.
+        environment["LTX2_VAE_DECODE_BUDGET_GB"] = str(memory_plan.decode_budget_bytes / 1024**3)
+    process = subprocess.Popen([str(interpreter), "-I", "-B", "-m", "skulk_mlx_video", "--job", str(request), "--parent-pid", str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment, start_new_session=True)
 
     def consume(stream: TextIO, *, diagnostics: bool) -> None:
         with stream:
@@ -108,12 +114,18 @@ def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable
     for reader in readers:
         reader.start()
     started = time.monotonic()
+    last_resource_check = started - 1
     try:
         while process.poll() is None or not messages.empty():
             if is_cancelled():
                 return None
             if time.monotonic() - started > 6 * 60 * 60:
                 raise ValueError("native video render exceeded its bounded execution deadline")
+            if resource_guard is not None and time.monotonic() - last_resource_check >= 0.5:
+                last_resource_check = time.monotonic()
+                refusal = resource_guard(process.pid)
+                if refusal is not None:
+                    raise ValueError(refusal)
             try:
                 message = messages.get(timeout=0.1)
             except queue.Empty:
@@ -124,7 +136,10 @@ def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable
         result = output / "result.json"
         if not result.is_file() or result.stat().st_size > 4096:
             raise ValueError("native video render did not return a bounded completion record")
-        return NativeResult.model_validate_json(result.read_bytes())
+        measured = NativeResult.model_validate_json(result.read_bytes())
+        if memory_plan is not None and measured.peak_memory_bytes > memory_plan.reservation_bytes:
+            raise ValueError("native video exceeded its reserved Metal working set; increase the video memory reservation before placing again")
+        return measured
     finally:
         _terminate(process)
         for reader in readers:
