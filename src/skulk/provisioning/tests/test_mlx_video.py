@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sys
 import threading
 import zipfile
@@ -19,12 +20,12 @@ from skulk.facts.testing import APPLE_GPU, make_facts
 from skulk.provisioning import mlx_video
 
 
-def _cache(root: Path) -> mlx_video.MlxVideoWheel:
-    payload = {"skulk_mlx_video/__init__.py": b'"""Test engine."""\n'}
+def _cache(root: Path, *, version: str = "0.1.0") -> mlx_video.MlxVideoWheel:
+    payload = {"skulk_mlx_video/__init__.py": f'"""Test engine {version}."""\n'.encode()}
     members = {name: hashlib.sha256(data).hexdigest() for name, data in payload.items()}
     identity = hashlib.sha256(json.dumps(members, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     payload["skulk_mlx_video/build.json"] = json.dumps({"source_revision": mlx_video.SOURCE_REVISION, "payload_sha256": identity, "members": members}).encode()
-    name = "skulk_mlx_video-0.1.0-cp313-cp313-macosx_15_0_arm64.whl"
+    name = f"skulk_mlx_video-{version}-cp313-cp313-macosx_15_0_arm64.whl"
     root.mkdir(parents=True)
     package = root / name
     with zipfile.ZipFile(package, "w") as archive:
@@ -77,6 +78,38 @@ def test_real_abi_and_os_requirements_remain_enforced(tmp_path: Path, monkeypatc
     assert mlx_video.wheel_for_host() == wheel
     monkeypatch.setattr(mlx_video, "sys_tags", lambda: iter([Tag("cp313", "cp313", "macosx_14_0_arm64")]))
     assert mlx_video.wheel_for_host() is None
+
+
+@pytest.mark.parametrize("newer_cache", ["missing", "corrupt", "valid"])
+def test_restart_rehydrates_cached_published_version_without_auto_provisioning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer_cache: str) -> None:
+    """A new publication never hides valid installed capacity on an offline host."""
+    older_root, newer_root = tmp_path / "older", tmp_path / "newer"
+    older = _cache(older_root)
+    newer = _cache(newer_root, version="0.2.0")
+    _host(monkeypatch, older)
+    monkeypatch.setattr(mlx_video, "PUBLISHED_WHEELS", (newer, older))
+    monkeypatch.setenv(mlx_video.AUTOPROVISION_OPT_OUT_ENV, "1")
+    def cached_root(wheel: mlx_video.MlxVideoWheel) -> Path:
+        return newer_root if wheel.build_identity == newer.build_identity else older_root
+    monkeypatch.setattr(mlx_video, "runtime_root", cached_root)
+    if newer_cache == "missing":
+        shutil.rmtree(newer_root)
+    elif newer_cache == "corrupt":
+        (newer_root / "venv/lib/python3.13/site-packages/skulk_mlx_video/__init__.py").write_text("changed")
+    probed: list[str] = []
+    def record_probe(_interpreter: Path, expected_build: str) -> None:
+        probed.append(expected_build)
+    monkeypatch.setattr(mlx_video, "probe_runtime", record_probe)
+    selected, selected_root = (newer, newer_root) if newer_cache == "valid" else (older, older_root)
+    assert mlx_video.wheel_for_host() == newer
+    assert mlx_video.installed_video_runtime() == (selected_root / "venv/bin/python", selected.build_identity)
+    assert probed == [selected.build_identity]
+    facts = make_facts(platform="darwin", gpus=(APPLE_GPU,)).model_copy(update={"mlx_video_build_identity": selected.build_identity})
+    assert mlx_video.installable_video_builds(facts, offline=True) == {}
+    assert "mlx_video-metal" in derive_node_backends(facts).installed_backends
+    assert engine_build_inventory(frozenset({"mlx_video-metal"}), facts, environ={})["mlx_video-metal"] == selected.build_identity
+    monkeypatch.setattr(mlx_video, "sys_tags", lambda: iter(()))
+    assert mlx_video.installed_video_runtime() is None
 
 
 def test_compatible_interpreter_upgrade_preserves_previous_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

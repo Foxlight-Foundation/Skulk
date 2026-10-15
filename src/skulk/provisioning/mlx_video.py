@@ -58,10 +58,18 @@ class MlxVideoWheel(FrozenModel):
         return f"https://wheels.foxlight.ai/wheels/{self.filename}"
 
 
-# Candidate run 38631488818 was attested at initiative commit 48e11c3d,
-# promoted without rebuilding by run 38631848725, and read back from the
-# owned channel. Only these published bytes advertise installable capacity.
+# Candidate run 38655354771 was attested at initiative commit a0dbfa74 and
+# promoted without rebuilding by run 38655556829. Live bytes/index and fresh
+# installed integrity/Metal/offline/restart probes passed. Keep v1 available
+# for exact existing placements; new installs prefer the published v2 protocol.
 PUBLISHED_WHEELS: Final[tuple[MlxVideoWheel, ...]] = (
+    MlxVideoWheel(
+        filename="skulk_mlx_video-0.2.0-cp313-cp313-macosx_15_0_arm64.whl",
+        sha256="151d2f57a8b4a0b9f849057ed2412fb4173733f9f59a41365dcbf9e715c93941",
+        payload_sha256="89249f099dbc74780bc6a75a1c1fc22571d271e10d9bdec46230790fc1f677a9",
+        size_bytes=119958178,
+        features=("audio_conditioning", "retake", "extend", "prompt_relay"),
+    ),
     MlxVideoWheel(
         filename="skulk_mlx_video-0.1.0-cp313-cp313-macosx_15_0_arm64.whl",
         sha256="e2ced0b7c5b176c9285b047eb908c5a63b1322c22b0ce5d8a07e504bf02bfdee",
@@ -247,14 +255,17 @@ def installable_video_builds(facts: NodeFacts, *, offline: bool) -> dict[str, st
 
 def installed_video_runtime() -> tuple[Path, str] | None:
     """Rehydrate a verified published package and test its actual GPU on restart."""
-    wheel = wheel_for_host()
-    if wheel is None:
-        return None
-    interpreter = verified_interpreter(runtime_root(wheel), wheel)
-    if interpreter is None:
-        return None
-    probe_runtime(interpreter, wheel.build_identity)
-    return interpreter, wheel.build_identity
+    # Publication preference selects a new install, not whether an older valid
+    # cache remains installed. Offline upgrades must retain their actual build.
+    for wheel in PUBLISHED_WHEELS:
+        if wheel_for_host(wheel.build_identity) is None:
+            continue
+        interpreter = verified_interpreter(runtime_root(wheel), wheel)
+        if interpreter is None:
+            continue
+        probe_runtime(interpreter, wheel.build_identity)
+        return interpreter, wheel.build_identity
+    return None
 
 
 def install_mlx_video(backend: str, expected_build: str, *, offline: bool, stop: threading.Event) -> Path:
