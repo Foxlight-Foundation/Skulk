@@ -2542,8 +2542,28 @@ class PlacementCardConfig(CamelCaseModel):
         return list(value)
 
 
+def _omit_absent_video_memory_budget(value: object) -> bool:
+    # Installed-card authorization binds the complete serialized projection.
+    # Adding an unused runtime hint must preserve preexisting card identities.
+    return value is None
+
+
 class RuntimeCapabilityCardConfig(CamelCaseModel):
     """Optional runtime behavior hints for a model card."""
+
+    video_memory_budget_bytes: int | None = Field(
+        default=None,
+        ge=1,
+        le=2**63 - 1,
+        exclude_if=_omit_absent_video_memory_budget,
+        description="Optional native-video working-set reservation for larger requests. It may raise, never lower, the artifact-derived estimate; live placement capacity still applies.",
+    )
+    """Per-instance native-video memory allocation, independent of qualification.
+
+    The staged default covers the selected working weights with runtime margin.
+    Larger canvases or timelines may need a larger reservation. The runner checks
+    each request against the reservation and bounds its decoder accordingly.
+    """
 
     prompt_renderer: PromptRendererType | None = None
     """How prompts are rendered for this model (``tokenizer`` chat template,

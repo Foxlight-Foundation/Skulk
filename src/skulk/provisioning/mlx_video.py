@@ -58,11 +58,18 @@ class MlxVideoWheel(FrozenModel):
         return f"https://wheels.foxlight.ai/wheels/{self.filename}"
 
 
-# Candidate run 38655354771 was attested at initiative commit a0dbfa74 and
-# promoted without rebuilding by run 38655556829. Live bytes/index and fresh
-# installed integrity/Metal/offline/restart probes passed. Keep v1 available
-# for exact existing placements; new installs prefer the published v2 protocol.
+# Candidate run 38666657955 was attested at reviewed initiative source 528a5383
+# and promoted unchanged by run 38668395794. Live bytes/index and fresh local
+# and physical-host integrity/Metal/offline/restart probes passed. Preserve
+# earlier exact placements while new installs receive whole-render telemetry.
 PUBLISHED_WHEELS: Final[tuple[MlxVideoWheel, ...]] = (
+    MlxVideoWheel(
+        filename="skulk_mlx_video-0.2.1-cp313-cp313-macosx_15_0_arm64.whl",
+        sha256="a08f846ddd88469e0ed5aa897596f5d584362739e06a10a800fd02db64766fd3",
+        payload_sha256="58523bb6c166dc864730afbd75c047ee8d0a040be9066534f2901931f073d6d6",
+        size_bytes=119959343,
+        features=("audio_conditioning", "retake", "extend", "prompt_relay"),
+    ),
     MlxVideoWheel(
         filename="skulk_mlx_video-0.2.0-cp313-cp313-macosx_15_0_arm64.whl",
         sha256="151d2f57a8b4a0b9f849057ed2412fb4173733f9f59a41365dcbf9e715c93941",

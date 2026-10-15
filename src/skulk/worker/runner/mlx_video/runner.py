@@ -27,6 +27,7 @@ from skulk.shared.types.events import (
     TaskAcknowledged,
     TaskStatusUpdated,
 )
+from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.tasks import (
     ConnectToGroup,
     LoadModel,
@@ -57,6 +58,12 @@ from skulk.shared.types.worker.runners import (
 )
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.comfy.graph import bind_references
+from skulk.worker.runner.mlx_video.memory import (
+    native_memory_pressure_error,
+    plan_native_memory,
+    read_native_image_pixels,
+    read_native_weight_profile,
+)
 from skulk.worker.runner.mlx_video.plan import plan_native_job, selected_model_view
 from skulk.worker.runner.mlx_video.process import NativeProgress, run_native_job
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
@@ -212,7 +219,8 @@ class Runner(ServedConcurrentDispatch):
                 fraction = 0.05 if message.stage == "encoding" else 0.9 if message.stage == "decoding" else 0.98 if message.stage == "muxing" else 0.05 + 0.8 * min(1.0, completed / planned_steps)
                 self.event_sender.send(ChunkGenerated(command_id=task.command_id, chunk=VideoChunk(model=self.model_id, stage=message.stage, step=completed if message.step is not None else None, total_steps=planned_steps if message.step is not None else None, progress=fraction)))
 
-            result = run_native_job(self.interpreter, job, progress=progress, is_cancelled=lambda: self._is_cancelled(task.task_id))
+            memory_plan = plan_native_memory(job, self.card, read_native_weight_profile(job), MemoryUsage.from_local_gpu_wireable(), image_pixels=read_native_image_pixels(job))
+            result = run_native_job(self.interpreter, job, progress=progress, is_cancelled=lambda: self._is_cancelled(task.task_id), memory_plan=memory_plan, resource_guard=lambda process_id: native_memory_pressure_error(process_id, memory_plan.reservation_bytes))
             if result is None or self._is_cancelled(task.task_id):
                 shutil.rmtree(output, ignore_errors=True)
                 return
