@@ -580,6 +580,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   weight loading, limiting RAM offload residency beside GPU allocations on
   unified-memory systems. This family policy preserves GPU execution and
   ordinary admission and applies across compatible CUDA hardware.
+  LTX ROCm servers use `--use-split-cross-attention`: the pinned default
+  attention path lost prompt subject adherence in matched renders, while
+  split attention recovered the requested subjects on the GPU. H3 keeps
+  its existing attention policy; no tested-device allowlist is introduced.
   LTX image guides are reapplied at full resolution and cropped before
   upscaling/decoding. Multi-stage progress counts each sampler independently.
   LTX request contracts also carry explicit pipeline/decoder selection, guided

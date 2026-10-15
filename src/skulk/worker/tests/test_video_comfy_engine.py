@@ -700,8 +700,9 @@ def test_runner_renders_through_a_comfy_server(
     assert runner.server is None
 
 
+@pytest.mark.parametrize("backend", ["comfy-cuda", "comfy-rocm"])
 def test_ltx_runner_executes_both_stages_and_retains_the_output_contract(
-    fake_comfy: Path, monkeypatch: pytest.MonkeyPatch,
+    fake_comfy: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
     """Exercise LTX through the managed server/job/output lifecycle without weights."""
     model_id = ModelId("Lightricks/LTX-2.5-distilled-comfy-int8")
@@ -712,12 +713,17 @@ def test_ltx_runner_executes_both_stages_and_retains_the_output_contract(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"")
     sender = _Sender()
-    runner = _runner(sender, _Cancels(), card=card)
+    runner = _runner(sender, _Cancels(), backend=backend, card=card)
     instance = runner.bound_instance.instance.instance_id
     try:
         runner.handle_task(LoadModel(instance_id=instance))
         assert runner.server is not None
-        assert runner.server.extra_args == ("--disable-cuda-malloc", "--fast-disk")
+        if backend == "comfy-rocm":
+            assert "--use-split-cross-attention" in runner.server.extra_args
+            assert "--bf16-vae" in runner.server.extra_args
+            assert "--fast-disk" not in runner.server.extra_args
+        else:
+            assert runner.server.extra_args == ("--disable-cuda-malloc", "--fast-disk")
         runner.handle_task(StartWarmup(instance_id=instance))
         runner._generate(VideoGeneration(
             command_id=CommandId("ltx-render"), instance_id=instance,

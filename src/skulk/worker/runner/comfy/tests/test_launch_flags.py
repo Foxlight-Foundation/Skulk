@@ -20,9 +20,11 @@ _STRIX_RAM = 64 * _GIB
 _STRIX_FLAGS = (*ROCM_LAUNCH_FLAGS, "--cache-ram", "25")
 
 
-def test_rocm_backends_get_the_validated_strix_flags() -> None:
+@pytest.mark.parametrize("family", [None, "minimax-h3", "ltx-2"])
+def test_other_rocm_families_keep_their_existing_policy(family: str | None) -> None:
+    """The LTX attention policy must not change H3 or unknown-family launches."""
     assert ROCM_LAUNCH_FLAGS == ("--bf16-vae",)
-    assert launch_flags("comfy-rocm", total_ram_bytes=_STRIX_RAM) == _STRIX_FLAGS
+    assert launch_flags("comfy-rocm", total_ram_bytes=_STRIX_RAM, model_family=family) == _STRIX_FLAGS
 
 
 def test_rocm_keeps_models_resident_between_renders() -> None:
@@ -99,12 +101,24 @@ def test_other_cuda_families_keep_their_existing_loading_policy(
 
 
 @pytest.mark.parametrize("backend", [None, "comfy", "comfy-rocm"])
-def test_ltx_rocm_retains_its_existing_loading_policy(
+def test_ltx_rocm_selects_split_attention_on_stamped_and_local_backends(
     backend: str | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ROCm keeps its BF16 VAE and RAM-pressure cache policy for LTX too."""
+    """LTX uses GPU split attention with the existing VAE and cache policy."""
     monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm"})
-    assert launch_flags(backend, total_ram_bytes=_STRIX_RAM, model_family="ltx-2.5") == _STRIX_FLAGS
+    assert launch_flags(backend, total_ram_bytes=_STRIX_RAM, model_family="ltx-2.5") == (
+        *_STRIX_FLAGS, "--use-split-cross-attention",
+    )
+
+
+def test_ltx_rocm_retains_split_attention_when_large_weights_disable_mmap(tmp_path: Path) -> None:
+    """The independent large-file policy must retain the LTX correctness option."""
+    large = tmp_path / "transformer.safetensors"
+    with large.open("wb") as handle:
+        handle.truncate(ROCM_MMAP_CEILING_BYTES + 1)
+    assert launch_flags("comfy-rocm", [large], total_ram_bytes=_STRIX_RAM, model_family="ltx-2.5") == (
+        *_STRIX_FLAGS, "--use-split-cross-attention", "--disable-mmap",
+    )
 
 
 def test_unstamped_shards_use_the_tag_this_node_advertises(monkeypatch: pytest.MonkeyPatch) -> None:

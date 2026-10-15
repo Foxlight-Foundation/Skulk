@@ -938,6 +938,12 @@ This limits RAM offload residency competing with GPU allocations on
 unified-memory systems while preserving GPU execution and ordinary memory
 admission. It applies to compatible CUDA hardware without a tested-device
 allowlist; other model families retain their existing loading policy.
+LTX-2.5 ROCm servers add `--use-split-cross-attention` to preserve prompt
+subject adherence: matched GPU renders with the pinned engine's default
+attention path produced unrelated subjects, while split attention recovered
+the requested subjects with the same weights, graph and seed. This family
+policy retains GPU execution, ordinary memory admission and eligibility for
+compatible untested hardware. H3 retains its existing attention path.
 The AMD channel is the one whose
 gfx1151 BLAS libraries are complete for H3: the rocm7.2 torch wheel from the
 PyTorch index, the lane's first wheel set, shipped a gfx1151 rocBLAS without
