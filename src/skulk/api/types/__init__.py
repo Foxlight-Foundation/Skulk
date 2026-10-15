@@ -62,6 +62,7 @@ from .api import ImageGenerationTaskParams as ImageGenerationTaskParams
 from .api import ImageListItem as ImageListItem
 from .api import ImageListResponse as ImageListResponse
 from .api import ImageSize as ImageSize
+from .api import InstanceChatCompletionRequest as InstanceChatCompletionRequest
 from .api import LicenseSection as LicenseSection
 from .api import Logprobs as Logprobs
 from .api import LogprobsContentItem as LogprobsContentItem

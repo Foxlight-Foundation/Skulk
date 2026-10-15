@@ -158,7 +158,7 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
 - **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration. Better same-round proposals arriving after the local timeout correct the completed result using the original vote ordering, so delayed subscription exchange does not leave conflicting masters waiting for a new membership event
-- **API**: FastAPI server for OpenAI-compatible chat completions
+- **API**: FastAPI server for OpenAI-compatible chat completions. The scoped `/v1/instances/{instance_id}/chat/completions` extension requires `allowed_node_install_ids`, checks every assigned rank's persistent identity, and uses the existing exact-target command path without replica fallback; no placement authority is granted.
 - **Operator identity/authority foundation**: stable per-host and cluster
   identities, deterministic Ed25519 quorum certification, two-phase
   crash-fault vote collection and recovery, a public consensus SQLite log, and

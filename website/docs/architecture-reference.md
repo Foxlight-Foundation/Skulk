@@ -846,6 +846,7 @@ Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
 | Endpoint | Method | What |
 |---|---|---|
 | `/v1/chat/completions` | POST | OpenAI Chat Completions; SSE when `stream=true` |
+| `/v1/instances/{instance_id}/chat/completions` | POST | Chat on one exact instance within required `allowed_node_install_ids`; no replica fallback; returns `X-Skulk-Instance-Id` |
 | `/v1/responses` | POST | OpenAI Responses |
 | `/v1/messages` | POST | Anthropic Messages |
 | `/v1/embeddings` | POST | OpenAI Embeddings |
