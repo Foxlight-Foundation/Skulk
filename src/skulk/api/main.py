@@ -229,6 +229,7 @@ from skulk.api.types import (
     ImageListItem,
     ImageListResponse,
     ImageSize,
+    InstanceChatCompletionRequest,
     LicenseSection,
     ModalitiesCapabilitySection,
     ModelList,
@@ -2885,6 +2886,23 @@ class API:
                 "to requests with operator mutation authority."
             ),
         )(self.chat_completions_route)
+        self.app.post(
+            "/v1/instances/{instance_id}/chat/completions",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="Generate chat on one exact instance within allowed installations",
+            description=(
+                "Use the Chat Completions payload plus a nonempty "
+                "allowed_node_install_ids array. The exact instance must exist, "
+                "serve the requested model, and assign every rank to an allowed "
+                "persistent installation identity. Missing instances return 404; "
+                "model or installation mismatches return 409 before dispatch. "
+                "Generation never falls back to another instance. Streaming and "
+                "disconnect cancellation use the normal chat path. A successful "
+                "response carries X-Skulk-Instance-Id. This endpoint neither "
+                "places models nor authorizes fleet mutation."
+            ),
+        )(self.instance_chat_completions_route)
         self.app.post(
             "/v1/embeddings",
             tags=["Compatibility APIs"],
@@ -6896,12 +6914,56 @@ class API:
             steward_installation_reader=installation_reader,
         )
 
+    async def instance_chat_completions_route(
+        self,
+        instance_id: InstanceId,
+        payload: InstanceChatCompletionRequest,
+    ) -> StreamingResponse:
+        """Generate on one existing instance within the caller's installation scope.
+
+        Args:
+            instance_id: Exact instance to use, without fallback to another replica.
+            payload: Chat request and allowed persistent installation identities.
+
+        Returns:
+            The normal cancellable chat response, bound to the requested instance.
+
+        Raises:
+            HTTPException: With 404 for a missing instance or 409 for a model or
+                installation mismatch. No inference is dispatched on refusal.
+        """
+        instance = self.state.instances.get(instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="Requested instance not found")
+        if instance.shard_assignments.model_id != payload.model:
+            raise HTTPException(status_code=409, detail="Instance does not serve the requested model")
+        nodes = instance.shard_assignments.node_to_runner
+        allowed = set(payload.allowed_node_install_ids)
+        if not nodes or any(
+            (identity := self._telemetry_view.node_identities.get(node_id)) is None
+            or identity.node_install_id is None
+            or identity.node_install_id not in allowed
+            for node_id in nodes
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Instance is outside the allowed node installation scope",
+            )
+        response = await self.chat_completions(
+            payload,
+            target_instance_id=instance_id,
+            steward_proposals_allowed=False,
+        )
+        response.headers["X-Skulk-Instance-Id"] = str(instance_id)
+        return response
+
     async def chat_completions(
         self,
         payload: ChatCompletionRequest,
         *,
         steward_proposals_allowed: bool = True,
         steward_installation_reader: InstalledMetadataReader | None = None,
+        target_instance_id: InstanceId | None = None,
     ) -> StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
@@ -6915,7 +6977,17 @@ class API:
                 installation_reader=steward_installation_reader,
             )
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
-        model_card = await self._get_running_model_card(resolved_model)
+        if target_instance_id is None:
+            model_card = await self._get_running_model_card(resolved_model)
+        else:
+            instance = self.state.instances.get(target_instance_id)
+            if instance is None:
+                raise HTTPException(status_code=404, detail="Requested instance no longer exists")
+            if instance.shard_assignments.model_id != resolved_model:
+                raise HTTPException(status_code=409, detail="Instance does not serve the requested model")
+            model_card = self._model_card_for_instance(instance)
+            if model_card is None:
+                raise HTTPException(status_code=409, detail="Requested instance has no model card")
         task_params = await chat_request_to_text_generation(
             payload.model_copy(update={"model": resolved_model}),
             model_card=model_card,
@@ -6930,7 +7002,13 @@ class API:
                 self._extension_context, task_params
             )
 
-        command = await self._send_text_generation_with_images(task_params)
+        command = (
+            await self._send_text_generation_with_images(task_params)
+            if target_instance_id is None
+            else await self._send_text_generation_with_images(
+                task_params, target_instance_id=target_instance_id
+            )
+        )
 
         # All observation taps (field telemetry, performance envelope, extension
         # chat summary) applied through the shared helper. The POST-transform

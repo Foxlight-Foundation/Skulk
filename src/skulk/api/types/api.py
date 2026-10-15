@@ -4,7 +4,7 @@ from collections.abc import Generator
 from typing import Annotated, Any, Literal, cast, final
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import UUID4, BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
 from skulk.shared.models.image import ImageCardConfig
@@ -1540,6 +1540,24 @@ class ChatCompletionRequest(BaseModel):
 
 class BenchChatCompletionRequest(ChatCompletionRequest):
     pass
+
+
+class InstanceChatCompletionRequest(ChatCompletionRequest):
+    """Chat constrained to one instance and an explicit installation allowlist."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    # HTTP JSON carries UUIDs as strings; only that wire representation needs
+    # parsing while the surrounding request retains strict field validation.
+    allowed_node_install_ids: list[Annotated[UUID4, Field(strict=False)]] = Field(
+        min_length=1,
+        max_length=1000,
+        description=(
+            "Persistent installation identities allowed to serve this request. "
+            "Every node assigned to the selected instance must match. This "
+            "narrows inference routing and grants no placement authority."
+        ),
+    )
 
 
 class AddCustomModelParams(BaseModel):

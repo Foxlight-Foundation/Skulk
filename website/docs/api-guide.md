@@ -836,6 +836,25 @@ Ollama, and Responses wire formats too, which share the same dispatch path.)
 The mounted model must also declare `TextGeneration`; speech-only cards return
 **400 Bad Request** without affecting their speech runner.
 
+### Chat on an exact instance
+
+**POST** `/v1/instances/{instance_id}/chat/completions` accepts the same chat
+payload plus a required, nonempty `allowed_node_install_ids` JSON array of
+persistent installation UUIDs. Every assigned rank of the selected instance
+must belong to that set. The response carries `X-Skulk-Instance-Id` and uses
+the normal JSON or SSE stream, including disconnect cancellation.
+
+Use this extension when a model has replicas in different operational pools
+and the caller must constrain which replica serves a request. The endpoint
+does not mount models or grant fleet mutation authority. A missing instance
+returns `404`; a model mismatch, unknown node identity, or rank outside the
+allowlist returns `409` before inference. A missing or empty allowlist returns
+`422`. If the instance disappears or becomes unavailable after admission,
+generation fails through the normal terminal-error path; it never falls back
+to another replica. Older Skulk versions return `404` for this route, so
+clients requiring scoped inference must retain that failure rather than retry
+the ordinary model-name endpoint.
+
 ### Context-length limits
 
 GGUF cards may include `gguf_cache_geometry`, derived from the selected artifact's
