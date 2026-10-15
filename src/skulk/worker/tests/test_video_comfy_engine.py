@@ -716,6 +716,8 @@ def test_ltx_runner_executes_both_stages_and_retains_the_output_contract(
     instance = runner.bound_instance.instance.instance_id
     try:
         runner.handle_task(LoadModel(instance_id=instance))
+        assert runner.server is not None
+        assert runner.server.extra_args == ("--disable-cuda-malloc", "--fast-disk")
         runner.handle_task(StartWarmup(instance_id=instance))
         runner._generate(VideoGeneration(
             command_id=CommandId("ltx-render"), instance_id=instance,

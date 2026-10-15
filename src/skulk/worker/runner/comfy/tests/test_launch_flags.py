@@ -1,4 +1,4 @@
-"""The ComfyUI launch line varies only by the stamped compute backend."""
+"""ComfyUI loading policy follows the resolved backend and model family."""
 
 from __future__ import annotations
 
@@ -76,6 +76,35 @@ def test_cuda_backends_launch_on_the_native_allocator(monkeypatch: pytest.Monkey
     assert launch_flags("comfy-cuda") == CUDA_LAUNCH_FLAGS
     assert launch_flags("comfy") == CUDA_LAUNCH_FLAGS
     assert launch_flags(None) == CUDA_LAUNCH_FLAGS
+
+
+@pytest.mark.parametrize("backend", [None, "comfy", "comfy-cuda"])
+def test_ltx_cuda_uses_disk_backed_gpu_loading(
+    backend: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Large LTX models must not retain RAM offload copies beside GPU weights."""
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-cuda"})
+    assert launch_flags(backend, model_family="ltx-2.5") == (
+        "--disable-cuda-malloc",
+        "--fast-disk",
+    )
+
+
+@pytest.mark.parametrize("family", [None, "minimax-h3", "ltx-2"])
+def test_other_cuda_families_keep_their_existing_loading_policy(
+    family: str | None,
+) -> None:
+    """The LTX policy must not alter other families' qualified CUDA launches."""
+    assert launch_flags("comfy-cuda", model_family=family) == CUDA_LAUNCH_FLAGS
+
+
+@pytest.mark.parametrize("backend", [None, "comfy", "comfy-rocm"])
+def test_ltx_rocm_retains_its_existing_loading_policy(
+    backend: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ROCm keeps its BF16 VAE and RAM-pressure cache policy for LTX too."""
+    monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm"})
+    assert launch_flags(backend, total_ram_bytes=_STRIX_RAM, model_family="ltx-2.5") == _STRIX_FLAGS
 
 
 def test_unstamped_shards_use_the_tag_this_node_advertises(monkeypatch: pytest.MonkeyPatch) -> None:

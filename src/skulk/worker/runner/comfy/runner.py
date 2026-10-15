@@ -179,16 +179,27 @@ def launch_flags(
     resolved_backend: str | None,
     weight_files: Iterable[Path] = (),
     total_ram_bytes: int | None = None,
+    *,
+    model_family: str | None = None,
 ) -> tuple[str, ...]:
-    """Extra ComfyUI flags for the node's compute backend and the card's weights.
+    """Return launch flags for the backend, selected weights and model family.
 
     The ROCm lane adds ``ROCM_LAUNCH_FLAGS``, the RAM-pressure cache headroom
     (``ROCM_CACHE_RAM_HEADROOM_FRACTION`` of ``total_ram_bytes``, the host's
     RAM when omitted, in whole GiB), and ``--disable-mmap`` when any of
     ``weight_files`` is larger than ``ROCM_MMAP_CEILING_BYTES``; every other
-    lane, CUDA, adds ``CUDA_LAUNCH_FLAGS``.
+    lane, CUDA, adds ``CUDA_LAUNCH_FLAGS``. An ``ltx-2.5`` family CUDA server
+    also uses disk-backed dynamic loading so CPU weight staging competes less
+    with GPU allocations on unified-memory systems. It still executes on the
+    GPU and retains ordinary memory admission. No files or settings are changed.
     """
     if not _is_rocm_lane(resolved_backend):
+        if model_family == "ltx-2.5":
+            # Keeping the large LTX encoder and transformer in RAM offload
+            # storage can exhaust a unified-memory host before sampling.
+            # The pinned engine's disk-backed path avoids that residency;
+            # low-VRAM mode would instead move text encoding onto the CPU.
+            return (*CUDA_LAUNCH_FLAGS, "--fast-disk")
         return CUDA_LAUNCH_FLAGS
     ram = total_ram_bytes if total_ram_bytes is not None else psutil.virtual_memory().total
     headroom_gib = max(1, int(ram * ROCM_CACHE_RAM_HEADROOM_FRACTION / 1024**3))
@@ -484,7 +495,11 @@ class Runner(ServedConcurrentDispatch):
             temp_dir=self.work_dir / "temp",
             user_dir=self.work_dir / "user",
             log_path=self.work_dir / "server.log",
-            extra_args=launch_flags(self.shard_metadata.resolved_backend, weight_files),
+            extra_args=launch_flags(
+                self.shard_metadata.resolved_backend,
+                weight_files,
+                model_family=self.card.family,
+            ),
         )
         server.start()
         self.server = server
