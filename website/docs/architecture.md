@@ -932,7 +932,13 @@ about 105 s. The CUDA lane launches ComfyUI
 with `--disable-cuda-malloc`: on the async allocator backend ComfyUI would
 otherwise choose, a render that applies the Fun ControlNet patch aborts the
 server on its first sampling step on the GB10, while PyTorch's own allocator
-renders it and costs a plain render nothing. The AMD channel is the one whose
+renders it and costs a plain render nothing. LTX-2.5 CUDA servers also use
+`--fast-disk`, the pinned engine's disk-backed dynamic weight-loading policy.
+This limits RAM offload residency competing with GPU allocations on
+unified-memory systems while preserving GPU execution and ordinary memory
+admission. It applies to compatible CUDA hardware without a tested-device
+allowlist; other model families retain their existing loading policy.
+The AMD channel is the one whose
 gfx1151 BLAS libraries are complete for H3: the rocm7.2 torch wheel from the
 PyTorch index, the lane's first wheel set, shipped a gfx1151 rocBLAS without
 the single-precision batched GEMM the Qwen3-VL text encoder's vision tower

@@ -576,6 +576,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
   dispatches graphs by the card's family: H3 retains its existing node graph,
   while `ltx-2.5` uses the LTX encoder, audio/video VAEs and joint latents,
   fixed 8+3 two-stage sampling and a pinned `latent_upscaler` companion.
+  LTX CUDA servers additionally use `--fast-disk` for disk-backed dynamic
+  weight loading, limiting RAM offload residency beside GPU allocations on
+  unified-memory systems. This family policy preserves GPU execution and
+  ordinary admission and applies across compatible CUDA hardware.
   LTX image guides are reapplied at full resolution and cropped before
   upscaling/decoding. Multi-stage progress counts each sampler independently.
   LTX request contracts also carry explicit pipeline/decoder selection, guided
