@@ -1545,7 +1545,11 @@ class BenchChatCompletionRequest(ChatCompletionRequest):
 class InstanceChatCompletionRequest(ChatCompletionRequest):
     """Chat constrained to one instance and an explicit installation allowlist."""
 
-    allowed_node_install_ids: list[UUID4] = Field(
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    # HTTP JSON carries UUIDs as strings; only that wire representation needs
+    # parsing while the surrounding request retains strict field validation.
+    allowed_node_install_ids: list[Annotated[UUID4, Field(strict=False)]] = Field(
         min_length=1,
         max_length=1000,
         description=(
