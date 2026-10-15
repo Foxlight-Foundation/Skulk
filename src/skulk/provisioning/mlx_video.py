@@ -255,14 +255,17 @@ def installable_video_builds(facts: NodeFacts, *, offline: bool) -> dict[str, st
 
 def installed_video_runtime() -> tuple[Path, str] | None:
     """Rehydrate a verified published package and test its actual GPU on restart."""
-    wheel = wheel_for_host()
-    if wheel is None:
-        return None
-    interpreter = verified_interpreter(runtime_root(wheel), wheel)
-    if interpreter is None:
-        return None
-    probe_runtime(interpreter, wheel.build_identity)
-    return interpreter, wheel.build_identity
+    # Publication preference selects a new install, not whether an older valid
+    # cache remains installed. Offline upgrades must retain their actual build.
+    for wheel in PUBLISHED_WHEELS:
+        if wheel_for_host(wheel.build_identity) is None:
+            continue
+        interpreter = verified_interpreter(runtime_root(wheel), wheel)
+        if interpreter is None:
+            continue
+        probe_runtime(interpreter, wheel.build_identity)
+        return interpreter, wheel.build_identity
+    return None
 
 
 def install_mlx_video(backend: str, expected_build: str, *, offline: bool, stop: threading.Event) -> Path:
