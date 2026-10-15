@@ -90,6 +90,11 @@ and projected as pipeline/decoder mode maps and duration-head mode lists.
 Alternative decoders and duration heads are separately pinned `video_decoder`
 and `duration_head` companions; primary component resolution excludes these
 auxiliary files. Generated keyframe tokens are stripped before upscaling.
+For an exact bundle, local upscaler/duration-head/alternative-decoder paths,
+declared sizes and explicit revisions must agree with the primary manifest and
+revision; external pinned packs remain separate. Source-audio conditioning and
+editing cannot declare an aggregate reference-file limit of zero. These checks
+preserve valid card identities and do not depend on hardware qualification.
 Duration prediction feeds the same bounded frame count into video and audio
 allocation; `video_probe.py` verifies actual dynamic container facts before
 publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is

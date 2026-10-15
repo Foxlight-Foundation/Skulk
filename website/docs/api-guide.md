@@ -2492,6 +2492,12 @@ true, and every supplied `registry_*` identity, provenance, architecture,
 format, or capability claim is removed. Service-bearer installs additionally
 receive `qualification_only`; operator installs do not. A full 40-character
 immutable `sourceRevision` is required.
+For an exact video bundle, local `latent_upscaler`, `duration_head` and
+`video_decoder` companions must occur in the manifest with matching declared
+sizes and local revisions. An explicit reference to the base repository is
+local too. Source-audio conditioning and editing cannot set the aggregate
+`referenceLimits.maxFiles` to zero. These inconsistent cards return 422 before
+catalog mutation; independently pinned external packs retain separate downloads.
 Every external vision, MTP, assistant, or draft repository must also declare
 its matching immutable companion revision.
 The exact add action authorizes repository code selected by the temporary card.

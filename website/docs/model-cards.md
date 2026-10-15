@@ -422,7 +422,17 @@ those modes. Duration bounds, `fps`, frame-grid and canvas multiples, aspect
 ratios, pixel limits, and sampling defaults constrain requests. `audio_output`
 requires `audio_sample_rate` and `audio_channels`. `ref2va` requires typed
 `reference_limits`. `companions` pin adapters, patches, embeddings, or graph
-templates to their source revision and declared modes. The generated
+templates to their source revision and declared modes. Source-audio conditioning
+and editing require at least one aggregate reference-file slot: `max_files = 0`
+is invalid for either feature, while an omitted bound or a positive limit is
+valid. For a selected `artifact_bundle`, local `latent_upscaler`, `duration_head`
+and `video_decoder` companions must name an exact manifest path. A declared
+companion size must match that file, and an explicit local revision must match
+`source_revision`. Naming the base artifact repository explicitly follows the
+same rule. Independently pinned external repositories retain separate download
+transactions; legacy repository-wide cards do not gain a bundle requirement.
+These are artifact/input consistency checks, independent of GPU qualification.
+The generated
 `VideoCardConfig` schema in the [API reference](/api/skulk-api) lists every
 field and its type.
 
