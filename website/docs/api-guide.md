@@ -1704,6 +1704,23 @@ installation, platform requirements and the supported request flow.
 The non-streaming response is `{ "created": ..., "data": [...] }` with one
 `b64_json` or `url` entry per image.
 
+### Generate images on an exact instance
+
+**POST** `/v1/instances/{instance_id}/images/generations` accepts the image
+generation body plus required `allowed_node_install_ids`, a nonempty array of
+persistent UUIDv4 installation identities. `instance_id` must identify an existing
+instance serving exactly the requested `model` with `TextToImage` support. Every
+assigned rank must have a known installation identity in the allowlist. Missing
+instances return 404; model, capability, or installation mismatches return 409;
+malformed/empty allowlists return 422. Refusals dispatch no inference and create
+no placement. The selected instance's card controls canvas and sampling limits.
+
+JSON and SSE responses carry `X-Skulk-Instance-Id`. A selected instance that
+disappears or becomes unavailable before master admission fails the request;
+another replica never receives it. Normal image output, cancellation, and
+streaming contracts apply. The allowlist narrows routing and grants no placement
+authority.
+
 ### Edit images
 
 **POST** `/v1/images/edits`

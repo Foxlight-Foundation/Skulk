@@ -1866,3 +1866,5 @@ Native SDXL image cards expose `image.unet_structure` (API `unetStructure`) for
 nonuniform module output channels and boundary convolutions. Generic dimensions
 are their module count and maximum output width; no text KV or image splitting
 is inferred. Registry publication rejects missing/provisional SDXL geometry.
+
+Exact scoped image generation uses `POST /v1/instances/{instance_id}/images/generations` and `ImageGeneration.target_instance_id`. Every assigned rank must match the caller's persistent installation allowlist; target loss fails without replica fallback. JSON/SSE response headers identify the exact instance.

@@ -1851,3 +1851,5 @@ its VAE/encoders, while companions in other repositories use their own pinned
 transactions. Dashboard native image requests own SSE responses so Stop closes
 the stream and cancels the underlying command rather than only aborting an
 unobserved non-streaming fetch.
+
+- Exact image generation: `POST /v1/instances/{instance_id}/images/generations`, JSON image parameters plus `allowed_node_install_ids`. `ImageGeneration.target_instance_id` pins master admission; terminal or missing targets fail without fallback. Both JSON/SSE carry `X-Skulk-Instance-Id`; the selected card supplies capability and canvas validation.
