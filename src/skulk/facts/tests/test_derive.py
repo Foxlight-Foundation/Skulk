@@ -7,6 +7,8 @@ binary override (#462), a Strix Halo with a Vulkan llama-server, a Mac, and
 the declared-override-vs-observed-hardware disagreements in between.
 """
 
+import pytest
+
 from skulk.facts.derive import derive_node_backends
 from skulk.facts.testing import (
     AMD_STRIX,
@@ -265,9 +267,33 @@ def test_served_derives_metal_from_the_binary_device_list_on_macos() -> None:
             device_probe=LlamaServerDeviceProbe(outcome="devices", computes=("metal",)),
         )
     )
-    assert "llama_server-metal" in derivation.backends
-    assert "llama_server-cpu" not in derivation.backends
+    # Exactly the Metal lane: no bare engine tag and no CPU floor, either of
+    # which would let a GGUF chat card resolve onto the Mac's CPU.
+    assert {tag for tag in derivation.backends if tag.startswith("llama_server")} == {
+        "llama_server-metal"
+    }
     assert derivation.conflicts == ()
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        LlamaServerDeviceProbe(outcome="devices", computes=()),
+        LlamaServerDeviceProbe(outcome="unsupported"),
+        LlamaServerDeviceProbe(outcome="failed", detail="boom"),
+    ],
+)
+def test_macos_without_a_metal_device_advertises_no_llama_server(
+    probe: LlamaServerDeviceProbe,
+) -> None:
+    derivation = derive_node_backends(
+        make_facts(
+            platform="darwin",
+            llama_server_bin=ok_bin("SKULK_LLAMA_SERVER_BIN"),
+            device_probe=probe,
+        )
+    )
+    assert not any(tag.startswith("llama_server") for tag in derivation.backends)
 
 
 def test_served_derives_from_nvidia_hardware_when_probe_unsupported() -> None:

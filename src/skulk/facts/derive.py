@@ -239,6 +239,9 @@ def _derive_llama_server(
             [],
         )
 
+    if facts.platform == "darwin":
+        return _derive_macos_llama_server(facts)
+
     conflicts: list[CapabilityConflict] = []
     notes: list[str] = []
     # Precedence: the SERVER-specific declaration wins; then the binary's own
@@ -284,12 +287,7 @@ def _derive_llama_server(
             )
             return set(), conflicts, notes
         if probe.outcome == "devices":
-            # Metal counts for the served engine on macOS: its lane is gated
-            # to embeddings in placement (backends.platform_compatible_backends),
-            # so MLX keeps owning chat on the Apple GPU.
-            computes = [
-                cb for cb in (*_GPU_COMPUTES, "metal") if cb in probe.computes
-            ]
+            computes = [cb for cb in _GPU_COMPUTES if cb in probe.computes]
             if computes:
                 notes.append(
                     f"llama-server --list-devices reported {sorted(computes)}; "
@@ -350,6 +348,34 @@ def _derive_llama_server(
 
     tags = {"llama_server"} | {f"llama_server-{compute}" for compute in computes}
     return tags, conflicts, notes
+
+
+def _derive_macos_llama_server(
+    facts: NodeFacts,
+) -> tuple[set[str], list[CapabilityConflict], list[str]]:
+    """Advertise exactly the Metal lane of a macOS llama-server, or nothing.
+
+    MLX owns chat on the Apple GPU; the Metal llama-server serves the embedding
+    lane, which placement gates to embedding cards. Neither the bare engine tag
+    nor a CPU floor is advertised: a bare-engine or registry-expanded card
+    requirement would match either one and land a GGUF chat model on the Mac's
+    CPU.
+    """
+    probe = facts.llama_server_device_probe
+    if probe.outcome == "devices" and "metal" in probe.computes:
+        return (
+            {"llama_server-metal"},
+            [],
+            ["llama-server --list-devices reported metal; advertising the Metal embedding lane"],
+        )
+    return (
+        set(),
+        [],
+        [
+            "llama-server on macOS serves only its Metal embedding lane, and the "
+            f"binary's device probe reported no Metal device ({probe.outcome})"
+        ],
+    )
 
 
 def _derive_vllm(
