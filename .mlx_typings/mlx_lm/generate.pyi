@@ -244,6 +244,21 @@ class BatchStats:
     peak_memory: float = ...
 
 @dataclass
+class BatchCounters:
+    """The quantities a batch generator counts as it works (mlx-lm 0.32.2,
+    defined in ``mlx_lm.generate_utils`` and imported into this module).
+
+    None of them ever decrease, so the difference between two readings
+    describes the interval between them.
+    """
+
+    prompt_tokens: int = ...
+    prompt_time: float = ...
+    generation_tokens: int = ...
+    generation_steps: int = ...
+    decode_time: float = ...
+
+@dataclass
 class BatchResponse:
     """
     An data object to hold a batch generation response.
@@ -310,10 +325,9 @@ class BatchGenerator:
     _unprocessed_sequences: deque[Any]
     _prompt_batch: PromptProcessingBatch
     _generation_batch: GenerationBatch
-    _prompt_tokens_counter: int
-    _prompt_time_counter: float
-    _gen_tokens_counter: int
-    _steps_counter: int
+    # mlx-lm 0.32.2 replaced the loose _prompt_time_counter / _steps_counter
+    # (and token) fields with one never-decreasing counters record.
+    _counters: BatchCounters
 
     def __init__(
         self,
@@ -355,7 +369,7 @@ class BatchGenerator:
     def remove(
         self, uids: List[int], return_prompt_caches: bool = ...
     ) -> Optional[dict[int, List[Any]]]: ...
-    def stats(self, stats: Optional[BatchStats] = ...) -> Any: ...
+    def stats(self) -> contextlib.AbstractContextManager[BatchStats]: ...
     def next(
         self,
     ) -> Tuple[

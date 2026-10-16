@@ -67,7 +67,9 @@ def test_fish_s2_dependency_advances_generation_hidden_state() -> None:
         Model,
     )
 
-    source = inspect.getsource(Model._generate_codes_for_batch)
+    # mlx-audio 0.5.9 moved the decode loop out of _generate_codes_for_batch,
+    # which now only collects this generator's steps.
+    source = inspect.getsource(Model._iter_codes_for_batch)
 
     assert "hidden_state = next_result.hidden_states[:, -1]" in source
 

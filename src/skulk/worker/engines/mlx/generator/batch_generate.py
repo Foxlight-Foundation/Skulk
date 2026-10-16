@@ -127,6 +127,35 @@ def _stop_sequences(task_params: TextGenerationTaskParams) -> list[str]:
     return task_params.stop
 
 
+# mlx-lm's BatchGenerator exposes no public cumulative counters, so these two
+# readers are the only places Skulk touches its private bookkeeping. mlx-lm
+# 0.32.2 moved the loose ``_prompt_time_counter`` / ``_steps_counter`` fields
+# into one never-decreasing ``_counters`` record; the next rename must fail
+# test_upstream_batch_counters, not every generation on the fleet.
+def upstream_prompt_seconds(generator: MlxBatchGenerator) -> float:
+    """Seconds the upstream generator has spent in prompt processing, cumulatively.
+
+    Args:
+        generator: The mlx-lm ``BatchGenerator`` driving generation.
+
+    Returns:
+        The never-decreasing prompt-processing time upstream has counted.
+    """
+    return generator._counters.prompt_time
+
+
+def upstream_decode_steps(generator: MlxBatchGenerator) -> int:
+    """Decode steps the upstream generator has taken, cumulatively.
+
+    Args:
+        generator: The mlx-lm ``BatchGenerator`` driving generation.
+
+    Returns:
+        The never-decreasing count of decoding steps upstream has taken.
+    """
+    return generator._counters.generation_steps
+
+
 @dataclass
 class _EngineTask:
     uid: int
@@ -162,8 +191,8 @@ class SkulkBatchGenerator:
     _mlx_gen: MlxBatchGenerator = field(init=False)
     _active_tasks: dict[int, _EngineTask] = field(default_factory=dict, init=False)
     # Cumulative wall time spent inside _mlx_gen.next(). Generation time is
-    # derived as (this - upstream's _prompt_time_counter), mirroring how
-    # mlx-lm 0.31.3's own stats() context manager computes it — the split
+    # derived as (this - upstream's cumulative prompt time), mirroring how
+    # mlx-lm's own stats() context manager computes it — the split
     # BatchGenerator no longer keeps a continuously-updated
     # _stats.generation_time field.
     _next_time_total: float = field(default=0.0, init=False)
@@ -182,7 +211,7 @@ class SkulkBatchGenerator:
 
     def _generation_time(self) -> float:
         """Total generation seconds so far (next() wall time minus prompt time)."""
-        return self._next_time_total - self._mlx_gen._prompt_time_counter
+        return self._next_time_total - upstream_prompt_seconds(self._mlx_gen)
 
     @property
     def has_work(self) -> bool:
@@ -559,7 +588,7 @@ class SkulkBatchGenerator:
 
         _step_elapsed = time.perf_counter() - _step_tic
         _overhead = _step_elapsed - _next_elapsed
-        if self._mlx_gen._steps_counter % 64 == 0 and responses:
+        if upstream_decode_steps(self._mlx_gen) % 64 == 0 and responses:
             logger.debug(
                 f"step overhead: {_overhead * 1000:.2f}ms (next={_next_elapsed * 1000:.2f}ms total={_step_elapsed * 1000:.2f}ms)"
             )

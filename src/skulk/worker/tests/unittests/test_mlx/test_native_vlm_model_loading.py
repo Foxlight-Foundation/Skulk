@@ -847,6 +847,38 @@ def test_converted_qwen_norm_guard_preserves_mlx_norm_weights() -> None:
     ]
 
 
+def test_converted_qwen_norm_guard_never_restores_keys_upstream_dropped() -> None:
+    """mlx-vlm 0.7.8 drops `mtp.` keys before sanitizing; the guard must not
+    put an MTP norm weight back, or a strict weight load sees an extra key."""
+
+    def _sanitize_key(key: str) -> str:
+        return key
+
+    def _upstream_sanitizer(
+        _model: object,
+        weights: dict[str, mx.array],
+    ) -> dict[str, mx.array]:
+        return {key: value for key, value in weights.items() if "mtp." not in key}
+
+    guard_factory = cast(
+        Callable[
+            [
+                Callable[[object, dict[str, mx.array]], dict[str, mx.array]],
+                Callable[[str], str],
+            ],
+            Callable[[object, dict[str, mx.array]], dict[str, mx.array]],
+        ],
+        vars(utils_mlx)["_guard_converted_qwen_norm_sanitizer"],
+    )
+    guarded = guard_factory(_upstream_sanitizer, _sanitize_key)
+    kept = "language_model.model.layers.0.input_layernorm.weight"
+    dropped = "language_model.mtp.layers.0.input_layernorm.weight"
+
+    sanitized = guarded(object(), {kept: mx.ones((2,)), dropped: mx.ones((2,))})
+
+    assert set(sanitized) == {kept}
+
+
 def test_vlm_wrapper_forwards_and_clears_qwen_image_grid() -> None:
     """Batch prefill must pass Qwen's grid metadata beside its image pixels."""
     inner = _RecordingVlmModel()

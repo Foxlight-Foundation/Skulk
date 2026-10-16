@@ -7,6 +7,7 @@ from typing import cast
 
 import mlx.core as mx
 import pytest
+from mlx_lm.generate import BatchCounters
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from skulk.shared.types.common import ModelId
@@ -824,7 +825,7 @@ def test_batch_generate_vision_bypasses_prefix_cache(
             self.saw_pixel_values = self.saw_pixel_values or pixel_values is not None
 
     class _FakeUpstreamBatchGenerator:
-        _prompt_time_counter = 0.0
+        _counters = BatchCounters()
 
         def insert(self, **_kwargs: object) -> list[int]:
             return [17]
