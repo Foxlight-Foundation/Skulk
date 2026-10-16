@@ -851,6 +851,20 @@ def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceI
     a resident steward when an ordinary placement is ready. Completed lifecycle
     tasks are retained state, not outstanding inference load.
     """
+    return _generation_instances(state, model_id, TextGenerationTask)
+
+
+def image_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
+    """Rank executable image instances by readiness and outstanding image load."""
+    return _generation_instances(state, model_id, ImageGenerationTask)
+
+
+def _generation_instances(
+    state: State,
+    model_id: ModelId,
+    task_type: type[TextGenerationTask] | type[ImageGenerationTask],
+) -> list[InstanceId]:
+    """Share lifecycle admission while counting only the requested workload."""
     ranked: list[tuple[bool, bool, int, InstanceId]] = []
     for instance in state.instances.values():
         assignments = instance.shard_assignments
@@ -867,7 +881,7 @@ def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceI
             isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses
         )
         active = sum(
-            isinstance(task, TextGenerationTask)
+            isinstance(task, task_type)
             and task.instance_id == instance.instance_id
             and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
             for task in state.tasks.values()
@@ -953,6 +967,40 @@ def music_generation_instances(state: State, model_id: ModelId) -> list[Instance
         )
         ranked.append((not ready, active, str(instance.instance_id), instance.instance_id))
     return [identifier for _, _, _, identifier in sorted(ranked)]
+
+
+def _image_generation_events(state: State, command: ImageGeneration) -> tuple[list[Event], TaskId]:
+    """Admit one image task or emit a correlated terminal failure without fallback."""
+    eligible = image_generation_instances(state, ModelId(command.task_params.model))
+    unavailable = False
+    if command.target_instance_id is not None:
+        selected = command.target_instance_id
+        unavailable = selected not in eligible
+    elif eligible:
+        selected = eligible[0]
+    else:
+        selected = InstanceId(str(command.command_id))
+        unavailable = True
+    identifier = TaskId()
+    result: list[Event] = [TaskCreated(
+        task_id=identifier,
+        task=ImageGenerationTask(
+            task_id=identifier,
+            command_id=command.command_id,
+            owner_node=command.owner_node,
+            instance_id=selected,
+            task_status=TaskStatus.Failed if unavailable else TaskStatus.Pending,
+            task_params=command.task_params,
+            trace_enabled=state.tracing_enabled,
+        ),
+    )]
+    if unavailable:
+        result.append(TaskFailed(
+            task_id=identifier,
+            error_type="instance_unavailable",
+            error_message="Requested image-generation instance is unavailable or does not serve the requested model",
+        ))
+    return result, identifier
 
 
 class Master:
@@ -3109,50 +3157,8 @@ class Master:
                                     )
                                 )
                         case ImageGeneration():
-                            for instance in self.state.instances.values():
-                                if (
-                                    instance.shard_assignments.model_id
-                                    == command.task_params.model
-                                ):
-                                    task_count = sum(
-                                        1
-                                        for task in self.state.tasks.values()
-                                        if task.instance_id == instance.instance_id
-                                    )
-                                    instance_task_counts[instance.instance_id] = (
-                                        task_count
-                                    )
-
-                            if not instance_task_counts:
-                                raise ValueError(
-                                    f"No instance found for model {command.task_params.model}"
-                                )
-
-                            available_instance_ids = sorted(
-                                instance_task_counts.keys(),
-                                key=lambda instance_id: instance_task_counts[
-                                    instance_id
-                                ],
-                            )
-
-                            task_id = TaskId()
-                            selected_instance_id = available_instance_ids[0]
-                            trace_enabled = self.state.tracing_enabled
-                            generated_events.append(
-                                TaskCreated(
-                                    task_id=task_id,
-                                    task=ImageGenerationTask(
-                                        task_id=task_id,
-                                        command_id=command.command_id,
-                                        owner_node=command.owner_node,  # #279 Phase 2
-                                        instance_id=selected_instance_id,
-                                        task_status=TaskStatus.Pending,
-                                        task_params=command.task_params,
-                                        trace_enabled=trace_enabled,
-                                    ),
-                                )
-                            )
-
+                            image_events, task_id = _image_generation_events(self.state, command)
+                            generated_events.extend(image_events)
                             self.command_task_mapping[command.command_id] = task_id
                         case VideoGeneration():
                             # A video instance is single-host and serves only

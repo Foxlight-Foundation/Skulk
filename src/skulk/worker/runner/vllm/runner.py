@@ -520,6 +520,8 @@ def build_vllm_serve_args(
         host,
         "--port",
         str(port),
+        "--kv-cache-dtype",
+        "auto",
         "--max-model-len",
         str(max_model_len),
         "--gpu-memory-utilization",

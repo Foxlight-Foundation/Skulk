@@ -837,6 +837,25 @@ Ollama, and Responses wire formats too, which share the same dispatch path.)
 The mounted model must also declare `TextGeneration`; speech-only cards return
 **400 Bad Request** without affecting their speech runner.
 
+### Chat on an exact instance
+
+**POST** `/v1/instances/{instance_id}/chat/completions` accepts the same chat
+payload plus a required, nonempty `allowed_node_install_ids` JSON array of
+persistent installation UUIDs. Every assigned rank of the selected instance
+must belong to that set. The response carries `X-Skulk-Instance-Id` and uses
+the normal JSON or SSE stream, including disconnect cancellation.
+
+Use this extension when a model has replicas in different operational pools
+and the caller must constrain which replica serves a request. The endpoint
+does not mount models or grant fleet mutation authority. A missing instance
+returns `404`; a model mismatch, unknown node identity, or rank outside the
+allowlist returns `409` before inference. A missing or empty allowlist returns
+`422`. If the instance disappears or becomes unavailable after admission,
+generation fails through the normal terminal-error path; it never falls back
+to another replica. Older Skulk versions return `404` for this route, so
+clients requiring scoped inference must retain that failure rather than retry
+the ordinary model-name endpoint.
+
 ### Context-length limits
 
 GGUF cards may include `gguf_cache_geometry`, derived from the selected artifact's
@@ -1622,9 +1641,10 @@ Availability note: these routes are always registered, but they return
 **404 No instance found** until an instance of the requested image model is
 placed and running. Image model cards appear in the model catalog
 (`GET /v1/models`, placement previews, and the dashboard) by default; an
-operator can hide them on a node with `SKULK_ENABLE_IMAGE_MODELS=false`. The
-image engine runs on Apple Silicon Macs, so on a cluster without one the
-placement preview's `compatibility_detail` says that the model needs one.
+operator can hide them on a node with `SKULK_ENABLE_IMAGE_MODELS=false`. Legacy MLX image cards use Apple Silicon. Native image cards select
+`stable_diffusion_cpp` on compatible Metal, CUDA, Vulkan or ROCm runtimes;
+placement applies real package requirements and configuration-specific memory fit.
+Missing representative qualification does not exclude otherwise compatible hardware.
 
 ### Generate images
 
@@ -1653,16 +1673,54 @@ Request fields:
 | `model` | string | Required placed image model id |
 | `prompt` | string | Required generation prompt |
 | `n` | integer | Number of images; default `1` |
-| `size` | string | `auto` (default), `512x512`, `768x768`, `1024x768`, `768x1024`, `1024x1024`, `1024x1536`, or `1536x1024` |
+| `size` | string | `auto` (default) uses the model canvas. Native image cards accept `WIDTHxHEIGHT`, with each dimension 64–4096 and model-specific alignment and area limits; eligible cards permit 2K canvases. Legacy MLX models retain their existing size list |
 | `quality` | string | `high`, `medium` (default), or `low` |
 | `output_format` | string | `png` (default), `jpeg`, or `webp` |
 | `response_format` | string | `b64_json` (default) returns inline base64 image data; `url` stores each image on this API node and returns a fetchable URL instead |
-| `stream` | boolean | With `partial_images > 0`, returns an SSE stream of partial and final images instead of one JSON response |
+| `stream` | boolean | For native profiles, true returns SSE final-image events and `[DONE]`; positive `partial_images` additionally requests previews. Legacy models require positive previews for SSE |
 | `partial_images` | integer | Number of intermediate previews per image when streaming; default `0` |
 | `advanced_params` | object | Optional `seed`, `num_inference_steps` (1-100), `guidance` (1.0-20.0), `negative_prompt`, and `num_sync_steps` (1-100). When `seed` is omitted, Skulk assigns one so multi-node generation stays deterministic |
 
+Native image generation and editing honor `stream=true` even with
+`partial_images=0`: the response is terminal-only SSE, and closing it cancels the
+command. Legacy image models retain their positive-preview streaming contract.
+
+Native image cards admit `n` from 1 to 4 and expose geometry, reference count,
+RGBA support, and sampling defaults in `/v1/models` under `image`. Native prompts
+and negative prompts are each bounded to 32,768 UTF-8 bytes.
+Seeds must fit the signed 64-bit range, including successive seeds for `n` images.
+Blank or corrupt terminal outputs fail the task. Native benchmark memory uses
+sampled host process RSS (`memory_scope: native_process_rss`); GPU allocation
+measurements require separate hardware telemetry.
+
+Qwen Image 2.1 Turbo requires its fixed eight-step schedule, guidance 1, and an empty
+negative prompt; incompatible overrides return **400** before dispatch.
+PNG and WebP preserve native alpha output; JPEG encoding discards alpha.
+Native producers run one image at a time and retain no terminal job after
+collection. Disconnect and cancellation stop the owned task. Compatible untested
+hardware remains eligible; qualification records describe only observed results.
+See [Native image models](native-image-models.md) for model aliases, first-use engine
+installation, platform requirements and the supported request flow.
+
 The non-streaming response is `{ "created": ..., "data": [...] }` with one
 `b64_json` or `url` entry per image.
+
+### Generate images on an exact instance
+
+**POST** `/v1/instances/{instance_id}/images/generations` accepts the image
+generation body plus required `allowed_node_install_ids`, a nonempty array of
+persistent UUIDv4 installation identities. `instance_id` must identify an existing
+instance serving exactly the requested `model` with `TextToImage` support. Every
+assigned rank must have a known installation identity in the allowlist. Missing
+instances return 404; model, capability, or installation mismatches return 409;
+malformed/empty allowlists return 422. Refusals dispatch no inference and create
+no placement. The selected instance's card controls canvas and sampling limits.
+
+JSON and SSE responses carry `X-Skulk-Instance-Id`. A selected instance that
+disappears or becomes unavailable before master admission fails the request;
+another replica never receives it. Normal image output, cancellation, and
+streaming contracts apply. The allowlist narrows routing and grants no placement
+authority.
 
 ### Edit images
 
@@ -1685,8 +1743,13 @@ Form fields mirror the generation fields (`n`, `size`, `quality`,
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `image` | file | Required input image, at most 24 MiB raw; larger uploads return **413 Request Entity Too Large** |
+| `image` | file | One input image. Supply this or `image[]`, never both |
+| `image[]` | repeated file | Ordered references for cards declaring multiple-image editing, up to the selected card limit. All inputs together are limited to 24 MiB raw (**413** when exceeded); native inputs must be valid PNG, JPEG or WebP and total at most 16,777,216 decoded pixels (**400** otherwise) |
 | `input_fidelity` | string | `low` (default) or `high`; controls how strongly the input image constrains the edit |
+
+The native SDXL runner accepts one initialization image; extra references return
+**400** before media dispatch even if the intrinsic profile declares a broader
+reference limit.
 
 The input image travels to the selected worker over the bounded vision media
 path described under chat image inputs; it is never written to the event log
@@ -2121,15 +2184,16 @@ Each entry also separates discovery truth from runtime truth:
 - `engine_support` reports the active signed engine/build decisions matching
   that exact architecture, artifact format, quantization, capability, and any
   required immutable card identity. These may include experimental or
-  unsupported history; placement expands only from exact `supported` claims
-  whose build and hardware constraints match a node. Load and feature
-  qualification always names the exact card tested, and known-incomplete
-  artifact capability evidence blocks expansion.
+  unsupported history. Active supported `upstream_compatibility` mappings may
+  identify additional compatible engines. Empirical load/feature qualifications
+  retain their exact tested card, build, hardware and workload for reporting;
+  missing or differently scoped results do not revoke declared compatibility.
+  Known-incomplete artifact capability evidence remains distinct from test coverage.
 
 Installed sidecars retain the intrinsic architecture and capability claims for
 air-gapped use. A hash-bound support matrix that was previously TUF-verified is
 also usable offline; it never converts an experimental or negative decision
-into placement permission.
+into an upstream compatibility mapping; empirical results are reporting evidence.
 
 ### Assess local fit and external capacity
 
@@ -2659,17 +2723,24 @@ exclusions and request a fresh preview. Alternatives are omitted when
 Every preview additionally reports `compatibility_source` (`card` or
 `signed_engine_support`), the exact `support_claim_ids` used when a signed
 matrix expanded placement, and an operator-readable `compatibility_detail` on
-engine/build, hardware, or incomplete-artifact gaps. A positive matrix claim
-must match the node's advertised exact build and hardware class. Missing,
-stale, experimental, or unsupported claims do not widen placement; legacy
-`compatible_backends` remain valid for existing cards.
+engine/package, resource or incomplete-artifact gaps. The claim IDs identify
+upstream compatibility mappings used by this preview, not an empirical GPU permit
+list. Declared compatible engines remain valid without qualification. Real
+compiled-target, ABI, implemented-operation and live capacity requirements still apply.
+
+Each preview also exposes `memory_estimate_notes`, an array describing effective
+cache storage, allocation padding/workspace and conservative unknown-layout
+fallbacks. Its returned instance carries `memorySettings` in each shard
+metadata object. Preserve those settings when submitting an exact placement: a
+changed effective cache policy requires a fresh preview. Weight quantization is
+independent of cache quantization, and estimates describe this serving configuration.
 
 A preview whose placement would install an engine first carries
-`engine_install`; otherwise the field is null. Today that is the video engine:
-a Linux node with an NVIDIA GPU or an AMD Strix Halo GPU installs it the first
-time a video model is placed there, beside the model download, so that first
-placement takes longer. The object holds `engine` (`comfy`), `node_ids` (the
-nodes that would install it), `approximate_download_bytes`, and `detail`, a
+`engine_install`; otherwise the field is null. Video cards can install `comfy`,
+and native image cards can install `stable_diffusion_cpp` on an eligible node
+before their first load. This happens beside the model download, so first use
+takes longer. The object holds `engine`, `node_ids` (the nodes that would install
+it), `approximate_download_bytes`, and `detail`, a
 sentence to show the operator before placing ("The video engine (about 7 GB)
 will be installed with this model, so placement will take longer."). Among
 otherwise equal candidates, placement prefers a node whose engine is already
@@ -2712,6 +2783,10 @@ The API requires every embedded shard card's `modelId` to match the assignment's
 canonical `modelId` before acknowledging creation. An inconsistent shard card
 returns HTTP 400 with `X-Skulk-Placement-Failure:
 model_card_identity_mismatch`, and no instance state is created.
+The instance's optional `excludedInstallIds` accepts an array of UUID strings
+and retains these persistent machine exclusions in the placement and subsequent
+repairs. Malformed UUIDs, numeric entries, and a scalar instead of an array
+return HTTP 422 before a placement command is sent.
 For a text-to-music instance, the placement must name exactly one node. The API
 prepares audio.cpp on that node and verifies a ready build and signed support
 claim before accepting the command. A matching Linux `amd64` Vulkan claim
@@ -3361,8 +3436,10 @@ The optional JSON body accepts the following fields:
 - `owner_registry_card_id`: immutable signed identity of that owning base card.
   Omit it only for installed or custom owner cards without a registry identity.
 - `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
-  `served_draft`, `vllm_draft`, or `video_companion` (a video card's externally
-  hosted companion, such as guide preprocessor weights); defaults to `base`.
+  `served_draft`, `vllm_draft`, `video_companion` (a video card's externally
+  hosted companion, such as guide preprocessor weights), or `image_component`
+  (an image card's external component repository/revision group); defaults to
+  `base`.
 
 A complete companion request names the companion repository and immutable
 revision, its role, and its owning card:
@@ -3402,6 +3479,17 @@ require the repository, revision, selected file, and `artifact_role` to match
 that owning card's signed companion declaration. A mismatched alias, role, or
 artifact selection returns `409 Conflict`; malformed identifiers and roles
 return `400 Bad Request`.
+
+For a typed image card, the store derives the exact component selection from
+its independently verified complete card. The base transaction includes every
+primary-repository component, including the VAE. An `image_component` request
+omits `gguf_file` and selects every declared file in its pinned external source
+group, including both text and vision encoders when declared. The store HTTP
+download endpoint accepts this role and verifies its owning card before starting
+the component transfer; an undeclared source revision returns 409. Missing files,
+listing-size conflicts, or failed object verification fail the transaction;
+unrelated quants and projectors are excluded. A cached base GGUF alone does not
+mark the group complete: missing components trigger recovery.
 
 The response reports `modelId`, nullable `sourceRevision`, `status`, and
 `progress`; transport or store rejection additionally reports `error`. The
@@ -3565,7 +3653,17 @@ for its `GET` routes.
 | `DELETE /models/{model_id}` | Model ID only. Removes the stored model and returns `modelId` and `deleted: true`; an absent model returns `404`. |
 | `POST /imports` | Loopback-only JSON `record`, `source_base_url`, `capability_token`, and `target_node_id`. Uses the capability-bound import and verification contract under [Internal cache export](#internal-cache-export). |
 
-## Models Endpoint
+## Models
+
+Model cards identify artifacts and compatible engines. Qualification records are
+scoped evidence, not hardware eligibility lists. Placement previews resolve the
+actual engine/cache configuration and expose `memory_estimate_notes` for storage,
+workspace and conservative unknown-layout assumptions. Their instances carry
+per-shard `memorySettings`; node resources expose `engineMemorySettings`. Weight
+and cache quantization are independent. The worker rejects settings drift before
+load so its guard, reservations and context sizing agree with placement. A memory
+refusal applies to the assessed configuration and workload, not permanent model/
+hardware compatibility. See [the compatibility contract](engine-compatibility.md).
 
 ### List models
 
@@ -3615,7 +3713,8 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or the earlier Skulk release that shipped an installed card, for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
-| `music` | object or null | Text-to-music family, lyric requirement, qualified duration bounds, and WAV output format; null for non-music cards |
+| `music` | object or null | Text-to-music family, lyric requirement, declared duration bounds, and WAV output format; null for non-music cards |
+| `image` | object or null | Native image family, immutable `components`, optional SDXL `unetStructure`, default canvas/steps/guidance, dimension and area limits, reference-image limit, alpha support and optional fixed sigma schedule; null for legacy or non-image cards |
 | `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, and the `video_shift`/`audio_shift` a render with the adapter uses when the request sets none, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), and every engine setting the job accepts with its default: `samplers` and `default_sampler`, `schedulers` and `default_scheduler`, the card's trained `video_shift`/`audio_shift` (null keeps the model's built-in value) with `shift_bounds`, `reference_fidelities` and `default_reference_fidelity` (empty and null unless the card serves `ref2va`), `codecs` and `default_codec`, `guides` (each guide the card derives from a `control` clip: `kind`, the `modes` it applies to, and the preprocessor `weights` it loads with their `repository` and `license`; empty without a ControlNet), `default_guide` (the guide a `control` clip gives when `control_kind` is omitted), and the ControlNet's own settings: `control_strength_bounds`, `default_control_strength` (the card's ControlNet's strength, else 1; null without a ControlNet), and `default_control_window` (the `control_start`/`control_end` a render takes when omitted). The lists are the engine's own, not a recommendation. Null for non-video cards |
 | `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
 | `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
@@ -3836,6 +3935,16 @@ source commits, every topology entry receives the warning-level
 all nodes converge. Operational visibility remains available, but events,
 commands, state, and inference are not cross-version-compatible; finish the
 deployment before starting new inference work.
+
+`nodeResources[node_id].engineMemorySettings` maps engine names to observed
+cache controls: `cacheBackend`, `keyBits`, `valueBits`, `groupSize`,
+`fp16EdgeLayers`, and nullable `configurationError`. These are runtime observations,
+not a request to enable compression. Placement captures them on shard
+`memorySettings`; the worker verifies them before allocation. Invalid active
+cache controls affect that engine configuration and leave unrelated engines
+available. Missing geometry or an unknown cache layout remains visibly uncertain
+or uses the shared conservative budget. Stored artifact sizes already reflect
+weight quantization; they do not determine cache precision.
 
 The response also carries a `capabilityNodes` map (keyed by host node id)
 describing the managed capability nodes each live host runs: extension-owned
@@ -5606,3 +5715,14 @@ The following routes support direct dashboard integrations:
 - [Model store guide](model-store)
 - [Architecture overview](architecture)
 - [API Reference](/api/skulk-api)
+
+
+### Native SDXL metadata
+
+`GET /v1/models` entries for native SDXL additionally expose
+`image.unetStructure`: `inputBlockChannels`, `middleBlockChannels` and
+`outputBlockChannels` arrays, plus `inputChannels` and `outputChannels`.
+They describe the selected checkpoint's nonuniform UNet module outputs and
+boundary convolutions. This is intrinsic geometry, independent of GPU test
+coverage. Generic card dimensions count those modules and use their maximum
+output width; they do not imply a uniform transformer or text-cache layout.

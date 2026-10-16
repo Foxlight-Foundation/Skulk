@@ -66,6 +66,10 @@ class TextGeneration(BaseCommand):
 class ImageGeneration(BaseCommand):
     task_params: ImageGenerationTaskParams
     owner_node: NodeId | None = None
+    target_instance_id: InstanceId | None = Field(
+        default=None,
+        description="Exact image instance to execute, with no replica fallback.",
+    )
 
 
 class ImageEdits(BaseCommand):

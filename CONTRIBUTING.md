@@ -579,3 +579,38 @@ For an operator-authorized screenshot of the generated QR screen, create a
 short-lived invitation, capture it, and immediately revoke that same invitation.
 Verify its revoked state before publishing the image and caption it as unusable
 for pairing. Do not publish an active pairing code.
+
+
+Native image wheel packaging lives in `packaging/skulk-stable-diffusion-cpp/`
+and is assembled by `scripts/build_stable_diffusion_cpp_wheel.py` from pinned
+source with the recorded lifecycle patch. Model placement never compiles native
+source. GPU qualification and append-only artifact publication are required
+before a package is added to the on-demand manifest.
+Linux Vulkan builds use the SHA-256-pinned LunarG 1.4.350.0 SDK rather than an
+unavailable Ubuntu 22.04 `glslc` package. The assembler records enabled x86 CPU
+helper instructions in the descriptor and native build manifest; installable
+package discovery and binary probing require the host to support those flags.
+The wheel carries its Vulkan loader and copyright notice, while the GPU driver
+remains an operating-system dependency.
+
+The native image candidate build workflow covers Metal ARM64, CUDA ARM64/x86_64,
+Vulkan x86_64 and ROCm x86_64. Linux compiler images are digest-pinned; CUDA
+embeds runtime/BLAS with an external driver, Vulkan bundles its loader, and the
+ROCm candidate records runtime libraries plus gfx942 code objects. Builds retain
+component notices and nested payload hashes and remain unqualified until exact
+hardware/model, loader and lifecycle gates pass. See
+`packaging/skulk-stable-diffusion-cpp/README.md`.
+
+Managed native image build identities include the executable and bundled runtime
+file digests. Probes verify these bytes before execution and select the managed
+library/code-object paths rather than inherited SDK overrides. Wheel descriptors
+carry exact archive and expanded sizes, bounded at 3 GiB and 8 GiB respectively;
+installation checks staging space for both plus a 1 GiB reserve. Legacy candidate
+packages retain the earlier executable identity and conservative size defaults.
+
+Native image engine candidates are built by `stable-diffusion-cpp-wheel`.
+After hardware qualification, its manual publication dispatch selects exact
+filename/SHA-256 pairs from a successful build run and verifies their provenance
+before uploading them to the append-only Foxlight index. Publication does not
+establish model/device support; maintain the separate qualification evidence and
+private engine ledger. The promotion verifier's tests live under `scripts/tests/`.

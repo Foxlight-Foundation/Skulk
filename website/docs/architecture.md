@@ -10,6 +10,16 @@ This is the long-form mental model for how Skulk is put together end to end. Rea
 
 ## What Skulk is
 
+The [model/engine compatibility contract](engine-compatibility.md) separates
+intrinsic model/artifact facts, actual engine requirements and representative
+qualification evidence. Compatible untested hardware remains eligible. Memory
+fit belongs to a concrete serving configuration: the placer and worker must use
+the same actual engine and effective weight/cache quantization settings, workload
+and live capacity. Stored weight size is not the whole resident/peak footprint.
+Effective engine/cache controls are advertised, stamped on shards and shared
+by admission, reservations, context sizing and worker checks. Known compressed
+layouts use their actual storage; unknown layouts retain an explicit fallback.
+
 Skulk is an interconnect fabric for multi-node AI compute: it connects Apple Silicon and Linux GPU or CPU nodes into one cluster and moves work across them. Its headline use is distributed inference, where models are sharded across nodes, any node's API can serve cluster-wide requests, and the cluster keeps running through node arrivals, departures, and master failures. One Python binary (`uv run skulk`) is everything you need on each node: the same process is router, worker, master-eligible coordinator, election participant, API server, and, when its built assets are present, dashboard host. A headless node (for example a Linux worker with no built dashboard) runs as a full node and serves the API without the UI.
 
 The design choices that shape almost everything else:
@@ -65,7 +75,7 @@ Each subsystem has its own concern:
 - **Master** admits only an explicit allowlist of durable control decisions and ordered connectivity facts, indexes those events into the event log (writing them to disk via `DiskEventLog`), publishes indexed events on `GLOBAL_EVENTS` for followers, and decides instance placements when a model is launched. Decodable payload events, observational telemetry, and transient download progress are skipped at their source sequence before ordering, persistence, replay, state application, or global broadcast. Snapshot-tail replay runs on one coalescing background worker and emits 32-event bursts at a bounded cadence, so a joining node cannot make a retained 10k-event tail monopolize command processing or overflow slower peers. The master also warns when the log grows above 60 events/min for a full minute while no task or download is active, identifying periodic control-plane amplification before it becomes replay pressure.
 - **Worker** receives indexed events, applies them to its local view of `State`, downloads model weights to disk when assigned a placement, and spawns / supervises runner subprocesses. Before spawning, it refuses a shard that won't fit local memory (a last-resort guard below the master's admission check, using the same shared estimator), and a crash circuit breaker gives up on a runner that keeps failing rather than relaunching it into another GPU-memory leak. When the give-up is driven by that *memory* guard (not a crash) the worker asks the master to re-place the model one node wider via `RefuseInstancePlacement` instead of letting the placement silently disappear (see "Placement memory admission" below).
 - **Runner** is *not* in the same process; it's a `mp.Process` daemon spawned by the worker. It owns one model and serves inference tasks for it. Multiple runners (one per pipeline rank) coordinate via `mlx.distributed` collectives.
-- **API** is a FastAPI app that exposes inference endpoints in four wire formats (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, Ollama) and Skulk-native control endpoints (placements, diagnostics, traces, config). It also serves the dashboard build at `/` when those assets are present; a headless node built without the UI skips that mount and serves the API alone.
+- **API** is a FastAPI app that exposes inference endpoints in four wire formats (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, Ollama) and Skulk-native control endpoints (placements, diagnostics, traces, config). Scoped chat at `/v1/instances/{instance_id}/chat/completions` binds generation to one existing instance and an explicit persistent installation allowlist, using the existing targeted command path with no replica fallback. It also serves the dashboard build at `/` when those assets are present; a headless node built without the UI skips that mount and serves the API alone.
 - **Storage** is a collection of on-disk responsibilities: the event log (msgpack + zstd), the model cache directory, custom model cards (per-user TOML files), and the optional shared model store.
 
 Because those four wire formats are the ones external tools already speak,
@@ -545,18 +555,15 @@ deliberately separate from the memory/topology axes above:
   allocation may move boundaries left, but never beyond this limit; the usual
   per-node memory check then validates the adjusted shards before launch.
 
-The signed registry adds an adaptive path without rewriting cards. Intrinsic
-capability claims describe what the model or selected artifact can do. A
-separate signed engine-support matrix records whether one exact engine build can
-serve one architecture, artifact format, quantization, and capability, with
-optional hardware constraints and auditable evidence. Placement unions active
-`supported` matches with the card's legacy `compatible_backends`; experimental,
-unsupported, stale-build, hardware-mismatched, other-artifact, and explicitly
-incomplete claims add nothing. Empirical load and feature qualification is
-bound to the immutable card tested; cited upstream engine compatibility may be
-architecture-scoped. Existing cards therefore keep working while a new
-architecture can become placeable as soon as independently signed support
-evidence exists.
+The signed registry adds upstream architecture/engine compatibility mappings
+without rewriting cards. Placement expands declared engines to the node's actual
+compute lanes and may add independently signed upstream mappings. Implemented
+runner operations, real package ABI/compiled targets and live resource availability
+are checked locally. Load/feature qualification records preserve their exact
+artifact, build, hardware and workload provenance for reporting; missing, stale,
+differently scoped or failed qualifications do not restrict otherwise compatible
+hardware. Artifact completeness remains a dependency of the affected operation,
+not a requirement to physically qualify every capability before model loading.
 
 The engine axis (which runtime) remains orthogonal to the node axis (which
 machine). The master resolves and stamps the concrete backend selected for each
@@ -2958,3 +2965,101 @@ delivery. Queue overflow and incomplete flows invalidate the observation.
 - [Model Store](model-store): shared model artifact hosting
 
 Maintenance discipline for this doc and the [Architecture Reference](architecture-reference) lives in [AGENTS.md](https://github.com/Foxlight-Foundation/Skulk/blob/main/AGENTS.md). Architectural shape changes (new component, new event, new pubsub topic, new state field, new major API endpoint, new family adapter) update these docs in the same commit as the code.
+
+
+### Native image engine
+
+`stable_diffusion_cpp` serves typed `image` model profiles through one resident,
+headless, authenticated loopback subprocess per single-host, single-GPU instance.
+Its compute lanes are `metal`, `cuda`, `vulkan`, and `rocm`; CPU-only serving is
+excluded. SDXL's `image.unet_structure` describes nonuniform input, middle
+and output module channels and first/final convolution channels. Its generic
+layer count is the module sum and hidden width is the maximum module output
+width; these fields do not imply text KV geometry or image splitting.
+`/v1/models.image.unetStructure` exposes that intrinsic structure; signed
+publication rejects provisional or inconsistent SDXL dimensions. Complete immutable component files are verified before load. Model
+placement can schedule an `InstallEngine` task for an exact published package;
+browsing does not acquire packages. `NodeResources.installable_engine_builds`
+records those candidates separately from measured `engine_builds`.
+Native package descriptors and build manifests additionally declare compiled
+CPU helper instructions. Package discovery also matches the interpreter's
+standard wheel-platform tags, rejecting older glibc, musl and older macOS before
+acquisition. Package discovery refuses incompatible hosts, and
+managed-binary probing checks these prerequisites before execution.
+Declared engine compatibility, actual package ABI/compiled targets, implemented
+runner operations and live resource fit govern placement. Exact build identity
+verifies the selected executable. Empirical qualification is scoped reporting
+evidence and never a hardware permission list. A source build alone does not
+prove installed or ready runtime capacity.
+
+Image downloads select every pinned file in the owning card's repository/revision
+group, including a same-repository VAE. External groups retain the durable
+`image_component` artifact role and the complete owning card; store approval
+checks that exact source group. Store transfers verify declared sizes and object
+identities, recover missing component files from partial caches, and exclude
+unrelated quants/projectors. Direct-Hub fallback carries the same exact file
+bundle, so store unavailability does not widen the download.
+
+The runner serializes image work with bounded admission, forwards previews and
+final PNG/JPEG/WebP through the existing image chunks, and cancels/deletes owned
+native jobs. The native watchdog exits on owner death. `SKULK_STABLE_DIFFUSION_CPP_BIN`
+selects a preprepared binary; package preparation obeys offline mode and
+`SKULK_NO_ENGINE_AUTOPROVISION`. Ordered reference edits use slot-indexed
+`VISION_MEDIA` frames and worker-local media, never replicated input bytes.
+Qwen Image 2.1 and Turbo CUDA/Vulkan instances enable Flash Attention at load time
+to reduce attention memory pressure at the default 2048-square canvas. ROCm
+instances also enable it to avoid observed native kernel-launch failures at
+that canvas.
+SDXL Metal loads disable batched classifier-free guidance to avoid blank
+outputs and enable Flash Attention at the default 1024-square canvas.
+Native shutdown retains process ownership through a bounded 30-second graceful
+wait and 15-second forced reap. Its supervisor allows 50 seconds for this cleanup,
+including large BF16 GPU contexts; failed reaping remains a visible failure.
+
+The native image candidate build workflow covers Metal ARM64, CUDA ARM64/x86_64,
+Vulkan x86_64 and ROCm x86_64. Linux compiler images are digest-pinned; CUDA
+embeds runtime/BLAS with an external driver, Vulkan bundles its loader, and the
+ROCm candidate records runtime libraries plus gfx942 code objects. Builds retain
+component notices and nested payload hashes and remain unqualified until exact
+hardware/model, loader and lifecycle gates pass. See
+`packaging/skulk-stable-diffusion-cpp/README.md`.
+
+Qwen Image 2.1 Vulkan loads also select 512-pixel VAE tiles with 25% overlap.
+This avoids the tested device single-buffer limit at 2K and its expensive CPU
+decode retry. Native teardown checks for an already-reaped process before
+signalling its former group; the runner retains ownership until exit is confirmed.
+
+Native image runners revalidate the exact installed package at model load when
+their inherited environment predates installation. This cache lookup never
+downloads and keeps model/engine preparation parallel while preventing a first-use
+runner crash. Explicit binary overrides still take precedence.
+
+Managed native image build identities include the executable and bundled runtime
+file digests. Probes verify these bytes before execution and select the managed
+library/code-object paths rather than inherited SDK overrides. Wheel descriptors
+carry exact archive and expanded sizes, bounded at 3 GiB and 8 GiB respectively;
+installation checks staging space for both plus a 1 GiB reserve. Legacy candidate
+packages retain the earlier executable identity and conservative size defaults.
+
+Metal native image instances keep parameters on their verified GPU to avoid
+duplicated residency in unified memory. CUDA/Vulkan/ROCm retain CPU parameter
+offload. Metal SDXL and Z-Image Turbo additionally use Flash Attention and
+512-pixel VAE tiles with 25% overlap; SDXL uses separate guidance passes.
+The tested Q8 SDXL and Z-Image default workflows stayed below kernel warning
+pressure on a 16 GiB Apple host.
+
+Apple hardware inventory retains the generic `apple:apple-gpu` class and adds
+the passively observed chip class (for example `apple:apple-m4`) when macOS
+reports it. Missing chip observations add no exact class. Native image package
+eligibility and signed support claims can therefore select measured Apple
+hardware without broadening qualification to every Metal device.
+
+Native image placement requires one pipeline rank and one observed GPU; tensor
+sharding or ambiguous multi-device install offers are rejected before preparation.
+Base image downloads select every pinned primary-repository component, including
+its VAE/encoders, while companions in other repositories use their own pinned
+transactions. Dashboard native image requests own SSE responses so Stop closes
+the stream and cancels the underlying command rather than only aborting an
+unobserved non-streaming fetch.
+
+Exact image qualification uses `POST /v1/instances/{instance_id}/images/generations`. The API verifies every rank against a persistent installation allowlist and dispatches `ImageGeneration.target_instance_id`; the master fails an unavailable target without selecting another replica. Both JSON and SSE return the selected instance identity.

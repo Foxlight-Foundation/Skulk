@@ -1,6 +1,7 @@
 import os
 import platform
 import socket
+import subprocess
 import sys
 from subprocess import CalledProcessError
 
@@ -301,6 +302,25 @@ def _linux_model_and_chip() -> tuple[str, str]:
     return (model, chip)
 
 
+def observe_apple_chip() -> str | None:
+    """Read a bounded Apple Silicon chip identity, or return None if unavailable.
+
+    This passive macOS sysctl observation supplies precise hardware matching
+    without exposing system_profiler's serial or other machine identifiers.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    name = result.stdout.strip()
+    return name if result.returncode == 0 and name.startswith("Apple M") and len(name) <= 80 else None
+
+
 async def get_model_and_chip() -> tuple[str, str]:
     """Get this node's hardware model and chip names.
 
@@ -334,6 +354,6 @@ async def get_model_and_chip() -> tuple[str, str]:
     model = model_line.split(": ")[1] if model_line else "Unknown Model"
 
     chip_line = next((line for line in output.split("\n") if "Chip" in line), None)
-    chip = chip_line.split(": ")[1] if chip_line else "Unknown Chip"
+    chip = observe_apple_chip() or (chip_line.split(": ")[1] if chip_line else "Unknown Chip")
 
     return (model, chip)

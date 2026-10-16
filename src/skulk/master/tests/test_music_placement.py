@@ -95,7 +95,7 @@ def test_music_exact_command_rejects_two_runners_on_one_node() -> None:
         add_instance_to_placements(CreateInstance(instance=instance), Topology(), {}, {})
 
 
-def test_music_exact_command_rejects_stamped_unclaimed_build() -> None:
+def test_music_exact_command_requires_live_memory_even_without_qualification() -> None:
     """An internal caller cannot bypass preparation with a client backend stamp."""
     card = _music_card()
     node = NodeId("music-node")
@@ -120,7 +120,7 @@ def test_music_exact_command_rejects_stamped_unclaimed_build() -> None:
         hardware_classes=frozenset({"platform:darwin"}),
         engine_builds={"audio_cpp-cpu": "unqualified-build"},
     )
-    with pytest.raises(PlacementError, match="matching signed support claim"):
+    with pytest.raises(PlacementError, match="memory telemetry"):
         add_instance_to_placements(
             CreateInstance(instance=instance), Topology(), {}, {},
             node_resources={node: resources},

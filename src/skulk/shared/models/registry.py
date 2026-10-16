@@ -397,7 +397,7 @@ class RegistryEngineSupportClaim(BaseModel):
         description="Intrinsic capability this engine decision covers.",
     )
     status: Literal["supported", "experimental", "unsupported"] = Field(
-        description="Decision status; only supported can expand placement."
+        description="Evidence outcome; supported upstream mappings may add an engine, while empirical qualification never revokes declared compatibility."
     )
     evidence_kind: Literal[
         "upstream_compatibility", "load_qualification", "feature_qualification"
@@ -421,7 +421,7 @@ class RegistryEngineSupportClaim(BaseModel):
     hardware_classes: tuple[str, ...] = Field(
         default=(),
         max_length=50,
-        description="Optional open hardware constraints; empty is neutral.",
+        description="Observed hardware scope for evidence; actual package/device requirements are enforced locally, independently of qualification.",
     )
     supersedes_claim_id: str | None = Field(
         default=None,

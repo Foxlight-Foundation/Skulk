@@ -1,0 +1,168 @@
+# Candidate artifacts remain separate from hardware qualification and publication.
+name: stable-diffusion-cpp-wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Promote already qualified artifacts without rebuilding
+        type: boolean
+        default: false
+      publish_run_id:
+        description: Successful candidate workflow run containing qualified bytes
+        type: string
+        default: ""
+      publish_sha256:
+        description: JSON map of selected wheel filenames to qualified SHA-256 digests
+        type: string
+        default: ""
+  push:
+    branches: ["initiative/**", dev]
+    paths:
+      - ".github/workflows/stable-diffusion-cpp-wheel.yml"
+      - "packaging/skulk-stable-diffusion-cpp/**"
+      - "scripts/build_stable_diffusion_cpp_wheel.py"
+      - "scripts/bundle_stable_diffusion_cpp_rocm.py"
+
+permissions:
+  contents: read
+
+env:
+  SDCPP_REF: d637cfb935feb2254898a8f1524046c958f3df80
+
+jobs:
+  candidate:
+    if: github.event_name != 'workflow_dispatch' || !inputs.publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            variant: metal
+            tag: macosx_15_0_arm64
+          - runner: ubuntu-22.04
+            variant: vulkan
+            tag: manylinux_2_35_x86_64
+            image: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+            gpu_targets: ""
+          - runner: ubuntu-22.04
+            variant: cuda
+            tag: manylinux_2_35_x86_64
+            image: nvidia/cuda@sha256:bd4e2680a261c212f1e2fea241606f71497dc67a417f73175d794ec8212b5ba8
+            gpu_targets: "80-real;86-real;89-real;90-virtual"
+          - runner: ubuntu-22.04-arm
+            variant: cuda
+            tag: manylinux_2_35_aarch64
+            image: nvidia/cuda@sha256:1c517d4fb96528c8999e14e6e6b16d7e2ff9ae8d194fd788d60fdc88e693e982
+            gpu_targets: "121a-real"
+          - runner: ubuntu-22.04
+            variant: rocm
+            tag: manylinux_2_35_x86_64
+            image: rocm/dev-ubuntu-22.04@sha256:e3909c89d9434e2816568f727e89bf6a00d6d9d746defc6b9957dbeb16d1ac31
+            gpu_targets: gfx942
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Fetch immutable source and carry recorded lifecycle patch
+        run: |
+          git clone --no-checkout https://github.com/leejet/stable-diffusion.cpp.git native-source
+          git -C native-source checkout "$SDCPP_REF"
+          git -C native-source submodule update --init --recursive
+          git -C native-source apply ../packaging/skulk-stable-diffusion-cpp/server-lifecycle.patch
+      - name: Build and assemble portable Linux candidate
+        if: runner.os == 'Linux'
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PLATFORM_TAG: ${{ matrix.tag }}
+          BUILD_IMAGE: ${{ matrix.image }}
+          GPU_TARGETS: ${{ matrix.gpu_targets }}
+        run: |
+          # Hosted images include unrelated SDKs; reclaim disposable runner disk
+          # before pulling the pinned CUDA/ROCm compiler image.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" "$BUILD_IMAGE" bash /work/packaging/skulk-stable-diffusion-cpp/build-linux.sh "$VARIANT" "$PLATFORM_TAG" "$GPU_TARGETS"
+      - name: Configure portable Metal server
+        if: runner.os == 'macOS'
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          flags=(-DCMAKE_BUILD_TYPE=Release -DSD_BUILD_EXAMPLES=ON -DSD_SERVER_BUILD_FRONTEND=OFF -DSD_RPC=OFF -DSD_WEBM=OFF -DSD_WEBP=ON -DGGML_NATIVE=OFF -DGGML_STATIC=ON)
+          flags+=(-DSD_METAL=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DGGML_CPU_ARM_ARCH=armv8.2-a+fp16)
+          uv tool run --from cmake cmake -S native-source -B native-build "${flags[@]}"
+          uv tool run --from cmake cmake --build native-build --target sd-server --parallel 3
+      - name: Assemble unqualified immutable Metal candidate
+        if: runner.os == 'macOS'
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PLATFORM_TAG: ${{ matrix.tag }}
+        run: |
+          uv run --no-project python scripts/build_stable_diffusion_cpp_wheel.py --source native-source --build native-build --output candidate-wheels --variant "$VARIANT" --platform-tag "$PLATFORM_TAG"
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: candidate-wheels/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unqualified-${{ matrix.variant }}-${{ matrix.tag }}
+          path: candidate-wheels/*
+          if-no-files-found: error
+
+  publish-index:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    concurrency:
+      group: foxlight-engine-wheel-index-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check source build identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.path')" = .github/workflows/stable-diffusion-cpp-wheel.yml
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha' > source-head.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unqualified-*
+          merge-multiple: true
+          path: dist
+          run-id: ${{ inputs.publish_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify explicitly qualified artifacts and attested source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
+        run: |
+          set -euo pipefail
+          python -m scripts.verify_stable_diffusion_cpp_promotion dist "$EXPECTED_SHA256" > verified-wheels.txt
+          while IFS= read -r wheel; do
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/stable-diffusion-cpp-wheel.yml" \
+              --source-digest "$(cat source-head.txt)" --deny-self-hosted-runners > /dev/null
+          done < verified-wheels.txt
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish the exact selected wheels to the Foxlight index
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < verified-wheels.txt
+          test "${#wheels[@]}" -gt 0
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py "${wheels[@]}"
