@@ -243,3 +243,18 @@ def test_embedding_card_without_context_length_is_refused(monkeypatch: pytest.Mo
 
     with pytest.raises(RuntimeError, match="declares no context_length"):
         runner._load_embedding_server(cast(Any, task), Path("/models/embed.gguf"))
+
+
+def test_embedding_dispatch_is_serial_like_its_one_slot_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wider pool would acknowledge requests that then queue inside the server."""
+
+    def sixteen_slots(_card: object) -> int:
+        return 16
+
+    monkeypatch.setattr(runner_module, "_effective_server_parallel", sixteen_slots)
+    embedding = cast(Any, SimpleNamespace(tasks=["TextEmbedding"]))
+    chat = cast(Any, SimpleNamespace(tasks=["TextGeneration"]))
+    assert runner_module._dispatch_width(embedding) == 1
+    assert runner_module._dispatch_width(chat) == 16
