@@ -70,10 +70,19 @@ def _get_device() -> torch.device:
 
 
 _FORWARD_BATCH_TEXTS: Final = 32
-"""Texts per forward pass. A request's texts are padded to their longest
-member, so one pass over an unbounded request could exhaust device memory;
-chunks bound it while results stay identical (each text's vector depends only
-on its own tokens)."""
+"""Most texts per forward pass."""
+
+_FORWARD_TOKEN_BUDGET: Final = 16384
+"""Most padded tokens per forward pass (32 texts at the historical 512-token
+cap). A request's texts are padded to their longest member, so the memory a pass
+needs grows with texts x truncation length; a long-context recipe (8192 tokens)
+gets two texts per pass instead of 32. Results are identical however the
+request is split, since each text's vector depends only on its own tokens."""
+
+
+def _texts_per_pass(max_tokens: int) -> int:
+    """How many texts one forward pass may carry at this truncation length."""
+    return max(1, min(_FORWARD_BATCH_TEXTS, _FORWARD_TOKEN_BUDGET // max_tokens))
 
 
 def _pool(
@@ -119,7 +128,7 @@ def _forward(
     *,
     rank: int,
 ) -> tuple[list[list[float]], int]:
-    """Embed texts with the model's own recipe, in bounded chunks.
+    """Embed texts with the model's own recipe, in token-bounded chunks.
 
     Tokenize (truncating at the recipe's limit), encode, pool and optionally
     L2-normalize, as the model's sentence-transformers pipeline does.
@@ -130,8 +139,9 @@ def _forward(
     result: list[list[float]] = []
     token_count = 0
     left_padded = getattr(tokenizer, "padding_side", "right") == "left"
-    for start in range(0, len(texts), _FORWARD_BATCH_TEXTS):
-        chunk = texts[start : start + _FORWARD_BATCH_TEXTS]
+    step = _texts_per_pass(recipe.max_tokens)
+    for start in range(0, len(texts), step):
+        chunk = texts[start : start + step]
         with trace("tokenize", rank, "embedding"):
             inputs = tokenizer(
                 chunk,
