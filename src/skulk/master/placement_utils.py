@@ -113,12 +113,16 @@ def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
     ``llama-server -ngl 99``, and ``vllm`` because ``vllm serve`` allocates weights +
     KV from the GPU -- both use VRAM exactly like the in-process llama.cpp runner.
     The ``comfy`` video and audio.cpp music engines hold their model weights
-    on the selected GPU in the same way. Metal stays on Apple unified memory;
-    this predicate gates only AMD/NVIDIA discrete-VRAM observations.
+    on the selected GPU in the same way. Metal stays on Apple unified memory
+    (``llama_server-metal`` included); this predicate gates only AMD/NVIDIA
+    discrete-VRAM observations.
     """
     return any(
         tag in _AUDIO_CPP_DISCRETE_LANES
-        or (tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES) and not tag.endswith("-cpu"))
+        or (
+            tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES)
+            and not tag.endswith(("-cpu", "-metal"))
+        )
         for tag in backends
     )
 

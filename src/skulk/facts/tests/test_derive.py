@@ -254,6 +254,22 @@ def test_served_derives_from_binary_device_list() -> None:
     assert derivation.conflicts == ()
 
 
+def test_served_derives_metal_from_the_binary_device_list_on_macos() -> None:
+    # The managed macOS build reports its Metal device; the served engine
+    # advertises the Metal lane (gated to embeddings in placement) with no
+    # conflict, since Apple GPUs are not a degradation signal.
+    derivation = derive_node_backends(
+        make_facts(
+            platform="darwin",
+            llama_server_bin=ok_bin("SKULK_LLAMA_SERVER_BIN"),
+            device_probe=LlamaServerDeviceProbe(outcome="devices", computes=("metal",)),
+        )
+    )
+    assert "llama_server-metal" in derivation.backends
+    assert "llama_server-cpu" not in derivation.backends
+    assert derivation.conflicts == ()
+
+
 def test_served_derives_from_nvidia_hardware_when_probe_unsupported() -> None:
     facts = make_facts(
         gpus=(NVIDIA_A40,),

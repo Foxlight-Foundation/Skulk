@@ -717,6 +717,14 @@ def test_comfy_backend_offloads_to_vram() -> None:
     assert backend_offloads_to_vram("comfy")
 
 
+def test_metal_lanes_use_unified_memory() -> None:
+    from skulk.shared.models.memory_estimate import backend_offloads_to_vram
+
+    assert not backend_offloads_to_vram("llama_server-metal")
+    assert not backend_offloads_to_vram("audio_cpp-metal")
+    assert backend_offloads_to_vram("llama_server-vulkan")
+
+
 def test_audio_cpp_discrete_gpu_lanes_offload_to_vram() -> None:
     """A music GPU lane consumes its accelerator pool except unified Metal."""
     from skulk.shared.models.memory_estimate import backend_offloads_to_vram

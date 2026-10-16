@@ -284,7 +284,12 @@ def _derive_llama_server(
             )
             return set(), conflicts, notes
         if probe.outcome == "devices":
-            computes = [cb for cb in _GPU_COMPUTES if cb in probe.computes]
+            # Metal counts for the served engine on macOS: its lane is gated
+            # to embeddings in placement (backends.platform_compatible_backends),
+            # so MLX keeps owning chat on the Apple GPU.
+            computes = [
+                cb for cb in (*_GPU_COMPUTES, "metal") if cb in probe.computes
+            ]
             if computes:
                 notes.append(
                     f"llama-server --list-devices reported {sorted(computes)}; "

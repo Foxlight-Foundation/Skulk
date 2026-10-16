@@ -321,6 +321,18 @@ def test_platform_compatible_backends_gates_embeddings_to_their_runner() -> None
     )
 
 
+def test_metal_llama_server_lane_serves_only_embeddings() -> None:
+    # MLX owns chat on the Apple GPU; the Metal llama-server lane exists for
+    # GGUF embedding cards, so a GGUF chat card never lands on it.
+    declared = frozenset({"llama_server-metal", "llama_server-vulkan", "llama_server"})
+    assert platform_compatible_backends(
+        declared, card_serves_vision=False, card_serves_embeddings=True
+    ) == declared
+    assert platform_compatible_backends(declared, card_serves_vision=False) == (
+        frozenset({"llama_server-vulkan", "llama_server"})
+    )
+
+
 def test_platform_compatible_backends_requires_vllm_tool_parser() -> None:
     """Tool-using cards cannot land on a vLLM server without its parser pair."""
     declared = frozenset({"mlx", "vllm-cuda", "vllm-rocm"})
