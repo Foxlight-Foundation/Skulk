@@ -3,11 +3,14 @@
 
 BERT-based embedding models cannot be loaded by mlx_lm, so this runner
 uses transformers.AutoModel directly. Single forward pass, no KV cache,
-no generation loop, no streaming.
+no generation loop, no streaming. Pooling, normalization and truncation come
+from the artifact's own sentence-transformers metadata (see ``recipe``), so a
+model's vectors match its reference implementation.
 """
 
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Final, cast
 
 import torch
 from transformers import AutoModel, AutoTokenizer
@@ -50,6 +53,11 @@ from skulk.shared.types.worker.runners import (
 )
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
+from skulk.worker.runner.embeddings.recipe import (
+    EmbeddingRecipe,
+    PoolingMode,
+    resolve_embedding_recipe,
+)
 
 
 def _get_device() -> torch.device:
@@ -61,42 +69,106 @@ def _get_device() -> torch.device:
     return torch.device("cpu")
 
 
+_FORWARD_BATCH_TEXTS: Final = 32
+"""Most texts per forward pass."""
+
+_FORWARD_TOKEN_BUDGET: Final = 16384
+"""Most padded tokens per forward pass (32 texts at the historical 512-token
+cap). A request's texts are padded to their longest member, so the memory a pass
+needs grows with texts x truncation length; a long-context recipe (8192 tokens)
+gets two texts per pass instead of 32. Results are identical however the
+request is split, since each text's vector depends only on its own tokens."""
+
+
+def _texts_per_pass(max_tokens: int) -> int:
+    """How many texts one forward pass may carry at this truncation length."""
+    return max(1, min(_FORWARD_BATCH_TEXTS, _FORWARD_TOKEN_BUDGET // max_tokens))
+
+
+def _pool(
+    hidden_states: torch.Tensor,
+    attention_mask: torch.Tensor,
+    pooling: PoolingMode,
+    *,
+    left_padded: bool,
+) -> torch.Tensor:
+    """Collapse token states to one vector per text, ignoring padding.
+
+    Args:
+        hidden_states: ``[batch, tokens, dim]`` encoder output.
+        attention_mask: ``[batch, tokens]`` with 1 for real tokens.
+        pooling: The model's pooling mode.
+        left_padded: Whether the tokenizer pads on the left, which moves the
+            last real token to the final position.
+
+    Returns:
+        ``[batch, dim]`` pooled vectors.
+    """
+    if pooling == "cls":
+        return hidden_states[:, 0]
+    if pooling == "last":
+        if left_padded:
+            return hidden_states[:, -1]
+        last_index = attention_mask.sum(dim=1).clamp(min=1) - 1
+        return hidden_states[torch.arange(hidden_states.shape[0]), last_index]
+    mask = attention_mask.unsqueeze(-1).to(hidden_states.dtype)
+    if pooling == "max":
+        masked = hidden_states.masked_fill(mask == 0, float("-inf"))
+        return masked.max(dim=1).values
+    summed = (hidden_states * mask).sum(dim=1)
+    return summed / mask.sum(dim=1).clamp(min=1)
+
+
 def _forward(
     model: Any,
     tokenizer: Any,
     texts: list[str],
     device: torch.device,
+    recipe: EmbeddingRecipe,
     *,
     rank: int,
 ) -> tuple[list[list[float]], int]:
-    """Run embedding forward pass: tokenize -> model -> mean pool -> L2 normalize."""
-    with trace("tokenize", rank, "embedding"):
-        inputs = tokenizer(
-            texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=512,
-        )
-    token_count = int(inputs["attention_mask"].sum().item())
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    """Embed texts with the model's own recipe, in token-bounded chunks.
 
-    with trace("forward", rank, "embedding"), torch.no_grad():
-        outputs = model(**inputs)
+    Tokenize (truncating at the recipe's limit), encode, pool and optionally
+    L2-normalize, as the model's sentence-transformers pipeline does.
 
-    # Mean pooling over non-padding tokens
-    with trace("pooling", rank, "embedding"):
-        attention_mask = inputs["attention_mask"].unsqueeze(-1)
-        hidden_states = outputs.last_hidden_state
-        summed = (hidden_states * attention_mask).sum(dim=1)
-        counts = attention_mask.sum(dim=1).clamp(min=1)
-        embeddings = summed / counts
+    Returns:
+        One vector per text, in input order, and the total input token count.
+    """
+    result: list[list[float]] = []
+    token_count = 0
+    left_padded = getattr(tokenizer, "padding_side", "right") == "left"
+    step = _texts_per_pass(recipe.max_tokens)
+    for start in range(0, len(texts), step):
+        chunk = texts[start : start + step]
+        with trace("tokenize", rank, "embedding"):
+            inputs = tokenizer(
+                chunk,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=recipe.max_tokens,
+            )
+        token_count += int(inputs["attention_mask"].sum().item())
+        inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    # L2 normalize
-    with trace("normalization", rank, "embedding"):
-        embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        with trace("forward", rank, "embedding"), torch.no_grad():
+            outputs = model(**inputs)
 
-    result: list[list[float]] = embeddings.tolist()
+        with trace("pooling", rank, "embedding"):
+            embeddings = _pool(
+                outputs.last_hidden_state,
+                inputs["attention_mask"],
+                recipe.pooling,
+                left_padded=left_padded,
+            )
+
+        if recipe.normalize:
+            with trace("normalization", rank, "embedding"):
+                embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+        result.extend(cast(list[list[float]], embeddings.tolist()))
     return result, token_count
 
 
@@ -130,6 +202,8 @@ class Runner:
         self.model: Any = None
         self.tokenizer: Any = None
         self.device: torch.device = torch.device("cpu")
+        # The legacy recipe until LoadModel reads the artifact's own.
+        self.recipe = EmbeddingRecipe(pooling="mean", normalize=True, max_tokens=512)
 
         self.current_status: RunnerStatus = RunnerIdle()
         logger.info("embedding runner created")
@@ -216,7 +290,21 @@ class Runner:
                     self.device = torch.device("cpu")
                     self.model.to(self.device)
                 self.model.eval()
-                logger.info(f"embedding model on device: {self.device}")
+                model_config = cast(object, self.model.config)
+                max_positions = cast(
+                    object, getattr(model_config, "max_position_embeddings", None)
+                )
+                self.recipe = resolve_embedding_recipe(
+                    Path(local_path),
+                    model_max_positions=(
+                        max_positions if isinstance(max_positions, int) else None
+                    ),
+                )
+                logger.info(
+                    f"embedding model on device: {self.device}; pooling "
+                    f"{self.recipe.pooling}, normalize {self.recipe.normalize}, "
+                    f"max {self.recipe.max_tokens} tokens"
+                )
 
                 # Skip straight to Ready — no warmup needed for embedding models
                 self.current_status = RunnerReady()
@@ -262,6 +350,7 @@ class Runner:
                             self.tokenizer,
                             task_params.input_texts,
                             self.device,
+                            self.recipe,
                             rank=self.shard_metadata.device_rank,
                         )
                     if task.trace_enabled:

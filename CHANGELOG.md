@@ -102,6 +102,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- Embedding vectors match each model's reference. The embeddings runner
+  always mean-pooled, normalized, and truncated at 512 tokens, so bge-small
+  (which pools its first token) returned wrong vectors and MiniLM (which stops
+  at 256 tokens) disagreed on long inputs. The runner now reads the pooling
+  mode, normalization, and truncation length from the model's own metadata,
+  refuses pipelines it cannot reproduce, and embeds large requests in bounded
+  chunks. An embedding card that names an engine without an embedding runner
+  is refused at placement instead of crashing at load, and `embed_texts`
+  without a model id picks the same model on every call.
 - vLLM serves Qwen3.5 and Qwen3.6 models again. vLLM 0.31 refuses to start a
   hybrid model when its sequence cap (default 256) exceeds the Mamba cache it
   can hold, one block per sequence, and at its placement-sized memory share a

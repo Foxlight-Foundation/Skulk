@@ -286,6 +286,24 @@ def test_platform_compatible_backends_gates_speech_to_mlx_audio() -> None:
     )
 
 
+def test_platform_compatible_backends_gates_embeddings_to_their_runner() -> None:
+    # Embedding cards dispatch to the transformers runner, which serves mlx
+    # placements; a card declaring another engine must be refused at placement
+    # rather than crash at runner import on a node without that runner.
+    declared = frozenset(
+        {"mlx", "mlx-metal", "llama_cpp-vulkan", "vllm-cuda", "future_engine"}
+    )
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_serves_embeddings=True,
+    ) == frozenset({"mlx", "mlx-metal", "future_engine"})
+    # Non-embedding cards are untouched by the gate.
+    assert (
+        platform_compatible_backends(declared, card_serves_vision=False) == declared
+    )
+
+
 def test_platform_compatible_backends_requires_vllm_tool_parser() -> None:
     """Tool-using cards cannot land on a vLLM server without its parser pair."""
     declared = frozenset({"mlx", "vllm-cuda", "vllm-rocm"})

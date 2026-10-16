@@ -1474,6 +1474,11 @@ class AudioResponseFormat(str, Enum):
     Pcm = "pcm"
 
 
+def card_serves_embeddings(card: "ModelCard") -> bool:
+    """Return whether the card declares a text-embedding serving workload."""
+    return ModelTask.TextEmbedding in card.tasks
+
+
 def card_serves_speech(card: "ModelCard") -> bool:
     """Return whether the card declares a speech serving workload."""
     return (

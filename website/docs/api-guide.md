@@ -1342,6 +1342,16 @@ Request fields:
 The response is the OpenAI list shape: one `data[]` entry per input in input
 order, the resolved `model`, and `usage` with prompt and total token counts.
 
+Vectors follow the model's own recipe, read from the sentence-transformers
+metadata shipped with its weights: the pooling mode (mean, CLS, max, or last
+token), whether vectors are L2-normalized, and the length past which input is
+truncated (`max_seq_length`, for example 256 tokens for MiniLM). Vectors from
+different models are not comparable. A model whose pipeline needs a step Skulk
+does not implement, such as a Dense projection, fails at load rather than
+serving approximate vectors. Programmatic callers that omit the model (the
+extension `embed_texts` helper) get the mounted embedding model with the lowest
+model id.
+
 ## OpenAI Audio Speech API
 
 **POST** `/v1/audio/speech`
