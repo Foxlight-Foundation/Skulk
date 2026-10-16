@@ -152,10 +152,17 @@ class KVCache(_BaseCache):
     def __init__(self) -> None: ...
     def update_and_fetch(self, keys, values):  # -> tuple[array | Any, array | Any]:
         ...
+    def keys_and_values(self) -> tuple[mx.array, mx.array]:
+        """The live keys and values, sliced to ``offset`` (mlx-lm 0.32.2)."""
+        ...
     @property
     def state(
         self,
-    ) -> tuple[mx.array | None, mx.array | None]: ...
+    ) -> tuple[mx.array | None, mx.array | None, int]:
+        """Serialization tuple: the full step-padded buffers and ``offset``
+        (mlx-lm 0.32.2, upstream #1778). Use ``keys_and_values`` for the live
+        slice."""
+        ...
     @state.setter
     def state(self, v) -> None: ...
     def is_trimmable(self):  # -> Literal[True]:
@@ -183,10 +190,17 @@ class RotatingKVCache(_BaseCache):
         self, keys, values
     ):  # -> tuple[array | Any, array | Any] | tuple[array | Any, array | Any | None]:
         ...
+    def keys_and_values(self) -> tuple[mx.array, mx.array]:
+        """The live keys and values: sliced to ``offset`` until the ring is
+        full, then the whole ring in buffer order (mlx-lm 0.32.2)."""
+        ...
     @property
     def state(
         self,
-    ) -> tuple[mx.array | None, mx.array | None]: ...
+    ) -> tuple[mx.array | None, mx.array | None, int, int, int, int]:
+        """Serialization tuple ``(keys, values, offset, keep, max_size,
+        _idx)`` (mlx-lm 0.32.2, upstream #1778)."""
+        ...
     @state.setter
     def state(self, v):  # -> None:
         ...

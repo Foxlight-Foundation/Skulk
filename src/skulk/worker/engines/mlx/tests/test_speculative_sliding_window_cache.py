@@ -47,8 +47,21 @@ class _WindowCache(Protocol):
 
     def trim(self, n: int) -> int: ...
 
-    @property
-    def state(self) -> tuple[mx.array, mx.array]: ...
+
+def live_keys(entry: object) -> mx.array:
+    """The keys a cache currently holds, in buffer order.
+
+    The two cache families expose them differently. mlx-lm 0.32.2 made
+    ``state`` the full step-padded serialization tuple (upstream #1778) and
+    moved the live slice to ``keys_and_values()``; mlx-vlm's
+    ``BufferedRotatingKVCache`` still returns the live slice from ``state``.
+    """
+    accessor = getattr(entry, "keys_and_values", None)
+    if callable(accessor):
+        keys, _ = cast(tuple[mx.array, mx.array], accessor())
+    else:
+        keys, _ = cast(tuple[mx.array, mx.array], getattr(entry, "state"))  # noqa: B009
+    return keys
 
 
 def positions(start: int, count: int) -> mx.array:
@@ -63,7 +76,7 @@ def write(entry: object, start: int, count: int) -> None:
 
 def window(entry: object) -> list[int]:
     """The positions a cache holds, oldest first, limited to the attention window."""
-    keys, _ = cast(_WindowCache, entry).state
+    keys = live_keys(entry)
     if type(entry) is RotatingKVCache:
         # A plain cache past its window holds a ring; put it in temporal order.
         temporal = cast(

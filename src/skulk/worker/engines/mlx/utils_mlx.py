@@ -1595,13 +1595,15 @@ class NullKVCache(KVCache):
         self.offset = 0
 
     @property
-    def state(self) -> tuple[mx.array, mx.array]:
-        # matches what mx.save_safetensors / mx.eval expect
+    def state(self) -> tuple[mx.array, mx.array, int]:
+        # Same serialization shape as KVCache in mlx-lm 0.32.2 (keys, values,
+        # offset; upstream #1778), so code that unpacks or saves a cache
+        # entry handles the null entry like any other.
         assert self.keys is not None and self.values is not None
-        return self.keys, self.values
+        return self.keys, self.values, self.offset
 
     @state.setter
-    def state(self, v: tuple[mx.array, mx.array]) -> None:
+    def state(self, v: tuple[mx.array, mx.array, int]) -> None:
         raise NotImplementedError("We should not be setting a NullKVCache.")
 
 

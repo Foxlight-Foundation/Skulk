@@ -114,7 +114,7 @@ class TestRotatingRollback:
             assert len(prefix) >= min(committed, window - 1)
             rollback_speculative_positions([cache], width - accepted - 1)
             committed += accepted + 1
-            state_keys = cast(mx.array, cache.state[0])
+            state_keys = cache.keys_and_values()[0]
             assert _flat(state_keys) == [
                 float(p) for p in range(committed - state_keys.shape[2], committed)
             ]
@@ -125,7 +125,7 @@ class TestRotatingRollback:
         _ = cache.update_and_fetch(*_positions([0.0, 1.0, 2.0, 3.0]))
         rollback_speculative_positions([cache], 2)
         assert cache.offset == 2
-        keys, _ = cache.state
+        keys, _ = cache.keys_and_values()
         assert _flat(keys) == [0.0, 1.0]
 
     def test_zero_rejections_is_a_no_op(self) -> None:
@@ -292,7 +292,7 @@ class TestLoopPositionalRollback:
         assert target.trunk_calls <= 2 + len(emitted)
 
         sequence = [float(t) for t in prompt + truth]
-        full_keys, _ = full_cache.state
+        full_keys, _ = full_cache.keys_and_values()
         cached = _flat(full_keys)
         # Every cached position is a committed token of the true sequence.
         assert cached == sequence[: len(cached)]
@@ -303,7 +303,7 @@ class TestLoopPositionalRollback:
         # one in the same slot.
         window_cache = caches[1]
         assert type(window_cache) is RotatingKVCache
-        window = _flat(cast(mx.array, window_cache.state[0]))[-window_cache.max_size :]
+        window = _flat(window_cache.keys_and_values()[0])[-window_cache.max_size :]
         assert window == cached[-len(window) :]
 
     def test_accepted_eos_ends_the_stream_and_drops_later_drafts(
@@ -322,6 +322,6 @@ class TestLoopPositionalRollback:
             monkeypatch=monkeypatch,
         )
         assert emitted == [7, 12, 5, 9, _EOS]
-        keys, _ = full_cache.state
+        keys, _ = full_cache.keys_and_values()
         assert 6.0 not in _flat(keys)
 

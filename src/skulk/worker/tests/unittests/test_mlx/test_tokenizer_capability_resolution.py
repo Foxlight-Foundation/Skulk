@@ -66,6 +66,22 @@ class _TokenizerBackend:
         """
         return ""
 
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+        """Faithful-fake requirement of mlx-lm 0.32.2.
+
+        Its streaming detokenizer probes ``encode("a ,b")`` and decodes the
+        result at construction (upstream #1879) to learn whether the
+        tokenizer cleans spaces. A character-level round trip answers that
+        honestly. Encoding is otherwise irrelevant to these tests.
+        """
+        del add_special_tokens
+        return [ord(character) for character in text]
+
+    def decode(self, token_ids: list[int], **kwargs: object) -> str:
+        """Inverse of :meth:`encode`; token 0 (the probe's ``decode([0])``) is empty."""
+        del kwargs
+        return "".join(chr(token) for token in token_ids if token > 0)
+
 
 def _gemma4_tool_parser() -> Callable[[str], list[dict[str, object]]]:
     module_dict = cast(dict[str, object], utils_mlx_module.__dict__)
