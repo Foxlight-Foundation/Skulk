@@ -165,12 +165,14 @@ CUDA context, cuBLAS workspace and peak activations, measured at 0.63 GiB for a
 scales with weights, so on the smallest models it can fall short of this."""
 
 # Upper bound on concurrent in-flight generations the runner streams to the one
-# ``vllm serve`` at once. This is a client-side admission bound (the thread-pool
-# width), NOT vLLM's batch width -- the server batches up to its own
-# ``--max-num-seqs`` (a version- and hardware-band-dependent default, 256 at
-# minimum on the validated matrix). Kept below every such default so queued
-# requests wait in the runner's bounded pool rather than piling unbounded
-# threads against the server.
+# ``vllm serve`` at once: the thread-pool width, and also the server's
+# ``--max-num-seqs``. vLLM can never see more sequences than the runner admits,
+# so its own default (256 to 1024 depending on version and hardware) only cost
+# memory and capture time. On vLLM 0.31 it also stopped hybrid models from
+# starting: the default model runner refuses CUDA graph capture when
+# max-num-seqs exceeds the Mamba cache blocks, one per decode sequence
+# ("max_num_seqs (256) exceeds available Mamba cache blocks (161)" for
+# Qwen3.6-27B-FP8 on an A100-80GB at its placement-sized memory share).
 _MAX_CONCURRENT_REQUESTS_ENV: Final = "SKULK_VLLM_MAX_CONCURRENT_REQUESTS"
 _DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
 
@@ -183,17 +185,13 @@ _DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
 # failed engine init outright ("max_num_scheduled_tokens is set to -1536",
 # observed live with the Laguna depth-15 card at the 2048/256 defaults); from
 # 0.28 the engine starts but decodes fewer sequences per step than it admits
-# (2048 / 16 = 128 on an A100 at depth 15). Both sides of that arithmetic are
-# version- and hardware-band-dependent (serve-time defaults range from
-# 2048/256 to 16384/1024, unchanged through 0.31), so at deep depths the
-# runner pins BOTH flags explicitly rather than raising one against an assumed
-# default: max-num-seqs is pinned to 256 and the batched budget derives from
-# it. The pinned formula, max(8192, 2048 + 256 * (depth - 1)), always clears
-# 256 * (1 + depth) with 1536 tokens to spare. The sizing starts at depth 8
-# (the historical default budget went non-positive at depth 9), and 8192 is
-# the fresh-box-validated floor (Laguna depth-15 card, A100-80GB).
+# (2048 / 16 = 128 on an A100 at depth 15). The serve-time batched default is
+# version- and hardware-band-dependent (2048 to 16384, unchanged through 0.31),
+# so at deep depths the runner pins it against the pinned sequence cap:
+# max(8192, 2048 + seqs * (depth - 1), seqs * (1 + depth)). The sizing starts
+# at depth 8 (the historical default budget went non-positive at depth 9), and
+# 8192 is the fresh-box-validated floor (Laguna depth-15 card, A100-80GB).
 _SPEC_PINNED_BATCH_BASE_TOKENS: Final = 2048
-_SPEC_PINNED_MAX_NUM_SEQS: Final = 256
 _SPEC_DEPTH_NEEDING_BATCH_SIZING: Final = 8
 _SPEC_BATCHED_TOKENS_FLOOR: Final = 8192
 
@@ -499,6 +497,7 @@ def build_vllm_serve_args(
     max_model_len: int,
     gpu_memory_utilization: float,
     trust_remote_code: bool,
+    max_num_seqs: int,
     spec_method: str | None = None,
     spec_num_tokens: int | None = None,
     spec_draft_repo: str | None = None,
@@ -515,6 +514,8 @@ def build_vllm_serve_args(
     decoupled from the on-disk directory path. ``--trust-remote-code`` is added when
     the card permits it (the ModelCard default; required by custom-code HF repos)
     since vLLM's flag defaults off and those models would otherwise fail at startup.
+    ``--max-num-seqs`` is always ``max_num_seqs``, the runner's own admission
+    bound, because the server never sees more concurrent sequences than that.
     """
     args = [
         binary,
@@ -534,6 +535,11 @@ def build_vllm_serve_args(
         f"{gpu_memory_utilization:.4f}",
         "--tensor-parallel-size",
         "1",
+        # The runner's admission bound (see _MAX_CONCURRENT_REQUESTS_ENV): a
+        # larger value is never used, and on hybrid models vLLM 0.31 refuses
+        # to start when it exceeds the Mamba cache blocks.
+        "--max-num-seqs",
+        str(max_num_seqs),
         # Off by default in vLLM; without it the include_usage final chunk
         # carries no prompt_tokens_details, so the cache-honest prompt rate
         # (#631) would silently never subtract cached prefix tokens.
@@ -578,24 +584,17 @@ def build_vllm_serve_args(
             and spec_num_tokens >= _SPEC_DEPTH_NEEDING_BATCH_SIZING
         ):
             # Deep block-parallel drafters need the scheduler budget sized
-            # to the depth, and BOTH flags pinned so the arithmetic cannot
-            # be broken by a vLLM default change underneath us (see the
-            # constant block above). Shallow MTP depths keep vLLM's
-            # defaults untouched (the shape the #649 cards validated
-            # under).
+            # to the depth against the pinned sequence cap, so a vLLM
+            # default change cannot break the arithmetic underneath us (see
+            # the constant block above). Shallow MTP depths keep vLLM's
+            # batched default (the shape the #649 cards validated under).
             batched = max(
                 _SPEC_BATCHED_TOKENS_FLOOR,
                 _SPEC_PINNED_BATCH_BASE_TOKENS
-                + _SPEC_PINNED_MAX_NUM_SEQS * (spec_num_tokens - 1),
+                + max_num_seqs * (spec_num_tokens - 1),
+                max_num_seqs * (1 + spec_num_tokens),
             )
-            args.extend(
-                [
-                    "--max-num-batched-tokens",
-                    str(batched),
-                    "--max-num-seqs",
-                    str(_SPEC_PINNED_MAX_NUM_SEQS),
-                ]
-            )
+            args.extend(["--max-num-batched-tokens", str(batched)])
     return args
 
 
@@ -839,8 +838,10 @@ class Runner(ServedConcurrentDispatch):
         # Concurrent-dispatch state lives in ServedConcurrentDispatch (shared with
         # the llama_server runner): the bounded pool, the SUBMITTED-job backpressure
         # semaphore, the lock-guarded in-flight/status accounting, and the dispatch
-        # loop. This runner supplies only the vLLM-specific hooks below.
-        self._init_concurrent_dispatch(_max_concurrent_requests(), "vllm-gen")
+        # loop. This runner supplies only the vLLM-specific hooks below. The
+        # same bound is the server's --max-num-seqs, so the two cannot drift.
+        self._admission_bound = _max_concurrent_requests()
+        self._init_concurrent_dispatch(self._admission_bound, "vllm-gen")
         self.server_proc: subprocess.Popen[bytes] | None = None
         self.server_log: Any = None
         self.server_log_path: Path | None = None
@@ -1025,6 +1026,7 @@ class Runner(ServedConcurrentDispatch):
             n_ctx,
             self._gpu_memory_share(model_dir, n_ctx),
             self.shard_metadata.model_card.trust_remote_code,
+            self._admission_bound,
             spec_method=(
                 card_runtime.vllm_spec_method if card_runtime is not None else None
             ),

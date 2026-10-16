@@ -102,6 +102,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- vLLM serves Qwen3.5 and Qwen3.6 models again. vLLM 0.31 refuses to start a
+  hybrid model when its sequence cap (default 256) exceeds the Mamba cache it
+  can hold, one block per sequence, and at its placement-sized memory share a
+  Qwen3.6-27B-FP8 had room for 161. The runner now sets `--max-num-seqs` to
+  its own admission bound (`SKULK_VLLM_MAX_CONCURRENT_REQUESTS`, default 32),
+  since vLLM never sees more requests than that.
 - A fresh Linux install starts again. The node imports Pillow at startup, and
   Linux received it only through mflux; making mflux macOS-only removed it, so
   the node failed with `No module named 'PIL'`. Pillow is now a declared

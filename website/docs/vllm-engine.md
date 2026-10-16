@@ -118,8 +118,11 @@ continuous batching actually engage and decode them together.
 
 - `SKULK_VLLM_MAX_CONCURRENT_REQUESTS` (default 32) bounds how many
   generations the runner keeps in flight; requests beyond it queue in the
-  runner's bounded pool. This is a client-side admission bound, not the
-  server's batch width (vLLM batches up to its own `--max-num-seqs`).
+  runner's bounded pool. The runner also passes it as the server's
+  `--max-num-seqs`, since vLLM never sees more concurrent sequences than the
+  runner admits. A larger cap only costs memory, and vLLM 0.31 refuses to
+  start a hybrid model (Qwen3.5 and Qwen3.6) whose cap exceeds its Mamba
+  cache, one block per sequence.
 - vLLM's share of GPU memory (`--gpu-memory-utilization`) is sized to the
   instance's placement. The runner passes the fraction of the device that
   holds the memory Skulk reserved for the model (weights with overhead, the KV
@@ -167,9 +170,9 @@ pairs Poolside's Laguna models with their block-parallel DFlash drafter
 Hugging Face cache at engine start (measured 1.35x single-stream on an
 A100-80GB; gains on other GPUs require measurement). Deep speculative depths need more scheduler budget
 than vLLM's defaults provide, so for carded depths of 8 or more the runner
-pins both `--max-num-batched-tokens` and `--max-num-seqs` explicitly, since
-vLLM's own defaults for them vary by version and hardware; shallow MTP depths
-run with vLLM's defaults untouched. DFlash speculators also JIT their kernels
+pins `--max-num-batched-tokens` against the pinned sequence cap, since vLLM's
+own default varies by version and hardware; shallow MTP depths keep vLLM's
+batched default. DFlash speculators also JIT their kernels
 through NVRTC at engine start and need a CUDA 12.8+ toolchain on the node.
 See [Speculative Decoding](speculative-decoding.md) for the other engines'
 mechanisms.

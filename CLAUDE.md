@@ -523,10 +523,14 @@ A model card's `placement.compatible_backends` selects which engine serves it
   DFlash drafter, 0.28.0 added DFlash2 drafter checkpoints on the same
   `dflash` method string, and from 0.29 every model runs on vLLM's V2
   model runner) + ninja in the venv (FlashInfer JIT; the runner
-  prepends the venv bin dir to the server PATH). Deep speculative depths
-  (>= 8) pin both `--max-num-batched-tokens` and `--max-num-seqs`
-  explicitly so vLLM's version/hardware-band-dependent scheduler defaults
-  cannot sink the draft-slot budget. Card `runtime.vllm_spec_method`/
+  prepends the venv bin dir to the server PATH). The runner always passes
+  `--max-num-seqs` equal to its admission bound
+  (`SKULK_VLLM_MAX_CONCURRENT_REQUESTS`, default 32): vLLM 0.31 refuses to
+  start a hybrid model (Qwen3.5/3.6) whose sequence cap exceeds its Mamba
+  cache blocks. Deep speculative depths (>= 8) also pin
+  `--max-num-batched-tokens` against that cap so vLLM's
+  version/hardware-band-dependent scheduler defaults cannot sink the
+  draft-slot budget. Card `runtime.vllm_spec_method`/
   `vllm_spec_num_tokens`/`vllm_spec_draft_repo` map to
   `--speculative-config` (method `mtp` = native prediction heads,
   Qwen3.6-27B-FP8 measured 2.01x; method `dflash` = separate block-parallel
