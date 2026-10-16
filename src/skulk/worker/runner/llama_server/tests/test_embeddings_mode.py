@@ -270,3 +270,18 @@ def test_macos_launch_runs_under_the_parent_watchdog(
     assert cmd[2].isdigit()
     assert cmd[3:] == ["/engines/llama-server", "--embeddings"]
     assert runner.base_url == "http://127.0.0.1:4321"
+
+
+def test_embedding_dispatch_is_serial_like_its_one_slot_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wider pool would acknowledge requests that then queue inside the server."""
+
+    def sixteen_slots(_card: object) -> int:
+        return 16
+
+    monkeypatch.setattr(runner_module, "_effective_server_parallel", sixteen_slots)
+    embedding = cast(Any, SimpleNamespace(tasks=["TextEmbedding"]))
+    chat = cast(Any, SimpleNamespace(tasks=["TextGeneration"]))
+    assert runner_module._dispatch_width(embedding) == 1
+    assert runner_module._dispatch_width(chat) == 16

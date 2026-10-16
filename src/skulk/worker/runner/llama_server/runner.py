@@ -189,6 +189,17 @@ def raise_for_server_status(response: httpx.Response) -> None:
         raise ServerRefusalError(server_refusal_message(error.response)) from error
 
 
+def _dispatch_width(card: Any) -> int:
+    """How many requests the runner keeps in flight against its server.
+
+    An embedding server runs one slot (``embedding_server_args``), so its
+    dispatch is serial too; a chat server's width is its slot count.
+    """
+    if card_serves_embeddings(card):
+        return 1
+    return _effective_server_parallel(card)
+
+
 def _effective_server_parallel(card: Any) -> int:
     """Return the safe served slot count for this card generation.
 
@@ -765,11 +776,13 @@ class Runner(ServedConcurrentDispatch):
             raise ValueError(
                 "llama-server settings changed since memory admission; re-place the instance"
             )
-        effective_parallel = _effective_server_parallel(self.shard_metadata.model_card)
-        self._init_concurrent_dispatch(effective_parallel, "llama-gen")
         # A TextEmbedding card runs a dedicated embedding server (``--embeddings``)
-        # and admits only embedding tasks through the same bounded dispatch.
+        # with one slot, so it admits only embedding tasks, one at a time: a
+        # wider pool would acknowledge requests that then wait inside the server
+        # behind that slot, where a long queue can outlast a request's timeout.
         self._serves_embeddings = card_serves_embeddings(self.shard_metadata.model_card)
+        effective_parallel = _dispatch_width(self.shard_metadata.model_card)
+        self._init_concurrent_dispatch(effective_parallel, "llama-gen")
         if self._serves_embeddings:
             self._generation_kinds = (TextEmbedding,)
         self._embedding_text_budget = 0
