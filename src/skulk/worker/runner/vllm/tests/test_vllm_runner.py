@@ -117,6 +117,7 @@ def _serve_args(**overrides: object) -> list[str]:
         max_model_len=8192,
         gpu_memory_utilization=0.9,
         trust_remote_code=False,
+        max_num_seqs=32,
     )
     kwargs.update(overrides)
     return build_vllm_serve_args(**kwargs)  # type: ignore[arg-type]
@@ -994,30 +995,60 @@ def test_build_vllm_serve_args_speculative_config() -> None:
         "model": "poolside/Laguna-XS-2.1-DFlash-FP8",
         "revision": "a" * 40,
     }
-    # Deep depths must raise the scheduler's batched-token budget AND pin
-    # the sequence cap: a DFlash sequence costs 1 + depth slots per decode
-    # step, so batched >= seqs * (1 + depth), and both sides are
-    # vLLM-version- and hardware-band-dependent defaults if left unpinned
-    # (0.25.1's effective 2048/256 failed engine init at depth 15 with
-    # "max_num_scheduled_tokens is set to -1536"; from 0.28 the defaults
-    # reach 1024 seqs, which would sink the raised budget again). 8192 is the
+    # Deep depths must raise the scheduler's batched-token budget against the
+    # pinned sequence cap: a DFlash sequence costs 1 + depth slots per decode
+    # step, so batched >= seqs * (1 + depth), and the batched default is
+    # vLLM-version- and hardware-band-dependent if left unpinned (0.25.1's
+    # effective 2048/256 failed engine init at depth 15 with
+    # "max_num_scheduled_tokens is set to -1536"). 8192 is the
     # fresh-box-validated floor for the Laguna depth-15 card.
     assert args[args.index("--max-num-batched-tokens") + 1] == "8192"
-    assert args[args.index("--max-num-seqs") + 1] == "256"
-    # Shallow MTP depths keep vLLM's default scheduler sizing (the exact
-    # shape the #649 cards validated under): neither flag emitted.
+    assert args[args.index("--max-num-seqs") + 1] == "32"
+    # Shallow MTP depths keep vLLM's batched default (the exact shape the
+    # #649 cards validated under); the sequence cap is pinned regardless.
     shallow = _serve_args(spec_method="mtp", spec_num_tokens=2)
     assert "--max-num-batched-tokens" not in shallow
-    assert "--max-num-seqs" not in shallow
-    # Depths past the validated floor scale linearly rather than re-hitting
-    # the same wall (2048 + 256 * 30 = 9728 at depth 31).
+    assert shallow[shallow.index("--max-num-seqs") + 1] == "32"
+    # A larger admission bound scales the budget linearly past the floor
+    # (2048 + 256 * 30 = 9728 at depth 31) rather than re-hitting the wall.
     deep = _serve_args(
+        max_num_seqs=256,
         spec_method="dflash",
         spec_num_tokens=31,
         spec_draft_repo="poolside/Laguna-XS-2.1-DFlash-FP8",
     )
     assert deep[deep.index("--max-num-batched-tokens") + 1] == "9728"
     assert deep[deep.index("--max-num-seqs") + 1] == "256"
+
+
+def test_max_num_seqs_is_always_the_admission_bound() -> None:
+    """vLLM 0.31 refuses to start a hybrid (Mamba-cache) model when
+    --max-num-seqs exceeds its Mamba cache blocks, one per decode sequence;
+    Qwen3.6-27B-FP8 had 161 blocks at its placement share against vLLM's
+    default 256. The runner never admits more than its own bound, so the
+    flag must always carry that bound, with or without speculation."""
+    for bound in (1, 8, 32, 200):
+        for spec in ({}, {"spec_method": "mtp", "spec_num_tokens": 2}):
+            args = _serve_args(max_num_seqs=bound, **spec)
+            assert args.count("--max-num-seqs") == 1
+            assert args[args.index("--max-num-seqs") + 1] == str(bound)
+
+
+def test_deep_speculation_budget_covers_every_admitted_sequence() -> None:
+    # The invariant the budget exists for, across bounds and depths,
+    # including bounds large enough that the linear term alone would fall
+    # short (2048 + seqs * (depth - 1) < seqs * (1 + depth) once seqs > 1024).
+    for bound in (1, 32, 256, 1024, 1500):
+        for depth in (8, 15, 31, 64):
+            args = _serve_args(
+                max_num_seqs=bound,
+                spec_method="dflash",
+                spec_num_tokens=depth,
+                spec_draft_repo="poolside/Laguna-XS-2.1-DFlash-FP8",
+            )
+            batched = int(args[args.index("--max-num-batched-tokens") + 1])
+            assert batched >= bound * (1 + depth)
+            assert batched >= 8192
 
 
 def test_vllm_max_model_len_constant_shared_with_placement() -> None:

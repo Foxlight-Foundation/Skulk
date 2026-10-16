@@ -47,6 +47,7 @@ def _serve_args(**overrides: object) -> list[str]:
         max_model_len=8192,
         gpu_memory_utilization=0.9,
         trust_remote_code=False,
+        max_num_seqs=32,
     )
     kwargs.update(overrides)
     return build_vllm_serve_args(**kwargs)  # type: ignore[arg-type]
