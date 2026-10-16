@@ -172,20 +172,24 @@ scales with weights, so on the smallest models it can fall short of this."""
 _MAX_CONCURRENT_REQUESTS_ENV: Final = "SKULK_VLLM_MAX_CONCURRENT_REQUESTS"
 _DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
 
-# Deep-speculation scheduler budget. vLLM reserves draft slots per sequence
-# out of --max-num-batched-tokens, so a deep drafter needs
-# batched >= seqs * (depth - 1) or engine init fails with a negative
-# max_num_scheduled_tokens ("set to -1536" observed live with the Laguna
-# depth-15 card on vLLM 0.25.1, whose effective defaults were 2048/256).
-# Both sides of that arithmetic are version- and hardware-band-dependent
-# (0.28.0 raises serve-time defaults as high as 16384/1024 on large GPUs),
-# so at deep depths the runner pins BOTH flags explicitly rather than
-# raising one against an assumed default: max-num-seqs is pinned to the
-# 0.25.1-validated 256 and the batched budget derives from it. Depth 9 is
-# where the historical default budget went non-positive (2048 - 256 * 8);
-# the sizing kicks in at 8 because depth 8 leaves a degenerate 256-token
-# budget. 8192 is the fresh-box-validated floor (Laguna depth-15 card,
-# A100-80GB).
+# Deep-speculation scheduler budget. A DFlash sequence costs 1 + depth slots
+# of --max-num-batched-tokens per decode step (one bonus query plus depth mask
+# queries; vllm/config/speculative.py max_num_new_slots_for_drafting at 0.31,
+# where MTP adds none), so a deep DFlash drafter needs
+# batched >= seqs * (1 + depth) for every admitted sequence to keep decoding
+# each step. On vLLM 0.25.1 a shortfall
+# failed engine init outright ("max_num_scheduled_tokens is set to -1536",
+# observed live with the Laguna depth-15 card at the 2048/256 defaults); from
+# 0.28 the engine starts but decodes fewer sequences per step than it admits
+# (2048 / 16 = 128 on an A100 at depth 15). Both sides of that arithmetic are
+# version- and hardware-band-dependent (serve-time defaults range from
+# 2048/256 to 16384/1024, unchanged through 0.31), so at deep depths the
+# runner pins BOTH flags explicitly rather than raising one against an assumed
+# default: max-num-seqs is pinned to 256 and the batched budget derives from
+# it. The pinned formula, max(8192, 2048 + 256 * (depth - 1)), always clears
+# 256 * (1 + depth) with 1536 tokens to spare. The sizing starts at depth 8
+# (the historical default budget went non-positive at depth 9), and 8192 is
+# the fresh-box-validated floor (Laguna depth-15 card, A100-80GB).
 _SPEC_PINNED_BATCH_BASE_TOKENS: Final = 2048
 _SPEC_PINNED_MAX_NUM_SEQS: Final = 256
 _SPEC_DEPTH_NEEDING_BATCH_SIZING: Final = 8
@@ -1342,8 +1346,9 @@ class Runner(ServedConcurrentDispatch):
         message = cast("dict[str, Any]", choice.get("message") or {})
         # vLLM responses carry OpenAI usage but no llama-server-style engine
         # timings, so usage-derived whole-request wall rates are the honest
-        # stats here; cached-prefix subtraction does not apply to the
-        # blocking path (no prompt_tokens_details outside include_usage).
+        # stats here. The blocking usage does include prompt_tokens_details
+        # (the server runs with --enable-prompt-tokens-details), but these
+        # stats do not yet subtract its cached prefix.
         stats = blocking_call_stats(result.get("usage"), request_seconds, None)
         if stats is not None:
             stats = stats.model_copy(
@@ -1373,7 +1378,12 @@ class Runner(ServedConcurrentDispatch):
         # chunk carries the server's real finish reason. content_filter is
         # preserved exactly like the streaming parser does; everything else
         # maps through the shared finish mapping.
-        reasoning = str(message.get("reasoning_content") or "")
+        # vLLM's non-streamed message names the field `reasoning` (it never
+        # serializes `reasoning_content`); reading only the latter silently
+        # dropped the thinking of a prose answer on this path.
+        reasoning = str(
+            message.get("reasoning") or message.get("reasoning_content") or ""
+        )
         content = str(message.get("content") or "")
         if reasoning:
             self._send_token(command_id, model_id, reasoning, is_thinking=True)

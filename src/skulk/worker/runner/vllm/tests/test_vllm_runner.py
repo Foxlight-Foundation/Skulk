@@ -995,12 +995,12 @@ def test_build_vllm_serve_args_speculative_config() -> None:
         "revision": "a" * 40,
     }
     # Deep depths must raise the scheduler's batched-token budget AND pin
-    # the sequence cap: the budget constraint is
-    # batched >= seqs * (depth - 1), and both sides are vLLM-version- and
-    # hardware-band-dependent defaults if left unpinned (0.25.1's effective
-    # 2048/256 failed engine init at depth 15 with
-    # "max_num_scheduled_tokens is set to -1536"; 0.28.0 defaults seqs as
-    # high as 1024, which would sink the raised budget again). 8192 is the
+    # the sequence cap: a DFlash sequence costs 1 + depth slots per decode
+    # step, so batched >= seqs * (1 + depth), and both sides are
+    # vLLM-version- and hardware-band-dependent defaults if left unpinned
+    # (0.25.1's effective 2048/256 failed engine init at depth 15 with
+    # "max_num_scheduled_tokens is set to -1536"; from 0.28 the defaults
+    # reach 1024 seqs, which would sink the raised budget again). 8192 is the
     # fresh-box-validated floor for the Laguna depth-15 card.
     assert args[args.index("--max-num-batched-tokens") + 1] == "8192"
     assert args[args.index("--max-num-seqs") + 1] == "256"

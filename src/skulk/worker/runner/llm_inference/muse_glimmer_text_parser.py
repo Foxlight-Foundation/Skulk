@@ -24,7 +24,7 @@ The parser is pure Python and engine-agnostic: the MLX engine feeds it
 detokenized deltas (``model_output_parsers.parse_muse_glimmer``), and an
 in-process llama.cpp path can feed it string deltas the same way once its
 binding grows the architecture. The served engines never need it: llama-server
-(b10353 and later) and vLLM 0.28 parse this format natively.
+(b10353 and later) and vLLM (0.28 and later) parse this format natively.
 
 Streaming discipline mirrors the other text parsers here: a marker split
 across two deltas is held back rather than emitted as literal text, the
