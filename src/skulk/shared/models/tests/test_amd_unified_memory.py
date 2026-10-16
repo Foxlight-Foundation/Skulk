@@ -53,6 +53,16 @@ def test_unified_limit_falls_back_to_gtt_when_ttm_unread() -> None:
     assert amd_unified_memory_limit(accelerator, _memory()) == _KITE5_TTM
 
 
+def test_unified_limit_is_capped_by_a_smaller_gtt() -> None:
+    """amdgpu allocates from GTT, so an explicit smaller ``amdgpu.gttsize``
+    caps the pool below the TTM limit."""
+    gtt = 48 * 2**30
+    accelerator = _amd(
+        gtt_total_bytes=gtt, unified_memory=True, addressable_memory_bytes=_KITE5_TTM
+    )
+    assert amd_unified_memory_limit(accelerator, _memory()) == gtt
+
+
 def test_unified_verdict_needs_no_memory_reading() -> None:
     """The kernel verdict stands alone; callers decide what to do without RAM."""
     accelerator = _amd(unified_memory=True, addressable_memory_bytes=_KITE5_TTM)

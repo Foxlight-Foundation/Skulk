@@ -1096,8 +1096,9 @@ the GPU to its KFD topology node by render minor. The kernel sizes a
 discrete card's memory bank at its VRAM and, for an APU that maps host RAM
 (its prefer-GTT mode), at the TTM page limit, the figure `amd-ttm` reports.
 A bank equal to the TTM limit but not the VRAM therefore marks a
-unified-memory GPU, and that limit is the host memory it can address; on an
-untuned kernel the limit defaults to half of RAM. Placement, the worker's
+unified-memory GPU, and that limit, capped by its GTT aperture, is the host
+memory it can address; on an untuned kernel the limit defaults to half of RAM.
+A KFD bank matching neither stays unknown. Placement, the worker's
 load guard and vLLM's memory share all use the same classifier
 (`amd_unified_memory_limit`). A node whose collector cannot tell keeps the
 older rule (GTT above the carve and covering all of RAM), which misses an

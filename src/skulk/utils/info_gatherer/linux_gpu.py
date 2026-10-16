@@ -199,10 +199,11 @@ def classify_unified_memory(
       also serves from its carve).
     * KFD bank equal to the TTM page limit but not the VRAM total: an APU in the
       kernel's prefer-GTT mode, whose memory is the host RAM it may map.
-    * No usable KFD report, but the APU-only ``uma`` sysfs interface exists
+    * No KFD report at all, but the APU-only ``uma`` sysfs interface exists
       (newer kernels): an APU, sized by the TTM limit.
-    * Anything else (for example a partitioned accelerator whose bank matches
-      neither): unknown, so placement keeps its size heuristic.
+    * A KFD bank matching neither (a partitioned accelerator, or a TTM limit
+      changed at runtime after the driver sized the bank), or no kernel facts:
+      unknown, so placement keeps its size heuristic.
 
     Args:
         vram_total: ``mem_info_vram_total`` in bytes.
@@ -220,6 +221,10 @@ def classify_unified_memory(
             return False, None
         if ttm_addressable is not None and kfd_bank == ttm_addressable:
             return True, kfd_bank
+        # A KFD report matching neither (a partitioned device, or a TTM limit
+        # changed after the driver sized the bank) contradicts both rules, so
+        # it stays unknown rather than falling through to the uma heuristic.
+        return None, None
     if has_uma_interface:
         return True, ttm_addressable
     return None, None

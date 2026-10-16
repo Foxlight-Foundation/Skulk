@@ -119,8 +119,9 @@ def amd_unified_memory_limit(
     The single classifier every placement, worker-fit and engine-sizing path
     uses, so they cannot disagree about a node. The collector's kernel-derived
     verdict (``AcceleratorMetrics.unified_memory``) decides, and the limit is
-    the TTM page limit it reports (``amd-ttm``'s figure), falling back to the
-    GTT total. When the collector could not tell (``None``: no KFD report),
+    the TTM page limit it reports (``amd-ttm``'s figure), capped by the GTT
+    aperture amdgpu allocates from. When the collector could not tell
+    (``None``: no KFD report),
     the older size heuristic applies: GTT larger than the VRAM carve AND
     covering all of system RAM. That heuristic cannot be the primary rule
     because it depends on optional tuning: AMD's recommended 512 MB carve with
@@ -142,8 +143,15 @@ def amd_unified_memory_limit(
     if accelerator.unified_memory is False:
         return None
     if accelerator.unified_memory is True:
-        limit = accelerator.addressable_memory_bytes or accelerator.gtt_total_bytes
-        return limit if limit is not None and limit > 0 else None
+        # amdgpu allocates this memory from its GTT aperture, so a GTT sized
+        # below the TTM limit (an explicit smaller ``amdgpu.gttsize``) is the
+        # real ceiling; take the smaller of the two that are known.
+        limits = [
+            value
+            for value in (accelerator.addressable_memory_bytes, accelerator.gtt_total_bytes)
+            if value is not None and value > 0
+        ]
+        return min(limits) if limits else None
     gtt_total = accelerator.gtt_total_bytes
     if (
         gtt_total is None

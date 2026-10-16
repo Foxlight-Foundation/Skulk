@@ -229,3 +229,17 @@ def test_kfd_node_is_matched_by_render_minor(tmp_path: Path) -> None:
     )
     assert acc.unified_memory is True
     assert acc.addressable_memory_bytes == _KITE5_BANK
+
+
+def test_contradictory_kfd_report_is_not_overridden_by_uma(tmp_path: Path) -> None:
+    """A KFD bank matching neither VRAM nor the current TTM limit (for example
+    a TTM limit raised at runtime after the driver sized the bank) stays
+    unknown even when the APU-only ``uma`` interface exists."""
+    device = _make_apu_device(tmp_path, vram=_KITE5_VRAM, uma_interface=True)
+    kfd = _make_kfd(tmp_path, [(110501, 128, _KITE5_BANK)])
+    raised_ttm_pages = _KITE5_TTM_PAGES + 1_048_576  # +4 GiB after init
+    acc = read_accelerator_metrics(
+        device, kfd_root=kfd, ttm_pages_limit=_ttm(tmp_path, raised_ttm_pages), page_size=_PAGE
+    )
+    assert acc.unified_memory is None
+    assert acc.addressable_memory_bytes is None
