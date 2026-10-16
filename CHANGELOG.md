@@ -102,6 +102,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- A fresh Linux install starts again. The node imports Pillow at startup, and
+  Linux received it only through mflux; making mflux macOS-only removed it, so
+  the node failed with `No module named 'PIL'`. Pillow is now a declared
+  dependency on every platform. Nodes upgraded in place kept their old copy
+  and were unaffected.
 - AMD Strix Halo nodes set up as AMD recommends (a 512 MB carve) can run GPU
   models again. Skulk decided whether the GPU shares system memory by
   comparing memory sizes, and on a 64 GB node whose GPU limit sat just below
