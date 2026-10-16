@@ -2,9 +2,11 @@
 
 Geometry describes tensors, not a measured total or a model-name heuristic.
 Engine configuration supplies slot count and recurrent rollback depth separately.
-The Qwen3.5 mapping follows llama.cpp b10753's qwen35 loader, hparams and
-recurrent-memory implementation; other recurrent architectures need their own
-verified mapping before they can use this estimate.
+The Qwen3.5 mapping follows llama.cpp b11669's qwen35 loader, hparams and
+recurrent-memory implementation, re-verified against b10753 when the pin
+advanced (identical state widths, FP32 state types and rollback rows); other
+recurrent architectures need their own verified mapping before they can use
+this estimate.
 """
 
 from collections.abc import Mapping
