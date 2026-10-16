@@ -48,6 +48,7 @@ from skulk.shared.models.memory_estimate import (
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
+    card_serves_embeddings,
     card_serves_speech,
     model_engine_requirements,
     registry_compatible_backends_for_node,
@@ -594,6 +595,7 @@ def _card_platform_backends(
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
         card_serves_music=card.music is not None,
+        card_serves_embeddings=card_serves_embeddings(card),
         card_has_native_image_profile=card.image is not None,
         card_has_pinned_projector=(
             card.vision is not None and card.vision.has_pinned_projector

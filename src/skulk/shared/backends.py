@@ -416,6 +416,10 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
 _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx", "llama_cpp"})
 _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
 _MUSIC_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"audio_cpp"})
+# Embedding cards dispatch to the transformers runner, which the worker runs
+# only for ``mlx`` placements. Without this gate a card declaring another
+# engine placed there and crashed at runner import instead of being refused.
+_EMBEDDING_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx"})
 AUDIO_CPP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
     {
         "audio_cpp-cpu",
@@ -446,6 +450,7 @@ def platform_compatible_backends(
     card_serves_vision: bool,
     card_serves_speech: bool = False,
     card_serves_music: bool = False,
+    card_serves_embeddings: bool = False,
     card_has_native_image_profile: bool = False,
     card_has_pinned_projector: bool = False,
     card_supports_tool_calling: bool = False,
@@ -468,6 +473,9 @@ def platform_compatible_backends(
         compatible_backends: the card's declared backend tags.
         card_serves_vision: whether the card declares a vision capability.
         card_serves_speech: whether the card declares a speech capability.
+        card_serves_music: whether the card declares a music workload.
+        card_serves_embeddings: whether the card declares a text-embedding
+            workload; only engines with an embedding runner remain.
         card_has_native_image_profile: whether complete typed image components
             require the native image runner; legacy image runners cannot load them.
         card_has_pinned_projector: whether a vision card identifies one exact
@@ -524,6 +532,13 @@ def platform_compatible_backends(
             for tag in expand_engine_backends(filtered)
             if (engine := engine_of(tag)) is None
             or (engine in _MUSIC_SERVING_ENGINES and tag in AUDIO_CPP_COMPUTE_BACKENDS)
+        )
+    if card_serves_embeddings:
+        filtered = frozenset(
+            tag
+            for tag in filtered
+            if (engine := engine_of(tag)) is None
+            or engine in _EMBEDDING_SERVING_ENGINES
         )
     if card_supports_tool_calling and card_vllm_tool_call_parser is None:
         filtered = frozenset(tag for tag in filtered if engine_of(tag) != "vllm")

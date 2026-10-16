@@ -9234,8 +9234,8 @@ class API:
 
         The programmatic equivalent of ``POST /v1/embeddings`` for in-process
         callers (extensions receive this via their ``ExtensionContext``).
-        When ``model_id`` is omitted, the first running embedding instance is
-        used. Returns one vector per input text, or ``None`` when no
+        When ``model_id`` is omitted, the running embedding model with the
+        lowest model id is used, so repeated calls agree on one vector space. Returns one vector per input text, or ``None`` when no
         embedding instance is available, the task errors, or the call times
         out. Callers must treat ``None`` as "degrade gracefully": this method
         never raises for serving-availability reasons. Side effect: sends a
@@ -9297,16 +9297,30 @@ class API:
 
         Reads the in-memory shard metadata (like text-model resolution) so
         availability does not depend on model-card cache misses or remote
-        fetches.
+        fetches. Vectors from different models are not comparable, so with
+        several embedding models mounted the choice must not depend on
+        instance ordering: the lowest model id wins, and the ambiguity is
+        logged so callers learn to name the model.
         """
         from skulk.shared.models.model_cards import ModelTask
 
-        for instance in self.state.instances.values():
-            assignments = instance.shard_assignments
-            for shard in assignments.runner_to_shard.values():
-                if ModelTask.TextEmbedding in shard.model_card.tasks:
-                    return assignments.model_id
-        return None
+        candidates = sorted(
+            {
+                instance.shard_assignments.model_id
+                for instance in self.state.instances.values()
+                if any(
+                    ModelTask.TextEmbedding in shard.model_card.tasks
+                    for shard in instance.shard_assignments.runner_to_shard.values()
+                )
+            }
+        )
+        if len(candidates) > 1:
+            logger.warning(
+                f"embed_texts without a model id: {len(candidates)} embedding "
+                f"models are mounted ({', '.join(candidates)}); using "
+                f"{candidates[0]}. Pass model_id for a stable vector space."
+            )
+        return candidates[0] if candidates else None
 
     def stream_events(self) -> StreamingResponse:
         def _generate_json_array(events: Iterable[Event]) -> Iterable[str]:

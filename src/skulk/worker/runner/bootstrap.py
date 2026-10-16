@@ -17,6 +17,7 @@ from skulk.shared.models.capabilities import (
 )
 from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
+    card_serves_embeddings,
     card_serves_speech,
 )
 from skulk.shared.models.remote_code_approval import require_remote_code_approval
@@ -402,7 +403,7 @@ def _metal_cleanup_signal_handler(signum: int, _frame: object) -> None:
 
 
 def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
-    """Resolve which engine serves this (non-image, non-embedding) text model here.
+    """Resolve which engine serves this text, speech or embedding model here.
 
     Prefers the backend the master already resolved for this node and persisted
     on the shard (``resolved_backend``, #330): dispatch is then deterministic
@@ -467,6 +468,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
             card_serves_music=shard.model_card.music is not None,
+            card_serves_embeddings=card_serves_embeddings(shard.model_card),
             card_has_native_image_profile=shard.model_card.image is not None,
             card_has_pinned_projector=(
                 shard.model_card.vision is not None
@@ -638,6 +640,16 @@ def entrypoint(
             )
             runner.main()
         elif bound_instance.is_embedding_model:
+            # Same engine resolution as text and speech: the transformers
+            # runner serves mlx placements (and legacy ones with no engine).
+            # Any other engine fails here with the reason rather than inside
+            # an import the node may not have.
+            embedding_engine = _resolve_text_engine(bound_instance)
+            if embedding_engine not in (None, "mlx"):
+                raise RuntimeError(
+                    f"no embedding runner serves engine {embedding_engine!r} for "
+                    f"{bound_instance.bound_shard.model_card.model_id} on this node"
+                )
             from skulk.worker.runner.embeddings.runner import Runner as EmbeddingRunner
 
             runner = EmbeddingRunner(
