@@ -232,6 +232,19 @@ class AcceleratorMetrics(CamelCaseModel):
     carve-out through GTT, so the usable GPU pool is far larger than
     ``vram_total_bytes`` (placement uses this to admit big models on a UMA node).
     ``None`` on discrete GPUs / collectors that do not report it."""
+    unified_memory: bool | None = None
+    """Whether this GPU's memory is host RAM it maps through GTT (an AMD APU in
+    the kernel's prefer-GTT mode) rather than a dedicated or carve-out pool.
+    Read from the kernel's own report instead of inferred from GTT, VRAM and RAM
+    sizes, which depend on optional tuning: KFD sizes such a GPU's memory bank
+    at the TTM page limit, while a discrete card's bank is its VRAM. ``None``
+    when the collector cannot tell, in which case placement keeps its size
+    heuristic."""
+    addressable_memory_bytes: int | None = None
+    """Host memory a unified-memory GPU can address: the kernel's TTM page
+    limit, as ``amd-ttm`` reports it (the KFD memory bank of such a GPU). Holds
+    with or without ``ttm.pages_limit`` tuning, since the kernel defaults it to
+    half of RAM. ``None`` for discrete GPUs or when unmeasured."""
     power_watts: float | None = None
     temperature_celsius: float | None = None
     clock_mhz: int | None = None

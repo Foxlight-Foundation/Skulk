@@ -71,6 +71,7 @@ from skulk.download.download_utils import build_model_path
 from skulk.shared.backends import VLLM_BIN_ENV
 from skulk.shared.models.memory_estimate import (
     VLLM_MAX_MODEL_LEN,
+    amd_unified_memory_limit,
     estimate_shard_footprint,
     is_gb10_accelerator,
     per_token_kv_bytes,
@@ -86,6 +87,7 @@ from skulk.shared.types.events import (
     TaskStatusUpdated,
 )
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.tasks import (
     LoadModel,
     Task,
@@ -456,11 +458,11 @@ def _device_memory_total(resolved_backend: str | None) -> int | None:
         total = amd.vram_total_bytes
         if total is None or total <= 0:
             return None
-        gtt_total = amd.gtt_total_bytes
+        # An APU's memory is the host RAM it maps, so there is no device total
+        # to size a share against; same classifier as placement.
         if (
-            gtt_total is not None
-            and gtt_total > total
-            and gtt_total >= psutil.virtual_memory().total
+            amd_unified_memory_limit(amd, MemoryUsage.from_psutil(override_memory=None))
+            is not None
         ):
             return None
         return total

@@ -59,6 +59,7 @@ from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     LOAD_FIT_TOLERANCE,
     UMA_GPU_OS_HEADROOM,
+    amd_unified_memory_limit,
     backend_offloads_to_vram,
     estimate_shard_footprint,
     gb10_unified_memory_pool,
@@ -678,12 +679,13 @@ def _local_usable_vram() -> Memory | None:
 
     * Discrete GPU: ``min(vram_total - vram_used, GPU_VRAM_WORKING_SET_FRACTION x
       vram_total)``.
-    * Unified-memory APU (GTT spans the whole system: ``gtt_total > vram_total``
-      AND ``gtt_total >= ram_total``, e.g. Strix Halo):
+    * Unified-memory APU (e.g. Strix Halo, classified by the shared
+      ``amd_unified_memory_limit``):
       ``min(vram_avail, GPU_VRAM_WORKING_SET_FRACTION x vram_total) +
-      min(max(0, local_ram_available - UMA_GPU_OS_HEADROOM), gtt_total)`` so the
-      GPU's GTT-mapped system RAM counts toward the pool. The live GPU-wireable
-      snapshot matches the ceiling the master derives from gossiped telemetry.
+      min(max(0, local_ram_available - UMA_GPU_OS_HEADROOM), addressable)`` so
+      the system RAM the GPU can address (the TTM limit) counts toward the pool.
+      The live GPU-wireable snapshot matches the ceiling the master derives from
+      gossiped telemetry.
 
     NVIDIA GB10 nodes use the CUDA-memory fallback when NVML lacks memory and
     bound their shared pool by current host RAM. Other NVIDIA GPUs take the
@@ -748,23 +750,17 @@ def _local_usable_vram() -> Memory | None:
     available = max(0, total - used)
     ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
     vram_usable = min(available, ceiling)
-    gtt_total = accelerator.gtt_total_bytes
     local_memory = MemoryUsage.from_local_gpu_wireable()
-    # UMA signature: GTT spans the whole system (exceeds the VRAM carve-out AND
-    # covers all of system RAM). A discrete AMD card also reports a GTT total
-    # (often ~= VRAM), so requiring it to cover system RAM keeps a discrete GPU
-    # on the VRAM-only path. Matches the master's gate in ``usable_vram_by_node``.
-    if (
-        gtt_total is not None
-        and gtt_total > total
-        and gtt_total >= local_memory.ram_total.in_bytes
-    ):
-        # UMA APU: the GPU maps host RAM via GTT beyond the BIOS VRAM carve-out,
-        # so count current free system RAM (minus OS headroom, capped by GTT).
-        # The VRAM portion keeps its working-set headroom.
+    # Same classifier as the master's ``usable_vram_by_node``, so the local
+    # guard cannot refuse a shard the master admitted on the same reading.
+    unified_limit = amd_unified_memory_limit(accelerator, local_memory)
+    if unified_limit is not None:
+        # UMA APU: the GPU maps host RAM beyond the BIOS VRAM carve-out, so
+        # count current free system RAM (minus OS headroom, capped by what the
+        # GPU can address). The VRAM portion keeps its working-set headroom.
         sys_for_gpu = min(
             max(0, local_memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
-            gtt_total,
+            unified_limit,
         )
         return Memory.from_bytes(vram_usable + sys_for_gpu)
     return Memory.from_bytes(vram_usable)
@@ -773,7 +769,7 @@ def _local_usable_vram() -> Memory | None:
 def _local_unified_memory_gpu() -> bool:
     """Whether this node's GPU pool shares physical memory with host RAM.
 
-    AMD APUs qualify when their GTT aperture spans host RAM. NVIDIA GB10
+    AMD APUs qualify by the shared ``amd_unified_memory_limit``. NVIDIA GB10
     qualifies when CUDA and host memory measurements confirm one shared pool.
     A fixed-window engine's KV allocation takes host pages on either device,
     so its stamped window must also fit current host RAM.
@@ -807,11 +803,10 @@ def _local_unified_memory_gpu() -> bool:
             is not None
         )
     accelerator = read_accelerator_metrics(device)
-    total = accelerator.vram_total_bytes
-    gtt_total = accelerator.gtt_total_bytes
-    if not total or total <= 0 or gtt_total is None or gtt_total <= total:
-        return False
-    return gtt_total >= MemoryUsage.from_local_gpu_wireable().ram_total.in_bytes
+    return (
+        amd_unified_memory_limit(accelerator, MemoryUsage.from_local_gpu_wireable())
+        is not None
+    )
 
 
 def _local_carve_first_gpu() -> bool:
@@ -836,13 +831,10 @@ def _local_carve_first_gpu() -> bool:
     if device is None:
         return False
     accelerator = read_accelerator_metrics(device)
-    total = accelerator.vram_total_bytes
-    gtt_total = accelerator.gtt_total_bytes
-    if not total or total <= 0 or gtt_total is None or gtt_total <= total:
-        return False
     return (
         accelerator.vram_used_bytes is not None
-        and gtt_total >= MemoryUsage.from_local_gpu_wireable().ram_total.in_bytes
+        and amd_unified_memory_limit(accelerator, MemoryUsage.from_local_gpu_wireable())
+        is not None
     )
 
 

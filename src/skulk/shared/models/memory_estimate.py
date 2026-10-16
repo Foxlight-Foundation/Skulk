@@ -111,6 +111,58 @@ def gb10_unified_memory_pool(
     )
 
 
+def amd_unified_memory_limit(
+    accelerator: AcceleratorMetrics, memory: MemoryUsage | None
+) -> int | None:
+    """Return the host memory an AMD unified-memory GPU can address, else ``None``.
+
+    The single classifier every placement, worker-fit and engine-sizing path
+    uses, so they cannot disagree about a node. The collector's kernel-derived
+    verdict (``AcceleratorMetrics.unified_memory``) decides, and the limit is
+    the TTM page limit it reports (``amd-ttm``'s figure), capped by the GTT
+    aperture amdgpu allocates from. When the collector could not tell
+    (``None``: no KFD report),
+    the older size heuristic applies: GTT larger than the VRAM carve AND
+    covering all of system RAM. That heuristic cannot be the primary rule
+    because it depends on optional tuning: AMD's recommended 512 MB carve with
+    a GTT just under RAM (a 64 GB Strix Halo at ``ttm.pages_limit`` 60 GiB)
+    fails it, and sizing such a node by its carve refused a 2.6 GB GGUF there.
+
+    Args:
+        accelerator: The node's accelerator telemetry.
+        memory: The node's system memory, needed only by the fallback
+            heuristic.
+
+    Returns:
+        Addressable host-memory bytes for a unified-memory AMD GPU, or
+        ``None`` for a discrete GPU, a non-AMD device, or an unknown.
+    """
+    total = accelerator.vram_total_bytes
+    if accelerator.vendor != "amd" or not total or total <= 0:
+        return None
+    if accelerator.unified_memory is False:
+        return None
+    if accelerator.unified_memory is True:
+        # amdgpu allocates this memory from its GTT aperture, so a GTT sized
+        # below the TTM limit (an explicit smaller ``amdgpu.gttsize``) is the
+        # real ceiling; take the smaller of the two that are known.
+        limits = [
+            value
+            for value in (accelerator.addressable_memory_bytes, accelerator.gtt_total_bytes)
+            if value is not None and value > 0
+        ]
+        return min(limits) if limits else None
+    gtt_total = accelerator.gtt_total_bytes
+    if (
+        gtt_total is None
+        or gtt_total <= total
+        or memory is None
+        or gtt_total < memory.ram_total.in_bytes
+    ):
+        return None
+    return gtt_total
+
+
 LLAMA_CPP_MEMORY_OVERHEAD_FACTOR: float = 1.10
 """``MEMORY_OVERHEAD_FACTOR`` for the llama.cpp (GGUF) engine. The 1.30 default
 covers MLX's buffer cache + Python/MLX runtime, which the C++ llama.cpp runtime
