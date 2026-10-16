@@ -1352,6 +1352,15 @@ serving approximate vectors. Programmatic callers that omit the model (the
 extension `embed_texts` helper) get the mounted embedding model with the lowest
 model id.
 
+GGUF embedding cards are served by a dedicated llama-server (`--embeddings`) on
+any node with a llama-server engine, including Linux GPU and CPU nodes. Their
+pooling comes from the GGUF metadata and vectors are L2-normalized, as llama.cpp
+does by default. Such a card must declare `context_length`, the model's input
+length: inputs longer than that are truncated through the model's own tokenizer
+before embedding (llama.cpp itself would refuse them), matching the
+safetensors runner's truncation. A GGUF card and the safetensors card of the
+same model are different vector spaces; compare vectors only within one card.
+
 ## OpenAI Audio Speech API
 
 **POST** `/v1/audio/speech`

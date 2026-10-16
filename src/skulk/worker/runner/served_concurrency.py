@@ -39,6 +39,7 @@ from skulk.shared.types.tasks import (
     Task,
     TaskId,
     TaskStatus,
+    TextEmbedding,
     TextGeneration,
     VideoGeneration,
 )
@@ -72,7 +73,14 @@ _QUEUED_POLL_S: float = 0.1
 _RECENT_TASK_ID_LIMIT = 4096
 
 
-type GenerationTask = TextGeneration | VideoGeneration | MusicGeneration | ImageGeneration | ImageEdits
+type GenerationTask = (
+    TextGeneration
+    | TextEmbedding
+    | VideoGeneration
+    | MusicGeneration
+    | ImageGeneration
+    | ImageEdits
+)
 """The task kinds the dispatch loop admits as generations: acknowledged on
 admission, run on the pool, and given their terminal status by the loop."""
 

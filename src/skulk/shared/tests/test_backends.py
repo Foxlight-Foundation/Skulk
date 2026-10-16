@@ -287,17 +287,34 @@ def test_platform_compatible_backends_gates_speech_to_mlx_audio() -> None:
 
 
 def test_platform_compatible_backends_gates_embeddings_to_their_runner() -> None:
-    # Embedding cards dispatch to the transformers runner, which serves mlx
-    # placements; a card declaring another engine must be refused at placement
-    # rather than crash at runner import on a node without that runner.
+    # Embedding cards run on engines with an embedding runner: the transformers
+    # runner (mlx placements) and a dedicated llama-server --embeddings. A card
+    # declaring another engine must be refused at placement rather than crash at
+    # runner import on a node without that runner.
     declared = frozenset(
-        {"mlx", "mlx-metal", "llama_cpp-vulkan", "vllm-cuda", "future_engine"}
+        {
+            "mlx",
+            "mlx-metal",
+            "llama_server-vulkan",
+            "llama_server-cuda",
+            "llama_cpp-vulkan",
+            "vllm-cuda",
+            "future_engine",
+        }
     )
     assert platform_compatible_backends(
         declared,
         card_serves_vision=False,
         card_serves_embeddings=True,
-    ) == frozenset({"mlx", "mlx-metal", "future_engine"})
+    ) == frozenset(
+        {
+            "mlx",
+            "mlx-metal",
+            "llama_server-vulkan",
+            "llama_server-cuda",
+            "future_engine",
+        }
+    )
     # Non-embedding cards are untouched by the gate.
     assert (
         platform_compatible_backends(declared, card_serves_vision=False) == declared
