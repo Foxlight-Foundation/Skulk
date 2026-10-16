@@ -109,3 +109,19 @@ def test_forward_normalizes_only_when_the_recipe_says_so() -> None:
     assert raw == [[3.0, 1.0]]
     norm = math.sqrt(3.0 * 3.0 + 1.0)
     assert [round(value, 6) for value in normalized[0]] == [round(3.0 / norm, 6), round(1.0 / norm, 6)]
+
+
+def test_pass_size_shrinks_with_the_truncation_length() -> None:
+    """A pass never pads past the token budget, however long the recipe's inputs."""
+    assert embeddings_runner._texts_per_pass(256) == 32
+    assert embeddings_runner._texts_per_pass(512) == 32
+    assert embeddings_runner._texts_per_pass(8192) == 2
+    assert embeddings_runner._texts_per_pass(65536) == 1
+
+    tokenizer = _Tokenizer()
+    texts = ["5"] * 5
+    embeddings_runner._forward(
+        _encoder, tokenizer, texts, torch.device("cpu"),
+        EmbeddingRecipe(pooling="mean", normalize=False, max_tokens=8192), rank=0,
+    )
+    assert [count for count, _ in tokenizer.calls] == [2, 2, 1]
