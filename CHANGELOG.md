@@ -85,7 +85,18 @@ This project records release notes here and mirrors public-facing notes in
   instead of the build machine's CPU, so it no longer risks an
   illegal-instruction crash on processors without AVX-512.
 
+- The vLLM engine that `install.sh --with-vllm` installs advances from 0.28.0
+  to 0.31.0 (still the CUDA 12.9 build, for x86_64 and aarch64), which runs
+  every model on vLLM's newer model runner. This release can run newer
+  families such as Qwen3.8-Flash-Next and GLM-5.3-Flash; Skulk serves them
+  once their model cards are published. Existing vLLM nodes keep 0.28.0 until
+  `install.sh --with-vllm` is run again.
+
 ### Fixed
+
+- A vLLM model's reasoning is no longer lost when a request with tools gets a
+  plain answer instead of a tool call. Skulk read the reasoning from a field
+  vLLM does not send, so the thinking never reached the caller.
 
 - Rolling a cluster back to an earlier build no longer stops its nodes from
   starting over a settings section the newer build added. Nodes used to

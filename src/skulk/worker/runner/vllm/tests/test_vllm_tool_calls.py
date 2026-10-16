@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import pytest
 
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -205,14 +206,24 @@ def test_tool_round_trip_emits_stamped_tool_call_chunk(monkeypatch: Any) -> None
     assert stats.in_flight_at_admission == 2
 
 
-def test_prose_answer_falls_back_to_tokens(monkeypatch: Any) -> None:
+@pytest.mark.parametrize(
+    "reasoning_key",
+    [
+        # vLLM's non-streamed ChatMessage carries reasoning only as `reasoning`
+        # (vllm/entrypoints/openai/chat_completion/protocol.py at 0.28 and 0.31).
+        "reasoning",
+        # DeepSeek-style servers name it `reasoning_content`; still accepted.
+        "reasoning_content",
+    ],
+)
+def test_prose_answer_falls_back_to_tokens(monkeypatch: Any, reasoning_key: str) -> None:
     task = _tool_task()
     events: list[object] = []
     runner = _runner(events, monkeypatch, task)
     payload = {
         "choices": [
             {
-                "message": {"content": "no tool needed", "reasoning_content": "hmm"},
+                "message": {"content": "no tool needed", reasoning_key: "hmm"},
                 "finish_reason": "length",
             }
         ],

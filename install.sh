@@ -302,16 +302,17 @@ if [[ "$WITH_VLLM" == "1" ]]; then
         # - vLLM's PyPI default wheel links CUDA 13 runtime libraries
         #   (libcudart.so.13), which cannot import on the CUDA 12.x drivers
         #   common on GPU clouds; the cu129 VARIANT wheel from wheels.vllm.ai
-        #   is the one that runs there (probe-validated on 0.25.1; 0.28.0
-        #   keeps publishing the cu129 variant). 0.25.1 remains the floor
-        #   for the DFlash speculator architectures (Laguna cards); 0.28.0
-        #   adds DFlash2 drafter checkpoints (selected by the checkpoint,
-        #   same "dflash" method string, V2 model runner auto-engaged).
+        #   is the one that runs there (probe-validated on 0.25.1; 0.31.0
+        #   still publishes the cu129 variant for x86_64 and aarch64). 0.25.1
+        #   remains the floor for the DFlash speculator architectures (Laguna
+        #   cards); 0.28.0 added DFlash2 drafter checkpoints (selected by the
+        #   checkpoint, same "dflash" method string). From 0.29 every model
+        #   runs on vLLM's V2 model runner.
         # - ninja must be resolvable by the vllm server process (FlashInfer
         #   JIT sampling kernels shell out to it); installing it into the
         #   venv suffices because the runner prepends the venv bin dir to the
         #   server's PATH.
-        # - torch backend must be cu129 (0.28.0 pairs with torch 2.13): the
+        # - torch backend must be cu129 (0.31.0 still pairs with torch 2.13): the
         #   cu128 torch index historically failed resolution outright
         #   (torchcodec too old, fresh-box validated on 0.25.1). DFlash
         #   cards additionally JIT their speculator kernels through nvrtc
@@ -321,8 +322,8 @@ if [[ "$WITH_VLLM" == "1" ]]; then
         # above): a host exporting UV_INDEX_URL/UV_DEFAULT_INDEX would
         # otherwise redirect dependency resolution to its own mirror.
         uv pip install --python "$VLLM_ENV/bin/python" \
-            "vllm==0.28.0+cu129" ninja \
-            --extra-index-url "https://wheels.vllm.ai/0.28.0/cu129/" \
+            "vllm==0.31.0+cu129" ninja \
+            --extra-index-url "https://wheels.vllm.ai/0.31.0/cu129/" \
             --index-url "https://pypi.org/simple/" \
             --torch-backend=cu129
         mkdir -p "$HOME/.skulk"
