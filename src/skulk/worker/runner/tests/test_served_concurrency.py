@@ -18,6 +18,7 @@ import pytest
 from anyio import WouldBlock
 
 from skulk.shared.types.common import CommandId, ModelId
+from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.events import (
     Event,
     RunnerStatusUpdated,
@@ -31,6 +32,7 @@ from skulk.shared.types.tasks import (
     Task,
     TaskId,
     TaskStatus,
+    TextEmbedding,
     TextGeneration,
     VideoGeneration,
 )
@@ -791,3 +793,37 @@ def test_a_dead_server_ends_the_loop_on_the_next_task() -> None:
         if t.is_alive():
             host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
             t.join(timeout=5)
+
+
+class _EmbeddingFakeHost(_VideoFakeHost):
+    """The llama-server embeddings mode: embeddings are the admitted kind."""
+
+    _generation_kinds = (TextEmbedding,)
+
+
+def test_embedding_tasks_reach_the_engine_through_the_loop() -> None:
+    """Regression: admitting TextEmbedding needs the loop's match pattern too.
+
+    Without it an embedding fell through to the lifecycle path and the served
+    runner raised "unsupported task", so no GGUF embedding request was served.
+    """
+    host = _EmbeddingFakeHost(max_concurrency=2)
+    _load_ready(host)
+    t = host.start()
+    try:
+        task = TextEmbedding(
+            command_id=CommandId(),
+            task_params=TextEmbeddingTaskParams(model=ModelId("m"), input_texts=["hi"]),
+            instance_id=_iid(),
+        )
+        host.send(task)
+        assert host.started.acquire(timeout=5)
+        assert host.started_order == [task.task_id]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and host.task_statuses(TaskStatus.Complete) < 1:
+            time.sleep(0.05)
+        assert host.acknowledged(task.task_id)
+        assert host.task_statuses(TaskStatus.Complete) == 1
+    finally:
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
