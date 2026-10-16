@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timezone
 from typing import cast
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +22,7 @@ from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.models.registry import RegistryEngineSupportClaim
 from skulk.shared.types.commands import (
+    CreateInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
     PlaceInstance,
@@ -97,6 +99,48 @@ def _single_node_instance(
         hosts_by_node={},
         ephemeral_port=0,
     )
+
+
+@pytest.mark.parametrize(
+    ("exclusions", "status"),
+    [
+        (["11111111-1111-4111-8111-111111111111"], 200),
+        (["not-a-uuid"], 422),
+        ([123], 422),
+        ("11111111-1111-4111-8111-111111111111", 422),
+    ],
+)
+async def test_exact_instance_json_preserves_persistent_exclusions(
+    monkeypatch: pytest.MonkeyPatch,
+    exclusions: object,
+    status: int,
+) -> None:
+    """JSON UUID exclusions survive HTTP admission without relaxing invalid input."""
+    api = _build_api()
+    instance = _single_node_instance("allowed-node")
+    payload = instance.model_dump(mode="json", by_alias=True)
+    payload["MlxRingInstance"]["excludedInstallIds"] = exclusions
+    send = AsyncMock()
+    monkeypatch.setattr(api, "_send", send)
+    monkeypatch.setattr(
+        api, "_load_authorized_model_card", AsyncMock(return_value=_card())
+    )
+    monkeypatch.setattr(
+        api, "_calculate_total_available_memory", lambda: Memory.from_gb(1)
+    )
+
+    response = TestClient(api.app).post("/instance", json={"instance": payload})
+
+    assert response.status_code == status, response.text
+    if status == 200:
+        send.assert_awaited_once()
+        command = cast(CreateInstance, send.call_args.args[0])
+        assert command.instance.excluded_install_ids == [
+            UUID("11111111-1111-4111-8111-111111111111")
+        ]
+        assert response.json()["instance_id"] == instance.instance_id
+    else:
+        send.assert_not_awaited()
 
 
 async def test_quick_launch_rejects_unknown_model_without_hub_discovery(
@@ -377,7 +421,7 @@ async def test_explicit_download_rejects_forged_same_alias_card(
     ]
 
 
-async def test_preview_exposes_exact_signed_engine_support(
+async def test_preview_exposes_upstream_engine_compatibility(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Operators can distinguish matrix-admitted placements from legacy cards."""
@@ -430,10 +474,10 @@ async def test_preview_exposes_exact_signed_engine_support(
             "engine_build": "vllm@9.9.9",
             "architecture": "future_architecture_v1",
             "artifact_format": "safetensors",
-            "artifact_card_id": "card_" + "a" * 52,
+            "artifact_card_id": None,
             "capability_id": "text.generate",
             "status": "supported",
-            "evidence_kind": "load_qualification",
+            "evidence_kind": "upstream_compatibility",
             "evidence_trust": "foxlight_observed",
             "source_url": "https://evidence.example/load",
             "source_sha256": "c" * 64,
@@ -451,9 +495,7 @@ async def test_preview_exposes_exact_signed_engine_support(
     def _fake_placements(
         _command: PlaceInstance, **_kwargs: object
     ) -> dict[InstanceId, MlxRingInstance]:
-        instance = _single_node_instance(
-            str(node_id), resolved_backend="vllm-cuda"
-        )
+        instance = _single_node_instance(str(node_id), resolved_backend="vllm-cuda")
         return {instance.instance_id: instance}
 
     def _support_for_card(_card: ModelCard) -> tuple[RegistryEngineSupportClaim, ...]:
@@ -474,8 +516,7 @@ async def test_preview_exposes_exact_signed_engine_support(
         for preview in successful
     )
     assert all(
-        preview["support_claim_ids"] == [support.claim_id]
-        for preview in successful
+        preview["support_claim_ids"] == [support.claim_id] for preview in successful
     )
     assert all(preview["trust_requirement"] is None for preview in successful)
 
@@ -810,4 +851,3 @@ def test_quick_launch_documents_its_response_in_openapi() -> None:
     assert '"#/components/schemas/CreateInstanceResponse"' in json.dumps(responses["200"])
     schemas = cast(dict[str, object], schema["components"]["schemas"])
     assert '"engine_install"' in json.dumps(schemas["CreateInstanceResponse"])
-

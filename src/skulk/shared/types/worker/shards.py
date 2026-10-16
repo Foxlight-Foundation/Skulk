@@ -3,6 +3,7 @@ from typing import TypeAlias, final
 
 from pydantic import Field
 
+from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.model_cards import ModelCard
 from skulk.utils.pydantic_ext import TaggedModel
@@ -34,7 +35,11 @@ class BaseShardMetadata(TaggedModel):
     resolved_backend: str | None = None
     resolved_engine_build: str | None = Field(
         default=None,
-        description="Exact music engine build observed by placement and required at sidecar launch.",
+        description="Exact native engine build selected by placement and required at sidecar launch.",
+    )
+    memory_settings: EngineMemorySettings | None = Field(
+        default=None,
+        description="Effective engine/cache settings captured for shared memory admission and verified before allocation.",
     )
     llama_server_settings: LlamaServerSettings | None = Field(
         default=None,

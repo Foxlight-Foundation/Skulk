@@ -317,3 +317,41 @@ def test_loader_error_echoing_flag_is_failed_not_unsupported(
         drm_root=tmp_path / "no-drm",
     )
     assert facts.llama_server_device_probe.outcome == "failed"
+
+
+def test_apple_chip_class_is_observed_and_retains_legacy_matching(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Measured chip classes support exact wheels while generic claims keep matching."""
+    monkeypatch.setattr(probe, "observe_apple_chip", lambda: "Apple M4")
+    facts = gather_node_facts(env={}, platform="darwin", drm_root=tmp_path / "no-drm")
+    assert facts.gpus[0].name == "Apple M4"
+    assert {"apple", "apple:apple-gpu", "apple:apple-m4"} <= hardware_class_inventory(facts)
+    monkeypatch.setattr(probe, "observe_apple_chip", lambda: None)
+    missing = gather_node_facts(env={}, platform="darwin", drm_root=tmp_path / "no-drm")
+    assert "apple:apple-m4" not in hardware_class_inventory(missing)
+
+
+def test_amd_instruction_target_is_observed_independently_of_gpu_name(
+    tmp_path: Path,
+) -> None:
+    """KFD ISA, rather than tested PCI names, selects compatible ROCm code objects."""
+    from skulk.facts.probe import _amd_gpu_facts
+
+    drm = tmp_path / "drm"
+    device = drm / "card0" / "device"
+    device.mkdir(parents=True)
+    (device / "gpu_busy_percent").write_text("0")
+    (device / "vendor").write_text("0x1002")
+    (device / "device").write_text("0x74a1")
+    kfd = tmp_path / "kfd"
+    node = kfd / "0"
+    node.mkdir(parents=True)
+    (node / "properties").write_text(
+        f"vendor_id 4098\ndevice_id {int('74a1', 16)}\ngfx_target_version 90402\n"
+    )
+    facts = _amd_gpu_facts(drm, kfd)
+    assert len(facts) == 1
+    assert facts[0].gpu_architecture == "gfx942"
+    (node / "properties").write_text("broken")
+    assert _amd_gpu_facts(drm, kfd)[0].gpu_architecture is None

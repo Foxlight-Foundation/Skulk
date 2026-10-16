@@ -32,6 +32,8 @@ from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.events import ChunkGenerated, Event
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
+    ImageEdits,
+    ImageGeneration,
     MusicGeneration,
     Shutdown,
     Task,
@@ -70,7 +72,7 @@ _QUEUED_POLL_S: float = 0.1
 _RECENT_TASK_ID_LIMIT = 4096
 
 
-type GenerationTask = TextGeneration | VideoGeneration | MusicGeneration
+type GenerationTask = TextGeneration | VideoGeneration | MusicGeneration | ImageGeneration | ImageEdits
 """The task kinds the dispatch loop admits as generations: acknowledged on
 admission, run on the pool, and given their terminal status by the loop."""
 
@@ -132,6 +134,7 @@ class ServedConcurrentDispatch:
         max_concurrency: int,
         thread_name_prefix: str,
         queue_admitted: bool = False,
+        max_admitted_queue: int | None = None,
     ) -> None:
         """Set up the concurrency state. Call once from the runner's ``__init__``.
 
@@ -149,6 +152,7 @@ class ServedConcurrentDispatch:
         """
         self._max_concurrency = max_concurrency
         self._queue_admitted = queue_admitted
+        self._max_admitted_queue = max_admitted_queue
         # Acknowledged generations waiting for a permit, oldest first; read and
         # written on the dispatch thread only.
         self._admitted: deque[GenerationTask] = deque()
@@ -159,6 +163,7 @@ class ServedConcurrentDispatch:
         self._cancel_lock = threading.Lock()
         self._seen_lock = threading.Lock()
         self._recent_finished_ids: OrderedDict[TaskId, None] = OrderedDict()
+        self._failed_generation_ids: set[TaskId] = set()
         self._outstanding_task_ids: set[TaskId] = set()
         self._pending_cancelled_ids: OrderedDict[TaskId, None] = OrderedDict()
         self._inflight: int = 0
@@ -214,6 +219,7 @@ class ServedConcurrentDispatch:
 
         with self._seen_lock:
             self._recent_finished_ids[task_id] = None
+            self._failed_generation_ids.discard(task_id)
             self._recent_finished_ids.move_to_end(task_id)
             while len(self._recent_finished_ids) > _RECENT_TASK_ID_LIMIT:
                 expired, _ = self._recent_finished_ids.popitem(last=False)
@@ -226,6 +232,11 @@ class ServedConcurrentDispatch:
     def _is_cancelled(self, task_id: TaskId) -> bool:
         self._drain_cancellations()
         return self._was_cancelled(task_id)
+
+    def _mark_generation_failed(self, task_id: TaskId) -> None:
+        """Retain explicit producer failure until the terminal task event is emitted."""
+        with self._seen_lock:
+            self._failed_generation_ids.add(task_id)
 
     def _was_cancelled(self, task_id: TaskId) -> bool:
         """Whether ``task_id`` is cancelled, WITHOUT draining the pipe.
@@ -283,7 +294,7 @@ class ServedConcurrentDispatch:
                         logger.warning("repeat task - potential error")
                         continue
                     match task:
-                        case TextGeneration() | VideoGeneration() | MusicGeneration() if isinstance(
+                        case TextGeneration() | VideoGeneration() | MusicGeneration() | ImageGeneration() | ImageEdits() if isinstance(
                             task, self._generation_kinds
                         ) and isinstance(
                             self.current_status, (RunnerReady, RunnerRunning)
@@ -305,6 +316,13 @@ class ServedConcurrentDispatch:
                                 blocking=False
                             ):
                                 if self._queue_admitted:
+                                    if self._max_admitted_queue is not None and len(self._admitted) >= self._max_admitted_queue:
+                                        self.event_sender.send(ChunkGenerated(command_id=task.command_id,
+                                            chunk=ErrorChunk(model=self.shard_metadata.model_card.model_id,
+                                                error_message="Native image engine admission limit reached")))
+                                        self.send_task_status(task, TaskStatus.Failed)
+                                        self._retire_task_id(task.task_id)
+                                        continue
                                     self._note_dispatch_waiter_started()
                                     self._admitted.append(task)
                                     continue
@@ -483,9 +501,11 @@ class ServedConcurrentDispatch:
         """Done-callback: emit the terminal task status and drop the in-flight count."""
         try:
             was_cancelled = self._was_cancelled(task.task_id)
+            with self._seen_lock:
+                failed = task.task_id in self._failed_generation_ids
             self.send_task_status(
                 task,
-                TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
+                TaskStatus.Cancelled if was_cancelled else TaskStatus.Failed if failed else TaskStatus.Complete,
             )
         finally:
             with self._admission_lock:

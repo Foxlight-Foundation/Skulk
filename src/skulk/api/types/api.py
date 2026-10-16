@@ -1,11 +1,13 @@
+import re
 import time
 from collections.abc import Generator
-from typing import Annotated, Any, Literal, cast, final, get_args
+from typing import Annotated, Any, Literal, cast, final
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import UUID4, BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
+from skulk.shared.models.image import ImageCardConfig
 from skulk.shared.models.memory_estimate import (
     MAX_REQUESTED_CONTEXT_TOKENS,
     MIN_REQUESTED_CONTEXT_TOKENS,
@@ -190,13 +192,13 @@ class ModelRequirements(BaseModel):
         description="Declared backend tags; live platform and runner constraints still apply."
     )
     required_capabilities: tuple[str, ...] = Field(
-        description="Complete positively evidenced capability set required for signed engine support; an empty set cannot authorize matrix-only admission."
+        description="Positively evidenced intrinsic capability identifiers for reporting; missing qualification does not revoke declared engine compatibility."
     )
     engine_support: tuple[RegistryEngineSupportClaim, ...] = Field(
-        description="Matching signed engine claims; status, exact build and hardware constraints remain authoritative."
+        description="Matching upstream compatibility mappings and scoped qualification evidence; observed build/hardware provenance is not an eligibility list."
     )
     incomplete_capabilities: tuple[str, ...] = Field(
-        description="Artifact capabilities explicitly marked incomplete; these block admission."
+        description="Artifact capabilities with missing components; a missing dependency applies to the affected operation."
     )
     estimate_only: Literal[True] = Field(
         default=True,
@@ -399,6 +401,7 @@ class ModelListModel(BaseModel):
             "Present only on video model cards."
         ),
     )
+    image: ImageCardConfig | None = Field(default=None, description="Declared image geometry, references, RGBA and sampling contract.")
     license: "LicenseSection | None" = Field(
         default=None,
         description=(
@@ -1458,6 +1461,9 @@ class GenerationStats(BaseModel):
 
 
 class ImageGenerationStats(BaseModel):
+    """Observed render timing and memory, with an explicit measurement scope."""
+
+    memory_scope: Literal["engine", "native_process_rss"] = Field(default="engine", description="Native RSS is sampled resident host memory; it does not claim GPU allocation measurements.")
     seconds_per_step: float
     total_generation_time: float
 
@@ -1534,6 +1540,24 @@ class ChatCompletionRequest(BaseModel):
 
 class BenchChatCompletionRequest(ChatCompletionRequest):
     pass
+
+
+class InstanceChatCompletionRequest(ChatCompletionRequest):
+    """Chat constrained to one instance and an explicit installation allowlist."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    # HTTP JSON carries UUIDs as strings; only that wire representation needs
+    # parsing while the surrounding request retains strict field validation.
+    allowed_node_install_ids: list[Annotated[UUID4, Field(strict=False)]] = Field(
+        min_length=1,
+        max_length=1000,
+        description=(
+            "Persistent installation identities allowed to serve this request. "
+            "Every node assigned to the selected instance must match. This "
+            "narrows inference routing and grants no placement authority."
+        ),
+    )
 
 
 class AddCustomModelParams(BaseModel):
@@ -2115,7 +2139,7 @@ class CreateInstanceParams(BaseModel):
 class PlacementEngineInstall(BaseModel):
     """An engine a placement installs on its node before the model can load."""
 
-    engine: str = Field(description="Engine that installs on demand, such as comfy.")
+    engine: str = Field(description="Engine that installs on demand, such as comfy or stable_diffusion_cpp.")
     node_ids: list[str] = Field(
         description="Nodes in this placement that install the engine first."
     )
@@ -2130,6 +2154,10 @@ class PlacementPreview(BaseModel):
         default=None,
         pattern=r"^[a-f0-9]{64}$",
         description="Canonical authorized-card content digest used to construct a launchable preview; compare with approved model requirements before submitting the exact instance. Null when no instance is present.",
+    )
+    memory_estimate_notes: list[str] = Field(
+        default_factory=list,
+        description="Effective cache accounting, allocation assumptions and conservative unknown-layout fallback; scoped to this serving configuration.",
     )
     model_id: ModelId
     sharding: Sharding
@@ -2170,12 +2198,15 @@ class PlacementPreview(BaseModel):
         ),
     )
     error: str | None = None
-    error_code: Literal[
-        "no_valid_placement",
-        "placement_info_pending",
-        "model_code_approval_required",
-        "model_card_identity_mismatch",
-    ] | None = Field(
+    error_code: (
+        Literal[
+            "no_valid_placement",
+            "placement_info_pending",
+            "model_code_approval_required",
+            "model_card_identity_mismatch",
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
             "Stable placement failure category, or null for a launchable preview. "
@@ -2194,11 +2225,11 @@ class PlacementPreview(BaseModel):
     )
     compatibility_source: Literal["card", "signed_engine_support"] | None = Field(
         default=None,
-        description="Truth source that admitted the selected backend, or null on error.",
+        description="Declared card or upstream architecture/engine compatibility source, or null on error; qualification is separate evidence.",
     )
     support_claim_ids: list[str] = Field(
         default_factory=list,
-        description="Active signed support claims applicable to this placement.",
+        description="Upstream architecture/engine mapping identifiers used by this placement; empirical qualification does not grant permission.",
     )
     compatibility_detail: str | None = Field(
         default=None,
@@ -2417,15 +2448,24 @@ class AudioVoiceList(BaseModel, frozen=True):
     data: tuple[AudioVoice, ...] = ()
 
 
-ImageSize = Literal[
-    "auto",
-    "512x512",
-    "768x768",
-    "1024x768",
-    "768x1024",
-    "1024x1024",
-    "1024x1536",
-    "1536x1024",
+LEGACY_IMAGE_SIZES = frozenset(
+    [
+        "auto",
+        "512x512",
+        "768x768",
+        "1024x768",
+        "768x1024",
+        "1024x1024",
+        "1024x1536",
+        "1536x1024",
+    ]
+)
+ImageSize = Annotated[
+    str,
+    Field(
+        pattern=r"^(auto|[1-9][0-9]{1,3}x[1-9][0-9]{1,3})$",
+        description="auto or an explicit WIDTHxHEIGHT canvas; the selected model validates area and alignment.",
+    ),
 ]
 
 
@@ -2433,9 +2473,13 @@ def normalize_image_size(v: object) -> ImageSize:
     """Shared validator for ImageSize fields: maps None → "auto" and rejects invalid values."""
     if v is None:
         return "auto"
-    if v not in get_args(ImageSize):
-        raise ValueError(f"Invalid size: {v!r}. Must be one of {get_args(ImageSize)}")
-    return v  # pyright: ignore[reportReturnType]
+    if not isinstance(v, str) or re.fullmatch(r"auto|[1-9][0-9]{1,3}x[1-9][0-9]{1,3}", v) is None:
+        raise ValueError("Image size must be auto or WIDTHxHEIGHT")
+    if v != "auto":
+        width, height = (int(part) for part in v.split("x", 1))
+        if not (64 <= width <= 4096 and 64 <= height <= 4096):
+            raise ValueError("Image canvas dimensions must be between 64 and 4096")
+    return v
 
 
 class AdvancedImageParams(BaseModel):
@@ -2471,6 +2515,21 @@ class ImageGenerationTaskParams(BaseModel):
         return normalize_image_size(v)
 
 
+class InstanceImageGenerationRequest(ImageGenerationTaskParams):
+    """Image generation bound to one instance and persistent installation scope."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    allowed_node_install_ids: list[Annotated[UUID4, Field(strict=False)]] = Field(
+        min_length=1,
+        max_length=1000,
+        description=(
+            "Persistent installation identities allowed to execute this request. "
+            "Every selected instance rank must match; this grants no placement authority."
+        ),
+    )
+
+
 class BenchImageGenerationTaskParams(ImageGenerationTaskParams):
     bench: bool = True
 
@@ -2480,6 +2539,8 @@ class ImageEditsTaskParams(BaseModel):
 
     image_data: str = ""  # Base64-encoded image (empty when using chunked transfer)
     total_input_chunks: int = 0
+    input_image_count: int = Field(default=1, ge=1, le=10, description="Ordered reference slots admitted by the API.")
+    reference_image_data: tuple[str, ...] = Field(default=(), exclude=True, description="Worker-local verified media; never serialized into cluster state.")
     prompt: str
     model: str
     n: int | None = 1
@@ -2500,7 +2561,7 @@ class ImageEditsTaskParams(BaseModel):
 
     def __repr_args__(self) -> Generator[tuple[str, Any], None, None]:
         for name, value in super().__repr_args__():  # pyright: ignore[reportAny]
-            if name == "image_data":
+            if name in {"image_data", "reference_image_data"}:
                 yield name, f"<{len(self.image_data)} chars>"
             elif name is not None:
                 yield name, value

@@ -167,6 +167,20 @@ class Runner:
         if timeout := getattr(self.shard_metadata, "should_timeout", 0):
             time.sleep(timeout)
 
+        from skulk.worker.engines.mlx.constants import ENGINE_MEMORY_SETTINGS
+
+        if ENGINE_MEMORY_SETTINGS.configuration_error is not None:
+            raise ValueError(
+                f"MLX cache configuration is invalid: {ENGINE_MEMORY_SETTINGS.configuration_error}"
+            )
+        if (
+            self.shard_metadata.memory_settings is not None
+            and self.shard_metadata.memory_settings != ENGINE_MEMORY_SETTINGS
+        ):
+            raise ValueError(
+                "Actual MLX cache policy differs from placement; refresh resources and retry"
+            )
+
         self.setup_start_time = time.time()
 
         self.generator: Builder | InferenceGenerator = Builder(

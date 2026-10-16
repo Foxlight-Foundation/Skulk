@@ -6,6 +6,7 @@ from typing import Final, final
 from loguru import logger
 from pydantic import Field
 
+from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
@@ -19,7 +20,6 @@ from skulk.shared.models.memory_estimate import (
     gpu_working_set_ceiling,
     is_gb10_accelerator,
     memory_overhead_factor,
-    per_token_kv_bytes,
     shard_admission_context_tokens,
     shard_fraction_of_model,
     vulkan_fills_carve_first,
@@ -89,7 +89,11 @@ class CycleMemoryDiagnostics(CamelCaseModel):
 # served llama-server engine launch with ``-ngl`` full-GPU offload; vLLM would
 # join here too. The bare CPU compute tag is excluded by the ``-cpu`` check.
 _GPU_OFFLOAD_ENGINE_PREFIXES: Final = (
-    "llama_cpp-", "llama_server-", "vllm-", "comfy-",
+    "llama_cpp-",
+    "llama_server-",
+    "vllm-",
+    "comfy-",
+    "stable_diffusion_cpp-",
 )
 _AUDIO_CPP_DISCRETE_LANES: Final = frozenset(
     {"audio_cpp-cuda", "audio_cpp-rocm", "audio_cpp-vulkan"}
@@ -275,6 +279,8 @@ def reserve_instance_vram(
                 fraction,
                 resolved_backend=shard.resolved_backend,
                 llama_server_settings=shard.llama_server_settings,
+                memory_settings=shard.memory_settings,
+                cache_layer_count=shard.end_layer - shard.start_layer,
                 context_budget=(
                     instance.context_token_limit
                     if instance.context_token_limit is not None
@@ -405,6 +411,8 @@ def reserve_instance_system_ram(
                 fraction,
                 resolved_backend=shard.resolved_backend,
                 llama_server_settings=shard.llama_server_settings,
+                memory_settings=shard.memory_settings,
+                cache_layer_count=shard.end_layer - shard.start_layer,
                 context_budget=shard_admission_context_tokens(
                     shard, instance.context_token_limit
                 ),
@@ -686,6 +694,8 @@ def filter_cycles_by_memory(
     fixed_memory_by_node: Mapping[NodeId, Memory] | None = None,
     resolved_backends: Mapping[NodeId, str | None] | None = None,
     llama_server_settings: Mapping[NodeId, LlamaServerSettings | None] | None = None,
+    engine_memory_settings: Mapping[NodeId, Mapping[str, EngineMemorySettings]]
+    | None = None,
 ) -> tuple[list[Cycle], CycleMemoryDiagnostics]:
     """Keep cycles whose every node can hold its shard with runtime headroom.
 
@@ -784,35 +794,59 @@ def filter_cycles_by_memory(
         )
         # GGUF runs on the lighter llama.cpp C++ runtime, so its weight overhead
         # is smaller than MLX's; use the engine-aware factor for the fit decision.
-        overhead_factor = memory_overhead_factor(model_card)
         overloaded: list[str] = []
         for node_id, share in node_shares.items():
             backend = (resolved_backends or {}).get(node_id)
             settings = (llama_server_settings or {}).get(node_id)
+            engine = (backend or "").split("-", 1)[0]
+            policy = (engine_memory_settings or {}).get(node_id, {}).get(engine)
+            if "TextGeneration" not in model_card.tasks:
+                policy = EngineMemorySettings()
+            overhead_factor = memory_overhead_factor(
+                model_card, resolved_backend=backend
+            )
             node_kv_ratio = kv_ratio
             recurrent_share = Memory()
-            if model_card.gguf_cache_geometry is not None:
-                if (
-                    backend is not None
-                    and backend.startswith("llama_server")
-                    and settings is None
-                ):
-                    overloaded.append(
-                        f"node {node_id} has no observed llama-server serving settings"
-                    )
-                    continue
-                node_kv_ratio = (
-                    per_token_kv_bytes(
-                        model_card,
-                        resolved_backend=backend,
-                        llama_server_settings=settings,
-                    )
-                    * context_budget
-                    / required_memory.in_bytes
+            if (
+                model_card.gguf_cache_geometry is not None
+                and backend is not None
+                and backend.startswith("llama_server")
+                and settings is None
+            ):
+                overloaded.append(
+                    f"node {node_id} has no observed llama-server serving settings"
                 )
-                recurrent_share = estimate_recurrent_cache_bytes(
-                    model_card, resolved_backend=backend, llama_server_settings=settings
-                ) * (share.in_bytes / required_memory.in_bytes)
+                continue
+            node_kv_ratio = (
+                _estimate_kv_cache_bytes(
+                    model_card,
+                    model_card.n_layers,
+                    context_budget,
+                    resolved_backend=backend,
+                    memory_settings=policy,
+                    llama_server_settings=settings,
+                    cache_layer_count=max(
+                        1,
+                        round(
+                            model_card.n_layers
+                            * share.in_bytes
+                            / required_memory.in_bytes
+                        ),
+                    )
+                    if sharding == Sharding.Pipeline and required_memory.in_bytes
+                    else None,
+                ).in_bytes
+                / required_memory.in_bytes
+                if required_memory.in_bytes
+                else 0.0
+            )
+            recurrent_share = estimate_recurrent_cache_bytes(
+                model_card, resolved_backend=backend, llama_server_settings=settings
+            ) * (
+                share.in_bytes / required_memory.in_bytes
+                if required_memory.in_bytes
+                else 0.0
+            )
             kv_share = share * node_kv_ratio
             required_with_overhead = (
                 share * overhead_factor

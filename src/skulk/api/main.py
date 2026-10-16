@@ -239,6 +239,8 @@ from skulk.api.types import (
     ImageListItem,
     ImageListResponse,
     ImageSize,
+    InstanceChatCompletionRequest,
+    InstanceImageGenerationRequest,
     LicenseSection,
     ModalitiesCapabilitySection,
     ModelList,
@@ -294,6 +296,7 @@ from skulk.api.types import (
     WebSearchToolResponse,
     normalize_image_size,
 )
+from skulk.api.types.api import LEGACY_IMAGE_SIZES
 from skulk.api.types.claude_api import (
     ClaudeMessagesRequest,
     ClaudeMessagesResponse,
@@ -367,6 +370,7 @@ from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
     PlacementNoCapableMachineError,
+    model_platform_backends,
     require_instance_model_card_identity,
     require_instance_model_code_approval,
     served_context_window,
@@ -395,7 +399,6 @@ from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.apply import apply
 from skulk.shared.backends import (
     AUDIO_CPP_COMPUTE_BACKENDS,
-    AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
     ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
@@ -403,6 +406,7 @@ from skulk.shared.backends import (
     audio_cpp_cuda_hardware_matches,
     engine_install_notice,
     engine_of,
+    expand_engine_backends,
 )
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -423,6 +427,7 @@ from skulk.shared.election import ElectionMessage
 from skulk.shared.experimental import experimental_mode_enabled
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.image import validate_reference_images
 from skulk.shared.models.inference_assessment import (
     InferenceAssessment,
     InferenceWorkload,
@@ -463,10 +468,11 @@ from skulk.shared.models.model_cards import (
     get_model_cards,
     get_model_engine_support,
     get_model_required_capabilities,
+    model_engine_requirements,
     preserve_generated_card_constraints,
     record_custom_card_mutation_applied,
     register_installed_card_record,
-    registry_supported_backends_for_node,
+    registry_compatible_backends_for_node,
     same_authorized_model_card,
 )
 from skulk.shared.models.registry import RegistryAdvisory
@@ -1642,7 +1648,6 @@ async def _read_request_json_object(request: Request) -> JsonObject:
     return _coerce_json_object(cast(dict[object, object], payload))
 
 
-
 def _model_store_defaults() -> dict[str, object]:
     """Return the store a fresh node starts with, for Settings to pre-fill.
 
@@ -1656,6 +1661,7 @@ def _model_store_defaults() -> dict[str, object]:
         "store_http_host": store.store_http_host,
         "store_path": store.store_path,
     }
+
 
 def _load_yaml_object(path: Path) -> JsonObject:
     """Read one YAML document from disk as a string-keyed object."""
@@ -1812,6 +1818,7 @@ class _PreviewContextFields(TypedDict):
     default_context_tokens: int | None
     reserves_context_at_load: bool
     kv_bytes_per_token: int | None
+    memory_estimate_notes: list[str]
 
 
 DASHBOARD_SHELL_CACHE_CONTROL: Final = "no-cache"
@@ -2928,6 +2935,23 @@ class API:
             ),
         )(self.chat_completions_route)
         self.app.post(
+            "/v1/instances/{instance_id}/chat/completions",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="Generate chat on one exact instance within allowed installations",
+            description=(
+                "Use the Chat Completions payload plus a nonempty "
+                "allowed_node_install_ids array. The exact instance must exist, "
+                "serve the requested model, and assign every rank to an allowed "
+                "persistent installation identity. Missing instances return 404; "
+                "model or installation mismatches return 409 before dispatch. "
+                "Generation never falls back to another instance. Streaming and "
+                "disconnect cancellation use the normal chat path. A successful "
+                "response carries X-Skulk-Instance-Id. This endpoint neither "
+                "places models nor authorizes fleet mutation."
+            ),
+        )(self.instance_chat_completions_route)
+        self.app.post(
             "/v1/embeddings",
             tags=["Compatibility APIs"],
             summary="Generate embeddings",
@@ -3002,9 +3026,23 @@ class API:
             summary="Generate images",
             description=(
                 "Generate images with an already-cataloged, placed image model. "
-                "Unknown or unplaced models return 404."
+                "Unknown or unplaced models return 404. Native profiles with stream=true return "
+                "SSE finals even with zero partial_images; legacy models require positive previews."
             ),
         )(self.image_generations)
+        self.app.post(
+            "/v1/instances/{instance_id}/images/generations",
+            response_model=None,
+            tags=["Images"],
+            summary="Generate images on one scoped instance",
+            description=(
+                "Generate on an existing exact image instance whose every rank belongs "
+                "to the supplied persistent installation allowlist. Missing instances "
+                "return 404; model, capability, or installation mismatches return 409 "
+                "before dispatch. No replica fallback or placement is performed. "
+                "The response identifies the selected instance in X-Skulk-Instance-Id."
+            ),
+        )(self.instance_image_generations)
         self.app.post(
             "/bench/images/generations",
             tags=["Images"],
@@ -3016,11 +3054,13 @@ class API:
             response_model=None,
             tags=["Images"],
             summary="Edit images",
+            description="Edit a placed model using one image or ordered image[] references. The selected image card validates geometry, sampling and input limits before dispatch; oversized aggregate uploads return 413. Native profiles with stream=true return SSE finals even when partial_images=0; legacy models require positive previews. Disconnect cancels streaming commands.",
         )(self.image_edits)
         self.app.post(
             "/bench/images/edits",
             tags=["Images"],
             summary="Benchmark image editing",
+            description="Edit a placed image model with one image or ordered image[] references and return timing and measured memory statistics. Streaming and partial images are disabled.",
         )(self.bench_image_edits)
         self.app.get("/images", tags=["Images"], summary="List stored images")(
             self.list_images
@@ -3280,7 +3320,7 @@ class API:
             "/state",
             tags=["State & Tracing"],
             summary="Get cluster state",
-            description="Return the current cluster state as seen by this API node, including topology, instances, node capabilities, and live telemetry (per-node memory and system profile).",
+            description="Return the current cluster state as seen by this API node, including topology, instances, node capabilities, and live telemetry. Node resources expose effective engine/cache settings under engineMemorySettings; shard metadata carries the captured memorySettings used for admission.",
         )(self.get_cluster_state)
         self.app.get(
             "/events",
@@ -3888,15 +3928,21 @@ class API:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     async def _prepare_music_engine_for_mount(
-        self, card: ModelCard, excluded_nodes: set[NodeId],
-        *, required_nodes: set[NodeId] | None = None,
+        self,
+        card: ModelCard,
+        excluded_nodes: set[NodeId],
+        *,
+        required_nodes: set[NodeId] | None = None,
         requested_backend: str | None = None,
     ) -> tuple[NodeId, NodeResources] | None:
         """Prepare an eligible node and return its ordered verified resources."""
 
         if ModelTask.TextToMusic not in card.tasks:
             return
-        if requested_backend is not None and requested_backend not in AUDIO_CPP_COMPUTE_BACKENDS:
+        if (
+            requested_backend is not None
+            and requested_backend not in AUDIO_CPP_COMPUTE_BACKENDS
+        ):
             raise HTTPException(
                 status_code=400,
                 detail=f"Music instance requested an invalid audio.cpp backend: {requested_backend}",
@@ -3918,7 +3964,7 @@ class API:
         )
 
         def supports_with_capacity(node_id: NodeId, backends: frozenset[str]) -> bool:
-            """Check signed lanes against the pool their runner actually allocates."""
+            """Check compatible lanes against the pool their runner actually allocates."""
             memory = node_ram[node_id]
             vram = node_vram.get(node_id)
             for backend in backends:
@@ -3930,46 +3976,44 @@ class API:
                         gpu_working_set_ceiling(memory.ram_total),
                     )
                 )
-                if pool is not None and estimate_shard_footprint(
-                    card, 1.0, resolved_backend=backend,
-                ) <= pool:
+                if (
+                    pool is not None
+                    and estimate_shard_footprint(
+                        card,
+                        1.0,
+                        resolved_backend=backend,
+                    )
+                    <= pool
+                ):
                     return True
             return False
 
-        claims = tuple(
-            claim for claim in get_model_engine_support(card)
-            if claim.status == "supported"
-        )
-
-        def claim_matches(lane: str, classes: frozenset[str]) -> bool:
-            """Limit preparation to lanes supported by signed hardware claims."""
-            return any(
-                claim.engine in {lane, "audio_cpp"}
-                and (
-                    not claim.hardware_classes
-                    or bool(set(claim.hardware_classes) & classes)
-                )
-                for claim in claims
+        def runtime_matches(lane: str, _classes: frozenset[str]) -> bool:
+            """Match the declared engine, independently of qualification hardware."""
+            return lane in expand_engine_backends(
+                model_engine_requirements(card)
+            ) or lane in registry_compatible_backends_for_node(
+                card, node_backends=frozenset({lane})
             )
 
-        def cuda_wheel_claim_matches(
-            architecture: str, classes: frozenset[str]
-        ) -> bool:
-            """Require the compiled SM in both live facts and the signed claim."""
+        def cuda_wheel_matches(architecture: str, classes: frozenset[str]) -> bool:
+            """Require the package's actual compiled SM, not a signed test result."""
             required_class = AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE.get(architecture)
-            return required_class is not None and audio_cpp_cuda_hardware_matches(required_class, classes) and any(
-                claim.engine in {"audio_cpp-cuda", "audio_cpp"}
-                and claim.engine_build == AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE[architecture]
-                and required_class in claim.hardware_classes
-                for claim in claims
+            return required_class is not None and audio_cpp_cuda_hardware_matches(
+                required_class, classes
             )
 
         variant_lanes: dict[Literal["cpu", "vulkan", "cuda"], frozenset[str]] = {
             # Primary-binary overrides can expose CUDA or ROCm through the
             # CPU preparation path; the dedicated CUDA wheel is independent.
-            "cpu": frozenset({
-                "audio_cpp-cpu", "audio_cpp-metal", "audio_cpp-cuda", "audio_cpp-rocm",
-            }),
+            "cpu": frozenset(
+                {
+                    "audio_cpp-cpu",
+                    "audio_cpp-metal",
+                    "audio_cpp-cuda",
+                    "audio_cpp-rocm",
+                }
+            ),
             "vulkan": frozenset({"audio_cpp-vulkan"}),
             "cuda": frozenset({"audio_cpp-cuda"}),
         }
@@ -3977,22 +4021,16 @@ class API:
         def candidate_lanes(
             variant: Literal["cpu", "vulkan", "cuda"], resources: NodeResources
         ) -> frozenset[str]:
-            """Keep known dedicated CUDA wheels out of primary CPU preparation."""
+            """Keep dedicated CUDA payloads separate from the primary preparation."""
             lanes = variant_lanes[variant]
-            if (
-                variant == "cpu"
-                and (
-                    resources.engine_builds.get("audio_cpp-cuda")
-                    in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
-                    or not any(
-                        claim.engine in {"audio_cpp-cuda", "audio_cpp"}
-                        and claim.engine_build not in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
-                        for claim in claims
-                    )
-                )
+            if variant == "cpu" and (
+                "audio_cpp-cuda" not in resources.backends
+                or resources.engine_builds.get("audio_cpp-cuda")
+                in AUDIO_CPP_CUDA_TARGETS_BY_BUILD
             ):
-                return lanes - {"audio_cpp-cuda"}
+                lanes -= {"audio_cpp-cuda"}
             return lanes
+
         candidates: list[
             tuple[int, bool, int, NodeId, Literal["cpu", "vulkan", "cuda"]]
         ] = []
@@ -4006,7 +4044,9 @@ class API:
             if resources is None or memory is None or resources.participation != "full":
                 continue
             available = max(
-                min(memory.ram_available, gpu_working_set_ceiling(memory.ram_total)).in_bytes,
+                min(
+                    memory.ram_available, gpu_working_set_ceiling(memory.ram_total)
+                ).in_bytes,
                 node_vram[node_id].in_bytes if node_id in node_vram else 0,
             )
             if available < estimate_shard_footprint(card, 1.0).in_bytes:
@@ -4025,18 +4065,17 @@ class API:
             if (
                 "platform:linux" in platform_classes
                 and "nvidia" in platform_classes
-                and cuda_wheel_claim_matches(architecture, platform_classes)
+                and cuda_wheel_matches(architecture, platform_classes)
             ):
                 variants.append("cuda")
             if (
                 "platform:linux" in platform_classes
                 and architecture in {"x86_64", "amd64"}
-                and claim_matches("audio_cpp-vulkan", platform_classes)
+                and runtime_matches("audio_cpp-vulkan", platform_classes)
             ):
                 variants.append("vulkan")
             if any(
-                claim_matches(lane, platform_classes)
-                for lane in variant_lanes["cpu"]
+                runtime_matches(lane, platform_classes) for lane in variant_lanes["cpu"]
             ):
                 variants.append("cpu")
             for variant in variants:
@@ -4044,7 +4083,7 @@ class API:
                 if requested_backend is not None:
                     lanes &= {requested_backend}
                 if not lanes or not any(
-                    claim_matches(lane, platform_classes) for lane in lanes
+                    runtime_matches(lane, platform_classes) for lane in lanes
                 ):
                     continue
                 ready = any(
@@ -4052,8 +4091,16 @@ class API:
                     for backend in resources.backends & lanes
                 )
                 priority = {"cuda": 3, "vulkan": 2, "cpu": 1}[variant]
+                if (
+                    variant == "cpu"
+                    and ready
+                    and resources.backends & {"audio_cpp-cuda", "audio_cpp-rocm"}
+                ):
+                    priority = 4
                 candidates.append((priority, ready, available, node_id, variant))
-        candidates.sort(key=lambda item: (item[0], item[1], item[2], str(item[3])), reverse=True)
+        candidates.sort(
+            key=lambda item: (item[0], item[1], item[2], str(item[3])), reverse=True
+        )
         if not candidates:
             raise HTTPException(
                 status_code=503,
@@ -4075,31 +4122,36 @@ class API:
                 resources = self._telemetry_view.node_resources.get(node_id)
                 supported: frozenset[str] = frozenset()
                 if resources is not None:
-                    supported = registry_supported_backends_for_node(
-                        card,
-                        node_backends=resources.backends,
-                        engine_builds=resources.engine_builds,
-                        hardware_classes=resources.hardware_classes,
-                    ) & lanes
+                    supported = model_platform_backends(card, resources) & lanes
                 if not supported:
-                    errors.append(f"{node_id}: no supported signed music claim matches its ready engine build and hardware")
+                    errors.append(
+                        f"{node_id}: no compatible implemented music runtime is ready"
+                    )
                     continue
                 if not supports_with_capacity(node_id, supported):
-                    errors.append(f"{node_id}: supported music backend lacks available model memory")
+                    errors.append(
+                        f"{node_id}: supported music backend lacks available model memory"
+                    )
                     continue
             request_id = CommandId()
             waiter = anyio.Event()
             self._audio_cpp_prepare_events[request_id] = waiter
             try:
-                await self._send(PrepareAudioCpp(
-                    command_id=request_id, target_node=node_id,
-                    owner_node=self.node_id, variant=variant,
-                ))
+                await self._send(
+                    PrepareAudioCpp(
+                        command_id=request_id,
+                        target_node=node_id,
+                        owner_node=self.node_id,
+                        variant=variant,
+                    )
+                )
                 with anyio.move_on_after(300):
                     await waiter.wait()
                 result = self._audio_cpp_prepare_results.pop(request_id, None)
                 if result is None:
-                    errors.append(f"{node_id}: preparation timed out or the API session reset")
+                    errors.append(
+                        f"{node_id}: preparation timed out or the API session reset"
+                    )
                     continue
                 if not result.success:
                     errors.append(f"{node_id}: {result.error or 'preparation failed'}")
@@ -4109,30 +4161,36 @@ class API:
                     lanes = candidate_lanes(variant, fresh)
                     if requested_backend is not None:
                         lanes &= {requested_backend}
-                if result.target_node != node_id or fresh is None or not any(
-                    backend in fresh.engine_builds
-                    for backend in fresh.backends & lanes
+                if (
+                    result.target_node != node_id
+                    or fresh is None
+                    or not any(
+                        backend in fresh.engine_builds
+                        for backend in fresh.backends & lanes
+                    )
                 ):
-                    errors.append(f"{node_id}: preparation returned no verified ready resources")
+                    errors.append(
+                        f"{node_id}: preparation returned no verified ready resources"
+                    )
                     continue
-                supported = registry_supported_backends_for_node(
-                    card,
-                    node_backends=fresh.backends,
-                    engine_builds=fresh.engine_builds,
-                    hardware_classes=fresh.hardware_classes,
-                ) & lanes
+                supported = model_platform_backends(card, fresh) & lanes
                 if not supported:
-                    errors.append(f"{node_id}: no supported signed music claim matches the prepared build and hardware")
+                    errors.append(
+                        f"{node_id}: no compatible implemented music runtime is ready after preparation"
+                    )
                     continue
                 if supports_with_capacity(node_id, supported):
                     return node_id, fresh
-                errors.append(f"{node_id}: supported music backend lacks available model memory")
+                errors.append(
+                    f"{node_id}: supported music backend lacks available model memory"
+                )
             finally:
                 self._audio_cpp_prepare_events.pop(request_id, None)
                 self._audio_cpp_prepare_results.pop(request_id, None)
         raise HTTPException(
             status_code=503,
-            detail="audio.cpp could not be prepared on an eligible node: " + "; ".join(errors),
+            detail="audio.cpp could not be prepared on an eligible node: "
+            + "; ".join(errors),
         )
 
     async def place_instance(
@@ -4411,13 +4469,25 @@ class API:
             requested=None,
             served_default=self._served_context_default(),
         )
+        from skulk.shared.models.memory_estimate import memory_estimate_notes
+
+        notes: set[str] = set()
         kv_bytes = 0
         for shard in shards:
+            notes.update(
+                memory_estimate_notes(
+                    shard.model_card,
+                    resolved_backend=shard.resolved_backend,
+                    memory_settings=shard.memory_settings,
+                )
+            )
             fraction = shard_fraction_of_model(shard)
             per_token = per_token_kv_bytes(
                 shard.model_card,
                 resolved_backend=shard.resolved_backend,
                 llama_server_settings=shard.llama_server_settings,
+                memory_settings=shard.memory_settings,
+                cache_layer_count=shard.end_layer - shard.start_layer,
             )
             if fraction is None or per_token <= 0:
                 kv_bytes = 0
@@ -4430,6 +4500,7 @@ class API:
                 shard_preallocates_kv_upfront(shard) for shard in shards
             ),
             kv_bytes_per_token=kv_bytes or None,
+            memory_estimate_notes=sorted(notes),
         )
 
     async def get_placement_previews(
@@ -4471,12 +4542,10 @@ class API:
             + ", ".join(incomplete_capabilities)
             if incomplete_capabilities
             else (
-                "Signed engine support matches this artifact, but no node advertises "
-                "the exact supported engine build and hardware constraint."
+                "No available engine currently matches this model and its runtime requirements."
                 if supported_claim_ids
                 else (
-                    "Model or artifact capabilities are known, but no active signed "
-                    "supported engine claim matches this architecture and artifact."
+                    "No compatible engine mapping is declared for this architecture and artifact."
                     if model_card.registry_capability_claims
                     and not model_card.placement.compatible_backends
                     else None
@@ -4487,14 +4556,15 @@ class API:
         def compatibility_for_instance(
             instance: Instance,
         ) -> tuple[Literal["card", "signed_engine_support"], list[str]]:
-            """Identify whether immutable card or signed support admitted a backend."""
+            """Identify the declared or upstream architecture/engine compatibility source."""
             resolved_backends = {
                 shard.resolved_backend
                 for shard in instance.shard_assignments.runner_to_shard.values()
                 if shard.resolved_backend is not None
             }
             uses_matrix = bool(
-                resolved_backends - model_card.placement.compatible_backends
+                resolved_backends
+                - expand_engine_backends(model_engine_requirements(model_card))
             )
             applicable_claim_ids: set[str] = set()
             if uses_matrix:
@@ -4509,19 +4579,11 @@ class API:
                     if backend is None or resources is None:
                         continue
                     engine = engine_of(backend)
-                    build = resources.engine_builds.get(
-                        backend,
-                        resources.engine_builds.get(engine) if engine else None,
-                    )
                     for claim in matching_engine_support:
-                        hardware_matches = not claim.hardware_classes or bool(
-                            set(claim.hardware_classes) & resources.hardware_classes
-                        )
                         if (
                             claim.status == "supported"
+                            and claim.evidence_kind == "upstream_compatibility"
                             and claim.engine in {backend, engine}
-                            and claim.engine_build == build
-                            and hardware_matches
                         ):
                             applicable_claim_ids.add(claim.claim_id)
             return (
@@ -6963,6 +7025,49 @@ class API:
             steward_burst_reader=burst_reader,
         )
 
+    async def instance_chat_completions_route(
+        self,
+        instance_id: InstanceId,
+        payload: InstanceChatCompletionRequest,
+    ) -> StreamingResponse:
+        """Generate on one existing instance within the caller's installation scope.
+
+        Args:
+            instance_id: Exact instance to use, without fallback to another replica.
+            payload: Chat request and allowed persistent installation identities.
+
+        Returns:
+            The normal cancellable chat response, bound to the requested instance.
+
+        Raises:
+            HTTPException: With 404 for a missing instance or 409 for a model or
+                installation mismatch. No inference is dispatched on refusal.
+        """
+        instance = self.state.instances.get(instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="Requested instance not found")
+        if instance.shard_assignments.model_id != payload.model:
+            raise HTTPException(status_code=409, detail="Instance does not serve the requested model")
+        nodes = instance.shard_assignments.node_to_runner
+        allowed = set(payload.allowed_node_install_ids)
+        if not nodes or any(
+            (identity := self._telemetry_view.node_identities.get(node_id)) is None
+            or identity.node_install_id is None
+            or identity.node_install_id not in allowed
+            for node_id in nodes
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Instance is outside the allowed node installation scope",
+            )
+        response = await self.chat_completions(
+            payload,
+            target_instance_id=instance_id,
+            steward_proposals_allowed=False,
+        )
+        response.headers["X-Skulk-Instance-Id"] = str(instance_id)
+        return response
+
     async def chat_completions(
         self,
         payload: ChatCompletionRequest,
@@ -6970,6 +7075,7 @@ class API:
         steward_proposals_allowed: bool = True,
         steward_installation_reader: InstalledMetadataReader | None = None,
         steward_burst_reader: BurstCapacityReader | None = None,
+        target_instance_id: InstanceId | None = None,
     ) -> StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
@@ -6984,7 +7090,17 @@ class API:
                 burst_reader=steward_burst_reader,
             )
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
-        model_card = await self._get_running_model_card(resolved_model)
+        if target_instance_id is None:
+            model_card = await self._get_running_model_card(resolved_model)
+        else:
+            instance = self.state.instances.get(target_instance_id)
+            if instance is None:
+                raise HTTPException(status_code=404, detail="Requested instance no longer exists")
+            if instance.shard_assignments.model_id != resolved_model:
+                raise HTTPException(status_code=409, detail="Instance does not serve the requested model")
+            model_card = self._model_card_for_instance(instance)
+            if model_card is None:
+                raise HTTPException(status_code=409, detail="Requested instance has no model card")
         task_params = await chat_request_to_text_generation(
             payload.model_copy(update={"model": resolved_model}),
             model_card=model_card,
@@ -6999,7 +7115,13 @@ class API:
                 self._extension_context, task_params
             )
 
-        command = await self._send_text_generation_with_images(task_params)
+        command = (
+            await self._send_text_generation_with_images(task_params)
+            if target_instance_id is None
+            else await self._send_text_generation_with_images(
+                task_params, target_instance_id=target_instance_id
+            )
+        )
 
         # All observation taps (field telemetry, performance envelope, extension
         # chat summary) applied through the shared helper. The POST-transform
@@ -7123,6 +7245,40 @@ class API:
                 status_code=404, detail=f"No instance found for model {resolved_model}"
             )
         return resolved_model
+
+    def _validate_image_request(self, model: ModelId, size: str, n: int, advanced: AdvancedImageParams | None, references: int = 0, *, prompt: str = "", target_instance_id: InstanceId | None = None) -> bool:
+        """Validate the mounted image contract before admitting downloads or GPU work."""
+        card: ModelCard | None = None
+        for instance in self.state.instances.values():
+            if target_instance_id is not None and instance.instance_id != target_instance_id:
+                continue
+            if instance.shard_assignments.model_id == model:
+                card = self._model_card_for_instance(instance)
+                if card is not None:
+                    break
+        profile = card.image if card is not None else None
+        if profile is None:
+            if size not in LEGACY_IMAGE_SIZES or references > 1:
+                raise HTTPException(status_code=400, detail="This image engine does not support the requested canvas or reference count")
+            return False
+        try:
+            if len(prompt.encode("utf-8")) > 32_768 or (advanced is not None and len((advanced.negative_prompt or "").encode("utf-8")) > 32_768):
+                raise ValueError("Native image prompts exceed the 32768-byte limit")
+            if advanced is not None and advanced.seed is not None and advanced.seed > 2**63 - n:
+                raise ValueError("Native image seed exceeds the signed 64-bit range for this image count")
+            if not 1 <= n <= 4 or references > profile.max_reference_images:
+                raise ValueError("Image count or references exceed this model's limits")
+            if profile.family == "sdxl" and references > 1:
+                raise ValueError("The native SDXL runner accepts one initialization image")
+            width, height = (profile.default_width, profile.default_height) if size == "auto" else tuple(int(part) for part in size.split("x", 1))
+            profile.validate_canvas(width, height)
+            if profile.family == "qwen_image_21_turbo" and advanced is not None and (
+                advanced.num_inference_steps not in (None, 8) or advanced.guidance not in (None, 1.0) or advanced.negative_prompt
+            ):
+                raise ValueError("Turbo requires eight steps, CFG=1, and no negative prompt")
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return True
 
     async def _validate_embedding_model(self, model_id: ModelId) -> ModelId:
         """Validate an embedding model exists and is the right type.
@@ -9301,10 +9457,16 @@ class API:
     async def image_generations(
         self, request: Request, payload: ImageGenerationTaskParams
     ) -> ImageGenerationResponse | StreamingResponse:
+        """Generate images using the normal least-loaded model placement."""
+        return await self._image_generations(request, payload)
+
+    async def _image_generations(
+        self, request: Request, payload: ImageGenerationTaskParams, *, target_instance_id: InstanceId | None = None
+    ) -> ImageGenerationResponse | StreamingResponse:
         """Handle image generation requests.
 
-        When stream=True and partial_images > 0, returns a StreamingResponse
-        with SSE-formatted events for partial and final images.
+        Native image profiles return SSE finals when stream=True, including with
+        zero previews. Legacy models retain their positive-preview requirement.
         """
         payload = payload.model_copy(
             update={
@@ -9316,11 +9478,13 @@ class API:
         command = ImageGeneration(
             owner_node=self.node_id,
             task_params=payload,
+            target_instance_id=target_instance_id,
         )
+        native = self._validate_image_request(ModelId(payload.model), payload.size, 1 if payload.n is None else payload.n, payload.advanced_params, prompt=payload.prompt, target_instance_id=target_instance_id)
         await self._send(command)
 
         # Check if streaming is requested
-        if payload.stream and payload.partial_images and payload.partial_images > 0:
+        if payload.stream and (native or (payload.partial_images or 0) > 0):
             return StreamingResponse(
                 self._generate_image_stream(
                     request=request,
@@ -9338,6 +9502,45 @@ class API:
             num_images=payload.n or 1,
             response_format=payload.response_format or "b64_json",
         )
+
+    async def instance_image_generations(
+        self,
+        request: Request,
+        response: Response,
+        instance_id: InstanceId,
+        payload: InstanceImageGenerationRequest,
+    ) -> ImageGenerationResponse | StreamingResponse:
+        """Generate on an exact scoped instance, preserving normal output and cancellation.
+
+        All ranks must have known persistent identities within the caller's
+        allowlist. The selected card supplies capability and canvas validation;
+        another replica at the same model alias cannot satisfy the request.
+        """
+        instance = self.state.instances.get(instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="Requested instance not found")
+        if instance.shard_assignments.model_id != payload.model:
+            raise HTTPException(status_code=409, detail="Instance does not serve the requested model")
+        allowed = set(payload.allowed_node_install_ids)
+        nodes = instance.shard_assignments.node_to_runner
+        if not nodes or any(
+            (identity := self._telemetry_view.node_identities.get(node_id)) is None
+            or identity.node_install_id is None
+            or identity.node_install_id not in allowed
+            for node_id in nodes
+        ):
+            raise HTTPException(status_code=409, detail="Instance is outside the allowed node installation scope")
+        card = self._model_card_for_instance(instance)
+        if card is None or ModelTask.TextToImage not in card.tasks:
+            raise HTTPException(status_code=409, detail="Instance does not support text-to-image generation")
+        generation = ImageGenerationTaskParams.model_validate(
+            payload.model_dump(exclude={"allowed_node_install_ids"})
+        )
+        result = await self._image_generations(request, generation, target_instance_id=instance_id)
+        response.headers["X-Skulk-Instance-Id"] = str(instance_id)
+        if isinstance(result, StreamingResponse):
+            result.headers["X-Skulk-Instance-Id"] = str(instance_id)
+        return result
 
     async def _generate_image_stream(
         self,
@@ -9616,6 +9819,7 @@ class API:
             }
         )
 
+        self._validate_image_request(ModelId(payload.model), payload.size, 1 if payload.n is None else payload.n, payload.advanced_params, prompt=payload.prompt)
         command = ImageGeneration(
             owner_node=self.node_id,
             task_params=payload,
@@ -9631,7 +9835,7 @@ class API:
 
     async def _send_image_edits_command(
         self,
-        image: UploadFile,
+        image: UploadFile | list[UploadFile],
         prompt: str,
         model: ModelId,
         n: int,
@@ -9649,20 +9853,34 @@ class API:
         resolved_model = await self._validate_image_model(model)
         advanced_params = _ensure_seed(advanced_params)
 
-        image_content = await image.read(_VISION_MEDIA_RAW_IMAGE_BYTES + 1)
-        if len(image_content) > _VISION_MEDIA_RAW_IMAGE_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail="Input image exceeds the per-request media limit",
-            )
-        image_data = base64.b64encode(image_content).decode("utf-8")
+        uploads = image if isinstance(image, list) else [image]
+        native = self._validate_image_request(resolved_model, size, n, advanced_params, len(uploads), prompt=prompt)
+        reference_data: list[bytes] = []
+        encoded_images: list[str] = []
+        input_bytes = 0
+        for upload in uploads:
+            image_content = await upload.read(_VISION_MEDIA_RAW_IMAGE_BYTES - input_bytes + 1)
+            input_bytes += len(image_content)
+            if input_bytes > _VISION_MEDIA_RAW_IMAGE_BYTES:
+                raise HTTPException(status_code=413, detail="Reference images exceed the aggregate media limit")
+            if not image_content:
+                raise HTTPException(status_code=400, detail="Reference images cannot be empty")
+            if native:
+                reference_data.append(image_content)
+            encoded_images.append(base64.b64encode(image_content).decode("ascii"))
+
+        if native:
+            try:
+                validate_reference_images(reference_data)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+        reference_data.clear()
 
         image_strength = 0.7 if input_fidelity == "high" else 0.3
 
-        data_chunks = [
-            image_data[i : i + SKULK_MAX_CHUNK_SIZE]
-            for i in range(0, len(image_data), SKULK_MAX_CHUNK_SIZE)
-        ]
+        data_chunks = [(slot, data[offset:offset + SKULK_MAX_CHUNK_SIZE])
+                       for slot, data in enumerate(encoded_images)
+                       for offset in range(0, len(data), SKULK_MAX_CHUNK_SIZE)]
         total_chunks = len(data_chunks)
 
         command = ImageEdits(
@@ -9670,6 +9888,7 @@ class API:
             task_params=ImageEditsTaskParams(
                 image_data="",
                 total_input_chunks=total_chunks,
+                input_image_count=len(uploads),
                 prompt=prompt,
                 model=resolved_model,
                 n=n,
@@ -9686,13 +9905,13 @@ class API:
         )
 
         logger.info(
-            f"Sending input image: {len(image_data)} bytes in {total_chunks} chunks"
+            f"Sending {len(uploads)} input images in {total_chunks} bounded chunks"
         )
         self._stage_vision_media(
             command.command_id,
             resolved_model,
-            [(0, chunk_data) for chunk_data in data_chunks],
-            1,
+            data_chunks,
+            len(uploads),
         )
         try:
             await self._send(command)
@@ -9706,7 +9925,7 @@ class API:
     async def image_edits(
         self,
         request: Request,
-        image: UploadFile = File(...),  # noqa: B008
+        image: UploadFile | None = File(None),  # noqa: B008
         prompt: str = Form(...),
         model: str = Form(...),
         n: int = Form(1),
@@ -9718,8 +9937,11 @@ class API:
         quality: Literal["high", "medium", "low"] = Form("medium"),
         output_format: Literal["png", "jpeg", "webp"] = Form("png"),
         advanced_params: str | None = Form(None),
+        images: list[UploadFile] | None = File(None, alias="image[]"),  # noqa: B008
     ) -> ImageGenerationResponse | StreamingResponse:
         """Handle image editing requests (img2img)."""
+        if (image is None) == (not images):
+            raise HTTPException(status_code=400, detail="Provide one image field or an ordered image[] array")
         # Parse string form values to proper types
         stream_bool = stream.lower() in ("true", "1", "yes")
         partial_images_int = int(partial_images) if partial_images.isdigit() else 0
@@ -9732,7 +9954,7 @@ class API:
                 )
 
         command = await self._send_image_edits_command(
-            image=image,
+            image=image if image is not None else images or [],
             prompt=prompt,
             model=ModelId(model),
             n=n,
@@ -9747,7 +9969,8 @@ class API:
             advanced_params=parsed_advanced_params,
         )
 
-        if stream_bool and partial_images_int > 0:
+        native = self._validate_image_request(ModelId(command.task_params.model), command.task_params.size, n, command.task_params.advanced_params, command.task_params.input_image_count, prompt=prompt)
+        if stream_bool and (native or partial_images_int > 0):
             return StreamingResponse(
                 self._generate_image_stream(
                     request=request,
@@ -9768,7 +9991,7 @@ class API:
     async def bench_image_edits(
         self,
         request: Request,
-        image: UploadFile = File(...),  # noqa: B008
+        image: UploadFile | None = File(None),  # noqa: B008
         prompt: str = Form(...),
         model: str = Form(...),
         n: int = Form(1),
@@ -9778,8 +10001,11 @@ class API:
         quality: Literal["high", "medium", "low"] = Form("medium"),
         output_format: Literal["png", "jpeg", "webp"] = Form("png"),
         advanced_params: str | None = Form(None),
+        images: list[UploadFile] | None = File(None, alias="image[]"),  # noqa: B008
     ) -> BenchImageGenerationResponse:
         """Handle benchmark image editing requests with generation stats."""
+        if (image is None) == (not images):
+            raise HTTPException(status_code=400, detail="Provide one image field or an ordered image[] array")
         parsed_advanced_params: AdvancedImageParams | None = None
         if advanced_params:
             with contextlib.suppress(Exception):
@@ -9788,7 +10014,7 @@ class API:
                 )
 
         command = await self._send_image_edits_command(
-            image=image,
+            image=image if image is not None else images or [],
             prompt=prompt,
             model=ModelId(model),
             n=n,
@@ -10365,6 +10591,7 @@ class API:
             tooling=ToolingCapabilitySection.from_model_card(card),
             runtime=RuntimeCapabilitySection.from_model_card(card),
             video=VideoCapabilitySection.from_model_card(card),
+            image=card.image,
             license=LicenseSection.from_model_card(card),
             resolved_capabilities=ResolvedModelCapabilities.from_profile(
                 resolved_profile

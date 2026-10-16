@@ -142,10 +142,12 @@ then observe exact placement, download, runner and inference evidence as describ
 above. Provider offers and budget enforcement belong to the external controller.
 
 
-Use `required_capabilities` when evaluating signed engine evidence: every
-required capability must have a supported exact engine/build/hardware match,
-and artifact-incomplete claims block admission independently. Do not infer the
-required set from the subset of engine claims returned.
+Use `required_capabilities` to assess intrinsic operation and artifact completeness.
+Declared compatible engines and supported upstream compatibility mappings identify
+runtimes; empirical qualifications describe tested outcomes and never form a GPU
+permission list. Apply actual package and runner requirements, then the resolved
+serving configuration's memory fit. Do not infer model capabilities from the subset
+of engine qualifications returned.
 
 At placement, compare the preview's `card_digest` with the approved requirements,
 check its exact node/backend and sufficient `contextTokenLimit`, and submit only

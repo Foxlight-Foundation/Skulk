@@ -318,6 +318,8 @@ def _engine_needs_install(
             return InstallEngine(
                 instance_id=instance_id,
                 engine=engine,
+                resolved_backend=runner.bound_instance.bound_shard.resolved_backend,
+                expected_build=runner.bound_instance.bound_shard.resolved_engine_build,
                 approximate_download_bytes=ON_DEMAND_ENGINE_DOWNLOAD_BYTES.get(engine, 0),
             )
     return None

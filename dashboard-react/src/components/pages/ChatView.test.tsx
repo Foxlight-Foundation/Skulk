@@ -429,3 +429,36 @@ it('keeps an ordinary streamed reply in its originating history after switching 
   expect(store.getState().chat.conversations[origin].messages.at(-1)?.content).toBe('Original reply');
   expect(store.getState().chat.conversations[steward].messages).toEqual([]);
 });
+
+describe('ChatView native images', () => {
+  it('routes an image model to image generation and displays its output', async () => {
+    let captured: Record<string, unknown> | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/models') return new Response(JSON.stringify({ data: [{
+        id: 'org/vision-model', tasks: ['TextToImage'], image: {
+          family: 'qwen_image_21_turbo', defaultWidth: 2048, defaultHeight: 2048,
+          dimensionMultiple: 32, maxPixels: 4400000, maxReferenceImages: 10,
+          supportsAlpha: true, defaultSteps: 8, defaultGuidance: 1,
+          fixedSigmas: [1, 0],
+        },
+      }] }), { status: 200 });
+      if (url === '/v1/images/generations') {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response('data: {"type":"final","image_index":0,"data":{"b64_json":"aW1hZ2U="}}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    await renderVisionChat();
+    const message = container?.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]');
+    const send = container?.querySelector<HTMLButtonElement>('[aria-label="Send message"]');
+    if (!message || !send) throw new Error('Image composer did not render');
+    await act(async () => {
+      await userEvent.fill(message, 'A fox beside a blue cup');
+      await userEvent.click(send);
+    });
+    await waitFor(() => Object.values(store.getState().chat.conversations).some(conversation => conversation.messages.some(item => item.generatedImages?.length === 1)), 'generated image was not retained');
+    expect(captured).toMatchObject({ prompt: 'A fox beside a blue cup', n: 1, size: 'auto', advanced_params: {}, stream: true });
+    expect(container?.querySelector<HTMLImageElement>('img[alt="Generated {index}"]')?.src).toBe('data:image/png;base64,aW1hZ2U=');
+  });
+});

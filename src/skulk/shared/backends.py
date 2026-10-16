@@ -28,6 +28,7 @@ written against the original ``{"mlx"}`` vocabulary keep matching unchanged.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import AbstractSet, Final, Literal
 
@@ -38,9 +39,17 @@ def _is_executable_file(path: str) -> bool:
     """Whether ``path`` names an existing executable file."""
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
+
 EngineType = Literal[
-    "mlx", "mlx_audio", "llama_cpp", "llama_server", "vllm", "test_video", "comfy",
+    "mlx",
+    "mlx_audio",
+    "llama_cpp",
+    "llama_server",
+    "vllm",
+    "test_video",
+    "comfy",
     "audio_cpp",
+    "stable_diffusion_cpp",
 ]
 """Inference runtime that loads and runs a model; selects the worker runner.
 
@@ -97,6 +106,7 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "test_video",
     "comfy",
     "audio_cpp",
+    "stable_diffusion_cpp",
 )
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
@@ -170,6 +180,7 @@ ON_DEMAND_ENGINE_DOWNLOAD_BYTES: Final[dict[EngineType, int]] = {"comfy": 7 * 10
 operators before a placement that triggers it (binary gigabytes, matching the
 dashboard's byte formatting)."""
 
+
 def engine_install_notice(engine: str, size_bytes: int) -> str:
     """The sentence an operator sees before a placement installs an engine.
 
@@ -214,7 +225,7 @@ AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE: Final[dict[str, str]] = {
     "aarch64": "nvidia:sm-12.1",
     "arm64": "nvidia:sm-12.1",
 }
-"""Compiled CUDA targets, requiring exact live and signed hardware evidence."""
+"""Actual CUDA targets compiled into the managed audio packages."""
 AUDIO_CPP_CUDA_TARGETS_BY_BUILD: Final[dict[str, str]] = {
     GB10_AUDIO_CPP_CUDA_BUILD: "nvidia:sm-12.1",
     L40S_AUDIO_CPP_CUDA_BUILD: "nvidia:sm-8.9",
@@ -246,6 +257,7 @@ def audio_cpp_cuda_hardware_matches(
         for hardware_class in hardware_classes
         if hardware_class.startswith("nvidia:sm-")
     } == {required_class}
+
 
 # ComfyUI compute backends Skulk advertises: NVIDIA CUDA and AMD ROCm.
 _COMFY_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")
@@ -401,13 +413,17 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
 # cards stay on the in-process compatibility path. Keeping the limitation here
 # rather than deleting model capability from cards preserves model/platform
 # truth and makes newly compiled cards light up without a broad card sweep.
-_VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
-    {"mlx", "llama_cpp"}
-)
+_VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx", "llama_cpp"})
 _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
 _MUSIC_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"audio_cpp"})
 AUDIO_CPP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
-    {"audio_cpp-cpu", "audio_cpp-metal", "audio_cpp-vulkan", "audio_cpp-cuda", "audio_cpp-rocm"}
+    {
+        "audio_cpp-cpu",
+        "audio_cpp-metal",
+        "audio_cpp-vulkan",
+        "audio_cpp-cuda",
+        "audio_cpp-rocm",
+    }
 )
 
 # Engines whose runner binding cannot LOAD a family the served sibling serves
@@ -430,6 +446,7 @@ def platform_compatible_backends(
     card_serves_vision: bool,
     card_serves_speech: bool = False,
     card_serves_music: bool = False,
+    card_has_native_image_profile: bool = False,
     card_has_pinned_projector: bool = False,
     card_supports_tool_calling: bool = False,
     card_vllm_tool_call_parser: str | None = None,
@@ -451,6 +468,8 @@ def platform_compatible_backends(
         compatible_backends: the card's declared backend tags.
         card_serves_vision: whether the card declares a vision capability.
         card_serves_speech: whether the card declares a speech capability.
+        card_has_native_image_profile: whether complete typed image components
+            require the native image runner; legacy image runners cannot load them.
         card_has_pinned_projector: whether a vision card identifies one exact
             immutable projector that the served runner can validate and load.
         card_supports_tool_calling: whether the model exposes tool calling.
@@ -465,7 +484,23 @@ def platform_compatible_backends(
     Returns:
         The subset of tags whose engine can serve everything the card declares.
     """
-    filtered = compatible_backends
+    # Legacy image runners do not yet consume the immutable component profile.
+    if card_has_native_image_profile:
+        filtered = frozenset(
+            tag
+            for tag in expand_engine_backends(compatible_backends)
+            if tag
+            in {
+                f"stable_diffusion_cpp-{compute}"
+                for compute in ("metal", "cuda", "vulkan", "rocm")
+            }
+        )
+    else:
+        filtered = frozenset(
+            tag
+            for tag in compatible_backends
+            if engine_of(tag) != "stable_diffusion_cpp"
+        )
     if card_serves_vision:
         vision_engines = (
             _VISION_SERVING_ENGINES | frozenset({"llama_server"})
@@ -486,7 +521,7 @@ def platform_compatible_backends(
     if card_serves_music:
         filtered = frozenset(
             tag
-            for tag in filtered
+            for tag in expand_engine_backends(filtered)
             if (engine := engine_of(tag)) is None
             or (engine in _MUSIC_SERVING_ENGINES and tag in AUDIO_CPP_COMPUTE_BACKENDS)
         )
@@ -497,6 +532,55 @@ def platform_compatible_backends(
             tag for tag in filtered if engine_of(tag) not in _FAMILY_GATED_ENGINES
         )
     return filtered
+
+
+def runtime_backends_for_builds(
+    backends: frozenset[str],
+    engine_builds: Mapping[str, str],
+    hardware_classes: frozenset[str],
+) -> frozenset[str]:
+    """Remove known compiled-target mismatches, independently of test coverage.
+
+    Installed operator binaries retain their runtime-probed compatibility.
+    Published package requirements cannot be bypassed by declaring an engine.
+    """
+    from skulk.provisioning.stable_diffusion_cpp import (
+        native_image_build_hardware_matches,
+    )
+
+    allowed = set(backends)
+    for backend in backends:
+        build = engine_builds.get(backend)
+        if build is None:
+            continue
+        if backend == "audio_cpp-cuda":
+            required = AUDIO_CPP_CUDA_TARGETS_BY_BUILD.get(build)
+            if required is not None and not audio_cpp_cuda_hardware_matches(
+                required, hardware_classes
+            ):
+                allowed.discard(backend)
+        if engine_of(
+            backend
+        ) == "stable_diffusion_cpp" and not native_image_build_hardware_matches(
+            build, hardware_classes
+        ):
+            allowed.discard(backend)
+    return frozenset(allowed)
+
+
+def expand_engine_backends(compatible_backends: AbstractSet[str]) -> frozenset[str]:
+    """Expand an engine requirement into compute tags without prescribing hardware.
+
+    Bare engine declarations accept any compute lane that the runtime actually
+    advertises. Explicit compound tags retain their narrower runtime requirement.
+    Unknown identifiers remain available to independently implemented engines.
+    This is model compatibility, not evidence of a physical qualification.
+    """
+    expanded = set(compatible_backends)
+    for tag in compatible_backends:
+        if engine_of(tag) == tag:
+            expanded.update(f"{tag}-{compute}" for compute in _COMPUTE_BACKENDS)
+    return frozenset(expanded)
 
 
 def resolve_node_backend(
@@ -515,10 +599,24 @@ def resolve_node_backend(
     ``resolved_backend`` on a shard at placement, #330) and the worker (to pick a
     runner) go through it so the two cannot disagree.
     """
-    intersection = compatible_backends & node_backends
+    intersection = expand_engine_backends(compatible_backends) & node_backends
+    # Prefer an actual compute lane when a node also publishes its legacy bare
+    # engine alias. Native runners need that lane for device and memory binding.
+    intersection = frozenset(
+        tag
+        for tag in intersection
+        if engine_of(tag) != tag
+        or not any(engine_of(other) == tag and other != tag for other in intersection)
+    )
     if not intersection:
         return None
-    ordered = [tag for tag in backend_preference if tag in intersection]
+    ordered = [
+        tag
+        for preference in backend_preference
+        for tag in sorted(intersection, key=lambda item: (item.endswith("-cpu"), item))
+        if tag == preference
+        or (engine_of(preference) == preference and engine_of(tag) == preference)
+    ]
     # Fallback for tags outside the card's preference list: deterministic, but
     # never let a CPU compute tag beat a GPU tag on alphabetical accident --
     # GPU serving dominates CPU for every model class we ship, and a card
@@ -530,7 +628,7 @@ def resolve_node_backend(
         for tag in sorted(
             intersection, key=lambda tag: (tag.endswith(f"{_TAG_SEPARATOR}cpu"), tag)
         )
-        if tag not in backend_preference
+        if tag not in ordered
     ]
     return ordered[0]
 

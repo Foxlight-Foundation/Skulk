@@ -283,8 +283,47 @@ def video_companion_selection(
     return frozenset(
         (item.path, item.size_bytes)
         for item in owner_card.video.companions
-        if item.repo is not None and str(item.repo) == repository and item.revision == revision
+        if item.repo is not None
+        and str(item.repo) == repository
+        and item.revision == revision
     )
+
+
+def select_store_image_files(
+    file_list: list[FileListEntry],
+    model_card: ModelCard,
+    repository: str,
+    revision: str,
+) -> list[FileListEntry]:
+    """Select every declared image file at its exact size from one source group.
+
+    Missing files or metadata conflicts fail before transfer; unrelated quants
+    and projectors remain outside the image transaction.
+    """
+    if model_card.image is None:
+        raise ValueError("image file selection requires a complete image profile")
+    expected = model_card.image.files_for_source(repository, revision)
+    if not expected:
+        raise ValueError("image profile declares no files from the requested source")
+    listed = {item.path: item for item in file_list}
+    selected: list[FileListEntry] = []
+    for item in expected:
+        observed = listed.get(item.path)
+        if observed is None:
+            raise FileNotFoundError(f"Image component file is absent: {item.path}")
+        if observed.size != item.size_bytes:
+            raise ValueError(f"Image component size mismatch: {item.path}")
+        selected.append(observed)
+    if (
+        repository == str(model_card.artifact_repository)
+        and revision == model_card.source_revision
+        and model_card.artifact_bundle is not None
+    ):
+        existing = {item.path: item for item in selected}
+        for item in select_store_artifact_bundle_files(file_list, model_card):
+            existing.setdefault(item.path, item)
+        selected = list(existing.values())
+    return selected
 
 
 def select_store_video_companion_files(
@@ -300,8 +339,12 @@ def select_store_video_companion_files(
     """
     expected = [
         item
-        for item in (owner_card.video.companions if owner_card.video is not None else ())
-        if item.repo is not None and str(item.repo) == repository and item.revision == revision
+        for item in (
+            owner_card.video.companions if owner_card.video is not None else ()
+        )
+        if item.repo is not None
+        and str(item.repo) == repository
+        and item.revision == revision
     ]
     if not expected:
         raise ValueError(
@@ -623,8 +666,12 @@ class ModelStore:
         """
         expected = [
             item
-            for item in (owner_card.video.companions if owner_card.video is not None else ())
-            if item.repo is not None and str(item.repo) == repository and item.revision == revision
+            for item in (
+                owner_card.video.companions if owner_card.video is not None else ()
+            )
+            if item.repo is not None
+            and str(item.repo) == repository
+            and item.revision == revision
         ]
         model_path = _resolve_store_child_path(self._store_path, entry.store_path)
         if not expected or model_path is None:
@@ -633,7 +680,8 @@ class ModelStore:
             candidate = model_path / item.path
             try:
                 if not candidate.is_file() or (
-                    item.size_bytes is not None and candidate.stat().st_size != item.size_bytes
+                    item.size_bytes is not None
+                    and candidate.stat().st_size != item.size_bytes
                 ):
                     return False
             except OSError:
@@ -926,9 +974,7 @@ class ModelStore:
     ) -> None:
         """Atomically replace durable automatic-import suppression metadata."""
 
-        self._reconciliation_tombstones_path.parent.mkdir(
-            parents=True, exist_ok=True
-        )
+        self._reconciliation_tombstones_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._reconciliation_tombstones_path.with_name(
             f".{self._reconciliation_tombstones_path.name}.tmp"
         )
@@ -1013,8 +1059,7 @@ class ModelStore:
         for model_id, entry in tuple(registry.items()):
             retained = entry.installed_card
             if model_id in tombstoned_aliases or (
-                retained is not None
-                and retained.owner_model_id in tombstoned_aliases
+                retained is not None and retained.owner_model_id in tombstoned_aliases
             ):
                 del registry[model_id]
                 changed = True
@@ -1131,15 +1176,12 @@ class ModelStore:
                 matches_current = (
                     current_card_id is not None
                     and (
-                        installed.owner_card_id
-                        or installed.model_card.registry_card_id
+                        installed.owner_card_id or installed.model_card.registry_card_id
                     )
                     == current_card_id
                 )
                 return (
-                    not matches_current
-                    if current_registry_ids is not None
-                    else False,
+                    not matches_current if current_registry_ids is not None else False,
                     not matches_previous,
                     installed.verification != "registry_verified",
                     -installed.captured_at.timestamp(),
@@ -1427,6 +1469,15 @@ class ModelStore:
             [pinned_gguf] if pinned_gguf is not None else [],
         )
         missing_companion = self.entry_missing_files(model_id, extra_pinned_gguf or [])
+        image_files = (
+            model_card.image.files_for_source(requested_repository, source_revision)
+            if model_card is not None and model_card.image is not None
+            else ()
+        )
+        missing_companion = missing_companion or any(
+            self.entry_file_requires_recovery(model_id, item.path, item.size_bytes)
+            for item in image_files
+        )
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
@@ -1873,7 +1924,9 @@ class ModelStore:
             sanitized = f"{sanitized}--source-{repository_digest}"
         bundle = transfer_bundle(model_card, artifact_role)
         if bundle is not None:
-            sanitized = f"{sanitized}--bundle-{bundle.bundle_id.removeprefix('bundle_')[:16]}"
+            sanitized = (
+                f"{sanitized}--bundle-{bundle.bundle_id.removeprefix('bundle_')[:16]}"
+            )
         target_dir = self._store_path / sanitized
         previous_entry = self.get_entry(model_id)
         transfer_lock_acquired = False
@@ -1907,14 +1960,20 @@ class ModelStore:
             # lands before registering (see the post-download guard below): a
             # store entry that omits the projector stages an unloadable vision
             # model, which surfaces only as a runner crash at load time (#346).
-            repo_ships_projector = has_gguf_projector(f.path for f in repo_file_list)
+            repo_ships_projector = (
+                model_card is None or model_card.image is None
+            ) and has_gguf_projector(f.path for f in repo_file_list)
             # For a GGUF repo, fetch only the preferred quant's shard group plus
             # config.json (dropping other quants, original/*, metal/*, etc.),
             # mirroring the direct-HF selective download (#339). The projector
             # glob is retained by ``gguf_allow_patterns``, so a vision GGUF keeps
             # its ``*mmproj*.gguf``.
             selected_files = (
-                select_store_artifact_bundle_files(repo_file_list, model_card)
+                select_store_image_files(
+                    repo_file_list, model_card, artifact_repository, revision
+                )
+                if model_card is not None and model_card.image is not None
+                else select_store_artifact_bundle_files(repo_file_list, model_card)
                 if model_card is not None and bundle is not None
                 else select_store_video_companion_files(
                     repo_file_list, model_card, artifact_repository, revision
@@ -2006,6 +2065,26 @@ class ModelStore:
                     and str(item.repo) == artifact_repository
                 }
             )
+
+            if model_card is not None and model_card.image is not None:
+                expected_files.update(
+                    {
+                        item.path: (item.size_bytes, item.object_id)
+                        for item in model_card.image.files_for_source(
+                            artifact_repository, revision
+                        )
+                    }
+                )
+                for item in model_card.image.files_for_source(
+                    artifact_repository, revision
+                ):
+                    await asyncio.to_thread(
+                        self._remove_invalid_registered_file_for_recovery,
+                        model_id,
+                        item.path,
+                        item.size_bytes,
+                        target_dir,
+                    )
 
             for f in file_list:
                 file_size = f.size or 0

@@ -1,0 +1,194 @@
+diff --git a/examples/server/async_jobs.cpp b/examples/server/async_jobs.cpp
+index 8840808..678fb69 100644
+--- a/examples/server/async_jobs.cpp
++++ b/examples/server/async_jobs.cpp
+@@ -90,6 +90,10 @@ const char* async_job_status_name(AsyncJobStatus status) {
+ void purge_expired_jobs(AsyncJobManager& manager) {
+     const int64_t now = unix_timestamp_now();
+ 
++    // Deleted/expired IDs are diagnostic tombstones, not an unbounded request ledger.
++    if (manager.expired_jobs.size() > 128) {
++        manager.expired_jobs.clear();
++    }
+     for (auto it = manager.expired_jobs.begin(); it != manager.expired_jobs.end();) {
+         if (it->second <= now) {
+             it = manager.expired_jobs.erase(it);
+@@ -115,6 +119,22 @@ void purge_expired_jobs(AsyncJobManager& manager) {
+             ++it;
+         }
+     }
++
++    // A caller that dies before collecting cannot leave an unlimited image history.
++    while (manager.jobs.size() > manager.max_retained_jobs) {
++        auto oldest = manager.jobs.end();
++        for (auto it = manager.jobs.begin(); it != manager.jobs.end(); ++it) {
++            if (it->second->completed_at != 0 &&
++                (oldest == manager.jobs.end() ||
++                 it->second->completed_at < oldest->second->completed_at)) {
++                oldest = it;
++            }
++        }
++        if (oldest == manager.jobs.end()) {
++            break;
++        }
++        manager.jobs.erase(oldest);
++    }
+ }
+ 
+ size_t count_pending_jobs(const AsyncJobManager& manager) {
+@@ -406,7 +426,14 @@ void async_job_worker(ServerRuntime& runtime) {
+             }
+ 
+             job->completed_at = unix_timestamp_now();
+-            if (ok) {
++            if (job->cancellation_requested) {
++                job->status = AsyncJobStatus::Cancelled;
++                job->error_code = "cancelled";
++                job->error_message = "job cancelled by client";
++                job->result_images_b64.clear();
++                job->result_media_b64.clear();
++                job->preview_b64.clear();
++            } else if (ok) {
+                 job->status                 = AsyncJobStatus::Completed;
+                 job->result_images_b64      = std::move(output_images);
+                 job->result_media_b64       = std::move(output_media_b64);
+diff --git a/examples/server/async_jobs.h b/examples/server/async_jobs.h
+index 2fe79bb..e0425b7 100644
+--- a/examples/server/async_jobs.h
++++ b/examples/server/async_jobs.h
+@@ -44,6 +44,8 @@ struct AsyncGenerationJob {
+     int result_fps         = 0;
+     std::string error_code;
+     std::string error_message;
++    // Cancellation is terminal only after the generation thread has released its buffers.
++    bool cancellation_requested = false;
+     mutable std::mutex preview_mutex;
+     std::string preview_b64;
+     int preview_pass          = 0;
+@@ -59,7 +61,8 @@ struct AsyncJobManager {
+     std::deque<std::string> queue;
+     uint64_t next_id              = 0;
+     bool stop                     = false;
+-    size_t max_pending_jobs       = 64;
++    size_t max_pending_jobs       = 1;
++    size_t max_retained_jobs      = 2;
+     int64_t completed_ttl_seconds = 600;
+     int64_t failed_ttl_seconds    = 600;
+ };
+diff --git a/examples/server/main.cpp b/examples/server/main.cpp
+index 1768f0d..a24e97d 100644
+--- a/examples/server/main.cpp
++++ b/examples/server/main.cpp
+@@ -4,6 +4,8 @@
+ #include <string>
+ #include <thread>
+ #include <vector>
++#include <chrono>
++#include <unistd.h>
+ 
+ #include "httplib.h"
+ 
+@@ -73,7 +75,36 @@ int main(int argc, const char** argv) {
+         std::cout << version_string() << "\n";
+         return EXIT_SUCCESS;
+     }
++    if (argc > 1 && std::string(argv[1]) == "--skulk-probe") {
++        // Runtime availability must come from this executable, not the node's vendor label.
++        const size_t size = sd_list_devices(nullptr, 0);
++        std::vector<char> devices(size + 1, '\0');
++        sd_list_devices(devices.data(), devices.size());
++        std::cout << json({{"protocol", 1},
++                           {"source_revision", "d637cfb935feb2254898a8f1524046c958f3df80"},
++                           {"device_report", devices.data()}}).dump() << std::endl;
++        return EXIT_SUCCESS;
++    }
+     SDSvrParams svr_params;
++    const char* token_value = std::getenv("SKULK_SDCPP_AUTH_TOKEN");
++    if (token_value == nullptr || std::string(token_value).size() < 32) {
++        std::cerr << "Skulk native server requires a request authorization token" << std::endl;
++        return EXIT_FAILURE;
++    }
++    const std::string authorization = std::string("Bearer ") + token_value;
++    const char* parent_value = std::getenv("SKULK_SDCPP_PARENT_PID");
++    const pid_t owner = parent_value ? static_cast<pid_t>(std::strtol(parent_value, nullptr, 10)) : getppid();
++    if (owner <= 1 || owner != getppid()) {
++        std::cerr << "Skulk native server lost its owning runner" << std::endl;
++        return EXIT_FAILURE;
++    }
++    // Covers SIGKILL of the runner on macOS as well as Linux; no supervisor sweep is needed.
++    std::thread([owner]() {
++        while (getppid() == owner) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(500));
++        }
++        std::_Exit(EXIT_FAILURE);
++    }).detach();
+     SDContextParams ctx_params;
+     // Preserve the CLI default while disabling cwd scans for sd-server.
+     ctx_params.lora_model_dir.clear();
+@@ -119,8 +150,22 @@ int main(int argc, const char** argv) {
+     std::thread async_worker(async_job_worker, std::ref(runtime));
+ 
+     httplib::Server svr;
+-
+-    svr.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
++    // Skulk submits bounded encoded images over loopback, never an unrestricted upload.
++    svr.set_payload_max_length(64 * 1024 * 1024);
++
++    svr.set_pre_routing_handler([authorization](const httplib::Request& req, httplib::Response& res) {
++        // Loopback is reachable by browsers and other processes; only the owning runner may use this server.
++        const std::string supplied = req.get_header_value("Authorization");
++        unsigned char mismatch = supplied.size() == authorization.size() ? 0 : 1;
++        for (size_t i = 0; i < authorization.size(); ++i) {
++            mismatch |= static_cast<unsigned char>(authorization[i]) ^
++                        static_cast<unsigned char>(i < supplied.size() ? supplied[i] : 0);
++        }
++        if (mismatch != 0) {
++            res.status = 401;
++            res.set_content(R"({"error":"unauthorized"})", "application/json");
++            return httplib::Server::HandlerResponse::Handled;
++        }
+         std::string origin = req.get_header_value("Origin");
+         if (origin.empty()) {
+             origin = "*";
+diff --git a/examples/server/routes_sdcpp.cpp b/examples/server/routes_sdcpp.cpp
+index 3139682..f4ecfdb 100644
+--- a/examples/server/routes_sdcpp.cpp
++++ b/examples/server/routes_sdcpp.cpp
+@@ -818,12 +818,35 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
+         }
+ 
+         if (job.status == AsyncJobStatus::Generating) {
+-            res.status = 409;
+-            res.set_content(R"({"error":"job is currently generating and cannot be interrupted yet"})", "application/json");
++            // The C API flag is atomic; taking sd_ctx_mutex here would wait until generation ended.
++            job.cancellation_requested = true;
++            sd_cancel_generation(runtime->sd_ctx, SD_CANCEL_ALL);
++            res.status = 200;
++            res.set_content(make_async_job_json(manager, job).dump(), "application/json");
+             return;
+         }
+ 
+         res.status = 200;
+         res.set_content(make_async_job_json(manager, job).dump(), "application/json");
+     });
++
++    // Collection is acknowledged by deleting only terminal jobs. Active work keeps its owner.
++    svr.Delete(R"(/sdcpp/v1/jobs/([A-Za-z0-9_\-]+))", [runtime](const httplib::Request& req, httplib::Response& res) {
++        AsyncJobManager& manager = *runtime->async_job_manager;
++        std::lock_guard<std::mutex> lock(manager.mutex);
++        const std::string job_id = req.matches[1];
++        auto it = manager.jobs.find(job_id);
++        if (it == manager.jobs.end()) {
++            res.status = 204;
++            return;
++        }
++        if (it->second->status == AsyncJobStatus::Queued ||
++            it->second->status == AsyncJobStatus::Generating) {
++            res.status = 409;
++            res.set_content(R"({"error":"job is still active"})", "application/json");
++            return;
++        }
++        manager.jobs.erase(it);
++        res.status = 204;
++    });
+ }

@@ -100,7 +100,7 @@ def _hardware_supports(compute: str, facts: NodeFacts) -> bool:
     if compute == "rocm":
         return amd
     if compute == "vulkan":
-        return nvidia or amd
+        return nvidia or amd or any(gpu.vendor == "intel" for gpu in facts.gpus)
     return True
 
 
@@ -671,6 +671,31 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         conflicts.extend(engine_conflicts)
         notes.extend(engine_notes)
 
+    native_image = facts.stable_diffusion_cpp_probe
+    if native_image.outcome == "ready" and len(native_image.devices) == 1:
+        from skulk.facts.inventory import hardware_class_inventory
+        from skulk.provisioning.stable_diffusion_cpp import (
+            native_image_build_hardware_matches,
+        )
+
+        if (
+            native_image.build_identity is not None
+            and native_image_build_hardware_matches(
+                native_image.build_identity, hardware_class_inventory(facts)
+            )
+        ):
+            tags.update(
+                f"stable_diffusion_cpp-{compute}" for compute in native_image.computes
+            )
+    elif facts.stable_diffusion_cpp_binary.state != "not_configured":
+        conflicts.append(
+            CapabilityConflict(
+                code="invalid_engine_binary",
+                message="The configured native image engine did not verify its source and GPU.",
+                remediation="Use a compatible pinned GPU image engine and refresh node resources.",
+            )
+        )
+
     # A node that can install the video engine advertises it before the
     # install, so placement can choose it; the worker installs the engine the
     # first time a video model lands here. A configured or wired install
@@ -685,6 +710,10 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
             f"comfy-{variant}" for variant in facts.comfy_on_demand_variants
         }
         tags |= on_demand
+
+    if facts.stable_diffusion_cpp_binary.state == "not_configured":
+        on_demand.update(facts.stable_diffusion_cpp_installable_builds)
+        tags.update(facts.stable_diffusion_cpp_installable_builds)
 
     if any(gpu.detection_source == "nvidia_device_node" for gpu in facts.gpus):
         # The #612 class: hardware is visibly present but the node cannot read

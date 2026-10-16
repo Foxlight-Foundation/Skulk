@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import hashlib
+import json
 import os
 import shutil
 import socket
@@ -35,7 +37,12 @@ from skulk.download.huggingface_utils import (
     resolve_hf_token_source,
 )
 from skulk.shared.constants import SKULK_MODELS_DIR
-from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.model_cards import (
+    ArtifactBundleConfig,
+    ArtifactBundleFile,
+    ModelCard,
+    ModelTask,
+)
 from skulk.shared.models.remote_code_approval import require_remote_code_approval
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.memory import Memory
@@ -528,6 +535,7 @@ def companion_download_specs(
         repo: str,
         source_revision: str | None,
         gguf_file: str | None = None,
+        artifact_bundle: ArtifactBundleConfig | None = None,
     ) -> PipelineShardMetadata:
         companion_model_id, effective_revision = companion_artifact_location(
             model_card,
@@ -540,6 +548,7 @@ def companion_download_specs(
                 source_repository=ModelId(repo),
                 source_revision=effective_revision,
                 gguf_file=gguf_file,
+                artifact_bundle=artifact_bundle,
                 storage_size=Memory.from_bytes(0),
                 n_layers=1,
                 hidden_size=1,
@@ -554,6 +563,54 @@ def companion_download_specs(
         )
 
     specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
+    if model_card.image is not None:
+        groups: dict[tuple[str, str], list[str]] = {}
+        for component in model_card.image.components:
+            paths = groups.setdefault((component.repository, component.revision), [])
+            for item in component.files:
+                if item.path not in paths:
+                    paths.append(item.path)
+        for (repository, revision), paths in groups.items():
+            if repository != str(model_card.artifact_repository):
+                # The owning image manifest selects the whole repository group,
+                # including direct-Hub fallback when a model store is unavailable.
+                files = tuple(
+                    ArtifactBundleFile(
+                        path=item.path,
+                        size_bytes=item.size_bytes,
+                        object_id=item.object_id,
+                    )
+                    for item in sorted(
+                        model_card.image.files_for_source(repository, revision),
+                        key=lambda item: item.path,
+                    )
+                )
+                manifest = [
+                    {
+                        "relative_path": item.path,
+                        "size_bytes": item.size_bytes,
+                        "object_id": item.object_id,
+                    }
+                    for item in files
+                ]
+                digest = hashlib.sha256(
+                    json.dumps(
+                        manifest, allow_nan=False, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).digest()
+                bundle = ArtifactBundleConfig(
+                    bundle_id="bundle_"
+                    + base64.b32encode(digest).decode().rstrip("=").lower(),
+                    files=files,
+                    download_size=sum(item.size_bytes for item in files),
+                )
+                specs.append(
+                    (
+                        _bare_shard(repository, revision, artifact_bundle=bundle),
+                        paths,
+                        True,
+                    )
+                )
     if model_card.vision and model_card.vision.weights_repo != str(
         model_card.artifact_repository
     ):
@@ -712,6 +769,15 @@ def model_companions_present_on_disk(
     model complete after ensure_shard returns, so the gate cannot loop
     within a session.
     """
+    if model_card.image is not None:
+        for component in model_card.image.components:
+            identifier, revision = companion_artifact_location(
+                model_card, component.repository, component.revision
+            )
+            for item in component.files:
+                path = build_sidecar_path(identifier, item.path, revision)
+                if path is None or path.stat().st_size != item.size_bytes:
+                    return False
     if model_card.vision and model_card.vision.weights_repo != str(
         model_card.artifact_repository
     ):
@@ -753,7 +819,9 @@ def model_companions_present_on_disk(
         # Preprocessor weights are load-bearing: a card that advertises a
         # guide it cannot derive would fail the render, not degrade it.
         for item in model_card.video.companions:
-            if item.repo is None or str(item.repo) == str(model_card.artifact_repository):
+            if item.repo is None or str(item.repo) == str(
+                model_card.artifact_repository
+            ):
                 continue
             if build_sidecar_path(ModelId(item.repo), item.path, item.revision) is None:
                 return False
@@ -817,16 +885,17 @@ def _apply_artifact_root(model_directory: Path, artifact_root: str | None) -> Pa
         return model_directory
     resolved_directory = model_directory.resolve()
     resolved_root = (resolved_directory / artifact_root).resolve()
-    if not resolved_root.is_relative_to(resolved_directory) or not resolved_root.is_dir():
+    if (
+        not resolved_root.is_relative_to(resolved_directory)
+        or not resolved_root.is_dir()
+    ):
         raise FileNotFoundError(
             f"Artifact root {artifact_root!r} is absent beneath {model_directory}"
         )
     return resolved_root
 
 
-def artifact_install_directory(
-    load_directory: Path, artifact_root: str | None
-) -> Path:
+def artifact_install_directory(load_directory: Path, artifact_root: str | None) -> Path:
     """Recover the staged generation root from its bundle loader directory.
 
     Args:
@@ -922,7 +991,9 @@ def build_model_path(
     # must be accepted here or a bare GGUF model that downloaded fine would fail
     # to load with FileNotFoundError (#327).
     default = SKULK_MODELS_DIR / model_id.normalize()
-    default_load_root = default / artifact_root if artifact_root is not None else default
+    default_load_root = (
+        default / artifact_root if artifact_root is not None else default
+    )
     if (
         default.is_dir()
         and default_load_root.is_dir()
@@ -1804,6 +1875,17 @@ async def get_weight_map(model_id: ModelId, revision: str = "main") -> dict[str,
 
 async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
     bundle = shard.model_card.artifact_bundle
+    if shard.model_card.image is not None:
+        # Primary-repository companions belong to the base transaction; the
+        # companion downloader handles only the other pinned repositories.
+        paths = [item.path for item in bundle.files] if bundle is not None else []
+        paths.extend(
+            item.path
+            for component in shard.model_card.image.components
+            if component.repository == str(shard.model_card.artifact_repository)
+            for item in component.files
+        )
+        return list(dict.fromkeys(paths))
     if bundle is not None:
         # A v2 signed card is an exact immutable file transaction. Broad config
         # or tokenizer globs would recreate the repository-wide ambiguity this
@@ -1951,31 +2033,41 @@ async def download_shard(
         filter_repo_objects(
             file_list,
             allow_patterns=allow_patterns,
-            ignore_patterns=["original/*", "metal/*"],
+            ignore_patterns=[] if shard.model_card.image is not None else ["original/*", "metal/*"],
             key=lambda x: x.path,
         )
     )
     bundle = shard.model_card.artifact_bundle
-    if bundle is not None:
+    expected_files = {item.path: (item.size_bytes, item.object_id) for item in bundle.files} if bundle is not None else {}
+    if shard.model_card.image is not None:
+        # A primary bundle does not replace same-repository component sources.
+        # Their exact manifest outranks the legacy MLX layout exclusions.
+        for item in shard.model_card.image.files_for_source(str(shard.model_card.artifact_repository), revision):
+            previous = expected_files.get(item.path)
+            if previous is not None and (previous[0] != item.size_bytes or (previous[1] is not None and previous[1] != item.object_id)):
+                raise ValueError(f"Image component conflicts with artifact bundle: {item.path}")
+            expected_files[item.path] = (item.size_bytes, item.object_id)
+    if expected_files:
+        manifest_label = "Image component" if shard.model_card.image is not None else "Signed artifact bundle"
         listed_by_path = {item.path: item for item in filtered_file_list}
         exact_files: list[FileListEntry] = []
-        for expected in bundle.files:
-            observed = listed_by_path.get(expected.path)
+        for path, (size, _object_id) in expected_files.items():
+            observed = listed_by_path.get(path)
             if observed is None:
                 raise FileNotFoundError(
-                    f"Signed artifact bundle file is absent: {expected.path}"
+                    f"{manifest_label} file is absent: {path}"
                 )
-            if observed.size != expected.size_bytes:
+            if observed.size != size:
                 raise ValueError(
-                    f"Signed artifact bundle size mismatch for {expected.path}: "
-                    f"expected {expected.size_bytes}, listing reports {observed.size}"
+                    f"{manifest_label} size mismatch for {path}: "
+                    f"expected {size}, listing reports {observed.size}"
                 )
             exact_files.append(observed)
         filtered_file_list = exact_files
 
     # For image models, skip root-level safetensors files since weights
     # are stored in component subdirectories (e.g., transformer/, vae/)
-    if bundle is None and is_image_model(shard):
+    if bundle is None and shard.model_card.image is None and is_image_model(shard):
         filtered_file_list = [
             f
             for f in filtered_file_list
@@ -2094,12 +2186,11 @@ async def download_shard(
 
     async def download_with_semaphore(file: FileListEntry) -> None:
         async with semaphore:
-            def progress(
-                curr_bytes: int, total_bytes: int, is_renamed: bool
-            ) -> None:
+
+            def progress(curr_bytes: int, total_bytes: int, is_renamed: bool) -> None:
                 schedule_progress(file, curr_bytes, total_bytes, is_renamed)
 
-            if bundle is None:
+            if not expected_files:
                 await download_file_with_retry(
                     shard.model_card.artifact_repository,
                     revision,
@@ -2110,7 +2201,7 @@ async def download_shard(
                     skip_internet=skip_internet,
                 )
                 return
-            expected = next(item for item in bundle.files if item.path == file.path)
+            expected_size, expected_object_id = expected_files[file.path]
             await download_file_with_retry(
                 shard.model_card.artifact_repository,
                 revision,
@@ -2119,8 +2210,8 @@ async def download_shard(
                 progress,
                 on_connection_lost=on_connection_lost,
                 skip_internet=skip_internet,
-                expected_size=expected.size_bytes,
-                expected_object_id=expected.object_id,
+                expected_size=expected_size,
+                expected_object_id=expected_object_id,
             )
 
     download_cancelled = False

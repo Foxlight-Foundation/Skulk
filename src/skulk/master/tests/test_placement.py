@@ -327,7 +327,7 @@ def test_placement_stamps_resolved_backend() -> None:
     )
     instance = next(iter(placements.values()))
     shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
-    assert shard.resolved_backend == "mlx"
+    assert shard.resolved_backend == "mlx-metal"
 
 
 def test_placement_leaves_resolved_backend_none_without_node_resources() -> None:
@@ -1895,15 +1895,15 @@ def test_signed_engine_support_adds_backend_without_card_replacement(
             "engine_build": "vllm@9.9.9",
             "architecture": "future_architecture_v1",
             "artifact_format": "safetensors",
-            "artifact_card_id": "card_" + "a" * 52,
+            "artifact_card_id": None,
             "quantization": "",
             "capability_id": "text.generate",
             "status": "supported",
-            "evidence_kind": "load_qualification",
+            "evidence_kind": "upstream_compatibility",
             "evidence_trust": "foxlight_observed",
             "source_url": "https://evidence.example/load",
             "source_sha256": "c" * 64,
-            "rationale": "Exact engine build loaded the exact artifact.",
+            "rationale": "Upstream declares architecture compatibility independently of physical qualification.",
             "hardware_classes": ["nvidia"],
             "supersedes_claim_id": None,
             "recorded_by": "operator@example.com",
@@ -1940,33 +1940,35 @@ def test_signed_engine_support_adds_backend_without_card_replacement(
         for shard in instance.shard_assignments.runner_to_shard.values()
     } <= {"vllm", "vllm-cuda"}
 
-    with pytest.raises(PlacementError, match="No candidate cycle"):
-        place_instance(
-            place_instance_command(card),
-            topology,
-            {},
-            node_memory,
-            node_network,
-            required_nodes={node_b},
-            node_resources={
-                node_a: NodeResources(
-                    backends=frozenset({"vllm", "vllm-cuda"}),
-                    engine_builds={
-                        "vllm": "vllm@9.9.9",
-                        "vllm-cuda": "vllm@9.9.9",
-                    },
-                    hardware_classes=frozenset({"nvidia"}),
-                ),
-                node_b: NodeResources(
-                    backends=frozenset({"vllm", "vllm-cuda"}),
-                    engine_builds={
-                        "vllm": "vllm@9.9.8",
-                        "vllm-cuda": "vllm@9.9.8",
-                    },
-                    hardware_classes=frozenset({"nvidia"}),
-                ),
-            },
-        )
+    alternative = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        required_nodes={node_b},
+        node_resources={
+            node_a: NodeResources(
+                backends=frozenset({"vllm", "vllm-cuda"}),
+                engine_builds={
+                    "vllm": "vllm@9.9.9",
+                    "vllm-cuda": "vllm@9.9.9",
+                },
+                hardware_classes=frozenset({"nvidia"}),
+            ),
+            node_b: NodeResources(
+                backends=frozenset({"vllm", "vllm-cuda"}),
+                engine_builds={
+                    "vllm": "vllm@9.9.8",
+                    "vllm-cuda": "vllm@9.9.8",
+                },
+                hardware_classes=frozenset({"nvidia"}),
+            ),
+        },
+    )
+    assert set(next(iter(alternative.values())).shard_assignments.node_to_runner) == {
+        node_b
+    }
 
 
 def test_missing_node_resources_is_treated_as_eligible() -> None:

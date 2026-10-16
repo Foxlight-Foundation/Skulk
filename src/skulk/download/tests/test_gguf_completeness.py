@@ -298,3 +298,26 @@ async def test_same_repo_draft_preserves_exact_projector_pattern() -> None:
         "config.json",
         "draft-Q4_K_M.gguf",
     ]
+
+
+@pytest.mark.parametrize("primary_file", ["model.gguf", "model.safetensors"])
+async def test_native_image_base_download_includes_same_repository_companions(primary_file: str) -> None:
+    """Fetch exact primary components without unrelated quant/projector globs."""
+    import json
+
+    from skulk.shared.models.model_cards import ModelCard
+    from skulk.shared.types.worker.shards import PipelineShardMetadata
+
+    card = ModelCard.model_validate_json(json.dumps({
+        "model_id": "owner/native", "source_revision": "a" * 40,
+        "gguf_file": primary_file if primary_file.endswith(".gguf") else None,
+        "storage_size": {"in_bytes": 14}, "n_layers": 1, "hidden_size": 1,
+        "supports_tensor": False, "tasks": ["TextToImage"],
+        "image": {"family": "sdxl", "default_steps": 20,
+            "components": [{"role": role, "repository": "owner/native", "revision": "a" * 40,
+                "entry_file": path, "files": [{"path": path, "size_bytes": 7, "object_id": "sha256:" + "b" * 64}]}
+                for role, path in [("model", primary_file), ("vae", "vae.safetensors")]]},
+    }))
+    shard = PipelineShardMetadata(model_card=card, device_rank=0, world_size=1, start_layer=0, end_layer=1, n_layers=1)
+    assert await download_utils.resolve_allow_patterns(shard) == [primary_file, "vae.safetensors"]
+    assert download_utils.companion_download_specs(card) == []

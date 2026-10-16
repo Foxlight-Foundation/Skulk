@@ -61,6 +61,8 @@ class InstallEngine(BaseTask):  # emitted by Worker
     """
 
     engine: EngineType
+    resolved_backend: str | None = Field(default=None, description="Exact backend requesting this installation; absent for legacy engine tasks.")
+    expected_build: str | None = Field(default=None, description="Immutable executable build selected by placement.")
     approximate_download_bytes: int = Field(
         default=0,
         ge=0,

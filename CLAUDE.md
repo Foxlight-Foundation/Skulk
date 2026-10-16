@@ -158,7 +158,7 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
 - **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration. Better same-round proposals arriving after the local timeout correct the completed result using the original vote ordering, so delayed subscription exchange does not leave conflicting masters waiting for a new membership event
-- **API**: FastAPI server for OpenAI-compatible chat completions
+- **API**: FastAPI server for OpenAI-compatible chat completions. The scoped `/v1/instances/{instance_id}/chat/completions` extension requires `allowed_node_install_ids`, checks every assigned rank's persistent identity, and uses the existing exact-target command path without replica fallback; no placement authority is granted.
 - **Operator identity/authority foundation**: stable per-host and cluster
   identities, deterministic Ed25519 quorum certification, two-phase
   crash-fault vote collection and recovery, a public consensus SQLite log, and
@@ -317,7 +317,8 @@ lanes retain their existing estimates.
 `NodeResources.engine_builds` hashes the executable for each concrete lane.
 `TextToMusic` is the sole
 task on a music card. The cards have
-their own `[music]` section and require exact signed support claims. The
+their own `[music]` section and declare compatible audio.cpp engine requirements;
+representative signed qualification is evidence, not hardware eligibility. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
 Silicon macOS and Linux amd64/arm64 plus separate Linux amd64 Vulkan and Linux
 amd64/arm64 CUDA packages from the pinned source. To promote already tested
@@ -328,30 +329,30 @@ A plain GPU digest is accepted only when the source run contains one GPU wheel.
 The verifier rejects missing, ambiguous, mixed-version, or digest-mismatched
 selections before attestation checks and publishes only verified paths.
 `PrepareAudioCpp` carries the
-selected package variant; the API chooses CUDA or Vulkan only when a matching
-signed support claim applies to the node's hardware, and can try a separately
-claimed CPU fallback. An explicit primary-binary override may probe as CUDA
+selected package variant; the API chooses a compatible CUDA, Vulkan or CPU
+package from actual node facts and runtime availability. Representative signed
+qualification remains reporting evidence. An explicit primary-binary override may probe as CUDA
 or ROCm; exact instance creation filters preparation to the requested compute
 lane. A standalone primary Vulkan override remains eligible when its pinned
 revision, specs, and device probe pass. AMD sysfs PCI IDs produce stable
 chip-class identifiers
-(`amd:pci-1002-1586` on Strix Halo) for claim selection before preparation.
+(`amd:pci-1002-1586` on Strix Halo) for observations and real package requirements.
 Music model weights are separate immutable downloads. Managed CUDA wheels target
 SM 8.9 on amd64 and GB10 SM 12.1 on arm64. Preparation requires the platform's
-exact managed executable build and compute class in the signed claim, plus one
+verified executable identity and its actual compiled compute class, plus one
 observed NVIDIA device with that class. Mixed GPU vendors, unknown classes, and multiple NVIDIA
 devices are rejected because the runner cannot yet bind execution and memory
-admission to a selected physical device. A qualified operator-provided primary
-CUDA binary uses its own exact claim through primary preparation. If a dedicated
+admission to a selected physical device. An operator-provided primary
+CUDA binary uses its own observed identity and runtime probe through preparation. If a dedicated
 CUDA wheel is already cached, set `SKULK_AUDIO_CPP_CUDA_BIN` to the operator
 binary as well: startup cache rehydration can otherwise prefer that managed
 build over a primary-only override.
 CUDA 12 runtime, cuBLAS, NCCL, and NVIDIA driver libraries
 must be on the host loader path; the binary probe reports missing libraries
-before advertising the lane. Signed support resolution also requires the
-exact class for this build after cache restore; CPU preparation does not
+before advertising the lane. Managed package compatibility still requires its
+actual compiled compute class after cache restore; CPU preparation does not
 reuse the dedicated CUDA wheel as a primary override.
-The bare `audio_cpp` tag reports availability; music support claims and runner
+The bare `audio_cpp` tag reports availability; engine requirements and runner
 placement select a concrete compute lane so memory and device choice agree.
 Runner Metal memory diagnostics and shutdown cleanup are inert outside macOS;
 Linux music runners do not import an unused MLX extension during teardown.
@@ -1245,7 +1246,48 @@ display/preferred-language metadata, optional checksummed bundled
 `reference_profile` identifiers, and a validated `audio.default_voice`, which
 the API applies only when callers omit `voice`.
 
-**Four compatibility truth layers:** signed registry capability claims describe intrinsic model behavior and artifact completeness; signed engine-support claims establish exact architecture/artifact/quant/capability compatibility for one engine build; `NodeResources.engine_builds` (the comfy engine's is `comfy@<checkout commit>/torch@<torch version>`, so the same checkout on another torch is another build) and `hardware_classes` prove the live node match; `platform_compatible_backends` applies Skulk runner limitations last. Empirical load/feature claims also bind the immutable card tested, and artifact-scoped `incomplete` evidence blocks matrix admission. Legacy card `compatible_backends` remain a valid projection and are unioned with exact active `supported` matrix matches. Experimental, unsupported, stale-build, and hardware-mismatched claims never expand placement. The master stamps the resolved backend; the worker repeats the matrix check only for unstamped fallback. `SKULK_ENGINE_BUILDS` is an open JSON engine/tag-to-build override for canonical upstream identities. When a runner gains a capability, flip the code table; do NOT shrink model capability truth.
+**Compatible untested hardware remains eligible. We test to ensure, not to exclude.**
+
+**Runtime compatibility and qualification:** model cards describe exact artifacts,
+intrinsic capabilities and compatible engine runtimes. They must not encode a
+list of the GPU models Foxlight has tested. Engine packages own genuine technical
+requirements: OS/CPU ABI, helper instructions, compiled accelerator targets,
+driver/runtime protocols and implemented operations. Nodes report actual runtime
+and resource availability; placement matches those requirements with local
+capacity and operator policy.
+
+Qualification is append-only evidence about a tested artifact, engine build,
+hardware, operation and workload. Missing, failed, stale-build or hardware-mismatched
+qualification does not revoke otherwise valid engine compatibility. A positive
+qualification does not assert that other hardware is incompatible. Qualification
+may inform confidence and preference, never become a hardware permission list.
+Every empirical record retains its original tested identities; unchanged
+artifact/runtime inputs may reuse that evidence through an explicit provenance
+association without inventing a new physical run.
+
+Complete, structurally valid cards with accurate engine requirements can be
+published independently of runtime qualification. Artifact integrity, repository
+code trust and genuine missing dependencies remain separate checks. Missing
+qualification for one capability must not prevent loading the model or serving
+another implemented operation. When a runner gains an operation, update runtime
+capability truth; never shrink intrinsic model truth to match test coverage.
+
+Every engine change must preserve regression coverage for compatible untested
+hardware, unqualified published cards, scoped failed qualifications and genuine
+package/operation incompatibilities. Special native-engine paths must follow the
+same compatibility rule as the general placer.
+
+**Memory fit is configuration-specific.** Placement, reservations, context sizing
+and the worker guard must use the same resolved actual engine and effective
+weight/cache quantization settings. A card supplies artifact sizes and model/cache
+geometry; stored weight quantization does not imply cache quantization or exact
+resident allocation. Include mixed-precision layers, compression metadata, peak
+workspace, context/concurrency, supported offloading and live usable memory. Count
+optimization savings only when actually enabled. Bind the effective policy to the
+placement; settings drift requires reassessment before load. A refusal describes
+the assessed configuration and uncertainty, not permanent model/device eligibility.
+Do not silently change the user's context/quality/concurrency constraints. See
+[the normative contract](website/docs/engine-compatibility.md); effective-policy propagation and conservative unknown-layout fallbacks are documented there.
 
 Model-specific sharding truth also lives on the card:
 `placement.max_pipeline_split_layer` caps pipeline boundaries for architectures
@@ -1571,7 +1613,7 @@ or signing authority, and omitted callbacks fail closed.
 
 
 External workload binding: `GET /models/requirements.required_capabilities`
-exports the complete set used by core signed-engine admission through
+exports the complete set used by core intrinsic capability resolution through
 `get_model_required_capabilities`. Launchable `/instance/previews` entries expose
 `card_digest` matching requirements canonicalization. Neither field replaces
 API/master card checks or the final resource-derived `context_token_limit`.
@@ -1767,3 +1809,96 @@ state; lifecycle tasks (download, install, load, warmup, group, cancel,
 shutdown) are not requests. `GET /instance/{instance_id}/activity` exposes it
 for burst idle release. It is in-memory only, never in `State` or the event log.
 
+Native image profiles use the single-host/single-GPU `stable_diffusion_cpp`
+runner, with verified component hashes and private native-job ownership.
+Qwen Image 2.1 and Turbo CUDA/Vulkan loads enable Flash Attention to reduce memory
+pressure at the default 2048-square canvas. ROCm loads also enable it to avoid
+observed native kernel-launch failures at that canvas.
+SDXL Metal loads disable batched classifier-free guidance to avoid blank
+outputs and enable Flash Attention at the default 1024-square canvas.
+Native CUDA wheel assembly requires `GGML_CUDA_NCCL=OFF` for the single-GPU
+image contract and to avoid an unnecessary host-library dependency.
+The portable Vulkan workflow pins and hashes the LunarG 1.4.350.0 shader SDK,
+records the compiled CPU instruction requirements, and bundles the Vulkan loader
+with its copyright notice. Package discovery and managed-binary probing reject
+hosts lacking required CPU instructions. GPU drivers remain host dependencies.
+Native image teardown retains the producer handle through a 30-second graceful
+wait and 15-second forced reap; its supervisor allows 50 seconds for cleanup.
+Published installable builds and installed measured builds remain separate in
+NodeResources. Candidate wheels grant no normal placement support; no CPU-only
+native image lane is delivered. See the architecture reference and
+`packaging/skulk-stable-diffusion-cpp/README.md` for preparation and build details.
+
+The native image candidate build workflow covers Metal ARM64, CUDA ARM64/x86_64,
+Vulkan x86_64 and ROCm x86_64. Linux compiler images are digest-pinned; CUDA
+embeds runtime/BLAS with an external driver, Vulkan bundles its loader, and the
+ROCm candidate records runtime libraries plus gfx942 code objects. Builds retain
+component notices and nested payload hashes and remain unqualified until exact
+hardware/model, loader and lifecycle gates pass. See
+`packaging/skulk-stable-diffusion-cpp/README.md`.
+
+Qwen Image 2.1 Vulkan loads also select 512-pixel VAE tiles with 25% overlap.
+This avoids the tested device single-buffer limit at 2K and its expensive CPU
+decode retry. Native teardown checks for an already-reaped process before
+signalling its former group; the runner retains ownership until exit is confirmed.
+
+Native image runners revalidate the exact installed package at model load when
+their inherited environment predates installation. This cache lookup never
+downloads and keeps model/engine preparation parallel while preventing a first-use
+runner crash. Explicit binary overrides still take precedence.
+
+Managed native image build identities include the executable and bundled runtime
+file digests. Probes verify these bytes before execution and select the managed
+library/code-object paths rather than inherited SDK overrides. Wheel descriptors
+carry exact archive and expanded sizes, bounded at 3 GiB and 8 GiB respectively;
+installation checks staging space for both plus a 1 GiB reserve. Legacy candidate
+packages retain the earlier executable identity and conservative size defaults.
+
+Metal native image instances keep parameters on their verified GPU to avoid
+duplicated residency in unified memory. CUDA/Vulkan/ROCm retain CPU parameter
+offload. Metal SDXL and Z-Image Turbo additionally use Flash Attention and
+512-pixel VAE tiles with 25% overlap; SDXL uses separate guidance passes.
+The tested Q8 SDXL and Z-Image default workflows stayed below kernel warning
+pressure on a 16 GiB Apple host.
+
+Native image wheel publication promotes selected qualified artifacts from a
+successful candidate workflow run. The dispatch requires a filename/digest map,
+verifies the originating workflow and source commit attestation, and publishes
+those exact bytes without rebuilding; model/device qualifications remain separate scoped evidence.
+
+Apple hardware inventory retains the generic `apple:apple-gpu` class and adds
+the passively observed chip class (for example `apple:apple-m4`) when macOS
+reports it. Missing chip observations add no exact class. Those classes preserve
+tested provenance; native image package eligibility depends on actual OS/ABI and
+compiled requirements. Compatible untested Metal devices remain eligible.
+
+Native image placement requires one pipeline rank and one observed GPU; tensor
+sharding or ambiguous multi-device install offers are rejected before preparation.
+Base image downloads select every pinned primary-repository component, including
+its VAE/encoders, while companions in other repositories use their own pinned
+transactions. Dashboard native image requests own SSE responses so Stop closes
+the stream and cancels the underlying command rather than only aborting an
+unobserved non-streaming fetch.
+
+Image downloads select every pinned file in the owning card's repository/revision
+group, including a same-repository VAE. External groups retain the durable
+`image_component` artifact role and the complete owning card; store approval
+checks that exact source group. Store transfers verify declared sizes and object
+identities, recover missing component files from partial caches, and exclude
+unrelated quants/projectors. Direct-Hub fallback carries the same exact file
+bundle, so store unavailability does not widen the download.
+
+Native image package eligibility uses standard interpreter wheel-platform tags
+before download/cache acquisition, alongside architecture, CPU instructions and
+actual compiled GPU targets. Tested hardware is informational. The published
+Linux wheels require glibc 2.35 or newer; musl
+and older glibc do not receive install offers. macOS minimums come from the same
+platform-tag check. Manual extraction never bypasses the ABI eligibility gate.
+
+
+Native SDXL image cards expose `image.unet_structure` (API `unetStructure`) for
+nonuniform module output channels and boundary convolutions. Generic dimensions
+are their module count and maximum output width; no text KV or image splitting
+is inferred. Registry publication rejects missing/provisional SDXL geometry.
+
+Exact scoped image generation uses `POST /v1/instances/{instance_id}/images/generations` and `ImageGeneration.target_instance_id`. Every assigned rank must match the caller's persistent installation allowlist; target loss fails without replica fallback. JSON/SSE response headers identify the exact instance.

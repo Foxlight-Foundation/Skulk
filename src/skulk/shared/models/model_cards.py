@@ -36,6 +36,7 @@ from skulk.shared.backends import (
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
     audio_cpp_cuda_hardware_matches,
     engine_of,
+    expand_engine_backends,
 )
 from skulk.shared.constants import (
     SKULK_CUSTOM_MODEL_CARDS_DIR,
@@ -51,6 +52,7 @@ from skulk.shared.constants import (
     offline_mode,
 )
 from skulk.shared.models.gguf_memory import GgufCacheGeometry, qwen35_cache_geometry
+from skulk.shared.models.image import ImageCardConfig
 from skulk.shared.models.registry import (
     EMBEDDED_REGISTRY_ROOT,
     RegistryAdvisory,
@@ -910,6 +912,44 @@ def get_model_required_capabilities(model_card: "ModelCard") -> frozenset[str]:
     )
 
 
+def model_engine_requirements(model_card: "ModelCard") -> frozenset[str]:
+    """Read engine requirements, including legacy typed native artifact profiles.
+
+    Early music/image cards left backends empty to defer to qualification. Their
+    validated GGUF component profiles already identify the implemented native
+    runtime; preserve that knowledge without inventing a hardware permission list
+    or changing the immutable signed card bytes.
+    """
+    declared = model_card.placement.compatible_backends
+    if declared:
+        return declared
+    if model_card.music is not None:
+        return frozenset({"audio_cpp"})
+    if model_card.image is not None:
+        return frozenset({"stable_diffusion_cpp"})
+    return declared
+
+
+def registry_compatible_backends_for_node(
+    model_card: "ModelCard", *, node_backends: AbstractSet[str]
+) -> frozenset[str]:
+    """Resolve architecture-to-engine compatibility independently of test coverage.
+
+    Upstream compatibility identifies an engine that implements the model's
+    architecture/artifact. Build and hardware recorded with that evidence are
+    provenance, not an exclusive permission list. Empirical qualifications are
+    retained separately and cannot admit, prohibit or revoke a compute lane.
+    Local package requirements and implemented runner operations still apply.
+    """
+    engines = frozenset(
+        claim.engine
+        for claim in get_model_engine_support(model_card)
+        if claim.status == "supported"
+        and claim.evidence_kind == "upstream_compatibility"
+    )
+    return expand_engine_backends(engines) & node_backends
+
+
 def registry_supported_backends_for_node(
     model_card: "ModelCard",
     *,
@@ -917,7 +957,11 @@ def registry_supported_backends_for_node(
     engine_builds: Mapping[str, str],
     hardware_classes: AbstractSet[str],
 ) -> frozenset[str]:
-    """Resolve signed positive support against one node's live engine inventory."""
+    """Find fully qualified node lanes for reporting, never launch eligibility.
+
+    Exact build/hardware matches preserve the scope of an observed result.
+    Their absence must not restrict independently declared engine compatibility.
+    """
     required_capabilities = get_model_required_capabilities(model_card)
     if not required_capabilities:
         return frozenset()
@@ -939,7 +983,9 @@ def registry_supported_backends_for_node(
                 backend == "audio_cpp-cuda"
                 and required_cuda_class is not None
                 and (
-                    not audio_cpp_cuda_hardware_matches(required_cuda_class, hardware_classes)
+                    not audio_cpp_cuda_hardware_matches(
+                        required_cuda_class, hardware_classes
+                    )
                     or required_cuda_class not in claim.hardware_classes
                 )
             ):
@@ -2393,8 +2439,12 @@ class PlacementCardConfig(CamelCaseModel):
     this set. Making the implicit ``{"mlx"}`` explicit is what enables future
     heterogeneous (llama_cpp / rocm / cuda) routing."""
 
-    min_vram_gib: float | None = None
-    """Hard constraint: planner gates on node available memory when set."""
+    min_vram_gib: float | None = Field(
+        default=None,
+        deprecated=True,
+        description="Legacy reference memory figure; actual engine/workload estimates determine placement. This is not a universal hardware eligibility floor.",
+    )
+    """Legacy reference figure, not a universal configuration-independent minimum."""
 
     max_context_tokens: int | None = None
     """Soft: caps the placement-time KV budget check (see #145) when set."""
@@ -2772,10 +2822,12 @@ class ModelCard(CamelCaseModel):
     selected quant's shard group, not every quant the repo hosts). The planner
     uses this for memory-fit and placement-width decisions."""
     n_layers: PositiveInt
-    """Number of transformer layers. Drives pipeline sharding (how layers split
-    across nodes) and KV-cache sizing."""
+    """Backbone transformer layers, or explicit SDXL UNet module count. Text
+    models use it for pipeline sharding and KV sizing; an image module count
+    does not establish image sharding or text-cache geometry."""
     hidden_size: PositiveInt
-    """Model hidden dimension, used in memory/KV-cache estimates."""
+    """Backbone hidden width; SDXL reports maximum UNet module output channels.
+    Text models use their hidden dimension in memory/cache estimates."""
     supports_tensor: bool
     """Whether the model may be served with tensor parallelism (``Sharding.Tensor``).
     GGUF/llama.cpp cards set this ``False`` (single-node engine)."""
@@ -2882,6 +2934,9 @@ class ModelCard(CamelCaseModel):
     """Optional audio-video generation contract (modes, duration and frame
     grid, canvas rules, audio output, reference bounds, sampling defaults,
     pinned companions); ``None`` for models that do not generate video."""
+    image: ImageCardConfig | None = None
+    """Immutable image components, canvas, references, and checkpoint sampling truth."""
+    """Complete image components, geometry, reference limits and sampling contract."""
     license: LicenseCardConfig | None = None
     """Optional operator-facing license facts surfaced by the catalog and
     user interfaces; never enforced by download or placement."""
@@ -2921,6 +2976,35 @@ class ModelCard(CamelCaseModel):
             raise ValueError(
                 "tasks must list exactly the families implied by video.modes"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_image_artifact(self) -> "ModelCard":
+        """Keep native image capabilities and complete component admission coherent."""
+        profile = self.image
+        if profile is None:
+            return self
+        structure = profile.unet_structure
+        if structure is not None and (
+            self.n_layers != structure.block_count
+            or self.hidden_size != structure.maximum_channels
+        ):
+            raise ValueError("SDXL card dimensions must match its UNet modules")
+        primary_role = "model" if profile.family == "sdxl" else "diffusion"
+        primary = next(component for component in profile.components if component.role == primary_role)
+        if primary.repository != str(self.artifact_repository):
+            raise ValueError("image primary component differs from its selected artifact repository")
+        if (self.gguf_file is not None or primary.entry_file.endswith(".gguf")) and self.gguf_file != primary.entry_file:
+            raise ValueError("image primary component differs from its selected GGUF artifact")
+        if ModelTask.TextToImage not in self.tasks:
+            raise ValueError("an image profile requires the TextToImage task")
+        if (ModelTask.ImageToImage in self.tasks) != (profile.max_reference_images > 0):
+            raise ValueError("image editing task and reference-image capability disagree")
+        if self.storage_size.in_bytes < profile.storage_bytes:
+            raise ValueError("image storage must account for every required component")
+        for component in profile.components:
+            if component.repository == str(self.artifact_repository) and component.revision != self.source_revision:
+                raise ValueError("image component revision differs from its primary artifact")
         return self
 
     @model_validator(mode="after")

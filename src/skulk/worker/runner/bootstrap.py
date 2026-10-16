@@ -416,38 +416,36 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     from skulk.facts import (
         current_backend_derivation,
         current_node_facts,
-        engine_build_inventory,
-        hardware_class_inventory,
     )
     from skulk.shared.backends import (
         engine_of,
         platform_compatible_backends,
         probe_node_backends,
         resolve_node_engine,
+        runtime_backends_for_builds,
     )
     from skulk.shared.models.model_cards import (
         load_cached_registry_engine_support,
-        registry_supported_backends_for_node,
+        model_engine_requirements,
+        registry_compatible_backends_for_node,
     )
+
     shard = bound_instance.bound_shard
     require_remote_code_approval(shard.model_card)
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
 
+    from skulk.facts.inventory import engine_build_inventory, hardware_class_inventory
+
+    facts = current_node_facts()
     placement = shard.model_card.placement
     derivation = current_backend_derivation()
-    facts = current_node_facts()
-    engine_builds = safe_engine_build_inventory(
-        lambda: engine_build_inventory(derivation.backends, facts)
-    )
     if shard.model_card.registry_card_id is not None:
         load_cached_registry_engine_support()
-    compatible_backends = placement.compatible_backends | (
-        registry_supported_backends_for_node(
+    compatible_backends = model_engine_requirements(shard.model_card) | (
+        registry_compatible_backends_for_node(
             shard.model_card,
             node_backends=derivation.backends,
-            engine_builds=engine_builds,
-            hardware_classes=hardware_class_inventory(facts),
         )
     )
     # Same platform-capability filter the master applies at placement: the
@@ -459,10 +457,17 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     )
     return resolve_node_engine(
         platform_compatible_backends(
-            compatible_backends,
+            runtime_backends_for_builds(
+                compatible_backends,
+                safe_engine_build_inventory(
+                    lambda: engine_build_inventory(derivation.backends, facts)
+                ),
+                hardware_class_inventory(facts),
+            ),
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
             card_serves_music=shard.model_card.music is not None,
+            card_has_native_image_profile=shard.model_card.image is not None,
             card_has_pinned_projector=(
                 shard.model_card.vision is not None
                 and shard.model_card.vision.has_pinned_projector
@@ -615,6 +620,17 @@ def entrypoint(
                 f"(resolved backend {resolved!r})"
             )
         if bound_instance.is_image_model:
+            from skulk.shared.backends import engine_of
+
+            if engine_of(shard.resolved_backend or "") == "stable_diffusion_cpp":
+                from skulk.worker.runner.stable_diffusion_cpp.runner import (
+                    Runner as NativeImageRunner,
+                )
+
+                NativeImageRunner(bound_instance, event_sender, task_receiver, cancel_receiver).main()
+                return
+            if shard.model_card.image is not None:
+                raise RuntimeError("no qualified native image engine serves this placement")
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner
 
             runner = ImageRunner(
