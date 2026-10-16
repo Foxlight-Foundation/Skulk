@@ -94,6 +94,22 @@ before launching Skulk. Confirm the supported GPU backend, engine build, model
 parser pins and compiler/Python development prerequisites with `skulk doctor`;
 a CLI path alone does not prove that the server can load a given model.
 
+### Known issue: H100 GPUs in Confidential Computing mode
+
+From vLLM 0.29 every model runs on vLLM's newer (V2) model runner. On an H100
+running in NVIDIA Confidential Computing mode, as in confidential cloud VMs,
+that runner currently decodes about 3x slower and can return repeated
+garbage tokens or crash its engine
+([vllm-project/vllm#57680](https://github.com/vllm-project/vllm/issues/57680)).
+Ordinary H100, H200 and other GPUs are not affected. Until the upstream fix
+ships in a release Skulk pins, add this line to `~/.skulk/skulk.env` on such a
+node and restart Skulk; the runner passes it to `vllm serve`, which then uses
+its previous runner:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=0
+```
+
 ## Concurrency behavior and knobs
 
 The vLLM runner **dispatches concurrently**: it keeps multiple requests in flight
