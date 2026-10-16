@@ -12,6 +12,7 @@ from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
     UMA_GPU_OS_HEADROOM,
+    amd_unified_memory_limit,
     backend_offloads_to_vram,
     estimate_music_workspace,
     estimate_recurrent_cache_bytes,
@@ -150,18 +151,20 @@ def usable_vram_by_node(
       visible in telemetry without subtracting loaded memory twice. RPC
       placements have no concrete per-device partition and retain observed
       memory admission; their driver shard is not a whole-model reservation.
-    * Unified-memory APU (e.g. AMD Strix Halo), detected when the GTT aperture
-      spans the whole system (``gtt_total > vram_total`` AND ``gtt_total >=
-      ram_total``): the GPU addresses the BIOS VRAM carve-out PLUS system RAM
-      mapped through GTT, so a model larger than the carve-out runs there. Usable
-      GPU memory is the working-set-capped VRAM plus the system RAM the GPU can
-      map via GTT, leaving ``UMA_GPU_OS_HEADROOM`` for the OS + worker + download
-      staging: ``min(vram_avail, vram_total * GPU_VRAM_WORKING_SET_FRACTION) +
-      min(max(0, ram_available - UMA_GPU_OS_HEADROOM), gtt_total)``. The UMA path
-      needs the node's current memory from ``node_memory``; without that entry it
-      falls back to the discrete path. A discrete GPU also exposes a GTT total
-      (often ~= VRAM), so requiring GTT to cover all of system RAM is what keeps
-      it off this path.
+    * Unified-memory APU (e.g. AMD Strix Halo), as decided by
+      ``amd_unified_memory_limit``: the collector's kernel-derived verdict (KFD
+      reports such a GPU's memory at the TTM page limit, a discrete card's at its
+      VRAM), with the older "GTT exceeds the carve and covers all system RAM"
+      heuristic only when the verdict is unknown. The GPU addresses the BIOS
+      VRAM carve-out PLUS system RAM, so a model larger than the carve-out runs
+      there. Usable GPU memory is the working-set-capped VRAM plus the system
+      RAM the GPU can address, leaving ``UMA_GPU_OS_HEADROOM`` for the OS +
+      worker + download staging: ``min(vram_avail, vram_total *
+      GPU_VRAM_WORKING_SET_FRACTION) + min(max(0, ram_available -
+      UMA_GPU_OS_HEADROOM), addressable)``, where ``addressable`` is the TTM
+      limit (``amd-ttm``'s figure, falling back to GTT). The UMA path needs the
+      node's current memory from ``node_memory``; without that entry it falls
+      back to the discrete path.
 
     The same figure serves single-node AND multi-node RPC admission. An
     earlier revision admitted RPC placements against a VRAM-carve-only
@@ -189,7 +192,6 @@ def usable_vram_by_node(
         vram_avail = max(0, total - used)
         ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
         vram_usable = min(vram_avail, ceiling)
-        gtt_total = accelerator.gtt_total_bytes
         memory = node_memory.get(node_id)
         if is_gb10_accelerator(accelerator):
             # GB10 is one shared pool, so an absent host-memory reading or a
@@ -198,26 +200,16 @@ def usable_vram_by_node(
             if gb10_pool is not None:
                 usable[node_id] = gb10_pool
             continue
-        # UMA signature: the GTT aperture spans the WHOLE system, i.e. it both
-        # exceeds the VRAM carve-out AND covers all of system RAM. A discrete AMD
-        # GPU also exposes ``mem_info_gtt_total`` (its default can equal VRAM), so
-        # ``gtt_total >= vram_total`` alone would misclassify a discrete card as
-        # unified and over-admit; requiring ``gtt_total >= ram_total`` keeps a
-        # discrete GPU (gtt ~= vram < system RAM) on the conservative VRAM-only
-        # path.
-        if (
-            gtt_total is not None
-            and gtt_total > total
-            and memory is not None
-            and gtt_total >= memory.ram_total.in_bytes
-        ):
-            # GTT spans host RAM, so the GPU can map system memory beyond the
-            # BIOS VRAM carve-out; count it (minus OS headroom) toward the pool,
-            # capped by what GTT itself can address. The VRAM portion still keeps
-            # its working-set headroom for driver/fragmentation overhead.
+        # A unified-memory APU maps host RAM beyond its BIOS VRAM carve-out, so
+        # count that RAM (minus OS headroom) toward the pool, capped by what the
+        # GPU can address (the TTM limit). The VRAM portion still keeps its
+        # working-set headroom for driver/fragmentation overhead. The classifier
+        # is shared with the worker and engine sizing so none of them disagree.
+        unified_limit = amd_unified_memory_limit(accelerator, memory)
+        if unified_limit is not None and memory is not None:
             sys_for_gpu = min(
                 max(0, memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
-                gtt_total,
+                unified_limit,
             )
             usable[node_id] = Memory.from_bytes(vram_usable + sys_for_gpu)
             continue
@@ -472,8 +464,9 @@ def unified_memory_gpu_node_ids(
 ) -> frozenset[NodeId]:
     """Return GPU-offload nodes whose accelerator pool includes host RAM.
 
-    A Strix-class APU reports a BIOS VRAM carve-out plus a GTT aperture spanning
-    all remaining system RAM. Placement may use that combined pool, but served
+    A Strix-class APU reports a BIOS VRAM carve-out plus host RAM it maps through
+    GTT, classified by ``amd_unified_memory_limit``. Placement may use that
+    combined pool, but served
     engines that allocate a fixed context window at startup cannot treat it as
     discrete VRAM: amdgpu may need host pages while constructing the GPU
     buffers, so the steady-state combined-pool fit does not bound peak host
@@ -484,8 +477,8 @@ def unified_memory_gpu_node_ids(
         node_system: Per-node accelerator telemetry.
         node_resources: Optional backend telemetry. When supplied, only nodes
             advertising a GPU-offload backend are considered.
-        node_memory: Per-node system-memory telemetry required to prove that GTT
-            spans the whole host-memory pool.
+        node_memory: Per-node system-memory telemetry; a node without a reading
+            is not classified, matching ``usable_vram_by_node``.
 
     Returns:
         Immutable IDs of confirmed unified-memory GPU-offload nodes.
@@ -502,23 +495,16 @@ def unified_memory_gpu_node_ids(
             ):
                 unified.add(node_id)
             continue
-        if (
-            accelerator is None
-            or accelerator.vendor != "amd"
-            or not accelerator.vram_total_bytes
-            or accelerator.vram_total_bytes <= 0
-            or accelerator.gtt_total_bytes is None
-            or memory is None
-        ):
+        # The node's memory reading is still required: without it
+        # ``usable_vram_by_node`` sizes the node as discrete, and the two must
+        # agree on which nodes are unified.
+        if accelerator is None or memory is None:
             continue
         if node_resources is not None:
             resources = node_resources.get(node_id)
             if resources is None or not _has_gpu_offload_backend(resources.backends):
                 continue
-        if (
-            accelerator.gtt_total_bytes > accelerator.vram_total_bytes
-            and accelerator.gtt_total_bytes >= memory.ram_total.in_bytes
-        ):
+        if amd_unified_memory_limit(accelerator, memory) is not None:
             unified.add(node_id)
     return frozenset(unified)
 

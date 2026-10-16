@@ -297,3 +297,47 @@ def test_local_carve_first_gpu_needs_an_amd_apu_with_a_carve_reading(
     monkeypatch.setattr(MemoryUsage, "from_local_gpu_wireable", classmethod(local_memory))
 
     assert worker_main._local_carve_first_gpu() is expected  # pyright: ignore[reportPrivateUsage]
+
+
+def test_recommended_carve_apu_local_fit_matches_the_master(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """kite5's exact facts: the local guard uses the same kernel verdict as
+    placement, so it cannot refuse a shard the master admitted."""
+    from pathlib import Path
+
+    ram_total = 65_430_781_952
+    ram_available = 62_244_913_152
+    ttm = 64_424_509_440
+    monkeypatch.setattr(worker_main.sys, "platform", "linux")
+    monkeypatch.setattr(nvidia_gpu, "prefer_nvidia_telemetry", lambda: False)
+    monkeypatch.setattr(linux_gpu, "find_amd_gpu_device", lambda: Path("/fake/card1/device"))
+
+    def kite5_metrics(_device: Path, **_kwargs: object) -> AcceleratorMetrics:
+        return AcceleratorMetrics(
+            vendor="amd",
+            vram_total_bytes=536_870_912,
+            vram_used_bytes=236_175_360,
+            gtt_total_bytes=ttm,
+            unified_memory=True,
+            addressable_memory_bytes=ttm,
+        )
+
+    monkeypatch.setattr(linux_gpu, "read_accelerator_metrics", kite5_metrics)
+
+    def local_memory(_cls: type[MemoryUsage]) -> MemoryUsage:
+        return MemoryUsage.from_bytes(
+            ram_total=ram_total,
+            ram_available=ram_available,
+            swap_total=0,
+            swap_available=0,
+        )
+
+    monkeypatch.setattr(MemoryUsage, "from_local_gpu_wireable", classmethod(local_memory))
+    usable = worker_main._local_usable_vram()  # pyright: ignore[reportPrivateUsage]
+    carve_usable = min(536_870_912 - 236_175_360, int(536_870_912 * 0.90))
+    host_share = min(ram_available - Memory.from_gb(16).in_bytes, ttm)
+    assert usable is not None
+    assert usable.in_bytes == carve_usable + host_share
+    assert worker_main._local_unified_memory_gpu()  # pyright: ignore[reportPrivateUsage]
+    assert worker_main._local_carve_first_gpu()  # pyright: ignore[reportPrivateUsage]

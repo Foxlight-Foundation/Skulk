@@ -85,7 +85,13 @@ through the GTT aperture into system RAM):
 
 Set both to fit your box (scale down proportionally on a smaller machine, for
 example a 64 GiB box). Without them the GPU is capped near the VRAM carve-out and
-large models fail to load. Skulk already understands this: it shows the machine's
+large models fail to load.
+
+Skulk does not depend on these values being set. It reads the limit the
+kernel actually reports, the same figure `amd-ttm` shows, and sizes the GPU
+pool from it. So a node at AMD's recommended minimal carve (512 MB), or one
+left at the kernel's default limit, is still recognized as unified memory
+and placed by what its GPU can really address. Skulk already understands this: it shows the machine's
 full unified memory in the dashboard (VRAM carve-out plus system RAM) and its
 planner admits models against the whole pool, so a 128 GiB box serves ~128 GiB of
 model rather than only the non-carve-out slice.

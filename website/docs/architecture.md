@@ -1089,6 +1089,20 @@ of a just-downloaded model would read as used GPU memory. Placement also checks 
 for the OS, and applies the 75% unified-memory working-set ceiling. A failed
 CUDA query leaves capacity unmeasured and prevents GPU admission.
 
+An AMD APU such as Strix Halo is recognized from what the kernel reports,
+not from comparing memory sizes, because those depend on optional tuning
+(`amdgpu.gttsize`, `ttm.pages_limit`, the BIOS carve). The collector matches
+the GPU to its KFD topology node by render minor. The kernel sizes a
+discrete card's memory bank at its VRAM and, for an APU that maps host RAM
+(its prefer-GTT mode), at the TTM page limit, the figure `amd-ttm` reports.
+A bank equal to the TTM limit but not the VRAM therefore marks a
+unified-memory GPU, and that limit is the host memory it can address; on an
+untuned kernel the limit defaults to half of RAM. Placement, the worker's
+load guard and vLLM's memory share all use the same classifier
+(`amd_unified_memory_limit`). A node whose collector cannot tell keeps the
+older rule (GTT above the carve and covering all of RAM), which misses an
+APU at AMD's recommended 512 MB carve whose GTT sits just below RAM.
+
 Music mounting ranks package variants with signed support claims for the
 observed hardware, preferring CUDA or Vulkan when a qualified package is
 available. If accelerator preparation fails, a separately claimed CPU variant

@@ -1517,3 +1517,91 @@ def test_carve_first_nodes_are_the_amd_apus_only() -> None:
     assert carve_first_gpu_node_ids(
         node_system, resources, node_memory=memory
     ) == frozenset({strix})
+
+
+def _kite5_profile(unified_memory: bool | None) -> SystemPerformanceProfile:
+    """kite5 as read 2026-10-16: AMD's recommended 512 MB carve on a 64 GB APU."""
+    return SystemPerformanceProfile(
+        accelerator=AcceleratorMetrics(
+            vendor="amd",
+            vram_total_bytes=536_870_912,
+            vram_used_bytes=236_175_360,
+            gtt_total_bytes=64_424_509_440,
+            unified_memory=unified_memory,
+            addressable_memory_bytes=64_424_509_440 if unified_memory else None,
+        )
+    )
+
+
+
+def test_recommended_carve_apu_places_by_its_kernel_reported_pool() -> None:
+    """kite5's exact facts: the carve is not a ceiling, so a 2.6 GB GGUF fits.
+
+    Its TTM/GTT (60 GiB) is just below its RAM (60.9 GiB), so the old
+    GTT-covers-RAM rule sized it at the carve (0.3 GB usable) and refused the
+    model. The collector's kernel verdict classifies it unified, and the pool
+    is the carve working set plus free RAM minus headroom, capped by TTM.
+    """
+    node = NodeId("kite5")
+    memory = {
+        node: create_node_memory(62_244_913_152, ram_total=65_430_781_952)
+    }
+    resources = {node: NodeResources(backends=frozenset({"llama_server", "llama_server-vulkan"}))}
+    system = {node: _kite5_profile(unified_memory=True)}
+
+    usable = usable_vram_by_node(system, resources, node_memory=memory)
+    carve_usable = min(536_870_912 - 236_175_360, int(536_870_912 * 0.90))
+    host_share = min(
+        62_244_913_152 - Memory.from_gb(16).in_bytes, 64_424_509_440
+    )
+    assert usable[node].in_bytes == carve_usable + host_share
+    assert unified_memory_gpu_node_ids(system, resources, node_memory=memory) == frozenset(
+        {node}
+    )
+    assert carve_first_gpu_node_ids(system, resources, node_memory=memory) == frozenset(
+        {node}
+    )
+
+    topology = Topology()
+    topology.add_node(node)
+    fitting, diagnostics = filter_cycles_by_memory(
+        topology.get_cycles(), memory, _card(2.6, gguf_file="qwen3.5-4b.gguf"), node_vram=usable
+    )
+    assert len(fitting) == 1, diagnostics.rejection_reasons
+
+
+def test_unknown_verdict_keeps_the_old_size_rule_for_kite5() -> None:
+    """Without the kernel verdict (an older collector) the size rule still
+    applies, and it cannot see kite5 as unified: the reason the verdict exists."""
+    node = NodeId("kite5")
+    memory = {
+        node: create_node_memory(62_244_913_152, ram_total=65_430_781_952)
+    }
+    resources = {node: NodeResources(backends=frozenset({"llama_server-vulkan"}))}
+    system = {node: _kite5_profile(unified_memory=None)}
+
+    usable = usable_vram_by_node(system, resources, node_memory=memory)
+    assert usable[node].in_bytes == min(536_870_912 - 236_175_360, int(536_870_912 * 0.90))
+    assert unified_memory_gpu_node_ids(system, resources, node_memory=memory) == frozenset()
+
+
+def test_kernel_discrete_verdict_stays_on_the_vram_path() -> None:
+    """A card the kernel reports as discrete never takes the host-RAM pool,
+    even when its GTT exceeds RAM."""
+    node = NodeId("discrete")
+    memory = {node: create_node_memory(30 * 2**30, ram_total=32 * 2**30)}
+    resources = {node: NodeResources(backends=frozenset({"llama_server-vulkan"}))}
+    system = {
+        node: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=24 * 2**30,
+                vram_used_bytes=0,
+                gtt_total_bytes=64 * 2**30,
+                unified_memory=False,
+            )
+        )
+    }
+    usable = usable_vram_by_node(system, resources, node_memory=memory)
+    assert usable[node].in_bytes == int(24 * 2**30 * 0.90)
+    assert unified_memory_gpu_node_ids(system, resources, node_memory=memory) == frozenset()

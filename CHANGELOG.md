@@ -94,6 +94,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- AMD Strix Halo nodes set up as AMD recommends (a 512 MB carve) can run GPU
+  models again. Skulk decided whether the GPU shares system memory by
+  comparing memory sizes, and on a 64 GB node whose GPU limit sat just below
+  its RAM it counted only the 512 MB carve, refusing even a 2.6 GB model.
+  It now reads what the kernel reports, the same limit `amd-ttm` shows, so it
+  no longer depends on how the kernel parameters are tuned.
+
 - A vLLM model's reasoning is no longer lost when a request with tools gets a
   plain answer instead of a tool call. Skulk read the reasoning from a field
   vLLM does not send, so the thinking never reached the caller.
