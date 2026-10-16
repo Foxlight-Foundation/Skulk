@@ -44,9 +44,10 @@ dependencies = [
   "zstandard>=0.23.0",
   "pyyaml>=6.0.2",
   "types-PyYAML>=6.0.12",
-  # 0.6.4 carries server-side audio model loading, MTP/APC fixes, and
-  # request-local M-RoPE batching fixes. Skulk narrowly backports its
-  # converted-Qwen norm guard; 0.6.5+ requires a separate MLX 0.32 upgrade.
+  # 0.7.8 moves with mlx 0.32.4 and mlx-audio 0.5.9 (it requires mlx >= 0.32.3
+  # and mlx-audio >= 0.5.2). Its Qwen3.5 sanitize detects converted
+  # checkpoints itself; Skulk's older converted-norm guard stays as an
+  # idempotent backstop that only restores keys upstream keeps.
   "mlx-vlm==0.7.8; sys_platform == 'darwin'",
   # Upstream 0.4.3 fails to advance Fish S2's hidden state while generating
   # codebooks, producing fluent but unrelated speech. The Foxlight post-release

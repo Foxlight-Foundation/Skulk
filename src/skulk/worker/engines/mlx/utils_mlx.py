@@ -189,7 +189,16 @@ def _guard_converted_qwen_norm_sanitizer(
             and any(key.endswith(suffix) for suffix in _QWEN_CONVERTED_NORM_SUFFIXES)
         }
         sanitized = sanitizer(model, weights)
-        sanitized.update(converted_norm_weights)
+        # Restore only keys upstream kept: mlx-vlm 0.7.8 drops every `mtp.`
+        # key before sanitizing (the MTP draft is a separate shard), and
+        # re-adding one would hand a strict weight load an unexpected key.
+        sanitized.update(
+            {
+                key: value
+                for key, value in converted_norm_weights.items()
+                if key in sanitized
+            }
+        )
         return sanitized
 
     return guarded

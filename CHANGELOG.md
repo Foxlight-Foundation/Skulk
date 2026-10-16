@@ -92,6 +92,14 @@ This project records release notes here and mirrors public-facing notes in
   once their model cards are published. Existing vLLM nodes keep 0.28.0 until
   `install.sh --with-vllm` is run again.
 
+- The Apple Silicon (MLX) engine stack moves forward: mlx 0.32.4, mlx-lm
+  0.32.2 (Foxlight's build, which keeps the fix for a decode-time memory leak
+  that upstream still has: about 55 MB per 20,000 generated tokens in
+  batched decoding), mlx-vlm 0.7.8, mlx-audio 0.5.9 and mflux 0.22.0. mflux
+  now comes from its regular release instead of a Foxlight copy, and Linux
+  nodes no longer install it, which also drops several gigabytes of CUDA
+  libraries it pulled in there.
+
 ### Fixed
 
 - A vLLM model's reasoning is no longer lost when a request with tools gets a
