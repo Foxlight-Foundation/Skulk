@@ -302,7 +302,7 @@ class ServedConcurrentDispatch:
                         logger.warning("repeat task - potential error")
                         continue
                     match task:
-                        case TextGeneration() | VideoGeneration() | MusicGeneration() | ImageGeneration() | ImageEdits() if isinstance(
+                        case TextGeneration() | TextEmbedding() | VideoGeneration() | MusicGeneration() | ImageGeneration() | ImageEdits() if isinstance(
                             task, self._generation_kinds
                         ) and isinstance(
                             self.current_status, (RunnerReady, RunnerRunning)
