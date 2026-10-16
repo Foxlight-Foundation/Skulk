@@ -29,6 +29,9 @@ How this wheel fits into Skulk's install and provisioning flow is documented in 
 
 The bundled `llama-server` and `ggml-rpc-server` binaries derive from llama.cpp (MIT); its license text ships in the wheel under `skulk_llama_server_cuda/licenses/`.
 
-Skulk requires CUDA packaging revision 1 or later for b10753. Both the normal
-installer and runtime auto-provisioner reject revision 0 and request the corrected
+Each engine pin sets a minimum CUDA packaging revision. For b11669 it is
+revision 0, because its first packaging already declares NCCL and avoids
+build-host CPU instructions. If a published revision is later found defective,
+the floor is raised, and both the normal installer and the runtime
+auto-provisioner then reject anything below it and request the corrected
 minimum, including on existing installations.

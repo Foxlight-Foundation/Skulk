@@ -21,6 +21,7 @@ from skulk.provisioning.llama_server import (
 )
 from skulk.provisioning.manifest import (
     LLAMA_SERVER_ARTIFACTS,
+    LLAMA_SERVER_CUDA_MIN_REVISION,
     LLAMA_SERVER_PIN,
     EngineArtifact,
 )
@@ -770,18 +771,27 @@ def test_install_success_requires_usable_wheel(
     assert not _REAL_TRY_INSTALL_CUDA_WHEEL(make_facts(gpus=(NVIDIA_A40,)))
 
 
+_PIN_BUILD = LLAMA_SERVER_PIN.removeprefix("b")
+
+# A fresh pin starts at floor 0, which has no revision below it. The floor
+# rejection path is exercised against this fixed floor instead, so the cases
+# stay meaningful across pin advances.
+_TEST_CUDA_FLOOR = 2
+
+
 @pytest.mark.parametrize(
     ("distribution", "installed", "accepted"),
     [
-        ("skulk-llama-server-cuda", "0.10753.0", False),
-        ("skulk-llama-server-cuda", "0.10753.1", True),
-        ("skulk-llama-server-cuda", "0.10753.2", True),
-        ("skulk-llama-server-cuda", "0.10753.1rc1", False),
+        ("skulk-llama-server-cuda", f"0.{_PIN_BUILD}.{_TEST_CUDA_FLOOR - 1}", False),
+        ("skulk-llama-server-cuda", f"0.{_PIN_BUILD}.{_TEST_CUDA_FLOOR}", True),
+        ("skulk-llama-server-cuda", f"0.{_PIN_BUILD}.{_TEST_CUDA_FLOOR + 1}", True),
+        ("skulk-llama-server-cuda", f"0.{_PIN_BUILD}.{_TEST_CUDA_FLOOR}rc1", False),
         # Above the floor but a pre-release: never a qualified engine.
-        ("skulk-llama-server-cuda", "0.10753.2rc1", False),
-        ("skulk-llama-server-cuda", "0.10754.1", False),
+        ("skulk-llama-server-cuda", f"0.{_PIN_BUILD}.{_TEST_CUDA_FLOOR + 1}rc1", False),
+        ("skulk-llama-server-cuda", f"0.{int(_PIN_BUILD) + 1}.{_TEST_CUDA_FLOOR}", False),
         ("skulk-llama-server-cuda", "malformed", False),
-        ("skulk-llama-server-vulkan", "0.10753.0", True),
+        # The packaging floor binds only the CUDA wheel.
+        ("skulk-llama-server-vulkan", f"0.{_PIN_BUILD}.0", True),
     ],
 )
 def test_engine_selection_rejects_broken_cuda_revision(
@@ -792,4 +802,18 @@ def test_engine_selection_rejects_broken_cuda_revision(
         return installed
 
     monkeypatch.setattr(importlib.metadata, "version", version)
+    monkeypatch.setattr(provisioning, "LLAMA_SERVER_CUDA_MIN_REVISION", _TEST_CUDA_FLOOR)
     assert provisioning._wheel_version_matches_pin(distribution) is accepted
+
+
+def test_current_pin_accepts_its_cuda_floor_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The current pin's own floor revision is selectable, so installs at the floor work."""
+    floor_version = f"0.{_PIN_BUILD}.{LLAMA_SERVER_CUDA_MIN_REVISION}"
+
+    def version(name: str) -> str:
+        return floor_version
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    assert provisioning._wheel_version_matches_pin("skulk-llama-server-cuda")

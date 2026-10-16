@@ -361,6 +361,29 @@ def _slot_server_args(max_concurrency: int) -> list[str]:
     return args
 
 
+def _chat_template_server_args() -> list[str]:
+    """llama-server flags that fix how chat templates render a conversation.
+
+    ``--jinja`` selects the GGUF's own chat template, which is what makes
+    tool calling and reasoning-content extraction work server-side.
+
+    ``--no-reasoning-preserve`` asks templates that support the control to
+    keep earlier turns' reasoning out of the rendered prompt. Skulk forwards an
+    assistant turn's ``reasoning_content`` in the history it sends. Through
+    b10753 llama-server passed no preference, leaving each template to its own
+    default. b11669 always passes one and defaults it to preserve
+    (``common/arg.cpp``, upstream #28174), and no flag restores the template's
+    own default. Accepting that would change multi-turn prompts, their token
+    counts and their KV reservations as a side effect of an engine pin
+    advance, so Skulk asks for the drop. Adopting preserved reasoning is a
+    separate, cross-engine decision.
+
+    Returns:
+        The flags to splice into the llama-server command line.
+    """
+    return ["--jinja", "--no-reasoning-preserve"]
+
+
 def _draft_model_args(
     runtime: Any,
     spec_type: str,
@@ -945,9 +968,7 @@ class Runner(ServedConcurrentDispatch):
             "127.0.0.1",
             "--port",
             str(port),
-            # --jinja enables the GGUF's chat template path, which is what makes
-            # tool calling and reasoning-content extraction work server-side.
-            "--jinja",
+            *_chat_template_server_args(),
         ]
         # RPC driver (#328): dial the placement-stamped donor endpoints so
         # llama.cpp pools their GPU memory with the local device. Sorted for a
