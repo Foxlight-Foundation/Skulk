@@ -1,4 +1,4 @@
-# Builds Skulk's Foxlight-owned Python forks (mflux, mlx-lm) as wheels from
+# Builds Skulk's Foxlight-owned Python forks (today: mlx-lm) as wheels from
 # their exact pinned commits and publishes them to the Foxlight PEP 503 index
 # (wheels.foxlight.ai). Skulk pins these wheels instead of git sources: a git
 # source makes every fresh install fetch the fork's entire history (mflux's is
@@ -7,7 +7,12 @@
 #
 # The wheel is the pinned commit's code; the only change is the version line,
 # stamped to the Foxlight build version (`<upstream>.postN`) so the wheel can
-# never be mistaken for, or collide with, an upstream release. The index is
+# never be mistaken for, or collide with, an upstream release. A fork whose
+# version comes from setuptools-scm (mlx-lm since upstream #1916 generates
+# `_version.py` at build time) is stamped through
+# `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_<DIST>`; a fork with a committed version
+# line is stamped by rewriting that line. mflux needs no fork since upstream
+# 0.19.2 lifted its mlx cap, and installs from PyPI. The index is
 # append-only: a published version is never rebuilt or replaced, so moving a
 # fork to a new commit means a new `.postN` here and in pyproject.toml.
 #
@@ -43,22 +48,18 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - distribution: mflux
-            wheel_name: mflux
-            repository: Foxlight-Foundation/mflux
-            commit: 051ba9ff25c9a8a8703356053a012a0dfad3fe39
-            upstream_version: "0.19.1"
-            version: "0.19.1.post1"
-            version_file: pyproject.toml
-            version_line: 'version = "{}"'
           - distribution: mlx-lm
             wheel_name: mlx_lm
             repository: Foxlight-Foundation/mlx-lm
-            commit: 587b88aaff5accabf6c5ecb7b4de5e010453dde4
-            upstream_version: "0.32.0"
-            version: "0.32.0.post1"
+            # v0.32.2 plus the two carried deltas (fork PR #4).
+            commit: f2f4932ea29c5fe4e4fba017935f3f53a7be28bd
+            upstream_version: "0.32.2"
+            version: "0.32.2.post1"
             version_file: mlx_lm/_version.py
-            version_line: '__version__ = "{}"'
+            # setuptools-scm writes this line from its template
+            # (`__version__ = {version!r}`), hence the single quotes.
+            version_line: "__version__ = '{}'"
+            scm_pretend_env: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_MLX_LM
     env:
       DISTRIBUTION: ${{ matrix.distribution }}
       WHEEL_NAME: ${{ matrix.wheel_name }}
@@ -67,6 +68,7 @@ jobs:
       BUILD_VERSION: ${{ matrix.version }}
       VERSION_FILE: ${{ matrix.version_file }}
       VERSION_LINE: ${{ matrix.version_line }}
+      SCM_PRETEND_ENV: ${{ matrix.scm_pretend_env }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,10 +104,14 @@ jobs:
           # it except for the version.
           cp -a fork pristine-src
           cd pristine-src
+          # A setuptools-scm fork cannot derive its version from a depth-1
+          # checkout (no tags), so pin it to the upstream release explicitly.
+          if [ -n "$SCM_PRETEND_ENV" ]; then export "$SCM_PRETEND_ENV=$UPSTREAM_VERSION"; fi
           uv build --wheel --out-dir ../pristine
           ls -la ../pristine
 
       - name: Stamp the Foxlight build version
+        if: matrix.scm_pretend_env == ''
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -132,6 +138,7 @@ jobs:
         run: |
           set -euo pipefail
           cd fork
+          if [ -n "$SCM_PRETEND_ENV" ]; then export "$SCM_PRETEND_ENV=$BUILD_VERSION"; fi
           uv build --wheel --out-dir ../dist
           ls -la ../dist
 
