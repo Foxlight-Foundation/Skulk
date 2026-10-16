@@ -6,11 +6,13 @@ use. A new user never builds llama.cpp.
 
 The pin is a specific upstream llama.cpp release tag whose official prebuilt
 Linux artifacts we resolve by platform, architecture, and compute variant.
-The pinned release publishes Linux CPU, Vulkan, and ROCm builds (its CUDA
-prebuilts remain Windows-only). Skulk consumes only CPU and Vulkan: the
-Vulkan build drives both AMD (RADV, fleet-proven) and NVIDIA GPUs through
-their Vulkan ICDs, so it is the GPU default, and the upstream Linux ROCm
-archive stays unconsumed until a ROCm lane is qualified on real hardware. macOS
+The pinned release publishes Linux CPU, Vulkan, ROCm, and (since b11669) CUDA
+builds. Skulk consumes only CPU and Vulkan: the Vulkan build drives both AMD
+(RADV, fleet-proven) and NVIDIA GPUs through their Vulkan ICDs, so it is the
+GPU default. The upstream Linux ROCm archive stays unconsumed until a ROCm lane
+is qualified on real hardware, and the upstream Linux CUDA archives (built on
+Ubuntu 24.04) stay unconsumed because the Foxlight CUDA wheel remains the
+qualified CUDA lane. macOS
 provisions nothing (in-process MLX owns that platform), and vLLM remains the
 first-class CUDA serving path.
 
@@ -30,33 +32,39 @@ from pydantic import ConfigDict
 
 from skulk.utils.pydantic_ext import CamelCaseModel
 
-LLAMA_SERVER_PIN: Final = "b10753"
+LLAMA_SERVER_PIN: Final = "b11669"
 """The pinned upstream llama.cpp release tag for managed llama-server builds.
 
-Includes the RPC tensor-memset protocol required by current DeepSeek V4
-multi-node execution, Qwen 3.8 text and native long-context support, recurrent
-state rollback, and served reasoning-effort plumbing. Advancing from b10434
-additionally picks up Kimi-K3 text, native MTP speculative decoding
-(``--spec-type draft-mtp`` second generation), a gemma4-assistant model fix,
-and MTP/next-n loader ordering fixes that matter to the served draft path.
-The RPC protocol changed in the b10434 window, so ``llama-server`` and every
-``ggml-rpc-server`` donor must always advance together. Advance deliberately,
-re-recording checksums and re-running the fresh-box gauntlet.
+This is the build behind upstream's stable ``v0.7.0`` release. Upstream now
+flags every ``b``-tag as a prerelease and publishes binaries only there, so
+the pin is resolved through the stable release's ``nightly-tag.txt`` rather
+than taken from the moving head. It carries everything the previous ``b10753``
+pin provided: the DeepSeek V4 RPC tensor-memset protocol, Qwen 3.8 text and
+long context, recurrent state rollback, served reasoning effort, Kimi-K3 text,
+native MTP and DFlash2 speculative decoding, and the gemma4-assistant and
+MTP/next-n loader fixes. The RPC protocol has changed between pins before (the
+b10434 window), so ``llama-server`` and every ``ggml-rpc-server`` donor must
+always advance together. Advance deliberately, re-recording checksums and
+re-running the fresh-box gauntlet.
 """
 
-LLAMA_SERVER_CUDA_MIN_REVISION: Final = 1
+LLAMA_SERVER_CUDA_MIN_REVISION: Final = 0
 """Minimum CUDA packaging revision for the current engine pin.
 
-Revision 1 fixes missing NCCL and build-host CPU instructions. Reset deliberately
-when advancing the engine pin, after validating the new wheel's packaging.
+Revision 0 is acceptable for this pin because its first packaging is built by
+the corrected workflow: the wheel declares NCCL and compiles with
+``GGML_NATIVE=OFF``, the two defects that forced revision 1 of the previous
+pin. Raise it deliberately if a packaging defect is found in a published
+revision of this pin, so installs and runtime selection refuse that revision.
 """
 
 EngineVariant = Literal["cpu", "vulkan", "rocm", "cuda"]
 """Compute variant of a managed llama-server build.
 
-``cuda`` has no upstream Linux prebuilt and is delivered by the Foxlight wheel.
-Upstream does publish a Linux ROCm x86_64 archive as of this pin, but Skulk
-does not consume it: AMD nodes stay on the fleet-qualified Vulkan wheel or
+``cuda`` is delivered only by the Foxlight wheel; the upstream Linux CUDA
+archives this pin also publishes are not consumed. Upstream likewise publishes
+a Linux ROCm x86_64 archive, which Skulk does not consume: AMD nodes stay on the
+fleet-qualified Vulkan wheel or
 archive until a ROCm lane is qualified on real Strix hardware. NVIDIA nodes fall through from the
 CUDA wheel to Vulkan when necessary (bare-metal drivers ship a working Vulkan
 ICD; compute-only container drivers generally do not)."""
@@ -90,24 +98,24 @@ class EngineArtifact(CamelCaseModel):
 
 
 # (machine, variant) -> artifact, for sys.platform == "linux". Checksums are
-# the upstream release asset digests, recorded 2026-09-02 (verified by
+# the upstream release asset digests, recorded 2026-10-16 (verified by
 # streaming each asset and comparing against the release API digest).
 LLAMA_SERVER_ARTIFACTS: Final[dict[tuple[str, EngineVariant], EngineArtifact]] = {
     ("x86_64", "cpu"): EngineArtifact(
         asset_name=f"llama-{LLAMA_SERVER_PIN}-bin-ubuntu-x64.tar.gz",
-        sha256="a25f023c1c68bafb315ada095fa7780e286d5867783e5eebd7dfc1e36eb1a856",
+        sha256="cf07c1c112d709bd67e522017471de57ed0ec8bea031d732c5422351c07f65ac",
     ),
     ("x86_64", "vulkan"): EngineArtifact(
         asset_name=f"llama-{LLAMA_SERVER_PIN}-bin-ubuntu-vulkan-x64.tar.gz",
-        sha256="30362addb83f0d1275a608c2cc9521d2b2d9a3596704aacebaf1294f94aa91e3",
+        sha256="e8709e5ba6c1b093dea7f3de57f4aba842f9a188fba6b465782d65d6fcfa4d9f",
     ),
     ("aarch64", "cpu"): EngineArtifact(
         asset_name=f"llama-{LLAMA_SERVER_PIN}-bin-ubuntu-arm64.tar.gz",
-        sha256="4224302b9bdb52b3fdfbf2439c320d6f51e3a3afc48500d4c1a5f9a76623d2ae",
+        sha256="9ac6fda2058d35677608a06f751a50122ddfa4ce0ddb7f084466b8e79b6d4a99",
     ),
     ("aarch64", "vulkan"): EngineArtifact(
         asset_name=f"llama-{LLAMA_SERVER_PIN}-bin-ubuntu-vulkan-arm64.tar.gz",
-        sha256="cba2f4a533c77a0bc5e0bcc13d4ac1129f941ba784be915196acbb403c1b2ffa",
+        sha256="d283522e479c0d532e3a04d715dd852ffb2d95925caa6d41ef2ba53a65e46a51",
     ),
 }
 

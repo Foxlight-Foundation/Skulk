@@ -73,6 +73,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- The managed llama.cpp served engine advances from b10753 to b11669, the
+  build behind upstream's first stable release, v0.7.0. This covers the CUDA
+  and Vulkan wheels (0.11669.0), the verified Linux archives and the prebaked
+  CUDA pod image. `ggml-rpc-server` advances with `llama-server` because the
+  RPC protocol changed again, so every machine in a multi-node GGUF pool must
+  upgrade together. This build keeps earlier turns' reasoning in multi-turn
+  prompts by default; Skulk asks it to leave that reasoning out, so the
+  upgrade does not make multi-turn prompts longer. The Vulkan wheel is now
+  built for a portable CPU baseline
+  instead of the build machine's CPU, so it no longer risks an
+  illegal-instruction crash on processors without AVX-512.
+
 - The vLLM engine that `install.sh --with-vllm` installs advances from 0.28.0
   to 0.31.0 (still the CUDA 12.9 build, for x86_64 and aarch64), which runs
   every model on vLLM's newer model runner. This release can run newer

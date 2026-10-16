@@ -1604,7 +1604,8 @@ resource telemetry, without advertising inference backends.
 
 The engine manifest also sets `LLAMA_SERVER_CUDA_MIN_REVISION`; both installation
 and runtime selection enforce this packaging floor. Revisit it when advancing the
-engine pin; revision 1 for b10753 excludes the NCCL/CPU portability defects.
+engine pin. For b11669 the floor is revision 0: its first packaging already
+carries the NCCL and portable-CPU fixes that forced revision 1 of b10753.
 
 The trusted steward extension facet reads the current intelligent-fabric mode and global
 `SKULK_FABRIC_CAPABILITIES_DISABLE` kill switch through `ExtensionContext.steward_actions_allowed`. Proposal

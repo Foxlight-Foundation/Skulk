@@ -41,7 +41,7 @@ on:
 env:
   # Must match src/skulk/provisioning/manifest.py LLAMA_SERVER_PIN and both
   # packaging versions (0.<build>.<rev>); the guard step enforces all of them.
-  LLAMA_CPP_PIN: b10753
+  LLAMA_CPP_PIN: b11669
 jobs:
   build:
     runs-on: ${{ matrix.runner }}
@@ -143,7 +143,11 @@ jobs:
             # a native AMX build can SIGILL during model load on a GPU host.
             BACKEND_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_architectures }} -DGGML_CUDA_NO_VMM=ON -DGGML_NATIVE=OFF"
           else
-            BACKEND_FLAGS="-DGGML_VULKAN=ON"
+            # Same portability rule as the CUDA wheels: a native build targets
+            # the runner's CPU and can SIGILL on an operator CPU that lacks one
+            # of its extensions (AVX-512 on most consumer x86). OFF keeps
+            # ggml's portable x86 baseline: AVX2, FMA, F16C, AVX-512 off.
+            BACKEND_FLAGS="-DGGML_VULKAN=ON -DGGML_NATIVE=OFF"
           fi
           cmake -S /tmp/llama-cpp-src -B /tmp/build \
             $BACKEND_FLAGS \

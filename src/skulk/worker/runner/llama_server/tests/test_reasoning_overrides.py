@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Tests for thinking-control forwarding to llama-server (#428/#420)."""
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from skulk.shared.types.text_generation import (
     TextGenerationTaskParams,
 )
 from skulk.worker.runner.llama_server.runner import (
+    _chat_template_server_args,
     model_declares_reasoning,
     reasoning_request_overrides,
 )
@@ -117,3 +119,15 @@ def test_intrinsic_reasoning_family_keeps_the_server_reasoning_format() -> None:
         update={"model_id": ModelId("example/plain-model"), "family": "custom"}
     )
     assert not model_declares_reasoning(plain)
+
+
+def test_server_keeps_earlier_reasoning_out_of_rendered_prompts() -> None:
+    """The server is told to drop earlier turns' reasoning when it renders.
+
+    b11669 changed llama-server's default to preserve it, which would silently
+    change multi-turn prompts and their token counts on an engine pin advance.
+    """
+    args = _chat_template_server_args()
+    assert "--jinja" in args
+    assert "--no-reasoning-preserve" in args
+    assert "--reasoning-preserve" not in args
