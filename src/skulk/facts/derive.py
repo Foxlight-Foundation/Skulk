@@ -34,6 +34,7 @@ from pydantic import ConfigDict
 
 from skulk.shared.types.node_facts import (
     CapabilityConflict,
+    LlamaServerDeviceProbe,
     NodeFacts,
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
@@ -239,6 +240,9 @@ def _derive_llama_server(
             [],
         )
 
+    if facts.platform == "darwin":
+        return _derive_macos_llama_server(facts)
+
     conflicts: list[CapabilityConflict] = []
     notes: list[str] = []
     # Precedence: the SERVER-specific declaration wins; then the binary's own
@@ -267,21 +271,7 @@ def _derive_llama_server(
             # placement a dead engine that only fails at runner startup.
             # Disable the engine loudly; unsupported (an old build without
             # the flag) is the only legitimate fall-through.
-            conflicts.append(
-                CapabilityConflict(
-                    code="invalid_engine_binary",
-                    message=(
-                        "The configured llama-server binary failed its device "
-                        f"probe ({probe.detail or 'no detail'}); the "
-                        "llama_server engine is disabled on this node."
-                    ),
-                    remediation=(
-                        "Run the binary with --list-devices to reproduce, fix "
-                        "or replace it (or unset SKULK_LLAMA_SERVER_BIN to "
-                        "use a managed build), then restart skulk."
-                    ),
-                )
-            )
+            conflicts.append(_failed_device_probe_conflict(probe))
             return set(), conflicts, notes
         if probe.outcome == "devices":
             computes = [cb for cb in _GPU_COMPUTES if cb in probe.computes]
@@ -345,6 +335,55 @@ def _derive_llama_server(
 
     tags = {"llama_server"} | {f"llama_server-{compute}" for compute in computes}
     return tags, conflicts, notes
+
+
+def _failed_device_probe_conflict(probe: LlamaServerDeviceProbe) -> CapabilityConflict:
+    """The node-health conflict for a llama-server that failed ``--list-devices``."""
+    return CapabilityConflict(
+        code="invalid_engine_binary",
+        message=(
+            "The configured llama-server binary failed its device "
+            f"probe ({probe.detail or 'no detail'}); the "
+            "llama_server engine is disabled on this node."
+        ),
+        remediation=(
+            "Run the binary with --list-devices to reproduce, fix "
+            "or replace it (or unset SKULK_LLAMA_SERVER_BIN to "
+            "use a managed build), then restart skulk."
+        ),
+    )
+
+
+def _derive_macos_llama_server(
+    facts: NodeFacts,
+) -> tuple[set[str], list[CapabilityConflict], list[str]]:
+    """Advertise exactly the Metal lane of a macOS llama-server, or nothing.
+
+    MLX owns chat on the Apple GPU; the Metal llama-server serves the embedding
+    lane, which placement gates to embedding cards. Neither the bare engine tag
+    nor a CPU floor is advertised: a bare-engine or registry-expanded card
+    requirement would match either one and land a GGUF chat model on the Mac's
+    CPU.
+    """
+    probe = facts.llama_server_device_probe
+    if probe.outcome == "devices" and "metal" in probe.computes:
+        return (
+            {"llama_server-metal"},
+            [],
+            ["llama-server --list-devices reported metal; advertising the Metal embedding lane"],
+        )
+    if probe.outcome == "failed":
+        # Same loud disable as Linux: a binary that cannot answer the probe
+        # must surface in node health, not just drop the lane.
+        return set(), [_failed_device_probe_conflict(probe)], []
+    return (
+        set(),
+        [],
+        [
+            "llama-server on macOS serves only its Metal embedding lane, and the "
+            f"binary's device probe reported no Metal device ({probe.outcome})"
+        ],
+    )
 
 
 def _derive_vllm(

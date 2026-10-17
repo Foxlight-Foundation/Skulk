@@ -53,13 +53,11 @@ def test_parse_cpu_only_build_reports_nothing() -> None:
     assert parse_list_devices_output("Available devices:\n") == ()
 
 
-def test_parse_ignores_metal_and_unknown_prefixes() -> None:
-    output = "  Metal0: Apple M4 (unified)\n  Widget0: nonsense\n"
-    assert parse_list_devices_output(output) == ()
-
-
-# --- binary classification -----------------------------------------------
-
+def test_parse_maps_metal_and_ignores_unknown_prefixes() -> None:
+    # The macOS build names Metal devices "MTL0"; an unrecognized prefix
+    # (including a hypothetical "Metal0") is still ignored.
+    output = "  MTL0: Apple M4 (18186 MiB, 18185 MiB free)\n  BLAS: Accelerate\n  Widget0: nonsense\n  Metal0: x\n"
+    assert parse_list_devices_output(output) == ("metal",)
 
 def test_binary_fact_states(tmp_path: Path) -> None:
     binary = _make_executable(tmp_path / "llama-server")

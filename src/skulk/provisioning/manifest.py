@@ -58,8 +58,12 @@ pin. Raise it deliberately if a packaging defect is found in a published
 revision of this pin, so installs and runtime selection refuse that revision.
 """
 
-EngineVariant = Literal["cpu", "vulkan", "rocm", "cuda"]
+EngineVariant = Literal["cpu", "vulkan", "rocm", "cuda", "metal"]
 """Compute variant of a managed llama-server build.
+
+``metal`` is the upstream macOS arm64 build (Metal shaders embedded, its
+dylibs resolved beside the binary through ``@loader_path``). It serves the
+embedding lane on Apple Silicon; MLX keeps serving chat there.
 
 ``cuda`` is delivered only by the Foxlight wheel; the upstream Linux CUDA
 archives this pin also publishes are not consumed. Upstream likewise publishes
@@ -97,9 +101,11 @@ class EngineArtifact(CamelCaseModel):
         )
 
 
-# (machine, variant) -> artifact, for sys.platform == "linux". Checksums are
-# the upstream release asset digests, recorded 2026-10-16 (verified by
-# streaming each asset and comparing against the release API digest).
+# (machine, variant) -> artifact. ``platform.machine()`` separates the
+# platforms: Linux reports ``x86_64``/``aarch64``, Apple Silicon macOS reports
+# ``arm64``. Checksums are the upstream release asset digests, recorded
+# 2026-10-16 (verified by streaming each asset and comparing against the
+# release API digest; the macOS archive also by download, size 12,191,582).
 LLAMA_SERVER_ARTIFACTS: Final[dict[tuple[str, EngineVariant], EngineArtifact]] = {
     ("x86_64", "cpu"): EngineArtifact(
         asset_name=f"llama-{LLAMA_SERVER_PIN}-bin-ubuntu-x64.tar.gz",
@@ -116,6 +122,10 @@ LLAMA_SERVER_ARTIFACTS: Final[dict[tuple[str, EngineVariant], EngineArtifact]] =
     ("aarch64", "vulkan"): EngineArtifact(
         asset_name=f"llama-{LLAMA_SERVER_PIN}-bin-ubuntu-vulkan-arm64.tar.gz",
         sha256="d283522e479c0d532e3a04d715dd852ffb2d95925caa6d41ef2ba53a65e46a51",
+    ),
+    ("arm64", "metal"): EngineArtifact(
+        asset_name=f"llama-{LLAMA_SERVER_PIN}-bin-macos-arm64.tar.gz",
+        sha256="dbed55493d72bc1ba2babc8770d669c2289b5bc4ee9fb2a4dfc158d45b7d13fd",
     ),
 }
 

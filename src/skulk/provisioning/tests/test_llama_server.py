@@ -38,14 +38,18 @@ def test_select_variant_chain_by_gpu_vendor() -> None:
     assert select_variant(make_facts(gpus=(AMD_STRIX,))) == "vulkan"
 
 
-def test_manifest_matches_pinned_linux_release_shape() -> None:
-    """Only Linux assets that exist for the pinned upstream tag are exposed."""
+def test_manifest_matches_pinned_release_shape() -> None:
+    """Only assets that exist for the pinned upstream tag are exposed: the
+    Linux CPU and Vulkan builds, and the Apple Silicon Metal build."""
     assert set(LLAMA_SERVER_ARTIFACTS) == {
         ("x86_64", "cpu"),
         ("x86_64", "vulkan"),
         ("aarch64", "cpu"),
         ("aarch64", "vulkan"),
+        ("arm64", "metal"),
     }
+    metal = LLAMA_SERVER_ARTIFACTS[("arm64", "metal")]
+    assert metal.asset_name == f"llama-{LLAMA_SERVER_PIN}-bin-macos-arm64.tar.gz"
     for artifact in LLAMA_SERVER_ARTIFACTS.values():
         assert LLAMA_SERVER_PIN in artifact.asset_name
         assert len(artifact.sha256) == 64
@@ -56,7 +60,14 @@ def test_select_variant_cpu_without_gpu() -> None:
     assert select_variant(make_facts()) == "cpu"
 
 
-def test_select_variant_none_on_darwin() -> None:
+def test_apple_silicon_selects_metal_and_intel_macs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Apple Silicon takes the Metal build for the embedding lane; MLX keeps
+    # chat. An Intel Mac has no pinned build and provisions nothing.
+    monkeypatch.setattr(provisioning.platform_module, "machine", lambda: "arm64")
+    assert select_variant_chain(make_facts(platform="darwin")) == ("metal",)
+    monkeypatch.setattr(provisioning.platform_module, "machine", lambda: "x86_64")
     assert select_variant(make_facts(platform="darwin")) is None
 
 

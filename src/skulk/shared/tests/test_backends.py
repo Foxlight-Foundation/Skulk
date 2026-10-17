@@ -18,6 +18,7 @@ from skulk.shared.backends import (
     describe_backend_hardware,
     engine_of,
     engine_supports_multi_node,
+    expand_engine_backends,
     make_backend_tag,
     platform_compatible_backends,
     probe_node_backends,
@@ -287,21 +288,84 @@ def test_platform_compatible_backends_gates_speech_to_mlx_audio() -> None:
 
 
 def test_platform_compatible_backends_gates_embeddings_to_their_runner() -> None:
-    # Embedding cards dispatch to the transformers runner, which serves mlx
-    # placements; a card declaring another engine must be refused at placement
-    # rather than crash at runner import on a node without that runner.
+    # Embedding cards run on engines with an embedding runner: the transformers
+    # runner (mlx placements) and a dedicated llama-server --embeddings. A card
+    # declaring another engine must be refused at placement rather than crash at
+    # runner import on a node without that runner.
     declared = frozenset(
-        {"mlx", "mlx-metal", "llama_cpp-vulkan", "vllm-cuda", "future_engine"}
+        {
+            "mlx",
+            "mlx-metal",
+            "llama_server-vulkan",
+            "llama_server-cuda",
+            "llama_cpp-vulkan",
+            "vllm-cuda",
+            "future_engine",
+        }
     )
     assert platform_compatible_backends(
         declared,
         card_serves_vision=False,
         card_serves_embeddings=True,
-    ) == frozenset({"mlx", "mlx-metal", "future_engine"})
+    ) == frozenset(
+        {
+            "mlx",
+            "mlx-metal",
+            "llama_server-vulkan",
+            "llama_server-cuda",
+            "future_engine",
+        }
+    )
     # Non-embedding cards are untouched by the gate.
     assert (
         platform_compatible_backends(declared, card_serves_vision=False) == declared
     )
+
+
+def test_metal_llama_server_lane_serves_only_embeddings() -> None:
+    # MLX owns chat on the Apple GPU; the Metal llama-server lane exists for
+    # GGUF embedding cards, so a GGUF chat card never lands on it.
+    declared = frozenset({"llama_server-metal", "llama_server-vulkan", "llama_server"})
+    assert platform_compatible_backends(
+        declared, card_serves_vision=False, card_serves_embeddings=True
+    ) == declared
+    assert platform_compatible_backends(declared, card_serves_vision=False) == (
+        frozenset({"llama_server-vulkan", "llama_server"})
+    )
+
+
+def test_a_bare_engine_tag_never_implies_the_embedding_only_lane() -> None:
+    expanded = expand_engine_backends(frozenset({"llama_server"}))
+    assert "llama_server-metal" not in expanded
+    assert {"llama_server", "llama_server-vulkan", "llama_server-cpu"} <= expanded
+    # A card that names the lane keeps it.
+    assert "llama_server-metal" in expand_engine_backends(
+        frozenset({"llama_server-metal"})
+    )
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        # The worker's fallback check passes the card's tags unexpanded...
+        frozenset({"llama_server"}),
+        # ...and the master expands them first, keeping the bare tag.
+        expand_engine_backends(frozenset({"llama_server"})),
+    ],
+)
+def test_a_bare_llama_server_chat_card_never_resolves_onto_a_mac(
+    declared: frozenset[str],
+) -> None:
+    mac = frozenset({"mlx", "mlx-metal", "llama_server-metal"})
+    linux = frozenset({"llama_server", "llama_server-vulkan", "llama_server-cpu"})
+    chat = platform_compatible_backends(declared, card_serves_vision=False)
+    assert resolve_node_backend(chat, (), mac) is None
+    assert resolve_node_backend(chat, (), linux) == "llama_server-vulkan"
+    embedding = platform_compatible_backends(
+        declared, card_serves_vision=False, card_serves_embeddings=True
+    )
+    assert resolve_node_backend(embedding, (), mac) == "llama_server-metal"
+    assert resolve_node_backend(embedding, (), linux) == "llama_server-vulkan"
 
 
 def test_platform_compatible_backends_requires_vllm_tool_parser() -> None:
