@@ -51,6 +51,20 @@ def test_generated_config_pins_safe_model_store_port() -> None:
     assert f"store_port: {DEFAULT_MODEL_STORE_PORT}" in _installer()
 
 
+def test_vllm_env_uses_a_managed_python_with_headers() -> None:
+    """vLLM's Triton helper compiles against Python.h at server start.
+
+    uv prefers an installed system interpreter by default, and GPU-cloud
+    images often ship Python 3.12 without its development headers, so the
+    vLLM environment must come from uv's managed builds, which carry them.
+    """
+
+    assert (
+        'uv venv "$VLLM_ENV" --python 3.12 --python-preference only-managed '
+        "--allow-existing"
+    ) in _installer()
+
+
 def test_bundled_node_probe_keeps_retry_diagnostics_visible() -> None:
     """Fresh-install Node probe failures must remain visible to operators."""
 
