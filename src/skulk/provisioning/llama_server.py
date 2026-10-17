@@ -14,7 +14,10 @@ The provisioning contract (#614 Phase 3):
   it). The facts probe then validates the managed binary exactly like any
   other: ``--list-devices`` ground truth, loud conflicts when the build
   cannot drive visible hardware.
-- macOS provisions nothing (in-process MLX owns Apple GPUs).
+- Apple Silicon macOS provisions the upstream Metal build for the embedding
+  lane (GGUF embedding cards); MLX keeps owning chat on the Apple GPU, and the
+  platform gate keeps other cards off the Metal lane. Intel Macs provision
+  nothing.
 
 Opt out with ``SKULK_NO_ENGINE_AUTOPROVISION=1`` (node-local launch policy).
 """
@@ -92,9 +95,12 @@ def select_variant_chain(facts: NodeFacts) -> tuple[EngineVariant, ...]:
     instance, so Vulkan-on-NVIDIA only works on bare metal with a full driver
     install), falling back to Vulkan where the CUDA artifact is unavailable
     for this architecture. An AMD GPU uses the Vulkan build (RADV is the
-    fleet-proven path). No GPU means the CPU build. Empty off Linux: macOS
-    serves through in-process MLX and provisions nothing.
+    fleet-proven path). No GPU means the CPU build. Apple Silicon macOS takes
+    the Metal build, which serves only the embedding lane; any other platform
+    provisions nothing.
     """
+    if facts.platform == "darwin":
+        return ("metal",) if platform_module.machine() == "arm64" else ()
     if facts.platform != "linux":
         return ()
     if facts.gpus_of("nvidia"):

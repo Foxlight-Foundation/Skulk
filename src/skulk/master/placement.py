@@ -667,6 +667,10 @@ def _cycle_common_multi_node_engines(
     warmup, while engine-specific multi-node shapes (llama_server RPC) wait
     until the node's real advertisement arrives.
     """
+    # Every embedding runner is single-node: the transformers runner and the
+    # dedicated llama-server --embeddings (which takes no RPC donors).
+    if card_serves_embeddings(card):
+        return set()
     common: set[EngineType] | None = None
     for node_id in cycle.node_ids:
         resources = node_resources.get(node_id)

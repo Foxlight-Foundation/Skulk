@@ -175,6 +175,18 @@ def test_common_engine_intersection_across_cycle() -> None:
     ) == {"llama_server"}
 
 
+def test_embedding_cards_never_span_a_multi_node_cycle() -> None:
+    """Every embedding runner is single-node (the dedicated llama-server
+    --embeddings takes no RPC donors), so an embedding card gets no multi-node
+    engine even on a cycle whose nodes share llama_server."""
+    amd_cycle = Cycle(node_ids=[NodeId("a"), NodeId("b")])
+    amd_resources = {NodeId("a"): _amd_resources(), NodeId("b"): _amd_resources()}
+    embedding_card = _gguf_card(storage_gb=0.05).model_copy(
+        update={"tasks": [ModelTask.TextEmbedding]}
+    )
+    assert _cycle_common_multi_node_engines(amd_cycle, embedding_card, amd_resources) == set()
+
+
 def test_hybrid_card_rejects_mixed_engine_cycle() -> None:
     """#414: a hybrid card must not admit a cycle mixing an MLX-only node with
     a llama.cpp-only node; the old any() over the card's backends allowed it."""

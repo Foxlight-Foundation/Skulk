@@ -28,7 +28,7 @@ The design choices that shape almost everything else:
 - **One master at a time.** A bully election picks the master; only the master indexes events. Failover is automatic, and the promoted node seeds the new session from its replicated state, so placed instances and bounded steward-action recovery truth survive a master restart: workers rebuild their runners and serving resumes after a model-reload-sized gap, while the new master resumes actionable approved or dispatched proposals. Instances with a rank on the dead master are cleaned up once live topology confirms the node is gone.
 - **Restart recovery.** Failover needs a surviving node; a single-node reboot or a whole-cluster restart has none. Each node therefore keeps a small record on its own disk of what the cluster was running (placements by stable machine install ID, not by the per-process node IDs) and the steward proposal history. A master that starts with no prior view seeds its first event from that record, with every restored proposal made terminal so a restart can never re-arm an action nobody approved after it, and holds a replicated `restart_recovery_pending` flag so no node overwrites its record with the nearly empty view of a cluster that is still coming back. Once the post-election settling window has passed, the master requests each recorded placement again through the ordinary planner, on the same machines when they are back and otherwise wherever it fits; a model that no longer fits or has left the catalog is reported once in the placement failure history, and restore never stops anything to make room. After a whole-cluster restart, every node advertises how fresh its record is on telemetry; the master waits for the returning nodes, restores from the record most recently confirmed current (fetching it over that node's API if it is not its own, over any link the nodes share, Thunderbolt's self-assigned addresses included, and from a node without a worker through the addresses its advert lists), so a node that was offline for days cannot bring back an old layout, and skips any placement that is already running so a master change mid-restore never places twice; once the master has settled what it is bringing back, that plan is in the replicated state too, so a master that takes over mid-restore finishes the same plan even if the machine whose record was chosen is gone (a placement on the master that just died does not count, since it is about to be removed). A machine that joined during the restart and dropped out again is still waited for, within the same two minutes, when its record might be the freshest. Machines in a shutdown rarely go down at the same moment, so a placement that disappears because its machine left stays in the surviving nodes' records for ten minutes; the last machine standing therefore still records what the departed ones were running, while a model the operator stopped leaves the record at once. While a restore runs, the replicated state carries how many models are coming back (`restart_recovery_placements`, seeded from the master's record and updated by a `RestartRecoveryStarted` event when another record is chosen), and the dashboard shows it. Settings has a **Bring models back after a restart** toggle (`restart_recovery.enabled`, on by default); turning it off still restores steward history but brings no models back, and nodes keep recording what runs. `SKULK_NO_RESTART_RECOVERY=1` turns the whole feature off at launch.
 - **libp2p pub/sub for transport.** Topics carry commands, events, telemetry, and connection updates between nodes. Election and telemetry each use dedicated Python egress plus their own gossipsub behavior, protocol, and per-peer handler queues on the same libp2p swarm, so telemetry pressure cannot consume control or election capacity. Election alone retains its temporary legacy-protocol compatibility copy.
-- **Capability-aware inference engines.** MLX supports Apple Silicon text, vision, embeddings and image workloads, with pipeline and tensor parallelism on `mlx.distributed` ring or jaccl/RDMA. GGUF text uses in-process llama.cpp or managed llama-server; GPU text can use vLLM. Dedicated MLX Audio, ComfyUI, and separately installed audio.cpp engines serve speech, video, and music. Model cards, exact engine support, live node evidence and runner limitations jointly determine admission. See [Inference and media](inference.md).
+- **Capability-aware inference engines.** MLX supports Apple Silicon text, vision, embeddings and image workloads, with pipeline and tensor parallelism on `mlx.distributed` ring or jaccl/RDMA. GGUF text uses in-process llama.cpp or managed llama-server, and GGUF embedding cards serve through a dedicated llama-server on every node type, Apple Silicon included; GPU text can use vLLM. Dedicated MLX Audio, ComfyUI, and separately installed audio.cpp engines serve speech, video, and music. Model cards, exact engine support, live node evidence and runner limitations jointly determine admission. See [Inference and media](inference.md).
 - **Subprocess isolation for runners.** Each model instance runs in its own `mp.Process` with its own engine context, so a crash or hang in one runner can't bring down the rest of the node. The shipped systemd unit sets `OOMPolicy=continue` for the same boundary: if Linux OOM-kills a runner child, systemd leaves the Skulk parent, API, and co-hosted model store alive while the supervisor and crash breaker handle the failed runner.
 
 ## The shape of a node
@@ -448,6 +448,25 @@ GPU offload only for an explicitly CPU-resolved placement. Vision and native
 MTP may be enabled together; that combination runs with one server slot until
 concurrent multimodal serving is qualified. Text-only and non-MTP vision
 instances retain the configured slot count.
+
+The served engine also serves GGUF embedding cards, which is how embeddings
+reach Linux GPU and CPU nodes and not only Apple Silicon. A TextEmbedding card
+on a `llama_server` lane gets a dedicated server started in llama.cpp's
+embeddings mode (`--embeddings`) with one slot and batch sizes that cover its
+window: the card's `context_length`, or the smaller window placement stamps
+when the node's memory admits less (CPU and unified-memory placements can).
+An encoder takes its whole input in one pass, and the server's 512-token
+default would refuse anything longer. The model's pooling
+comes from its own GGUF metadata and vectors are L2-normalized, as llama.cpp
+does by default, so the server reproduces the artifact's recipe without Skulk
+passing either. llama.cpp never truncates an input past its window, so the
+runner truncates first, at that same effective window, through the server's
+own tokenizer (`/tokenize` and `/detokenize`), matching the safetensors
+runner's contract, and returns
+vectors in input order. Dispatch is serial to match the single slot, and an
+embedding card never spans a multi-node RPC cycle. A GGUF card and the
+safetensors card of the same model are different vector spaces: vectors are
+comparable only within one card.
 
 A second served-backend engine, `vllm`, reuses that same shape with a `vllm serve`
 process instead of `llama-server`. vLLM is the **GPU-serving fast path**: its
@@ -1615,6 +1634,20 @@ stays a loud `invalid_engine_binary` conflict, because silently substituting a
 different binary would hide the configuration error.
 `SKULK_NO_ENGINE_AUTOPROVISION=1` opts a node out; provisioning failure (for
 example, no network) degrades to a warning rather than blocking node startup.
+
+Apple Silicon Macs provision the pinned upstream macOS build of the same
+release (`llama-<pin>-bin-macos-arm64.tar.gz`), checksum-verified like the
+Linux tarballs. It embeds its Metal shaders and loads its bundled libraries
+from beside the binary, so it runs on a stock Mac and inside the packaged
+app's bundled interpreter. A Mac advertises exactly one lane,
+`llama_server-metal`, and only when the binary's own device probe reports a
+Metal device; a binary that fails the probe is an `invalid_engine_binary`
+conflict in node health. The lane serves embedding cards only: MLX keeps
+owning chat on the Apple GPU, and a bare `llama_server` tag on a chat card
+never expands to it, so GGUF chat placements cannot move onto Macs. It is
+admitted against unified memory, and because macOS has no parent-death
+signal the server runs under the same small parent watchdog the audio.cpp
+engine uses. Intel Macs provision nothing.
 
 ### Packaged apps and the source installer
 

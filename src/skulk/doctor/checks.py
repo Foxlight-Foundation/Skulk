@@ -26,6 +26,7 @@ from typing import Literal, final
 from pydantic import ConfigDict
 
 from skulk.facts import derive_node_backends
+from skulk.shared.backends import engine_of
 from skulk.shared.types.node_facts import (
     CONFLICT_ERROR_CODES,
     NodeFacts,
@@ -153,7 +154,8 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
         engines.append("mlx_audio (speech)")
     if "llama_cpp" in derived:
         engines.append("llama_cpp (in-process GGUF)")
-    if "llama_server" in derived:
+    if any(engine_of(tag) == "llama_server" for tag in derived):
+        # By any tag: macOS advertises only the Metal lane, no bare tag.
         engines.append(f"llama_server ({facts.llama_server_binary.configured_path})")
     if "vllm" in derived:
         engines.append(f"vllm ({facts.vllm_binary.configured_path})")
@@ -192,7 +194,7 @@ def _check_engine_available(facts: NodeFacts) -> Sequence[CheckResult]:
             }
         )
         replay = derive_node_backends(hypothetical)
-        if "llama_server" in replay.backends:
+        if any(engine_of(tag) == "llama_server" for tag in replay.backends):
             # Derivation can advertise the engine AND raise conflicts (the
             # #609 cpu-only-on-GPU shape keeps llama_server-cpu with an
             # error-level gpu_serving_disabled). The capability-conflicts

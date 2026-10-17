@@ -645,6 +645,20 @@ def entrypoint(
             # Any other engine fails here with the reason rather than inside
             # an import the node may not have.
             embedding_engine = _resolve_text_engine(bound_instance)
+            if embedding_engine == "llama_server":
+                # GGUF embedding cards: a dedicated llama-server --embeddings.
+                from skulk.worker.runner.llama_server.runner import (
+                    Runner as LlamaServerEmbeddingRunner,
+                )
+
+                LlamaServerEmbeddingRunner(
+                    bound_instance,
+                    event_sender,
+                    task_receiver,
+                    cancel_receiver,
+                    context_token_limit=context_token_limit,
+                ).main()
+                return
             if embedding_engine not in (None, "mlx"):
                 raise RuntimeError(
                     f"no embedding runner serves engine {embedding_engine!r} for "

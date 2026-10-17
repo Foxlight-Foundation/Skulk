@@ -1456,6 +1456,18 @@ def test_comfy_gpu_tags_count_as_vram_offload() -> None:
     assert not _has_gpu_offload_backend(frozenset({"comfy"}))
 
 
+def test_metal_llama_server_lane_is_not_discrete_vram() -> None:
+    """A Mac advertising the Metal llama-server lane stays on unified memory."""
+    from skulk.master.placement_utils import (
+        _has_gpu_offload_backend,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert not _has_gpu_offload_backend(
+        frozenset({"mlx", "mlx-metal", "llama_server", "llama_server-metal"})
+    )
+    assert _has_gpu_offload_backend(frozenset({"llama_server-vulkan"}))
+
+
 def test_carve_first_nodes_are_the_amd_apus_only() -> None:
     """GB10 is unified but has no carve; a discrete card is not unified at all;
     a Strix that does not report carve usage keeps the conservative charge."""

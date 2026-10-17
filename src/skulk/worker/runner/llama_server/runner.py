@@ -31,6 +31,7 @@ import random
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -52,8 +53,17 @@ from skulk.shared.models.llama_server_settings import (
     LLAMA_SERVER_DEFAULT_PARALLEL,
     resolve_llama_server_settings,
 )
-from skulk.shared.models.model_cards import ModelCard, OutputParserType
-from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    OutputParserType,
+    card_serves_embeddings,
+)
+from skulk.shared.types.chunks import (
+    EmbeddingChunk,
+    ErrorChunk,
+    TokenChunk,
+    ToolCallChunk,
+)
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
     ChunkGenerated,
@@ -68,6 +78,7 @@ from skulk.shared.types.tasks import (
     Task,
     TaskId,
     TaskStatus,
+    TextEmbedding,
     TextGeneration,
 )
 from skulk.shared.types.worker.instances import BoundInstance, LlamaRpcInstance
@@ -80,6 +91,7 @@ from skulk.shared.types.worker.runners import (
     RunnerStatus,
 )
 from skulk.utils.channels import MpReceiver, MpSender
+from skulk.worker.runner.audio_cpp import parent_watchdog
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.generation_stats import (
@@ -100,6 +112,14 @@ from skulk.worker.runner.llama_cpp.runner import (
 )
 from skulk.worker.runner.llama_server.channel_text_parser import (
     GemmaChannelTextParser,
+)
+from skulk.worker.runner.llama_server.embeddings import (
+    embedding_server_args,
+    parse_embeddings_response,
+    server_detokenize,
+    server_tokenize,
+    text_token_budget,
+    truncate_inputs,
 )
 from skulk.worker.runner.llm_inference.reasoning_controls import (
     muse_glimmer_strength_kwargs,
@@ -167,6 +187,17 @@ def raise_for_server_status(response: httpx.Response) -> None:
         response.raise_for_status()
     except httpx.HTTPStatusError as error:
         raise ServerRefusalError(server_refusal_message(error.response)) from error
+
+
+def _dispatch_width(card: Any) -> int:
+    """How many requests the runner keeps in flight against its server.
+
+    An embedding server runs one slot (``embedding_server_args``), so its
+    dispatch is serial too; a chat server's width is its slot count.
+    """
+    if card_serves_embeddings(card):
+        return 1
+    return _effective_server_parallel(card)
 
 
 def _effective_server_parallel(card: Any) -> int:
@@ -745,8 +776,16 @@ class Runner(ServedConcurrentDispatch):
             raise ValueError(
                 "llama-server settings changed since memory admission; re-place the instance"
             )
-        effective_parallel = _effective_server_parallel(self.shard_metadata.model_card)
+        # A TextEmbedding card runs a dedicated embedding server (``--embeddings``)
+        # with one slot, so it admits only embedding tasks, one at a time: a
+        # wider pool would acknowledge requests that then wait inside the server
+        # behind that slot, where a long queue can outlast a request's timeout.
+        self._serves_embeddings = card_serves_embeddings(self.shard_metadata.model_card)
+        effective_parallel = _dispatch_width(self.shard_metadata.model_card)
         self._init_concurrent_dispatch(effective_parallel, "llama-gen")
+        if self._serves_embeddings:
+            self._generation_kinds = (TextEmbedding,)
+        self._embedding_text_budget = 0
         if (
             effective_parallel == 1
             and self.shard_metadata.model_card.vision is not None
@@ -885,6 +924,9 @@ class Runner(ServedConcurrentDispatch):
                 )
         if gguf_path is None:
             gguf_path = select_gguf_file(model_dir)
+        if self._serves_embeddings:
+            self._load_embedding_server(task, gguf_path)
+            return
         projector_path = self._resolve_projector(model_dir)
 
         # When the card declares a channel output parser we strip reasoning
@@ -932,6 +974,94 @@ class Runner(ServedConcurrentDispatch):
             f"(url={self.base_url})"
         )
 
+    def _load_embedding_server(self, task: Task, gguf_path: Path) -> None:
+        """Spawn and health-check a dedicated embedding server.
+
+        The window is the card's declared ``context_length`` (via the stamped
+        limit): the batch sizes cover it, so an undeclared length would size
+        them for the 32k chat default on a 512-token encoder.
+        """
+        card = self.shard_metadata.model_card
+        if card.context_length <= 0:
+            raise RuntimeError(
+                f"embedding card {card.model_id} declares no context_length; the "
+                "embedding server sizes its batches to the model's input length"
+            )
+        n_ctx = min(self._serving_context_tokens, card.context_length)
+        try:
+            with runner_phase(
+                "load_model",
+                detail="spawn_llama_server_embeddings",
+                task_id=task.task_id,
+                attrs={"gguf_file": gguf_path.name, "n_ctx": n_ctx},
+            ):
+                self._spawn_server(gguf_path, n_ctx, None, True, embeddings=True)
+                self._await_health()
+                assert self.base_url is not None
+                with httpx.Client(timeout=30.0) as client:
+                    special = len(
+                        server_tokenize(client, self.base_url, "", add_special=True)
+                    )
+                self._embedding_text_budget = text_token_budget(n_ctx, special)
+        except Exception:
+            self._teardown_server()
+            raise
+        self.current_status = RunnerReady()
+        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
+        logger.info(
+            f"llama-server embedding runner ready in "
+            f"{time.time() - self.setup_start_time:.1f}s (window {n_ctx} tokens, "
+            f"{self._embedding_text_budget} of text per input, url={self.base_url})"
+        )
+
+    def _embed(self, task: TextEmbedding) -> None:
+        """Truncate the inputs to the window and proxy ``/v1/embeddings``.
+
+        Runs on a pool worker thread like ``_generate``. A failure becomes an
+        ErrorChunk and a failed task, never a partial result.
+        """
+        assert self.base_url is not None
+        base_url = self.base_url
+        model_id = self.shard_metadata.model_card.model_id
+        timeout = httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=None)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                inputs = truncate_inputs(
+                    task.task_params.input_texts,
+                    max_text_tokens=self._embedding_text_budget,
+                    tokenize=lambda text: server_tokenize(
+                        client, base_url, text, add_special=False
+                    ),
+                    detokenize=lambda tokens: server_detokenize(
+                        client, base_url, tokens
+                    ),
+                )
+                response = client.post(
+                    f"{base_url}/v1/embeddings",
+                    json={"input": inputs, "encoding_format": "float"},
+                )
+                raise_for_server_status(response)
+                vectors, token_count = parse_embeddings_response(
+                    cast(object, response.json()), expected=len(inputs)
+                )
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=task.command_id,
+                    chunk=EmbeddingChunk(
+                        model=model_id, embeddings=vectors, token_count=token_count
+                    ),
+                )
+            )
+        except Exception as exc:
+            logger.opt(exception=exc).warning("llama-server embedding request failed")
+            self._mark_generation_failed(task.task_id)
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=task.command_id,
+                    chunk=ErrorChunk(model=model_id, error_message=str(exc)),
+                )
+            )
+
     def _spawn_server(
         self,
         gguf_path: Path,
@@ -939,6 +1069,8 @@ class Runner(ServedConcurrentDispatch):
         runtime: Any,
         reasoning_format_none: bool,
         projector_path: Path | None = None,
+        *,
+        embeddings: bool = False,
     ) -> None:
         binary = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
         if not binary:
@@ -955,6 +1087,26 @@ class Runner(ServedConcurrentDispatch):
             )
         port = self._pick_port()
         n_gpu_layers = _gpu_layers_for_backend(self.shard_metadata.resolved_backend)
+        if embeddings:
+            self._launch_server(
+                binary,
+                [
+                    binary,
+                    "-m",
+                    str(gguf_path),
+                    "-ngl",
+                    n_gpu_layers,
+                    "-c",
+                    str(n_ctx),
+                    *embedding_server_args(n_ctx),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                port,
+            )
+            return
         cmd: list[str] = [
             binary,
             "-m",
@@ -1036,6 +1188,10 @@ class Runner(ServedConcurrentDispatch):
                     cmd += ["--spec-draft-n-max", str(n_max)]
                     cmd += draft_args
 
+        self._launch_server(binary, cmd, port)
+
+    def _launch_server(self, binary: str, cmd: list[str], port: int) -> None:
+        """Start the built llama-server command with its log and library path."""
         self.server_log_path = (
             Path(tempfile.gettempdir()) / f"skulk-llama-server-{self.runner_id}.log"
         )
@@ -1048,12 +1204,27 @@ class Runner(ServedConcurrentDispatch):
         existing = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
         logger.info("launching llama-server: " + " ".join(cmd))
+        # Read at runtime: a static ``sys.platform`` comparison makes the type
+        # checker treat the other platform's branch as dead code.
+        system = os.uname().sysname
+        if system == "Darwin":
+            # macOS has no prctl(PDEATHSIG): the parent watchdog (shared with
+            # the audio.cpp runner) owns the server and ends its process group
+            # if this runner disappears without tearing it down.
+            cmd = [
+                sys.executable,
+                str(Path(parent_watchdog.__file__)),
+                str(os.getpid()),
+                *cmd,
+            ]
         self.server_proc = subprocess.Popen(  # noqa: S603 - args are built here, not user input
             cmd,
             stdout=self.server_log,
             stderr=subprocess.STDOUT,
             env=env,
-            preexec_fn=_set_pdeathsig,  # noqa: PLW1509 - Linux reap-on-parent-death
+            preexec_fn=(  # noqa: PLW1509 - Linux reap-on-parent-death
+                _set_pdeathsig if system == "Linux" else None
+            ),
         )
         self.base_url = f"http://127.0.0.1:{port}"
 
@@ -1277,6 +1448,9 @@ class Runner(ServedConcurrentDispatch):
         # the dispatch loop's in-flight counter, and the task was already
         # acknowledged at acceptance in the loop (before backpressure), so neither
         # is touched here.
+        if isinstance(task, TextEmbedding):
+            self._embed(task)
+            return
         assert isinstance(task, TextGeneration)
         assert self.base_url is not None
 

@@ -69,6 +69,9 @@ _DEVICE_PREFIX_TO_COMPUTE = {
     "vulkan": "vulkan",
     "rocm": "rocm",
     "hip": "rocm",
+    # llama.cpp's Metal backend names its devices "MTL0"; the macOS build's
+    # Metal lane serves embeddings (derivation advertises it on macOS only).
+    "mtl": "metal",
 }
 
 _AUDIO_CPP_DEVICE_COMPUTES = {
@@ -358,10 +361,10 @@ def _binary_fact(env_var: str, env: Mapping[str, str]) -> EngineBinaryFact:
 def parse_list_devices_output(output: str) -> tuple[str, ...]:
     """Parse ``llama-server --list-devices`` output into compute backends.
 
-    Returns the deduplicated compute backends (``cuda``/``vulkan``/``rocm``)
-    that the binary reported at least one device for, in first-seen order.
-    Metal and CPU device lines are deliberately not mapped: Metal serving is
-    MLX's domain in our vocabulary, and CPU is the implicit floor.
+    Returns the deduplicated compute backends (``cuda``/``vulkan``/``rocm``,
+    and ``metal`` from the macOS build's ``MTL`` devices) that the binary
+    reported at least one device for, in first-seen order. CPU device lines
+    are deliberately not mapped: CPU is the implicit floor.
     """
     computes: list[str] = []
     for line in output.splitlines():
