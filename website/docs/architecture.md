@@ -452,14 +452,17 @@ instances retain the configured slot count.
 The served engine also serves GGUF embedding cards, which is how embeddings
 reach Linux GPU and CPU nodes and not only Apple Silicon. A TextEmbedding card
 on a `llama_server` lane gets a dedicated server started in llama.cpp's
-embeddings mode (`--embeddings`) with one slot and batch sizes that cover the
-card's `context_length`: an encoder takes its whole input in one pass, and the
-server's 512-token default would refuse anything longer. The model's pooling
+embeddings mode (`--embeddings`) with one slot and batch sizes that cover its
+window: the card's `context_length`, or the smaller window placement stamps
+when the node's memory admits less (CPU and unified-memory placements can).
+An encoder takes its whole input in one pass, and the server's 512-token
+default would refuse anything longer. The model's pooling
 comes from its own GGUF metadata and vectors are L2-normalized, as llama.cpp
 does by default, so the server reproduces the artifact's recipe without Skulk
 passing either. llama.cpp never truncates an input past its window, so the
-runner truncates first through the server's own tokenizer (`/tokenize` and
-`/detokenize`), matching the safetensors runner's contract, and returns
+runner truncates first, at that same effective window, through the server's
+own tokenizer (`/tokenize` and `/detokenize`), matching the safetensors
+runner's contract, and returns
 vectors in input order. Dispatch is serial to match the single slot, and an
 embedding card never spans a multi-node RPC cycle. A GGUF card and the
 safetensors card of the same model are different vector spaces: vectors are
