@@ -416,10 +416,14 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
 _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx", "llama_cpp"})
 _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
 _MUSIC_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"audio_cpp"})
-# Embedding cards dispatch to the transformers runner, which the worker runs
-# only for ``mlx`` placements. Without this gate a card declaring another
-# engine placed there and crashed at runner import instead of being refused.
-_EMBEDDING_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx"})
+# Engines with an embedding runner: the transformers runner serves ``mlx``
+# placements (safetensors cards), and ``llama_server`` runs a dedicated
+# ``--embeddings`` server (GGUF cards). Without this gate a card declaring
+# another engine placed there and crashed at runner import instead of being
+# refused.
+_EMBEDDING_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
+    {"mlx", "llama_server"}
+)
 AUDIO_CPP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
     {
         "audio_cpp-cpu",

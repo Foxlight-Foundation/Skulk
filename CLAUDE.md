@@ -506,7 +506,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   media only to that driver. A request the server refuses (a prompt past
   the context window) is raised with the server's own message
   (`raise_for_server_status`), a context-size refusal prefixed with the
-  API's context sentinel so it answers 400 rather than 500. The engine
+  API's context sentinel so it answers 400 rather than 500. A
+  `TextEmbedding` GGUF card runs a dedicated `--embeddings` server instead
+  (`llama_server/embeddings.py`): one slot, batch sizes equal to the card's
+  required `context_length`, inputs truncated through the server's tokenizer,
+  `/v1/embeddings` proxied into `EmbeddingChunk`. The engine
   coexists with `llama_cpp`; the managed-server-plus-proxy shape is shared
   with `vllm`.
 - **`vllm`** (`worker/runner/vllm/`): second served-backend engine; the worker

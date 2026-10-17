@@ -44,6 +44,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Embeddings run on Linux GPU and CPU nodes. A GGUF embedding card now places
+  on any node with a llama-server engine (Vulkan, CUDA, or CPU) and is served by
+  a dedicated llama-server in embeddings mode, with the model's own pooling and
+  normalized vectors. Inputs longer than the card's declared `context_length`
+  are truncated, as on the Mac runner.
 - Models now come back on their own after a reboot or a whole-cluster restart.
   Each machine keeps a small record of what the cluster was running. After a
   restart, Skulk uses the most recently confirmed record from any machine and
