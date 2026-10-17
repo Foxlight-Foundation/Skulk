@@ -97,7 +97,7 @@ async def test_a_custom_card_above_this_release_is_ignored(
         _CARD.format(model_id="testorg/fits", floor='min_skulk_version = "2.0.3"\n')
     )
     monkeypatch.setattr(model_cards_module, "_card_cache", {})
-    monkeypatch.setattr(model_cards_module, "_card_floor_warnings", set())
+    monkeypatch.setattr(model_cards_module, "_card_floor_warnings", set[tuple[str, str]]())
 
     def this_release() -> str:
         return "2.0.3"
