@@ -1356,8 +1356,9 @@ GGUF embedding cards are served by a dedicated llama-server (`--embeddings`) on
 any node with a llama-server engine, including Linux GPU and CPU nodes. Their
 pooling comes from the GGUF metadata and vectors are L2-normalized, as llama.cpp
 does by default. Such a card must declare `context_length`, the model's input
-length: inputs longer than that are truncated through the model's own tokenizer
-before embedding (llama.cpp itself would refuse them), matching the
+length. The serving window is that length, or the smaller window placement
+stamps when the node's memory admits less; inputs longer than the window are
+truncated through the model's own tokenizer before embedding (llama.cpp itself would refuse them), matching the
 safetensors runner's truncation. A GGUF card and the safetensors card of the
 same model are different vector spaces; compare vectors only within one card.
 
