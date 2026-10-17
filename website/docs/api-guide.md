@@ -2494,6 +2494,9 @@ receive `qualification_only`; operator installs do not. A full 40-character
 immutable `sourceRevision` is required.
 Every external vision, MTP, assistant, or draft repository must also declare
 its matching immutable companion revision.
+A card whose `minSkulkVersion` is above this node's release is refused with
+422 and the reason, since the node would persist it and then skip it on every
+load.
 The exact add action authorizes repository code selected by the temporary card.
 Unlike `/models/add` (which also admits direct trusted-fabric peers for the
 dashboard), this mutation accepts only direct loopback access

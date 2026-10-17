@@ -609,6 +609,28 @@ async def test_exact_custom_card_requires_immutable_revision() -> None:
 
 
 @pytest.mark.asyncio
+async def test_exact_custom_card_this_release_is_too_old_for_is_refused() -> None:
+    """A card above this build's floor would persist and then never load."""
+    supplied = ModelCard(
+        model_id=ModelId("org/needs-newer"),
+        source_revision="c" * 40,
+        storage_size=Memory.from_bytes(1234),
+        n_layers=2,
+        hidden_size=16,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        min_skulk_version="99.0",
+    )
+    api = object.__new__(API)
+
+    with pytest.raises(HTTPException, match="requires Skulk 99.0 or newer"):
+        await api.add_exact_custom_model_card(
+            AddExactCustomModelCardParams(model_card=supplied),
+            _authenticated_gateway_request(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_exact_custom_card_requires_immutable_external_companions() -> None:
     """Qualification evidence pins executable companion bytes as well as weights."""
     supplied = ModelCard(

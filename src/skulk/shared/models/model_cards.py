@@ -18,6 +18,7 @@ import tomlkit
 from anyio import Path, open_file, to_thread
 from huggingface_hub import model_info
 from loguru import logger
+from packaging.version import InvalidVersion, Version
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -66,6 +67,7 @@ from skulk.shared.models.registry_gguf_metadata import RegistryGgufArtifactMetad
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
+from skulk.shared.version import get_skulk_version
 from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel
 
 if TYPE_CHECKING:
@@ -206,6 +208,56 @@ def _is_vocabulary_skew(error: ValidationError, payload: dict[str, Any]) -> bool
             continue
         return False
     return True
+
+
+def card_requires_newer_skulk(
+    card: "ModelCard", running_version: str | None = None
+) -> str | None:
+    """Why this Skulk build cannot serve ``card``, or ``None`` when it can.
+
+    A card's ``min_skulk_version`` is a floor on the running release. A
+    pre-release or development build counts as its release (``2.0.3rc1`` and
+    ``2.0.3.dev4`` satisfy ``2.0.3``): ``dev`` carries the next release's
+    version and code. A build whose own version cannot be read cannot prove
+    the floor, so it refuses the card.
+
+    Args:
+        card: The card to check.
+        running_version: This build's version; defaults to the installed
+            package version.
+
+    Returns:
+        An operator-readable reason when the build is below the floor, else
+        ``None``.
+    """
+    floor = card.min_skulk_version
+    if floor is None:
+        return None
+    running = running_version if running_version is not None else get_skulk_version()
+    try:
+        current = Version(Version(running).base_version)
+    except InvalidVersion:
+        return (
+            f"{card.model_id} requires Skulk {floor} or newer, and this build's "
+            f"version ({running!r}) cannot be read"
+        )
+    if current >= Version(floor):
+        return None
+    return f"{card.model_id} requires Skulk {floor} or newer; this node runs {running}"
+
+
+_card_floor_warnings: set[tuple[str, str]] = set()
+"""Floor skips already logged, keyed by source and card, so a periodic refresh
+reports each skipped card once instead of on every pass."""
+
+
+def _warn_card_floor_once(source: str, identity: str, message: str) -> None:
+    """Log one floor skip the first time this source reports this card."""
+    key = (source, identity)
+    if key in _card_floor_warnings:
+        return
+    _card_floor_warnings.add(key)
+    logger.warning(message)
 
 
 def _bundle_file_facts(
@@ -362,6 +414,14 @@ def registry_model_cards(catalog: RegistryCatalog) -> list["ModelCard"]:
                 f"{unknown}"
             )
             continue
+        floor_reason = card_requires_newer_skulk(card)
+        if floor_reason is not None:
+            _warn_card_floor_once(
+                "registry",
+                envelope.card_id,
+                f"signed registry card {envelope.card_id} is skipped: {floor_reason}",
+            )
+            continue
         cards.append(card)
     return cards
 
@@ -470,6 +530,14 @@ async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
     async for toml_file in directory.rglob("*.toml"):
         try:
             card = await ModelCard.load_from_path(toml_file)
+            floor_reason = card_requires_newer_skulk(card)
+            if floor_reason is not None:
+                _warn_card_floor_once(
+                    "file",
+                    str(toml_file),
+                    f"ignoring model card {toml_file}: {floor_reason}",
+                )
+                continue
             if is_custom:
                 card = card.model_copy(update={"is_custom": True})
                 if card.model_id in loaded_in_this_pass:
@@ -627,6 +695,16 @@ def _apply_installed_card_snapshot(
     selected_records: dict[ModelId, InstalledCardRecord] = {}
     for record in discovered:
         if record.artifact_role != "base":
+            continue
+        # An installed card this build is too old for (a node rolled back
+        # under a card that needs a newer release) is absent, not served.
+        floor_reason = card_requires_newer_skulk(record.model_card)
+        if floor_reason is not None:
+            _warn_card_floor_once(
+                "installed",
+                str(record.model_card.model_id),
+                f"installed model card is skipped: {floor_reason}",
+            )
             continue
         model_id = ModelId(record.owner_model_id or record.artifact_model_id)
         current_card = _registry_current_cards.get(model_id)
@@ -2913,6 +2991,15 @@ class ModelCard(CamelCaseModel):
     The registry service credential may clean up only cards carrying this marker;
     ordinary operator-owned custom cards remain outside its deletion authority.
     """
+    min_skulk_version: str | None = None
+    """Oldest Skulk release that can serve this card, as a PEP 440 release
+    such as ``"2.0.3"``; ``None`` for any build that can read the card. A card
+    names it when it depends on engine or runner behavior that release added.
+    A build below the floor skips the card wherever it loads (registry,
+    installed record, custom file), and a build older than this field skips
+    it as vocabulary it does not know. A floor only: a card never stops
+    working on a newer Skulk. Pre-releases and development builds of a release
+    count as that release (see :func:`card_requires_newer_skulk`)."""
     generator_revision: int | None = None
     """Revision of the machine card generator that produced this card
     (:data:`CARD_GENERATOR_REVISION` at generation time), persisted in the card
@@ -3084,6 +3171,25 @@ class ModelCard(CamelCaseModel):
                 "runtime GGUF geometry disagrees with signed header evidence"
             )
         return self
+
+    @field_validator("min_skulk_version")
+    @classmethod
+    def _validate_min_skulk_version(cls, value: str | None) -> str | None:
+        # A floor must compare against every build's version, so it is a plain
+        # release: no local segment, normalized so equal floors are equal text.
+        if value is None:
+            return None
+        try:
+            parsed = Version(value)
+        except InvalidVersion as error:
+            raise ValueError(
+                f"min_skulk_version {value!r} is not a PEP 440 version"
+            ) from error
+        if parsed.local is not None or parsed.base_version != str(parsed):
+            raise ValueError(
+                f"min_skulk_version {value!r} must be a plain release such as '2.0.3'"
+            )
+        return str(parsed)
 
     @field_validator("registry_capability_claims", mode="before")
     @classmethod

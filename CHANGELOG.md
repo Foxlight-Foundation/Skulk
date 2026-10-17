@@ -51,6 +51,12 @@ This project records release notes here and mirrors public-facing notes in
   own pooling and normalized vectors. Inputs longer than the card's declared
   `context_length` are truncated, as on the Mac runner. The Metal lane serves
   only embedding cards; MLX keeps serving chat on Macs.
+- Model cards can name the oldest Skulk release that can serve them
+  (`min_skulk_version`). A node below that release skips the card instead of
+  listing a model it cannot load, and releases older than the field already
+  skip it as card vocabulary they do not know. This lets the registry publish
+  a card that needs new engine behavior, such as the GGUF embedding cards,
+  without breaking nodes on earlier releases.
 - Models now come back on their own after a reboot or a whole-cluster restart.
   Each machine keeps a small record of what the cluster was running. After a
   restart, Skulk uses the most recently confirmed record from any machine and

@@ -442,6 +442,7 @@ from skulk.shared.models.model_cards import (
     VideoMode,
     add_to_card_cache,
     authorized_model_card_digest,
+    card_requires_newer_skulk,
     card_visible_in_catalog,
     custom_card_mutation_applied,
     delete_custom_card,
@@ -11193,6 +11194,11 @@ class API:
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # A card this release is too old for would be persisted and then
+        # skipped on every load; refuse it here with the reason instead.
+        floor_reason = card_requires_newer_skulk(payload.model_card)
+        if floor_reason is not None:
+            raise HTTPException(status_code=422, detail=floor_reason)
         card = self._unsigned_exact_custom_card(
             payload.model_card,
             qualification_only=qualification_service,
