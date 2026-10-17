@@ -733,3 +733,37 @@ def test_audio_cpp_discrete_gpu_lanes_offload_to_vram() -> None:
         assert backend_offloads_to_vram(lane)
     for lane in ("audio_cpp", "audio_cpp-cpu", "audio_cpp-metal"):
         assert not backend_offloads_to_vram(lane)
+
+
+def test_llama_server_embedding_placement_is_stamped_at_the_engine_window() -> None:
+    """A card keeps its model's input length; the engine's window caps the stamp.
+
+    llama-server's embeddings mode sizes its micro-batch to the whole window, so
+    the stamp (and with it the memory placement reserves) stops at the engine's
+    qualified window. A chat card on the same engine is unaffected."""
+    from skulk.shared.models.memory_estimate import LLAMA_SERVER_EMBEDDING_MAX_WINDOW
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    placement = PlacementCardConfig(compatible_backends=frozenset({"llama_server-vulkan"}))
+    embedding = _card(1, kv_heads=8, n_layers=28).model_copy(
+        update={
+            "tasks": [ModelTask.TextEmbedding],
+            "context_length": 32768,
+            "gguf_file": "model.gguf",
+            "placement": placement,
+        }
+    )
+    chat = embedding.model_copy(update={"tasks": [ModelTask.TextGeneration]})
+    totals = {NodeId("n0"): Memory.from_gb(128)}
+    vram = {NodeId("n0"): Memory.from_gb(96)}
+
+    def stamp(card: ModelCard) -> int | None:
+        shard = _pipeline_shard(card, start=0, end=28).model_copy(
+            update={"resolved_backend": "llama_server-vulkan"}
+        )
+        return instance_context_token_limit(
+            _assignments(card, {"r0": (shard, "n0")}), totals, node_vram=vram
+        )
+
+    assert stamp(embedding) == LLAMA_SERVER_EMBEDDING_MAX_WINDOW
+    assert (stamp(chat) or 0) > LLAMA_SERVER_EMBEDDING_MAX_WINDOW

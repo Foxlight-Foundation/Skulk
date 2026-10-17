@@ -285,3 +285,36 @@ def test_embedding_dispatch_is_serial_like_its_one_slot_server(
     chat = cast(Any, SimpleNamespace(tasks=["TextGeneration"]))
     assert runner_module._dispatch_width(embedding) == 1
     assert runner_module._dispatch_width(chat) == 16
+
+
+def test_embedding_server_window_stops_at_the_engine_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card declaring a long input length still runs the engine's window."""
+    from skulk.shared.models.memory_estimate import LLAMA_SERVER_EMBEDDING_MAX_WINDOW
+
+    runner, _ = _runner()
+    runner.shard_metadata = cast(
+        Any,
+        SimpleNamespace(
+            model_card=SimpleNamespace(model_id=ModelId("org/embed-GGUF"), context_length=32768),
+            resolved_backend="llama_server-vulkan",
+        ),
+    )
+    runner._serving_context_tokens = 32768
+    spawned: list[int] = []
+
+    def capture_spawn(_path: Path, n_ctx: int, *_args: object, **_kwargs: object) -> None:
+        spawned.append(n_ctx)
+        raise RuntimeError("stop after spawn")
+
+    def no_teardown() -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_spawn_server", capture_spawn)
+    monkeypatch.setattr(runner, "_teardown_server", no_teardown)
+    task = SimpleNamespace(task_id="t1")
+
+    with pytest.raises(RuntimeError, match="stop after spawn"):
+        runner._load_embedding_server(cast(Any, task), Path("/models/embed.gguf"))
+    assert spawned == [LLAMA_SERVER_EMBEDDING_MAX_WINDOW]

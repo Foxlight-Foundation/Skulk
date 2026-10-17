@@ -453,8 +453,12 @@ The served engine also serves GGUF embedding cards, which is how embeddings
 reach Linux GPU and CPU nodes and not only Apple Silicon. A TextEmbedding card
 on a `llama_server` lane gets a dedicated server started in llama.cpp's
 embeddings mode (`--embeddings`) with one slot and batch sizes that cover its
-window: the card's `context_length`, or the smaller window placement stamps
-when the node's memory admits less (CPU and unified-memory placements can).
+window: the card's `context_length`, capped at the engine's qualified
+embedding window (`LLAMA_SERVER_EMBEDDING_MAX_WINDOW`, 8192 tokens), or the
+smaller window placement stamps when the node's memory admits less (CPU and
+unified-memory placements can). The cap is platform truth: the card keeps
+its model's real input length, and placement stamps and reserves memory for
+the capped window.
 An encoder takes its whole input in one pass, and the server's 512-token
 default would refuse anything longer. The model's pooling
 comes from its own GGUF metadata and vectors are L2-normalized, as llama.cpp

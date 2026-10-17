@@ -53,6 +53,7 @@ from skulk.shared.models.llama_server_settings import (
     LLAMA_SERVER_DEFAULT_PARALLEL,
     resolve_llama_server_settings,
 )
+from skulk.shared.models.memory_estimate import LLAMA_SERVER_EMBEDDING_MAX_WINDOW
 from skulk.shared.models.model_cards import (
     ModelCard,
     OutputParserType,
@@ -977,9 +978,12 @@ class Runner(ServedConcurrentDispatch):
     def _load_embedding_server(self, task: Task, gguf_path: Path) -> None:
         """Spawn and health-check a dedicated embedding server.
 
-        The window is the card's declared ``context_length`` (via the stamped
-        limit): the batch sizes cover it, so an undeclared length would size
-        them for the 32k chat default on a 512-token encoder.
+        The window is the smallest of the card's declared ``context_length``,
+        the placement-stamped window, and the engine's qualified embedding
+        window (``LLAMA_SERVER_EMBEDDING_MAX_WINDOW``, also applied at the
+        stamp; repeated here as defense in depth). The batch sizes cover it, so
+        an undeclared length would size them for the 32k chat default on a
+        512-token encoder.
         """
         card = self.shard_metadata.model_card
         if card.context_length <= 0:
@@ -987,7 +991,11 @@ class Runner(ServedConcurrentDispatch):
                 f"embedding card {card.model_id} declares no context_length; the "
                 "embedding server sizes its batches to the model's input length"
             )
-        n_ctx = min(self._serving_context_tokens, card.context_length)
+        n_ctx = min(
+            self._serving_context_tokens,
+            card.context_length,
+            LLAMA_SERVER_EMBEDDING_MAX_WINDOW,
+        )
         try:
             with runner_phase(
                 "load_model",

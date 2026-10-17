@@ -49,7 +49,8 @@ This project records release notes here and mirrors public-facing notes in
   Apple Silicon, where Skulk now fetches the pinned upstream macOS build) and
   is served by a dedicated llama-server in embeddings mode, with the model's
   own pooling and normalized vectors. Inputs longer than the card's declared
-  `context_length` are truncated, as on the Mac runner. The Metal lane serves
+  `context_length`, or than the server's 8192-token embedding window, are
+  truncated, as on the Mac runner. The Metal lane serves
   only embedding cards; MLX keeps serving chat on Macs.
 - Model cards can name the oldest Skulk release that can serve them
   (`min_skulk_version`). A node below that release skips the card instead of

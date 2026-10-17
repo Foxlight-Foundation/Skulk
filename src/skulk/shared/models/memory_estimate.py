@@ -24,7 +24,11 @@ from skulk.shared.models.llama_server_settings import (
     LLAMA_SERVER_DEFAULT_DRAFT_DEPTH,
     LlamaServerSettings,
 )
-from skulk.shared.models.model_cards import ModelCard, MusicModelFamily
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    MusicModelFamily,
+    card_serves_embeddings,
+)
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import AcceleratorMetrics, MemoryUsage
@@ -450,6 +454,17 @@ _UPFRONT_WINDOW_ENGINE_PREFIXES: Final = ("llama_cpp", "llama_server", "vllm")
 #: window can never disagree (PR #649 review, both reviewers); the runner
 #: min()s against the same constant as defense in depth.
 VLLM_MAX_MODEL_LEN: Final = 32768
+
+LLAMA_SERVER_EMBEDDING_MAX_WINDOW: Final = 8192
+"""Longest window a dedicated llama-server embedding server runs.
+
+Platform truth, not model truth: in embeddings mode llama.cpp forces the
+micro-batch to the batch size, and both must cover the window, so the compute
+buffer grows with the window (with its square where flash attention is
+unavailable). 8192 tokens is the largest window qualified on every lane the
+server runs (Metal, Vulkan, CUDA). A card keeps its model's real input length;
+placement stamps, and the runner serves, at most this window, and longer
+inputs are truncated to it. Raise it here once a longer window is qualified."""
 
 
 def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
@@ -1019,6 +1034,27 @@ def instance_context_token_limit(
         limit = (
             VLLM_MAX_MODEL_LEN if limit is None else min(limit, VLLM_MAX_MODEL_LEN)
         )
+
+    # llama-server embeddings mode sizes its micro-batch to the whole window, so
+    # an embedding placement on that engine is stamped at most the engine's
+    # qualified window, whatever input length the card declares. Same
+    # resolved-or-declared rule as the vLLM cap above.
+    if card_serves_embeddings(model_card):
+        if any(r is not None for r in resolved):
+            placement_is_llama_server = all(
+                r is not None and r.startswith("llama_server") for r in resolved
+            )
+        else:
+            declared = model_card.placement.compatible_backends
+            placement_is_llama_server = bool(declared) and all(
+                tag.startswith("llama_server") for tag in declared
+            )
+        if placement_is_llama_server:
+            limit = (
+                LLAMA_SERVER_EMBEDDING_MAX_WINDOW
+                if limit is None
+                else min(limit, LLAMA_SERVER_EMBEDDING_MAX_WINDOW)
+            )
 
     # This ceiling is now the value the runner actually serves: the window-committing
     # served engines (llama_cpp / llama_server / vllm, the runners that call
