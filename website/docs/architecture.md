@@ -603,6 +603,15 @@ deleted custom card therefore cannot be recreated from retained model bytes.
 Separately hosted processor, vision-weight, assistant, MTP, and speculative
 draft repositories require their own immutable companion revisions for signed,
 custom, and installed cards alike.
+A card that depends on engine or runner behavior added in a particular release
+names that release in `min_skulk_version`. A node below the floor treats the
+card as absent wherever it would load it (the signed registry, an installed
+record, a custom file) and logs why once, and the exact-card add endpoint
+refuses it. Releases that predate the field already skip a signed card
+carrying vocabulary they do not know, without refusing the rest of the
+catalog, so the registry can publish such a card as soon as a release can
+serve it, while older releases keep their working catalog. The floor never
+caps newer releases.
 The low-level explicit-download route is operator-authenticated and compares
 its embedded shard card with the same authorized catalog before admitting bytes
 to a node. Exact comparison ignores only the TUF snapshot publication stamp;

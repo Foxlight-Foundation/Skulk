@@ -207,6 +207,10 @@ remain separate truths.
   - whether the model uses classifier-free guidance (relevant to some image/diffusion models)
 - `generator_revision`
   - optional version of the card generator used to produce a curated card; it is metadata about card production, not a mutable model revision
+- `min_skulk_version`
+  - optional oldest Skulk release that can serve the card, a plain release such as `"2.0.3"`; set it when the card depends on engine or runner behavior that release added
+  - a node below the floor skips the card wherever it loads it (signed registry, installed record, custom file) with one warning, and `POST /models/add-card` refuses it; builds older than the field skip it as vocabulary they do not know, so a floored card never reaches a release that cannot serve it
+  - a floor only, never a ceiling: newer releases always serve the card; pre-releases and development builds count as their release
 
 ### Catalog metadata
 

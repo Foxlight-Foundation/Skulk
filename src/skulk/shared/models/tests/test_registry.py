@@ -299,6 +299,77 @@ def test_registry_skips_a_card_whose_vocabulary_this_build_lacks() -> None:
         registry_model_cards(RegistryCatalog.model_validate(wrong_shape, strict=False))
 
 
+def test_registry_skips_a_card_this_release_is_too_old_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signed card whose min_skulk_version is above this build is skipped.
+
+    Like unknown vocabulary, it must not take the rest of the signed catalog
+    away; a card whose floor this build meets loads as usual."""
+    from loguru import logger
+
+    def this_release() -> str:
+        return "2.0.3"
+
+    monkeypatch.setattr(model_cards_module, "get_skulk_version", this_release)
+    monkeypatch.setattr(model_cards_module, "_card_floor_warnings", set())
+    payload = _with_second_card(
+        cast("dict[str, object]", json.loads(_catalog_payload())),
+        f"card_{'w' * 52}",
+        "org/needs-newer",
+        min_skulk_version="9.0",
+    )
+    payload = _with_second_card(
+        payload,
+        f"card_{'v' * 52}",
+        "org/needs-this-release",
+        min_skulk_version="2.0.3",
+    )
+    warnings: list[str] = []
+    handler = logger.add(lambda message: warnings.append(str(message)), level="WARNING")
+    try:
+        loaded = registry_model_cards(RegistryCatalog.model_validate(payload, strict=False))
+    finally:
+        logger.remove(handler)
+    assert sorted(str(card.model_id) for card in loaded) == [
+        "org/multi-gguf@q4-k-m",
+        "org/needs-this-release",
+    ]
+    assert any(
+        "card_" + "w" * 52 in line and "requires Skulk 9.0 or newer" in line
+        for line in warnings
+    )
+
+
+def test_installed_card_this_release_is_too_old_for_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed record needing a newer release is neither cached nor served."""
+
+    def this_release() -> str:
+        return "2.0.3"
+
+    monkeypatch.setattr(model_cards_module, "get_skulk_version", this_release)
+    monkeypatch.setattr(model_cards_module, "_card_floor_warnings", set())
+    card = registry_model_cards(
+        RegistryCatalog.model_validate_json(_catalog_payload(), strict=False)
+    )[0].model_copy(update={"min_skulk_version": "9.0"})
+    artifact = tmp_path / card.model_id.normalize()
+    artifact.mkdir()
+    (artifact / "model-Q4_K_M.gguf").write_bytes(b"weights")
+    record = build_installed_card_record(artifact, card)
+    monkeypatch.setattr(model_cards_module, "_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_installed_card_cache", {})
+    monkeypatch.setattr(model_cards_module, "_installed_current_registry_ids", {})
+
+    model_cards_module._apply_installed_card_snapshot(
+        [record], model_cards_module._installed_card_cache_version
+    )
+
+    assert model_cards_module.get_installed_card_record(card.model_id) is None
+    assert model_cards_module.get_card(card.model_id) is None
+
+
 def test_registry_checks_bundle_agreement_before_skipping_unknown_vocabulary() -> None:
     """A card this build cannot read still cannot carry a mismatched bundle."""
     payload = _with_second_card(
