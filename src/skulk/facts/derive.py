@@ -34,6 +34,7 @@ from pydantic import ConfigDict
 
 from skulk.shared.types.node_facts import (
     CapabilityConflict,
+    LlamaServerDeviceProbe,
     NodeFacts,
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
@@ -270,21 +271,7 @@ def _derive_llama_server(
             # placement a dead engine that only fails at runner startup.
             # Disable the engine loudly; unsupported (an old build without
             # the flag) is the only legitimate fall-through.
-            conflicts.append(
-                CapabilityConflict(
-                    code="invalid_engine_binary",
-                    message=(
-                        "The configured llama-server binary failed its device "
-                        f"probe ({probe.detail or 'no detail'}); the "
-                        "llama_server engine is disabled on this node."
-                    ),
-                    remediation=(
-                        "Run the binary with --list-devices to reproduce, fix "
-                        "or replace it (or unset SKULK_LLAMA_SERVER_BIN to "
-                        "use a managed build), then restart skulk."
-                    ),
-                )
-            )
+            conflicts.append(_failed_device_probe_conflict(probe))
             return set(), conflicts, notes
         if probe.outcome == "devices":
             computes = [cb for cb in _GPU_COMPUTES if cb in probe.computes]
@@ -350,6 +337,23 @@ def _derive_llama_server(
     return tags, conflicts, notes
 
 
+def _failed_device_probe_conflict(probe: LlamaServerDeviceProbe) -> CapabilityConflict:
+    """The node-health conflict for a llama-server that failed ``--list-devices``."""
+    return CapabilityConflict(
+        code="invalid_engine_binary",
+        message=(
+            "The configured llama-server binary failed its device "
+            f"probe ({probe.detail or 'no detail'}); the "
+            "llama_server engine is disabled on this node."
+        ),
+        remediation=(
+            "Run the binary with --list-devices to reproduce, fix "
+            "or replace it (or unset SKULK_LLAMA_SERVER_BIN to "
+            "use a managed build), then restart skulk."
+        ),
+    )
+
+
 def _derive_macos_llama_server(
     facts: NodeFacts,
 ) -> tuple[set[str], list[CapabilityConflict], list[str]]:
@@ -368,6 +372,10 @@ def _derive_macos_llama_server(
             [],
             ["llama-server --list-devices reported metal; advertising the Metal embedding lane"],
         )
+    if probe.outcome == "failed":
+        # Same loud disable as Linux: a binary that cannot answer the probe
+        # must surface in node health, not just drop the lane.
+        return set(), [_failed_device_probe_conflict(probe)], []
     return (
         set(),
         [],

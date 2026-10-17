@@ -294,6 +294,10 @@ def test_macos_without_a_metal_device_advertises_no_llama_server(
         )
     )
     assert not any(tag.startswith("llama_server") for tag in derivation.backends)
+    # Only a binary that failed the probe is a node-health problem; a build
+    # without Metal or without the flag is a quiet absence, as on Linux.
+    expected = ["invalid_engine_binary"] if probe.outcome == "failed" else []
+    assert [conflict.code for conflict in derivation.conflicts] == expected
 
 
 def test_served_derives_from_nvidia_hardware_when_probe_unsupported() -> None:
