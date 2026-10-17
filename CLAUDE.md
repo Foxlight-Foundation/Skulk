@@ -255,7 +255,10 @@ upstream llama-server build on demand (Vulkan for visible GPUs, CPU
 otherwise; no upstream Linux CUDA prebuilt exists; the CUDA lane is the
 Foxlight wheel, auto-installed on demand for NVIDIA nodes, #661, and for the
 running user when the runtime is read-only or lacks uv, as the OS packages
-are);
+are); on Apple Silicon macOS it fetches the pinned upstream Metal build,
+whose `llama_server-metal` lane serves only GGUF embedding cards
+(`_EMBEDDING_ONLY_LANES`; MLX keeps chat), runs under the shared parent
+watchdog (no PDEATHSIG on macOS), and is admitted against unified memory;
 `SKULK_LLAMA_SERVER_BIN` overrides, `SKULK_NO_ENGINE_AUTOPROVISION=1` opts
 out. The CUDA engine also ships as x86_64 and aarch64 variants of the pip wheel
 `skulk-llama-server-cuda` (packaging/, built by

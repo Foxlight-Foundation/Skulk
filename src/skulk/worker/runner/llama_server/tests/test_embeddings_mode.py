@@ -245,6 +245,33 @@ def test_embedding_card_without_context_length_is_refused(monkeypatch: pytest.Mo
         runner._load_embedding_server(cast(Any, task), Path("/models/embed.gguf"))
 
 
+def test_macos_launch_runs_under_the_parent_watchdog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """macOS has no PDEATHSIG, so the server runs under the shared watchdog."""
+    runner, _ = _runner()
+    runner.runner_id = cast(Any, "r1")
+    launched: list[list[str]] = []
+
+    class _Process:
+        def __init__(self, cmd: list[str], **_: object) -> None:
+            launched.append(cmd)
+
+    monkeypatch.setattr(
+        runner_module.os, "uname", lambda: cast(Any, SimpleNamespace(sysname="Darwin"))
+    )
+    monkeypatch.setattr(runner_module.subprocess, "Popen", _Process)
+    monkeypatch.setattr(runner_module.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    runner._launch_server("/engines/llama-server", ["/engines/llama-server", "--embeddings"], 4321)
+
+    cmd = launched[0]
+    assert cmd[1].endswith("parent_watchdog.py")
+    assert cmd[2].isdigit()
+    assert cmd[3:] == ["/engines/llama-server", "--embeddings"]
+    assert runner.base_url == "http://127.0.0.1:4321"
+
+
 def test_embedding_dispatch_is_serial_like_its_one_slot_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

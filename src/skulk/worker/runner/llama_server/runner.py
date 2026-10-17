@@ -31,6 +31,7 @@ import random
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -90,6 +91,7 @@ from skulk.shared.types.worker.runners import (
     RunnerStatus,
 )
 from skulk.utils.channels import MpReceiver, MpSender
+from skulk.worker.runner.audio_cpp import parent_watchdog
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.generation_stats import (
@@ -1202,12 +1204,27 @@ class Runner(ServedConcurrentDispatch):
         existing = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
         logger.info("launching llama-server: " + " ".join(cmd))
+        # Read at runtime: a static ``sys.platform`` comparison makes the type
+        # checker treat the other platform's branch as dead code.
+        system = os.uname().sysname
+        if system == "Darwin":
+            # macOS has no prctl(PDEATHSIG): the parent watchdog (shared with
+            # the audio.cpp runner) owns the server and ends its process group
+            # if this runner disappears without tearing it down.
+            cmd = [
+                sys.executable,
+                str(Path(parent_watchdog.__file__)),
+                str(os.getpid()),
+                *cmd,
+            ]
         self.server_proc = subprocess.Popen(  # noqa: S603 - args are built here, not user input
             cmd,
             stdout=self.server_log,
             stderr=subprocess.STDOUT,
             env=env,
-            preexec_fn=_set_pdeathsig,  # noqa: PLW1509 - Linux reap-on-parent-death
+            preexec_fn=(  # noqa: PLW1509 - Linux reap-on-parent-death
+                _set_pdeathsig if system == "Linux" else None
+            ),
         )
         self.base_url = f"http://127.0.0.1:{port}"
 

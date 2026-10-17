@@ -424,6 +424,11 @@ _MUSIC_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"audio_cpp"})
 _EMBEDDING_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
     {"mlx", "llama_server"}
 )
+# Lanes qualified only for embeddings. Apple Silicon provisions the Metal
+# llama-server so GGUF embedding cards serve on Macs; MLX keeps owning chat on
+# the Apple GPU, and opening this lane to other cards would move existing GGUF
+# chat placements onto Macs, which has not been qualified there.
+_EMBEDDING_ONLY_LANES: Final[frozenset[str]] = frozenset({"llama_server-metal"})
 AUDIO_CPP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
     {
         "audio_cpp-cpu",
@@ -544,6 +549,13 @@ def platform_compatible_backends(
             if (engine := engine_of(tag)) is None
             or engine in _EMBEDDING_SERVING_ENGINES
         )
+        # A bare engine tag does not expand to an embedding-only lane, so an
+        # embedding card declaring the bare engine opts in here.
+        filtered |= frozenset(
+            lane for lane in _EMBEDDING_ONLY_LANES if engine_of(lane) in filtered
+        )
+    else:
+        filtered = filtered - _EMBEDDING_ONLY_LANES
     if card_supports_tool_calling and card_vllm_tool_call_parser is None:
         filtered = frozenset(tag for tag in filtered if engine_of(tag) != "vllm")
     if card_family_predates_in_process_binding:
@@ -598,7 +610,16 @@ def expand_engine_backends(compatible_backends: AbstractSet[str]) -> frozenset[s
     expanded = set(compatible_backends)
     for tag in compatible_backends:
         if engine_of(tag) == tag:
-            expanded.update(f"{tag}-{compute}" for compute in _COMPUTE_BACKENDS)
+            # An embedding-only lane is never implied by a bare engine tag:
+            # a card names it, or the embedding gate in
+            # ``platform_compatible_backends`` opts embedding cards in.
+            # Otherwise every expansion (placement, the worker's fallback
+            # check, resolution) would reopen it to chat cards.
+            expanded.update(
+                lane
+                for compute in _COMPUTE_BACKENDS
+                if (lane := f"{tag}-{compute}") not in _EMBEDDING_ONLY_LANES
+            )
     return frozenset(expanded)
 
 
