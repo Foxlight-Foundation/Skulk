@@ -549,6 +549,11 @@ def platform_compatible_backends(
             if (engine := engine_of(tag)) is None
             or engine in _EMBEDDING_SERVING_ENGINES
         )
+        # A bare engine tag does not expand to an embedding-only lane, so an
+        # embedding card declaring the bare engine opts in here.
+        filtered |= frozenset(
+            lane for lane in _EMBEDDING_ONLY_LANES if engine_of(lane) in filtered
+        )
     else:
         filtered = filtered - _EMBEDDING_ONLY_LANES
     if card_supports_tool_calling and card_vllm_tool_call_parser is None:
@@ -605,7 +610,16 @@ def expand_engine_backends(compatible_backends: AbstractSet[str]) -> frozenset[s
     expanded = set(compatible_backends)
     for tag in compatible_backends:
         if engine_of(tag) == tag:
-            expanded.update(f"{tag}-{compute}" for compute in _COMPUTE_BACKENDS)
+            # An embedding-only lane is never implied by a bare engine tag:
+            # a card names it, or the embedding gate in
+            # ``platform_compatible_backends`` opts embedding cards in.
+            # Otherwise every expansion (placement, the worker's fallback
+            # check, resolution) would reopen it to chat cards.
+            expanded.update(
+                lane
+                for compute in _COMPUTE_BACKENDS
+                if (lane := f"{tag}-{compute}") not in _EMBEDDING_ONLY_LANES
+            )
     return frozenset(expanded)
 
 
