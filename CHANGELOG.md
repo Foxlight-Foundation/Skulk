@@ -102,6 +102,10 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- `install.sh --with-vllm` now builds the vLLM environment on uv's own Python
+  3.12. It used to take an installed system Python first, and on GPU-cloud
+  images that ship one without its development headers, vLLM failed at
+  startup when its Triton helper could not compile against `Python.h`.
 - Embedding vectors match each model's reference. The embeddings runner
   always mean-pooled, normalized, and truncated at 512 tokens, so bge-small
   (which pools its first token) returned wrong vectors and MiniLM (which stops

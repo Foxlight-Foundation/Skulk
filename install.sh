@@ -296,7 +296,13 @@ if [[ "$WITH_VLLM" == "1" ]]; then
         log "installing vLLM into $VLLM_ENV (validated matrix; several GB)"
         # --allow-existing keeps re-runs idempotent (a bare `uv venv` refuses
         # to reuse an existing environment and would fail the second install).
-        uv venv "$VLLM_ENV" --python 3.12 --allow-existing
+        # Only uv's managed Python: by default uv prefers an installed system
+        # 3.12, and GPU-cloud images often ship one without its development
+        # headers. vLLM's Triton helper compiles against Python.h when the
+        # server starts, so a header-less interpreter fails at startup
+        # ("architectures failed to be inspected"). Managed builds ship
+        # their headers.
+        uv venv "$VLLM_ENV" --python 3.12 --python-preference only-managed --allow-existing
         # vLLM lives in its own venv and Skulk drives its CLI as an external
         # served engine (SKULK_VLLM_BIN). Validated matrix notes:
         # - vLLM's PyPI default wheel links CUDA 13 runtime libraries

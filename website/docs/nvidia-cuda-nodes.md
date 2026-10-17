@@ -143,7 +143,10 @@ vLLM lives in its **own virtual environment** (`~/.skulk/vllm-env`) with
 Skulk's validated dependency matrix, because Skulk's environment and vLLM
 currently require conflicting dependency versions; Skulk drives the `vllm` CLI
 as an external served engine through `SKULK_VLLM_BIN`, which the installer
-records in `~/.skulk/skulk.env`. The download is several GB. See
+records in `~/.skulk/skulk.env`. The environment uses uv's own Python 3.12,
+not a system interpreter, because vLLM compiles a helper against the Python
+headers when it starts and many GPU-cloud images ship Python without them.
+The download is several GB. See
 [The vLLM engine](vllm-engine.md) for scope, knobs, and when it wins.
 
 One extra requirement applies to models carded with a DFlash speculator
