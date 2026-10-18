@@ -30,9 +30,9 @@ from skulk.utils.pydantic_ext import FrozenModel
 if TYPE_CHECKING:
     from skulk.shared.types.node_facts import NodeFacts
 
-SOURCE_REVISION: Final = "d637cfb935feb2254898a8f1524046c958f3df80"
+SOURCE_REVISION: Final = "8cd731e7b4667eb8f40a153315b9a7125d09a58d"
 SERVER_PATCH_SHA256: Final = (
-    "5c97917794372067d71ef6a49083f0c1afcfa3bbf46a368d08a7d0591691769b"
+    "51c67831044dee71e071519b5d868dc8e0c79eadb61b6100fdd6c68ca39f3ed7"
 )
 BINARY_ENV: Final = "SKULK_STABLE_DIFFUSION_CPP_BIN"
 ImageCompute = Literal["metal", "cuda", "vulkan", "rocm"]
