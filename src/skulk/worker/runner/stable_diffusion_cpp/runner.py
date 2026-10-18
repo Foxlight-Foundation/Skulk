@@ -170,7 +170,14 @@ class Runner(ServedConcurrentDispatch):
                     raise ValueError(
                         "native image placement lacks a prepared exact engine build"
                     )
-                if not native_image_build_supports_family(build, self.card.image.family):
+                from skulk.provisioning.stable_diffusion_cpp import probe_native_image
+
+                observed = probe_native_image(Path(binary))
+                if observed.build_identity != build:
+                    raise ValueError("native image executable differs from the placed build")
+                if not native_image_build_supports_family(
+                    build, self.card.image.family, {build: observed.model_families},
+                ):
                     raise ValueError("native image build predates the selected model family")
                 self.work_dir.mkdir(parents=True, exist_ok=True)
                 self.server = NativeImageServer(

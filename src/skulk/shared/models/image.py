@@ -12,7 +12,7 @@ from skulk.utils.pydantic_ext import FrozenModel
 
 ImageFamily = Literal[
     "qwen_image_21", "qwen_image_21_turbo", "flux_2_klein_4b",
-    "flux_3_klein", "flux_3_klein_base", "z_image_turbo", "sdxl"
+    "flux_3_klein", "flux_3_klein_base", "moss_image", "z_image_turbo", "sdxl"
 ]
 ImageComponentRole = Literal[
     "model",
@@ -20,6 +20,7 @@ ImageComponentRole = Literal[
     "vae",
     "text_encoder",
     "text_encoder_vision",
+    "tokenizer",
     "clip_l",
     "clip_g",
     "t5xxl",
@@ -83,6 +84,15 @@ class ImageComponent(FrozenModel):
         min_length=1, description="All files required by this component."
     )
 
+    tensor_format: Literal["native", "modelopt_fp8", "modelopt_nvfp4", "flux3_diffusers"] = Field(
+        default="native",
+        description="Intrinsic serialized tensor packing; runtime precision is engine-specific.",
+    )
+    parameter_count: int = Field(
+        default=0, ge=0,
+        description="Logical scalar weight count before packing, excluding quantization scales.",
+    )
+
     @field_validator("files", mode="before")
     @classmethod
     def wire_files(cls, value: object) -> object:
@@ -92,6 +102,8 @@ class ImageComponent(FrozenModel):
     @model_validator(mode="after")
     def complete_entry(self) -> ImageComponent:
         """Require an unambiguous entry in the complete immutable file set."""
+        if self.tensor_format != "native" and (self.role != "diffusion" or not self.parameter_count):
+            raise ValueError("packed image weights require diffusion geometry")
         paths = [item.path for item in self.files]
         if len(paths) != len(set(paths)) or self.entry_file not in paths:
             raise ValueError("image component entry must belong to a unique file set")
@@ -246,6 +258,8 @@ class ImageCardConfig(FrozenModel):
             raise ValueError(
                 "Qwen reference editing requires a pinned vision component"
             )
+        if self.family == "moss_image" and "tokenizer" not in roles:
+            raise ValueError("MOSS Image requires its pinned Qwen3.5 tokenizer")
         self.validate_canvas(self.default_width, self.default_height)
         if self.fixed_sigmas and (
             len(self.fixed_sigmas) != self.default_steps + 1

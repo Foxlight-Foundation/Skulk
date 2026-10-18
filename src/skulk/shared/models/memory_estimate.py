@@ -384,7 +384,7 @@ def estimate_shard_footprint(
     """
     if shard_fraction <= 0.0:
         return Memory()
-    weights_share = model_card.storage_size * shard_fraction
+    weights_share = engine_parameter_bytes(model_card, resolved_backend=resolved_backend) * shard_fraction
     full_kv = Memory.from_bytes(
         per_token_kv_bytes(
             model_card,
@@ -680,6 +680,23 @@ def per_token_kv_bytes(
     return (rank_bytes * model_card.n_layers + active_layers - 1) // active_layers
 
 
+def engine_parameter_bytes(model_card: ModelCard, *, resolved_backend: str | None) -> Memory:
+    """Budget native packed-weight expansion without changing download size.
+
+    NVFP4 is prepared as BF16. Native FP8 kernels may preserve FP8 or expand
+    weights on a backend without that operation, so reserve two bytes per logical
+    parameter until the engine reports a narrower resident allocation.
+    """
+    if model_card.image is None or (resolved_backend is not None and not resolved_backend.startswith("stable_diffusion_cpp")):
+        return model_card.storage_size
+    expanded = sum(
+        max(0, 2 * component.parameter_count - sum(item.size_bytes for item in component.files))
+        for component in model_card.image.components
+        if component.tensor_format in {"modelopt_fp8", "modelopt_nvfp4"}
+    )
+    return model_card.storage_size + Memory.from_bytes(expanded)
+
+
 def memory_estimate_notes(
     model_card: ModelCard,
     *,
@@ -689,7 +706,8 @@ def memory_estimate_notes(
     """Explain effective cache accounting and conservative unknown-layout fallback."""
     if model_card.image is not None:
         return (
-            "Native image auto-fit may stream parameters from RAM; stored weights and runtime margin are budgeted in system memory while the native engine fits GPU buffers.",
+            "Native image auto-fit may stream parameters from RAM; effective runtime weight precision and margin are budgeted in system memory while the native engine fits GPU buffers.",
+            *( ("Packed diffusion weights reserve 16-bit expansion; compressed download size is not resident-memory size.",) if any(component.tensor_format in {"modelopt_fp8", "modelopt_nvfp4"} for component in model_card.image.components) else () ),
         )
     if (
         model_card.num_key_value_heads is None
@@ -825,7 +843,7 @@ def _node_window_tokens(
         return None
     kv_budget = (
         working_set
-        - model_card.storage_size
+        - engine_parameter_bytes(model_card, resolved_backend=shard.resolved_backend)
         * fraction
         * memory_overhead_factor(model_card, resolved_backend=shard.resolved_backend)
         - MEMORY_OVERHEAD_FLOOR

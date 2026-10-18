@@ -436,7 +436,11 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
 
-    from skulk.facts.inventory import engine_build_inventory, hardware_class_inventory
+    from skulk.facts.inventory import (
+        engine_build_inventory,
+        hardware_class_inventory,
+        native_image_family_inventory,
+    )
 
     facts = current_node_facts()
     placement = shard.model_card.placement
@@ -465,6 +469,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
                 ),
                 hardware_class_inventory(facts),
                 image_family=shard.model_card.image.family if shard.model_card.image is not None else None,
+                native_image_families=native_image_family_inventory(facts),
             ),
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),

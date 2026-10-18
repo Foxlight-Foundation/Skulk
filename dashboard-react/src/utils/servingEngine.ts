@@ -7,7 +7,8 @@ export type ServingEngine =
   | 'vllm'
   | 'comfy'
   | 'audio_cpp'
-  | 'test_video';
+  | 'test_video'
+  | 'stable_diffusion_cpp';
 
 /** An engine and, when the tag names one, the accelerator it runs on. */
 export interface ServingBackend {
@@ -25,6 +26,7 @@ const ENGINES: Record<string, ServingEngine> = {
   comfy: 'comfy',
   audio_cpp: 'audio_cpp',
   test_video: 'test_video',
+  stable_diffusion_cpp: 'stable_diffusion_cpp',
 };
 
 const ACCELERATORS: Record<string, string> = {

@@ -295,3 +295,15 @@ def hardware_class_inventory(facts: NodeFacts) -> frozenset[str]:
             # otherwise aggregate classes could hide an unqualified device.
             classes.add(f"nvidia:sm-{gpu.compute_capability or 'unknown'}")
     return frozenset(classes)
+
+
+def native_image_family_inventory(facts: NodeFacts) -> dict[str, tuple[str, ...]]:
+    """Bind implemented native-image families to the executable actually probed.
+
+    An empty legacy probe supplies no new restriction. Fresh probes always carry
+    source-derived or explicitly reported capabilities, including backports.
+    """
+    probe = facts.stable_diffusion_cpp_probe
+    if probe.outcome != "ready" or probe.build_identity is None or not probe.model_families:
+        return {}
+    return {probe.build_identity: probe.model_families}

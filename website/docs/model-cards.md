@@ -666,13 +666,14 @@ For concrete examples, see [Model Capabilities](model-capabilities) and the per-
 
 The optional `[image]` section describes a complete pinned image workload. Its
 `family` selects `qwen_image_21`, `qwen_image_21_turbo`, `flux_2_klein_4b`,
-`z_image_turbo`, or `sdxl`. `TextToImage` is required; `ImageToImage` must agree
+`flux_3_klein`, `flux_3_klein_base`, `moss_image`, `z_image_turbo`, or `sdxl`. `TextToImage` is required; `ImageToImage` must agree
 with a positive `max_reference_images`. These are intrinsic artifact facts;
 engine support remains in the exact-build, artifact-bound signed matrix.
 
 | Field | Contract |
 | --- | --- |
-| `components` | One source per unique role: `diffusion`, `vae`, `text_encoder`, and for Qwen editing `text_encoder_vision`; SDXL instead requires `model` and may add `vae`. Each source pins a repository, full commit, entry file and complete file list with sizes and immutable object IDs. |
+| `components` | One source per unique role: `diffusion`, `vae`, `text_encoder`, and for Qwen editing `text_encoder_vision`; SDXL instead requires `model` and may add `vae`. MOSS additionally requires the external `tokenizer` role. Each source pins a repository, full commit, entry file and complete file list with sizes and immutable object IDs. |
+| Component `tensor_format`, `parameter_count` | Optional intrinsic serialization and logical scalar geometry. Formats are `native` (default), `flux3_diffusers`, `modelopt_fp8`, `modelopt_nvfp4`. Non-native formats require a diffusion component and positive logical count. They describe downloaded weights, not guaranteed GPU execution precision. |
 | `default_width`, `default_height`, `dimension_multiple`, `max_pixels` | Default canvas and accepted area/alignment bounds; each dimension is bounded at 4096. |
 | `default_steps`, `default_guidance`, `fixed_sigmas` | Model sampling defaults and optional decreasing schedule with terminal zero. Turbo fixes eight steps, guidance 1 and its nine-value sigma grid. |
 | `max_reference_images`, `supports_alpha` | Ordered reference limit (0–10) and model RGBA truth. Z-Image has no references; Klein/SDXL accept one. Runtime and media limits may be stricter. |
@@ -691,6 +692,14 @@ then preparation installs and probes it in an isolated cache. Qualification is
 representative evidence and is not an installation or publication prerequisite. The runner repeats verification at load.
 Operator-facing license metadata continues to describe the model's terms.
 
+
+FLUX.3 Diffusers bundles are prepared locally with native tensor names while
+preserving their dense bytes. ModelOpt FP8 retains channel scaling; estimates
+reserve 16-bit fallback when the backend expands its weights. ModelOpt NVFP4 is
+expanded to a verified local BF16 cache, so its smaller download does not imply
+FP4 execution or FP4 resident memory. Preparation requires room for both the
+original artifact and derived weights. A new reader must understand these fields;
+older strict readers skip incompatible cards independently.
 
 ### SDXL UNet structure
 

@@ -90,6 +90,8 @@ export interface RawRdmaCtl {
 export interface RawNodeResources {
   backends?: string[];
   engineBuilds?: Record<string, string>;
+  /** Implemented model families bound to measured native-image build identities. */
+  nativeImageFamilies?: Record<string, string[]>;
   hardwareClasses?: string[];
   participation?: 'full' | 'management' | 'ffn_only';
   dataTransport?: 'gossipsub' | 'zenoh';

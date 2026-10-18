@@ -733,3 +733,33 @@ def test_audio_cpp_discrete_gpu_lanes_offload_to_vram() -> None:
         assert backend_offloads_to_vram(lane)
     for lane in ("audio_cpp", "audio_cpp-cpu", "audio_cpp-metal"):
         assert not backend_offloads_to_vram(lane)
+
+
+def test_packed_image_admission_budgets_engine_precision_not_download_bytes() -> None:
+    """Master and worker estimates share FP16 expansion and retain native quant fit."""
+    from skulk.shared.models.image import (
+        ImageCardConfig,
+        ImageComponent,
+        ImageComponentFile,
+    )
+    from skulk.shared.models.memory_estimate import engine_parameter_bytes
+
+    components = tuple(ImageComponent(
+        role=role, repository="owner/model", revision="a" * 40,
+        entry_file=role + ".safetensors", files=(ImageComponentFile(
+            path=role + ".safetensors", size_bytes=100, object_id="sha256:" + "b" * 64,
+        ),),
+    ) for role in ("diffusion", "vae", "text_encoder"))
+    original = _card(1).model_copy(update={
+        "storage_size": Memory.from_bytes(300),
+        "image": ImageCardConfig(family="flux_3_klein", components=components, default_steps=16),
+        "tasks": [ModelTask.TextToImage],
+    })
+    assert original.image is not None
+    diffusion, *companions = original.image.components
+    packed = diffusion.model_copy(update={"tensor_format": "modelopt_nvfp4", "parameter_count": 1000})
+    card = original.model_copy(update={"image": original.image.model_copy(update={"components": (packed, *companions)})})
+    assert engine_parameter_bytes(card, resolved_backend="stable_diffusion_cpp-cuda").in_bytes == 2200
+    assert engine_parameter_bytes(card, resolved_backend=None).in_bytes == 2200
+    assert engine_parameter_bytes(original, resolved_backend="stable_diffusion_cpp-cuda").in_bytes == 300
+    assert estimate_shard_footprint(card, 1.0, resolved_backend="stable_diffusion_cpp-cuda") > estimate_shard_footprint(original, 1.0, resolved_backend="stable_diffusion_cpp-cuda")
