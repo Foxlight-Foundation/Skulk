@@ -31,6 +31,13 @@ if TYPE_CHECKING:
     from skulk.shared.types.node_facts import NodeFacts
 
 SOURCE_REVISION: Final = "8cd731e7b4667eb8f40a153315b9a7125d09a58d"
+# The previous source implements the same hardened protocol. Operator builds
+# were supported before this upgrade and still bind readiness to measured bytes;
+# replacing a managed default must not revoke their explicit binary override.
+COMPATIBLE_PROBE_SOURCES: Final = frozenset({
+    SOURCE_REVISION,
+    "d637cfb935feb2254898a8f1524046c958f3df80",
+})
 SERVER_PATCH_SHA256: Final = (
     "51c67831044dee71e071519b5d868dc8e0c79eadb61b6100fdd6c68ca39f3ed7"
 )
@@ -433,19 +440,8 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
         raise ValueError("native image probe is not an object")
     record = cast("dict[str, object]", raw)
     binary_digest = file_sha256(binary)
-    build = f"stable_diffusion_cpp@sha256:{payload_digest or binary_digest}"
-    known = _known_wheel_for_build(build)
     source_revision = record.get("source_revision")
-    # Retained sources are accepted only through their pinned executable/runtime
-    # identity; adding a source string must never admit arbitrary older binaries.
-    retained_source_matches = (
-        known is not None
-        and known.binary_sha256 == binary_digest
-        and known.source_revision == source_revision
-    )
-    if record.get("protocol") != 1 or (
-        source_revision != SOURCE_REVISION and not retained_source_matches
-    ):
+    if record.get("protocol") != 1 or not isinstance(source_revision, str) or source_revision not in COMPATIBLE_PROBE_SOURCES:
         raise ValueError(
             "native image probe reports an unrecognized protocol or source"
         )
@@ -476,7 +472,7 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
     if not devices:
         raise ValueError("native image engine reports no GPU device")
     return NativeImageProbe(
-        source_revision=cast(str, source_revision),
+        source_revision=source_revision,
         binary_sha256=binary_digest,
         payload_sha256=payload_digest,
         devices=tuple(devices),

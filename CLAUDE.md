@@ -1796,6 +1796,8 @@ its exact build before load independently of the default advertised on the node.
 The runner prefers that cache over an inherited default, and restoring an older
 build never makes it the default for new placements. Known pre-FLUX.3 builds
 cannot serve the new FLUX.3 families; compatible untested hardware stays eligible.
+Explicit operator builds keep the prior supported source/probe contract and
+must still match the instance's exact measured build identity.
 
 FLUX.3 Klein and Klein Base have distinct `flux_3_klein` and
 `flux_3_klein_base` image profiles. Their pinned diffusion transformer,

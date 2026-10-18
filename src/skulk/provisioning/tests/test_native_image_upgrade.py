@@ -85,10 +85,39 @@ def test_offline_restart_restores_old_exact_cache_without_changing_default(
         offline=True, stop=threading.Event()) == old_binary
     assert engines.probe_native_image(old_binary).source_revision == _OLD_SOURCE
     assert engines.os.environ[engines.BINARY_ENV] == str(new_binary)
-    # The source pin is accepted through the known payload, never by string alone.
+    # The previous protocol also remains valid for explicit operator builds.
     monkeypatch.setattr(engines, "RETAINED_WHEELS", ())
+    assert engines.probe_native_image(old_binary).build_identity == old.build_identity
+
+
+def test_previous_source_operator_override_retains_exact_build_enforcement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An independently built old executable survives upgrade without joining the wheel catalog."""
+    binary = tmp_path / "operator-server"
+    binary.write_bytes(b"independent operator executable")
+    expected = "stable_diffusion_cpp@sha256:" + engines.file_sha256(binary)
+    source = _OLD_SOURCE
+
+    def probe(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, json.dumps({
+            "protocol": 1, "source_revision": source, "device_report": "MTL0\tApple GPU\n"}), "")
+
+    monkeypatch.setattr(engines.subprocess, "run", probe)
+    assert engines.probe_native_image(binary).build_identity == expected
+    override = {engines.BINARY_ENV: str(binary)}
+    assert engines.install_native_image(_BACKEND, expected, _HARDWARE,
+        offline=True, stop=threading.Event(), environ=override) == binary
+    with pytest.raises(engines.ImageEngineInstallError, match="override build"):
+        engines.install_native_image(_BACKEND, "different-stamped-build", _HARDWARE,
+            offline=True, stop=threading.Event(), environ=override)
+    binary.write_bytes(b"replaced operator executable")
+    with pytest.raises(engines.ImageEngineInstallError, match="override build"):
+        engines.install_native_image(_BACKEND, expected, _HARDWARE,
+            offline=True, stop=threading.Event(), environ=override)
+    source = "f" * 40
     with pytest.raises(ValueError, match="unrecognized protocol or source"):
-        engines.probe_native_image(old_binary)
+        engines.probe_native_image(binary)
 
 
 def test_cold_retained_preparation_downloads_exact_old_bytes_beside_ready_new_default(

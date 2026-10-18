@@ -2986,6 +2986,8 @@ cache path and verified identity. Each native instance waits for its own exact
 runner prefers that exact cache over its inherited default. Preparing a retained
 build does not change the default for new placements. Known pre-FLUX.3 builds
 remain eligible for older families but cannot serve FLUX.3 profiles.
+Explicit operator builds retain the previously accepted source/probe contract;
+their measured executable/runtime identity must still match the stamped build.
 Native package descriptors and build manifests additionally declare compiled
 CPU helper instructions. Package discovery also matches the interpreter's
 standard wheel-platform tags, rejecting older glibc, musl and older macOS before

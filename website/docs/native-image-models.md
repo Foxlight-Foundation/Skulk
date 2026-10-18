@@ -42,6 +42,8 @@ retained immutable package when necessary. Different builds can serve different
 instances on the same node; new placements use the current default. Offline
 restoration requires the exact package to remain cached. An older retained build
 does not acquire newer model-family implementations merely because Skulk upgraded.
+Explicit operator binaries from the previously supported native source retain
+their probe protocol and must still match each placement's measured build identity.
 
 Native inference currently runs on one host and one GPU. Managed packages cover
 macOS ARM64 Metal, Linux ARM64/x86_64 CUDA, and Linux x86_64 Vulkan/ROCm.
