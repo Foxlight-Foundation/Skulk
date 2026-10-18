@@ -25,7 +25,10 @@ def compatible_wheel_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize(
     "wheel",
-    [wheel for wheel in image_engine.PUBLISHED_WHEELS if wheel.system == "linux"],
+    [
+        wheel.model_copy(update={"qualified_hardware_classes": frozenset()})
+        for wheel in image_engine.PUBLISHED_WHEELS if wheel.system == "linux"
+    ],
 )
 @pytest.mark.parametrize(
     "host_abi", ["glibc-old", "musl", "unknown", "glibc-supported"]
@@ -35,7 +38,7 @@ def test_linux_abi_gates_install_offers_and_prevents_package_acquisition(
     host_abi: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Qualified GPUs on old/non-glibc hosts never advertise or acquire a wheel."""
+    """Compatible untested GPUs still require a supported host ABI to acquire a wheel."""
     from skulk.shared.types.node_facts import EngineBinaryFact, GpuDeviceFact
 
     monkeypatch.setattr(image_engine.platform, "system", lambda: "Linux")
@@ -59,7 +62,16 @@ def test_linux_abi_gates_install_offers_and_prevents_package_acquisition(
         ),
     }[host_abi]
     monkeypatch.setattr(image_engine, "platform_tags", lambda: iter(tags))
-    classes = wheel.qualified_hardware_classes
+    # Live GPU targets are independent of whether this payload has physical
+    # qualification evidence. Keep every simulated wheel unqualified above.
+    if wheel.compute == "cuda":
+        classes = frozenset({
+            "nvidia:sm-12.1" if wheel.architecture == "aarch64" else "nvidia:sm-8.0"
+        })
+    elif wheel.compute == "rocm":
+        classes = frozenset({"amd:gfx942"})
+    else:
+        classes = frozenset({"amd:untested-gpu"})
     backend = f"stable_diffusion_cpp-{wheel.compute}"
     missing = EngineBinaryFact(env_var="unset")
     facts = NodeFacts(
@@ -70,7 +82,7 @@ def test_linux_abi_gates_install_offers_and_prevents_package_acquisition(
         gpus=(
             GpuDeviceFact(
                 vendor="nvidia" if wheel.compute == "cuda" else "amd",
-                name="qualified GPU",
+                name="compatible untested GPU",
                 index=0,
                 detection_source="nvml" if wheel.compute == "cuda" else "amdgpu_sysfs",
             ),
