@@ -104,10 +104,10 @@ def test_other_cuda_families_keep_their_existing_loading_policy(
 def test_ltx_rocm_selects_split_attention_on_stamped_and_local_backends(
     backend: str | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """LTX uses GPU split attention with the existing VAE and cache policy."""
+    """LTX retains GPU attention/cache policy without overriding its FP32 audio VAE."""
     monkeypatch.setattr(backends, "probe_node_backends", lambda: {"comfy", "comfy-rocm"})
     assert launch_flags(backend, total_ram_bytes=_STRIX_RAM, model_family="ltx-2.5") == (
-        *_STRIX_FLAGS, "--use-split-cross-attention",
+        "--cache-ram", "25", "--use-split-cross-attention",
     )
 
 
@@ -117,7 +117,7 @@ def test_ltx_rocm_retains_split_attention_when_large_weights_disable_mmap(tmp_pa
     with large.open("wb") as handle:
         handle.truncate(ROCM_MMAP_CEILING_BYTES + 1)
     assert launch_flags("comfy-rocm", [large], total_ram_bytes=_STRIX_RAM, model_family="ltx-2.5") == (
-        *_STRIX_FLAGS, "--use-split-cross-attention", "--disable-mmap",
+        "--cache-ram", "25", "--use-split-cross-attention", "--disable-mmap",
     )
 
 

@@ -720,7 +720,8 @@ def test_ltx_runner_executes_both_stages_and_retains_the_output_contract(
         assert runner.server is not None
         if backend == "comfy-rocm":
             assert "--use-split-cross-attention" in runner.server.extra_args
-            assert "--bf16-vae" in runner.server.extra_args
+            assert "--bf16-vae" not in runner.server.extra_args
+            assert "--fp32-vae" not in runner.server.extra_args
             assert "--fast-disk" not in runner.server.extra_args
         else:
             assert runner.server.extra_args == ("--disable-cuda-malloc", "--fast-disk")
