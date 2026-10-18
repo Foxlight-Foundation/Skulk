@@ -1541,6 +1541,12 @@ def place_instance(
                         "Native placement lacks its exact engine build"
                     )
                 updates["resolved_engine_build"] = build
+            if engine_of(resolved_backend) == "vllm" and resources is not None:
+                build = resources.engine_builds.get(resolved_backend) or resources.installable_engine_builds.get(resolved_backend)
+                if build is not None:
+                    updates["resolved_engine_build"] = build
+                elif resolved_backend in resources.on_demand_backends:
+                    raise PlacementError("vLLM placement lacks its installable runtime recipe")
             stamped_runner_to_shard[runner_id] = shard.model_copy(update=updates)
     shard_assignments = ShardAssignments(
         model_id=shard_assignments.model_id,

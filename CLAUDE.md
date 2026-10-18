@@ -523,14 +523,14 @@ A model card's `placement.compatible_backends` selects which engine serves it
   engines collapse (Phase 0 spike, A100 gpt-oss-120B, 64-way concurrency:
   llama.cpp TTFT ~31s vs vLLM ~0.5s), while single-stream on non-FP4 GPUs the
   in-process engines can win. **Coexists** (not replaces): the planner picks by
-  hardware + expected concurrency. Enabled per node via `SKULK_VLLM_BIN`
-  (advertises `vllm-cuda`/`vllm-rocm`, GPU-only). Validated matrix: vllm
-  0.31.0+cu129 (variant wheel from wheels.vllm.ai; the PyPI default links
-  CUDA 13 runtime libraries; 0.25.1 remains the floor for the Laguna
-  DFlash drafter, 0.28.0 added DFlash2 drafter checkpoints on the same
-  `dflash` method string, and from 0.29 every model runs on vLLM's V2
-  model runner) + ninja in the venv (FlashInfer JIT; the runner
-  prepends the venv bin dir to the server PATH). The runner always passes
+  hardware + expected concurrency. Nodes advertise installed or on-demand
+  `vllm-cuda`/`vllm-rocm` runtimes. The managed default is vLLM 0.32.0,
+  complete hashed binary dependencies and managed Python 3.12.13; explicit
+  `SKULK_VLLM_BIN` environments win. Recipe wheels and exact upstream mirrors
+  use the append-only Foxlight index. CUDA uses cu129 rather than the default
+  CUDA 13 wheel; ROCm uses the rocm723 release channel. The environment
+  includes ninja, and the runner prepends its bin directory to PATH.
+  DFlash/mtp and explicit parser pins remain card driven. The runner passes
   `--max-num-seqs` equal to its admission bound
   (`SKULK_VLLM_MAX_CONCURRENT_REQUESTS`, default 32): vLLM 0.31 refuses to
   start a hybrid model (Qwen3.5/3.6) whose sequence cap exceeds its Mamba
@@ -1924,3 +1924,32 @@ are their module count and maximum output width; no text KV or image splitting
 is inferred. Registry publication rejects missing/provisional SDXL geometry.
 
 Exact scoped image generation uses `POST /v1/instances/{instance_id}/images/generations` and `ImageGeneration.target_instance_id`. Every assigned rank must match the caller's persistent installation allowlist; target loss fails without replica fallback. JSON/SSE response headers identify the exact instance.
+
+
+## Managed vLLM first-use runtime
+
+`provisioning/vllm_runtime.py` consumes three SHA-256-pinned runtime recipe wheels
+(CUDA 12.9 x86_64/aarch64, ROCm 7.2.3 x86_64). They bind upstream vLLM 0.32.0,
+complete hashed binary dependencies, and managed Python 3.12.13. The upstream
+vLLM wheels are mirrored without modification. Runtime environments stay separate
+from Skulk and model weights, keyed by the complete recipe digest.
+
+Node facts expose `vllm_installable_builds`; backend derivation marks these tags
+on demand, separately from installed backends. Existing `NodeResources.engineBuilds`
+and `onDemandBackends` carry installed identities and readiness;
+`installableEngineBuilds` separately binds recipes available for first use.
+`InstallEngine` serializes and shares installation, holds load until completion,
+publishes fresh resources, and gives every waiter a named failure on error.
+Cross-process file locks, staged adoption, hash/version/GPU checks and cancellable
+subprocess groups protect first use. The child runner resolves completed cache
+paths independently because it may start before the worker installs the engine.
+
+Startup only wires a completed cache, including offline restarts. Explicit
+`SKULK_VLLM_BIN` runtimes win; offline, opt-out and management policy prevent new
+downloads. `install.sh --with-vllm` eagerly invokes the same provisioner. Build and
+exact-byte promotion live in `.github/workflows/vllm-runtime-wheel.yml`; source
+recipes and lockfiles live in `packaging/skulk-vllm-runtime/`. Publication is
+append-only and qualification never becomes a tested-hardware allowlist. The
+runner's `--kv-cache-dtype auto` keeps the full-precision shared estimate; new
+compressed cache modes need explicit runner and admission support. See
+[the vLLM runtime guide](website/docs/vllm-engine.md) for user setup and prerequisites.

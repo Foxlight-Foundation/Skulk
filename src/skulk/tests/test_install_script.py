@@ -51,18 +51,11 @@ def test_generated_config_pins_safe_model_store_port() -> None:
     assert f"store_port: {DEFAULT_MODEL_STORE_PORT}" in _installer()
 
 
-def test_vllm_env_uses_a_managed_python_with_headers() -> None:
-    """vLLM's Triton helper compiles against Python.h at server start.
+def test_vllm_eager_install_uses_the_same_managed_runtime_as_first_use() -> None:
+    """The optional installer flag must preserve the managed-runtime contract."""
+    assert "python -m skulk.provisioning.vllm_runtime" in _installer()
+    assert 'VLLM_ENV="$HOME/.skulk/vllm-env"' not in _installer()
 
-    uv prefers an installed system interpreter by default, and GPU-cloud
-    images often ship Python 3.12 without its development headers, so the
-    vLLM environment must come from uv's managed builds, which carry them.
-    """
-
-    assert (
-        'uv venv "$VLLM_ENV" --python 3.12 --python-preference only-managed '
-        "--allow-existing"
-    ) in _installer()
 
 
 def test_bundled_node_probe_keeps_retry_diagnostics_visible() -> None:

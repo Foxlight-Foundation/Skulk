@@ -750,6 +750,11 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         }
         tags |= on_demand
 
+    if facts.vllm_installable_builds and facts.vllm_binary.state == "not_configured":
+        vllm_tags = {"vllm", *facts.vllm_installable_builds}
+        on_demand.update(vllm_tags)
+        tags.update(vllm_tags)
+
     if facts.stable_diffusion_cpp_binary.state == "not_configured":
         on_demand.update(facts.stable_diffusion_cpp_installable_builds)
         tags.update(facts.stable_diffusion_cpp_installable_builds)

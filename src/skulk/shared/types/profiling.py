@@ -504,9 +504,10 @@ class NodeResources(CamelCaseModel):
             architecture=platform.machine().lower(),
             engine_builds=engine_builds,
             native_image_families=native_image_family_inventory(facts),
-            installable_engine_builds=dict(
-                facts.stable_diffusion_cpp_installable_builds
-            ),
+            installable_engine_builds={
+                **facts.stable_diffusion_cpp_installable_builds,
+                **facts.vllm_installable_builds,
+            },
             llama_server_settings=(
                 resolve_llama_server_settings(os.environ)
                 if any(

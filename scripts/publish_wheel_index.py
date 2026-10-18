@@ -73,11 +73,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _artifact_key(filename: str) -> str:
+    """Keep GPU-specific upstream inputs out of generic pip package selection.
+
+    A generic vllm index would let a CUDA host resolve the ROCm local-version
+    wheel. Managed recipes select these immutable inputs directly by URL/hash;
+    only Foxlight recipe packages belong in the PEP 503 index.
+    """
+    prefix = "runtime-inputs/vllm" if filename.startswith("vllm-") else "wheels"
+    return f"{prefix}/{filename}"
+
+
 def _remote_sha256(client: Any, bucket: str, filename: str) -> str | None:
     """Hash an existing wheel's bytes, or return None when its key is absent."""
 
     try:
-        response = client.get_object(Bucket=bucket, Key=f"wheels/{filename}")
+        response = client.get_object(Bucket=bucket, Key=_artifact_key(filename))
     except client.exceptions.NoSuchKey:
         return None
     body = response["Body"]
@@ -91,7 +102,10 @@ def _remote_sha256(client: Any, bucket: str, filename: str) -> str | None:
 
 
 def _upload_wheels(
-    client: Any, bucket: str, wheels: list[Path], checksums: dict[str, str],
+    client: Any,
+    bucket: str,
+    wheels: list[Path],
+    checksums: dict[str, str],
 ) -> None:
     """Publish only new wheel names after checking every existing digest."""
 
@@ -102,7 +116,7 @@ def _upload_wheels(
             pending[wheel.name] = wheel
         elif existing != checksums[wheel.name]:
             raise RuntimeError(
-                f"refusing to overwrite wheels/{wheel.name}: remote SHA-256 "
+                f"refusing to overwrite {_artifact_key(wheel.name)}: remote SHA-256 "
                 f"{existing} differs from local {checksums[wheel.name]}"
             )
         else:
@@ -112,7 +126,7 @@ def _upload_wheels(
         client.upload_file(
             str(wheel),
             bucket,
-            f"wheels/{wheel.name}",
+            _artifact_key(wheel.name),
             ExtraArgs={"ContentType": "application/octet-stream"},
         )
 
@@ -151,9 +165,7 @@ def _put_html(client: Any, bucket: str, key: str, body: str) -> None:
         )
 
 
-def _regenerate_index(
-    client: Any, bucket: str, checksums: dict[str, str]
-) -> None:
+def _regenerate_index(client: Any, bucket: str, checksums: dict[str, str]) -> None:
     """Rebuild both index levels from the bucket's current contents.
 
     Args:
@@ -169,9 +181,13 @@ def _regenerate_index(
     projects = _bucket_wheels(client, bucket)
     for project in projects:
         try:
-            body = client.get_object(
-                Bucket=bucket, Key=f"simple/{project}/index.html"
-            )["Body"].read().decode()
+            body = (
+                client.get_object(Bucket=bucket, Key=f"simple/{project}/index.html")[
+                    "Body"
+                ]
+                .read()
+                .decode()
+            )
         except client.exceptions.NoSuchKey:
             # First publish for this project: no prior anchors to preserve.
             continue
@@ -204,7 +220,9 @@ def _regenerate_index(
             "<!DOCTYPE html>\n<html><head>"
             '<meta name="pypi:repository-version" content="1.0">'
             f"<title>Links for {project}</title></head>\n<body>\n"
-            f"  <h1>Links for {project}</h1>\n" + "\n".join(rows) + "\n</body></html>\n",
+            f"  <h1>Links for {project}</h1>\n"
+            + "\n".join(rows)
+            + "\n</body></html>\n",
         )
         project_links.append(f'    <a href="/simple/{project}/">{project}</a><br/>')
 
@@ -215,7 +233,9 @@ def _regenerate_index(
         "<!DOCTYPE html>\n<html><head>"
         '<meta name="pypi:repository-version" content="1.0">'
         "<title>Foxlight wheel index</title></head>\n<body>\n"
-        "  <h1>Foxlight wheel index</h1>\n" + "\n".join(project_links) + "\n</body></html>\n",
+        "  <h1>Foxlight wheel index</h1>\n"
+        + "\n".join(project_links)
+        + "\n</body></html>\n",
     )
     print(f"index regenerated for {len(projects)} project(s)")
 

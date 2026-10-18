@@ -17,7 +17,7 @@
 #   --dir <path>       install location            (default: ~/skulk, or SKULK_INSTALL_DIR)
 #   --ref <git-ref>    branch or tag to install    (default: main, or SKULK_INSTALL_REF)
 #   --headless         intentionally skip the dashboard build
-#   --with-vllm        NVIDIA Linux only: create a dedicated vLLM venv with
+#   --with-vllm        Linux GPU: eagerly prepare the managed vLLM runtime with
 #                      Skulk's validated dependency matrix (several GB of
 #                      wheels; the concurrency-serving fast path on CUDA)
 #
@@ -285,62 +285,17 @@ else
     die "dashboard build requires Node.js, but neither system node/npm nor Skulk's bundled runtime is usable; re-run with --headless only if this node is intentionally API-only"
 fi
 
-# --- vLLM (optional, NVIDIA Linux) ----------------------------------------
+# --- vLLM (optional eager preparation; normally installs on first use) -------
 
 if [[ "$WITH_VLLM" == "1" ]]; then
-    if [[ "$OS" != "Linux" ]] || ! command -v nvidia-smi >/dev/null 2>&1 \
-        || ! nvidia-smi -L 2>/dev/null | grep -q GPU; then
-        warn "--with-vllm requested but no NVIDIA GPU is visible on this Linux node; skipping"
+    if [[ "$OS" != "Linux" ]]; then
+        warn "--with-vllm requires a Linux GPU node; skipping"
     else
-        VLLM_ENV="$HOME/.skulk/vllm-env"
-        log "installing vLLM into $VLLM_ENV (validated matrix; several GB)"
-        # --allow-existing keeps re-runs idempotent (a bare `uv venv` refuses
-        # to reuse an existing environment and would fail the second install).
-        # Only uv's managed Python: by default uv prefers an installed system
-        # 3.12, and GPU-cloud images often ship one without its development
-        # headers. vLLM's Triton helper compiles against Python.h when the
-        # server starts, so a header-less interpreter fails at startup
-        # ("architectures failed to be inspected"). Managed builds ship
-        # their headers.
-        uv venv "$VLLM_ENV" --python 3.12 --python-preference only-managed --allow-existing
-        # vLLM lives in its own venv and Skulk drives its CLI as an external
-        # served engine (SKULK_VLLM_BIN). Validated matrix notes:
-        # - vLLM's PyPI default wheel links CUDA 13 runtime libraries
-        #   (libcudart.so.13), which cannot import on the CUDA 12.x drivers
-        #   common on GPU clouds; the cu129 VARIANT wheel from wheels.vllm.ai
-        #   is the one that runs there (probe-validated on 0.25.1; 0.31.0
-        #   still publishes the cu129 variant for x86_64 and aarch64). 0.25.1
-        #   remains the floor for the DFlash speculator architectures (Laguna
-        #   cards); 0.28.0 added DFlash2 drafter checkpoints (selected by the
-        #   checkpoint, same "dflash" method string). From 0.29 every model
-        #   runs on vLLM's V2 model runner.
-        # - ninja must be resolvable by the vllm server process (FlashInfer
-        #   JIT sampling kernels shell out to it); installing it into the
-        #   venv suffices because the runner prepends the venv bin dir to the
-        #   server's PATH.
-        # - torch backend must be cu129 (0.31.0 still pairs with torch 2.13): the
-        #   cu128 torch index historically failed resolution outright
-        #   (torchcodec too old, fresh-box validated on 0.25.1). DFlash
-        #   cards additionally JIT their speculator kernels through nvrtc
-        #   and need a CUDA >= 12.8 toolchain on the node (12.4 headers
-        #   lack __nv_fp8_e8m0).
-        # Default index pinned explicitly (mirroring ENGINE_INDEX_FLAGS
-        # above): a host exporting UV_INDEX_URL/UV_DEFAULT_INDEX would
-        # otherwise redirect dependency resolution to its own mirror.
-        uv pip install --python "$VLLM_ENV/bin/python" \
-            "vllm==0.31.0+cu129" ninja \
-            --extra-index-url "https://wheels.vllm.ai/0.31.0/cu129/" \
-            --index-url "https://pypi.org/simple/" \
-            --torch-backend=cu129
-        mkdir -p "$HOME/.skulk"
-        if ! grep -q "SKULK_VLLM_BIN" "$HOME/.skulk/skulk.env" 2>/dev/null; then
-            echo "SKULK_VLLM_BIN=$VLLM_ENV/bin/vllm" >> "$HOME/.skulk/skulk.env"
-        fi
-        export SKULK_VLLM_BIN="$VLLM_ENV/bin/vllm"
-        log "vLLM installed; SKULK_VLLM_BIN recorded in ~/.skulk/skulk.env"
-        log "The service wrappers (deployment/install) source that file; an"
-        log "interactive shell does not, so launch interactively with:"
-        log "    SKULK_VLLM_BIN=$VLLM_ENV/bin/vllm uv run skulk"
+        log "preparing the pinned managed vLLM runtime (several GB)"
+        # Use exactly the same immutable wheel recipe as first-use placement.
+        # This never modifies an operator's existing vLLM environment.
+        uv run --project "$INSTALL_DIR" python -m skulk.provisioning.vllm_runtime
+        log "vLLM prepared; Skulk will discover its managed cache at startup"
     fi
 fi
 

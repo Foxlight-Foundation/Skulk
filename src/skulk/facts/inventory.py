@@ -102,6 +102,11 @@ def _vllm_build(binary: EngineBinaryFact) -> str | None:
     """Return the configured vLLM environment's own distribution version."""
     if binary.state != "ok" or binary.configured_path is None:
         return None
+    from skulk.provisioning.vllm_runtime import managed_vllm_build
+
+    managed = managed_vllm_build(binary.configured_path)
+    if managed is not None:
+        return managed
     version = _binary_version(binary.configured_path)
     return f"vllm@{version}" if version is not None else None
 
@@ -224,7 +229,7 @@ def engine_build_inventory(
         elif engine == "vllm":
             # vLLM normally lives in its own managed virtual environment, so
             # the Skulk environment's package metadata is not its build truth.
-            build = _vllm_build(facts.vllm_binary)
+            build = _vllm_build(facts.vllm_binary) or next(iter(facts.vllm_installable_builds.values()), None)
         elif engine == "comfy":
             build = _comfy_build(facts)
         elif engine == "audio_cpp":
@@ -258,6 +263,9 @@ def engine_build_inventory(
             ):
                 binary = facts.audio_cpp_cuda_binary
             build = _binary_build("audio.cpp", binary, fresh=True)
+        elif engine == "vllm" and "/recipe@sha256:" in discovered.get(engine, ""):
+            # A managed recipe is measured runtime truth, not a declaration.
+            build = discovered[engine]
         else:
             build = declared.get(backend) or declared.get(engine) or discovered.get(engine)
         if build is None:

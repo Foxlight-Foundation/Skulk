@@ -480,8 +480,8 @@ for a *single* request llama.cpp was faster, because that particular A100 has no
 native FP4 hardware and vLLM had to emulate the model's 4-bit format (a gap that
 closes on newer Blackwell GPUs). So vLLM does not replace the in-process engines,
 it **coexists** with them, and the planner chooses per model by the node's hardware
-and how much concurrent load it expects. A node offers vLLM when `SKULK_VLLM_BIN`
-points at the `vllm` CLI (it advertises `vllm-cuda` / `vllm-rocm`, GPU-only), and a
+and how much concurrent load it expects. A node offers vLLM through a usable explicit `SKULK_VLLM_BIN` or an installed
+or installable managed GPU runtime (`vllm-cuda` / `vllm-rocm`), and a
 card opts in through `compatible_backends`. Because the right engine now depends on
 the GPU *generation* (FP4 support and all), each node also reports its GPU compute
 capability in telemetry, so placement can eventually route a model to the metal
@@ -3105,3 +3105,32 @@ the stream and cancels the underlying command rather than only aborting an
 unobserved non-streaming fetch.
 
 Exact image qualification uses `POST /v1/instances/{instance_id}/images/generations`. The API verifies every rank against a persistent installation allowlist and dispatches `ImageGeneration.target_instance_id`; the master fails an unavailable target without selecting another replica. Both JSON and SSE return the selected instance identity.
+
+
+## Managed vLLM first-use runtime
+
+`provisioning/vllm_runtime.py` consumes three SHA-256-pinned runtime recipe wheels
+(CUDA 12.9 x86_64/aarch64, ROCm 7.2.3 x86_64). They bind upstream vLLM 0.32.0,
+complete hashed binary dependencies, and managed Python 3.12.13. The upstream
+vLLM wheels are mirrored without modification. Runtime environments stay separate
+from Skulk and model weights, keyed by the complete recipe digest.
+
+Node facts expose `vllm_installable_builds`; backend derivation marks these tags
+on demand, separately from installed backends. Existing `NodeResources.engineBuilds`
+and `onDemandBackends` carry installed identities and readiness;
+`installableEngineBuilds` separately binds recipes available for first use.
+`InstallEngine` serializes and shares installation, holds load until completion,
+publishes fresh resources, and gives every waiter a named failure on error.
+Cross-process file locks, staged adoption, hash/version/GPU checks and cancellable
+subprocess groups protect first use. The child runner resolves completed cache
+paths independently because it may start before the worker installs the engine.
+
+Startup only wires a completed cache, including offline restarts. Explicit
+`SKULK_VLLM_BIN` runtimes win; offline, opt-out and management policy prevent new
+downloads. `install.sh --with-vllm` eagerly invokes the same provisioner. Build and
+exact-byte promotion live in `.github/workflows/vllm-runtime-wheel.yml`; source
+recipes and lockfiles live in `packaging/skulk-vllm-runtime/`. Publication is
+append-only and qualification never becomes a tested-hardware allowlist. The
+runner's `--kv-cache-dtype auto` keeps the full-precision shared estimate; new
+compressed cache modes need explicit runner and admission support. See
+[the vLLM runtime guide](vllm-engine.md) for user setup and prerequisites.

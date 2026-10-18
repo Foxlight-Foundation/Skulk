@@ -2774,7 +2774,8 @@ independent of cache quantization, and estimates describe this serving configura
 
 A preview whose placement would install an engine first carries
 `engine_install`; otherwise the field is null. Video cards can install `comfy`,
-and native image cards can install `stable_diffusion_cpp` on an eligible node
+text cards can install `vllm`, and native image cards can install
+`stable_diffusion_cpp` on an eligible node
 before their first load. This happens beside the model download, so first use
 takes longer. The object holds `engine`, `node_ids` (the nodes that would install
 it), `approximate_download_bytes`, and `detail`, a
@@ -5596,3 +5597,23 @@ implemented families; an empty or malformed array rejects the probe. This
 allows an explicit backport to report its implementation while retaining the
 existing protocol/source and measured-executable checks. It does not replace
 ABI, compiled-target or resource admission.
+
+
+### vLLM engine installation in existing placement APIs
+
+`GET /instance/previews` and `POST /place_instance` use the existing placement
+request parameters. When a selected vLLM backend is installable but absent, their
+`engine_install` object names `vllm`, the affected node IDs, approximately 8 GiB
+of downloads, and the first-use notice. No new request flag or endpoint is needed.
+The worker's `InstallEngine` task proceeds alongside model downloads; model load
+waits for a verified runtime. Installation failure appears as
+`engine_install_failed` in `instanceFailures`; a later placement can retry.
+
+`GET /state` retains the existing `nodeResources` contract: `backends` describes
+compatible available or installable engines, `onDemandBackends` distinguishes
+pending installation, and `installableEngineBuilds` binds an engine recipe available for installation.
+`engineBuilds` reports completed installed runtimes.
+After installation, fresh telemetry removes the on-demand tags. A managed build
+identity includes vLLM's exact GPU build and the recipe SHA-256. Qualification
+records are evidence and do not limit compatible untested hardware. See
+[The vLLM engine](vllm-engine.md) for installation, cache and override semantics.

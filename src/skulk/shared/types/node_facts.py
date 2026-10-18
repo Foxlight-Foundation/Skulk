@@ -300,6 +300,10 @@ class NodeFacts(CamelCaseModel):
     declared_comfy_backends: str | None = None
     """Raw ``SKULK_COMFY_BACKENDS`` value, verbatim, or ``None`` when unset."""
 
+    vllm_installable_builds: dict[str, str] = Field(
+        default_factory=dict, description="Exact immutable vLLM runtime recipe available on first use; absent when installed, offline, overridden or ineligible."
+    )
+
     comfy_on_demand_variants: tuple[Literal["cuda", "rocm"], ...] = ()
     """ComfyUI variants this node may install when a video model is placed on it.
 

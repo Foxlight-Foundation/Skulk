@@ -8,7 +8,7 @@ path: its continuous batching and paged attention hold latency flat and grow
 aggregate throughput under concurrent load, where the single-stream engines
 (``llama_cpp`` / ``llama_server``) collapse. It coexists with those engines and
 is selected per model by the card's ``compatible_backends`` on a node that set
-``SKULK_VLLM_BIN``.
+``SKULK_VLLM_BIN`` or can install the managed runtime.
 
 Single-node only in this first slice (no ring / warmup / RPC), mirroring the
 in-process runners. Linux-oriented: the subprocess is reaped on parent death via
@@ -16,19 +16,11 @@ in-process runners. Linux-oriented: the subprocess is reaped on parent death via
 holding GPU memory. Per-request cancellation aborts the proxied HTTP connection
 (stopping server-side generation); ``SIGTERM`` is for whole-server teardown.
 
-Scope of this slice: streamed chat completions only. Tool calling and per-token
-logprobs are rejected loudly rather than silently mismeasured (the OpenAI SSE
-proxy does not surface logprobs, and tool-call round-tripping is a follow-up).
-
-Reasoning is best-effort in this slice. Thinking control (``enable_thinking`` /
-``reasoning_effort``) is forwarded so the model thinks, and both ``reasoning_content``
-and ``reasoning`` SSE deltas are parsed into ``is_thinking`` chunks. But vLLM only
-SPLITS reasoning from content when the server is launched with a family-specific
-``--reasoning-parser`` (e.g. ``qwen3`` / ``deepseek_r1`` / ``openai_gptoss``); this
-slice does not yet map the card to that flag, so on a reasoning model the thinking
-text arrives inline in ``content`` (raw markers) rather than as a separated
-reasoning stream. Threading the card's reasoning family into ``--reasoning-parser``
-is a follow-up (alongside tool calling and logprobs).
+The runner serves single-node text, card-pinned tool calls and reasoning parsers.
+Tool requests use the assembled non-streamed response; ordinary chat streams
+through the existing bounded proxy. Per-token logprobs remain unsupported.
+Managed first-use environments are discovered from completed on-disk receipts,
+including when this child process started before the worker installed vLLM.
 
 Concurrent dispatch: unlike the in-process runners (which serialize one task at a
 time), ``main()`` keeps up to N ``TextGeneration`` requests in flight at once,
@@ -1001,6 +993,13 @@ class Runner(ServedConcurrentDispatch):
         self, model_dir: Path, served_model_name: str, n_ctx: int
     ) -> None:
         binary = os.environ.get(VLLM_BIN_ENV, "").strip()
+        if not binary:
+            from skulk.provisioning.vllm_runtime import installed_managed_vllm
+
+            # This process can start before InstallEngine exports the worker's
+            # environment; resolve its completed, placement-bound cache here.
+            managed = installed_managed_vllm(self.shard_metadata.resolved_backend, self.shard_metadata.resolved_engine_build)
+            binary = str(managed) if managed is not None else ""
         if not binary or not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
             # Validate up front (like the llama_server runner) so a misconfigured or
             # vanished-since-probe binary surfaces as a clear runner error rather
