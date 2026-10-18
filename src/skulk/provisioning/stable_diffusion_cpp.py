@@ -136,6 +136,90 @@ class StableDiffusionCppWheel(FrozenModel):
 # governed by host ABI and actual compiled requirements, independently of tests.
 PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
     StableDiffusionCppWheel(
+        source_revision="b13a48219d5cdf408edcb93da6cd69b612ed03d3",
+        filename="skulk_stable_diffusion_cpp_metal-0.1.0.post3-py3-none-macosx_15_0_arm64.whl",
+        sha256="78718cefeb5acecd609307956c93bc47ec9fb8397a2c873ae27c553ee673375d",
+        binary_sha256="69967aeb558aeb921f9ba10950676e9fcc09f7efe609a71b0f386cfdd75c68fb",
+        payload_sha256="ee57be8f98f5a918d5fb8ccf0af8bba498dfc2fd6c13f2dce81b0e81354a6133",
+        size_bytes=17095041,
+        expanded_size_bytes=45856168,
+        compute="metal",
+        system="darwin",
+        architecture="arm64",
+        qualified_hardware_classes=frozenset(["apple:apple-m4"]),
+        required_cpu_features=frozenset([]),
+    ),
+    StableDiffusionCppWheel(
+        source_revision="b13a48219d5cdf408edcb93da6cd69b612ed03d3",
+        filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post3-py3-none-manylinux_2_35_aarch64.whl",
+        sha256="d55d85b0e2d72170b920eddc34a8ee9ebfb8406b9d4aa87a021c66e9461aaf14",
+        binary_sha256="02ce0a94d5e8b88356b93c1c548d409980ac9030c7beb8badfb1bf8e015b2f0f",
+        payload_sha256="bd0884d483211f39c263ed629bf9f8510905bb60de00f6708eb0cab9c28a772e",
+        size_bytes=544347776,
+        expanded_size_bytes=750246580,
+        compute="cuda",
+        system="linux",
+        architecture="aarch64",
+        qualified_hardware_classes=frozenset(["nvidia:nvidia-gb10"]),
+        gpu_targets=("121a-real",),
+        required_cpu_features=frozenset([]),
+    ),
+    StableDiffusionCppWheel(
+        source_revision="b13a48219d5cdf408edcb93da6cd69b612ed03d3",
+        filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post3-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="411cf22f249e31ab533ed040d5e8fca97dc1c2cf96901d83fa6495fad37893d4",
+        binary_sha256="61bce4cf9c80ea49d2ba121792bdee39c8089b85db5b43be75101f980a520b72",
+        payload_sha256="7e14661acaaebe61958d2c4e40aabf6071c475f0e776e5088921125000c5f8a4",
+        size_bytes=614945480,
+        expanded_size_bytes=929202125,
+        compute="cuda",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset([]),
+        gpu_targets=("80-real", "86-real", "89-real", "90-virtual"),
+        required_cpu_features=frozenset(
+            ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
+        ),
+    ),
+    StableDiffusionCppWheel(
+        source_revision="b13a48219d5cdf408edcb93da6cd69b612ed03d3",
+        filename="skulk_stable_diffusion_cpp_vulkan-0.1.0.post3-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="8d074bc484e78e9a13b3c008cfa4437b8b8efb90a38bea9d3104b880b9b3521f",
+        binary_sha256="b8406991fbf4a70e61e08e612b18f6f5b12726f56ba8eebc084ba4167d72a838",
+        payload_sha256="b755d12fbddd0b715cd459490bf8434f3a9d52ea0c643119677eacc9a70eb8e8",
+        size_bytes=29919312,
+        expanded_size_bytes=84133852,
+        compute="vulkan",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset(["amd:pci-1002-1586"]),
+        required_cpu_features=frozenset(
+            ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
+        ),
+    ),
+    StableDiffusionCppWheel(
+        source_revision="b13a48219d5cdf408edcb93da6cd69b612ed03d3",
+        filename="skulk_stable_diffusion_cpp_rocm-0.1.0.post3-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="0bfa0b4c13f7b22acd65583454edbe719970c8c100e2a9ba7a6547c013887c07",
+        binary_sha256="cd38cb804df525a6d1f0d709a8361c62229714fb78774bcad83e53229b321970",
+        payload_sha256="97b6bf4311ddcf2bf01470785cbf3308300284f351a7edfaab95419b743eea79",
+        size_bytes=2172218959,
+        expanded_size_bytes=4651454858,
+        compute="rocm",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset([]),
+        gpu_targets=("gfx942",),
+        required_cpu_features=frozenset(
+            ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
+        ),
+    ),
+)
+
+# Existing placements retain their exact build across source upgrades. These
+# immutable packages are restoration choices, never the default for new work.
+RETAINED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
+    StableDiffusionCppWheel(
         source_revision="8cd731e7b4667eb8f40a153315b9a7125d09a58d",
         filename="skulk_stable_diffusion_cpp_metal-0.1.0.post2-py3-none-macosx_15_0_arm64.whl",
         sha256="0c6a2ad81b58520a105f977c24a8d9ac31703e198dd185949504f5480c1e1099",
@@ -214,11 +298,6 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
             ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
         ),
     ),
-)
-
-# Existing placements retain their exact build across source upgrades. These
-# immutable packages are restoration choices, never the default for new work.
-RETAINED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
     StableDiffusionCppWheel(
         source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
         filename="skulk_stable_diffusion_cpp_metal-0.1.0.post1-py3-none-macosx_15_0_arm64.whl",
@@ -315,19 +394,28 @@ def _known_wheel_for_build(build: str) -> StableDiffusionCppWheel | None:
     )
 
 
-def native_image_build_supports_family(build: str, family: str) -> bool:
-    """Reject a known older engine's missing model implementation, not untested GPUs.
+def native_image_source_families(source_revision: str) -> tuple[str, ...]:
+    """Return implemented families for a recognized source, independent of GPU tests."""
+    families = ("qwen_image_21", "qwen_image_21_turbo", "flux_2_klein_4b", "z_image_turbo", "sdxl")
+    if source_revision == "d637cfb935feb2254898a8f1524046c958f3df80":
+        return families
+    families += ("flux_3_klein", "flux_3_klein_base")
+    return families + (("moss_image",) if source_revision == "b13a48219d5cdf408edcb93da6cd69b612ed03d3" else ())
 
-    Unknown operator builds retain their runtime-probed eligibility. Retained
-    pre-FLUX.3 packages remain usable for their existing image model families.
+
+def native_image_build_supports_family(
+    build: str, family: str, observed_families: Mapping[str, tuple[str, ...]] | None = None,
+) -> bool:
+    """Check measured implementation provenance; qualification never excludes GPUs.
+
+    A custom executable may explicitly report backported families. Older probes
+    inherit their recognized source's implemented families. Unknown legacy facts
+    retain compatibility until a fresh probe supplies authoritative provenance.
     """
+    if observed_families is not None and build in observed_families:
+        return family in observed_families[build]
     wheel = _known_wheel_for_build(build)
-    return not (
-        family in {"flux_3_klein", "flux_3_klein_base"}
-        and wheel is not None
-        and wheel.source_revision == "d637cfb935feb2254898a8f1524046c958f3df80"
-    )
-
+    return wheel is None or family in native_image_source_families(wheel.source_revision)
 
 
 @final
@@ -336,6 +424,9 @@ class NativeImageProbe(FrozenModel):
 
     source_revision: str = Field(
         description="Source revision reported by the executable."
+    )
+    model_families: tuple[str, ...] = Field(
+        default=(), description="Implemented families from the executable or recognized source provenance."
     )
     binary_sha256: str = Field(description="Measured executable digest.")
     payload_sha256: str | None = Field(
@@ -451,6 +542,15 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
         raise ValueError(
             "native image probe reports an unrecognized protocol or source"
         )
+    raw_families = record.get("model_families")
+    if raw_families is None:
+        families = native_image_source_families(source_revision)
+    elif (isinstance(raw_families, list) and 0 < len(cast("list[object]", raw_families)) <= 64
+          and all(isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", value)
+                  for value in cast("list[object]", raw_families))):
+        families = tuple(cast("list[str]", raw_families))
+    else:
+        raise ValueError("native image probe has invalid implemented model families")
     report = record.get("device_report")
     if not isinstance(report, str):
         raise ValueError("native image probe lacks a device report")
@@ -479,6 +579,7 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
         raise ValueError("native image engine reports no GPU device")
     return NativeImageProbe(
         source_revision=source_revision,
+        model_families=families,
         binary_sha256=binary_digest,
         payload_sha256=payload_digest,
         devices=tuple(devices),

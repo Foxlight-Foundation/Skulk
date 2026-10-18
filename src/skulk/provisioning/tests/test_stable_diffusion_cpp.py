@@ -551,3 +551,34 @@ def test_compiled_targets_remain_real_requirements_not_qualification() -> None:
     assert not image_engine.native_image_build_hardware_matches(
         hip.build_identity, frozenset({"amd", "amd:gfx1151"})
     )
+
+
+@pytest.mark.parametrize("source_revision,flux,moss", [
+    ("d637cfb935feb2254898a8f1524046c958f3df80", False, False),
+    ("8cd731e7b4667eb8f40a153315b9a7125d09a58d", True, False),
+    (image_engine.SOURCE_REVISION, True, True),
+])
+def test_custom_engine_measured_source_and_explicit_backport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_revision: str, flux: bool, moss: bool,
+) -> None:
+    """An unrecognized digest cannot hide old source; an explicit backport stays eligible."""
+    from skulk.shared.backends import runtime_backends_for_builds
+
+    binary = tmp_path / "custom-server"
+    binary.write_bytes(b"custom backport executable")
+    record: dict[str, object] = {"protocol": 1, "source_revision": source_revision, "device_report": "Vulkan0\tuntested GPU\n"}
+    def run_probe(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, json.dumps(record), "")
+
+    monkeypatch.setattr(image_engine.subprocess, "run", run_probe)
+    probe = image_engine.probe_native_image(binary)
+    backend = "stable_diffusion_cpp-vulkan"
+    for family, expected in (("qwen_image_21", True), ("flux_3_klein", flux), ("moss_image", moss)):
+        eligible = runtime_backends_for_builds(frozenset({backend}), {backend: probe.build_identity}, frozenset({"intel:untested"}), image_family=family, native_image_families={probe.build_identity: probe.model_families})
+        assert (backend in eligible) is expected
+    record["model_families"] = ["moss_image"]
+    backport = image_engine.probe_native_image(binary)
+    assert image_engine.native_image_build_supports_family(backport.build_identity, "moss_image", {backport.build_identity: backport.model_families})
+    record["model_families"] = ["--unsafe-flag"]
+    with pytest.raises(ValueError, match="model families"):
+        image_engine.probe_native_image(binary)

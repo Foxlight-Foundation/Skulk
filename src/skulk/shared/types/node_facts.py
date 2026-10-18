@@ -167,6 +167,8 @@ class StableDiffusionCppProbe(CamelCaseModel):
     """Whether the executable answered its source and GPU probe."""
     build_identity: str | None = None
     """Measured executable digest, never an operator-supplied build declaration."""
+    model_families: tuple[str, ...] = ()
+    """Implemented model families bound to the measured executable identity."""
     devices: tuple[str, ...] = ()
     """Exact device names accepted by the native backend selector."""
     computes: tuple[str, ...] = ()

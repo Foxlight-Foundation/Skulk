@@ -632,6 +632,7 @@ def _card_platform_backends(
             },
             node_resources.hardware_classes,
             image_family=card.image.family if card.image is not None else None,
+            native_image_families=node_resources.native_image_families,
         )
     )
 

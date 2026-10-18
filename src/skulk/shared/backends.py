@@ -571,6 +571,7 @@ def runtime_backends_for_builds(
     hardware_classes: frozenset[str],
     *,
     image_family: str | None = None,
+    native_image_families: Mapping[str, tuple[str, ...]] | None = None,
 ) -> frozenset[str]:
     """Remove known build requirements that conflict with this node or model.
 
@@ -599,7 +600,7 @@ def runtime_backends_for_builds(
             backend
         ) == "stable_diffusion_cpp" and (
             not native_image_build_hardware_matches(build, hardware_classes)
-            or (image_family is not None and not native_image_build_supports_family(build, image_family))
+            or (image_family is not None and not native_image_build_supports_family(build, image_family, native_image_families))
         ):
             allowed.discard(backend)
     return frozenset(allowed)

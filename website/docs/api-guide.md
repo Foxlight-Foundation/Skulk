@@ -1665,6 +1665,18 @@ operator can hide them on a node with `SKULK_ENABLE_IMAGE_MODELS=false`. Legacy 
 placement applies real package requirements and configuration-specific memory fit.
 Missing representative qualification does not exclude otherwise compatible hardware.
 
+MOSS Base/SFT generation uses the same endpoint. The card supplies 50-step
+Euler/CFG 3 defaults, 16-pixel canvas alignment and its required external tokenizer.
+The API forwards prose or JSON prompts literally. These cards expose generation;
+reference-image editing requires a card that explicitly advertises that task.
+
+FLUX.3 raw BF16, Diffusers, FP8 and NVFP4 artifacts use the existing image API.
+First load may prepare a verified local native cache: Diffusers preserves dense
+weights, while ModelOpt NVFP4 expands to BF16. Placement previews and worker guards
+budget effective engine precision rather than treating compressed download size
+as resident memory. There are no additional generation parameters for these
+serialization formats.
+
 ### Generate images
 
 **POST** `/v1/images/generations`
@@ -5564,3 +5576,23 @@ They describe the selected checkpoint's nonuniform UNet module outputs and
 boundary convolutions. This is intrinsic geometry, independent of GPU test
 coverage. Generic card dimensions count those modules and use their maximum
 output width; they do not imply a uniform transformer or text-cache layout.
+
+### Native image implementation provenance
+
+`GET /state` includes `nodeResources.<node>.nativeImageFamilies`, a map from a
+measured native engine build identity to its implemented image families. Installed
+build identities remain in `engineBuilds`; on-demand candidates remain separately
+in `installableEngineBuilds`. An absent map is legacy telemetry, not a hardware
+incompatibility claim. Placement verifies recognized package/source capability,
+ABI, compiled targets and memory fit. Qualification history does not restrict
+otherwise compatible hardware. The runner re-probes its stamped executable
+before load, including explicit family declarations from custom backports.
+
+
+A custom native `--skulk-probe` response may add `model_families`: an array
+of 1–64 implemented-family identifiers, each matching
+`[a-z][a-z0-9_]{0,63}`. An omitted array inherits the recognized source's
+implemented families; an empty or malformed array rejects the probe. This
+allows an explicit backport to report its implementation while retaining the
+existing protocol/source and measured-executable checks. It does not replace
+ABI, compiled-target or resource admission.

@@ -55,6 +55,12 @@ describe('RunningInstanceCard engine label', () => {
     expect(container!.textContent).not.toContain('MLX Ring');
   });
 
+  it('names the native image engine and its accelerator', async () => {
+    await renderCard({ ...readyCard, engine: 'stable_diffusion_cpp', accelerator: 'CUDA', supportsTextChat: false });
+    expect(container!.textContent).toContain('Image engine · CUDA');
+    expect(container!.textContent).not.toContain('MLX Ring');
+  });
+
   it('keeps the MLX sharding and transport label', async () => {
     await renderCard({ ...readyCard, supportsTextChat: true });
     expect(container!.textContent).toContain('Pipeline · MLX Ring');

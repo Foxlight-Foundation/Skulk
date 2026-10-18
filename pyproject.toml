@@ -76,6 +76,8 @@ dependencies = [
   # module load. Linux used to get it only through mflux, so when mflux became
   # macOS-only a fresh Linux install could not start the node.
   "pillow>=12.3.0",
+  # Native packed-weight preparation uses bounded CPU arrays on every platform.
+  "numpy>=2.2,<3",
   # Operator cluster identity and authority records use Ed25519 and AES-GCM.
   # This is a direct production dependency: secret storage must not rely on a
   # transitive dependency accidentally keeping cryptography installed.

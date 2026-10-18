@@ -160,8 +160,10 @@ def test_retained_build_family_limit_does_not_disqualify_untested_hardware() -> 
         backends = frozenset(builds)
         # Genuine implementation limits apply to both new model variants.
         for family in ("flux_3_klein", "flux_3_klein_base"):
-            assert not runtime_backends_for_builds(backends, builds, frozenset(), image_family=family)
-        assert runtime_backends_for_builds(backends, builds, frozenset(), image_family="flux_2_klein") == backends
+            permitted = runtime_backends_for_builds(backends, builds, frozenset(), image_family=family)
+            assert bool(permitted) is (wheel.source_revision != _OLD_SOURCE)
+        assert not runtime_backends_for_builds(backends, builds, frozenset(), image_family="moss_image")
+        assert runtime_backends_for_builds(backends, builds, frozenset(), image_family="flux_2_klein_4b") == backends
     for build in (engines.PUBLISHED_WHEELS[0].build_identity, "operator-compatible-build"):
         assert runtime_backends_for_builds(frozenset({_BACKEND}), {_BACKEND: build}, _HARDWARE,
             image_family="flux_3_klein") == frozenset({_BACKEND})

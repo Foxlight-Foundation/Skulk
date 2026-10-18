@@ -19,6 +19,7 @@ def test_node_resources_survives_json_wire_round_trip() -> None:
     original = NodeResources(
         backends=frozenset({"mlx"}),
         engine_builds={"mlx": "mlx@0.29.1"},
+        native_image_families={"stable_diffusion_cpp@sha256:" + "a" * 64: ("moss_image", "flux_3_klein")},
         hardware_classes=frozenset({"apple", "apple:m4-max"}),
         participation="management",
         api_available=False,

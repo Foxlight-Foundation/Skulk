@@ -105,6 +105,7 @@ function formatEngineLabel(
   if (engine === 'vllm') return on(t('placement.vllm', 'vLLM'));
   if (engine === 'comfy') return on(t('placement.comfy', 'ComfyUI'));
   if (engine === 'audio_cpp') return on(t('placement.audioCpp', 'audio.cpp'));
+  if (engine === 'stable_diffusion_cpp') return on(t('placement.nativeImage', 'Image engine'));
   if (engine === 'mlx_audio') return t('placement.mlxAudio', 'MLX Audio');
   if (engine === 'test_video') return t('placement.testVideo', 'Test video engine');
   const shard = sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor');

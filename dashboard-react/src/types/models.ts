@@ -104,7 +104,7 @@ export interface RegistryEngineSupportClaim {
 /** Image geometry and sampling contract returned by the model catalog. */
 export interface ImageCapabilityInfo {
   /** Exact native image checkpoint family. */
-  family: 'qwen_image_21' | 'qwen_image_21_turbo' | 'flux_2_klein_4b' | 'flux_3_klein' | 'flux_3_klein_base' | 'z_image_turbo' | 'sdxl';
+  family: 'qwen_image_21' | 'qwen_image_21_turbo' | 'flux_2_klein_4b' | 'flux_3_klein' | 'flux_3_klein_base' | 'moss_image' | 'z_image_turbo' | 'sdxl';
   defaultWidth: number;
   defaultHeight: number;
   dimensionMultiple: number;

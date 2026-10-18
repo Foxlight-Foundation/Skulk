@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import json
 from pathlib import Path
 
 from PIL import Image
@@ -14,8 +15,13 @@ from skulk.download.download_utils import (
     build_sidecar_path,
     companion_artifact_location,
 )
+from skulk.shared.constants import SKULK_ENGINES_DIR
 from skulk.shared.models.image import ImageCardConfig, validate_reference_images
 from skulk.shared.models.model_cards import ModelCard
+from skulk.worker.runner.stable_diffusion_cpp.packed_weights import (
+    prepare_flux3_diffusers,
+    prepare_nvfp4_weights,
+)
 
 _ROLE_FLAGS = {
     "model": "--model",
@@ -23,6 +29,7 @@ _ROLE_FLAGS = {
     "vae": "--vae",
     "text_encoder": "--llm",
     "text_encoder_vision": "--llm_vision",
+    "tokenizer": "--tokenizer",
     "clip_l": "--clip_l",
     "clip_g": "--clip_g",
     "t5xxl": "--t5xxl",
@@ -76,9 +83,23 @@ def native_component_arguments(card: ModelCard, *, backend: str) -> list[str]:
                     "image component differs from its immutable file identity"
                 )
             verified.add(identity)
-        arguments.extend(
-            (_ROLE_FLAGS[component.role], str(root / component.entry_file))
-        )
+        if component.tensor_format == "modelopt_nvfp4":
+            selected_file = next(item for item in component.files if item.path == component.entry_file)
+            entry = prepare_nvfp4_weights(
+                entry, source_identity=selected_file.object_id,
+                parameter_count=component.parameter_count,
+                cache_root=SKULK_ENGINES_DIR / "stable_diffusion_cpp",
+            )
+        elif component.tensor_format == "flux3_diffusers":
+            identity = hashlib.sha256(json.dumps(
+                [(item.path, item.size_bytes, item.object_id) for item in component.files],
+                sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            entry = prepare_flux3_diffusers(
+                entry, source_identity=identity, parameter_count=component.parameter_count,
+                cache_root=SKULK_ENGINES_DIR / "stable_diffusion_cpp",
+            )
+        arguments.extend((_ROLE_FLAGS[component.role], str(entry)))
     # Full attention exceeded tested Vulkan/CUDA memory capacity and failed
     # native ROCm kernel launches at the default canvas. The same pinned builds
     # completed with Flash Attention; the ROCm launch failure is not an OOM claim.
@@ -165,6 +186,9 @@ def native_image_request(
         "sample_steps": steps,
         "guidance": {"txt_cfg": guidance},
     }
+    if profile.family == "moss_image":
+        # The MOSS schedule is shifted and snapped by its native discrete scheduler.
+        sampling["flow_shift"] = 5.0
     if profile.fixed_sigmas:
         sampling["custom_sigmas"] = list(profile.fixed_sigmas)
     body: dict[str, object] = {

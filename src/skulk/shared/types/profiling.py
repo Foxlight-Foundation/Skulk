@@ -359,6 +359,10 @@ class NodeResources(CamelCaseModel):
         default_factory=dict,
         description="Exact installed build identities keyed by engine and backend tag.",
     )
+    native_image_families: dict[str, tuple[str, ...]] = Field(
+        default_factory=dict,
+        description="Implemented model families keyed by the measured native image build; never a hardware qualification allowlist.",
+    )
     engine_memory_settings: dict[str, EngineMemorySettings] = Field(
         default_factory=dict,
         description="Effective engine/cache controls, independent of artifact weight quantization, used by placement and runner guards.",
@@ -402,6 +406,15 @@ class NodeResources(CamelCaseModel):
         if isinstance(v, (list, tuple, set, frozenset)):
             return frozenset(cast("Iterable[str]", v))
         return v
+
+    @field_validator("native_image_families", mode="before")
+    @classmethod
+    def _coerce_native_image_families(cls, value: object) -> object:
+        """Restore per-build immutable family lists from the strict gossip wire."""
+        if isinstance(value, dict):
+            return {key: tuple(cast("list[object]", families)) if isinstance(families, list) else families
+                    for key, families in cast("dict[str, object]", value).items()}
+        return value
 
     @field_validator("hardware_classes", mode="before")
     @classmethod
@@ -462,6 +475,7 @@ class NodeResources(CamelCaseModel):
             engine_build_inventory,
             hardware_class_inventory,
         )
+        from skulk.facts.inventory import native_image_family_inventory
 
         derivation = current_backend_derivation()
         facts = current_node_facts()
@@ -489,6 +503,7 @@ class NodeResources(CamelCaseModel):
             on_demand_backends=derivation.on_demand_backends,
             architecture=platform.machine().lower(),
             engine_builds=engine_builds,
+            native_image_families=native_image_family_inventory(facts),
             installable_engine_builds=dict(
                 facts.stable_diffusion_cpp_installable_builds
             ),

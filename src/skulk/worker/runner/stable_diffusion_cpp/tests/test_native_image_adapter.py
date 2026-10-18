@@ -365,3 +365,48 @@ def test_flux3_checkpoint_sampling_and_prepared_caption_survive_translation(
             card, ImageEditsTaskParams(model="owner/model", prompt=prompt),
             42, (*references, references[0]),
         )
+
+
+@pytest.mark.parametrize("prompt", [
+    "An orange fox beside a blue mug.",
+    '{"summary":{"caption":"A travel poster"},"items":[{"text":"EXPLORE","bbox":[-416,-384,-288,384]}],"bbox_coord_space":"abs_centralized","bbox_format":"yxyx"}',
+    "A detailed scene. " * 500,
+])
+def test_moss_tokenizer_and_literal_prompt_contract(prompt: str) -> None:
+    """MOSS preserves prose/layout prompts and its native shifted schedule."""
+    original = _card()
+    assert original.image is not None
+    components = tuple(
+        component for component in original.image.components
+        if component.role != "text_encoder_vision"
+    )
+    with pytest.raises(ValueError, match="pinned Qwen3.5 tokenizer"):
+        ImageCardConfig(
+            family="moss_image", components=components,
+            default_steps=50, default_guidance=3.0, dimension_multiple=16,
+        )
+    tokenizer = components[0].model_copy(update={"role": "tokenizer"})
+    profile = ImageCardConfig(
+        family="moss_image", components=(*components, tokenizer),
+        default_steps=50, default_guidance=3.0, dimension_multiple=16,
+    )
+    card = ModelCard.model_validate_json(original.model_copy(update={
+        "image": profile, "tasks": [ModelTask.TextToImage],
+    }).model_dump_json())
+    body = adapter.native_image_request(
+        card, ImageGenerationTaskParams(
+            model="owner/model", prompt=prompt, size="1008x1024",
+        ), 42,
+    )
+    assert body["prompt"] == prompt
+    assert body["sample_params"] == {
+        "sample_method": "euler", "sample_steps": 50,
+        "guidance": {"txt_cfg": 3.0}, "flow_shift": 5.0,
+    }
+    assert body["width"] == 1008
+    assert "ref_images" not in body
+    with pytest.raises(ValueError, match="reference input"):
+        adapter.native_image_request(
+            card, ImageEditsTaskParams(model="owner/model", prompt=prompt),
+            42, (_image("blue"),),
+        )

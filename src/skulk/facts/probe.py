@@ -552,6 +552,7 @@ def gather_node_facts(
             native_image_probe = StableDiffusionCppProbe(
                 outcome="ready",
                 build_identity=observed.build_identity,
+                model_families=observed.model_families,
                 devices=observed.devices,
                 computes=observed.computes,
             )

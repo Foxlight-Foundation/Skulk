@@ -18,7 +18,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   sizing, assessments and worker guards must share the actual engine and effective
   weight/cache policy; memory fit is workload-specific. `NodeResources.engine_memory_settings` and `ShardMetadata.memory_settings` bind
   effective policy to shared estimates and pre-load drift checks. Known layouts
-  use actual compressed storage; unknown layouts retain explicit FP16 fallback.
+  use actual compressed storage; unknown layouts retain explicit 16-bit fallback.
 
 - **Inference assessment:** `master/inference_assessment.py:assess_inference`
   performs read-only workload planning through `placement.py:place_instance`
@@ -1814,6 +1814,32 @@ ordered edits accept up to ten references. Checkpoint cards carry their own
 sampling defaults. The API forwards captions literally, including textual
 bounding-box instructions, and does not silently invoke a prompt upsampler.
 Model users can prepare full scene captions using any suitable language model.
+
+
+MOSS Base and SFT use the `moss_image` profile with a pinned Qwen3.5-9B
+text encoder, external `tokenizer` component and FLUX.2 VAE. Both expose image
+generation with 50-step Euler/CFG 3 defaults and 16-pixel alignment; prompts,
+including JSON layout descriptions, are forwarded literally. These checkpoints
+do not advertise reference-image editing.
+
+Native components may declare `tensor_format` and `parameter_count` to identify
+serialized packing and logical weight geometry. FLUX.3 BF16 native weights load
+directly. `flux3_diffusers` preparation verifies the complete shard index and
+copies dense tensor bytes into a native-name cache. `modelopt_fp8` preserves its
+per-output-channel scaling and reserves conservative 16-bit fallback residency.
+`modelopt_nvfp4` preparation expands verified block-16 E2M1 weights and E4M3/FP32
+scales to BF16; it does not provide an FP4 execution kernel. Original downloads
+remain immutable. Derived caches use bounded reads/arrays, a disk-space check,
+per-artifact locks, atomic receipts and output hashes checked on reuse. Placement
+and worker guards budget effective precision rather than compressed download size.
+
+`NodeResources.native_image_families` binds implemented families to measured
+native build identities. Legacy probes inherit their recognized source's
+implementations; custom backports may report a bounded `model_families` array in
+`--skulk-probe`. Master placement, worker fallback and the runner apply this
+implementation evidence independently of hardware qualification. Retained builds
+remain eligible for families they implement, and compatible untested GPUs remain
+eligible.
 
 Qwen Image 2.1 and Turbo CUDA/Vulkan instances enable Flash Attention at load time
 to reduce attention memory pressure at the default 2048-square canvas. ROCm
