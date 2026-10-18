@@ -30,16 +30,17 @@ from skulk.utils.pydantic_ext import FrozenModel
 if TYPE_CHECKING:
     from skulk.shared.types.node_facts import NodeFacts
 
-SOURCE_REVISION: Final = "8cd731e7b4667eb8f40a153315b9a7125d09a58d"
+SOURCE_REVISION: Final = "b13a48219d5cdf408edcb93da6cd69b612ed03d3"
 # The previous source implements the same hardened protocol. Operator builds
 # were supported before this upgrade and still bind readiness to measured bytes;
 # replacing a managed default must not revoke their explicit binary override.
 COMPATIBLE_PROBE_SOURCES: Final = frozenset({
     SOURCE_REVISION,
+    "8cd731e7b4667eb8f40a153315b9a7125d09a58d",
     "d637cfb935feb2254898a8f1524046c958f3df80",
 })
 SERVER_PATCH_SHA256: Final = (
-    "51c67831044dee71e071519b5d868dc8e0c79eadb61b6100fdd6c68ca39f3ed7"
+    "bd532a36f5f61083e9808d0532ca00b3db7c02886a97d66b53d67a053a90cf5f"
 )
 BINARY_ENV: Final = "SKULK_STABLE_DIFFUSION_CPP_BIN"
 ImageCompute = Literal["metal", "cuda", "vulkan", "rocm"]
@@ -135,6 +136,7 @@ class StableDiffusionCppWheel(FrozenModel):
 # governed by host ABI and actual compiled requirements, independently of tests.
 PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
     StableDiffusionCppWheel(
+        source_revision="8cd731e7b4667eb8f40a153315b9a7125d09a58d",
         filename="skulk_stable_diffusion_cpp_metal-0.1.0.post2-py3-none-macosx_15_0_arm64.whl",
         sha256="0c6a2ad81b58520a105f977c24a8d9ac31703e198dd185949504f5480c1e1099",
         binary_sha256="3b7b5014580daee13acc8815bec716991970e7e40ef9e060b738210f4b46937e",
@@ -148,6 +150,7 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
         required_cpu_features=frozenset([]),
     ),
     StableDiffusionCppWheel(
+        source_revision="8cd731e7b4667eb8f40a153315b9a7125d09a58d",
         filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post2-py3-none-manylinux_2_35_aarch64.whl",
         sha256="3ba5533aaf47731ed4474475269741750535538bfa58d6b18fa726a7b5ee78b2",
         binary_sha256="3ca22f6b7472ffdd2a9641461880d7b7d196a8388fc54db7f9520bb76e7fa306",
@@ -162,6 +165,7 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
         required_cpu_features=frozenset([]),
     ),
     StableDiffusionCppWheel(
+        source_revision="8cd731e7b4667eb8f40a153315b9a7125d09a58d",
         filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post2-py3-none-manylinux_2_35_x86_64.whl",
         sha256="ddfcd9d6131b5f24abad805e53e75354b577310dc3073837bb02caa6a2d4b282",
         binary_sha256="03e299a8d380daf6d0f8ede70b0c8fe8cb686b85ae56eeb26739fca41db4f7e7",
@@ -178,6 +182,7 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
         ),
     ),
     StableDiffusionCppWheel(
+        source_revision="8cd731e7b4667eb8f40a153315b9a7125d09a58d",
         filename="skulk_stable_diffusion_cpp_vulkan-0.1.0.post2-py3-none-manylinux_2_35_x86_64.whl",
         sha256="d4ab2d993db3e5c5eed23273999a1b2ec8f7e2309504bcb5617a07cf8801dcf5",
         binary_sha256="94f619ed0ac2409e15e1efef9b6d8edaf69b5a5ee8cb683684cf3b021a02f792",
@@ -193,6 +198,7 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
         ),
     ),
     StableDiffusionCppWheel(
+        source_revision="8cd731e7b4667eb8f40a153315b9a7125d09a58d",
         filename="skulk_stable_diffusion_cpp_rocm-0.1.0.post2-py3-none-manylinux_2_35_x86_64.whl",
         sha256="db83255a863031bd0eb5bfb457efd940e7840bd98d7814eece74eaaad52c88f8",
         binary_sha256="8c2b53767eed146768c2439dede5d74b09ac7733a19b8087f3b9163ed195fdac",

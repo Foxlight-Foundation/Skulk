@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 env:
-  SDCPP_REF: 8cd731e7b4667eb8f40a153315b9a7125d09a58d
+  SDCPP_REF: b13a48219d5cdf408edcb93da6cd69b612ed03d3
 
 jobs:
   candidate:

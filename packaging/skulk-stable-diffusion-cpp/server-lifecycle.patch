@@ -76,7 +76,7 @@ index 2fe79bb..e0425b7 100644
      int64_t failed_ttl_seconds    = 600;
  };
 diff --git a/examples/server/main.cpp b/examples/server/main.cpp
-index ddfd733..f14bd77 100644
+index ddfd733..9397d3d 100644
 --- a/examples/server/main.cpp
 +++ b/examples/server/main.cpp
 @@ -4,6 +4,8 @@
@@ -98,7 +98,7 @@ index ddfd733..f14bd77 100644
 +        std::vector<char> devices(size + 1, '\0');
 +        sd_list_devices(devices.data(), devices.size());
 +        std::cout << json({{"protocol", 1},
-+                           {"source_revision", "8cd731e7b4667eb8f40a153315b9a7125d09a58d"},
++                           {"source_revision", "b13a48219d5cdf408edcb93da6cd69b612ed03d3"},
 +                           {"device_report", devices.data()}}).dump() << std::endl;
 +        return EXIT_SUCCESS;
 +    }
@@ -151,7 +151,7 @@ index ddfd733..f14bd77 100644
          if (origin.empty()) {
              origin = "*";
 diff --git a/examples/server/routes_sdcpp.cpp b/examples/server/routes_sdcpp.cpp
-index 3139682..f4ecfdb 100644
+index a6c8a1e..2d53f17 100644
 --- a/examples/server/routes_sdcpp.cpp
 +++ b/examples/server/routes_sdcpp.cpp
 @@ -818,12 +818,35 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
