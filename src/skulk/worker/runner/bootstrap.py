@@ -464,6 +464,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
                     lambda: engine_build_inventory(derivation.backends, facts)
                 ),
                 hardware_class_inventory(facts),
+                image_family=shard.model_card.image.family if shard.model_card.image is not None else None,
             ),
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),

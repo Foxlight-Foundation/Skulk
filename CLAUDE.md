@@ -1790,6 +1790,12 @@ approval/lifecycle and allocated compute remain separate from these declarations
 
 Native image profiles use the single-host/single-GPU `stable_diffusion_cpp`
 runner, with verified component hashes and private native-job ownership.
+Native instances retain their stamped engine build across upgrades. Retained
+package descriptors preserve source-specific cache paths; each instance verifies
+its exact build before load independently of the default advertised on the node.
+The runner prefers that cache over an inherited default, and restoring an older
+build never makes it the default for new placements. Known pre-FLUX.3 builds
+cannot serve the new FLUX.3 families; compatible untested hardware stays eligible.
 
 FLUX.3 Klein and Klein Base have distinct `flux_3_klein` and
 `flux_3_klein_base` image profiles. Their pinned diffusion transformer,

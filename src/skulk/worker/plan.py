@@ -86,7 +86,15 @@ def plan(
     reference_media_ready: Set[CommandId] | None = None,
     on_demand_backends: Set[str] = frozenset(),
     engine_install_requested: Set[InstanceId] = frozenset(),
+    engine_install_ready: Set[InstanceId] = frozenset(),
 ) -> Task | None:
+    """Select the next local lifecycle task from current runners and cluster state.
+
+    Installation requests suppress duplicate work. ``engine_install_ready``
+    identifies instances whose exact native build preparation completed; a
+    globally installed default cannot substitute for that per-instance proof.
+    This function performs no effects and returns ``None`` when nothing is ready.
+    """
     # Python short circuiting OR logic should evaluate these sequentially.
     return (
         # Kill orphaned or poisoned runners before issuing cooperative task
@@ -99,7 +107,7 @@ def plan(
         or _model_needs_download(node_id, runners, global_download_status)
         or _engine_needs_install(runners, on_demand_backends, engine_install_requested)
         or _init_distributed_backend(runners, all_runners)
-        or _load_model(runners, all_runners, global_download_status, on_demand_backends)
+        or _load_model(runners, all_runners, global_download_status, on_demand_backends, engine_install_ready)
         or _ready_to_warmup(runners, all_runners)
         or _pending_tasks(
             runners,
@@ -282,16 +290,23 @@ def _init_distributed_backend(
     return None
 
 
-def awaited_engine(shard: ShardMetadata, on_demand_backends: Set[str]) -> EngineType | None:
+def awaited_engine(
+    shard: ShardMetadata, on_demand_backends: Set[str], *, native_image_ready: bool = False
+) -> EngineType | None:
     """The on-demand engine a shard still waits for on this node, if any.
 
     Placement stamps the backend each shard resolved to; when that backend is
     advertised but not installed yet, the shard needs its engine installed
-    before the model can load. Unstamped shards resolve their engine in the
-    runner, which reports a missing engine itself.
+    before the model can load. Native image shards additionally verify their
+    exact pinned build per instance, independently of the node's default build.
+    Unstamped shards resolve their engine in the runner.
     """
     backend = shard.resolved_backend
-    if backend is None or backend not in on_demand_backends:
+    if backend is None:
+        return None
+    if engine_of(backend) == "stable_diffusion_cpp":
+        return None if native_image_ready else "stable_diffusion_cpp"
+    if backend not in on_demand_backends:
         return None
     return engine_of(backend)
 
@@ -305,8 +320,6 @@ def _engine_needs_install(
 
     Scheduled right after the model download so both proceed together.
     """
-    if not on_demand_backends:
-        return None
     for runner in runners.values():
         if _is_rpc_donor(runner) or not isinstance(runner.status, RunnerIdle):
             continue
@@ -330,13 +343,18 @@ def _load_model(
     all_runners: Mapping[RunnerId, RunnerStatus],
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
     on_demand_backends: Set[str] = frozenset(),
+    engine_install_ready: Set[InstanceId] = frozenset(),
 ) -> LoadModel | None:
     for runner in runners.values():
         instance = runner.bound_instance.instance
         shard_assignments = instance.shard_assignments
 
         # A shard whose engine installs on demand loads only once installed.
-        if awaited_engine(runner.bound_instance.bound_shard, on_demand_backends):
+        if awaited_engine(
+            runner.bound_instance.bound_shard,
+            on_demand_backends,
+            native_image_ready=instance.instance_id in engine_install_ready,
+        ):
             continue
 
         # RPC placements (#328) are role-asymmetric: donors never load (their

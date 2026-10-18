@@ -1772,6 +1772,13 @@ publication rejects provisional or inconsistent SDXL dimensions. Complete immuta
 placement can schedule an `InstallEngine` task for an exact published package;
 browsing does not acquire packages. `NodeResources.installable_engine_builds`
 records those candidates separately from measured `engine_builds`.
+Existing placements retain their `resolved_engine_build` across upgrades.
+Retained immutable package descriptors preserve each build's source-specific
+cache path and verified identity. Each native instance waits for its own exact
+`InstallEngine` preparation, even when another default build is installed; the
+runner prefers that exact cache over its inherited default. Preparing a retained
+build does not change the default for new placements. Known pre-FLUX.3 builds
+remain eligible for older families but cannot serve FLUX.3 profiles.
 Native package descriptors and build manifests additionally declare compiled
 CPU helper instructions. Package discovery also matches the interpreter's
 standard wheel-platform tags, rejecting older glibc, musl and older macOS before

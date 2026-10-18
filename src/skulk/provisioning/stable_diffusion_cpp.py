@@ -53,6 +53,11 @@ _DEVICE_COMPUTES: Final[dict[str, ImageCompute]] = {
 class StableDiffusionCppWheel(FrozenModel):
     """One published engine package, independently pinned before it is installable."""
 
+    source_revision: str = Field(
+        default=SOURCE_REVISION,
+        pattern=r"^[0-9a-f]{40}$",
+        description="Immutable native source revision, also used by the managed cache path.",
+    )
     filename: str = Field(
         pattern=r"^skulk_stable_diffusion_cpp_(?:metal|cuda|vulkan|rocm)-[a-zA-Z0-9_.]+-py3-none-[a-zA-Z0-9_]+\.whl$",
         description="Immutable wheel filename on the Foxlight engine index.",
@@ -198,6 +203,119 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
     ),
 )
 
+# Existing placements retain their exact build across source upgrades. These
+# immutable packages are restoration choices, never the default for new work.
+RETAINED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
+    StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
+        filename="skulk_stable_diffusion_cpp_metal-0.1.0.post1-py3-none-macosx_15_0_arm64.whl",
+        sha256="d84428a1073f21a4f40e8eec7610eb44eae86dd45170047473d18a4c568ca939",
+        binary_sha256="f0e876810448d30fe1a263bd8053f66b8b97ff20735f6aee9592492c2712abda",
+        payload_sha256="201af2888ceeeaaa86a7523023610b91e6ef7644f6b63b3af740c145ff4ace5d",
+        size_bytes=16435084,
+        expanded_size_bytes=42336264,
+        compute="metal",
+        system="darwin",
+        architecture="arm64",
+        qualified_hardware_classes=frozenset(["apple:apple-m4"]),
+        required_cpu_features=frozenset([]),
+    ),
+    StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
+        filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post1-py3-none-manylinux_2_35_aarch64.whl",
+        sha256="e4f68af1b4bca2041cf40e93ccb40868ea4cf92a660497aa57120e08393f8cfd",
+        binary_sha256="d569fe99973f3c4c3b3b6a0bd54593a21c60ec9338d5f62ffc06dc3376720b69",
+        payload_sha256="4ecf8709af95fd6429dc64d8f32ef43165b71b4ccd48a571222c56173510c1e9",
+        size_bytes=543371268,
+        expanded_size_bytes=748018484,
+        compute="cuda",
+        system="linux",
+        architecture="aarch64",
+        qualified_hardware_classes=frozenset(["nvidia:nvidia-gb10"]),
+        gpu_targets=("121a-real",),
+        required_cpu_features=frozenset([]),
+    ),
+    StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
+        filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post1-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="6a055d454b7dd90edf2d74e948a4398df123e74129564f51ebd6b4d35a3610ad",
+        binary_sha256="56c6f97815b103f6c0477d998ecbcc95f3dda60ef3965969ef9fffd59dbdd9c7",
+        payload_sha256="0dcd9be9a5e5607f1edc1b3218e55b7b045ef8fe608dd93341d64a1fefdda4ab",
+        size_bytes=613420003,
+        expanded_size_bytes=926212077,
+        compute="cuda",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset(
+            ["nvidia:nvidia-a100-sxm4-80gb", "nvidia:nvidia-geforce-rtx-4090"]
+        ),
+        gpu_targets=("80-real", "86-real", "89-real", "90-virtual"),
+        required_cpu_features=frozenset(
+            ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
+        ),
+    ),
+    StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
+        filename="skulk_stable_diffusion_cpp_vulkan-0.1.0.post1-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="dbbb89980b894a6ac00e7188f563e10bd01d7d10c9d9a00f88aaa1e57fd6fc96",
+        binary_sha256="23d7cf1efeb5d6c966813e15cee4a1b2fbb5c145fd77abbe9b6a8a1f778b273a",
+        payload_sha256="9b9984949802fbd0f2b33aa22044bc728c05f252b46ba21da471c4e86c550732",
+        size_bytes=30791307,
+        expanded_size_bytes=86390804,
+        compute="vulkan",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset(["amd:pci-1002-1586"]),
+        required_cpu_features=frozenset(
+            ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
+        ),
+    ),
+    StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
+        filename="skulk_stable_diffusion_cpp_rocm-0.1.0.post1-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="45bec6e5e4df083cbf44eeb81d5f09be5214c323994a4800ae918129e3bb44ff",
+        binary_sha256="67122895591407c0f1656bd9d8eb91c1e358e0ad6fe6ea77a154b0834e8ee3c4",
+        payload_sha256="46bfe6624f77b43f24bcef1ee2df6ffb2cb461b6ff4fc5bedda4a302998b2759",
+        size_bytes=2170695534,
+        expanded_size_bytes=4644443682,
+        compute="rocm",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset(["amd:pci-1002-74b9"]),
+        gpu_targets=("gfx942",),
+        required_cpu_features=frozenset(
+            ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
+        ),
+    ),
+)
+
+
+def _known_wheels() -> tuple[StableDiffusionCppWheel, ...]:
+    return PUBLISHED_WHEELS + RETAINED_WHEELS
+
+
+def _known_wheel_for_build(build: str) -> StableDiffusionCppWheel | None:
+    return next(
+        (wheel for wheel in _known_wheels()
+         if build in {wheel.build_identity, f"stable_diffusion_cpp@sha256:{wheel.binary_sha256}"}),
+        None,
+    )
+
+
+def native_image_build_supports_family(build: str, family: str) -> bool:
+    """Reject a known older engine's missing model implementation, not untested GPUs.
+
+    Unknown operator builds retain their runtime-probed eligibility. Retained
+    pre-FLUX.3 packages remain usable for their existing image model families.
+    """
+    wheel = _known_wheel_for_build(build)
+    return not (
+        family in {"flux_3_klein", "flux_3_klein_base"}
+        and wheel is not None
+        and wheel.source_revision == "d637cfb935feb2254898a8f1524046c958f3df80"
+    )
+
+
 
 @final
 class NativeImageProbe(FrozenModel):
@@ -314,7 +432,20 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
     if not isinstance(raw, dict):
         raise ValueError("native image probe is not an object")
     record = cast("dict[str, object]", raw)
-    if record.get("protocol") != 1 or record.get("source_revision") != SOURCE_REVISION:
+    binary_digest = file_sha256(binary)
+    build = f"stable_diffusion_cpp@sha256:{payload_digest or binary_digest}"
+    known = _known_wheel_for_build(build)
+    source_revision = record.get("source_revision")
+    # Retained sources are accepted only through their pinned executable/runtime
+    # identity; adding a source string must never admit arbitrary older binaries.
+    retained_source_matches = (
+        known is not None
+        and known.binary_sha256 == binary_digest
+        and known.source_revision == source_revision
+    )
+    if record.get("protocol") != 1 or (
+        source_revision != SOURCE_REVISION and not retained_source_matches
+    ):
         raise ValueError(
             "native image probe reports an unrecognized protocol or source"
         )
@@ -345,8 +476,8 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
     if not devices:
         raise ValueError("native image engine reports no GPU device")
     return NativeImageProbe(
-        source_revision=SOURCE_REVISION,
-        binary_sha256=file_sha256(binary),
+        source_revision=cast(str, source_revision),
+        binary_sha256=binary_digest,
         payload_sha256=payload_digest,
         devices=tuple(devices),
         computes=tuple(computes),
@@ -439,9 +570,7 @@ def native_image_build_hardware_matches(
     Unknown operator builds and absent hardware facts defer to the native device
     probe. Published builds reject demonstrated code-object mismatches.
     """
-    wheel = next(
-        (item for item in PUBLISHED_WHEELS if item.build_identity == build), None
-    )
+    wheel = _known_wheel_for_build(build)
     return (
         wheel is None
         or not hardware_classes
@@ -450,9 +579,14 @@ def native_image_build_hardware_matches(
 
 
 def wheel_for_host(
-    backend: str, hardware_classes: frozenset[str]
+    backend: str, hardware_classes: frozenset[str], *, expected_build: str | None = None
 ) -> StableDiffusionCppWheel | None:
-    """Match real host ABI, helper and compiled GPU requirements, not test coverage."""
+    """Match host ABI, helper and compiled GPU requirements, not test coverage.
+
+    New placements use the current published default. ``expected_build`` also
+    permits an exact retained package for an existing placement; no other older
+    package becomes a fallback. Return ``None`` for an incompatible host/build.
+    """
     machine = platform.machine().lower()
     system = platform.system().lower()
     machine = (
@@ -467,8 +601,11 @@ def wheel_for_host(
     return next(
         (
             wheel
-            for wheel in PUBLISHED_WHEELS
-            if wheel.system == system
+            for wheel in (
+                PUBLISHED_WHEELS if expected_build is None else _known_wheels()
+            )
+            if (expected_build is None or wheel.build_identity == expected_build)
+            and wheel.system == system
             and wheel.architecture == machine
             and wheel.filename.rsplit("-", 1)[1].removesuffix(".whl") in host_platforms
             and backend == f"stable_diffusion_cpp-{wheel.compute}"
@@ -483,7 +620,7 @@ def wheel_for_host(
 
 
 def _root(wheel: StableDiffusionCppWheel) -> Path:
-    return SKULK_ENGINES_DIR / "stable_diffusion_cpp" / SOURCE_REVISION / wheel.sha256
+    return SKULK_ENGINES_DIR / "stable_diffusion_cpp" / wheel.source_revision / wheel.sha256
 
 
 @contextmanager
@@ -551,8 +688,8 @@ def prepared_native_image(
     inherited environment cannot prove current cache readiness. Only the exact
     eligible package/build is returned; loading still probes the actual GPU.
     """
-    wheel = wheel_for_host(backend, hardware_classes)
-    if wheel is None or wheel.build_identity != expected_build:
+    wheel = wheel_for_host(backend, hardware_classes, expected_build=expected_build)
+    if wheel is None:
         return None
     return _verify_payload(_root(wheel), wheel)
 
@@ -605,7 +742,12 @@ def install_native_image(
     interruption leaves no final cache. Offline mode only reuses verified bytes.
     """
     env = os.environ if environ is None else environ
-    if explicit := env.get(BINARY_ENV, "").strip():
+    explicit = env.get(BINARY_ENV, "").strip()
+    managed_default = explicit and any(
+        Path(explicit) == _root(item) / item.prefix / "bin/sd-server"
+        for item in _known_wheels()
+    )
+    if explicit and not managed_default:
         binary = Path(explicit)
         observed = probe_native_image(binary)
         if (
@@ -617,8 +759,8 @@ def install_native_image(
                 "the engine check", "override build or GPU differs from placement"
             )
         return binary
-    wheel = wheel_for_host(backend, hardware_classes)
-    if wheel is None or wheel.build_identity != expected_build:
+    wheel = wheel_for_host(backend, hardware_classes, expected_build=expected_build)
+    if wheel is None:
         raise ImageEngineInstallError(
             "the eligibility check",
             "no exact published image engine matches this placement",
@@ -741,5 +883,8 @@ def install_native_image(
             raise ImageEngineInstallError(
                 "the engine check", "cached build/device no longer matches placement"
             )
-        os.environ[BINARY_ENV] = str(binary)
+        # Old stamped instances may coexist with the default build. Preparing
+        # their exact cache must not change what new placements advertise.
+        if wheel in PUBLISHED_WHEELS:
+            os.environ[BINARY_ENV] = str(binary)
         return binary

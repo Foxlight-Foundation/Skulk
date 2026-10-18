@@ -36,6 +36,13 @@ When preparation is needed, the preview's `engine_install` describes its additio
 engine download. Accepted placement installs the exact engine package and pinned
 model components before load. Browsing the catalog does not download them.
 
+An existing placement retains its exact engine build when Skulk upgrades. The
+worker verifies that build's cache before loading, reusing or acquiring the
+retained immutable package when necessary. Different builds can serve different
+instances on the same node; new placements use the current default. Offline
+restoration requires the exact package to remain cached. An older retained build
+does not acquire newer model-family implementations merely because Skulk upgraded.
+
 Native inference currently runs on one host and one GPU. Managed packages cover
 macOS ARM64 Metal, Linux ARM64/x86_64 CUDA, and Linux x86_64 Vulkan/ROCm.
 Actual wheel ABI, CPU helper instructions, compiled GPU targets and runtime

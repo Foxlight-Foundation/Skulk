@@ -3827,7 +3827,10 @@ class Worker:
             installed = any(
                 engine_of(tag) == job.engine for tag in derivation.installed_backends
             )
-            if still_on_demand or not installed:
+            # Native preparation has already verified this instance's exact
+            # build and GPU. A retained build can be ready while the newer
+            # process-wide default remains on demand.
+            if job.engine != "stable_diffusion_cpp" and (still_on_demand or not installed):
                 raise ComfyInstallError(
                     "the engine check",
                     "the installed engine does not report as usable on this node",
@@ -3924,6 +3927,12 @@ class Worker:
                 self._reference_media_ready,
                 on_demand_backends=self._on_demand_backends,
                 engine_install_requested=frozenset(self._engine_install_tasks),
+                engine_install_ready=frozenset(
+                    instance_id
+                    for instance_id, task_id in self._engine_install_tasks.items()
+                    if (install_task := self.state.tasks.get(task_id)) is not None
+                    and install_task.task_status == TaskStatus.Complete
+                ),
             )
             if not isinstance(task, CreateRunner):
                 return task

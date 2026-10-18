@@ -13,6 +13,7 @@ from anyio import to_thread
 
 import skulk.facts as facts_module
 import skulk.provisioning.comfy as comfy_module
+import skulk.provisioning.stable_diffusion_cpp as image_module
 from skulk.facts.derive import BackendDerivation
 from skulk.facts.testing import NVIDIA_A40, make_facts
 from skulk.routing.router import get_node_id_keypair
@@ -232,6 +233,35 @@ async def test_an_install_the_node_does_not_report_as_usable_fails(
     failures = [forwarded.command for forwarded in commands.collect()]
     assert len(failures) == 1 and isinstance(failures[0], FailInstance)
     assert "the engine check failed" in failures[0].error_message
+
+
+@pytest.mark.usefixtures("node_facts")
+async def test_retained_native_build_can_be_ready_while_default_is_on_demand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exact native preparation, rather than global default facts, releases a waiter."""
+    worker, events, commands = _worker(tmp_path)
+    prepared: list[tuple[str, str]] = []
+
+    def install(backend: str, build: str, _classes: frozenset[str], *,
+                offline: bool, stop: threading.Event) -> Path:
+        assert not offline and not stop.is_set()
+        prepared.append((backend, build))
+        return tmp_path / "verified-retained-server"
+
+    backend = "stable_diffusion_cpp-cuda"
+    monkeypatch.setattr(image_module, "install_native_image", install)
+    monkeypatch.setattr(facts_module, "current_backend_derivation", lambda: BackendDerivation(
+        backends=frozenset({backend}), on_demand_backends=frozenset({backend})))
+    task = TaskId("retained-install")
+    job = _EngineInstallJob(engine="stable_diffusion_cpp", resolved_backend=backend,
+                           expected_build="retained-build", waiters={_FIRST: task})
+    await worker._run_engine_install(job)
+    assert prepared == [(backend, "retained-build")]
+    assert job.succeeded and job.finished
+    assert _statuses(events) == [(task, TaskStatus.Complete)]
+    assert worker._on_demand_backends == frozenset({backend})
+    assert commands.collect() == []
 
 
 def test_a_runner_that_finds_no_engine_is_terminal_for_its_instance() -> None:

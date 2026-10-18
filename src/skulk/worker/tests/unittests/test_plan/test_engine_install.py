@@ -2,6 +2,8 @@
 
 from collections.abc import Set
 
+import pytest
+
 import skulk.worker.plan as plan_mod
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.tasks import InstallEngine, LoadModel, Task
@@ -28,9 +30,11 @@ def _plan(
     downloaded: bool,
     on_demand: Set[str] = _ON_DEMAND,
     requested: Set[InstanceId] = frozenset(),
+    ready: Set[InstanceId] = frozenset(),
+    backend: str = "comfy-cuda",
 ) -> Task | None:
     shard = get_pipeline_shard_metadata(model_id=MODEL_A_ID, device_rank=0).model_copy(
-        update={"resolved_backend": "comfy-cuda"}
+        update={"resolved_backend": backend, "resolved_engine_build": "pinned-build"}
     )
     instance = get_mlx_ring_instance(
         instance_id=INSTANCE_1_ID,
@@ -71,6 +75,7 @@ def _plan(
         tasks={},
         on_demand_backends=on_demand,
         engine_install_requested=requested,
+        engine_install_ready=ready,
     )
 
 
@@ -93,3 +98,22 @@ def test_model_loads_once_its_engine_is_installed() -> None:
 
 def test_installed_engines_never_request_an_install() -> None:
     assert isinstance(_plan(downloaded=True, on_demand=frozenset()), LoadModel)
+
+
+@pytest.mark.parametrize("on_demand", [frozenset[str](), frozenset({"stable_diffusion_cpp-cuda"})])
+def test_native_instance_prepares_its_exact_build_independently_of_default(
+    on_demand: Set[str],
+) -> None:
+    """A ready default does not prove the cache for a restored instance's pin."""
+    backend = "stable_diffusion_cpp-cuda"
+    task = _plan(downloaded=True, backend=backend, on_demand=on_demand)
+    assert isinstance(task, InstallEngine)
+    assert task.resolved_backend == backend and task.expected_build == "pinned-build"
+    assert _plan(downloaded=True, backend=backend, on_demand=on_demand,
+                 requested={INSTANCE_1_ID}) is None
+    # Another instance's successful preparation cannot release this one.
+    assert _plan(downloaded=True, backend=backend, on_demand=on_demand,
+                 requested={INSTANCE_1_ID}, ready={InstanceId("another-instance")}) is None
+    task = _plan(downloaded=True, backend=backend, on_demand=on_demand,
+                 requested={INSTANCE_1_ID}, ready={INSTANCE_1_ID})
+    assert isinstance(task, LoadModel)

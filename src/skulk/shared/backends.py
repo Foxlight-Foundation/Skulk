@@ -569,14 +569,19 @@ def runtime_backends_for_builds(
     backends: frozenset[str],
     engine_builds: Mapping[str, str],
     hardware_classes: frozenset[str],
+    *,
+    image_family: str | None = None,
 ) -> frozenset[str]:
-    """Remove known compiled-target mismatches, independently of test coverage.
+    """Remove known build requirements that conflict with this node or model.
 
     Installed operator binaries retain their runtime-probed compatibility.
     Published package requirements cannot be bypassed by declaring an engine.
+    ``image_family`` additionally checks known native model implementations;
+    qualification history never restricts the returned backend set.
     """
     from skulk.provisioning.stable_diffusion_cpp import (
         native_image_build_hardware_matches,
+        native_image_build_supports_family,
     )
 
     allowed = set(backends)
@@ -592,8 +597,9 @@ def runtime_backends_for_builds(
                 allowed.discard(backend)
         if engine_of(
             backend
-        ) == "stable_diffusion_cpp" and not native_image_build_hardware_matches(
-            build, hardware_classes
+        ) == "stable_diffusion_cpp" and (
+            not native_image_build_hardware_matches(build, hardware_classes)
+            or (image_family is not None and not native_image_build_supports_family(build, image_family))
         ):
             allowed.discard(backend)
     return frozenset(allowed)
