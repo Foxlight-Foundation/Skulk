@@ -184,7 +184,7 @@ def launch_flags(
 ) -> tuple[str, ...]:
     """Return launch flags for the backend, selected weights and model family.
 
-    The ROCm lane adds ``ROCM_LAUNCH_FLAGS``, the RAM-pressure cache headroom
+    The H3 ROCm lane adds ``ROCM_LAUNCH_FLAGS``. Every ROCm family adds the RAM-pressure cache headroom
     (``ROCM_CACHE_RAM_HEADROOM_FRACTION`` of ``total_ram_bytes``, the host's
     RAM when omitted, in whole GiB), and ``--disable-mmap`` when any of
     ``weight_files`` is larger than ``ROCM_MMAP_CEILING_BYTES``; every other
@@ -192,8 +192,9 @@ def launch_flags(
     also uses disk-backed dynamic loading so CPU weight staging competes less
     with GPU allocations on unified-memory systems. It still executes on the
     GPU and retains ordinary memory admission. LTX on ROCm instead selects the
-    engine's split attention path to preserve prompt subject adherence. This
-    also executes on the GPU. No files or settings are changed.
+    engine's split attention path to preserve prompt subject adherence and
+    leaves VAE precision to each component's supported dtypes. This also
+    executes on the GPU. No files or settings are changed.
     """
     if not _is_rocm_lane(resolved_backend):
         if model_family == "ltx-2.5":
@@ -205,7 +206,11 @@ def launch_flags(
         return CUDA_LAUNCH_FLAGS
     ram = total_ram_bytes if total_ram_bytes is not None else psutil.virtual_memory().total
     headroom_gib = max(1, int(ram * ROCM_CACHE_RAM_HEADROOM_FRACTION / 1024**3))
-    flags = (*ROCM_LAUNCH_FLAGS, "--cache-ram", str(headroom_gib))
+    # Forcing BF16 overrides the LTX audio VAE's FP32-only working dtype;
+    # its mel preprocessor returns FP32 and source encoding then fails in
+    # the first BF16 convolution. Let Comfy select each LTX VAE's dtype.
+    vae_flags = () if model_family == "ltx-2.5" else ROCM_LAUNCH_FLAGS
+    flags = (*vae_flags, "--cache-ram", str(headroom_gib))
     if model_family == "ltx-2.5":
         # The pinned ROCm default produced unrelated subjects in matched LTX
         # renders; split attention recovered the requested subjects with the
