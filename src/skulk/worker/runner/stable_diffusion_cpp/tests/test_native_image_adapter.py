@@ -17,6 +17,7 @@ from skulk.shared.models.image import (
     ImageCardConfig,
     ImageComponent,
     ImageComponentFile,
+    ImageFamily,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
@@ -318,3 +319,49 @@ def test_sdxl_does_not_silently_discard_extra_reference_input() -> None:
     assert body["init_image"] == base64.b64encode(first).decode()
     with pytest.raises(ValueError, match="initialization image"):
         adapter.native_image_request(card, params, 42, (first, _image("blue")))
+
+
+@pytest.mark.parametrize(
+    ("family", "steps", "guidance"),
+    [("flux_3_klein", 16, 1.0), ("flux_3_klein_base", 50, 3.5)],
+)
+def test_flux3_checkpoint_sampling_and_prepared_caption_survive_translation(
+    family: ImageFamily, steps: int, guidance: float,
+) -> None:
+    """Distilled/Base captions and ten ordered references reach the native API unchanged."""
+    original = _card()
+    assert original.image is not None
+    # FLUX.3 conditions references through its VAE; it needs the Qwen3-VL text
+    # weights but does not require Qwen Image's separate vision projector.
+    profile = ImageCardConfig(
+        family=family, default_steps=steps, default_guidance=guidance,
+        max_reference_images=10, supports_alpha=False,
+        components=tuple(
+            component for component in original.image.components
+            if component.role != "text_encoder_vision"
+        ),
+    )
+    card = ModelCard.model_validate_json(original.model_copy(
+        update={"image": profile, "storage_size": Memory.from_bytes(9)}
+    ).model_dump_json())
+    prompt = 'Full-color studio photograph of a fox <fox> beside a blue mug. [{"id":"fox","bbox":[0,0,1000,500]}]'
+    references = tuple(_image(f"#{index:06x}") for index in range(10))
+    body = adapter.native_image_request(
+        card,
+        ImageEditsTaskParams(model="owner/model", prompt=prompt, input_image_count=10),
+        42, references,
+    )
+    assert body["prompt"] == prompt
+    assert body["sample_params"] == {
+        "sample_method": "euler", "sample_steps": steps,
+        "guidance": {"txt_cfg": guidance},
+    }
+    assert body["ref_images"] == [base64.b64encode(item).decode() for item in references]
+    assert "init_image" not in body
+    assert card.image is not None
+    assert ImageCardConfig.model_validate_json(card.image.model_dump_json()) == card.image
+    with pytest.raises(ValueError, match="reference input"):
+        adapter.native_image_request(
+            card, ImageEditsTaskParams(model="owner/model", prompt=prompt),
+            42, (*references, references[0]),
+        )

@@ -16,10 +16,10 @@ import zipfile
 from pathlib import Path
 from typing import Literal
 
-SOURCE_REVISION = "d637cfb935feb2254898a8f1524046c958f3df80"
+SOURCE_REVISION = "8cd731e7b4667eb8f40a153315b9a7125d09a58d"
 GGML_REVISION = "d25b121ce1d6ae0c7e62ad080460d9fc1e46dd93"
-PATCH_SHA256 = "5c97917794372067d71ef6a49083f0c1afcfa3bbf46a368d08a7d0591691769b"
-VERSION = "0.1.0.post1"
+PATCH_SHA256 = "5169e54969c0cf6d5f8f2ce7cfd183632e7316ef0bda7de272fdf2b186f65473"
+VERSION = "0.1.0.post2"
 Variant = Literal["metal", "cuda", "vulkan", "rocm"]
 PLATFORMS = {
     "macosx_15_0_arm64": ("darwin", "arm64"),

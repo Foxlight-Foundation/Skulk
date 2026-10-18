@@ -76,7 +76,7 @@ index 2fe79bb..e0425b7 100644
      int64_t failed_ttl_seconds    = 600;
  };
 diff --git a/examples/server/main.cpp b/examples/server/main.cpp
-index 1768f0d..a24e97d 100644
+index ddfd733..7d4546d 100644
 --- a/examples/server/main.cpp
 +++ b/examples/server/main.cpp
 @@ -4,6 +4,8 @@

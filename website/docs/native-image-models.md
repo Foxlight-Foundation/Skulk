@@ -7,7 +7,7 @@ sidebar_position: 6
 <!-- Copyright 2026 Foxlight Foundation -->
 
 Skulk serves Qwen Image 2.1, Qwen Image 2.1 Turbo, FLUX.2 Klein 4B,
-Z-Image Turbo and SDXL through the on-demand `stable_diffusion_cpp` engine.
+FLUX.3 Klein, FLUX.3 Klein Base, Z-Image Turbo and SDXL through the on-demand `stable_diffusion_cpp` engine.
 Each quantization or reference artifact has its own immutable model card.
 SDXL metadata exposes its mixed-width UNet through `image.unetStructure`;
 its generic dimensions count verified modules and maximum module output width
@@ -79,3 +79,25 @@ results remain scoped evidence rather than permission to select a model.
 
 Model users review and accept the applicable model license. The catalog exposes
 license information independently of engine availability and hardware test coverage.
+
+## FLUX.3 Klein captions and components
+
+FLUX.3 Klein is a separate image architecture from FLUX.2 Klein. The distilled
+profile defaults to 16 steps and guidance 1; Klein Base defaults to 50 steps
+and guidance 3.5. Each selected quantization has its own exact card. Both need
+the diffusion weights, a Qwen3-VL-4B text encoder and the FLUX.2 VAE; the
+transformer's 5.6B parameter count excludes its text encoder and runtime workspace.
+The card accounts for all pinned component bytes.
+
+[BFL recommends full scene captions](https://huggingface.co/black-forest-labs/flux-3-image-klein#prompting),
+including framing, subjects, lighting and the requested edit. Expand a short
+request with a suitable language model, or supply a prepared caption directly.
+Skulk sends `prompt` unchanged: it does not load the separate BFL prompt-upsample
+model, rewrite a caption, or require another mounted chat model for image serving.
+For an edit, the prepared caption should describe the reference scene with the
+requested change incorporated. Up to ten ordered reference images can be supplied
+subject to the existing aggregate media/pixel limits.
+
+BFL's textual bounding-box syntax may be included in the caption; it does not
+add a new Skulk request parameter or a hard pixel mask. Runtime qualification
+checks execution and transport separately from subjective prompt adherence.
