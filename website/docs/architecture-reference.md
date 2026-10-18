@@ -1772,6 +1772,15 @@ publication rejects provisional or inconsistent SDXL dimensions. Complete immuta
 placement can schedule an `InstallEngine` task for an exact published package;
 browsing does not acquire packages. `NodeResources.installable_engine_builds`
 records those candidates separately from measured `engine_builds`.
+Existing placements retain their `resolved_engine_build` across upgrades.
+Retained immutable package descriptors preserve each build's source-specific
+cache path and verified identity. Each native instance waits for its own exact
+`InstallEngine` preparation, even when another default build is installed; the
+runner prefers that exact cache over its inherited default. Preparing a retained
+build does not change the default for new placements. Known pre-FLUX.3 builds
+remain eligible for older families but cannot serve FLUX.3 profiles.
+Explicit operator builds retain the previously accepted source/probe contract;
+their measured executable/runtime identity must still match the stamped build.
 Native package descriptors and build manifests additionally declare compiled
 CPU helper instructions. Package discovery also matches the interpreter's
 standard wheel-platform tags, rejecting older glibc, musl and older macOS before
@@ -1797,6 +1806,15 @@ native jobs. The native watchdog exits on owner death. `SKULK_STABLE_DIFFUSION_C
 selects a preprepared binary; package preparation obeys offline mode and
 `SKULK_NO_ENGINE_AUTOPROVISION`. Ordered reference edits use slot-indexed
 `VISION_MEDIA` frames and worker-local media, never replicated input bytes.
+
+FLUX.3 Klein and Klein Base have distinct `flux_3_klein` and
+`flux_3_klein_base` image profiles. Their pinned diffusion transformer,
+Qwen3-VL-4B text encoder and FLUX.2 VAE use the existing native runner;
+ordered edits accept up to ten references. Checkpoint cards carry their own
+sampling defaults. The API forwards captions literally, including textual
+bounding-box instructions, and does not silently invoke a prompt upsampler.
+Model users can prepare full scene captions using any suitable language model.
+
 Qwen Image 2.1 and Turbo CUDA/Vulkan instances enable Flash Attention at load time
 to reduce attention memory pressure at the default 2048-square canvas. ROCm
 instances also enable it to avoid observed native kernel-launch failures at

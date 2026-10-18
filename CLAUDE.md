@@ -1790,6 +1790,23 @@ approval/lifecycle and allocated compute remain separate from these declarations
 
 Native image profiles use the single-host/single-GPU `stable_diffusion_cpp`
 runner, with verified component hashes and private native-job ownership.
+Native instances retain their stamped engine build across upgrades. Retained
+package descriptors preserve source-specific cache paths; each instance verifies
+its exact build before load independently of the default advertised on the node.
+The runner prefers that cache over an inherited default, and restoring an older
+build never makes it the default for new placements. Known pre-FLUX.3 builds
+cannot serve the new FLUX.3 families; compatible untested hardware stays eligible.
+Explicit operator builds keep the prior supported source/probe contract and
+must still match the instance's exact measured build identity.
+
+FLUX.3 Klein and Klein Base have distinct `flux_3_klein` and
+`flux_3_klein_base` image profiles. Their pinned diffusion transformer,
+Qwen3-VL-4B text encoder and FLUX.2 VAE use the existing native runner;
+ordered edits accept up to ten references. Checkpoint cards carry their own
+sampling defaults. The API forwards captions literally, including textual
+bounding-box instructions, and does not silently invoke a prompt upsampler.
+Model users can prepare full scene captions using any suitable language model.
+
 Qwen Image 2.1 and Turbo CUDA/Vulkan loads enable Flash Attention to reduce memory
 pressure at the default 2048-square canvas. ROCm loads also enable it to avoid
 observed native kernel-launch failures at that canvas.

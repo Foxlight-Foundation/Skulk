@@ -11,6 +11,26 @@ const profile: ImageCapabilityInfo = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Native image request ownership', () => {
+  it.each(['flux_3_klein', 'flux_3_klein_base'] as const)('sends literal %s captions and ten references in order', async family => {
+    const caption = 'Studio photograph: an orange fox sits beside two ceramic mugs, cream wall and soft window light.';
+    const references = Array.from({ length: 10 }, (_, index) => `data:image/png;base64,${btoa(String(index))}`);
+    let form: FormData | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('data:')) return new Response(atob(url.split(',')[1]));
+      expect(url).toBe('/v1/images/edits');
+      form = init?.body as FormData;
+      return new Response('data: {"type":"final","image_index":0,"data":{"b64_json":"aW1hZ2U="}}\n\ndata: [DONE]\n\n');
+    }));
+    const klein: ImageCapabilityInfo = { ...profile, family, maxReferenceImages: 10, fixedSigmas: [], defaultSteps: family === 'flux_3_klein' ? 16 : 50 };
+    await requestDashboardImages('model', caption, DEFAULT_IMAGE_PARAMS, klein, references, new AbortController().signal);
+    const captured = form as FormData | null;
+    expect(captured?.get('prompt')).toBe(caption);
+    expect(captured?.get('advanced_params')).toBe('{}');
+    const files = captured?.getAll('image[]') as File[];
+    expect(await Promise.all(files.map(file => file.text()))).toEqual(Array.from({ length: 10 }, (_, index) => String(index)));
+    await expect(requestDashboardImages('model', caption, DEFAULT_IMAGE_PARAMS, klein, [...references, references[0]], new AbortController().signal)).rejects.toThrow('at most 10');
+  });
   it('preserves reference order and removes incompatible distilled overrides', async () => {
     let form: FormData | null = null;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

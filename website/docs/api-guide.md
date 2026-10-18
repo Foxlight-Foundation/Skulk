@@ -1718,6 +1718,9 @@ PNG and WebP preserve native alpha output; JPEG encoding discards alpha.
 Native producers run one image at a time and retain no terminal job after
 collection. Disconnect and cancellation stop the owned task. Compatible untested
 hardware remains eligible; qualification records describe only observed results.
+FLUX.3 Klein/Base use the same image routes and forward the supplied caption unchanged;
+Skulk does not automatically run prompt expansion. Prepared full scene captions and
+textual layout instructions belong in `prompt`; there is no separate bounding-box field.
 See [Native image models](native-image-models.md) for model aliases, first-use engine
 installation, platform requirements and the supported request flow.
 

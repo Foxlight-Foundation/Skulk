@@ -16,7 +16,11 @@ import httpx
 
 from skulk.api.types.api import ImageEditsTaskParams, ImageGenerationStats
 from skulk.facts import current_node_facts, hardware_class_inventory
-from skulk.provisioning.stable_diffusion_cpp import BINARY_ENV, prepared_native_image
+from skulk.provisioning.stable_diffusion_cpp import (
+    BINARY_ENV,
+    native_image_build_supports_family,
+    prepared_native_image,
+)
 from skulk.shared.constants import SKULK_CACHE_HOME
 from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.events import (
@@ -153,9 +157,10 @@ class Runner(ServedConcurrentDispatch):
                     self.shard_metadata.resolved_engine_build,
                 )
                 binary = os.environ.get(BINARY_ENV, "").strip()
-                if not binary and backend is not None and build is not None:
+                if backend is not None and build is not None:
                     # Spawn captures the pre-install environment. Recheck the
                     # immutable cache after the worker's install gate has passed.
+                    # An inherited default may belong to another live instance.
                     prepared = prepared_native_image(
                         backend, build, hardware_class_inventory(current_node_facts())
                     )
@@ -165,6 +170,8 @@ class Runner(ServedConcurrentDispatch):
                     raise ValueError(
                         "native image placement lacks a prepared exact engine build"
                     )
+                if not native_image_build_supports_family(build, self.card.image.family):
+                    raise ValueError("native image build predates the selected model family")
                 self.work_dir.mkdir(parents=True, exist_ok=True)
                 self.server = NativeImageServer(
                     Path(binary),

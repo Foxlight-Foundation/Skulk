@@ -1,5 +1,6 @@
 """CUDA image packages must not inherit build-host collective dependencies."""
 
+import hashlib
 import json
 import zipfile
 from pathlib import Path
@@ -92,3 +93,14 @@ def test_native_package_records_compiled_cpu_requirements(
         assert name in manifest["members"]
     assert manifest["required_cpu_features"] == descriptor["required_cpu_features"]
     assert manifest["payload_sha256"] == descriptor["payload_sha256"]
+
+
+def test_native_probe_revision_matches_assembled_source() -> None:
+    """The C++ probe must bind the same immutable source as package provenance."""
+    from skulk.provisioning import stable_diffusion_cpp as runtime
+
+    patch = (Path(__file__).parents[2] / "packaging/skulk-stable-diffusion-cpp/server-lifecycle.patch").read_bytes()
+    assert f'{{"source_revision", "{builder.SOURCE_REVISION}"}}'.encode() in patch
+    assert hashlib.sha256(patch).hexdigest() == builder.PATCH_SHA256
+    assert runtime.SOURCE_REVISION == builder.SOURCE_REVISION
+    assert runtime.SERVER_PATCH_SHA256 == builder.PATCH_SHA256

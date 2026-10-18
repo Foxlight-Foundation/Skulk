@@ -30,9 +30,16 @@ from skulk.utils.pydantic_ext import FrozenModel
 if TYPE_CHECKING:
     from skulk.shared.types.node_facts import NodeFacts
 
-SOURCE_REVISION: Final = "d637cfb935feb2254898a8f1524046c958f3df80"
+SOURCE_REVISION: Final = "8cd731e7b4667eb8f40a153315b9a7125d09a58d"
+# The previous source implements the same hardened protocol. Operator builds
+# were supported before this upgrade and still bind readiness to measured bytes;
+# replacing a managed default must not revoke their explicit binary override.
+COMPATIBLE_PROBE_SOURCES: Final = frozenset({
+    SOURCE_REVISION,
+    "d637cfb935feb2254898a8f1524046c958f3df80",
+})
 SERVER_PATCH_SHA256: Final = (
-    "5c97917794372067d71ef6a49083f0c1afcfa3bbf46a368d08a7d0591691769b"
+    "51c67831044dee71e071519b5d868dc8e0c79eadb61b6100fdd6c68ca39f3ed7"
 )
 BINARY_ENV: Final = "SKULK_STABLE_DIFFUSION_CPP_BIN"
 ImageCompute = Literal["metal", "cuda", "vulkan", "rocm"]
@@ -53,6 +60,11 @@ _DEVICE_COMPUTES: Final[dict[str, ImageCompute]] = {
 class StableDiffusionCppWheel(FrozenModel):
     """One published engine package, independently pinned before it is installable."""
 
+    source_revision: str = Field(
+        default=SOURCE_REVISION,
+        pattern=r"^[0-9a-f]{40}$",
+        description="Immutable native source revision, also used by the managed cache path.",
+    )
     filename: str = Field(
         pattern=r"^skulk_stable_diffusion_cpp_(?:metal|cuda|vulkan|rocm)-[a-zA-Z0-9_.]+-py3-none-[a-zA-Z0-9_]+\.whl$",
         description="Immutable wheel filename on the Foxlight engine index.",
@@ -123,6 +135,86 @@ class StableDiffusionCppWheel(FrozenModel):
 # governed by host ABI and actual compiled requirements, independently of tests.
 PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
     StableDiffusionCppWheel(
+        filename="skulk_stable_diffusion_cpp_metal-0.1.0.post2-py3-none-macosx_15_0_arm64.whl",
+        sha256="0c6a2ad81b58520a105f977c24a8d9ac31703e198dd185949504f5480c1e1099",
+        binary_sha256="3b7b5014580daee13acc8815bec716991970e7e40ef9e060b738210f4b46937e",
+        payload_sha256="f7e3a29c9dd5b2d6447b77306a9ca0e8049ec6ddf3518814046aee047131498c",
+        size_bytes=16464676,
+        expanded_size_bytes=42422328,
+        compute="metal",
+        system="darwin",
+        architecture="arm64",
+        qualified_hardware_classes=frozenset(["apple:apple-m4"]),
+        required_cpu_features=frozenset([]),
+    ),
+    StableDiffusionCppWheel(
+        filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post2-py3-none-manylinux_2_35_aarch64.whl",
+        sha256="3ba5533aaf47731ed4474475269741750535538bfa58d6b18fa726a7b5ee78b2",
+        binary_sha256="3ca22f6b7472ffdd2a9641461880d7b7d196a8388fc54db7f9520bb76e7fa306",
+        payload_sha256="c41d806ba0ed7ae311540e2909de98efe4933534a260e72ba43440c086ddebd6",
+        size_bytes=543410025,
+        expanded_size_bytes=748215092,
+        compute="cuda",
+        system="linux",
+        architecture="aarch64",
+        qualified_hardware_classes=frozenset(["nvidia:nvidia-gb10"]),
+        gpu_targets=("121a-real",),
+        required_cpu_features=frozenset([]),
+    ),
+    StableDiffusionCppWheel(
+        filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post2-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="ddfcd9d6131b5f24abad805e53e75354b577310dc3073837bb02caa6a2d4b282",
+        binary_sha256="03e299a8d380daf6d0f8ede70b0c8fe8cb686b85ae56eeb26739fca41db4f7e7",
+        payload_sha256="e25169554e631c2b3e8967efd88eade5957876542425220c4feed949c01a18de",
+        size_bytes=613436425,
+        expanded_size_bytes=926277613,
+        compute="cuda",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset([]),
+        gpu_targets=("80-real", "86-real", "89-real", "90-virtual"),
+        required_cpu_features=frozenset(
+            ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
+        ),
+    ),
+    StableDiffusionCppWheel(
+        filename="skulk_stable_diffusion_cpp_vulkan-0.1.0.post2-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="d4ab2d993db3e5c5eed23273999a1b2ec8f7e2309504bcb5617a07cf8801dcf5",
+        binary_sha256="94f619ed0ac2409e15e1efef9b6d8edaf69b5a5ee8cb683684cf3b021a02f792",
+        payload_sha256="703ce79d80235ef1a389c686729e784e3168dc229bd18b77d0c2245d29ac3061",
+        size_bytes=30825397,
+        expanded_size_bytes=86485012,
+        compute="vulkan",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset(["amd:pci-1002-1586"]),
+        required_cpu_features=frozenset(
+            ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
+        ),
+    ),
+    StableDiffusionCppWheel(
+        filename="skulk_stable_diffusion_cpp_rocm-0.1.0.post2-py3-none-manylinux_2_35_x86_64.whl",
+        sha256="db83255a863031bd0eb5bfb457efd940e7840bd98d7814eece74eaaad52c88f8",
+        binary_sha256="8c2b53767eed146768c2439dede5d74b09ac7733a19b8087f3b9163ed195fdac",
+        payload_sha256="ce8d24948486b874c8f456e43ec74bcbf0e1713d23b34038db6f37ef5e8e3dbb",
+        size_bytes=2170738199,
+        expanded_size_bytes=4644532802,
+        compute="rocm",
+        system="linux",
+        architecture="x86_64",
+        qualified_hardware_classes=frozenset([]),
+        gpu_targets=("gfx942",),
+        required_cpu_features=frozenset(
+            ["avx", "avx2", "bmi2", "f16c", "fma", "sse4_2"]
+        ),
+    ),
+)
+
+# Existing placements retain their exact build across source upgrades. These
+# immutable packages are restoration choices, never the default for new work.
+RETAINED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
+    StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
         filename="skulk_stable_diffusion_cpp_metal-0.1.0.post1-py3-none-macosx_15_0_arm64.whl",
         sha256="d84428a1073f21a4f40e8eec7610eb44eae86dd45170047473d18a4c568ca939",
         binary_sha256="f0e876810448d30fe1a263bd8053f66b8b97ff20735f6aee9592492c2712abda",
@@ -136,6 +228,7 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
         required_cpu_features=frozenset([]),
     ),
     StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
         filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post1-py3-none-manylinux_2_35_aarch64.whl",
         sha256="e4f68af1b4bca2041cf40e93ccb40868ea4cf92a660497aa57120e08393f8cfd",
         binary_sha256="d569fe99973f3c4c3b3b6a0bd54593a21c60ec9338d5f62ffc06dc3376720b69",
@@ -150,6 +243,7 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
         required_cpu_features=frozenset([]),
     ),
     StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
         filename="skulk_stable_diffusion_cpp_cuda-0.1.0.post1-py3-none-manylinux_2_35_x86_64.whl",
         sha256="6a055d454b7dd90edf2d74e948a4398df123e74129564f51ebd6b4d35a3610ad",
         binary_sha256="56c6f97815b103f6c0477d998ecbcc95f3dda60ef3965969ef9fffd59dbdd9c7",
@@ -168,6 +262,7 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
         ),
     ),
     StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
         filename="skulk_stable_diffusion_cpp_vulkan-0.1.0.post1-py3-none-manylinux_2_35_x86_64.whl",
         sha256="dbbb89980b894a6ac00e7188f563e10bd01d7d10c9d9a00f88aaa1e57fd6fc96",
         binary_sha256="23d7cf1efeb5d6c966813e15cee4a1b2fbb5c145fd77abbe9b6a8a1f778b273a",
@@ -183,6 +278,7 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
         ),
     ),
     StableDiffusionCppWheel(
+        source_revision="d637cfb935feb2254898a8f1524046c958f3df80",
         filename="skulk_stable_diffusion_cpp_rocm-0.1.0.post1-py3-none-manylinux_2_35_x86_64.whl",
         sha256="45bec6e5e4df083cbf44eeb81d5f09be5214c323994a4800ae918129e3bb44ff",
         binary_sha256="67122895591407c0f1656bd9d8eb91c1e358e0ad6fe6ea77a154b0834e8ee3c4",
@@ -199,6 +295,33 @@ PUBLISHED_WHEELS: Final[tuple[StableDiffusionCppWheel, ...]] = (
         ),
     ),
 )
+
+
+def _known_wheels() -> tuple[StableDiffusionCppWheel, ...]:
+    return PUBLISHED_WHEELS + RETAINED_WHEELS
+
+
+def _known_wheel_for_build(build: str) -> StableDiffusionCppWheel | None:
+    return next(
+        (wheel for wheel in _known_wheels()
+         if build in {wheel.build_identity, f"stable_diffusion_cpp@sha256:{wheel.binary_sha256}"}),
+        None,
+    )
+
+
+def native_image_build_supports_family(build: str, family: str) -> bool:
+    """Reject a known older engine's missing model implementation, not untested GPUs.
+
+    Unknown operator builds retain their runtime-probed eligibility. Retained
+    pre-FLUX.3 packages remain usable for their existing image model families.
+    """
+    wheel = _known_wheel_for_build(build)
+    return not (
+        family in {"flux_3_klein", "flux_3_klein_base"}
+        and wheel is not None
+        and wheel.source_revision == "d637cfb935feb2254898a8f1524046c958f3df80"
+    )
+
 
 
 @final
@@ -316,7 +439,9 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
     if not isinstance(raw, dict):
         raise ValueError("native image probe is not an object")
     record = cast("dict[str, object]", raw)
-    if record.get("protocol") != 1 or record.get("source_revision") != SOURCE_REVISION:
+    binary_digest = file_sha256(binary)
+    source_revision = record.get("source_revision")
+    if record.get("protocol") != 1 or not isinstance(source_revision, str) or source_revision not in COMPATIBLE_PROBE_SOURCES:
         raise ValueError(
             "native image probe reports an unrecognized protocol or source"
         )
@@ -347,8 +472,8 @@ def probe_native_image(binary: Path) -> NativeImageProbe:
     if not devices:
         raise ValueError("native image engine reports no GPU device")
     return NativeImageProbe(
-        source_revision=SOURCE_REVISION,
-        binary_sha256=file_sha256(binary),
+        source_revision=source_revision,
+        binary_sha256=binary_digest,
         payload_sha256=payload_digest,
         devices=tuple(devices),
         computes=tuple(computes),
@@ -441,9 +566,7 @@ def native_image_build_hardware_matches(
     Unknown operator builds and absent hardware facts defer to the native device
     probe. Published builds reject demonstrated code-object mismatches.
     """
-    wheel = next(
-        (item for item in PUBLISHED_WHEELS if item.build_identity == build), None
-    )
+    wheel = _known_wheel_for_build(build)
     return (
         wheel is None
         or not hardware_classes
@@ -452,9 +575,14 @@ def native_image_build_hardware_matches(
 
 
 def wheel_for_host(
-    backend: str, hardware_classes: frozenset[str]
+    backend: str, hardware_classes: frozenset[str], *, expected_build: str | None = None
 ) -> StableDiffusionCppWheel | None:
-    """Match real host ABI, helper and compiled GPU requirements, not test coverage."""
+    """Match host ABI, helper and compiled GPU requirements, not test coverage.
+
+    New placements use the current published default. ``expected_build`` also
+    permits an exact retained package for an existing placement; no other older
+    package becomes a fallback. Return ``None`` for an incompatible host/build.
+    """
     machine = platform.machine().lower()
     system = platform.system().lower()
     machine = (
@@ -469,8 +597,11 @@ def wheel_for_host(
     return next(
         (
             wheel
-            for wheel in PUBLISHED_WHEELS
-            if wheel.system == system
+            for wheel in (
+                PUBLISHED_WHEELS if expected_build is None else _known_wheels()
+            )
+            if (expected_build is None or wheel.build_identity == expected_build)
+            and wheel.system == system
             and wheel.architecture == machine
             and wheel.filename.rsplit("-", 1)[1].removesuffix(".whl") in host_platforms
             and backend == f"stable_diffusion_cpp-{wheel.compute}"
@@ -485,7 +616,7 @@ def wheel_for_host(
 
 
 def _root(wheel: StableDiffusionCppWheel) -> Path:
-    return SKULK_ENGINES_DIR / "stable_diffusion_cpp" / SOURCE_REVISION / wheel.sha256
+    return SKULK_ENGINES_DIR / "stable_diffusion_cpp" / wheel.source_revision / wheel.sha256
 
 
 @contextmanager
@@ -553,8 +684,8 @@ def prepared_native_image(
     inherited environment cannot prove current cache readiness. Only the exact
     eligible package/build is returned; loading still probes the actual GPU.
     """
-    wheel = wheel_for_host(backend, hardware_classes)
-    if wheel is None or wheel.build_identity != expected_build:
+    wheel = wheel_for_host(backend, hardware_classes, expected_build=expected_build)
+    if wheel is None:
         return None
     return _verify_payload(_root(wheel), wheel)
 
@@ -607,7 +738,12 @@ def install_native_image(
     interruption leaves no final cache. Offline mode only reuses verified bytes.
     """
     env = os.environ if environ is None else environ
-    if explicit := env.get(BINARY_ENV, "").strip():
+    explicit = env.get(BINARY_ENV, "").strip()
+    managed_default = explicit and any(
+        Path(explicit) == _root(item) / item.prefix / "bin/sd-server"
+        for item in _known_wheels()
+    )
+    if explicit and not managed_default:
         binary = Path(explicit)
         observed = probe_native_image(binary)
         if (
@@ -619,8 +755,8 @@ def install_native_image(
                 "the engine check", "override build or GPU differs from placement"
             )
         return binary
-    wheel = wheel_for_host(backend, hardware_classes)
-    if wheel is None or wheel.build_identity != expected_build:
+    wheel = wheel_for_host(backend, hardware_classes, expected_build=expected_build)
+    if wheel is None:
         raise ImageEngineInstallError(
             "the eligibility check",
             "no exact published image engine matches this placement",
@@ -743,5 +879,8 @@ def install_native_image(
             raise ImageEngineInstallError(
                 "the engine check", "cached build/device no longer matches placement"
             )
-        os.environ[BINARY_ENV] = str(binary)
+        # Old stamped instances may coexist with the default build. Preparing
+        # their exact cache must not change what new placements advertise.
+        if wheel in PUBLISHED_WHEELS:
+            os.environ[BINARY_ENV] = str(binary)
         return binary

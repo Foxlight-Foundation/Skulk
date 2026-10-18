@@ -11,7 +11,8 @@ from pydantic import Field, field_validator, model_validator
 from skulk.utils.pydantic_ext import FrozenModel
 
 ImageFamily = Literal[
-    "qwen_image_21", "qwen_image_21_turbo", "flux_2_klein_4b", "z_image_turbo", "sdxl"
+    "qwen_image_21", "qwen_image_21_turbo", "flux_2_klein_4b",
+    "flux_3_klein", "flux_3_klein_base", "z_image_turbo", "sdxl"
 ]
 ImageComponentRole = Literal[
     "model",

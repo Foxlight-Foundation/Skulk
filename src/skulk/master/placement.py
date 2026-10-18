@@ -631,6 +631,7 @@ def _card_platform_backends(
                 **node_resources.engine_builds,
             },
             node_resources.hardware_classes,
+            image_family=card.image.family if card.image is not None else None,
         )
     )
 
