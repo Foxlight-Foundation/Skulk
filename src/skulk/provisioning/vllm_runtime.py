@@ -228,6 +228,38 @@ def managed_vllm_variant(binary: str) -> Literal["cuda", "rocm"] | None:
     return None
 
 
+def resolve_vllm_runtime(
+    configured: str | None,
+    resolved_backend: str | None,
+    expected_build: str | None,
+) -> str | None:
+    """Choose a binary without replacing an instance's placement-bound runtime.
+
+    Managed defaults may change on restart, so the immutable placement takes
+    precedence over a rehydrated environment. External operator binaries remain
+    authoritative for unbound/external placements; a conflicting managed stamp
+    fails explicitly. Missing historical recipes require fresh placement rather
+    than silently serving with another build. No download or environment mutation.
+    """
+    configured_build = managed_vllm_build(configured) if configured else None
+    if configured and configured_build is None:
+        if expected_build is not None and "/recipe@sha256:" in expected_build:
+            raise RuntimeError(
+                "The explicit vLLM runtime conflicts with this placement's managed build; refresh placement before changing runtimes."
+            )
+        return configured
+    binary = installed_managed_vllm(
+        resolved_backend, expected_build or configured_build
+    )
+    if binary is not None:
+        return str(binary)
+    if configured_build is not None or expected_build is not None:
+        raise RuntimeError(
+            "The placement-bound vLLM runtime is unavailable; refresh placement instead of substituting another build."
+        )
+    return None
+
+
 def runtime_prerequisites_present(recipe: VllmRecipe) -> bool:
     """Check host-supplied ROCm/OpenMPI libraries before promising a download.
 

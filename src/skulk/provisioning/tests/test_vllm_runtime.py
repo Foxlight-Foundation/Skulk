@@ -212,6 +212,46 @@ def test_completed_cache_snapshot_keeps_mixed_gpu_tags_honest(
     assert {tag for tag in derived.installed_backends if tag.startswith("vllm")} == {"vllm", "vllm-cuda"}
 
 
+@pytest.mark.parametrize("configured", [None, "/managed/new/vllm"])
+def test_restored_binding_wins_over_a_newer_managed_default(
+    monkeypatch: pytest.MonkeyPatch, configured: str | None
+) -> None:
+    """A restored instance must keep the exact older recipe, including on restart."""
+    older = "vllm@old/recipe@sha256:old"
+
+    def build(_binary: str) -> str:
+        return "vllm@new/recipe@sha256:new"
+
+    def installed(backend: str | None = None, expected_build: str | None = None) -> Path:
+        assert backend == "vllm-cuda" and expected_build == older
+        return Path("/managed/old/vllm")
+
+    monkeypatch.setattr(runtime, "managed_vllm_build", build)
+    monkeypatch.setattr(runtime, "installed_managed_vllm", installed)
+    assert runtime.resolve_vllm_runtime(configured, "vllm-cuda", older) == "/managed/old/vllm"
+
+
+def test_missing_bound_runtime_never_falls_back_to_the_new_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unavailable history is actionable failure, never an implicit upgrade."""
+    def build(_binary: str) -> str:
+        return "vllm@new/recipe@sha256:new"
+
+    def missing(_backend: str | None = None, _expected: str | None = None) -> None:
+        return None
+
+    monkeypatch.setattr(runtime, "managed_vllm_build", build)
+    monkeypatch.setattr(runtime, "installed_managed_vllm", missing)
+    with pytest.raises(RuntimeError, match="placement-bound"):
+        runtime.resolve_vllm_runtime("/managed/new/vllm", "vllm-cuda", "vllm@old/recipe@sha256:old")
+
+
+def test_external_override_cannot_replace_a_managed_stamp() -> None:
+    """An explicit external runtime remains usable after the operator re-places."""
+    assert runtime.resolve_vllm_runtime("/operator/vllm", "vllm-cuda", None) == "/operator/vllm"
+    with pytest.raises(RuntimeError, match="explicit vLLM runtime conflicts"):
+        runtime.resolve_vllm_runtime("/operator/vllm", "vllm-cuda", "vllm@old/recipe@sha256:old")
+
+
 @pytest.mark.parametrize(
     "environment",
     [

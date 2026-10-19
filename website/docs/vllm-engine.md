@@ -146,6 +146,9 @@ Skulk, and optionally declare `SKULK_VLLM_BACKENDS=cuda` or `rocm`. The override
 wins; Skulk does not upgrade that environment or hide an invalid executable behind
 a managed fallback. Unset it to use the current managed runtime. Older managed
 recipe directories remain intact when a new runtime pin is introduced.
+Restored instances retain their placement-bound runtime even if the managed
+default changes. If that build is unavailable, or an explicit override conflicts
+with its managed binding, Skulk asks for fresh placement before changing builds.
 
 ### Cache, parsers and API compatibility
 

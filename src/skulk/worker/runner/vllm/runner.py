@@ -1002,14 +1002,15 @@ class Runner(ServedConcurrentDispatch):
     def _spawn_server(
         self, model_dir: Path, served_model_name: str, n_ctx: int
     ) -> None:
-        binary = os.environ.get(VLLM_BIN_ENV, "").strip()
-        if not binary:
-            from skulk.provisioning.vllm_runtime import installed_managed_vllm
+        from skulk.provisioning.vllm_runtime import resolve_vllm_runtime
 
-            # This process can start before InstallEngine exports the worker's
-            # environment; resolve its completed, placement-bound cache here.
-            managed = installed_managed_vllm(self.shard_metadata.resolved_backend, self.shard_metadata.resolved_engine_build)
-            binary = str(managed) if managed is not None else ""
+        # The child may predate installation, or inherit a newer managed default
+        # after restart. Neither may replace its immutable placement stamp.
+        binary = resolve_vllm_runtime(
+            os.environ.get(VLLM_BIN_ENV, "").strip() or None,
+            self.shard_metadata.resolved_backend,
+            self.shard_metadata.resolved_engine_build,
+        ) or ""
         if not binary or not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
             # Validate up front (like the llama_server runner) so a misconfigured or
             # vanished-since-probe binary surfaces as a clear runner error rather
