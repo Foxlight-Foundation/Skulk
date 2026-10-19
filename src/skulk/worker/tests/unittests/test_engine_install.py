@@ -13,6 +13,7 @@ from anyio import to_thread
 
 import skulk.facts as facts_module
 import skulk.provisioning.comfy as comfy_module
+import skulk.provisioning.mlx_video as mlx_video_module
 import skulk.provisioning.stable_diffusion_cpp as image_module
 import skulk.provisioning.vllm_runtime as vllm_module
 from skulk.facts.derive import BackendDerivation
@@ -104,6 +105,39 @@ def _derivation_after_install(*, installed: bool) -> BackendDerivation:
     return BackendDerivation(
         backends=tags, on_demand_backends=frozenset() if installed else tags
     )
+
+
+async def test_native_video_waiters_are_bound_to_exact_build(tmp_path: Path) -> None:
+    worker, _, _ = _worker(tmp_path)
+    recorder = _record_starts(worker)
+    first = InstallEngine(instance_id=_FIRST, engine="mlx_video", resolved_backend="mlx_video-metal", expected_build="build-a")
+    second = InstallEngine(instance_id=_SECOND, engine="mlx_video", resolved_backend="mlx_video-metal", expected_build="build-a")
+    await worker._start_engine_install(first)
+    await worker._start_engine_install(second)
+    assert len(recorder.started) == 1
+    assert len(worker._engine_install_jobs[("mlx_video", "mlx_video-metal", "build-a")].waiters) == 2
+    await worker._start_engine_install(InstallEngine(instance_id=InstanceId("another-build"), engine="mlx_video", resolved_backend="mlx_video-metal", expected_build="build-b"))
+    assert len(recorder.started) == 2
+
+
+@pytest.mark.parametrize("actual_build", ["expected-build", "different-build"])
+async def test_native_video_install_publishes_only_verified_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, actual_build: str) -> None:
+    worker, events, _ = _worker(tmp_path)
+    facts = make_facts(platform="darwin").model_copy(update={"mlx_video_build_identity": actual_build})
+    monkeypatch.setattr(facts_module, "current_node_facts", lambda: facts)
+    monkeypatch.setattr(facts_module, "refresh_node_facts", lambda: facts)
+    monkeypatch.setattr(facts_module, "current_backend_derivation", lambda: BackendDerivation(backends=frozenset({"mlx_video-metal"})))
+    installed: list[tuple[str, str]] = []
+    def install(backend: str, expected_build: str, *, offline: bool, stop: threading.Event) -> Path:
+        installed.append((backend, expected_build))
+        return tmp_path
+    monkeypatch.setattr(mlx_video_module, "install_mlx_video", install)
+    task = TaskId("native-install-task")
+    job = _EngineInstallJob(engine="mlx_video", resolved_backend="mlx_video-metal", expected_build="expected-build", waiters={_FIRST: task})
+    await worker._run_engine_install(job)
+    assert installed == [("mlx_video-metal", "expected-build")]
+    assert job.succeeded == (actual_build == "expected-build")
+    assert _statuses(events) == [(task, TaskStatus.Complete if job.succeeded else TaskStatus.Failed)]
 
 
 @pytest.fixture

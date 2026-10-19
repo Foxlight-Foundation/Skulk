@@ -77,6 +77,7 @@ from skulk.shared.models.model_cards import (
     get_model_cards,
     same_authorized_model_card,
 )
+from skulk.shared.models.video_support import video_request_supported
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
@@ -189,6 +190,7 @@ from skulk.shared.types.telemetry import (
     TelemetryView,
     record_membership_from_event,
 )
+from skulk.shared.types.video import VideoGenerationTaskParams
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadCompleted,
@@ -893,7 +895,7 @@ def _generation_instances(
 
 
 def video_generation_instances(
-    state: State, model_id: ModelId, mode: VideoMode
+    state: State, model_id: ModelId, mode: VideoMode, params: VideoGenerationTaskParams | None = None
 ) -> list[InstanceId]:
     """Rank viable video placements for one generation mode.
 
@@ -916,6 +918,8 @@ def video_generation_instances(
         shard = next(iter(assignments.runner_to_shard.values()))
         video = shard.model_card.video
         if video is None or mode not in video.modes:
+            continue
+        if params is not None and not video_request_supported(shard.model_card, params, shard.resolved_backend, shard.resolved_engine_build):
             continue
         statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
         if any(
@@ -3171,6 +3175,7 @@ class Master:
                                 self.state,
                                 ModelId(command.task_params.model),
                                 requested_mode,
+                                command.task_params,
                             )
                             task_id = TaskId()
                             video_unavailable = not video_candidates
@@ -3216,7 +3221,7 @@ class Master:
                                         error_message=(
                                             "No running instance of "
                                             f"{command.task_params.model} serves "
-                                            f"the {requested_mode.value} mode"
+                                            f"the {requested_mode.value} mode with these controls and installed engine build"
                                         ),
                                     )
                                 )

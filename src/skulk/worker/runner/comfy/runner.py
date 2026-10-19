@@ -18,6 +18,7 @@ import os
 import shutil
 import time
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, cast, final
 
@@ -94,6 +95,8 @@ from skulk.worker.runner.comfy.server import (
     run_prompt,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
+from skulk.worker.runner.video_input import MediaInputRequest
+from skulk.worker.runner.video_input_process import prepare_media_input
 
 _HASH_CHUNK: Final = 1 << 20
 _THUMBNAIL_QUALITY: Final = 85
@@ -106,9 +109,9 @@ ROCM_LAUNCH_FLAGS: Final[tuple[str, ...]] = ("--bf16-vae",)
 the transformer. Weights are memory-mapped (below ``ROCM_MMAP_CEILING_BYTES``)
 and models stay resident between renders under ComfyUI's RAM-pressure cache,
 with the headroom from ``ROCM_CACHE_RAM_HEADROOM_FRACTION`` added at launch.
-No attention flag: ComfyUI's default SDPA path already selects the wheel
-set's flash-class kernel on gfx1151 (measured against the math path on the
-hardware).
+H3 keeps ComfyUI's default SDPA path, which already selects the wheel set's
+flash-class kernel on gfx1151. Family-specific attention policy is added
+separately by ``launch_flags``.
 """
 
 
@@ -176,20 +179,43 @@ def launch_flags(
     resolved_backend: str | None,
     weight_files: Iterable[Path] = (),
     total_ram_bytes: int | None = None,
+    *,
+    model_family: str | None = None,
 ) -> tuple[str, ...]:
-    """Extra ComfyUI flags for the node's compute backend and the card's weights.
+    """Return launch flags for the backend, selected weights and model family.
 
-    The ROCm lane adds ``ROCM_LAUNCH_FLAGS``, the RAM-pressure cache headroom
+    The H3 ROCm lane adds ``ROCM_LAUNCH_FLAGS``. Every ROCm family adds the RAM-pressure cache headroom
     (``ROCM_CACHE_RAM_HEADROOM_FRACTION`` of ``total_ram_bytes``, the host's
     RAM when omitted, in whole GiB), and ``--disable-mmap`` when any of
     ``weight_files`` is larger than ``ROCM_MMAP_CEILING_BYTES``; every other
-    lane, CUDA, adds ``CUDA_LAUNCH_FLAGS``.
+    lane, CUDA, adds ``CUDA_LAUNCH_FLAGS``. An ``ltx-2.5`` family CUDA server
+    also uses disk-backed dynamic loading so CPU weight staging competes less
+    with GPU allocations on unified-memory systems. It still executes on the
+    GPU and retains ordinary memory admission. LTX on ROCm instead selects the
+    engine's split attention path to preserve prompt subject adherence and
+    leaves VAE precision to each component's supported dtypes. This also
+    executes on the GPU. No files or settings are changed.
     """
     if not _is_rocm_lane(resolved_backend):
+        if model_family == "ltx-2.5":
+            # Keeping the large LTX encoder and transformer in RAM offload
+            # storage can exhaust a unified-memory host before sampling.
+            # The pinned engine's disk-backed path avoids that residency;
+            # low-VRAM mode would instead move text encoding onto the CPU.
+            return (*CUDA_LAUNCH_FLAGS, "--fast-disk")
         return CUDA_LAUNCH_FLAGS
     ram = total_ram_bytes if total_ram_bytes is not None else psutil.virtual_memory().total
     headroom_gib = max(1, int(ram * ROCM_CACHE_RAM_HEADROOM_FRACTION / 1024**3))
-    flags = (*ROCM_LAUNCH_FLAGS, "--cache-ram", str(headroom_gib))
+    # Forcing BF16 overrides the LTX audio VAE's FP32-only working dtype;
+    # its mel preprocessor returns FP32 and source encoding then fails in
+    # the first BF16 convolution. Let Comfy select each LTX VAE's dtype.
+    vae_flags = () if model_family == "ltx-2.5" else ROCM_LAUNCH_FLAGS
+    flags = (*vae_flags, "--cache-ram", str(headroom_gib))
+    if model_family == "ltx-2.5":
+        # The pinned ROCm default produced unrelated subjects in matched LTX
+        # renders; split attention recovered the requested subjects with the
+        # same weights, graph and seed while keeping inference on the GPU.
+        flags = (*flags, "--use-split-cross-attention")
     if any(path.stat().st_size > ROCM_MMAP_CEILING_BYTES for path in weight_files):
         return (*flags, "--disable-mmap")
     return flags
@@ -428,6 +454,7 @@ class Runner(ServedConcurrentDispatch):
         except ValueError as error:
             # The request or the plan was refused (ComfyRenderError included):
             # the task fails with its reason and the runner lives on.
+            self._mark_generation_failed(task.task_id)
             self.event_sender.send(
                 ChunkGenerated(
                     command_id=command_id,
@@ -441,9 +468,12 @@ class Runner(ServedConcurrentDispatch):
             # keeps the loop alive past this thread, so the server goes here
             # and the loop's next liveness check, on the next task or the idle
             # poll, ends the runner for the supervisor to restart.
+            self._mark_generation_failed(task.task_id)
             shutil.rmtree(SKULK_VIDEO_OUTPUT_DIR / str(command_id), ignore_errors=True)
             self._teardown_server()
             raise
+        finally:
+            (SKULK_VIDEO_INPUT_DIR / f"_prepared_{command_id}.wav").unlink(missing_ok=True)
 
     # --- model load -----------------------------------------------------------
 
@@ -477,7 +507,11 @@ class Runner(ServedConcurrentDispatch):
             temp_dir=self.work_dir / "temp",
             user_dir=self.work_dir / "user",
             log_path=self.work_dir / "server.log",
-            extra_args=launch_flags(self.shard_metadata.resolved_backend, weight_files),
+            extra_args=launch_flags(
+                self.shard_metadata.resolved_backend,
+                weight_files,
+                model_family=self.card.family,
+            ),
         )
         server.start()
         self.server = server
@@ -491,9 +525,21 @@ class Runner(ServedConcurrentDispatch):
         started = time.monotonic()
         render = plan_comfy_render(params, self.card)
         bindings = bind_references(params.references, SKULK_VIDEO_INPUT_DIR)
-        prompt = build_prompt(render, params, bindings, str(command_id))
         output_dir = SKULK_VIDEO_OUTPUT_DIR / str(command_id)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if params.audio_conditioning is not None:
+            source = next(binding for binding in bindings if binding.spec.kind == "audio")
+            destination = SKULK_VIDEO_INPUT_DIR / f"_prepared_{command_id}.wav"
+            prepared = prepare_media_input(server.interpreter, MediaInputRequest(
+                operation="audio", source=str(SKULK_VIDEO_INPUT_DIR / source.input_name),
+                destination=str(destination), start_seconds=params.audio_conditioning.start_seconds,
+                duration_seconds=render.plan.frame_count / render.plan.fps,
+            ), output_dir, is_cancelled=lambda: self._is_cancelled(task_id))
+            if prepared is None:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return
+            bindings = tuple(replace(binding, input_name=destination.name) if binding is source else binding for binding in bindings)
+        prompt = build_prompt(render, params, bindings, str(command_id))
         logger.info(
             f"comfy engine rendering {render.mode.value} {render.plan.frame_count} frames at "
             f"{render.plan.width}x{render.plan.height} over {render.plan.steps} steps for {command_id}"
@@ -513,7 +559,8 @@ class Runner(ServedConcurrentDispatch):
             run_prompt(
                 server.base_url,
                 prompt,
-                total_steps=render.plan.steps,
+                total_steps=render.steps,
+                sampler_steps=render.sampler_steps,
                 on_progress=progress,
                 is_cancelled=lambda: self._is_cancelled(task_id),
                 server_alive=server.alive,
@@ -524,12 +571,12 @@ class Runner(ServedConcurrentDispatch):
             shutil.rmtree(output_dir, ignore_errors=True)
             return
         manifest = self._collect_output(result, render, output_dir)
-        steps_done = result.steps_observed or render.plan.steps
+        steps_done = result.steps_observed or render.steps
         stats = VideoGenerationStats(
-            steps=render.plan.steps,
+            steps=render.steps,
             seconds_per_step=result.sampling_seconds / max(1, steps_done),
             total_generation_time=time.monotonic() - started,
-            engine=render.engine_settings(),
+            engine=render.engine_settings().model_copy(update={"frame_count": manifest.frame_count}),
         )
         self.event_sender.send(
             ChunkGenerated(
@@ -558,14 +605,22 @@ class Runner(ServedConcurrentDispatch):
         frame.unlink(missing_ok=True)
         thumbnail_sha256, thumbnail_size = _sha256_and_size(thumbnail)
         plan = render.plan
+        actual_frames, actual_seconds = plan.frame_count, plan.seconds
+        if render.duration == "auto":
+            from skulk.worker.runner.video_probe import probe_video_output
+
+            server = self.server
+            assert server is not None
+            actual = probe_video_output(final, plan, codec=render.codec, interpreter=server.interpreter, minimum_frames=render.minimum_frames)
+            actual_frames, actual_seconds = actual.frame_count, actual.seconds
         return VideoOutputManifest(
             sha256=sha256,
             size_bytes=size,
             width=plan.width,
             height=plan.height,
-            frame_count=plan.frame_count,
+            frame_count=actual_frames,
             fps=plan.fps,
-            seconds=plan.seconds,
+            seconds=actual_seconds,
             audio_sample_rate=plan.sample_rate if plan.audio else None,
             audio_channels=plan.channels if plan.audio else None,
             thumbnail_sha256=thumbnail_sha256,

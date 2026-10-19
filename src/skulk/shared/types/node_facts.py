@@ -331,6 +331,9 @@ class NodeFacts(CamelCaseModel):
     stable_diffusion_cpp_installable_builds: dict[str, str] = Field(default_factory=dict)
     """Published GPU packages this host may acquire; distinct from installed inventory."""
 
+    mlx_video_build_identity: str | None = Field(default=None, description="Verified published native video runtime identity after an actual Metal probe.")
+    mlx_video_installable_builds: dict[str, str] = Field(default_factory=dict, description="Published compatible native video builds available on demand; never installed proof.")
+
     audio_cpp_probe: AudioCppProbe = AudioCppProbe()
     """The binary's own version and device report, required for readiness."""
 

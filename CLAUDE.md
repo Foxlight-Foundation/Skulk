@@ -585,7 +585,40 @@ A model card's `placement.compatible_backends` selects which engine serves it
   checkout) point at a hand-built install instead. The runner spawns ComfyUI headless (loopback
   port, custom and API nodes disabled, Skulk-owned input/output/temp/user
   directories, an `extra_model_paths.yaml` exposing the staged artifact),
-  binds the card and request onto ComfyUI's own MiniMax H3 node graph
+  dispatches graphs by the card's family: H3 retains its existing node graph,
+  while `ltx-2.5` uses the LTX encoder, audio/video VAEs and joint latents,
+  fixed 8+3 two-stage sampling and a pinned `latent_upscaler` companion.
+  Exact-bundle card validation binds local upscalers, duration heads and
+  alternative decoders to manifest paths/sizes and the primary revision;
+  separately pinned external packs keep separate downloads. Source conditioning
+  cannot advertise an aggregate input-file limit of zero. Valid card identities
+  and compatibility remain independent of qualification coverage.
+  LTX CUDA servers additionally use `--fast-disk` for disk-backed dynamic
+  weight loading, limiting RAM offload residency beside GPU allocations on
+  unified-memory systems. This family policy preserves GPU execution and
+  ordinary admission and applies across compatible CUDA hardware.
+  LTX ROCm servers use `--use-split-cross-attention`: the pinned default
+  attention path lost prompt subject adherence in matched renders, while
+  split attention recovered the requested subjects on the GPU. H3 keeps
+  its existing attention policy; no tested-device allowlist is introduced.
+  LTX image guides are reapplied at full resolution and cropped before
+  upscaling/decoding. Multi-stage progress counts each sampler independently.
+  LTX request contracts also carry explicit pipeline/decoder selection, guided
+  negative conditioning and base-stage CFG/STG/modality scales, internal
+  keyframe spacing, and bounded automatic duration. Dev two-stage graphs bind
+  an exact distilled-refinement LoRA and freeze base audio during refinement.
+  Companion mode limits are enforced in validation and file selection,
+  and exposed as pipeline/decoder mode maps and duration-head mode lists.
+  Alternative decoders and duration heads are separately pinned `video_decoder`
+  and `duration_head` companions; primary component resolution excludes these
+  auxiliary files. Generated keyframe tokens are stripped before upscaling.
+  Duration prediction feeds the same bounded frame count into video and audio
+  allocation; `video_probe.py` verifies actual dynamic container facts before
+  publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
+  absent) and DFR temporal refinement rather than silently approximating them.
+
+  Cards retain broad compatible GPU backends; benchmark qualification is not
+  a hardware allowlist. The H3 path binds onto its MiniMax H3 node graph
   (`graph.py`, the official workflow templates node for node; a request's
   `control`, `mask`, and `source` attachments, the `VIDEO_STRUCTURAL_ROLES`,
   never decide the mode, never count against the card's reference limits,
@@ -1917,7 +1950,6 @@ Linux wheels require glibc 2.35 or newer; musl
 and older glibc do not receive install offers. macOS minimums come from the same
 platform-tag check. Manual extraction never bypasses the ABI eligibility gate.
 
-
 Native SDXL image cards expose `image.unet_structure` (API `unetStructure`) for
 nonuniform module output channels and boundary convolutions. Generic dimensions
 are their module count and maximum output width; no text KV or image splitting
@@ -1963,3 +1995,13 @@ placement and worker admission to the same sequence cap as the runner. The
 text runner disables unused encoders with `--language-model-only` without
 shrinking model modality truth. See
 [the vLLM runtime guide](website/docs/vllm-engine.md) for user setup and prerequisites.
+
+### Native MLX video runner
+
+`mlx_video-metal` uses `worker/runner/mlx_video` and the existing serial served-dispatch loop. Each job runs in a separate process group with bounded JSON progress, cancellation and parent-death reaping. The `InstallEngine` worker binds an exact published build from `provisioning/mlx_video.py`, installs all locked binary dependencies offline in a versioned runtime, verifies installed code against trusted archive bytes and probes Metal before publishing resources. Engine wheels live in `packaging/skulk-mlx-video`; candidate attestation and exact-byte promotion use `.github/workflows/mlx-video-wheel.yml`. Weights remain separate immutable selected packs, exposed through a local member-only view; missing Gemma 4/projections/tokenizer/quantization/VAEs fail before loading, with Hub access disabled. Native HQ uses the pinned Res2s pipeline; Comfy sampler overrides are refused. No tested-hardware allowlist is introduced. Video remains single-host, and measured model fit/phase profiles are separate acceptance requirements; the common memory guard is preserved.
+
+LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. The pinned Comfy core nodes lack the exact temporal retake/extension and prompt-relay masks.
+
+Native v0.2.1 decode observation is bundled from `worker/runner/video_observability.py`. It announces the actual decode-and-save boundary and disables the decoder's verbose-only allocator reset, preserving encoder/sampling/decode peaks across the complete render. Telemetry-only engine changes still require a new immutable published wheel. The wheel workflow watches both standalone bundled helper sources for candidate assembly and isolated validation.
+
+Native staged memory admission uses `shared/models/video_memory.py` for selected encoder/connector versus remaining-pack weights, common overhead and conservative unknown-layout fallback. `worker/runner/mlx_video/memory.py` reads bounded tensor headers and admits request geometry, joint sampling (including silent output), source buffers and decoder workspace against the same reservation and live GPU-wireable memory. `runtime.video_memory_budget_bytes` raises only the reservation for larger workloads and is omitted when absent to preserve installed-card authorization projections. The supervisor sets only the checked existing `LTX2_VAE_DECODE_BUDGET_GB` after sanitizing inherited tuning, refuses an over-budget minimum conv tile, and reaps on live pressure/RSS or an over-reservation result peak. These are estimates and pressure backstops, not a hard Metal quota; qualification remains separate from hardware eligibility.

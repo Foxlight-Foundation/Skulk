@@ -25,6 +25,7 @@ from skulk.shared.models.llama_server_settings import (
     LlamaServerSettings,
 )
 from skulk.shared.models.model_cards import ModelCard, MusicModelFamily
+from skulk.shared.models.video_memory import staged_video_weights
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import AcceleratorMetrics, MemoryUsage
@@ -410,7 +411,18 @@ def estimate_weight_runtime_bytes(
     """
     if shard_fraction <= 0.0:
         return Memory()
-    weights = engine_parameter_bytes(model_card, resolved_backend=resolved_backend) * shard_fraction
+    # Native video streams stages rather than retaining the complete selected pack.
+    # Every admission caller must charge the same staged resident weights.
+    staged_weights = (
+        staged_video_weights(model_card, resolved_backend=resolved_backend)
+        if shard_fraction == 1.0
+        else None
+    )
+    weights = (
+        staged_weights
+        if staged_weights is not None
+        else engine_parameter_bytes(model_card, resolved_backend=resolved_backend)
+    ) * shard_fraction
     footprint = (
         weights * memory_overhead_factor(model_card, resolved_backend=resolved_backend)
         + MEMORY_OVERHEAD_FLOOR
@@ -478,6 +490,14 @@ def estimate_shard_footprint(
         * shard_fraction
         + estimate_music_workspace(model_card, resolved_backend=resolved_backend)
     )
+    if (
+        resolved_backend == "mlx_video-metal"
+        and model_card.runtime is not None
+        and model_card.runtime.video_memory_budget_bytes is not None
+    ):
+        footprint = max(
+            footprint, Memory.from_bytes(model_card.runtime.video_memory_budget_bytes)
+        )
     # A single-node GGUF vision runner owns the complete projector in addition
     # to the base weights. RPC donors bypass this shard guard; the RPC driver
     # reservation is handled explicitly by placement because llama.cpp chooses

@@ -1282,6 +1282,10 @@ def _video_create_multipart_schema() -> dict[str, object]:
         "items": binary,
         "description": "Reference images, clips, or audio, in slot order.",
     }
+    properties["audio_source"] = {
+        **binary,
+        "description": "One audio file for explicit audio_conditioning; optional image anchors use the ordinary frame fields.",
+    }
     properties["control"] = {
         **binary,
         "description": (
@@ -1297,7 +1301,7 @@ def _video_create_multipart_schema() -> dict[str, object]:
     }
     properties["source_video"] = {
         **binary,
-        "description": "The clip behind the mask; read only with a mask.",
+        "description": "Source clip for explicit LTX editing, or the clip behind an H3 mask.",
     }
     return {**schema, "title": "VideoCreateMultipart", "properties": properties}
 
@@ -3036,7 +3040,12 @@ class API:
                 "text-to-video, or `multipart/form-data` whose file parts are the "
                 "conditioning attachments (`input_reference` or `first_frame`, "
                 "`last_frame`, repeated timed `keyframe` parts each paired in order "
-                "with a `keyframe_at` value in seconds, repeated `reference`). Poll "
+                "with a `keyframe_at` value in seconds, repeated `reference`). "
+                "LTX source conditioning additionally accepts `audio_source` with "
+                "JSON `audio_conditioning`; source editing pairs `source_video` "
+                "with JSON `editing`, and `prompt_relay` describes timed local scenes. "
+                "These controls require the selected artifact and installed engine "
+                "to implement them; unavailable workflows are refused. Poll "
                 "`GET /v1/videos/{video_id}` "
                 "for progress and fetch the result from "
                 "`GET /v1/videos/{video_id}/content`."
@@ -12153,6 +12162,14 @@ class API:
                     scheduler=engine.scheduler,
                     steps=engine.steps,
                     seed=engine.seed,
+                    pipeline=engine.pipeline,
+                    decoder=engine.decoder,
+                    guidance=engine.guidance,
+                    generated_keyframe_interval=engine.generated_keyframe_interval,
+                    duration=engine.duration,
+                    audio_conditioning=engine.audio_conditioning,
+                    editing=engine.editing,
+                    prompt_relay=engine.prompt_relay,
                     video_shift=engine.video_shift,
                     audio_shift=engine.audio_shift,
                     adapter=engine.adapter,
@@ -12299,6 +12316,7 @@ class API:
             ("first_frame", "first_frame"),
             ("last_frame", "last_frame"),
             ("keyframe", "keyframe"),
+            ("audio_source", "reference"),
             ("reference", "reference"),
             ("control", "control"),
             ("mask", "mask"),
@@ -12319,6 +12337,8 @@ class API:
                 detail="keyframe_at values must match the keyframe parts one to one",
             )
         for key, value in form.multi_items():
+            if key == "audio_source" and form.get("audio_conditioning") is None:
+                raise HTTPException(status_code=400, detail="audio_source requires explicit audio_conditioning controls")
             if isinstance(value, StarletteUploadFile) and key not in recognized:
                 # A misspelled part would otherwise vanish and the request
                 # would run an expensive unconditioned render.
@@ -12326,7 +12346,7 @@ class API:
                     status_code=400,
                     detail=(
                         f"{key} is not an attachment field; use input_reference, "
-                        "first_frame, last_frame, keyframe, reference, control, "
+                        "first_frame, last_frame, keyframe, audio_source, reference, control, "
                         "mask, or source_video"
                     ),
                 )
@@ -12374,6 +12394,8 @@ class API:
                             "content type"
                         ),
                     )
+                if field_name == "audio_source" and kind != "audio":
+                    raise HTTPException(status_code=400, detail="audio_source must declare an audio content type")
                 attachment = await self._read_video_attachment(upload, remaining)
                 if attachment.size_bytes == 0:
                     raise HTTPException(
@@ -12465,7 +12487,7 @@ class API:
                 status_code=400, detail=f"{create.model} is not a video model"
             )
         seconds = (
-            create.seconds if create.seconds is not None else card.video.min_seconds
+            create.seconds if create.seconds is not None else card.video.max_seconds if create.duration == "auto" else card.video.min_seconds
         )
         try:
             params = VideoGenerationTaskParams(
@@ -12480,6 +12502,16 @@ class API:
                 lora=create.lora,
                 lora_strength=create.lora_strength,
                 audio=create.audio,
+                audio_conditioning=create.audio_conditioning,
+                editing=create.editing,
+                prompt_relay=create.prompt_relay,
+                pipeline=create.pipeline,
+                decoder=create.decoder,
+                negative_prompt=create.negative_prompt,
+                guidance=create.guidance,
+                generated_keyframe_interval=create.generated_keyframe_interval,
+                duration=create.duration,
+                duration_min_seconds=create.duration_min_seconds,
                 sampler=create.sampler,
                 scheduler=create.scheduler,
                 video_shift=create.video_shift,
@@ -12515,7 +12547,7 @@ class API:
                 ),
             )
         steering = [
-            spec.role for spec in params.references if spec.role in VIDEO_STRUCTURAL_ROLES
+            spec.role for spec in params.references if spec.role in VIDEO_STRUCTURAL_ROLES and not (spec.role == "source" and params.editing is not None and card.family == "ltx-2.5")
         ]
         if steering:
             # A control clip or a mask means nothing without the card's
@@ -12989,6 +13021,10 @@ class API:
             raise HTTPException(
                 status_code=400, detail=f"{params.model} is not a video model"
             )
+        try:
+            params.validate_family(card.family, card.video)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         mode = params.implied_mode()
         if mode not in card.video.modes:
             raise HTTPException(
@@ -13032,7 +13068,7 @@ class API:
         # A control clip, a mask and its source steer the ControlNet; they are
         # not references and the card's reference limits do not count them.
         conditioning = [
-            spec for spec in params.references if spec.role not in VIDEO_STRUCTURAL_ROLES
+            spec for spec in params.references if spec.role not in VIDEO_STRUCTURAL_ROLES or (params.editing is not None and spec.role == "source")
         ]
         if limits is not None:
             counts = {

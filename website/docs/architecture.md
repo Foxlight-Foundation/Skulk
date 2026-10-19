@@ -844,6 +844,44 @@ never supply it.
 
 ### Video jobs
 
+The ComfyUI graph builder dispatches by model family. LTX-2.5 distilled
+generation uses its own Gemma 4 encoder, joint audio/video latents, fixed
+eight-step base and three-step refinement schedules, and a pinned
+`latent_upscaler` companion. Image anchors are reapplied after upscaling;
+appended guide tokens are cropped before upscaling and final decoding.
+Both stages contribute to progress and timing. A silent container still
+samples the joint audio branch and omits audio only at muxing. Its two-stage
+renderer requires a 64-pixel output grid with edges of at least 128 pixels,
+while the model's intrinsic grid remains 32 pixels. The card declares the
+selected transformer's `distilled` variant; a dev or undeclared checkpoint
+cannot silently use distilled sampling. Unsupported H3 controls are refused
+before dispatch.
+
+LTX request contracts also carry explicit pipeline/decoder selection, guided
+negative conditioning and base-stage CFG/STG/modality scales, internal
+keyframe spacing, and bounded automatic duration. Dev two-stage graphs bind
+an exact distilled-refinement LoRA and freeze base audio during refinement.
+Companion mode limits are enforced in request validation and file selection,
+and projected as pipeline/decoder mode maps and duration-head mode lists.
+Alternative decoders and duration heads are separately pinned `video_decoder`
+and `duration_head` companions; primary component resolution excludes these
+auxiliary files. Generated keyframe tokens are stripped before upscaling.
+For an exact bundle, local upscaler/duration-head/alternative-decoder paths,
+declared sizes and explicit revisions must agree with the primary manifest and
+revision; external pinned packs remain separate. Source-audio conditioning and
+editing cannot declare an aggregate reference-file limit of zero. These checks
+preserve valid card identities and do not depend on hardware qualification.
+Duration prediction feeds the same bounded frame count into video and audio
+allocation; `video_probe.py` verifies actual dynamic container facts before
+publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
+absent) and DFR temporal refinement rather than silently approximating them.
+
+Backend compatibility and retained hardware qualification are separate.
+A declared compatible backend does not require a benchmark for the exact
+GPU; live engine availability, actual runner restrictions, complete artifacts
+and resource admission still apply. Support claims attest tested tuples and
+can extend compatibility without making missing benchmark evidence a denial.
+
 Renders take minutes, so the API exposes them as jobs rather than a held
 request: `POST /v1/videos` validates the request against the card (mode,
 duration range, canvas grid, reference limits), stages any attachments for
@@ -927,7 +965,19 @@ about 105 s. The CUDA lane launches ComfyUI
 with `--disable-cuda-malloc`: on the async allocator backend ComfyUI would
 otherwise choose, a render that applies the Fun ControlNet patch aborts the
 server on its first sampling step on the GB10, while PyTorch's own allocator
-renders it and costs a plain render nothing. The AMD channel is the one whose
+renders it and costs a plain render nothing. LTX-2.5 CUDA servers also use
+`--fast-disk`, the pinned engine's disk-backed dynamic weight-loading policy.
+This limits RAM offload residency competing with GPU allocations on
+unified-memory systems while preserving GPU execution and ordinary memory
+admission. It applies to compatible CUDA hardware without a tested-device
+allowlist; other model families retain their existing loading policy.
+LTX-2.5 ROCm servers add `--use-split-cross-attention` to preserve prompt
+subject adherence: matched GPU renders with the pinned engine's default
+attention path produced unrelated subjects, while split attention recovered
+the requested subjects with the same weights, graph and seed. This family
+policy retains GPU execution, ordinary memory admission and eligibility for
+compatible untested hardware. H3 retains its existing attention path.
+The AMD channel is the one whose
 gfx1151 BLAS libraries are complete for H3: the rocm7.2 torch wheel from the
 PyTorch index, the lane's first wheel set, shipped a gfx1151 rocBLAS without
 the single-precision batched GEMM the Qwen3-VL text encoder's vision tower
@@ -3144,3 +3194,17 @@ placement and worker admission to the same sequence cap as the runner. The
 text runner disables unused encoders with `--language-model-only` without
 shrinking model modality truth. See
 [the vLLM runtime guide](vllm-engine.md) for user setup and prerequisites.
+
+### Native Apple video runtime
+
+The `mlx_video-metal` runner executes LTX-2.5 through a Foxlight-owned wheel containing pinned MLX pipeline source and all locked binary dependencies. The existing `InstallEngine` task acquires the exact published digest into a versioned isolated environment. Verification binds installed code and libraries to the original archive, checks interpreter isolation and performs a real Metal operation before node resources advertise readiness. Placement records the exact build; missing benchmarks never exclude an otherwise compatible Apple GPU.
+
+Archive integrity checks stream bounded chunks and retain only digests. Nested dependency wheels use temporary files to prevent ZIP seeks from retaining expanded libraries in the parent before memory admission.
+
+Each job uses one supervised process group and a bounded progress channel, with parent-death cleanup, cancellation and bundled media encoding. Only card-selected local pack members are exposed. Missing Gemma 4, projection, VAE, tokenizer or quantization files fail before upstream fallback loading; Hub access stays offline. Distilled, dev and native HQ pipelines use their pinned schedules; unsupported explicit controls fail. Transformer streaming and staged decode do not pool cluster memory or prove single-Mac fit. The shared admission guard remains in force, and model qualification/memory profiles are separate from a weightless engine probe.
+
+Native staged admission uses `shared/models/video_memory.py` to charge the larger of the selected encoder/connector group and the remaining pack, retaining common runtime overhead and the worker's live capacity check. Unknown layouts keep full-artifact accounting. `worker/runner/mlx_video/memory.py` reads bounded local tensor headers before rendering and checks each request's geometry, joint sampling, source buffers and decoder workspace against that reservation. `runtime.video_memory_budget_bytes` can raise the reservation for larger workloads; it cannot lower the artifact-derived estimate. The process supervisor supplies only its checked decode budget after stripping inherited upstream tuning, refuses a convolutional decode whose smallest tile cannot fit, and reaps the group on live memory pressure or excess RSS. These estimates and pressure backstops are not a hard Metal allocator quota. Qualification coverage never supplies a GPU eligibility list.
+
+LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. The pinned Comfy core nodes lack the exact temporal retake/extension and prompt-relay masks.
+
+Native video engine v0.2.1 marks decoding at the actual decode-and-save call. The headless decoder's private verbose profiler is disabled so its counter reset cannot erase earlier encoder/sampling memory peaks. The reported Metal peak covers the complete render; it is distinct from host RSS and the two counters must not be added.

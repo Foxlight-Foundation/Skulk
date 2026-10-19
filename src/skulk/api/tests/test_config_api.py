@@ -56,6 +56,51 @@ def _build_api(node_id: str = "test-node") -> API:
     )
 
 
+@pytest.mark.parametrize(
+    ("contradiction", "message"),
+    [
+        ("missing_companion", "must contain local video companion"),
+        ("companion_size", "size must match the artifact bundle"),
+        ("no_input_slots", "max_files to permit at least one"),
+    ],
+)
+def test_exact_card_http_rejects_incomplete_video_transactions(
+    contradiction: str, message: str,
+) -> None:
+    """The public exact-card route surfaces inconsistent artifacts before mutation."""
+    companion: dict[str, object] = {
+        "kind": "latent_upscaler", "name": "selected",
+        "path": "pipeline.safetensors", "sizeBytes": 13,
+    }
+    video: dict[str, object] = {"modes": ["t2va"], "companions": [companion]}
+    card: dict[str, object] = {
+        "modelId": "example/video-model", "sourceRepository": "example/upstream",
+        "sourceRevision": "a" * 40, "storageSize": {"inBytes": 13},
+        "nLayers": 1, "hiddenSize": 1, "supportsTensor": False,
+        "tasks": ["TextToVideo"], "video": video,
+        "artifactBundle": {
+            "bundleId": "bundle_" + "a" * 52, "downloadSize": 13,
+            "files": [{"path": "pipeline.safetensors", "sizeBytes": 13}],
+        },
+    }
+    if contradiction == "missing_companion":
+        companion["path"] = "missing.safetensors"
+    elif contradiction == "companion_size":
+        companion["sizeBytes"] = 14
+    else:
+        card["tasks"] = ["ReferenceToVideo"]
+        video.update({
+            "modes": ["ref2va"], "audioConditioning": True,
+            "audioOutput": True, "audioSampleRate": 48000, "audioChannels": 2,
+            "referenceLimits": {"maxAudioClips": 1, "maxFiles": 0},
+        })
+    api = _build_api()
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
+    response = client.post("/models/add-card", json={"model_card": card})
+    assert response.status_code == 422
+    assert message in str(_json_object(response)["detail"])
+
+
 def test_get_config_reports_effective_kv_backend_when_file_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

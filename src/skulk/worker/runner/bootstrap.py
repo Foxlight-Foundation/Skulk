@@ -621,6 +621,13 @@ def entrypoint(
                 )
                 runner.main()
                 return
+            if video_engine == "mlx_video":
+                from skulk.worker.runner.mlx_video.runner import (
+                    Runner as MlxVideoRunner,
+                )
+
+                MlxVideoRunner(bound_instance, event_sender, task_receiver, cancel_receiver).main()
+                return
             # Fail loudly with the reason instead of letting a text runner
             # try to load a diffusion stack and report something unrelated.
             raise RuntimeError(

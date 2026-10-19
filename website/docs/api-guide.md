@@ -1856,6 +1856,8 @@ Every route returns or lists this object. The first block matches OpenAI's
 | `output` | object or null | Container facts once rendered: `sha256`, `size_bytes`, `content_type`, `width`, `height`, `frame_count`, `fps`, `seconds`, `audio_sample_rate`, `audio_channels`, `has_thumbnail`, and when a thumbnail exists its `thumbnail_sha256` and `thumbnail_size_bytes` so a client can verify the `variant=thumbnail` bytes it fetches |
 | `stats` | object or null | Runner timing: `steps`, `seconds_per_step`, `total_generation_time`, `peak_memory_bytes`, and `engine`: what the render ran with after the request, the adapter and the card were resolved (`sampler`, `scheduler`, `steps`, `seed` (resolved when the request gave none), `video_shift`, `audio_shift`, `adapter`, `adapter_strength`, `width`, `height`, `frame_count`, `reference_fidelity` for `ref2va`, `styles`, `codec`, and when the ControlNet ran `control_inputs`, `control_strength`, `control_start`, `control_end`, and `control_kind` when a guide was derived from a control clip), null from an engine that does not report it |
 
+Native MLX video engine v0.2.1 preserves the allocator counter across encoder, sampling and decode, so `peak_memory_bytes` covers the complete render. This accelerator allocation counter is distinct from host RSS; do not add them. Earlier native engine versions may report only the final decoder phase's counter.
+
 ### Create a video job
 
 **POST** `/v1/videos`
@@ -1892,7 +1894,7 @@ Request fields (JSON keys or form fields):
 |-------|------|-------|
 | `model` | string | Required placed video model id |
 | `prompt` | string | Required; up to 8000 characters, structured prompts pass through verbatim |
-| `seconds` | integer | Clip length; any integer inside the card's supported range (MiniMax H3: 4 to 15). Omitted means the card's shortest clip. A string such as `"8"` is accepted for OpenAI SDK compatibility |
+| `seconds` | integer | Clip length; any integer inside the card's supported range (MiniMax H3: 4 to 15). Omitted means the card's shortest clip, or its maximum with `duration=auto`. A string such as `"8"` is accepted for OpenAI SDK compatibility |
 | `size` | string | `WIDTHxHEIGHT`; must be a multiple of the card's canvas grid and inside its pixel budget. Omitted lets the engine pick the trained canvas |
 | `aspect_ratio` | string | Advisory `W:H` used when `size` is omitted. With neither, a `first_frame` (else `last_frame`, else the earliest timed `keyframe`) image sets the shape: the canvas follows the keyframe, snapped to the card's grid and pixel budget, so the frame keeps its framing (`input_reference` is the OpenAI name for the first frame). The shape is the displayed one: a JPEG's EXIF orientation is honored, and PNG, JPEG, WebP, GIF, HEIC, HEIF, and AVIF are read. A plain `reference` never decides the canvas |
 | `mode` | string | `t2va`, `fl2va`, or `ref2va`; omitted derives it from the attachments |
@@ -1901,8 +1903,19 @@ Request fields (JSON keys or form fields):
 | `lora` | string | Name of a card companion adapter, for example a turbo LoRA |
 | `lora_strength` | number | 0.0 to 2.0 |
 | `audio` | boolean | Default `true`; the job fails at settlement if the render carries no audio track |
-| `sampler` | string | Engine tier. Omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
-| `scheduler` | string | Engine tier. `simple` (default), `normal`, `sgm_uniform`, `beta`, `kl_optimal`, `linear_quadratic`, `karras`, `exponential`, or `ddim_uniform` |
+| `pipeline` | string | LTX workflow: `distilled_two_stage` or `dev_two_stage`, matching the declared transformer; `retake` or `extend` requires matching `editing` controls. HQ (`hq_two_stage`) and DFR (`dfr`) requests currently fail on the pinned Comfy core engine; it does not approximate them |
+| `audio_conditioning` | object | LTX distilled source-audio workflow: `start_seconds` (0–120, default 0) selects an uploaded `audio_source` segment covering the full aligned clip. Audio is frozen in both stages. Multipart supplies this object as JSON |
+| `editing` | object | Native LTX source-video workflow: `operation` is `retake` or `extend`. Retake requires inclusive `start_seconds` and exclusive `end_seconds`; `regenerate_audio` defaults true, false preserves the source waveform. The region may cover the complete aligned frame duration, which can exceed nominal `seconds` (for example 25 frames at 24 fps is 25/24 seconds). Region boundaries round outward onto the 8-frame latent grid. Extend appends to reach `seconds`, the total output length, and refuses retake-region controls. Requires `source_video` and an explicit source-matching `size` |
+| `prompt_relay` | object | Native LTX timed local prompts: `segments` contains 2–8 objects with `prompt` and positive relative `length` (1–120). Each scene receives at least one latent frame; remaining frames share the length ratio with deterministic rounding. Global plus local prompts total at most 8000 characters. Multipart supplies JSON |
+| `decoder` | string | LTX `convolutional` (default) or `diffusion`; the latter requires the exact `video_decoder` companion named `diffusion_decoder`. The convolutional VAE still conditions images and upscales latents |
+| `negative_prompt` | string | Up to 8000 characters, guided LTX only; encoded verbatim. Distilled generation refuses it |
+| `guidance` | object | Guided LTX base stage only: `video_cfg` (default 3), `audio_cfg` (7), `stg_scale` (0, block 28), `modality_scale` (1). CFG ranges 1–100; STG 0–10; modality 1–10. Multipart supplies this object as JSON. Refinement uses unity CFG and preserves base audio |
+| `generated_keyframe_interval` | integer | LTX internal detailing keyframe spacing in pixel frames, 1–1024. Requires a transformer declaring `generated_keyframes`; these tokens are removed before upscaling and never become extra output frames |
+| `duration` | string | `fixed` (default) or LTX `auto`. Automatic prediction requires an exact `duration_head` companion and bounds the allocation before sampling. `seconds` is its maximum; omitted uses the card maximum. Actual container frames and duration are verified using PyAV from the isolated engine and recorded in the output |
+| `duration_min_seconds` | integer | LTX automatic-duration lower bound, otherwise refused. Omitted uses the card minimum; both bounds must lie within card limits and contain a complete 8n+1 grid. Timed keyframes must precede this lower bound |
+
+| `sampler` | string | Engine tier. LTX-2.5 distilled accepts `euler_ancestral` only (also its default). Native HQ selects Res2s through its pipeline and requires sampler overrides to be omitted. H3 omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
+| `scheduler` | string | Engine tier. H3 accepts `simple` (default), `normal`, `sgm_uniform`, `beta`, `kl_optimal`, `linear_quadratic`, `karras`, `exponential`, or `ddim_uniform`. LTX-2.5 distilled uses fixed manual sigma tables and requires this field to be omitted |
 | `video_shift` | number | Engine tier. Video sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's |
 | `audio_shift` | number | Engine tier. Audio sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's. The audio schedule rides the video one scaled by `video_shift / audio_shift` |
 | `reference_fidelity` | string | `ref2va` only: `match` (default) sizes reference images to the canvas; `max` keeps them at full resolution for stronger likeness at a much higher cost. Refused for other modes |
@@ -1913,6 +1926,42 @@ Request fields (JSON keys or form fields):
 | `control_end` | number | Fraction at which it stops, above `control_start`; default 1. Any control setting without a `control` or `mask` part is refused |
 | `control_kind` | string | What the render derives from the `control` clip: `pose` (default), `depth`, or `edges`. Only with a `control` part; a kind the card has no weights for is refused with **400** naming the kinds it derives (see the card's `video.guides`) |
 
+For a card with family `ltx-2.5` and `video.transformer_variant = "distilled"`,
+the baseline distilled renderer uses two stages: eight base sampling intervals at half
+resolution, a required `spatial_x2` latent-upscaler companion, and three
+refinement intervals. A guided dev transformer uses `dev_two_stage` and requires its exact
+`distilled_refinement` LoRA. Its base stage uses the LTX Euler schedule and
+requested guidance; refinement uses three intervals with unity guidance
+and frozen base audio. Undeclared transformers and mismatched pipelines
+are refused. `steps`, when supplied, must be `8`; `stats.steps` and
+`stats.engine.steps` report the total `11`. `/v1/models` exposes
+`transformer_variant`, `sampling_stage_steps: [8, 3]`,
+`default_scheduler: "manual"`, an empty scheduler override list, and the
+effective output grid of 64 pixels with `min_short_edge: 128`. Explicit sizes
+outside those constraints are refused. Seeds must fit an unsigned 64-bit
+integer.
+
+The model video metadata additionally exposes `pipelines`, `decoders`,
+`generated_keyframes`, `automatic_duration`, `audio_conditioning`, `editing`, `prompt_relay` and guided defaults.
+`pipeline_modes` and `decoder_modes` map each offered choice to its permitted
+modes; `automatic_duration_modes` lists the modes allowed by the selected
+head. Companion mode limits are enforced before graph dispatch, including
+the required spatial upscaler and dev refinement LoRA. Missing
+selected components disable their controls, independently of hardware
+qualification. Pipeline, decoder, guidance and duration choices also persist
+in `stats.engine`; its frame count is the verified actual count.
+
+LTX accepts text, first/last/timed image keyframes, and explicit supported source workflows. It rejects H3 sigma
+shifts, adapters, style embeddings and ControlNet controls. `audio=false`
+omits the output audio track while retaining joint audio/video sampling.
+Backend compatibility remains available to untested compatible GPUs;
+qualification evidence is separate. Each render runs on one GPU host;
+memory on other hosts is not pooled for video generation.
+
+Source audio is decoded in an isolated engine helper to an exact 48 kHz stereo PCM segment, then used as frozen conditioning. Audible output carries that waveform; `audio=false` produces a silent container. Editing fully decodes a constant-rate source on the 8n+1 grid before any model loads. A retake requires the requested frame count; extension requires a shorter source, with at least 25 frames for the distilled workflow. Source geometry and frame rate must match the request/card. Decoding has a 60-second deadline, a 512 MiB resident-memory watchdog, a 64 MiB file ceiling, and cancellation/parent-death reaping. Source video also has a 128 MiB per-frame and 2 GiB total fp32 pixel-volume bound before encoder allocation. Invalid, truncated, non-finite, oversized or unsupported tracks fail the job with cleanup.
+
+Distilled retake uses one deterministic Euler stage with eight intervals, so its step total is eight. Dev retake and extension use one guided Euler stage (30 intervals by default), with fixed CFG 3 and STG 1 rather than per-modality two-stage guidance. Distilled extension and source-audio generation use the eight-plus-three ancestral workflow. Source workflows do not combine with automatic duration, generated keyframes or prompt relay. The pinned Comfy core engine implements source-audio conditioning, but lacks the exact temporal masks for retake, extension and prompt relay; it refuses those choices. Native advanced controls require an exact published wheel that declares the corresponding feature. Routing chooses an instance with that build support; no capable mounted instance yields a terminal failure. DFR and structural LTX control require exact 2.5 adapters and remain unavailable. Engine availability and artifact completeness determine offered controls; tested hardware is not an execution allowlist.
+
 File parts (multipart only), in slot order:
 
 | Part | Role | Notes |
@@ -1920,17 +1969,17 @@ File parts (multipart only), in slot order:
 | `input_reference` | first frame | OpenAI's name for the keyframe image; `first_frame` is the same thing |
 | `last_frame` | last frame | Image |
 | `keyframe` | keyframe | Repeatable image anchored at a time into the clip; pair every part with one `keyframe_at` form value (seconds, zero or more, in the same order). At most 8, at distinct times, none past the clip's end. Alone they imply `fl2va`; beside `reference` parts they anchor a `ref2va` render. The engine snaps each to the nearest frame |
+| `audio_source` | reference | One audio file paired with explicit `audio_conditioning`; an omitted object or non-audio type is refused before staging |
 | `reference` | reference | Repeatable; images, video clips, or audio in the order given |
 | `control` | control | One ordinary clip (or a still) whose motion or structure the render follows. The render derives the guide from it (`control_kind`): whole-body pose (people detected with RT-DETR, keypoints from SDPose), depth (Depth Anything 3), or Canny edges, as ComfyUI's own H3 ControlNet template does. The engine holds the guide's last frame when it is short, cuts it when it is long, and scales and centre-crops each frame to the canvas |
 | `mask` | mask | One image or clip for the ControlNet, read from its red channel; white marks what to regenerate |
-| `source_video` | source | One clip behind the mask, read only with a `mask` part; without it the masked region is generated into an empty frame |
+| `source_video` | source | One source clip paired with LTX `editing`, or an H3 clip behind a `mask`. LTX editing counts it against reference video limits; ordinary H3 structural inputs do not |
 
 Each part must carry an `image/*`, `video/*`, or `audio/*` content type. At
 most 16 attachments and 256 MiB per request; larger uploads return
 **413**. Keyframe roles allow one first and one last frame. The card's
 `reference_limits` bound the counts per kind; `control`, `mask`, and
-`source_video` steer the ControlNet, never decide the mode, and are not
-counted against those limits. A `control` or `mask` part on a card with no
+`source_video` steer H3 ControlNet and do not count against those limits. An LTX editing source implies `ref2va` and counts against the selected artifact's video limits. A `control` or `mask` part on a card with no
 ControlNet (a `model_patch` companion) for the mode is refused with **400**. Attachments travel to the
 selected worker over the bounded vision media path; they are never written
 to the event log or replicated state.
@@ -1938,6 +1987,10 @@ to the event log or replicated state.
 The response is the video object with `status: "queued"`. One API node
 accepts 32 live jobs; beyond that the route returns **503** until one
 finishes.
+
+Native Apple LTX cards select `mlx_video-metal` and use the same video job endpoints and bounded reference/output contracts. Native `hq_two_stage` implements the pinned Res2s pipeline, while the pinned Comfy engine refuses that pipeline. Native metadata offers no selectable Comfy samplers/schedulers and currently lists H.264 output only. Request matching excludes native placements for explicit AV1 output before dispatch; Comfy placements retain AV1 support. Other explicit incompatible controls fail the job rather than being ignored. Generated keyframe intervals are resolved after bounded automatic duration prediction, so internal positions stay inside the actual clip. Missing exact converted-pack components fail before rendering, and the engine does not fetch alternate weights. Backend compatibility remains independent of retained hardware benchmarks; ordinary resource admission still applies.
+
+Native placement charges staged working weights with runtime headroom, rather than treating all selected downloads as simultaneously resident. Each request also checks geometry, source buffers, joint sampling and decoder workspace before loading model tensors; disabling the output audio track still requires joint audio-latent sampling. A request that exceeds its placement's reservation fails with a resource explanation. Reduce duration/resolution, or raise the card's `runtime.video_memory_budget_bytes` and recreate the placement on capacity that can hold it. That setting can only raise the artifact-derived reservation. Live host pressure or excess process memory can also terminate a job, with its process group reaped. These guards do not turn an untested GPU into an incompatible GPU and do not provide a hard Metal allocator quota.
 
 ### Poll a job
 
@@ -2323,9 +2376,12 @@ placement guarantee.
   usable discrete-VRAM and Apple RAM working-set fractions. Compare the
   estimated footprint to usable capacity; summing device memory does not prove
   that the engine supports the required sharding.
-- `compatible_backends` contains declared tags; `engine_support` contains matching
-  signed claims whose status, exact build and hardware restrictions still apply.
-  `incomplete_capabilities` reports artifact evidence that blocks admission.
+- `compatible_backends` contains declared artifact/engine compatibility tags.
+  `required_capabilities` reports positively evidenced intrinsic capabilities;
+  `engine_support` reports matching compatibility mappings and scoped qualification
+  evidence. Tested build/hardware provenance is not an eligibility list. Missing
+  qualification does not revoke declared compatibility.
+  `incomplete_capabilities` reports missing components for the affected operation.
 - `estimate_only` is always true. No resource reservation, spending approval,
   download or placement occurs.
 
@@ -2507,6 +2563,12 @@ true, and every supplied `registry_*` identity, provenance, architecture,
 format, or capability claim is removed. Service-bearer installs additionally
 receive `qualification_only`; operator installs do not. A full 40-character
 immutable `sourceRevision` is required.
+For an exact video bundle, local `latent_upscaler`, `duration_head` and
+`video_decoder` companions must occur in the manifest with matching declared
+sizes and local revisions. An explicit reference to the base repository is
+local too. Source-audio conditioning and editing cannot set the aggregate
+`referenceLimits.maxFiles` to zero. These inconsistent cards return 422 before
+catalog mutation; independently pinned external packs retain separate downloads.
 Every external vision, MTP, assistant, or draft repository must also declare
 its matching immutable companion revision.
 A card whose `minSkulkVersion` is above this node's release is refused with
@@ -2879,14 +2941,16 @@ or backend/build support. Controllers must obtain a fresh target-specific previe
 verify live node support before submission, and continue checking support and
 readiness afterward; an accepted command alone is not proof of usable capacity.
 
-The requirements response also includes `required_capabilities`, the complete
-positively evidenced intrinsic capability set used by core's signed-engine
-resolver. Matrix-only compatibility requires a nonempty set and supported claims
-covering every member for the proposed backend/engine, exact engine build and
-applicable hardware classes. `incomplete_capabilities` remains an independent
-artifact blocker. One positive claim alone is insufficient. Declared compatible
-backends retain their existing behavior; actual platform/runner admission still
-applies after a node joins.
+The requirements response's `required_capabilities` and scoped qualification
+claims are reporting evidence. Controllers must not require a retained benchmark,
+a complete qualification matrix, or a tested build/hardware tuple before accepting
+otherwise compatible capacity. Untested compatible hardware remains eligible.
+Use those claims to describe observed results and recommended workloads; verify
+the live advertised backend and its actual architecture, ABI, compiled-target,
+dependency and resource requirements separately. Missing artifact components or
+an unimplemented operation still block that operation. Actual platform/runner
+admission and exact selected-runtime integrity checks remain in force after a node
+joins; qualification evidence cannot substitute for live readiness.
 
 A controller also checks the preview's `contextTokenLimit` against its approved
 per-sequence context budget and verifies the live accepted instance after

@@ -15,6 +15,7 @@ from skulk.master.placement_utils import (
     get_mlx_ring_hosts_by_node,
     get_shard_assignments,
     get_shard_assignments_for_llama_rpc,
+    get_single_host_video_shard_assignments,
     get_smallest_cycles,
 )
 from skulk.shared.backends import (
@@ -1484,6 +1485,12 @@ def place_instance(
     selected_is_rpc = _is_llama_rpc_cycle(
         selected_cycle, command.model_card, resolved_node_resources
     )
+    single_node_backend: str | None = None
+    if len(selected_cycle) == 1 and (single_resources := resolved_node_resources.get(selected_cycle.node_ids[0])) is not None:
+        single_node_backend = resolve_node_backend(
+            _card_platform_backends(command.model_card, single_resources),
+            backend_preference, single_resources.backends,
+        )
     if command.instance_meta == InstanceMeta.LlamaRpc and not selected_is_rpc:
         raise PlacementError(
             "Requested a multi-node llama.cpp (RPC) placement, but the "
@@ -1516,6 +1523,10 @@ def place_instance(
             )
         shard_assignments = get_shard_assignments_for_llama_rpc(
             command.model_card, selected_cycle, driver_node
+        )
+    elif single_node_backend == "mlx_video-metal":
+        shard_assignments = get_single_host_video_shard_assignments(
+            command.model_card, selected_cycle.node_ids[0]
         )
     else:
         shard_assignments = get_shard_assignments(
@@ -1560,7 +1571,7 @@ def place_instance(
             updates: dict[str, str] = {"resolved_backend": resolved_backend}
             if (
                 command.model_card.music is not None
-                or engine_of(resolved_backend) == "stable_diffusion_cpp"
+                or engine_of(resolved_backend) in {"stable_diffusion_cpp", "mlx_video"}
             ):
                 assert resources is not None
                 build = resources.engine_builds.get(resolved_backend) or (

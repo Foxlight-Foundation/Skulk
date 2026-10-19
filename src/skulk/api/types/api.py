@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import UUID4, BaseModel, ConfigDict, Field, field_validator
 
+from skulk.provisioning.mlx_video import NativeVideoFeature, published_video_features
+from skulk.shared.backends import engine_of
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
 from skulk.shared.models.image import ImageCardConfig
 from skulk.shared.models.memory_estimate import (
@@ -45,9 +47,15 @@ from skulk.shared.types.video import (
     VIDEO_SAMPLERS,
     VIDEO_SCHEDULERS,
     VIDEO_SHIFT_BOUNDS,
+    VideoAudioConditioning,
     VideoCodecName,
+    VideoDecoder,
+    VideoEditing,
+    VideoGuidance,
     VideoGuideKind,
     VideoJobStatus,
+    VideoPipeline,
+    VideoPromptRelay,
     VideoReferenceFidelity,
     VideoSchedulerName,
     derivable_guides,
@@ -226,7 +234,7 @@ class ModelListModel(BaseModel):
     system_role: Literal["steward"] | None = Field(
         default=None,
         description=(
-            "Set for fabric-managed system entries (\"steward\" = the "
+            'Set for fabric-managed system entries ("steward" = the '
             "intelligent-fabric resident, addressable as a chat model but "
             "not user-placeable). Model pickers should badge or separate "
             "these rather than listing them as ordinary models."
@@ -337,9 +345,7 @@ class ModelListModel(BaseModel):
     remote_code_approved_for_cluster: bool = Field(
         default=False,
         deprecated=True,
-        description=(
-            "Deprecated compatibility state for a legacy cluster approval."
-        ),
+        description=("Deprecated compatibility state for a legacy cluster approval."),
     )
     remote_code_approved_on_this_node: bool = Field(
         default=False,
@@ -401,7 +407,10 @@ class ModelListModel(BaseModel):
             "Present only on video model cards."
         ),
     )
-    image: ImageCardConfig | None = Field(default=None, description="Declared image geometry, references, RGBA and sampling contract.")
+    image: ImageCardConfig | None = Field(
+        default=None,
+        description="Declared image geometry, references, RGBA and sampling contract.",
+    )
     license: "LicenseSection | None" = Field(
         default=None,
         description=(
@@ -735,13 +744,19 @@ class VideoAdapterSection(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True)
 
-    name: str = Field(description="Adapter name accepted by the video job `lora` field.")
+    name: str = Field(
+        description="Adapter name accepted by the video job `lora` field."
+    )
     modes: list[VideoModeName] = Field(
         default_factory=list,
         description="Generation modes the adapter is trained for; empty means every mode.",
     )
-    steps: int | None = Field(default=None, description="Sampling steps the adapter was trained for.")
-    strength: float | None = Field(default=None, description="Default adapter strength.")
+    steps: int | None = Field(
+        default=None, description="Sampling steps the adapter was trained for."
+    )
+    strength: float | None = Field(
+        default=None, description="Default adapter strength."
+    )
     video_shift: float | None = Field(
         default=None,
         description="Video sigma shift a render with this adapter uses when the request sets none; null keeps the card's.",
@@ -757,7 +772,9 @@ class VideoStyleSection(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True)
 
-    name: str = Field(description="Style name accepted by the video job `styles` field.")
+    name: str = Field(
+        description="Style name accepted by the video job `styles` field."
+    )
     modes: list[VideoModeName] = Field(
         default_factory=list,
         description="Generation modes the style is declared for; empty means every mode.",
@@ -800,13 +817,27 @@ class VideoReferenceLimitsSection(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True)
 
-    max_images: int = Field(default=0, description="Reference images accepted per request.")
-    max_videos: int = Field(default=0, description="Reference clips accepted per request.")
-    max_audio_clips: int = Field(default=0, description="Reference audio clips accepted per request.")
-    max_files: int | None = Field(default=None, description="Total attachments accepted, when bounded.")
-    clip_min_seconds: int | None = Field(default=None, description="Shortest reference clip accepted.")
-    clip_max_seconds: int | None = Field(default=None, description="Longest reference clip accepted.")
-    total_clip_seconds: int | None = Field(default=None, description="Combined reference clip length accepted.")
+    max_images: int = Field(
+        default=0, description="Reference images accepted per request."
+    )
+    max_videos: int = Field(
+        default=0, description="Reference clips accepted per request."
+    )
+    max_audio_clips: int = Field(
+        default=0, description="Reference audio clips accepted per request."
+    )
+    max_files: int | None = Field(
+        default=None, description="Total attachments accepted, when bounded."
+    )
+    clip_min_seconds: int | None = Field(
+        default=None, description="Shortest reference clip accepted."
+    )
+    clip_max_seconds: int | None = Field(
+        default=None, description="Longest reference clip accepted."
+    )
+    total_clip_seconds: int | None = Field(
+        default=None, description="Combined reference clip length accepted."
+    )
 
 
 class VideoCapabilitySection(BaseModel):
@@ -822,24 +853,65 @@ class VideoCapabilitySection(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True)
 
     modes: list[VideoModeName] = Field(description="Generation modes the card serves.")
+    transformer_variant: Literal["distilled", "dev"] | None = Field(
+        default=None,
+        description="Selected transformer's training variant when declared.",
+    )
+    pipelines: list[VideoPipeline] = Field(default_factory=list, description="Implemented baseline family pipelines available with this selected artifact.")
+    pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by every required asset of each implemented pipeline.")
+    decoders: list[VideoDecoder] = Field(default_factory=list, description="Selectable decoders whose exact components are present.")
+    decoder_modes: dict[VideoDecoder, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by each selected decoder and its pipeline assets.")
+    generated_keyframes: bool = Field(default=False, description="Whether internal detailing keyframe tokens are supported by this artifact.")
+    automatic_duration: bool = Field(default=False, description="Whether an exact duration head is selected.")
+    automatic_duration_modes: list[VideoModeName] = Field(default_factory=list, description="Implemented modes permitted by the selected duration head.")
+    audio_conditioning: bool = Field(default=False, description="A selected artifact and available engine can freeze prepared source audio in both sampling stages.")
+    editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an available owned native engine.")
+    prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an available owned native engine.")
+    guidance: VideoGuidance | None = Field(default=None, description="Default guided LTX base-stage scales; null for distilled or other families.")
     min_seconds: int = Field(description="Shortest clip length accepted.")
     max_seconds: int = Field(description="Longest clip length accepted.")
     fps: int = Field(description="Output frame rate.")
-    frame_grid_multiple: int = Field(description="Frame counts snap to this multiple plus the offset.")
+    frame_grid_multiple: int = Field(
+        description="Frame counts snap to this multiple plus the offset."
+    )
     frame_grid_offset: int = Field(description="Frame grid offset.")
-    canvas_multiple: int = Field(description="Canvas dimensions must be multiples of this.")
-    default_short_edge: int | None = Field(default=None, description="Trained short edge when `size` is omitted.")
+    canvas_multiple: int = Field(
+        description="Canvas dimensions must be multiples of this."
+    )
+    min_short_edge: int | None = Field(
+        default=None,
+        description="Minimum canvas edge imposed by the implemented pipeline.",
+    )
+    default_short_edge: int | None = Field(
+        default=None, description="Trained short edge when `size` is omitted."
+    )
     max_pixels: int | None = Field(default=None, description="Pixel budget per frame.")
-    aspect_ratios: list[str] = Field(default_factory=list, description="Advisory aspect ratios the card lists.")
-    audio_output: bool = Field(description="Whether renders carry a synchronized audio track.")
-    audio_sample_rate: int | None = Field(default=None, description="Audio sample rate of rendered clips.")
-    audio_channels: int | None = Field(default=None, description="Audio channels of rendered clips.")
-    default_steps: int = Field(description="Sampling steps when no adapter is selected.")
+    aspect_ratios: list[str] = Field(
+        default_factory=list, description="Advisory aspect ratios the card lists."
+    )
+    audio_output: bool = Field(
+        description="Whether renders carry a synchronized audio track."
+    )
+    audio_sample_rate: int | None = Field(
+        default=None, description="Audio sample rate of rendered clips."
+    )
+    audio_channels: int | None = Field(
+        default=None, description="Audio channels of rendered clips."
+    )
+    default_steps: int = Field(
+        description="Sampling steps when no adapter is selected."
+    )
+    sampling_stage_steps: list[int] = Field(
+        default_factory=list,
+        description="Fixed interval counts for successive sampling stages; empty for a variable schedule.",
+    )
     reference_limits: VideoReferenceLimitsSection | None = Field(
-        default=None, description="Reference attachment limits for reference-to-video cards."
+        default=None,
+        description="Reference attachment limits for reference-to-video cards.",
     )
     adapters: list[VideoAdapterSection] = Field(
-        default_factory=list, description="Named adapters (LoRAs) selectable through the job `lora` field."
+        default_factory=list,
+        description="Named adapters (LoRAs) selectable through the job `lora` field.",
     )
     styles: list[VideoStyleSection] = Field(
         default_factory=list,
@@ -850,14 +922,16 @@ class VideoCapabilitySection(BaseModel):
         description="Every sampler the job `sampler` field accepts: the engine's list, not a recommendation.",
     )
     default_sampler: str = Field(
-        default=VIDEO_DEFAULT_SAMPLER, description="Sampler a render uses when the request names none."
+        default=VIDEO_DEFAULT_SAMPLER,
+        description="Sampler a render uses when the request names none.",
     )
     schedulers: list[str] = Field(
         default_factory=lambda: list(VIDEO_SCHEDULERS),
         description="Every sigma schedule the job `scheduler` field accepts.",
     )
     default_scheduler: str = Field(
-        default=VIDEO_DEFAULT_SCHEDULER, description="Sigma schedule a render uses when the request names none."
+        default=VIDEO_DEFAULT_SCHEDULER,
+        description="Sigma schedule a render uses when the request names none.",
     )
     video_shift: float | None = Field(
         default=None,
@@ -876,12 +950,17 @@ class VideoCapabilitySection(BaseModel):
         description="Reference sizings the job `reference_fidelity` field accepts; empty when the card serves no `ref2va`.",
     )
     default_reference_fidelity: str | None = Field(
-        default=None, description="Reference sizing a `ref2va` render uses when the request names none."
+        default=None,
+        description="Reference sizing a `ref2va` render uses when the request names none.",
     )
     codecs: list[str] = Field(
-        default_factory=lambda: list(VIDEO_CODECS), description="Every codec the job `codec` field accepts."
+        default_factory=lambda: list(VIDEO_CODECS),
+        description="Every codec the job `codec` field accepts.",
     )
-    default_codec: str = Field(default=VIDEO_DEFAULT_CODEC, description="Codec a render is written with by default.")
+    default_codec: str = Field(
+        default=VIDEO_DEFAULT_CODEC,
+        description="Codec a render is written with by default.",
+    )
     guides: list[VideoGuideSection] = Field(
         default_factory=list,
         description=(
@@ -920,14 +999,66 @@ class VideoCapabilitySection(BaseModel):
             return None
         limits = config.reference_limits
         guides = _guide_sections(config)
+        ltx = model_card.family == "ltx-2.5"
+        engines = {engine_of(backend) for backend in model_card.placement.compatible_backends}
+        native_only = ltx and engines == {"mlx_video"}
+        native_features = published_video_features() if "mlx_video" in engines else frozenset[NativeVideoFeature]()
+        def companion_modes(kind: VideoCompanionKind, name: str) -> list[VideoModeName]:
+            return cast("list[VideoModeName]", [mode.value for mode in config.modes if mode in (VideoMode.TextToAudioVideo, VideoMode.FramesToAudioVideo) and any(item.kind is kind and item.name == name and item.supports_mode(mode) for item in config.companions)])
+
+        prerequisites = ltx and config.audio_output and config.frame_grid_multiple == 8 and config.frame_grid_offset == 1
+        spatial_modes: list[VideoModeName] = companion_modes(VideoCompanionKind.LatentUpscaler, "spatial_x2") if prerequisites else []
+        distilled_modes: list[VideoModeName] = spatial_modes if config.transformer_variant == "distilled" else []
+        dev_modes: list[VideoModeName] = [mode for mode in spatial_modes if mode in companion_modes(VideoCompanionKind.Lora, "distilled_refinement")] if config.transformer_variant == "dev" else []
+        ltx_distilled, ltx_dev = bool(distilled_modes), bool(dev_modes)
+        ltx_available = ltx_distilled or ltx_dev
+        pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = {}
+        if distilled_modes:
+            pipeline_modes["distilled_two_stage"] = distilled_modes
+        if dev_modes:
+            pipeline_modes["dev_two_stage"] = dev_modes
+            if any(engine_of(backend) == "mlx_video" for backend in model_card.placement.compatible_backends):
+                pipeline_modes["hq_two_stage"] = dev_modes
+        served_modes: list[VideoModeName] = distilled_modes or dev_modes
+        reference_mode: list[VideoModeName] = ["ref2va"] if prerequisites and VideoMode.ReferenceToAudioVideo in config.modes else []
+        spatial_reference = any(item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(VideoMode.ReferenceToAudioVideo) for item in config.companions)
+        audio_conditioning = bool(reference_mode) and spatial_reference and config.transformer_variant == "distilled" and config.audio_conditioning and ("comfy" in engines or "audio_conditioning" in native_features)
+        editing: list[Literal["retake", "extend"]] = [operation for operation in config.editing if reference_mode and operation in native_features and (operation == "retake" or config.transformer_variant == "dev" or spatial_reference)]
+        if audio_conditioning:
+            pipeline_modes["distilled_two_stage"] = [*distilled_modes, *reference_mode]
+        for operation in editing:
+            pipeline_modes[operation] = reference_mode
+        if audio_conditioning or editing:
+            served_modes = [*served_modes, *reference_mode]
+        decoder_modes: dict[VideoDecoder, list[VideoModeName]] = {}
+        if served_modes:
+            decoder_modes["convolutional"] = served_modes
+        diffusion_modes: list[VideoModeName] = [mode for mode in served_modes if mode in companion_modes(VideoCompanionKind.VideoDecoder, "diffusion_decoder")]
+        if diffusion_modes:
+            decoder_modes["diffusion"] = diffusion_modes
+        duration_modes: list[VideoModeName] = [mode for mode in served_modes if mode in companion_modes(VideoCompanionKind.DurationHead, "duration_head")]
         return cls(
             modes=cast("list[VideoModeName]", [mode.value for mode in config.modes]),
+            transformer_variant=config.transformer_variant,
+            pipelines=list(pipeline_modes),
+            pipeline_modes=pipeline_modes,
+            codecs=["h264"] if native_only else list(VIDEO_CODECS),
+            decoders=list(decoder_modes),
+            decoder_modes=decoder_modes,
+            generated_keyframes=ltx_available and config.generated_keyframes,
+            automatic_duration=bool(duration_modes),
+            automatic_duration_modes=duration_modes,
+            audio_conditioning=audio_conditioning,
+            editing=editing,
+            prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in native_features,
+            guidance=VideoGuidance() if ltx_dev else None,
             min_seconds=config.min_seconds,
             max_seconds=config.max_seconds,
             fps=config.fps,
             frame_grid_multiple=config.frame_grid_multiple,
             frame_grid_offset=config.frame_grid_offset,
-            canvas_multiple=config.canvas_multiple,
+            canvas_multiple=64 if ltx else config.canvas_multiple,
+            min_short_edge=128 if ltx else None,
             default_short_edge=config.default_short_edge,
             max_pixels=config.max_pixels,
             aspect_ratios=list(config.aspect_ratios),
@@ -935,13 +1066,29 @@ class VideoCapabilitySection(BaseModel):
             audio_sample_rate=config.audio_sample_rate,
             audio_channels=config.audio_channels,
             default_steps=config.default_steps,
+            sampling_stage_steps=[8, 3] if ltx_distilled else [],
+            samplers=[] if native_only else (["euler_ancestral"] if ltx_distilled else ["euler"] if ltx_dev else [])
+            if ltx
+            else list(VIDEO_SAMPLERS),
+            default_sampler="euler_ancestral"
+            if ltx_distilled
+            else ("euler" if ltx_dev else "unsupported" if ltx else VIDEO_DEFAULT_SAMPLER),
+            schedulers=[] if ltx else list(VIDEO_SCHEDULERS),
+            default_scheduler=("ltx" if native_only else "manual" if ltx_distilled else "ltx" if ltx_dev else "unsupported")
+            if ltx
+            else VIDEO_DEFAULT_SCHEDULER,
+            shift_bounds=[] if ltx else list(VIDEO_SHIFT_BOUNDS),
             video_shift=config.video_shift,
             audio_shift=config.audio_shift,
             reference_fidelities=(
-                list(VIDEO_REFERENCE_FIDELITIES) if VideoMode.ReferenceToAudioVideo in config.modes else []
+                list(VIDEO_REFERENCE_FIDELITIES)
+                if not ltx and VideoMode.ReferenceToAudioVideo in config.modes
+                else []
             ),
             default_reference_fidelity=(
-                VIDEO_DEFAULT_REFERENCE_FIDELITY if VideoMode.ReferenceToAudioVideo in config.modes else None
+                VIDEO_DEFAULT_REFERENCE_FIDELITY
+                if not ltx and VideoMode.ReferenceToAudioVideo in config.modes
+                else None
             ),
             reference_limits=(
                 VideoReferenceLimitsSection(
@@ -959,19 +1106,23 @@ class VideoCapabilitySection(BaseModel):
             adapters=[
                 VideoAdapterSection(
                     name=companion.name,
-                    modes=cast("list[VideoModeName]", [mode.value for mode in companion.modes]),
+                    modes=cast(
+                        "list[VideoModeName]", [mode.value for mode in companion.modes]
+                    ),
                     steps=companion.steps,
                     strength=companion.strength,
                     video_shift=companion.video_shift,
                     audio_shift=companion.audio_shift,
                 )
                 for companion in config.companions
-                if companion.kind == VideoCompanionKind.Lora
+                if companion.kind == VideoCompanionKind.Lora and not ltx
             ],
             styles=[
                 VideoStyleSection(
                     name=companion.name,
-                    modes=cast("list[VideoModeName]", [mode.value for mode in companion.modes]),
+                    modes=cast(
+                        "list[VideoModeName]", [mode.value for mode in companion.modes]
+                    ),
                 )
                 for companion in config.companions
                 if companion.kind == VideoCompanionKind.Embedding
@@ -1010,7 +1161,9 @@ def _guide_sections(config: VideoCardConfig) -> list[VideoGuideSection]:
                 weights=[
                     VideoGuideWeightsSection(
                         name=companion.name,
-                        repository=None if companion.repo is None else str(companion.repo),
+                        repository=None
+                        if companion.repo is None
+                        else str(companion.repo),
                         license=companion.license,
                     )
                     for companion in config.companions
@@ -1028,10 +1181,15 @@ class LicenseSection(BaseModel):
 
     name: str = Field(description="Human-readable license name.")
     url: str | None = Field(default=None, description="Where the license text lives.")
-    spdx_id: str | None = Field(default=None, description="SPDX identifier when one exists.")
-    notice: str | None = Field(default=None, description="Terms the operator should see before fetching.")
+    spdx_id: str | None = Field(
+        default=None, description="SPDX identifier when one exists."
+    )
+    notice: str | None = Field(
+        default=None, description="Terms the operator should see before fetching."
+    )
     display_name: str | None = Field(
-        default=None, description="Product display name the license requires, for example a model brand."
+        default=None,
+        description="Product display name the license requires, for example a model brand.",
     )
 
     @classmethod
@@ -1463,7 +1621,10 @@ class GenerationStats(BaseModel):
 class ImageGenerationStats(BaseModel):
     """Observed render timing and memory, with an explicit measurement scope."""
 
-    memory_scope: Literal["engine", "native_process_rss"] = Field(default="engine", description="Native RSS is sampled resident host memory; it does not claim GPU allocation measurements.")
+    memory_scope: Literal["engine", "native_process_rss"] = Field(
+        default="engine",
+        description="Native RSS is sampled resident host memory; it does not claim GPU allocation measurements.",
+    )
     seconds_per_step: float
     total_generation_time: float
 
@@ -1739,14 +1900,14 @@ class StoreDownloadRequest(BaseModel):
             "download. Omit to use the repository's default quant selection."
         ),
     )
-    extra_gguf_files: list[
-        Annotated[str, Field(min_length=1, max_length=2048)]
-    ] = Field(
-        default_factory=list,
-        description=(
-            "Same-repository companion GGUF paths to fetch with the selected "
-            "base quant."
-        ),
+    extra_gguf_files: list[Annotated[str, Field(min_length=1, max_length=2048)]] = (
+        Field(
+            default_factory=list,
+            description=(
+                "Same-repository companion GGUF paths to fetch with the selected "
+                "base quant."
+            ),
+        )
     )
     source_revision: str | None = Field(
         default=None,
@@ -1843,16 +2004,20 @@ class CachedArtifactLocation(BaseModel):
 
     node_id: str = Field(description="Fabric node retaining this exact generation.")
     complete: bool = Field(description="Whether the node reported a complete manifest.")
-    installed_identity: str = Field(description="Durable installed generation identity.")
+    installed_identity: str = Field(
+        description="Durable installed generation identity."
+    )
     bytes: int = Field(ge=0, description="Artifact bytes retained on the node.")
     last_use_epoch_seconds: float = Field(
         ge=0,
         description="Unix time of the node's most recent artifact use.",
     )
-    in_use: bool = Field(description="Whether a live runner currently depends on the replica.")
+    in_use: bool = Field(
+        description="Whether a live runner currently depends on the replica."
+    )
     location_kind: Literal["store_local", "node_cache"] = Field(
         default="node_cache",
-        description="Whether the bytes are canonical-store-local or a node cache."
+        description="Whether the bytes are canonical-store-local or a node cache.",
     )
 
 
@@ -1889,8 +2054,12 @@ class StoreRegistryEntry(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     model_id: str = Field(description="Canonical store artifact alias.")
-    store_path: str = Field(description="Artifact directory relative to the store root.")
-    files: list[str] = Field(description="Registered files relative to the artifact directory.")
+    store_path: str = Field(
+        description="Artifact directory relative to the store root."
+    )
+    files: list[str] = Field(
+        description="Registered files relative to the artifact directory."
+    )
     downloaded_at: str = Field(description="ISO 8601 UTC registration time.")
     total_bytes: int = Field(ge=0, description="Registered artifact byte total.")
     source_revision: str | None = Field(
@@ -2473,7 +2642,10 @@ def normalize_image_size(v: object) -> ImageSize:
     """Shared validator for ImageSize fields: maps None → "auto" and rejects invalid values."""
     if v is None:
         return "auto"
-    if not isinstance(v, str) or re.fullmatch(r"auto|[1-9][0-9]{1,3}x[1-9][0-9]{1,3}", v) is None:
+    if (
+        not isinstance(v, str)
+        or re.fullmatch(r"auto|[1-9][0-9]{1,3}x[1-9][0-9]{1,3}", v) is None
+    ):
         raise ValueError("Image size must be auto or WIDTHxHEIGHT")
     if v != "auto":
         width, height = (int(part) for part in v.split("x", 1))
@@ -2539,8 +2711,17 @@ class ImageEditsTaskParams(BaseModel):
 
     image_data: str = ""  # Base64-encoded image (empty when using chunked transfer)
     total_input_chunks: int = 0
-    input_image_count: int = Field(default=1, ge=1, le=10, description="Ordered reference slots admitted by the API.")
-    reference_image_data: tuple[str, ...] = Field(default=(), exclude=True, description="Worker-local verified media; never serialized into cluster state.")
+    input_image_count: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Ordered reference slots admitted by the API.",
+    )
+    reference_image_data: tuple[str, ...] = Field(
+        default=(),
+        exclude=True,
+        description="Worker-local verified media; never serialized into cluster state.",
+    )
     prompt: str
     model: str
     n: int | None = 1
@@ -2663,6 +2844,48 @@ class VideoCreateRequest(BaseModel):
     """Adapter strength override."""
     audio: bool = True
     """Whether the output must carry the model's synchronized audio track."""
+    audio_conditioning: VideoAudioConditioning | None = None
+    """Freeze one uploaded audio segment; multipart forms supply a JSON object."""
+    editing: VideoEditing | None = None
+    """Retake or extend source_video; seconds always describes total output length."""
+    prompt_relay: VideoPromptRelay | None = None
+    """Ordered local scene prompts; multipart forms supply a JSON object."""
+    pipeline: VideoPipeline | None = None
+    """Family execution workflow; omitted selects the declared transformer variant."""
+    decoder: VideoDecoder | None = None
+    """LTX decoder choice; omitted selects convolutional decoding."""
+    negative_prompt: str | None = Field(default=None, max_length=MAX_VIDEO_PROMPT_CHARS)
+    """Guided LTX negative conditioning, encoded verbatim."""
+    guidance: VideoGuidance | None = None
+    """LTX base-stage guidance; a multipart form supplies a JSON object."""
+    generated_keyframe_interval: int | None = Field(default=None, ge=1, le=1024)
+    """Internal detailing keyframe spacing in pixel frames."""
+    duration: Literal["fixed", "auto"] = "fixed"
+    """Automatic duration uses ``seconds`` as its upper bound, or the card maximum."""
+    duration_min_seconds: int | None = Field(default=None, ge=1, le=120)
+    """Automatic duration lower bound; omitted uses the card minimum."""
+
+    @field_validator("guidance", mode="before")
+    @classmethod
+    def _parse_guidance(cls, value: object) -> object:
+        if isinstance(value, str):
+            return VideoGuidance.model_validate_json(value)
+        return value
+
+    @field_validator("audio_conditioning", mode="before")
+    @classmethod
+    def _parse_audio_conditioning(cls, value: object) -> object:
+        return VideoAudioConditioning.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("editing", mode="before")
+    @classmethod
+    def _parse_editing(cls, value: object) -> object:
+        return VideoEditing.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("prompt_relay", mode="before")
+    @classmethod
+    def _parse_prompt_relay(cls, value: object) -> object:
+        return VideoPromptRelay.model_validate_json(value) if isinstance(value, str) else value
     sampler: str | None = None
     """Sampler name from the engine's list; omitted keeps ``res_multistep``.
     Samplers that cannot serve distilled H3 are refused by name."""
@@ -2754,6 +2977,22 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Sampling steps the schedule ran."""
     seed: int | None = None
     """The noise seed the render drew from, resolved when the request gave none."""
+    pipeline: VideoPipeline | None = None
+    """Executed family workflow, when applicable."""
+    decoder: VideoDecoder | None = None
+    """Selected decoder, when applicable."""
+    guidance: VideoGuidance | None = None
+    """Guidance applied to the base stage."""
+    generated_keyframe_interval: int | None = None
+    """Internal generated keyframe spacing, when used."""
+    duration: Literal["fixed", "auto"] = "fixed"
+    """How the actual frame count was determined."""
+    audio_conditioning: VideoAudioConditioning | None = None
+    """Source waveform offset used as frozen context."""
+    editing: VideoEditing | None = None
+    """Executed source operation and requested retake interval."""
+    prompt_relay: VideoPromptRelay | None = None
+    """Executed local prompts and relative timeline lengths."""
     video_shift: float | None
     """Video sigma shift applied; null leaves the loader default."""
     audio_shift: float | None
@@ -2876,10 +3115,23 @@ class MusicCreateRequest(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     model: str = Field(min_length=1, description="Mounted text-to-music model.")
-    prompt: str = Field(min_length=1, max_length=8000, description="Nonblank musical description.")
-    lyrics: str | None = Field(default=None, min_length=1, max_length=20_000, description="Nonblank lyrics, required by MiniMax Music 3.")
-    seconds: int = Field(ge=1, le=120, description="Generation target or budget; MiniMax may yield a different duration.")
-    seed: int | None = Field(default=None, ge=0, le=2**32 - 1, description="Optional deterministic seed.")
+    prompt: str = Field(
+        min_length=1, max_length=8000, description="Nonblank musical description."
+    )
+    lyrics: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20_000,
+        description="Nonblank lyrics, required by MiniMax Music 3.",
+    )
+    seconds: int = Field(
+        ge=1,
+        le=120,
+        description="Generation target or budget; MiniMax may yield a different duration.",
+    )
+    seed: int | None = Field(
+        default=None, ge=0, le=2**32 - 1, description="Optional deterministic seed."
+    )
 
     @field_validator("prompt", "lyrics")
     @classmethod
@@ -2904,7 +3156,9 @@ class MusicResource(BaseModel):
     completed_at: int | None = Field(description="Terminal time in Unix seconds.")
     expires_at: int | None = Field(description="WAV expiry time in Unix seconds.")
     error: str | None = Field(description="Failure detail, if any.")
-    output: MusicOutputManifest | None = Field(description="Actual WAV duration, sample rate, channels, size, and digest.")
+    output: MusicOutputManifest | None = Field(
+        description="Actual WAV duration, sample rate, channels, size, and digest."
+    )
 
 
 class MusicListResponse(BaseModel):

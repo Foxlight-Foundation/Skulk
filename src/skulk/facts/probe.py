@@ -541,6 +541,16 @@ def gather_node_facts(
     declared_llama_server = env.get(LLAMA_SERVER_BACKENDS_ENV)
     declared_vllm = env.get(VLLM_BACKENDS_ENV)
     comfy_binary = _binary_fact(COMFY_BIN_ENV, env)
+    from skulk.provisioning.mlx_video import installed_video_runtime
+
+    video_build: str | None = None
+    if platform == "darwin":
+        try:
+            installed_video = installed_video_runtime()
+            if installed_video is not None:
+                video_build = installed_video[1]
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            logger.debug(f"native video runtime is unavailable: {error}")
     from skulk.provisioning.stable_diffusion_cpp import BINARY_ENV, probe_native_image
 
     native_image_binary = _binary_fact(BINARY_ENV, env)
@@ -652,6 +662,7 @@ def gather_node_facts(
         declared_vllm_backends=declared_vllm,
         test_video_engine=test_video_engine,
         comfy_binary=comfy_binary,
+        mlx_video_build_identity=video_build,
         stable_diffusion_cpp_binary=native_image_binary,
         stable_diffusion_cpp_probe=native_image_probe,
         comfy_root=comfy_root,

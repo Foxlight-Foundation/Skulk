@@ -1,0 +1,3 @@
+from pathlib import Path
+
+def is_ltx25_pack(model_dir: str | Path) -> bool: ...
