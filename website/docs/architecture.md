@@ -3132,5 +3132,7 @@ exact-byte promotion live in `.github/workflows/vllm-runtime-wheel.yml`; source
 recipes and lockfiles live in `packaging/skulk-vllm-runtime/`. Publication is
 append-only and qualification never becomes a tested-hardware allowlist. The
 runner's `--kv-cache-dtype auto` keeps the full-precision shared estimate; new
-compressed cache modes need explicit runner and admission support. See
+compressed cache modes need explicit runner and admission support. A shared
+3 GiB minimum runtime reserve covers cold compilation in placement, worker
+admission, context sizing and server memory allocation. See
 [the vLLM runtime guide](vllm-engine.md) for user setup and prerequisites.

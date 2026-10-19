@@ -400,7 +400,7 @@ def test_wide_head_model_share_covers_the_artifact_cache() -> None:
 
     A Gemma 4 12B shape on a 48 GiB GPU: the card estimates 6 GiB of window KV
     cache, but at the artifact's 256-wide heads the bound is 12 GiB. The share
-    covers 8 GiB of weights, those 12 GiB and vLLM's own gigabyte.
+    covers 8 GiB of weights, those 12 GiB and vLLM's runtime reserve.
     """
     card = ModelCard(
         model_id=ModelId("org/wide"),
@@ -463,10 +463,9 @@ def test_small_model_share_covers_vllm_runtime_memory() -> None:
     """A tiny model still gets its window's KV cache after vLLM's own memory.
 
     Half a GiB of weights at the 1.30 factor leaves only 0.15 GiB of overhead
-    allowance, less than the gigabyte vLLM holds for its CUDA context and
-    activations whatever the model's size. The share is raised to weights,
-    3.5 GiB of window KV cache and that gigabyte: 5.0 GiB, not the 4.4 GiB
-    footprint.
+    allowance, less than vLLM's cold compilation and CUDA runtime reserve.
+    Placement and server sizing both hold weights, 3.5 GiB of window KV
+    cache and the shared 3 GiB reserve.
     """
     card = ModelCard(
         model_id=ModelId("org/tiny"),
@@ -482,7 +481,7 @@ def test_small_model_share_covers_vllm_runtime_memory() -> None:
         card, 32768, "vllm-cuda", device_total, None, 2 * 28 * 8 * 128 * 2
     )
     assert share.basis == "placement"
-    assert share.fraction * device_total >= 5.0 * _GIB
+    assert share.fraction * device_total >= 7.0 * _GIB
 
 
 def test_share_never_exceeds_the_fixed_default() -> None:

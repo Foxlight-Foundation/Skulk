@@ -8,8 +8,10 @@ from skulk.shared.models.memory_estimate import (
     LOAD_FIT_TOLERANCE,
     MEMORY_OVERHEAD_FACTOR,
     MEMORY_OVERHEAD_FLOOR,
+    VLLM_RUNTIME_ALLOWANCE,
     estimate_kv_cache_bytes,
     estimate_shard_footprint,
+    estimate_weight_runtime_bytes,
     gpu_working_set_ceiling,
     memory_overhead_factor,
 )
@@ -43,6 +45,25 @@ def test_memory_overhead_factor_is_engine_aware():
     assert (
         memory_overhead_factor(_card(8, gguf_file="model.gguf"))
         == LLAMA_CPP_MEMORY_OVERHEAD_FACTOR
+    )
+
+
+@pytest.mark.parametrize("backend", ["vllm-cuda", "vllm-rocm"])
+def test_vllm_admission_covers_cold_start_and_cache(backend: str) -> None:
+    """Cold compilation must fit without borrowing the reserved KV budget."""
+    card = _card(1, kv_heads=2)
+    base = estimate_weight_runtime_bytes(card, 1.0, resolved_backend=backend)
+    assert base == card.storage_size + VLLM_RUNTIME_ALLOWANCE
+    footprint = estimate_shard_footprint(card, 1.0, 4096, resolved_backend=backend)
+    assert footprint == base + estimate_kv_cache_bytes(card, card.n_layers, 4096, resolved_backend=backend)
+    assert footprint > estimate_shard_footprint(card, 1.0, 4096, resolved_backend="mlx-metal")
+
+
+def test_vllm_large_model_keeps_larger_proportional_overhead() -> None:
+    """The fixed reserve is a floor, never a reduction of larger estimates."""
+    card = _card(30)
+    assert estimate_weight_runtime_bytes(card, 1.0, resolved_backend="vllm-cuda") == (
+        card.storage_size * MEMORY_OVERHEAD_FACTOR + MEMORY_OVERHEAD_FLOOR
     )
 
 

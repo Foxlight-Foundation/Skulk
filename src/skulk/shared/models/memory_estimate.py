@@ -49,6 +49,14 @@ MEMORY_OVERHEAD_FLOOR: Memory = Memory.from_mb(256)
 """Flat per-shard overhead (Python interpreter, MLX runtime, IPC buffers) that
 the multiplicative factor under-counts for small shards."""
 
+VLLM_RUNTIME_ALLOWANCE: Final = Memory.from_bytes(3 * 1024**3)
+"""Minimum vLLM runtime/workspace reserve beyond weights and cache.
+
+Cold compilation on a shared-memory CUDA device consumed about 3 GiB during
+vLLM 0.32's startup profiling; a warm cache used substantially less. Admission
+must cover first use, rather than relying on an already compiled model.
+"""
+
 GPU_WORKING_SET_FRACTION: float = 0.75
 """Fraction of a node's *total* RAM usable as the Metal GPU working set on
 Apple Silicon. ``mx.device_info()["max_recommended_working_set_size"]`` measured
@@ -355,6 +363,29 @@ def estimate_music_workspace(
     return Memory()
 
 
+def estimate_weight_runtime_bytes(
+    model_card: ModelCard,
+    shard_fraction: float,
+    *,
+    resolved_backend: str | None = None,
+) -> Memory:
+    """Return shard weights and engine workspace, excluding attention cache.
+
+    The vLLM floor covers cold compilation even for small models. Both context
+    sizing and the master/worker footprint use this same reservation.
+    """
+    if shard_fraction <= 0.0:
+        return Memory()
+    weights = engine_parameter_bytes(model_card, resolved_backend=resolved_backend) * shard_fraction
+    footprint = (
+        weights * memory_overhead_factor(model_card, resolved_backend=resolved_backend)
+        + MEMORY_OVERHEAD_FLOOR
+    )
+    if resolved_backend is not None and resolved_backend.startswith("vllm"):
+        return max(footprint, weights + VLLM_RUNTIME_ALLOWANCE)
+    return footprint
+
+
 def estimate_shard_footprint(
     model_card: ModelCard,
     shard_fraction: float,
@@ -367,7 +398,7 @@ def estimate_shard_footprint(
 ) -> Memory:
     """Estimate resident memory for a shard holding ``shard_fraction`` of a model.
 
-    ``weights_share * overhead + kv_share + recurrent_share + overhead_floor + music_workspace``
+    ``weight_runtime_bytes + kv_share + recurrent_share + music_workspace``
     where weights and KV both scale by ``shard_fraction``. Music is single-host
     and reserves its complete transient workspace. That single fraction
     works for every sharding because both quantities are linear in it:
@@ -384,7 +415,6 @@ def estimate_shard_footprint(
     """
     if shard_fraction <= 0.0:
         return Memory()
-    weights_share = engine_parameter_bytes(model_card, resolved_backend=resolved_backend) * shard_fraction
     full_kv = Memory.from_bytes(
         per_token_kv_bytes(
             model_card,
@@ -401,8 +431,9 @@ def estimate_shard_footprint(
     )
     kv_share = full_kv * shard_fraction
     footprint = (
-        weights_share
-        * memory_overhead_factor(model_card, resolved_backend=resolved_backend)
+        estimate_weight_runtime_bytes(
+            model_card, shard_fraction, resolved_backend=resolved_backend
+        )
         + kv_share
         + estimate_recurrent_cache_bytes(
             model_card,
@@ -410,7 +441,6 @@ def estimate_shard_footprint(
             llama_server_settings=llama_server_settings,
         )
         * shard_fraction
-        + MEMORY_OVERHEAD_FLOOR
         + estimate_music_workspace(model_card, resolved_backend=resolved_backend)
     )
     # A single-node GGUF vision runner owns the complete projector in addition
@@ -843,10 +873,9 @@ def _node_window_tokens(
         return None
     kv_budget = (
         working_set
-        - engine_parameter_bytes(model_card, resolved_backend=shard.resolved_backend)
-        * fraction
-        * memory_overhead_factor(model_card, resolved_backend=shard.resolved_backend)
-        - MEMORY_OVERHEAD_FLOOR
+        - estimate_weight_runtime_bytes(
+            model_card, fraction, resolved_backend=shard.resolved_backend
+        )
         - estimate_recurrent_cache_bytes(
             model_card,
             resolved_backend=shard.resolved_backend,

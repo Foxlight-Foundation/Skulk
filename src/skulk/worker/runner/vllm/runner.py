@@ -63,6 +63,7 @@ from skulk.download.download_utils import build_model_path
 from skulk.shared.backends import VLLM_BIN_ENV
 from skulk.shared.models.memory_estimate import (
     VLLM_MAX_MODEL_LEN,
+    VLLM_RUNTIME_ALLOWANCE,
     amd_unified_memory_limit,
     estimate_shard_footprint,
     is_gb10_accelerator,
@@ -119,6 +120,7 @@ from skulk.worker.runner.llm_inference.scaffolding_scrub import (
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
+from skulk.worker.runner.vllm.server_errors import raise_for_vllm_status
 
 # vLLM startup can be slow: weight load + torch.compile + CUDA-graph capture on a
 # large model runs to minutes, and 0.28.0's torch-2.13 AOT compile chain pushed a
@@ -149,12 +151,6 @@ _ADDRESS_IN_USE_MARKER: Final = "Address already in use"
 # (see resolve_gpu_memory_utilization).
 _GPU_MEMORY_UTILIZATION_ENV: Final = "SKULK_VLLM_GPU_MEMORY_UTILIZATION"
 _DEFAULT_GPU_MEMORY_UTILIZATION: Final = 0.90
-
-_VLLM_RUNTIME_ALLOWANCE: Final = Memory.from_bytes(1024**3)
-"""Memory vLLM holds beyond weights and KV cache whatever the model's size:
-CUDA context, cuBLAS workspace and peak activations, measured at 0.63 GiB for a
-0.6B and 1.0 GiB for a 7B model on vLLM 0.28. The placement estimate's overhead
-scales with weights, so on the smallest models it can fall short of this."""
 
 # Upper bound on concurrent in-flight generations the runner streams to the one
 # ``vllm serve`` at once: the thread-pool width, and also the server's
@@ -342,7 +338,7 @@ def resolve_gpu_memory_utilization(
 
     The share never drops below weights, the served window's KV cache at the
     artifact's own geometry (``artifact_kv_bytes_per_token``, an upper bound)
-    and vLLM's fixed runtime memory (``_VLLM_RUNTIME_ALLOWANCE``). The card's
+    and vLLM's fixed runtime memory (``VLLM_RUNTIME_ALLOWANCE``). The card's
     estimate assumes 128-wide attention heads and a proportional overhead, so
     wide-head models and the smallest models would otherwise leave vLLM short
     of its window, and it would refuse to start. The share is rounded up to the
@@ -387,7 +383,7 @@ def resolve_gpu_memory_utilization(
     window_kv = Memory.from_bytes(kv_per_token * context_tokens)
     share_bytes = max(
         footprint.in_bytes,
-        (model_card.storage_size + window_kv + _VLLM_RUNTIME_ALLOWANCE).in_bytes,
+        (model_card.storage_size + window_kv + VLLM_RUNTIME_ALLOWANCE).in_bytes,
     )
     units = math.ceil(share_bytes * _SHARE_RESOLUTION / device_total_bytes)
     return GpuMemoryShare(
@@ -1336,7 +1332,7 @@ class Runner(ServedConcurrentDispatch):
         request_started = time.perf_counter()
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)
-            resp.raise_for_status()
+            raise_for_vllm_status(resp)
             result = cast("dict[str, Any]", resp.json())
         request_seconds = time.perf_counter() - request_started
         # A cancel that landed while the blocking POST was in flight: drain it
@@ -1475,7 +1471,7 @@ class Runner(ServedConcurrentDispatch):
                 "POST", f"{self.base_url}/v1/chat/completions", json=body
             ) as resp,
         ):
-            resp.raise_for_status()
+            raise_for_vllm_status(resp)
             for line in resp.iter_lines():
                 if self._is_cancelled(task.task_id):
                     logger.info(f"vllm generation cancelled: {task.task_id}")

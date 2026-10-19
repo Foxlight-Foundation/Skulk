@@ -69,7 +69,15 @@ boundaries are enforced loudly rather than degraded silently:
 
 The served context window is sized to the memory the cluster admitted for the
 instance (passed as `--max-model-len`), never blindly to the model's full
-trained context.
+trained context. An oversized prompt retains vLLM's bounded explanation and
+the shared `context_length_exceeded` classification. If response headers have
+already been sent, the API returns that error in the response body, following
+the [API error contract](api-guide.md).
+
+Placement, worker admission and server sizing reserve at least 3 GiB beyond
+weights and cache for vLLM runtime and cold compilation workspace. Larger
+models retain the larger proportional overhead estimate. This reserve covers
+the first start as well as later starts that reuse compiled kernels.
 
 ## Setup
 
