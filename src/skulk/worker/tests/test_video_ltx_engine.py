@@ -448,6 +448,8 @@ def test_dfr_carries_detailing_tokens_and_preserves_the_timeline(temporal: int) 
     params = _params(pipeline="dfr", temporal_upscalings=temporal)
     render = plan_comfy_render(params, _dfr_card())
     graph = build_prompt(render, params, (), "command")
+    assert render.sampler == "euler"
+    assert graph["sampler_select"]["inputs"]["sampler_name"] == "euler"
     assert render.plan.fps == 24 * (2 ** temporal)
     assert render.plan.frame_count == 120 * (2 ** temporal) + 1
     assert (render.plan.frame_count - 1) / render.plan.fps == 5
@@ -523,3 +525,14 @@ def test_temporal_metadata_does_not_expand_a_companions_modes() -> None:
     assert metadata.temporal_upscaling_modes == ["fl2va"]
     with pytest.raises(ValueError, match="temporal_x2"):
         plan_comfy_render(_params(pipeline="dfr", temporal_upscalings=1), card)
+
+
+
+def test_dfr_fixed_sampler_cannot_be_replaced_by_distilled_ancestral() -> None:
+    with pytest.raises(ValueError, match="fixed euler sampler"):
+        plan_comfy_render(_params(pipeline="dfr", sampler="euler_ancestral"), _dfr_card())
+    render = plan_comfy_render(_params(pipeline="dfr", sampler="euler"), _dfr_card())
+    assert render.engine_settings().sampler == "euler"
+    metadata = VideoCapabilitySection.from_model_card(_dfr_card())
+    assert metadata is not None and metadata.samplers == ["euler_ancestral", "euler"]
+    assert metadata.default_sampler == "euler_ancestral"

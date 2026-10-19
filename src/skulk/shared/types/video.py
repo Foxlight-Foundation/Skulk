@@ -650,7 +650,7 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError(
                 "LTX-2.5 distilled rendering uses a fixed 8-step base schedule"
             )
-        expected_sampler = "euler_ancestral" if video.transformer_variant == "distilled" and pipeline != "retake" else "euler"
+        expected_sampler = "euler_ancestral" if video.transformer_variant == "distilled" and pipeline not in ("retake", "dfr") else "euler"
         if self.sampler not in (None, expected_sampler) or self.scheduler is not None:
             raise ValueError(
                 f"LTX-2.5 {pipeline} uses its fixed {expected_sampler} sampler and family schedule"

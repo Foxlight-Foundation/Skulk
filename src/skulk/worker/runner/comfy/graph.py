@@ -611,7 +611,7 @@ def plan_comfy_render(
             adapter=None if pipeline != "dev_two_stage" or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=files.refinement_strength, steps=None),
             video_shift=None,
             audio_shift=None,
-            sampler="euler_ancestral" if pipeline in ("distilled_two_stage", "dfr") else "euler",
+            sampler="euler_ancestral" if pipeline == "distilled_two_stage" else "euler",
             scheduler="manual" if pipeline in ("distilled_two_stage", "dfr") else "ltx",
             codec=params.codec or CODEC_DEFAULT,
             family=card.family,

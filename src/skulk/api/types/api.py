@@ -1075,7 +1075,7 @@ class VideoCapabilitySection(BaseModel):
             audio_channels=config.audio_channels,
             default_steps=config.default_steps,
             sampling_stage_steps=[8, 3] if ltx_distilled else [],
-            samplers=[] if native_only else (["euler_ancestral"] if ltx_distilled else ["euler"] if ltx_dev else [])
+            samplers=[] if native_only else (["euler_ancestral", *(["euler"] if "dfr" in pipeline_modes else [])] if ltx_distilled else ["euler"] if ltx_dev else [])
             if ltx
             else list(VIDEO_SAMPLERS),
             default_sampler="euler_ancestral"
