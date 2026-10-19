@@ -1903,13 +1903,14 @@ Request fields (JSON keys or form fields):
 | `lora` | string | Name of a card companion adapter, for example a turbo LoRA |
 | `lora_strength` | number | 0.0 to 2.0 |
 | `audio` | boolean | Default `true`; the job fails at settlement if the render carries no audio track |
-| `pipeline` | string | LTX workflow: `distilled_two_stage` or `dev_two_stage`, matching the declared transformer; `retake` or `extend` requires matching `editing` controls. HQ (`hq_two_stage`) and DFR (`dfr`) requests currently fail on the pinned Comfy core engine; it does not approximate them |
+| `pipeline` | string | LTX workflow: `distilled_two_stage` or `dev_two_stage`, matching the declared transformer; `retake` or `extend` requires matching `editing` controls. DFR (`dfr`) requires a distilled transformer declaring generated keyframes and an exact `dfr_spatial` IC-LoRA. HQ (`hq_two_stage`) still requires the exact Res2s sampler and is refused by the pinned Comfy core engine |
 | `audio_conditioning` | object | LTX distilled source-audio workflow: `start_seconds` (0–120, default 0) selects an uploaded `audio_source` segment covering the full aligned clip. Audio is frozen in both stages. Multipart supplies this object as JSON |
 | `editing` | object | Native LTX source-video workflow: `operation` is `retake` or `extend`. Retake requires inclusive `start_seconds` and exclusive `end_seconds`; `regenerate_audio` defaults true, false preserves the source waveform. The region may cover the complete aligned frame duration, which can exceed nominal `seconds` (for example 25 frames at 24 fps is 25/24 seconds). Region boundaries round outward onto the 8-frame latent grid. Extend appends to reach `seconds`, the total output length, and refuses retake-region controls. Requires `source_video` and an explicit source-matching `size` |
 | `prompt_relay` | object | Native LTX timed local prompts: `segments` contains 2–8 objects with `prompt` and positive relative `length` (1–120). Each scene receives at least one latent frame; remaining frames share the length ratio with deterministic rounding. Global plus local prompts total at most 8000 characters. Multipart supplies JSON |
 | `decoder` | string | LTX `convolutional` (default) or `diffusion`; the latter requires the exact `video_decoder` companion named `diffusion_decoder`. The convolutional VAE still conditions images and upscales latents |
 | `negative_prompt` | string | Up to 8000 characters, guided LTX only; encoded verbatim. Distilled generation refuses it |
 | `guidance` | object | Guided LTX base stage only: `video_cfg` (default 3), `audio_cfg` (7), `stg_scale` (0, block 28), `modality_scale` (1). CFG ranges 1–100; STG 0–10; modality 1–10. Multipart supplies this object as JSON. Refinement uses unity CFG and preserves base audio |
+| `temporal_upscalings` | integer | DFR only: `0` (default) keeps the card FPS; `1` adds a temporal x2 refinement pass using the exact `temporal_x2` companion. FPS doubles and output frames become `2 * (base_frames - 1) + 1`, preserving the endpoint timeline. DFR currently requires fixed duration |
 | `generated_keyframe_interval` | integer | LTX internal detailing keyframe spacing in pixel frames, 1–1024. Requires a transformer declaring `generated_keyframes`; these tokens are removed before upscaling and never become extra output frames |
 | `duration` | string | `fixed` (default) or LTX `auto`. Automatic prediction requires an exact `duration_head` companion and bounds the allocation before sampling. `seconds` is its maximum; omitted uses the card maximum. Actual container frames and duration are verified using PyAV from the isolated engine and recorded in the output |
 | `duration_min_seconds` | integer | LTX automatic-duration lower bound, otherwise refused. Omitted uses the card minimum; both bounds must lie within card limits and contain a complete 8n+1 grid. Timed keyframes must precede this lower bound |
@@ -1942,7 +1943,7 @@ outside those constraints are refused. Seeds must fit an unsigned 64-bit
 integer.
 
 The model video metadata additionally exposes `pipelines`, `decoders`,
-`generated_keyframes`, `automatic_duration`, `audio_conditioning`, `editing`, `prompt_relay` and guided defaults.
+`generated_keyframes`, `temporal_upscaling`, `temporal_upscaling_modes`, `automatic_duration`, `audio_conditioning`, `editing`, `prompt_relay` and guided defaults.
 `pipeline_modes` and `decoder_modes` map each offered choice to its permitted
 modes; `automatic_duration_modes` lists the modes allowed by the selected
 head. Companion mode limits are enforced before graph dispatch, including

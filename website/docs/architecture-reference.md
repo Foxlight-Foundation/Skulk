@@ -1985,3 +1985,13 @@ shrinking model modality truth. See
 LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. The pinned Comfy core nodes lack the exact temporal retake/extension and prompt-relay masks.
 
 - Native v0.2.1 decode observation: standalone `worker/runner/video_observability.py`, bundled as `skulk_mlx_video.telemetry`; hooks actual decode/save, forwards every latent/rate/seed/keyframe, propagates errors and disables the upstream verbose-only allocator reset. Final Metal peak covers all render stages.
+
+
+### Comfy LTX detailing
+
+LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
+keyframe carry between base and spatial refinement. An explicit optional temporal
+x2 pass requires its pinned latent upscaler, doubles frame density and conditioning
+FPS together, and freezes the existing audio. Request admission checks selected
+companions and modes independently of hardware qualification. No additional
+engine installation is needed for these nodes at the pinned Comfy revision.

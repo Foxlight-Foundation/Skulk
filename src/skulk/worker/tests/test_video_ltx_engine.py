@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import pytest
@@ -15,6 +16,7 @@ from skulk.shared.models import model_cards
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
+    VideoCompanionConfig,
     VideoCompanionKind,
     VideoMode,
 )
@@ -232,10 +234,9 @@ def test_missing_or_inapplicable_selected_features_are_refused(controls: dict[st
         plan_comfy_render(_params(**controls), _card())
 
 
-@pytest.mark.parametrize("pipeline", ["hq_two_stage", "dfr"])
-def test_comfy_does_not_approximate_an_unimplemented_pipeline(pipeline: str) -> None:
-    with pytest.raises(ValueError, match="Res2s|DFR temporal"):
-        plan_comfy_render(_params(pipeline=pipeline), _card() if pipeline == "dfr" else _dev_card())
+def test_comfy_does_not_approximate_the_hq_sampler() -> None:
+    with pytest.raises(ValueError, match="Res2s"):
+        plan_comfy_render(_params(pipeline="hq_two_stage"), _dev_card())
 
 
 def test_duration_metadata_and_wire_roundtrip() -> None:
@@ -431,3 +432,94 @@ def test_multistage_progress_counts_each_sampler_once_and_never_rewinds() -> Non
     assert session.steps_seen == 11
     assert fractions == sorted(fractions)
     assert fractions[-1] <= 1.0
+
+
+def _dfr_card(*, temporal: bool = True) -> ModelCard:
+    card = _card()
+    assert card.video is not None
+    companions = (*card.video.companions, VideoCompanionConfig(kind=VideoCompanionKind.Lora, name="dfr_spatial", path="loras/dfr.safetensors"))
+    if temporal:
+        companions = (*companions, VideoCompanionConfig(kind=VideoCompanionKind.LatentUpscaler, name="temporal_x2", path="latent_upscale_models/temporal.safetensors"))
+    return card.model_copy(update={"video": card.video.model_copy(update={"companions": companions})})
+
+
+@pytest.mark.parametrize("temporal", [0, 1])
+def test_dfr_carries_detailing_tokens_and_preserves_the_timeline(temporal: int) -> None:
+    params = _params(pipeline="dfr", temporal_upscalings=temporal)
+    render = plan_comfy_render(params, _dfr_card())
+    graph = build_prompt(render, params, (), "command")
+    assert render.plan.fps == 24 * (2 ** temporal)
+    assert render.plan.frame_count == 120 * (2 ** temporal) + 1
+    assert (render.plan.frame_count - 1) / render.plan.fps == 5
+    assert graph["condition"]["inputs"]["frame_rate"] == 24
+    assert graph["ltx_video_latent"]["inputs"]["length"] == 121
+    assert graph["ltx_audio_latent"]["inputs"]["frames_number"] == 121
+    assert graph["ltx_upscale_keyframes"]["inputs"]["samples"] == ["ltx_strip_generated", 3]
+    assert graph["ltx_refine_keyframes"]["inputs"]["keyframes"] == ["ltx_upscale_keyframes", 0]
+    assert graph["ltx_dfr_detail_guide"]["inputs"]["guiding_latent"] == ["ltx_strip_generated", 2]
+    assert graph["ltx_dfr_lora"]["inputs"]["lora_name"] == "dfr.safetensors"
+    assert graph["ltx_refine_guider"]["inputs"]["model"] == ["ltx_dfr_lora", 0]
+    assert graph["ltx_refine_sigmas"]["inputs"]["sigmas"] == "0.909375, 0.725, 0.421875, 0.0"
+    assert graph["decode_audio"]["inputs"]["samples"] == ["ltx_refine_split", 1]
+    assert graph["create_video"]["inputs"]["fps"] == float(render.plan.fps)
+    assert render.steps == 11 + 4 * temporal
+    assert render.engine_settings().temporal_upscalings == temporal
+    if temporal:
+        assert graph["ltx_temporal_upscale"]["inputs"]["samples"] == ["ltx_refine_crop", 2]
+        assert graph["ltx_temporal_guides"]["inputs"]["keyframes"] == ["ltx_refine_strip_generated", 3]
+        assert graph["ltx_temporal_condition"]["inputs"]["frame_rate"] == 48
+        assert graph["ltx_temporal_frozen_audio"]["inputs"]["latent"] == ["ltx_refine_split", 1]
+        assert graph["decode_video"]["inputs"]["samples"] == ["ltx_temporal_crop", 2]
+        assert render.sampler_steps["ltx_temporal_sampler"] == 4
+    else:
+        assert "ltx_temporal_sampler" not in graph
+        assert graph["decode_video"]["inputs"]["samples"] == ["ltx_refine_crop", 2]
+
+
+@pytest.mark.parametrize("controls,card,error", [
+    ({"pipeline": "dfr"}, _card, "dfr_spatial"),
+    ({"pipeline": "dfr", "temporal_upscalings": 1}, lambda: _dfr_card(temporal=False), "temporal_x2"),
+    ({"temporal_upscalings": 1}, _card, "requires.*DFR"),
+    ({"pipeline": "dfr", "duration": "auto"}, _dfr_card, "fixed duration"),
+])
+def test_dfr_requires_its_selected_assets_and_explicit_controls(controls: dict[str, object], card: Callable[[], ModelCard], error: str) -> None:
+    # Each case constructs an independent card; no qualification allowlist is involved.
+    with pytest.raises(ValueError, match=error):
+        plan_comfy_render(_params(**controls), card())
+
+
+def test_dfr_metadata_requires_mode_matching_companions() -> None:
+    metadata = VideoCapabilitySection.from_model_card(_card())
+    assert metadata is not None and "dfr" not in metadata.pipelines and not metadata.temporal_upscaling
+    metadata = VideoCapabilitySection.from_model_card(_dfr_card())
+    assert metadata is not None and "dfr" in metadata.pipelines and metadata.temporal_upscaling
+    metadata = VideoCapabilitySection.from_model_card(_dfr_card(temporal=False))
+    assert metadata is not None and "dfr" in metadata.pipelines and not metadata.temporal_upscaling
+
+
+@pytest.mark.parametrize("value", [True, 1.0, "1"])
+def test_replicated_temporal_control_is_a_strict_integer(value: object) -> None:
+    with pytest.raises(ValueError, match="temporal_upscalings"):
+        _params(temporal_upscalings=value)
+
+
+def test_temporal_control_accepts_multipart_integer_and_roundtrips() -> None:
+    from skulk.api.types.api import VideoCreateRequest
+    from skulk.shared.types.video import VideoEngineSettings
+    create = VideoCreateRequest.model_validate({"model": str(MODEL), "prompt": "A fox", "pipeline": "dfr", "temporal_upscalings": "1"})
+    assert create.temporal_upscalings == 1
+    settings = plan_comfy_render(_params(pipeline="dfr", temporal_upscalings=create.temporal_upscalings), _dfr_card()).engine_settings()
+    assert VideoEngineSettings.model_validate_json(settings.model_dump_json()) == settings
+
+
+
+def test_temporal_metadata_does_not_expand_a_companions_modes() -> None:
+    card = _dfr_card()
+    assert card.video is not None
+    companions = tuple(item.model_copy(update={"modes": (VideoMode.FramesToAudioVideo,)}) if item.name == "temporal_x2" else item for item in card.video.companions)
+    card = card.model_copy(update={"video": card.video.model_copy(update={"companions": companions})})
+    metadata = VideoCapabilitySection.from_model_card(card)
+    assert metadata is not None and metadata.temporal_upscaling
+    assert metadata.temporal_upscaling_modes == ["fl2va"]
+    with pytest.raises(ValueError, match="temporal_x2"):
+        plan_comfy_render(_params(pipeline="dfr", temporal_upscalings=1), card)
