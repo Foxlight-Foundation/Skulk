@@ -2825,6 +2825,11 @@ The instance's optional `excludedInstallIds` accepts an array of UUID strings
 and retains these persistent machine exclusions in the placement and subsequent
 repairs. Malformed UUIDs, numeric entries, and a scalar instead of an array
 return HTTP 422 before a placement command is sent.
+For vLLM, exact placement fills a missing shard `resolvedEngineBuild` from the
+node's advertised installed or first-use runtime, just like automatic placement.
+Missing backend telemetry or a missing first-use recipe prevents an unbound
+launch. An existing build binding is preserved for worker verification; a newer
+managed default cannot silently replace it.
 For a text-to-music instance, the placement must name exactly one node. The API
 prepares audio.cpp on that node and verifies a ready build and signed support
 claim before accepting the command. A matching Linux `amd64` Vulkan claim
