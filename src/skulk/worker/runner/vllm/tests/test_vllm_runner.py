@@ -139,6 +139,8 @@ def test_build_vllm_serve_args_shape() -> None:
     # Required for prompt_tokens_details in the include_usage final chunk;
     # without it the cache-honest prompt rate (#631) never sees cached counts.
     assert "--enable-prompt-tokens-details" in args
+    # The text-only runner must not warm encoders its admission never reserved.
+    assert "--language-model-only" in args
 
 
 def test_build_vllm_serve_args_reasoning_parser() -> None:
@@ -388,6 +390,22 @@ def test_share_grows_with_the_served_window() -> None:
     assert short.fraction < long.fraction
 
 
+def test_mtp_share_matches_the_same_admitted_capacity() -> None:
+    """A lower declared sequence cap lowers both reservation and server budget."""
+    from skulk.shared.models.engine_memory_settings import EngineMemorySettings
+    from skulk.shared.models.memory_estimate import estimate_shard_footprint
+    from skulk.shared.models.model_cards import RuntimeCapabilityCardConfig
+
+    card = _sized_card().model_copy(update={"runtime": RuntimeCapabilityCardConfig(vllm_spec_method="mtp", vllm_spec_num_tokens=2)})
+    small = EngineMemorySettings(vllm_max_concurrent_requests=8)
+    footprint = estimate_shard_footprint(card, 1, 32768, resolved_backend="vllm-cuda", memory_settings=small).in_bytes
+    share = resolve_gpu_memory_utilization(card, 32768, "vllm-cuda", _GB10_TOTAL, None, _QWEN_7B_KV, memory_settings=small)
+    full = resolve_gpu_memory_utilization(card, 32768, "vllm-cuda", _GB10_TOTAL, None, _QWEN_7B_KV, memory_settings=EngineMemorySettings())
+    assert full.fraction > share.fraction
+    assert share.fraction * _GB10_TOTAL >= footprint - 1
+    assert share.fraction * _GB10_TOTAL - footprint < _GB10_TOTAL / 10_000
+
+
 def test_operator_pin_wins_over_sizing() -> None:
     share = resolve_gpu_memory_utilization(
         _sized_card(), 32768, "vllm-cuda", _GB10_TOTAL, 0.6, _QWEN_7B_KV
@@ -633,6 +651,18 @@ def test_max_concurrent_requests_default(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_max_concurrent_requests_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(_MAX_CONCURRENT_REQUESTS_ENV, "8")
     assert _max_concurrent_requests() == 8
+
+
+@pytest.mark.parametrize("raw", ["8", "+8", "32", "0", "-3", "nonsense"])
+def test_vllm_dispatch_capacity_matches_advertised_policy(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    """The served sequence cap and the shared reservation use one effective value."""
+    from skulk.shared.models.engine_memory_settings import (
+        resolve_engine_memory_settings,
+    )
+
+    monkeypatch.setenv(_MAX_CONCURRENT_REQUESTS_ENV, raw)
+    policy = resolve_engine_memory_settings({_MAX_CONCURRENT_REQUESTS_ENV: raw}, engine="vllm")
+    assert _max_concurrent_requests() == policy.vllm_max_concurrent_requests
 
 
 @pytest.mark.parametrize("bad", ["nonsense", "0", "-3", "1.5"])

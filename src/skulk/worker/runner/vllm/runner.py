@@ -61,11 +61,18 @@ import psutil
 from skulk.api.types import GenerationStats
 from skulk.download.download_utils import build_model_path
 from skulk.shared.backends import VLLM_BIN_ENV
+from skulk.shared.models.engine_memory_settings import (
+    VLLM_DEFAULT_MAX_CONCURRENT_REQUESTS,
+    VLLM_MAX_CONCURRENT_REQUESTS_ENV,
+    EngineMemorySettings,
+    observe_engine_memory_settings,
+)
 from skulk.shared.models.memory_estimate import (
     VLLM_MAX_MODEL_LEN,
     VLLM_RUNTIME_ALLOWANCE,
     amd_unified_memory_limit,
     estimate_shard_footprint,
+    estimate_vllm_mtp_workspace,
     is_gb10_accelerator,
     per_token_kv_bytes,
 )
@@ -161,8 +168,8 @@ _DEFAULT_GPU_MEMORY_UTILIZATION: Final = 0.90
 # max-num-seqs exceeds the Mamba cache blocks, one per decode sequence
 # ("max_num_seqs (256) exceeds available Mamba cache blocks (161)" for
 # Qwen3.6-27B-FP8 on an A100-80GB at its placement-sized memory share).
-_MAX_CONCURRENT_REQUESTS_ENV: Final = "SKULK_VLLM_MAX_CONCURRENT_REQUESTS"
-_DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
+_MAX_CONCURRENT_REQUESTS_ENV: Final = VLLM_MAX_CONCURRENT_REQUESTS_ENV
+_DEFAULT_MAX_CONCURRENT_REQUESTS: Final = VLLM_DEFAULT_MAX_CONCURRENT_REQUESTS
 
 # Deep-speculation scheduler budget. A DFlash sequence costs 1 + depth slots
 # of --max-num-batched-tokens per decode step (one bonus query plus depth mask
@@ -207,7 +214,7 @@ def _max_concurrent_requests() -> int:
             f"using {_DEFAULT_MAX_CONCURRENT_REQUESTS}"
         )
         return _DEFAULT_MAX_CONCURRENT_REQUESTS
-    return value
+    return observe_engine_memory_settings(os.environ, engine="vllm").vllm_max_concurrent_requests
 
 
 class _StreamDelta(NamedTuple):
@@ -327,6 +334,8 @@ def resolve_gpu_memory_utilization(
     device_total_bytes: int | None,
     pinned: float | None,
     artifact_kv_per_token: int | None,
+    *,
+    memory_settings: EngineMemorySettings | None = None,
 ) -> GpuMemoryShare:
     """Choose vLLM's memory share for one placement. Pure, so it is unit-testable.
 
@@ -358,6 +367,7 @@ def resolve_gpu_memory_utilization(
         pinned: A valid ``SKULK_VLLM_GPU_MEMORY_UTILIZATION``, or ``None``.
         artifact_kv_per_token: The artifact's KV bound, or ``None`` when its
             config could not be read.
+        memory_settings: Stamped engine policy, including the admitted sequence cap.
 
     Returns:
         The share to pass to vLLM and the basis it was chosen on.
@@ -375,6 +385,7 @@ def resolve_gpu_memory_utilization(
         1.0,
         context_budget=context_tokens,
         resolved_backend=resolved_backend,
+        memory_settings=memory_settings,
     )
     kv_per_token = max(
         artifact_kv_per_token,
@@ -383,7 +394,7 @@ def resolve_gpu_memory_utilization(
     window_kv = Memory.from_bytes(kv_per_token * context_tokens)
     share_bytes = max(
         footprint.in_bytes,
-        (model_card.storage_size + window_kv + VLLM_RUNTIME_ALLOWANCE).in_bytes,
+        (model_card.storage_size + window_kv + VLLM_RUNTIME_ALLOWANCE + estimate_vllm_mtp_workspace(model_card, memory_settings)).in_bytes,
     )
     units = math.ceil(share_bytes * _SHARE_RESOLUTION / device_total_bytes)
     return GpuMemoryShare(
@@ -532,6 +543,9 @@ def build_vllm_serve_args(
         # carries no prompt_tokens_details, so the cache-honest prompt rate
         # (#631) would silently never subtract cached prefix tokens.
         "--enable-prompt-tokens-details",
+        # This runner accepts text only. Profiling unused encoders otherwise
+        # consumes the placement's text/cache reservation on multimodal cards.
+        "--language-model-only",
     ]
     if trust_remote_code:
         args.append("--trust-remote-code")
@@ -1088,6 +1102,7 @@ class Runner(ServedConcurrentDispatch):
             None if pinned is not None else _device_memory_total(shard.resolved_backend),
             pinned,
             None if pinned is not None else _read_artifact_kv_bytes_per_token(model_dir),
+            memory_settings=shard.memory_settings,
         )
         match share.basis:
             case "pinned":

@@ -5612,7 +5612,12 @@ waits for a verified runtime. Installation failure appears as
 `GET /state` retains the existing `nodeResources` contract: `backends` describes
 compatible available or installable engines, `onDemandBackends` distinguishes
 pending installation, and `installableEngineBuilds` binds an engine recipe available for installation.
-`engineBuilds` reports completed installed runtimes.
+`engineBuilds` reports completed installed runtimes. The vLLM entry in
+`engineMemorySettings` also reports `vllmMaxConcurrentRequests`, the effective
+sequence limit stamped into placements and checked again by the worker. Native
+MTP workspace estimates use this limit and the selected draft depth, independently
+of stored weight quantization. Invalid sequence overrides retain the documented
+32-request fallback.
 After installation, fresh telemetry removes the on-demand tags. A managed build
 identity includes vLLM's exact GPU build and the recipe SHA-256. Qualification
 records are evidence and do not limit compatible untested hardware. See

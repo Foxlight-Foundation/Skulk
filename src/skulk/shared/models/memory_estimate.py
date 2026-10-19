@@ -57,6 +57,13 @@ vLLM 0.32's startup profiling; a warm cache used substantially less. Admission
 must cover first use, rather than relying on an already compiled model.
 """
 
+_VLLM_MTP_REFERENCE_WORKSPACE: Final = Memory.from_bytes(8 * 1024**3)
+"""Additional native-MTP graph/recurrent reserve at 64 layers, width 5120,
+32 sequences and two draft tokens. A 27B hybrid model's 4.94 GiB graph capture
+plus recurrent cache exceeded ordinary proportional overhead on vLLM 0.32.
+This is a conservative geometry/workload estimate, independent of weight bits.
+"""
+
 GPU_WORKING_SET_FRACTION: float = 0.75
 """Fraction of a node's *total* RAM usable as the Metal GPU working set on
 Apple Silicon. ``mx.device_info()["max_recommended_working_set_size"]`` measured
@@ -363,11 +370,38 @@ def estimate_music_workspace(
     return Memory()
 
 
+def estimate_vllm_mtp_workspace(
+    model_card: ModelCard,
+    memory_settings: EngineMemorySettings | None = None,
+) -> Memory:
+    """Estimate native MTP workspace from geometry, concurrency and draft depth.
+
+    Graph and recurrent buffers do not shrink with weight quantization. Unknown
+    geometry retains the reference reserve; no hardware qualification is consulted.
+    This estimate supplements ordinary runtime overhead, not attention KV bytes.
+    """
+    runtime = model_card.runtime
+    if runtime is None or runtime.vllm_spec_method != "mtp":
+        return Memory()
+    policy = memory_settings or EngineMemorySettings()
+    width = model_card.hidden_size if model_card.hidden_size > 0 else 5120
+    layers = model_card.n_layers if model_card.n_layers > 0 else 64
+    depth = runtime.vllm_spec_num_tokens or 2
+    scale = (
+        width / 5120
+        * (layers / 64)
+        * (policy.vllm_max_concurrent_requests / 32)
+        * ((depth + 1) / 3)
+    )
+    return _VLLM_MTP_REFERENCE_WORKSPACE * scale
+
+
 def estimate_weight_runtime_bytes(
     model_card: ModelCard,
     shard_fraction: float,
     *,
     resolved_backend: str | None = None,
+    memory_settings: EngineMemorySettings | None = None,
 ) -> Memory:
     """Return shard weights and engine workspace, excluding attention cache.
 
@@ -382,7 +416,7 @@ def estimate_weight_runtime_bytes(
         + MEMORY_OVERHEAD_FLOOR
     )
     if resolved_backend is not None and resolved_backend.startswith("vllm"):
-        return max(footprint, weights + VLLM_RUNTIME_ALLOWANCE)
+        return max(footprint, weights + VLLM_RUNTIME_ALLOWANCE) + estimate_vllm_mtp_workspace(model_card, memory_settings)
     return footprint
 
 
@@ -432,7 +466,8 @@ def estimate_shard_footprint(
     kv_share = full_kv * shard_fraction
     footprint = (
         estimate_weight_runtime_bytes(
-            model_card, shard_fraction, resolved_backend=resolved_backend
+            model_card, shard_fraction, resolved_backend=resolved_backend,
+            memory_settings=memory_settings,
         )
         + kv_share
         + estimate_recurrent_cache_bytes(
@@ -874,7 +909,8 @@ def _node_window_tokens(
     kv_budget = (
         working_set
         - estimate_weight_runtime_bytes(
-            model_card, fraction, resolved_backend=shard.resolved_backend
+            model_card, fraction, resolved_backend=shard.resolved_backend,
+            memory_settings=shard.memory_settings,
         )
         - estimate_recurrent_cache_bytes(
             model_card,

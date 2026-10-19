@@ -3137,5 +3137,10 @@ append-only and qualification never becomes a tested-hardware allowlist. The
 runner's `--kv-cache-dtype auto` keeps the full-precision shared estimate; new
 compressed cache modes need explicit runner and admission support. A shared
 3 GiB minimum runtime reserve covers cold compilation in placement, worker
-admission, context sizing and server memory allocation. See
+admission, context sizing and server memory allocation. Native MTP adds a
+geometry/concurrency/depth workspace estimate independent of weight precision;
+`EngineMemorySettings.vllm_max_concurrent_requests` binds node advertisement,
+placement and worker admission to the same sequence cap as the runner. The
+text runner disables unused encoders with `--language-model-only` without
+shrinking model modality truth. See
 [the vLLM runtime guide](vllm-engine.md) for user setup and prerequisites.

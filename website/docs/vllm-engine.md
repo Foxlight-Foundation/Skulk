@@ -77,7 +77,15 @@ the [API error contract](api-guide.md).
 Placement, worker admission and server sizing reserve at least 3 GiB beyond
 weights and cache for vLLM runtime and cold compilation workspace. Larger
 models retain the larger proportional overhead estimate. This reserve covers
-the first start as well as later starts that reuse compiled kernels.
+the first start as well as later starts that reuse compiled kernels. Native
+MTP additionally reserves graph/recurrent workspace from the model geometry,
+actual `SKULK_VLLM_MAX_CONCURRENT_REQUESTS` and card-pinned draft depth. The
+conservative reference reserve is 8 GiB at width 5120, 64 layers, 32 sequences
+and two draft tokens; it scales with those dimensions and does not shrink
+with weight quantization. These remain estimates, rather than universal
+measurements. The text runner passes `--language-model-only` so unused media
+encoders cannot consume its text/cache reservation. Model modality claims are
+retained; this describes the current runner limitation.
 
 ## Setup
 
