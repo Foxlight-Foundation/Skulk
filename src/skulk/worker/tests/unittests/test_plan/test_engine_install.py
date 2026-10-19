@@ -100,6 +100,17 @@ def test_installed_engines_never_request_an_install() -> None:
     assert isinstance(_plan(downloaded=True, on_demand=frozenset()), LoadModel)
 
 
+def test_vllm_first_use_waits_for_its_runtime_then_loads() -> None:
+    """Model bytes alone are insufficient while the selected runtime installs."""
+    backends = frozenset({"vllm", "vllm-cuda"})
+    task = _plan(downloaded=True, backend="vllm-cuda", on_demand=backends)
+    assert isinstance(task, InstallEngine)
+    assert task.engine == "vllm" and task.expected_build == "pinned-build"
+    assert task.approximate_download_bytes == 8 * 1024**3
+    assert _plan(downloaded=True, backend="vllm-cuda", on_demand=backends, requested={INSTANCE_1_ID}) is None
+    assert isinstance(_plan(downloaded=True, backend="vllm-cuda", on_demand=frozenset(), requested={INSTANCE_1_ID}), LoadModel)
+
+
 @pytest.mark.parametrize("on_demand", [frozenset[str](), frozenset({"stable_diffusion_cpp-cuda"})])
 def test_native_instance_prepares_its_exact_build_independently_of_default(
     on_demand: Set[str],

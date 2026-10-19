@@ -207,6 +207,16 @@ def served_context_window(
     return ceiling
 
 
+def _vllm_placement_build(backend: str, resources: NodeResources) -> str | None:
+    """Bind either public placement path to the advertised installed/first-use recipe."""
+    build = resources.engine_builds.get(
+        backend
+    ) or resources.installable_engine_builds.get(backend)
+    if build is None and backend in resources.on_demand_backends:
+        raise PlacementError("vLLM placement lacks its installable runtime recipe")
+    return build
+
+
 def add_instance_to_placements(
     command: CreateInstance,
     topology: Topology,
@@ -294,6 +304,21 @@ def add_instance_to_placements(
                     resolved_shards[runner_id] = shard.model_copy(
                         update={"resolved_engine_build": build}
                     )
+                elif (
+                    engine_of(shard.resolved_backend) == "vllm"
+                    and shard.resolved_engine_build is None
+                ):
+                    # An exact backend chosen by the client still needs the
+                    # same immutable first-use binding as automatic placement.
+                    if resources is None:
+                        raise PlacementError(
+                            "Backend telemetry is required for exact vLLM placement"
+                        )
+                    build = _vllm_placement_build(shard.resolved_backend, resources)
+                    if build is not None:
+                        resolved_shards[runner_id] = shard.model_copy(
+                            update={"resolved_engine_build": build}
+                        )
                 continue
             if resources is None:
                 # Production callers always supply resources. Retain the legacy
@@ -321,6 +346,10 @@ def add_instance_to_placements(
                         "Exact music placement lacks a verified engine build"
                     )
                 updates["resolved_engine_build"] = build
+            if engine_of(backend) == "vllm" and shard.resolved_engine_build is None:
+                build = _vllm_placement_build(backend, resources)
+                if build is not None:
+                    updates["resolved_engine_build"] = build
             resolved_shards[runner_id] = shard.model_copy(update=updates)
         assignments = assignments.model_copy(
             update={"runner_to_shard": resolved_shards}
@@ -443,7 +472,9 @@ def _stamp_llama_server_settings(
             if "TextGeneration" not in shard.model_card.tasks:
                 settings = EngineMemorySettings()
             if shard.memory_settings is not None and shard.memory_settings != settings:
-                raise PlacementError("Engine/cache settings changed since this exact placement; refresh resources and retry")
+                raise PlacementError(
+                    "Engine/cache settings changed since this exact placement; refresh resources and retry"
+                )
             shard = shard.model_copy(update={"memory_settings": settings})
             shards[runner_id] = shard
         if isinstance(shard, RpcDonorShardMetadata):
@@ -531,7 +562,10 @@ def _cycle_engine_ready_score(
     """
     return int(
         all(
-            bool((resources.backends - resources.on_demand_backends) & compatible_backends)
+            bool(
+                (resources.backends - resources.on_demand_backends)
+                & compatible_backends
+            )
             for node_id in cycle
             if (resources := node_resources.get(node_id)) is not None
         )
@@ -676,9 +710,7 @@ def _cycle_common_multi_node_engines(
     common: set[EngineType] | None = None
     for node_id in cycle.node_ids:
         resources = node_resources.get(node_id)
-        backends = (
-            resources.backends if resources is not None else frozenset({"mlx"})
-        )
+        backends = resources.backends if resources is not None else frozenset({"mlx"})
         card_backends = _card_platform_backends(card, resources)
         node_engines: set[EngineType] = {
             engine
@@ -1541,6 +1573,10 @@ def place_instance(
                         "Native placement lacks its exact engine build"
                     )
                 updates["resolved_engine_build"] = build
+            if engine_of(resolved_backend) == "vllm" and resources is not None:
+                build = _vllm_placement_build(resolved_backend, resources)
+                if build is not None:
+                    updates["resolved_engine_build"] = build
             stamped_runner_to_shard[runner_id] = shard.model_copy(update=updates)
     shard_assignments = ShardAssignments(
         model_id=shard_assignments.model_id,

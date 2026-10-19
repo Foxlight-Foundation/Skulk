@@ -1,0 +1,106 @@
+name: vllm-runtime-wheel
+
+on:
+  push:
+    branches: ["initiative/**", dev]
+    paths:
+      - ".github/workflows/vllm-runtime-wheel.yml"
+      - "packaging/skulk-vllm-runtime/**"
+      - "scripts/build_vllm_runtime_wheel.py"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Promote exact candidate artifacts without rebuilding
+        type: boolean
+        default: false
+      publish_run_id:
+        description: Successful candidate run with the reviewed bytes
+        type: string
+        default: ""
+      publish_sha256:
+        description: JSON map of all six wheel filenames to expected SHA-256
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: github.event_name != 'workflow_dispatch' || !inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cuda-aarch64, cuda-x86_64, rocm-x86_64]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble recipe and verify unmodified upstream wheel
+        run: python3 scripts/build_vllm_runtime_wheel.py '${{ matrix.variant }}' --output candidate-wheels
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: candidate-wheels/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vllm-${{ matrix.variant }}
+          path: candidate-wheels/*
+          if-no-files-found: error
+
+  publish-index:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    concurrency:
+      group: foxlight-engine-wheel-index-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.publish_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq '.conclusion')" = success
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq '.path')" = .github/workflows/vllm-runtime-wheel.yml
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq '.head_sha' > source-head.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vllm-*
+          merge-multiple: true
+          path: dist
+          run-id: ${{ inputs.publish_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify exact selected artifacts and source attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_vllm_runtime_promotion.py dist "$EXPECTED_SHA256" > verified-wheels.txt
+          while IFS= read -r wheel; do
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/vllm-runtime-wheel.yml" \
+              --source-digest "$(cat source-head.txt)" --deny-self-hosted-runners > /dev/null
+          done < verified-wheels.txt
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish immutable wheels
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < verified-wheels.txt
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py "${wheels[@]}"

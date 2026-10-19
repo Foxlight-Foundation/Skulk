@@ -14,6 +14,7 @@ from anyio import to_thread
 import skulk.facts as facts_module
 import skulk.provisioning.comfy as comfy_module
 import skulk.provisioning.stable_diffusion_cpp as image_module
+import skulk.provisioning.vllm_runtime as vllm_module
 from skulk.facts.derive import BackendDerivation
 from skulk.facts.testing import NVIDIA_A40, make_facts
 from skulk.routing.router import get_node_id_keypair
@@ -128,6 +129,49 @@ async def test_waiting_instances_share_one_install(tmp_path: Path) -> None:
         (first.task_id, TaskStatus.Running),
         (second.task_id, TaskStatus.Running),
     ]
+
+
+async def test_vllm_waiters_share_the_same_exact_runtime_job(tmp_path: Path) -> None:
+    """Concurrent model placements must not duplicate a multi-gigabyte install."""
+    worker, _, _ = _worker(tmp_path)
+    recorder = _record_starts(worker)
+    first = InstallEngine(instance_id=_FIRST, engine="vllm", resolved_backend="vllm-cuda", expected_build="recipe")
+    second = InstallEngine(instance_id=_SECOND, engine="vllm", resolved_backend="vllm-cuda", expected_build="recipe")
+    await worker._start_engine_install(first)
+    await worker._start_engine_install(second)
+    assert len(recorder.started) == 1
+    job = worker._engine_install_jobs[("vllm", "vllm-cuda", "recipe")]
+    assert job.waiters == {_FIRST: first.task_id, _SECOND: second.task_id}
+
+
+@pytest.mark.usefixtures("node_facts")
+@pytest.mark.parametrize("succeeds", [True, False])
+async def test_vllm_install_releases_or_fails_all_waiters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, succeeds: bool
+) -> None:
+    """Readiness and safe step-specific failures must reach every waiting model."""
+    worker, events, commands = _worker(tmp_path)
+
+    def install(_facts: object, *, expected_build: str | None, **_kwargs: object) -> Path:
+        assert expected_build == "recipe"
+        if not succeeds:
+            raise vllm_module.VllmInstallError("the GPU check", "private installer diagnostics")
+        return tmp_path
+
+    monkeypatch.setattr(vllm_module, "install_vllm_on_demand", install)
+    monkeypatch.setattr(facts_module, "current_backend_derivation", lambda: BackendDerivation(backends=frozenset({"vllm", "vllm-cuda"})))
+    first, second = TaskId("task-first"), TaskId("task-second")
+    job = _EngineInstallJob(engine="vllm", resolved_backend="vllm-cuda", expected_build="recipe", waiters={_FIRST: first, _SECOND: second})
+    await worker._run_engine_install(job)
+    status = TaskStatus.Complete if succeeds else TaskStatus.Failed
+    assert job.finished and job.succeeded == succeeds
+    assert _statuses(events) == [(first, status), (second, status)]
+    failures = [forwarded.command for forwarded in commands.collect() if isinstance(forwarded.command, FailInstance)]
+    assert len(failures) == (0 if succeeds else 2)
+    for failure in failures:
+        assert failure.error_code == "engine_install_failed"
+        assert "the GPU check failed" in failure.error_message
+        assert "private installer diagnostics" not in failure.error_message
 
 
 @pytest.mark.usefixtures("node_facts")

@@ -2,18 +2,27 @@ import tomllib
 
 import pytest
 
+from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.memory_estimate import (
     GPU_WORKING_SET_FRACTION,
     LLAMA_CPP_MEMORY_OVERHEAD_FACTOR,
     LOAD_FIT_TOLERANCE,
     MEMORY_OVERHEAD_FACTOR,
     MEMORY_OVERHEAD_FLOOR,
+    VLLM_RUNTIME_ALLOWANCE,
     estimate_kv_cache_bytes,
     estimate_shard_footprint,
+    estimate_vllm_mtp_workspace,
+    estimate_weight_runtime_bytes,
     gpu_working_set_ceiling,
     memory_overhead_factor,
 )
-from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    RuntimeCapabilityCardConfig,
+)
 from skulk.shared.tests.model_card_fixtures import FIXTURE_CARDS_DIR, fixture_card_path
 from skulk.shared.types.memory import Memory
 
@@ -44,6 +53,49 @@ def test_memory_overhead_factor_is_engine_aware():
         memory_overhead_factor(_card(8, gguf_file="model.gguf"))
         == LLAMA_CPP_MEMORY_OVERHEAD_FACTOR
     )
+
+
+@pytest.mark.parametrize("backend", ["vllm-cuda", "vllm-rocm"])
+def test_vllm_admission_covers_cold_start_and_cache(backend: str) -> None:
+    """Cold compilation must fit without borrowing the reserved KV budget."""
+    card = _card(1, kv_heads=2)
+    base = estimate_weight_runtime_bytes(card, 1.0, resolved_backend=backend)
+    assert base == card.storage_size + VLLM_RUNTIME_ALLOWANCE
+    footprint = estimate_shard_footprint(card, 1.0, 4096, resolved_backend=backend)
+    assert footprint == base + estimate_kv_cache_bytes(card, card.n_layers, 4096, resolved_backend=backend)
+    assert footprint > estimate_shard_footprint(card, 1.0, 4096, resolved_backend="mlx-metal")
+
+
+def test_vllm_large_model_keeps_larger_proportional_overhead() -> None:
+    """The fixed reserve is a floor, never a reduction of larger estimates."""
+    card = _card(30)
+    assert estimate_weight_runtime_bytes(card, 1.0, resolved_backend="vllm-cuda") == (
+        card.storage_size * MEMORY_OVERHEAD_FACTOR + MEMORY_OVERHEAD_FLOOR
+    )
+
+
+def test_vllm_mtp_workspace_uses_geometry_and_actual_capacity_not_weight_bits() -> None:
+    """Prediction/recurrent buffers must not inherit a weight-quantization discount."""
+    card = _card(28, kv_heads=4, n_layers=64).model_copy(update={
+        "hidden_size": 5120,
+        "runtime": RuntimeCapabilityCardConfig(vllm_spec_method="mtp", vllm_spec_num_tokens=2),
+    })
+    full = EngineMemorySettings(vllm_max_concurrent_requests=32)
+    small = EngineMemorySettings(vllm_max_concurrent_requests=8)
+    workspace = estimate_vllm_mtp_workspace(card, full)
+    assert workspace == Memory.from_bytes(8 * 1024**3)
+    quantized = card.model_copy(update={"storage_size": Memory.from_gb(7), "quantization": "NVFP4"})
+    assert estimate_vllm_mtp_workspace(quantized, full) == workspace
+    assert estimate_vllm_mtp_workspace(card, small) == workspace * 0.25
+    deeper = card.model_copy(update={"runtime": RuntimeCapabilityCardConfig(vllm_spec_method="mtp", vllm_spec_num_tokens=5)})
+    assert estimate_vllm_mtp_workspace(deeper, full) == workspace * 2
+    plain = card.model_copy(update={"runtime": None})
+    assert estimate_vllm_mtp_workspace(plain, full) == Memory()
+    assert estimate_shard_footprint(card, 1, 4096, resolved_backend="vllm-rocm", memory_settings=small) == (
+        estimate_shard_footprint(plain, 1, 4096, resolved_backend="vllm-rocm", memory_settings=small)
+        + workspace * 0.25
+    )
+    assert estimate_shard_footprint(card, 1, 4096, resolved_backend="mlx-metal", memory_settings=full) == estimate_shard_footprint(plain, 1, 4096, resolved_backend="mlx-metal", memory_settings=full)
 
 
 def test_shard_footprint_uses_lighter_factor_for_gguf():

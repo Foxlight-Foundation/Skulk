@@ -154,7 +154,7 @@ VLLM_BIN_ENV: Final = "SKULK_VLLM_BIN"
 VLLM_BACKENDS_ENV: Final = "SKULK_VLLM_BACKENDS"
 
 # vLLM compute backends we support advertising. GPU-only: NVIDIA CUDA and AMD
-# CDNA ROCm. vLLM's Vulkan/Metal/CPU paths are out of scope for placement.
+# ROCm. vLLM's Vulkan/Metal/CPU paths are out of scope for placement.
 _VLLM_COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = ("cuda", "rocm")
 
 # Advertise the deterministic test video engine (``test_video`` /
@@ -175,7 +175,7 @@ COMFY_ROOT_ENV: Final = "SKULK_COMFY_ROOT"
 # declaration chain vLLM uses, then to the observed GPU vendor.
 COMFY_BACKENDS_ENV: Final = "SKULK_COMFY_BACKENDS"
 
-ON_DEMAND_ENGINE_DOWNLOAD_BYTES: Final[dict[EngineType, int]] = {"comfy": 7 * 1024**3}
+ON_DEMAND_ENGINE_DOWNLOAD_BYTES: Final[dict[EngineType, int]] = {"comfy": 7 * 1024**3, "vllm": 8 * 1024**3}
 """Approximate download a node makes to install an on-demand engine, quoted to
 operators before a placement that triggers it (binary gigabytes, matching the
 dashboard's byte formatting)."""
@@ -714,8 +714,8 @@ def probe_node_backends() -> frozenset[str]:
     llama.cpp tags; a node with ``SKULK_LLAMA_SERVER_BIN`` set adds served
     tags derived from its declaration, the binary's own ``--list-devices``
     report, or observed GPU hardware, in that order; a GPU node with
-    ``SKULK_VLLM_BIN`` set adds its ``vllm`` tags. A bare Linux node with none
-    advertises an empty set and is therefore not a placement candidate.
+    ``SKULK_VLLM_BIN`` set adds its ``vllm`` tags. A matching managed runtime
+    adds installed or on-demand vLLM tags; startup never downloads that runtime.
 
     The result is cached for the process lifetime (the same contract as any
     import-time capability): installing a dependency or changing an env var

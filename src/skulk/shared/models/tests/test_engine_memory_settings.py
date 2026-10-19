@@ -30,6 +30,14 @@ def memory_card() -> ModelCard:
     )
 
 
+@pytest.mark.parametrize("raw,expected", [("",32),("8",8),("+8",8),("0",32),("-3",32),("nonsense",32)])
+def test_vllm_capacity_is_part_of_the_actual_memory_policy(raw: str, expected: int) -> None:
+    """Placement and worker cache policy include the native sequence limit."""
+    policy = resolve_engine_memory_settings({"SKULK_VLLM_MAX_CONCURRENT_REQUESTS":raw}, engine="vllm")
+    assert policy.vllm_max_concurrent_requests == expected
+    assert policy.key_bits == policy.value_bits == 16
+
+
 def test_weight_quantization_does_not_select_cache_quantization() -> None:
     card = memory_card()
     default = resolve_engine_memory_settings({})

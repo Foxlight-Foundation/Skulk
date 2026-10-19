@@ -13,17 +13,17 @@ const t = ((_key: string, fallback: string, params?: Record<string, unknown>) =>
 describe('deriveInstanceStatus', () => {
   const idle = { 'runner-1': { RunnerIdle: {} } };
 
-  it('reports the video engine install and its size while the runner waits idle', () => {
+  it('reports an engine install and its size while the runner waits idle', () => {
     expect(deriveInstanceStatus(['runner-1'], idle, t, 7 * 1024 ** 3)).toEqual({
       status: 'loading',
-      message: 'Installing video engine (about 7 GB)...',
+      message: 'Installing engine (about 7 GB)...',
     });
   });
 
   it('reports the install without a size when the task carries none', () => {
     expect(deriveInstanceStatus(['runner-1'], idle, t, 0)).toEqual({
       status: 'loading',
-      message: 'Installing video engine...',
+      message: 'Installing engine...',
     });
   });
 

@@ -1,0 +1,62 @@
+[
+  {
+    "variant": "cuda",
+    "architecture": "aarch64",
+    "platform_tag": "manylinux_2_28_aarch64",
+    "filename": "skulk_vllm_runtime_cuda-0.32.0.post1-py3-none-manylinux_2_28_aarch64.whl",
+    "sha256": "eb518d017900dabc38d181353df71cb573821c38249eecb06486afe66233f4ba",
+    "size_bytes": 187408,
+    "lock_sha256": "463270b81e5e3c197255b2390cb108d434db89d26abd111133d0d096874cc1e5",
+    "upstream_filename": "vllm-0.32.0+cu129-cp38-abi3-manylinux_2_28_aarch64.whl",
+    "upstream_sha256": "258418994620a9bf904544d20f90e2cf6963788614b88d26d1b429f5d46a5194",
+    "source_revision": "5df63a7203cdb9328d824a27b682e77c7b9928be",
+    "version": "0.32.0+cu129",
+    "required_system_libraries": []
+  },
+  {
+    "variant": "cuda",
+    "architecture": "x86_64",
+    "platform_tag": "manylinux_2_28_x86_64",
+    "filename": "skulk_vllm_runtime_cuda-0.32.0.post1-py3-none-manylinux_2_28_x86_64.whl",
+    "sha256": "2419ce8eb4805f52ead0cb9eb76052f125157e2eec2ebb2b7c97e0fa0260637c",
+    "size_bytes": 187408,
+    "lock_sha256": "83f8a746cee4e2443df46ef034b928914406dc2f683456630c92a56fcfd1eb9c",
+    "upstream_filename": "vllm-0.32.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "upstream_sha256": "9918be806fb2808c406547ff4f9f43870ac6ff28dc4b179291fcf532145bb50b",
+    "source_revision": "5df63a7203cdb9328d824a27b682e77c7b9928be",
+    "version": "0.32.0+cu129",
+    "required_system_libraries": []
+  },
+  {
+    "variant": "rocm",
+    "architecture": "x86_64",
+    "platform_tag": "manylinux_2_39_x86_64",
+    "filename": "skulk_vllm_runtime_rocm-0.32.0.post1-py3-none-manylinux_2_39_x86_64.whl",
+    "sha256": "63f201aba00dab8683ef9c18f5b61cb76069fb21b0f83a7eefa195ba31e5714c",
+    "size_bytes": 209637,
+    "lock_sha256": "00f74c7ff1cb9b9e072461a2d14fb31ea7487d94a28a6f352cc99b4e6369b9a8",
+    "upstream_filename": "vllm-0.32.0+rocm723-cp312-cp312-manylinux_2_39_x86_64.whl",
+    "upstream_sha256": "733504dae65ee4cfa1b9ac8cf771116eec0f81264d4e0561b4ea255b6ba2190f",
+    "source_revision": "5df63a7203cdb9328d824a27b682e77c7b9928be",
+    "version": "0.32.0+rocm723",
+    "required_system_libraries": [
+      "libamdhip64.so.7",
+      "libhiprtc.so.7",
+      "libhipblas.so.3",
+      "libhipblaslt.so.1",
+      "libhipfft.so.0",
+      "libhiprand.so.1",
+      "libhipsparse.so.4",
+      "libhipsolver.so.1",
+      "librocsolver.so.0",
+      "libhipsparselt.so.0",
+      "librccl.so.1",
+      "librocblas.so.5",
+      "libMIOpen.so.1",
+      "libroctx64.so.4",
+      "librocprofiler-sdk.so.1",
+      "libmpi_cxx.so.40",
+      "libmpi.so.40"
+    ]
+  }
+]

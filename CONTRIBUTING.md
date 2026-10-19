@@ -614,3 +614,13 @@ filename/SHA-256 pairs from a successful build run and verifies their provenance
 before uploading them to the append-only Foxlight index. Publication does not
 establish model/device support; maintain the separate qualification evidence and
 private engine ledger. The promotion verifier's tests live under `scripts/tests/`.
+
+
+Managed vLLM packaging lives in `packaging/skulk-vllm-runtime/`: complete hashed
+Python 3.12 locks for CUDA x86/ARM and ROCm x86. The deterministic assembler
+`scripts/build_vllm_runtime_wheel.py` builds recipe wheels and verifies unmodified
+upstream wheel mirrors. `.github/workflows/vllm-runtime-wheel.yml` attests candidate
+artifacts and promotes the exact selected bytes. A lock change needs a new recipe
+version, updated manifest digests and a private wheel ledger entry. Test provisioning
+failure/retry, policy, cache restart and representative GPU execution before
+advancing the managed default. Never install vLLM into Skulk's Python environment.

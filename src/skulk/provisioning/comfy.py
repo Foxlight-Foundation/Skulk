@@ -240,6 +240,27 @@ def _require_tool(name: str) -> str:
     return path
 
 
+def runtime_install_tool(name: str) -> str:
+    """Locate an installer executable, including uv bundled in packaged Skulk.
+
+    Raises RuntimeError when the requested prerequisite is unavailable.
+    """
+    return _require_tool(name)
+
+
+def runtime_install_tool_available(name: str) -> bool:
+    """Return whether an installer executable is available without downloading it."""
+    return _tool_path(name) is not None
+
+
+def run_runtime_install_command(run: Runner, args: Sequence[str], *, timeout: float, what: str, env: dict[str, str]) -> str:
+    """Execute an injected installer command with bounded time and diagnostics.
+
+    Returns stdout or raises RuntimeError with the failed installation step.
+    """
+    return _run(run, args, timeout=timeout, what=what, env=env)
+
+
 def _run(run: Runner, args: Sequence[str], *, timeout: float, what: str, env: dict[str, str] | None = None) -> str:
     try:
         completed = run(

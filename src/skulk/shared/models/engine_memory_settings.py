@@ -1,7 +1,7 @@
 """Effective runner cache controls shared by node facts and memory admission."""
 
 from collections.abc import Mapping
-from typing import Literal, final
+from typing import Final, Literal, final
 
 from pydantic import Field
 
@@ -17,6 +17,9 @@ CACHE_BACKENDS: tuple[CacheBackend, ...] = (
     "turboquant_adaptive",
     "optiq",
 )
+
+VLLM_DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
+VLLM_MAX_CONCURRENT_REQUESTS_ENV: Final = "SKULK_VLLM_MAX_CONCURRENT_REQUESTS"
 
 
 @final
@@ -60,6 +63,12 @@ class EngineMemorySettings(FrozenModel):
         description="Invalid active cache controls; the engine must not allocate with this policy. Other node engines remain usable.",
     )
 
+    vllm_max_concurrent_requests: int = Field(
+        default=VLLM_DEFAULT_MAX_CONCURRENT_REQUESTS,
+        ge=1,
+        description="Effective vLLM sequence/admission limit, used for native MTP workspace sizing; ignored by other engines.",
+    )
+
 
 def resolve_engine_memory_settings(
     environment: Mapping[str, str],
@@ -72,6 +81,14 @@ def resolve_engine_memory_settings(
     Invalid bit widths fail explicitly rather than creating an optimistic budget.
     Non-MLX engines use their explicitly pinned full-precision attention policy.
     """
+    if engine == "vllm":
+        try:
+            capacity = int(environment.get(VLLM_MAX_CONCURRENT_REQUESTS_ENV, "") or VLLM_DEFAULT_MAX_CONCURRENT_REQUESTS)
+        except ValueError:
+            capacity = VLLM_DEFAULT_MAX_CONCURRENT_REQUESTS
+        return EngineMemorySettings(
+            vllm_max_concurrent_requests=capacity if capacity > 0 else VLLM_DEFAULT_MAX_CONCURRENT_REQUESTS
+        )
     if engine != "mlx":
         return EngineMemorySettings()
     requested = environment.get("SKULK_KV_CACHE_BACKEND", "default") or "default"

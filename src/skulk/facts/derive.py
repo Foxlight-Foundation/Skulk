@@ -441,6 +441,19 @@ def _derive_vllm(
                 "GPU hardware (no backends declared)"
             )
 
+    if managed := facts.vllm_managed_variant:
+        # A verified managed recipe is stronger evidence than GPU visibility:
+        # CUDA and ROCm packages cannot drive each other's visible devices.
+        if declared and any(compute != managed for compute in computes):
+            conflicts.append(
+                CapabilityConflict(
+                    code="backend_override_conflict",
+                    message=f"The managed vLLM runtime supports {managed}, but its backend declaration requests another compute variant.",
+                    remediation="Select a matching managed runtime or configure a separate operator runtime and restart Skulk.",
+                )
+            )
+        computes = [managed] if not declared or managed in computes else []
+
     if not computes:
         conflicts.append(
             CapabilityConflict(
@@ -749,6 +762,11 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
             f"comfy-{variant}" for variant in facts.comfy_on_demand_variants
         }
         tags |= on_demand
+
+    if facts.vllm_installable_builds and facts.vllm_binary.state == "not_configured":
+        vllm_tags = {"vllm", *facts.vllm_installable_builds}
+        on_demand.update(vllm_tags)
+        tags.update(vllm_tags)
 
     if facts.stable_diffusion_cpp_binary.state == "not_configured":
         on_demand.update(facts.stable_diffusion_cpp_installable_builds)
