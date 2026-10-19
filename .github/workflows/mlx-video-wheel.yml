@@ -1,0 +1,116 @@
+name: mlx-video-wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Promote previously validated candidate bytes without rebuilding
+        type: boolean
+        default: false
+      publish_run_id:
+        description: Successful candidate workflow run
+        type: string
+        default: ""
+      publish_sha256:
+        description: Exact selected candidate wheel SHA-256
+        type: string
+        default: ""
+  push:
+    branches: ["initiative/**", dev]
+    paths:
+      - ".github/workflows/mlx-video-wheel.yml"
+      - "packaging/skulk-mlx-video/**"
+      - "scripts/build_mlx_video_wheel.py"
+      - "scripts/verify_mlx_video_promotion.py"
+      - "src/skulk/worker/runner/video_input.py"
+      - "src/skulk/worker/runner/video_observability.py"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: github.event_name != 'workflow_dispatch' || !inputs.publish
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Fetch exact MIT-licensed pipeline source
+        run: |
+          git clone --no-checkout https://github.com/dgrauet/ltx-2-mlx.git native-source
+          git -C native-source checkout 9e4a1a54194460547a103334b5e06382724fbba6
+      - name: Acquire only locked binary dependencies and assemble owned wheel
+        run: |
+          uvx --python 3.13 --from pip pip download --require-hashes --only-binary=:all: --no-deps \
+            --platform macosx_15_0_arm64 --python-version 313 --implementation cp --abi cp313 \
+            --index-url https://pypi.org/simple --dest wheelhouse -r packaging/skulk-mlx-video/requirements.lock
+          uv run --no-project --python 3.13 python scripts/build_mlx_video_wheel.py \
+            --source native-source --wrapper packaging/skulk-mlx-video/skulk_mlx_video \
+            --wheelhouse wheelhouse --lock packaging/skulk-mlx-video/requirements.lock --output candidate-wheels
+      - name: Validate the isolated adapter against its complete offline runtime
+        run: |
+          uv venv --python 3.13 wrapper-check
+          uv pip install --python wrapper-check/bin/python --no-index --no-deps wheelhouse/*.whl candidate-wheels/*.whl
+          uvx --from basedpyright basedpyright packaging/skulk-mlx-video/skulk_mlx_video --pythonpath wrapper-check/bin/python
+          wrapper-check/bin/python -I -B -c 'import skulk_mlx_video.__main__'
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: candidate-wheels/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mlx-video-candidate
+          path: candidate-wheels/*
+          if-no-files-found: error
+
+  publish-index:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    concurrency:
+      group: foxlight-engine-wheel-index-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate candidate workflow and retain attested source identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.path')" = .github/workflows/mlx-video-wheel.yml
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha' > source-head.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: mlx-video-candidate
+          path: dist
+          run-id: ${{ inputs.publish_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify the selected bytes and their build attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
+        run: |
+          set -euo pipefail
+          python -m scripts.verify_mlx_video_promotion dist "$EXPECTED_SHA256" > verified-wheel.txt
+          gh attestation verify "$(cat verified-wheel.txt)" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/mlx-video-wheel.yml" \
+            --source-digest "$(cat source-head.txt)" --deny-self-hosted-runners > /dev/null
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish the exact owned wheel to the append-only Foxlight index
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: uv run --no-project --with boto3 python scripts/publish_wheel_index.py "$(cat verified-wheel.txt)"

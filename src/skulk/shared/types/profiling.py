@@ -507,6 +507,7 @@ class NodeResources(CamelCaseModel):
             installable_engine_builds={
                 **facts.stable_diffusion_cpp_installable_builds,
                 **facts.vllm_installable_builds,
+                **facts.mlx_video_installable_builds,
             },
             llama_server_settings=(
                 resolve_llama_server_settings(os.environ)

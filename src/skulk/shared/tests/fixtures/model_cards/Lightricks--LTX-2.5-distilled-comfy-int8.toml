@@ -1,0 +1,118 @@
+# Exact LTX-2.5 distilled core bundle for candidate graph/placement tests.
+# Compatibility describes backends, not a tested-hardware allowlist.
+model_id = "Lightricks/LTX-2.5-distilled-comfy-int8"
+source_repository = "Lightricks/LTX-2.5"
+source_revision = "49b093a39c19169a8a81721dcc541e07e945232f"
+n_layers = 48
+hidden_size = 4096
+supports_tensor = false
+tasks = ["TextToVideo", "ImageToVideo", "ReferenceToVideo"]
+family = "ltx-2.5"
+quantization = "int8_convrot"
+base_model = "Lightricks/LTX-2.5"
+capabilities = ["video_gen"]
+trust_remote_code = false
+
+[storage_size]
+in_bytes = 39689918812
+
+[license]
+name = "LTX-2.x Community License Agreement"
+url = "https://github.com/Lightricks/LTX-2/blob/9ec55f9f22798a3198d9c923856824821bc3317e/LICENSE-2_x"
+display_name = "LTX-2.5"
+notice = "Read the LTX-2.x Community License before downloading. Commercial use by entities with annual revenue of at least USD 10 million requires a paid agreement, subject to its noncommercial exception. Preserve required license and transparency notices."
+
+[placement]
+compatible_backends = ["comfy-cuda", "comfy-rocm"]
+backend_preference = ["comfy-cuda", "comfy-rocm"]
+
+[video]
+transformer_variant = "distilled"
+generated_keyframes = true
+audio_conditioning = true
+editing = ["retake", "extend"]
+prompt_relay = true
+modes = ["t2va", "fl2va", "ref2va"]
+min_seconds = 1
+max_seconds = 20
+fps = 24
+frame_grid_multiple = 8
+frame_grid_offset = 1
+canvas_multiple = 32
+default_short_edge = 512
+audio_output = true
+audio_sample_rate = 48000
+audio_channels = 2
+default_steps = 8
+
+[video.reference_limits]
+max_images = 8
+max_videos = 1
+max_audio_clips = 1
+max_files = 9
+
+[[video.companions]]
+kind = "latent_upscaler"
+name = "spatial_x2"
+path = "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+size_bytes = 995778752
+
+[[components]]
+component_name = "transformer"
+component_path = "diffusion_models"
+can_shard = false
+
+[components.storage_size]
+in_bytes = 21504034224
+
+[[components]]
+component_name = "text_encoder"
+component_path = "text_encoders"
+can_shard = false
+
+[components.storage_size]
+in_bytes = 15372969374
+
+[[components]]
+component_name = "video_vae"
+component_path = "vae"
+can_shard = false
+
+[components.storage_size]
+in_bytes = 1452269922
+
+[[components]]
+component_name = "audio_vae"
+component_path = "vae"
+can_shard = false
+
+[components.storage_size]
+in_bytes = 364866540
+
+[artifact_bundle]
+bundle_id = "bundle_awv3vyfccz7hzkpwkem47o7q6ww45rt2q7vqsxohwewyajlffeaa"
+download_size = 39689918812
+[[artifact_bundle.files]]
+path = "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+size_bytes = 21504034224
+object_id = "sha256:c4279eeff115cbeaca494bd2183e7d768c38fe85a184dc6afbb7159157c44334"
+
+[[artifact_bundle.files]]
+path = "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
+size_bytes = 15372969374
+object_id = "sha256:6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f"
+
+[[artifact_bundle.files]]
+path = "vae/ltx-2.5-video-vae-conv-bf16.safetensors"
+size_bytes = 1452269922
+object_id = "sha256:685b06ee3d9b2039647698fc4ea33175112462fc374e2777312c907897dfce8d"
+
+[[artifact_bundle.files]]
+path = "vae/ltx-2.5-audio-vae-bf16.safetensors"
+size_bytes = 364866540
+object_id = "sha256:c52733d37f6a7fb7949c3dc0fb468c6cb2169e4d836983a73babb9f0d54837a5"
+
+[[artifact_bundle.files]]
+path = "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+size_bytes = 995778752
+object_id = "sha256:eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8"

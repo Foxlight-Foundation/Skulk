@@ -49,7 +49,7 @@ EngineType = Literal[
     "test_video",
     "comfy",
     "audio_cpp",
-    "stable_diffusion_cpp",
+    "stable_diffusion_cpp", "mlx_video",
 ]
 """Inference runtime that loads and runs a model; selects the worker runner.
 
@@ -107,6 +107,7 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "comfy",
     "audio_cpp",
     "stable_diffusion_cpp",
+    "mlx_video",
 )
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
@@ -175,7 +176,7 @@ COMFY_ROOT_ENV: Final = "SKULK_COMFY_ROOT"
 # declaration chain vLLM uses, then to the observed GPU vendor.
 COMFY_BACKENDS_ENV: Final = "SKULK_COMFY_BACKENDS"
 
-ON_DEMAND_ENGINE_DOWNLOAD_BYTES: Final[dict[EngineType, int]] = {"comfy": 7 * 1024**3, "vllm": 8 * 1024**3}
+ON_DEMAND_ENGINE_DOWNLOAD_BYTES: Final[dict[EngineType, int]] = {"comfy": 7 * 1024**3, "vllm": 8 * 1024**3, "mlx_video": 128 * 1024**2}
 """Approximate download a node makes to install an on-demand engine, quoted to
 operators before a placement that triggers it (binary gigabytes, matching the
 dashboard's byte formatting)."""
@@ -191,8 +192,8 @@ def engine_install_notice(engine: str, size_bytes: int) -> str:
     Returns:
         A one-sentence notice naming the engine and its approximate size.
     """
-    name = "video engine" if engine == "comfy" else f"{engine} engine"
-    size = f" (about {round(size_bytes / 1024**3)} GB)" if size_bytes else ""
+    name = "video engine" if engine == "comfy" else "Apple video engine" if engine == "mlx_video" else f"{engine} engine"
+    size = (f" (about {round(size_bytes / 1024**3)} GB)" if size_bytes >= 1024**3 else f" (about {round(size_bytes / 1024**2)} MB)") if size_bytes else ""
     return (
         f"The {name}{size} will be installed with this model, so placement will "
         "take longer."
@@ -329,6 +330,7 @@ def engine_of(tag: str) -> EngineType | None:
 # ``provisioning.manifest.COMFY_ROCM_PCI_DEVICE_IDS``; a test keeps them equal.
 _ENGINE_HARDWARE: Final[dict[EngineType, tuple[str, frozenset[str]]]] = {
     "mlx": ("an Apple Silicon Mac", frozenset({"platform:darwin"})),
+    "mlx_video": ("an Apple Silicon Mac with a compatible Metal runtime", frozenset({"platform:darwin"})),
     "comfy": (
         "a Linux machine with an NVIDIA GPU or an AMD Strix Halo GPU",
         frozenset({"nvidia", "amd:pci-1002-1586"}),

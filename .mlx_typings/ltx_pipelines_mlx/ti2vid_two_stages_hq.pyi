@@ -1,0 +1,3 @@
+from .ti2vid_two_stages import TI2VidTwoStagesPipeline
+
+class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline): ...

@@ -1602,6 +1602,13 @@ class VideoCompanionKind(str, Enum):
     ordinary clip inside the render (a pose estimator, the person detector
     it crops with, a depth estimator); ``role`` says which."""
 
+    LatentUpscaler = "latent_upscaler"
+    """Model weights that refine video latents between generation stages."""
+    DurationHead = "duration_head"
+    """Prompt-conditioned duration predictor, pinned independently of the transformer."""
+    VideoDecoder = "video_decoder"
+    """An alternative decoder; the base video VAE remains available for conditioning."""
+
 
 class VideoPreprocessorRole(str, Enum):
     """What a preprocessor companion's weights do in deriving a guide video."""
@@ -1703,6 +1710,14 @@ class VideoCompanionConfig(CamelCaseModel):
     def _serialize_modes(self, value: tuple[VideoMode, ...]) -> list[str]:
         return [item.value for item in value]
 
+    def supports_mode(self, mode: VideoMode) -> bool:
+        """Return whether this selected asset permits the requested mode.
+
+        An empty mode declaration applies to every mode on the owning card.
+        This checks artifact scope, independently of hardware qualification.
+        """
+        return not self.modes or mode in self.modes
+
     @field_validator("license")
     @classmethod
     def _validate_license(cls, value: str | None) -> str | None:
@@ -1785,6 +1800,17 @@ class VideoCardConfig(CamelCaseModel):
 
     modes: tuple[VideoMode, ...]
     """Generation modes this artifact serves; each implies a ``ModelTask``."""
+    transformer_variant: Literal["distilled", "dev"] | None = None
+    """Selected transformer's training variant, when the family distinguishes
+    distilled and guided checkpoints. It does not select an execution engine."""
+    generated_keyframes: bool = False
+    """Whether the selected transformer was trained with generated keyframe tokens."""
+    audio_conditioning: bool = False
+    """Whether the complete selected audio VAE can encode frozen source-audio context."""
+    editing: tuple[Literal["retake", "extend"], ...] = ()
+    """Source-video operations provided by the selected transformer and encoder/decoder components."""
+    prompt_relay: bool = False
+    """Whether local scene prompts can be temporally gated alongside the global prompt."""
     min_seconds: PositiveInt = 4
     """Shortest output duration the model supports."""
     max_seconds: PositiveInt = 15
@@ -1872,6 +1898,11 @@ class VideoCardConfig(CamelCaseModel):
             for item in cast("Iterable[object]", value)
         )
 
+    @field_validator("editing", mode="before")
+    @classmethod
+    def _coerce_editing(cls, value: object) -> object:
+        return tuple(cast("list[object]", value)) if isinstance(value, list) else value
+
     @model_validator(mode="after")
     def _validate_contract(self) -> "VideoCardConfig":
         if self.min_seconds > self.max_seconds:
@@ -1891,6 +1922,20 @@ class VideoCardConfig(CamelCaseModel):
             and self.reference_limits is None
         ):
             raise ValueError("ref2va requires reference_limits")
+        if (self.audio_conditioning or self.editing) and VideoMode.ReferenceToAudioVideo not in self.modes:
+            raise ValueError("source audio and editing require the ref2va mode and reference limits")
+        if self.audio_conditioning and (not self.audio_output or self.reference_limits is None or self.reference_limits.max_audio_clips < 1):
+            raise ValueError("audio conditioning requires a complete audio VAE and at least one audio reference")
+        if self.editing and (self.reference_limits is None or self.reference_limits.max_videos < 1):
+            raise ValueError("editing requires at least one source video in the reference limits")
+        if (
+            (self.audio_conditioning or self.editing)
+            and self.reference_limits is not None
+            and self.reference_limits.max_files == 0
+        ):
+            raise ValueError("source conditioning requires max_files to permit at least one reference file")
+        if len(set(self.editing)) != len(self.editing):
+            raise ValueError("editing operations must be unique")
         keys = [(item.kind, item.name) for item in self.companions]
         if len(set(keys)) != len(keys):
             raise ValueError("companions must be unique per kind and name")
@@ -2586,8 +2631,28 @@ class PlacementCardConfig(CamelCaseModel):
         return list(value)
 
 
+def _omit_absent_video_memory_budget(value: object) -> bool:
+    # Installed-card authorization binds the complete serialized projection.
+    # Adding an unused runtime hint must preserve preexisting card identities.
+    return value is None
+
+
 class RuntimeCapabilityCardConfig(CamelCaseModel):
     """Optional runtime behavior hints for a model card."""
+
+    video_memory_budget_bytes: int | None = Field(
+        default=None,
+        ge=1,
+        le=2**63 - 1,
+        exclude_if=_omit_absent_video_memory_budget,
+        description="Optional native-video working-set reservation for larger requests. It may raise, never lower, the artifact-derived estimate; live placement capacity still applies.",
+    )
+    """Per-instance native-video memory allocation, independent of qualification.
+
+    The staged default covers the selected working weights with runtime margin.
+    Larger canvases or timelines may need a larger reservation. The runner checks
+    each request against the reservation and bounds its decoder accordingly.
+    """
 
     prompt_renderer: PromptRendererType | None = None
     """How prompts are rendered for this model (``tokenizer`` chat template,
@@ -3113,16 +3178,36 @@ class ModelCard(CamelCaseModel):
 
     @model_validator(mode="after")
     def _require_bundle_revision_and_selected_file(self) -> "ModelCard":
-        """Bind a bundle manifest to one immutable upstream repository state."""
+        """Bind selected files and local pipeline companions to immutable bundle bytes."""
 
         bundle = self.artifact_bundle
         if bundle is None:
             return self
         if self.source_revision is None:
             raise ValueError("an artifact bundle requires source_revision")
-        paths = {item.path for item in bundle.files}
-        if self.gguf_file is not None and self.gguf_file not in paths:
+        files = {item.path: item for item in bundle.files}
+        if self.gguf_file is not None and self.gguf_file not in files:
             raise ValueError("artifact bundle must contain the selected GGUF")
+        if self.video is not None:
+            for companion in self.video.companions:
+                if companion.kind not in {
+                    VideoCompanionKind.LatentUpscaler,
+                    VideoCompanionKind.DurationHead,
+                    VideoCompanionKind.VideoDecoder,
+                } or (
+                    companion.repo is not None
+                    and companion.repo != self.artifact_repository
+                ):
+                    continue
+                # These selected local pipeline weights are fetched through the
+                # base bundle, unlike independently downloaded external packs.
+                selected = files.get(companion.path)
+                if selected is None:
+                    raise ValueError(f"artifact bundle must contain local video companion {companion.name!r}")
+                if companion.size_bytes is not None and companion.size_bytes != selected.size_bytes:
+                    raise ValueError(f"local video companion {companion.name!r} size must match the artifact bundle")
+                if companion.revision is not None and companion.revision != self.source_revision:
+                    raise ValueError(f"local video companion {companion.name!r} revision must match source_revision")
         return self
 
     registry_card_id: Annotated[str, Field(pattern=r"^card_[a-z2-7]{52}$")] | None = (

@@ -723,6 +723,9 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         conflicts.extend(engine_conflicts)
         notes.extend(engine_notes)
 
+    if facts.platform == "darwin" and facts.gpus_of("apple") and facts.mlx_video_build_identity is not None:
+        tags.update({"mlx_video", "mlx_video-metal"})
+
     native_image = facts.stable_diffusion_cpp_probe
     if native_image.outcome == "ready" and len(native_image.devices) == 1:
         from skulk.facts.inventory import hardware_class_inventory
@@ -753,6 +756,9 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
     # first time a video model lands here. A configured or wired install
     # already derived its tags above and leaves no install eligibility.
     on_demand: set[str] = set()
+    if facts.mlx_video_build_identity is None:
+        on_demand.update(facts.mlx_video_installable_builds)
+        tags.update(facts.mlx_video_installable_builds)
     if (
         facts.comfy_on_demand_variants
         and facts.comfy_binary.state == "not_configured"
