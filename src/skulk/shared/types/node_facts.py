@@ -304,6 +304,11 @@ class NodeFacts(CamelCaseModel):
         default_factory=dict, description="Exact immutable vLLM runtime recipe available on first use; absent when installed, offline, overridden or ineligible."
     )
 
+    vllm_managed_variant: Literal["cuda", "rocm"] | None = Field(
+        default=None,
+        description="Compute variant proven by the configured managed runtime receipt; limits installed tags on mixed-vendor hosts, without changing explicit external-runtime declarations.",
+    )
+
     comfy_on_demand_variants: tuple[Literal["cuda", "rocm"], ...] = ()
     """ComfyUI variants this node may install when a video model is placed on it.
 

@@ -1908,7 +1908,10 @@ complete hashed binary dependencies, and managed Python 3.12.13. The upstream
 vLLM wheels are mirrored without modification. Runtime environments stay separate
 from Skulk and model weights, keyed by the complete recipe digest.
 
-Node facts expose `vllm_installable_builds`; backend derivation marks these tags
+Node facts expose `vllm_installable_builds`; the observed
+`vllm_managed_variant` binds installed tags to the verified recipe even on a
+mixed-vendor host. Explicit backend selection chooses the corresponding
+visible GPU variant. Backend derivation marks installable tags
 on demand, separately from installed backends. Existing `NodeResources.engineBuilds`
 and `onDemandBackends` carry installed identities and readiness;
 `installableEngineBuilds` separately binds recipes available for first use.

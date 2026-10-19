@@ -84,15 +84,14 @@ export function deriveInstanceStatus(
     return { status: 'loading', message, progress };
   }
 
-  // The runner waits idle while its node installs an on-demand engine (the
-  // video engine) beside the model download.
+  // The runner waits idle while its node installs an on-demand engine beside the model download.
   if (engineInstallBytes !== null) {
     const size = engineInstallSize(engineInstallBytes);
     return {
       status: 'loading',
       message: size
-        ? t('app.instanceStatus.installingVideoEngineSize', 'Installing video engine (about {size})...', { size })
-        : t('app.instanceStatus.installingVideoEngine', 'Installing video engine...'),
+        ? t('app.instanceStatus.installingEngineSize', 'Installing engine (about {size})...', { size })
+        : t('app.instanceStatus.installingEngine', 'Installing engine...'),
     };
   }
 

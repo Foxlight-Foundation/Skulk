@@ -103,6 +103,9 @@ wheels are mirrored byte for byte on `wheels.foxlight.ai`; the small
 hashed dependency recipe. Other dependencies download from their recorded
 upstream channels. Compatible hardware remains eligible without a qualification
 record; actual model support also depends on the runtime's kernels and resources.
+On a mixed AMD/NVIDIA host, `SKULK_VLLM_BACKENDS=cuda` or `rocm` selects
+the corresponding managed recipe; installed tags describe only the verified
+runtime, rather than every GPU the machine can see.
 
 Allow at least **20 GiB free disk** for first-use installation, plus model storage
 and compilation caches. The host supplies a compatible GPU driver. The upstream ROCm wheel also requires

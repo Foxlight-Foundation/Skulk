@@ -21,7 +21,7 @@ import pytest
 import skulk.provisioning.vllm_runtime as runtime
 from skulk.facts.derive import derive_node_backends
 from skulk.facts.inventory import engine_build_inventory
-from skulk.facts.testing import AMD_STRIX, NVIDIA_A40, bad_bin, make_facts
+from skulk.facts.testing import AMD_STRIX, NVIDIA_A40, bad_bin, make_facts, ok_bin
 from skulk.provisioning.comfy import ComfyInstallCancelledError
 from skulk.shared.backends import VLLM_BIN_ENV
 
@@ -148,6 +148,70 @@ def test_rocm_matches_published_libc_and_cpu_abi(
     assert recipe is not None and recipe.variant == "rocm"
 
 
+@pytest.mark.parametrize("declared,expected", [(None, "cuda"), ("cuda", "cuda"), ("rocm", "rocm")])
+def test_mixed_vendor_recipe_honors_selected_compute(
+    monkeypatch: pytest.MonkeyPatch, declared: str | None, expected: str
+) -> None:
+    """An AMD integrated GPU must not hide an explicitly selected ROCm recipe."""
+    monkeypatch.setattr(runtime.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(runtime, "platform_tags", lambda: iter(("manylinux_2_28_x86_64", "manylinux_2_39_x86_64")))
+    recipe = runtime.select_vllm_recipe(make_facts(gpus=(NVIDIA_A40, AMD_STRIX), declared_vllm=declared))
+    assert recipe is not None and recipe.variant == expected
+
+
+@pytest.mark.parametrize("variant", ["cuda", "rocm"])
+def test_managed_runtime_advertises_only_its_proven_compute(variant: str) -> None:
+    """GPU visibility cannot expand one installed recipe into another runtime."""
+    facts = make_facts(gpus=(NVIDIA_A40, AMD_STRIX), vllm_bin=ok_bin(VLLM_BIN_ENV))
+    facts = facts.model_copy(update={"vllm_managed_variant": variant})
+    derived = derive_node_backends(facts)
+    assert {tag for tag in derived.installed_backends if tag.startswith("vllm")} == {"vllm", f"vllm-{variant}"}
+
+
+def test_incompatible_override_cannot_expand_managed_runtime() -> None:
+    """A declaration contradicting a known binary disables the unusable lane."""
+    facts = make_facts(gpus=(NVIDIA_A40, AMD_STRIX), vllm_bin=ok_bin(VLLM_BIN_ENV), declared_vllm="rocm")
+    facts = facts.model_copy(update={"vllm_managed_variant": "cuda"})
+    derived = derive_node_backends(facts)
+    assert not any(tag.startswith("vllm") for tag in derived.installed_backends)
+    assert any(conflict.code == "backend_override_conflict" for conflict in derived.conflicts)
+
+
+def test_completed_cache_snapshot_keeps_mixed_gpu_tags_honest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh process snapshot records the verified recipe before derivation."""
+    import skulk.facts as facts_module
+    import skulk.provisioning.comfy as comfy_runtime
+    import skulk.provisioning.stable_diffusion_cpp as image_runtime
+
+    recipe = _channel(monkeypatch)
+    hardware = make_facts(gpus=(NVIDIA_A40, AMD_STRIX))
+    binary = runtime.install_vllm_on_demand(
+        hardware, offline=False, stop=threading.Event(), run=_run([]),
+        expected_build=recipe.build_identity,
+    )
+    observed = hardware.model_copy(update={
+        "vllm_binary": ok_bin(VLLM_BIN_ENV).model_copy(update={"configured_path": str(binary)})
+    })
+    def no_variants(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        return ()
+
+    def no_cache(*_args: object) -> None:
+        return None
+
+    def no_builds(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(comfy_runtime, "comfy_on_demand_variants", no_variants)
+    monkeypatch.setattr(image_runtime, "rehydrate_native_image", no_cache)
+    monkeypatch.setattr(image_runtime, "installable_image_builds", no_builds)
+    snapshot = facts_module._with_install_eligibility(observed)
+    assert snapshot.vllm_managed_variant == "cuda"
+    derived = derive_node_backends(snapshot)
+    assert {tag for tag in derived.installed_backends if tag.startswith("vllm")} == {"vllm", "vllm-cuda"}
+
+
 @pytest.mark.parametrize(
     "environment",
     [
@@ -198,6 +262,7 @@ def test_first_use_publishes_only_verified_runtime_then_reuses_it_offline(
     assert binary.read_text().startswith(f"#!{root}/venv/bin/python\n")
     assert subprocess.check_output([str(binary)], text=True).strip() == "ready"
     assert runtime.managed_vllm_build(str(binary)) == recipe.build_identity
+    assert runtime.managed_vllm_variant(str(binary)) == "cuda"
     assert runtime.installed_managed_vllm("vllm-cuda", recipe.build_identity) == binary
     assert runtime.installed_managed_vllm("vllm-rocm") is None
     assert runtime.installed_managed_vllm("vllm-cuda", "different-build") is None

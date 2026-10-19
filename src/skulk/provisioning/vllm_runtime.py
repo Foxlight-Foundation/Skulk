@@ -127,13 +127,11 @@ def select_vllm_recipe(facts: NodeFacts) -> VllmRecipe | None:
     if facts.platform != "linux":
         return None
     tags = set(platform_tags())
-    variants: tuple[str, ...] = (
-        ("cuda",)
-        if facts.gpus_of("nvidia")
-        else ("rocm",)
-        if facts.gpus_of("amd")
-        else ()
-    )
+    variants: set[str] = set()
+    if facts.gpus_of("nvidia"):
+        variants.add("cuda")
+    if facts.gpus_of("amd"):
+        variants.add("rocm")
     declared = (
         facts.declared_vllm_backends
         or facts.declared_llama_server_backends
@@ -214,6 +212,19 @@ def managed_vllm_build(binary: str) -> str | None:
         root = managed_vllm_root(recipe)
         if str(_binary(root)) == binary and _complete(root, recipe):
             return recipe.build_identity
+    return None
+
+
+def managed_vllm_variant(binary: str) -> Literal["cuda", "rocm"] | None:
+    """Read the verified managed binary's compute variant for the facts snapshot.
+
+    A mixed-vendor host can see more GPUs than one installed runtime can drive.
+    The observed recipe limits advertised tags without probing inside derivation.
+    """
+    for recipe in PUBLISHED_RECIPES:
+        root = managed_vllm_root(recipe)
+        if str(_binary(root)) == binary and _complete(root, recipe):
+            return recipe.variant
     return None
 
 

@@ -92,7 +92,11 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
         installable_image_builds,
         rehydrate_native_image,
     )
-    from skulk.provisioning.vllm_runtime import installable_vllm_builds, rehydrate_vllm
+    from skulk.provisioning.vllm_runtime import (
+        installable_vllm_builds,
+        managed_vllm_variant,
+        rehydrate_vllm,
+    )
     from skulk.shared.constants import offline_mode
 
     if rehydrate_vllm(facts) is not None:
@@ -110,6 +114,9 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
     return facts.model_copy(update={
         "comfy_on_demand_variants": variants,
         "vllm_installable_builds": vllm_builds,
+        "vllm_managed_variant": managed_vllm_variant(
+            facts.vllm_binary.configured_path or ""
+        ),
         "stable_diffusion_cpp_installable_builds": image_builds,
     })
 
