@@ -2016,6 +2016,12 @@ an older instance gained features. An unpublished candidate adds no feature or
 installation offer. Normal resource admission still applies on compatible
 untested hardware.
 
+New Comfy LTX placements select the issued `0.1.1` extension through ordinary
+on-demand engine installation. Its editing encoder retains the complete source
+waveform instead of applying Comfy's generic spatial crop to the audio timeline.
+Existing placements retain their exact engine build; place a new instance to
+use the update.
+
 ### Poll a job
 
 **GET** `/v1/videos/{video_id}`

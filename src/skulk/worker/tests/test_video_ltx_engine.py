@@ -653,13 +653,13 @@ def test_published_engine_enables_only_its_issued_workflows(backend: str, torch:
         video_request_supported,
     )
 
-    wheel = published_extensions()[0]
-    build = wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@{torch}")
-    assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend"]}
-    assert video_request_supported(_dev_card(), _params(pipeline="hq_two_stage"), backend, build)
-    for operation in ("retake", "extend"):
-        assert video_request_supported(_card(), _editing_params(operation), backend, build)
-    assert not video_request_supported(_dev_card(), _params(pipeline="hq_two_stage"), backend, build.split("/extension@")[0])
+    builds = tuple(wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@{torch}") for wheel in published_extensions())
+    assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend"] for build in builds}
+    for build in builds:
+        assert video_request_supported(_dev_card(), _params(pipeline="hq_two_stage"), backend, build)
+        for operation in ("retake", "extend"):
+            assert video_request_supported(_card(), _editing_params(operation), backend, build)
+        assert not video_request_supported(_dev_card(), _params(pipeline="hq_two_stage"), backend, build.split("/extension@")[0])
 
 
 @pytest.mark.parametrize("operation", ["retake", "extend"])

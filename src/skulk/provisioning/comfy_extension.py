@@ -112,6 +112,15 @@ class ComfyExtensionProbeReply(BaseModel):
 # A locally built candidate is deliberately absent from normal node offers.
 PUBLISHED_EXTENSIONS: Final[tuple[ComfyExtensionWheel, ...]] = (
     ComfyExtensionWheel(
+        filename="skulk_comfy_ltx-0.1.1-py3-none-any.whl",
+        sha256="0b6c28318b7f0aeaded710dea7862cfb1700cda3dc421354f62de65c9f78ea4a",
+        payload_sha256="df3189f3232051717b249cec0087d728f0808463183f866ee32e0b4414cd3b16",
+        size_bytes=48855,
+        comfy_revision="40c4fcdf513a4523e39d54a9d391908af8df8171",
+        ltx_revision="e98f6d927d83c92ef2be6aec76c8440b19306e39",
+        features=("res2s", "retake", "extend"),
+    ),
+    ComfyExtensionWheel(
         filename="skulk_comfy_ltx-0.1.0-py3-none-any.whl",
         sha256="3ff6a292521de798de59d171474a8ec041e741d3fcd4f59b0a51aa4c7e8879e3",
         payload_sha256="345d060988431db5496b9916e329e856f13b3f55883c2dc5052b6fc85a35fedb",

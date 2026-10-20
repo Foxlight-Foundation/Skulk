@@ -37,7 +37,7 @@ def test_candidate_admission_requires_its_exact_published_descriptor(tmp_path: P
     issued = extension.published_extensions()
     promoted = next((wheel for wheel in issued if wheel.filename == built.filename), None)
     if promoted is not None:
-        assert promoted == built
+        assert promoted == issued[0] == built
     else:
         # CI must assemble and attest new versions before a descriptor can
         # truthfully name their published bytes. The actual candidate must
