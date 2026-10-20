@@ -258,7 +258,7 @@ class PreservationJournal:
                         "SELECT count(*) FROM jobs WHERE state='interrupted'"
                     ).fetchone(),
                 )[0]
-                if uncertain >= 256:
+                if uncertain >= 256 and plan.kind != "check":
                     raise PreservationHostError(
                         "uncertain_history_needs_reconciliation"
                     )
@@ -402,17 +402,99 @@ class PreservationJournal:
                 ).fetchall(),
             )
             for row in rows:
-                job = PreservationJob.model_validate_json(row[0]).model_copy(
+                previous = PreservationJob.model_validate_json(row[0])
+                uncertain = previous.expected_manifest_id is not None
+                state = (
+                    "interrupted"
+                    if uncertain
+                    else "cancelled"
+                    if previous.state == "cancelling"
+                    else "failed"
+                )
+                now = int(time.time())
+                job = previous.model_copy(
                     update={
-                        "state": "interrupted",
-                        "stage": "check_outcome",
-                        "updated_at": int(time.time()),
+                        "state": state,
+                        "stage": "check_outcome" if uncertain else state,
+                        "error_code": None
+                        if uncertain
+                        else "host_restart_before_publication",
+                        "updated_at": now,
+                        "finished_at": None if uncertain else now,
                     }
                 )
                 db.execute(
                     "UPDATE jobs SET state=?,updated=?,value=? WHERE id=?",
                     (job.state, job.updated_at, job.model_dump_json(), job.job_id),
                 )
+
+    def confirm_outcome(self, original_id: str, copy_id: str) -> None:
+        """Close a recorded uncertain outcome only after matching copy verification.
+
+        The host calls this after its actual Check worker succeeded. Ordinary
+        copy checks have no original job and do nothing here. Immutable model,
+        location and expected manifest bindings are rechecked under the journal
+        lock; reads never perform this transition or replay the original effect.
+        """
+        with self._connection() as db:
+            row = cast(
+                tuple[str] | None,
+                db.execute(
+                    "SELECT value FROM jobs WHERE id=?", (original_id,)
+                ).fetchone(),
+            )
+            if row is None:
+                return
+            original = PreservationJob.model_validate_json(row[0])
+            if original.state != "interrupted":
+                return
+            retained = cast(
+                tuple[str] | None,
+                db.execute(
+                    "SELECT value FROM copies WHERE id=?", (copy_id,)
+                ).fetchone(),
+            )
+            plan_row = cast(
+                tuple[str] | None,
+                db.execute(
+                    "SELECT value FROM plans WHERE id=?", (original.plan_id,)
+                ).fetchone(),
+            )
+            if retained is None or plan_row is None:
+                raise PreservationHostError("verified_outcome_missing")
+            copy = PreservationCopy.model_validate_json(retained[0])
+            record = cast(dict[str, JsonValue], json.loads(plan_row[0]))
+            plan = PreservationPlan.model_validate_json(safe_json(record["view"]))
+            if (copy.manifest_id, copy.location_id, copy.model_id) != (
+                original.expected_manifest_id,
+                plan.location_id,
+                original.model_id,
+            ):
+                raise PreservationHostError("verified_outcome_mismatch")
+            now = int(time.time())
+            confirmed = original.model_copy(
+                update={
+                    "state": "succeeded",
+                    "stage": "reconciled",
+                    "copy_id": copy_id,
+                    "updated_at": now,
+                    "finished_at": now,
+                    "error_code": None,
+                    "result": {
+                        "copy_id": copy_id,
+                        "manifest_id": copy.manifest_id,
+                    },
+                }
+            )
+            db.execute(
+                "UPDATE jobs SET state=?,updated=?,value=? WHERE id=?",
+                (
+                    confirmed.state,
+                    confirmed.updated_at,
+                    confirmed.model_dump_json(),
+                    original_id,
+                ),
+            )
 
     def add_copy(self, copy: PreservationCopy) -> None:
         """Retain a confirmed copy after actual verification; never infer from a process start."""

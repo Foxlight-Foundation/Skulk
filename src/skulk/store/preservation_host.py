@@ -386,7 +386,10 @@ class PreservationHost:
                         }
                     )
                 )
-                async with self.store.preservation_lease():
+                if job.kind == "preserve":
+                    async with self.store.preservation_lease():
+                        await self._run(job_id)
+                else:
                     await self._run(job_id)
         except Exception:
             job = self.journal.job(job_id)
@@ -553,6 +556,8 @@ class PreservationHost:
                             member_count=result.member_count,
                         )
                     )
+                    if plan.kind == "check" and plan.copy_id is not None:
+                        self.journal.confirm_outcome(plan.copy_id, copy_id)
                     self.journal.update_job(
                         current.model_copy(
                             update={

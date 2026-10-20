@@ -140,3 +140,68 @@ async def test_source_generation_change_refuses_and_cancel_waiting_on_owner_fenc
         assert not tuple((host.root / "device-archive").iterdir())
     finally:
         await host.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_check_ignores_store_lease_and_closes_recorded_uncertainty(
+    tmp_path: Path,
+) -> None:
+    installed = make_preservation_installation(tmp_path)
+    store = ModelStore(installed.primary.parent)
+    host = PreservationHost(store, tmp_path / "private-host")
+    try:
+        await host.setup_device()
+        model = (await host.page()).models[0]
+        original_plan = await host.plan(
+            PreservationPlanRequest(
+                kind="preserve",
+                location_id="device",
+                model_id=model.model_id,
+                generation_id=model.generation_id,
+            )
+        )
+        initial = host.start(
+            PreservationStart(
+                plan_id=original_plan.plan_id, operation_id="complete-capture"
+            )
+        )
+        await _settled(host, initial.job_id)
+        complete = host.journal.job(initial.job_id)
+        assert complete.state == "succeeded" and complete.expected_manifest_id
+        # A real completed archive is the outcome observed after a simulated
+        # durable-intent crash; the job must reconcile without repeating capture.
+        request = PreservationStart(
+            plan_id=original_plan.plan_id, operation_id="interrupted-capture"
+        )
+        original, _ = host.journal.reserve(request)
+        host.journal.update_job(
+            original.model_copy(
+                update={
+                    "state": "interrupted",
+                    "expected_manifest_id": complete.expected_manifest_id,
+                }
+            )
+        )
+        check_plan = await host.plan(
+            PreservationPlanRequest(
+                kind="check", location_id="device", copy_id=original.job_id
+            )
+        )
+        async with store.preservation_lease():
+            checking = host.start(
+                PreservationStart(
+                    plan_id=check_plan.plan_id, operation_id="confirm-outcome"
+                )
+            )
+            await _settled(host, checking.job_id)
+            assert host.journal.job(checking.job_id).state == "succeeded"
+        confirmed = host.journal.job(original.job_id)
+        assert confirmed.state == "succeeded" and confirmed.stage == "reconciled"
+        assert confirmed.copy_id == complete.copy_id
+        assert confirmed.result == {
+            "copy_id": complete.copy_id,
+            "manifest_id": complete.expected_manifest_id,
+        }
+        assert host.journal.reserve(request) == (confirmed, False)
+    finally:
+        await host.close()

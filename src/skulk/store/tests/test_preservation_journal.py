@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from skulk.store.preservation_contracts import PreservationPlan, PreservationStart
+from skulk.store.preservation_contracts import (
+    PreservationJob,
+    PreservationPlan,
+    PreservationStart,
+)
 from skulk.store.preservation_journal import PreservationHostError, PreservationJournal
 
 
@@ -105,3 +109,83 @@ def test_failed_initialization_releases_owner(tmp_path: Path) -> None:
         _ = db.execute("PRAGMA user_version=1")
     second = PreservationJournal(root)
     second.close()
+
+
+def test_restart_before_publication_is_definitive_not_an_impossible_check(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "private"
+    journal = PreservationJournal(root)
+    request = _plan(journal)
+    queued, _ = journal.reserve(request)
+    stopping, _ = journal.reserve(
+        request.model_copy(update={"operation_id": "stopping"})
+    )
+    journal.update_job(stopping.model_copy(update={"state": "cancelling"}))
+    journal.close()
+    restarted = PreservationJournal(root)
+    restarted.interrupt_active()
+    assert restarted.job(queued.job_id).state == "failed"
+    assert restarted.job(queued.job_id).stage != "check_outcome"
+    assert restarted.job(stopping.job_id).state == "cancelled"
+    assert restarted.reserve(request)[1] is False
+    restarted.close()
+
+
+def test_full_uncertain_budget_still_allows_explicit_verification_and_resolution(
+    tmp_path: Path,
+) -> None:
+    from skulk.store.preservation_contracts import PreservationCopy
+
+    journal = PreservationJournal(tmp_path / "private")
+    request = _plan(journal)
+    originals: list[PreservationJob] = []
+    for index in range(256):
+        job, _ = journal.reserve(
+            request.model_copy(update={"operation_id": f"original-{index}"})
+        )
+        uncertain = job.model_copy(
+            update={"state": "interrupted", "expected_manifest_id": "b" * 64}
+        )
+        journal.update_job(uncertain)
+        originals.append(uncertain)
+    with pytest.raises(
+        PreservationHostError, match="uncertain_history_needs_reconciliation"
+    ):
+        journal.reserve(request)
+    check = PreservationPlan(
+        plan_id="c" * 64,
+        kind="check",
+        model_id="example/base",
+        location_id="device",
+        copy_id=originals[0].job_id,
+        manifest_id="b" * 64,
+        size_bytes=100,
+        members=("example/base",),
+        member_count=1,
+        expires_at=int(time.time()) + 600,
+    )
+    journal.add_plan(check, {})
+    assert journal.reserve(
+        PreservationStart(plan_id=check.plan_id, operation_id="resolve")
+    )[1]
+    copy = PreservationCopy(
+        copy_id="confirmed-copy",
+        model_id="example/base",
+        location_id="device",
+        manifest_id="b" * 64,
+        audience="private",
+        size_bytes=100,
+        created_at=1,
+        checked_at=2,
+        member_count=1,
+    )
+    journal.add_copy(copy)
+    journal.confirm_outcome(originals[0].job_id, copy.copy_id)
+    confirmed = journal.job(originals[0].job_id)
+    assert confirmed.state == "succeeded" and confirmed.stage == "reconciled"
+    assert confirmed.expected_manifest_id == "b" * 64
+    assert journal.reserve(request)[1]
+    replay = request.model_copy(update={"operation_id": "original-0"})
+    assert journal.reserve(replay) == (confirmed, False)
+    journal.close()
