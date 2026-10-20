@@ -38,7 +38,7 @@ def video_engine_feature_builds(engines: Set[str | None]) -> dict[str, list[Vide
     if "comfy" in engines:
         for wheel in published_extensions():
             features: list[VideoExecutionFeature] = ["hq_two_stage"] if "res2s" in wheel.features else []
-            temporal: tuple[VideoExecutionFeature, ...] = ("retake", "extend", "prompt_relay")
+            temporal: tuple[VideoExecutionFeature, ...] = ("retake", "extend", "prompt_relay", "dfr")
             features.extend(feature for feature in temporal if feature in wheel.features)
             if features:
                 builds[f"comfy@{wheel.comfy_revision}/extension@sha256:{wheel.payload_sha256}"] = features
@@ -66,7 +66,10 @@ def video_request_supported(card: ModelCard, params: VideoGenerationTaskParams, 
         from skulk.provisioning.comfy_extension import extension_features_for_build
 
         features = extension_features_for_build(build)
-        baseline = pipeline in ("distilled_two_stage", "dev_two_stage", "dfr")
+        # Image-conditioned DFR keeps its stock-node path. Text-only DFR
+        # needs the exact issued mask bridge, independent of hardware tests.
+        dfr = pipeline == "dfr" and ("dfr" in features or any(reference.kind == "image" for reference in params.references))
+        baseline = pipeline in ("distilled_two_stage", "dev_two_stage") or dfr
         hq = pipeline == "hq_two_stage" and "res2s" in features
         editing = params.editing is not None and params.editing.operation in features
         return (baseline or hq or editing) and params.prompt_relay is None

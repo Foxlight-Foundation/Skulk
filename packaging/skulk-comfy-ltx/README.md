@@ -30,6 +30,20 @@ remains available for retained instances: 48,584 bytes, archive SHA256
 `3ff6a292521de798de59d171474a8ec041e741d3fcd4f59b0a51aa4c7e8879e3`.
 Later changes require a new version; issued bytes are immutable.
 
+The `0.1.2` source candidate adds a `dfr` feature and the
+`SkulkLTXAddGeneratedKeyframes` bridge. It preserves dense upscaled video while
+restoring a five-dimensional sampling mask; real image/guide masks are cloned
+unchanged. Default grid positions retain stock behavior. If anchors occupy every
+candidate, one detail frame uses the largest free interior gap (earliest on ties).
+A fully occupied canvas is rejected rather than dropping detailing. Actual token
+creation and conditioning remain delegated to the pinned Comfy node.
+
+Only an issued descriptor can enable text-only DFR; a source candidate does not
+create an engine offer. Existing image-conditioned stock-node DFR and issued
+0.1.0/0.1.1 identities remain intact. Candidate validation reproduces the original
+dense-video failure against hash-bound pinned occupancy helpers, then checks
+correct masks, preserved anchors and the short-clip fallback on bounded tensors.
+
 The solver runs on the reference's token-major video and audio layouts, then
 restores Comfy's channel-first packed states at each prediction and callback.
 Step-level SDE noise uses the pinned HQ pipeline's default seed (-1, with 9999

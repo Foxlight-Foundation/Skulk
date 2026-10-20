@@ -2166,14 +2166,17 @@ still visible to operators but cannot be reconciled back into the store; owned
 companions inherit the base alias suppression. Only a successful explicit
 upstream download clears the tombstone.
 
-Offline preservation recovery uses `skulk-preservation inspect/recover` (also
+Native model preservation uses `skulk-preservation plan/preserve/inspect/recover` (also
 `skulk preservation`). It independently verifies owner-signed public bundles,
 actual bytes, current runtime card semantics and retained registry proof against
-the packaged root. It creates a fresh home for a self-contained text model;
+the packaged root. Preserve selects installed records and all supported declared
+companions, snapshots and verifies their bytes, and publishes a private signed
+copy. Recovery creates a fresh home for the complete selected closure;
 one final rename publishes normal store files, schema-3 installed evidence,
 custom admission when required, and offline configuration together. It never
-mutates a live store. Only fresh publication and complete original SHA-256
-binding retain registry verification. Other valid captures need explicit custom
+mutates a live store. Unsupported offline companion paths fail closed. Only a
+single self-contained model with fresh publication and complete original SHA-256
+binding retains registry verification. Multi-member closures and other valid captures need explicit custom
 admission; repository-code permission is a separate decision. See
 [Offline model recovery](model-preservation).
 The package's `pyinstaller40` hook retains the public core's JSON resources and
@@ -3261,8 +3264,17 @@ LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
 keyframe carry between base and spatial refinement. An explicit optional temporal
 x2 pass requires its pinned latent upscaler, doubles frame density and conditioning
 FPS together, and freezes the existing audio. Request admission checks selected
-companions and modes independently of hardware qualification. No additional
-engine installation is needed for these nodes at the pinned Comfy revision.
+companions and modes independently of hardware qualification. Image-conditioned
+DFR retains the stock-node path. Text-only DFR requires a placed issued extension
+advertising `dfr`; unknown/base-only builds are refused before dispatch. The owned
+`SkulkLTXAddGeneratedKeyframes` bridge supplies a compact float32 five-dimensional
+sampling mask after upsampling removes it, preserves existing image/guide masks,
+and delegates token/conditioning creation to the pinned stock node. If anchors
+occupy every default detailing candidate, it selects one interior pixel in the
+largest free gap (earliest on ties); a fully occupied canvas is refused. Samples
+and metadata remain intact, and input masks are cloned. Schema readiness and
+archive-member checks require the bridge for a build advertising that feature.
+Candidate source alone creates no issued build or installation offer.
 
 
 ### Trusted Comfy workflow extensions

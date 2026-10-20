@@ -4,14 +4,18 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-Offline public-bundle recovery lives in `store/preservation.py` and
+Native installed preservation lives in `store/preservation_export.py`; complete
+card-selected mappings live in `store/preservation_closure.py`. Offline recovery
+lives in `store/preservation.py` and
 `store/preservation_cli.py` (`skulk-preservation`, also `skulk preservation`).
 It creates a new home with ordinary model-store and custom-card records in one
 publication; it never instantiates a second writer for a live store. Receiver
 owner trust is explicit, registry proof uses the packaged root, and code
 authorization is separate from provenance acceptance. Recovery observations use
 installed-card schema 3; legacy sidecar serialization stays unchanged. See
-`website/docs/model-preservation.md` for the supported text-model scope and limits.
+`website/docs/model-preservation.md` for supported companions, conservative multi-member custom admission and limits.
+`plan` is inventory only; `preserve` is a local private snapshot, not a lease on
+a live store. Processor/vLLM direct-Hub loaders require separate offline adapters.
 The `pyinstaller40` entry point in `_pyinstaller/` includes the public core's
 JSON schemas and distribution metadata in frozen builds. Keep the resource
 closure test separate from actual desktop signing and release qualification.
@@ -2052,8 +2056,17 @@ LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
 keyframe carry between base and spatial refinement. An explicit optional temporal
 x2 pass requires its pinned latent upscaler, doubles frame density and conditioning
 FPS together, and freezes the existing audio. Request admission checks selected
-companions and modes independently of hardware qualification. No additional
-engine installation is needed for these nodes at the pinned Comfy revision.
+companions and modes independently of hardware qualification. Image-conditioned
+DFR retains the stock-node path. Text-only DFR requires a placed issued extension
+advertising `dfr`; unknown/base-only builds are refused before dispatch. The owned
+`SkulkLTXAddGeneratedKeyframes` bridge supplies a compact float32 five-dimensional
+sampling mask after upsampling removes it, preserves existing image/guide masks,
+and delegates token/conditioning creation to the pinned stock node. If anchors
+occupy every default detailing candidate, it selects one interior pixel in the
+largest free gap (earliest on ties); a fully occupied canvas is refused. Samples
+and metadata remain intact, and input masks are cloned. Schema readiness and
+archive-member checks require the bridge for a build advertising that feature.
+Candidate source alone creates no issued build or installation offer.
 
 
 Comfy workflow extensions use immutable Foxlight wheels through `InstallEngine`.

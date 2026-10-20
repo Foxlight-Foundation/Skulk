@@ -209,7 +209,7 @@ def _temporal_refinement(
     prompt["ltx_temporal_upscale"] = _node("LTXVLatentUpsampler", "Double temporal density", samples=video, upscale_model=_link("ltx_temporal_model"), vae=_link("video_vae"))
     positive, negative, video, _ = _condition_images(prompt, references, stage="temporal", positive=_link("condition", 0), negative=_link("condition", 1), latent=_link("ltx_temporal_upscale"), fps=render.plan.fps, refinement=True)
     prompt["ltx_temporal_guides"] = _node("LTXVGeneratedKeyframesToGuides", "Pin previous detailing frames", positive=positive, negative=negative, vae=_link("video_vae"), latent=video, keyframes=_link("ltx_refine_strip_generated", 3), strength=0.95)
-    prompt["ltx_temporal_keyframes"] = _node("LTXVAddGeneratedKeyframes", "Generate intermediate detailing frames", positive=_link("ltx_temporal_guides", 0), negative=_link("ltx_temporal_guides", 1), vae=_link("video_vae"), latent=_link("ltx_temporal_guides", 2), interval_frames=render.generated_keyframe_interval, keyframes=_link("ltx_temporal_upscale"))
+    prompt["ltx_temporal_keyframes"] = _node("SkulkLTXAddGeneratedKeyframes" if render.dfr_extension else "LTXVAddGeneratedKeyframes", "Generate intermediate detailing frames", positive=_link("ltx_temporal_guides", 0), negative=_link("ltx_temporal_guides", 1), vae=_link("video_vae"), latent=_link("ltx_temporal_guides", 2), interval_frames=render.generated_keyframe_interval, keyframes=_link("ltx_temporal_upscale"))
     prompt["ltx_temporal_condition"] = _node("LTXVConditioning", "Temporal refinement frame rate", positive=_link("ltx_temporal_keyframes", 0), negative=_link("ltx_temporal_keyframes", 1), frame_rate=render.plan.fps)
     prompt["ltx_temporal_frozen_audio"] = _node("LTXVFreezeLatent", "Preserve refined audio", latent=_link("ltx_refine_split", 1))
     sampled = sampling_stage(prompt, "temporal", seed=(render.plan.seed + 2) % (2**64), sigmas=DFR_TEMPORAL_SIGMAS, positive=_link("ltx_temporal_condition", 0), negative=_link("ltx_temporal_condition", 1), video=_link("ltx_temporal_keyframes", 2), audio=_link("ltx_temporal_frozen_audio"), render=render, model=model)
@@ -348,7 +348,7 @@ def build_ltx_prompt(
     )
     if render.generated_keyframe_interval is not None:
         prompt["ltx_generated_keyframes"] = _node(
-            "LTXVAddGeneratedKeyframes", "Internal detailing keyframes",
+            "SkulkLTXAddGeneratedKeyframes" if render.dfr_extension else "LTXVAddGeneratedKeyframes", "Internal detailing keyframes",
             positive=positive, negative=negative, vae=_link("video_vae"),
             latent=video, interval_frames=render.generated_keyframe_interval,
         )
@@ -403,7 +403,7 @@ def build_ltx_prompt(
         prompt["ltx_dfr_lora"] = _node("LoraLoaderModelOnly", "DFR spatial detail model", model=refinement_model, lora_name=files.dfr_spatial_lora, strength_model=1.0)
         refinement_model = _link("ltx_dfr_lora")
         prompt["ltx_upscale_keyframes"] = _node("LTXVLatentUpsampler", "Upscale detailing keyframes", samples=_link("ltx_strip_generated", 3), upscale_model=_link("ltx_spatial_model"), vae=_link("video_vae"))
-        prompt["ltx_refine_keyframes"] = _node("LTXVAddGeneratedKeyframes", "Carry detailing keyframes", positive=positive, negative=negative, vae=_link("video_vae"), latent=video, interval_frames=render.generated_keyframe_interval, keyframes=_link("ltx_upscale_keyframes"))
+        prompt["ltx_refine_keyframes"] = _node("SkulkLTXAddGeneratedKeyframes" if render.dfr_extension else "LTXVAddGeneratedKeyframes", "Carry detailing keyframes", positive=positive, negative=negative, vae=_link("video_vae"), latent=video, interval_frames=render.generated_keyframe_interval, keyframes=_link("ltx_upscale_keyframes"))
         prompt["ltx_dfr_detail_guide"] = _node("LTXVAddLatentGuide", "Half-resolution detail reference", positive=_link("ltx_refine_keyframes", 0), negative=_link("ltx_refine_keyframes", 1), vae=_link("video_vae"), latent=_link("ltx_refine_keyframes", 2), guiding_latent=base_video, latent_idx=0, strength=1.0)
         positive, negative, video = (_link("ltx_dfr_detail_guide", 0), _link("ltx_dfr_detail_guide", 1), _link("ltx_dfr_detail_guide", 2))
         guided = True

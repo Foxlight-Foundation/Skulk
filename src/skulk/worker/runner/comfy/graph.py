@@ -535,6 +535,8 @@ class ComfyRenderPlan:
     audio_conditioning: VideoAudioConditioning | None = None
     editing: VideoEditing | None = None
     transformer_variant: Literal["distilled", "dev"] | None = None
+    dfr_extension: bool = False
+    """Whether this placed issued build implements the DFR mask/keyframe bridge."""
     source_frames: int | None = None
     """Fully decoded worker facts, required before any temporal-edit graph is built."""
 
@@ -643,6 +645,11 @@ def plan_comfy_render(
 
             if "res2s" not in extension_features_for_build(engine_build):
                 raise ValueError("LTX-2.5 HQ requires a placed renderer with the published Res2s extension; update the renderer before using HQ")
+        from skulk.provisioning.comfy_extension import extension_features_for_build
+
+        dfr_extension = pipeline == "dfr" and "dfr" in extension_features_for_build(engine_build)
+        if pipeline == "dfr" and not dfr_extension and not any(reference.kind == "image" for reference in params.references):
+            raise ValueError("LTX-2.5 text-only DFR requires its exact published detailing extension; update and reload the model")
         minimum = params.duration_min_seconds or video.min_seconds
         files = resolve_model_files(card, mode)
         base = plan_render(params, video.model_copy(update={"canvas_multiple": 64, **({"default_steps": 15} if pipeline == "hq_two_stage" else {"default_steps": 30} if params.editing is not None and video.transformer_variant == "dev" else {})}))
@@ -662,6 +669,7 @@ def plan_comfy_render(
             decoder=params.decoder or "convolutional",
             guidance=(params.guidance or VideoGuidance(modality_scale=3.0 if pipeline == "hq_two_stage" else 1.0)) if pipeline in ("dev_two_stage", "hq_two_stage") else VideoGuidance(stg_scale=1.0, modality_scale=3.0) if params.editing is not None and video.transformer_variant == "dev" else None,
             temporal_upscalings=params.temporal_upscalings,
+            dfr_extension=dfr_extension,
             generated_keyframe_interval=(params.generated_keyframe_interval or 24) if pipeline == "dfr" else params.generated_keyframe_interval,
             duration=params.duration,
             audio_conditioning=params.audio_conditioning,

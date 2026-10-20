@@ -12,17 +12,19 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
-- **Offline preservation recovery:** `store/preservation.py` and
-  `store/preservation_cli.py`; `skulk-preservation inspect/recover`, also
-  `skulk preservation`. Pinned public core dependency; no network or node launch.
-  Exact manifest + independent owner trust + packaged registry root. One
-  self-contained text model, new home only. Atomic whole-home publication includes
-  normal store/index, schema-3 installed evidence, custom TOML admission and
-  offline config. Owner acceptance and repository-code permission are distinct.
-  Only fresh registry proof plus complete original SHA-256 binding produces
-  `registry_verified`; historical/owner-only/gapped evidence is custom. No
-  companion importer, live mutation, host jobs, export, sharing or inference
-  qualification. [Contract](model-preservation).
+- **Native model preservation:** `store/preservation_export.py` resolves exact
+  installed records and snapshots/verifies a private closure; `preservation_closure.py`
+  maps only card-declared companions; `preservation.py` atomically recovers a new
+  home; `preservation_cli.py` exposes `skulk-preservation plan/preserve/inspect/recover`
+  (also `skulk preservation`). No network/node launch, GUI, durable host job or
+  second live-store writer. Independent owner trust and packaged registry root;
+  code consent stays separate. Supported pinned companions publish together with
+  normal store/index, schema-3 observations, custom admission and offline config.
+  Unsupported processor/vLLM offline paths fail closed. Exact bundles are required
+  for non-text/composite selections. Only single self-contained models with fresh
+  registry proof and complete original SHA-256 binding retain registry verification;
+  multi-member closures require custom admission with base publication retained.
+  Private copy labels do not imply encryption/anonymity. [Contract](model-preservation).
   `_pyinstaller/` registers a `pyinstaller40` hook for the public core's JSON
   schema and distribution version metadata; no installer/direct-URL metadata
   enters the binary through this hook.
@@ -2029,8 +2031,17 @@ LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
 keyframe carry between base and spatial refinement. An explicit optional temporal
 x2 pass requires its pinned latent upscaler, doubles frame density and conditioning
 FPS together, and freezes the existing audio. Request admission checks selected
-companions and modes independently of hardware qualification. No additional
-engine installation is needed for these nodes at the pinned Comfy revision.
+companions and modes independently of hardware qualification. Image-conditioned
+DFR retains the stock-node path. Text-only DFR requires a placed issued extension
+advertising `dfr`; unknown/base-only builds are refused before dispatch. The owned
+`SkulkLTXAddGeneratedKeyframes` bridge supplies a compact float32 five-dimensional
+sampling mask after upsampling removes it, preserves existing image/guide masks,
+and delegates token/conditioning creation to the pinned stock node. If anchors
+occupy every default detailing candidate, it selects one interior pixel in the
+largest free gap (earliest on ties); a fully occupied canvas is refused. Samples
+and metadata remain intact, and input masks are cloned. Schema readiness and
+archive-member checks require the bridge for a build advertising that feature.
+Candidate source alone creates no issued build or installation offer.
 
 
 ### Comfy extension build binding

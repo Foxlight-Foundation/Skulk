@@ -445,11 +445,48 @@ def _dfr_card(*, temporal: bool = True) -> ModelCard:
     return card.model_copy(update={"video": card.video.model_copy(update={"companions": companions})})
 
 
+def _issued_dfr_build(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Bind candidate tests to an explicit issued inventory without publishing it."""
+    from skulk.provisioning import comfy_extension
+
+    wheel = comfy_extension.ComfyExtensionWheel(filename="skulk_comfy_ltx-0.1.2-py3-none-any.whl", sha256="e" * 64, payload_sha256="f" * 64, size_bytes=1000, features=("res2s", "retake", "extend", "dfr"), comfy_revision=comfy_extension.COMFY_PIN, ltx_revision=comfy_extension.LTX_REFERENCE_REVISION)
+    monkeypatch.setattr(comfy_extension, "PUBLISHED_EXTENSIONS", (wheel,))
+    return wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@2.14.0+cu130")
+
+
+@pytest.mark.parametrize("backend", ["comfy-cuda", "comfy-rocm"])
+def test_text_only_dfr_requires_issued_mask_code_but_old_image_conditioning_remains_usable(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    from skulk.shared.models.video_support import video_request_supported
+
+    card, text = _dfr_card(), _params(pipeline="dfr")
+    image = VideoReferenceSpec(slot=0, kind="image", role="first_frame", media_type="image/png", size_bytes=1, sha256="0" * 64)
+    conditioned = _params(pipeline="dfr", references=(image,), reference_bytes=1, total_input_chunks=1)
+    for previous in (None, "unknown"):
+        assert not video_request_supported(card, text, backend, previous)
+        with pytest.raises(ValueError, match="exact published detailing extension"):
+            plan_comfy_render(text, card, engine_build=previous)
+        assert video_request_supported(card, conditioned, backend, previous)
+        render = plan_comfy_render(conditioned, card, engine_build=previous)
+        graph = build_prompt(render, conditioned, (ReferenceBinding(spec=image, input_name="image.png"),), "old")
+        assert graph["ltx_refine_keyframes"]["class_type"] == "LTXVAddGeneratedKeyframes"
+    issued = _issued_dfr_build(monkeypatch)
+    if backend == "comfy-rocm":
+        issued = issued.replace("cu130", "rocm7.4")
+    assert video_request_supported(card, text, backend, issued)
+    metadata = VideoCapabilitySection.from_model_card(card)
+    assert metadata is not None and any("dfr" in features for features in metadata.engine_feature_builds.values())
+    for unknown in (issued.split("/extension@")[0], issued.replace("f" * 64, "a" * 64)):
+        assert not video_request_supported(card, text, backend, unknown)
+
+
 @pytest.mark.parametrize("temporal", [0, 1])
-def test_dfr_carries_detailing_tokens_and_preserves_the_timeline(temporal: int) -> None:
+def test_dfr_carries_detailing_tokens_and_preserves_the_timeline(monkeypatch: pytest.MonkeyPatch, temporal: int) -> None:
     params = _params(pipeline="dfr", temporal_upscalings=temporal)
-    render = plan_comfy_render(params, _dfr_card())
+    render = plan_comfy_render(params, _dfr_card(), engine_build=_issued_dfr_build(monkeypatch))
     graph = build_prompt(render, params, (), "command")
+    assert graph["ltx_generated_keyframes"]["class_type"] == "SkulkLTXAddGeneratedKeyframes"
+    assert graph["ltx_refine_keyframes"]["class_type"] == "SkulkLTXAddGeneratedKeyframes"
+    assert graph["ltx_refine_keyframes"]["inputs"]["latent"] == ["ltx_spatial_upscale", 0]
     assert render.sampler == "euler"
     assert graph["sampler_select"]["inputs"]["sampler_name"] == "euler"
     assert render.plan.fps == 24 * (2 ** temporal)
@@ -469,6 +506,7 @@ def test_dfr_carries_detailing_tokens_and_preserves_the_timeline(temporal: int) 
     assert render.steps == 11 + 4 * temporal
     assert render.engine_settings().temporal_upscalings == temporal
     if temporal:
+        assert graph["ltx_temporal_keyframes"]["class_type"] == "SkulkLTXAddGeneratedKeyframes"
         assert graph["ltx_temporal_upscale"]["inputs"]["samples"] == ["ltx_refine_crop", 2]
         assert graph["ltx_temporal_guides"]["inputs"]["keyframes"] == ["ltx_refine_strip_generated", 3]
         assert graph["ltx_temporal_condition"]["inputs"]["frame_rate"] == 48
@@ -507,12 +545,12 @@ def test_replicated_temporal_control_is_a_strict_integer(value: object) -> None:
         _params(temporal_upscalings=value)
 
 
-def test_temporal_control_accepts_multipart_integer_and_roundtrips() -> None:
+def test_temporal_control_accepts_multipart_integer_and_roundtrips(monkeypatch: pytest.MonkeyPatch) -> None:
     from skulk.api.types.api import VideoCreateRequest
     from skulk.shared.types.video import VideoEngineSettings
     create = VideoCreateRequest.model_validate({"model": str(MODEL), "prompt": "A fox", "pipeline": "dfr", "temporal_upscalings": "1"})
     assert create.temporal_upscalings == 1
-    settings = plan_comfy_render(_params(pipeline="dfr", temporal_upscalings=create.temporal_upscalings), _dfr_card()).engine_settings()
+    settings = plan_comfy_render(_params(pipeline="dfr", temporal_upscalings=create.temporal_upscalings), _dfr_card(), engine_build=_issued_dfr_build(monkeypatch)).engine_settings()
     assert VideoEngineSettings.model_validate_json(settings.model_dump_json()) == settings
 
 
@@ -530,10 +568,10 @@ def test_temporal_metadata_does_not_expand_a_companions_modes() -> None:
 
 
 
-def test_dfr_fixed_sampler_cannot_be_replaced_by_distilled_ancestral() -> None:
+def test_dfr_fixed_sampler_cannot_be_replaced_by_distilled_ancestral(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError, match="fixed euler sampler"):
         plan_comfy_render(_params(pipeline="dfr", sampler="euler_ancestral"), _dfr_card())
-    render = plan_comfy_render(_params(pipeline="dfr", sampler="euler"), _dfr_card())
+    render = plan_comfy_render(_params(pipeline="dfr", sampler="euler"), _dfr_card(), engine_build=_issued_dfr_build(monkeypatch))
     assert render.engine_settings().sampler == "euler"
     metadata = VideoCapabilitySection.from_model_card(_dfr_card())
     assert metadata is not None and metadata.samplers == ["euler_ancestral", "euler"]

@@ -289,6 +289,8 @@ class ComfyServer:
         required = [("SkulkLTXRes2sSampler", ["SAMPLER"]), ("SkulkLTXGuidanceRescale", ["MODEL"])]
         if {"retake", "extend"} & set(manifest.features):
             required.extend([("SkulkLTXEditVideoLatent", ["LATENT"]), ("SkulkLTXEditAudioLatent", ["LATENT", "AUDIO"]), ("SkulkLTXPreserveVideo", ["IMAGE"]), ("SkulkLTXPreserveAudio", ["AUDIO"])])
+        if "dfr" in manifest.features:
+            required.append(("SkulkLTXAddGeneratedKeyframes", ["CONDITIONING", "CONDITIONING", "LATENT"]))
         for name, outputs in required:
             data = bytearray()
             with httpx.stream("GET", f"{self.base_url}/object_info/{name}", timeout=10.0) as response:

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from skulk.provisioning.comfy import Runner
     from skulk.shared.types.node_facts import NodeFacts
 
-ComfyExtensionFeature = Literal["res2s", "retake", "extend", "prompt_relay", "union_control", "motion_tracks", "inpaint"]
+ComfyExtensionFeature = Literal["res2s", "retake", "extend", "dfr", "prompt_relay", "union_control", "motion_tracks", "inpaint"]
 """Explicit node features; publication does not imply model qualification."""
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 _PACKAGE: Final = "skulk_comfy_ltx"
@@ -51,7 +51,7 @@ class ComfyExtensionWheel(BaseModel):
     size_bytes: int = Field(gt=0, le=_MAX_ARCHIVE_BYTES, description="Exact published archive size.")
     comfy_revision: str = Field(pattern=r"^[0-9a-f]{40}$", description="Exact base Comfy API revision supported by these issued bytes.")
     ltx_revision: str = Field(pattern=r"^[0-9a-f]{40}$", description="Immutable upstream algorithm provenance retained per issued wheel.")
-    features: tuple[ComfyExtensionFeature, ...] = Field(min_length=1, max_length=7, description="Node features implemented by these exact bytes.")
+    features: tuple[ComfyExtensionFeature, ...] = Field(min_length=1, max_length=8, description="Node features implemented by these exact bytes.")
 
     @property
     def url(self) -> str:
@@ -74,7 +74,7 @@ class ComfyExtensionManifest(BaseModel):
     version: str = Field(pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$", description="Immutable wheel version.")
     comfy_revision: str = Field(pattern=r"^[0-9a-f]{40}$", description="Exact supported base Comfy source.")
     ltx_revision: str = Field(pattern=r"^[0-9a-f]{40}$", description="Reference pipeline provenance.")
-    features: tuple[ComfyExtensionFeature, ...] = Field(min_length=1, max_length=7, description="Implemented node features.")
+    features: tuple[ComfyExtensionFeature, ...] = Field(min_length=1, max_length=8, description="Implemented node features.")
     payload_sha256: Digest = Field(description="Canonical member-manifest identity.")
     members: dict[str, Digest] = Field(min_length=1, max_length=128, description="Every installed package file except this manifest, by exact SHA-256.")
 
@@ -190,6 +190,8 @@ def _read_manifest(package: Path, wheel: ComfyExtensionWheel) -> ComfyExtensionM
     required = {f"{_PACKAGE}/{name}" for name in ("__init__.py", "nodes.py", "comfy_sampler.py", "res2s.py", "guidance.py", "layout.py", "launcher.py")}
     if {"retake", "extend"} & set(manifest.features):
         required.update(f"{_PACKAGE}/{name}" for name in ("editing.py", "editing_nodes.py"))
+    if "dfr" in manifest.features:
+        required.update(f"{_PACKAGE}/{name}" for name in ("dfr.py", "dfr_nodes.py"))
     if not required <= manifest.members.keys():
         raise ValueError("extension lacks its required implementation members")
     return manifest

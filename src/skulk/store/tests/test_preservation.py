@@ -441,8 +441,11 @@ def test_bundle_cannot_enroll_its_own_registry_root(
     assert not (tmp_path / "home").exists()
 
 
+@pytest.mark.parametrize("boundary", ["restore", "flush"])
 def test_registry_expiry_during_copy_blocks_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: Literal["restore", "flush"],
 ) -> None:
     capture = _capture(tmp_path, monkeypatch, registry=True)
     copied = False
@@ -458,9 +461,16 @@ def test_registry_expiry_during_copy_blocks_publication(
     ) -> Manifest:
         nonlocal copied
         result = restore(store, manifest_id, trust, destination)
-        copied = True
+        copied = boundary == "restore"
         return result
 
+    def delayed_flush(root: Path) -> None:
+        nonlocal copied
+        assert root.is_dir()
+        copied = True
+
+    if boundary == "flush":
+        monkeypatch.setattr(preservation, "_flush_tree", delayed_flush)
     monkeypatch.setattr(proof_verifier, "datetime", Clock)
     monkeypatch.setattr(preservation, "restore", delayed_restore)
     with pytest.raises(PreservationError):
@@ -669,7 +679,7 @@ def test_composite_model_requires_the_closure_importer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     capture = _capture(tmp_path, monkeypatch, composite=True)
-    with pytest.raises(PreservationError, match="self-contained"):
+    with pytest.raises(PreservationError, match="exact artifact bundle"):
         preservation.recover_home(
             capture.store,
             capture.manifest_id,
@@ -823,3 +833,56 @@ def test_receiving_observations_are_scoped_to_unchanged_card_and_artifact(
         assert after.captured_at == before.captured_at
     else:
         assert after.preservation is None and after.schema_version == 2
+
+
+def test_preserve_retains_explicit_original_registry_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foxlight_model_preservation.assurance import load_retained_card
+    from foxlight_model_preservation.storage import verify_store
+
+    import skulk.store.preservation_export as exporter
+
+    capture = _capture(tmp_path, monkeypatch, registry=True)
+    source_home = tmp_path / "first-home"
+    original_report = preservation.recover_home(
+        capture.store, capture.manifest_id, capture.trust, source_home
+    )
+    manifest = verify_store(capture.store, capture.manifest_id, capture.trust)
+    original = manifest.members[0].retained_card
+    assert original is not None
+    retained = load_retained_card(identity_json(original))
+    monkeypatch.setattr(
+        exporter, "EMBEDDED_REGISTRY_ROOT", preservation.EMBEDDED_REGISTRY_ROOT
+    )
+    archive = tmp_path / "second-archive"
+    archive.mkdir()
+    exported = exporter.preserve_installed(
+        source_home / "model-store" / "example--recovered",
+        archive,
+        (load_key(tmp_path / "owner.pem", None),),
+        retained_card=retained,
+    )
+    report = preservation.inspect_recovery(archive, exported, capture.trust)
+    assert report.publication == "registry-fresh"
+    assert report.card_id == original_report.card_id
+    assert (
+        report.file_coverage == "complete-sha256"
+        and not report.requires_owner_acceptance
+    )
+    assert retained.registry_proof
+    forged = retained.model_copy(
+        update={
+            "registry_proof": retained.registry_proof.model_copy(
+                update={"anchor_sha256": "0" * 64}
+            )
+        }
+    )
+    with pytest.raises(PreservationError):
+        exporter.preserve_installed(
+            source_home / "model-store" / "example--recovered",
+            archive,
+            (load_key(tmp_path / "owner.pem", None),),
+            retained_card=forged,
+        )
+    assert len(list((archive / "manifests").glob("*.json"))) == 1

@@ -140,7 +140,7 @@ VideoCodecName = Literal["h264", "av1"]
 VideoPipeline = Literal["distilled_two_stage", "dev_two_stage", "hq_two_stage", "dfr", "retake", "extend"]
 """Family-specific execution workflow; engines must refuse unavailable workflows."""
 
-VideoExecutionFeature = Literal["hq_two_stage", "audio_conditioning", "retake", "extend", "prompt_relay"]
+VideoExecutionFeature = Literal["hq_two_stage", "dfr", "audio_conditioning", "retake", "extend", "prompt_relay"]
 """Advanced execution contracts selected by an instance's immutable engine build."""
 
 

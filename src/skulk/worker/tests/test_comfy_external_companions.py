@@ -15,8 +15,9 @@ from skulk.shared.models.model_cards import (
     VideoCompanionConfig,
     VideoCompanionKind,
 )
-from skulk.shared.types.video import VideoGenerationTaskParams
+from skulk.shared.types.video import VideoGenerationTaskParams, VideoReferenceSpec
 from skulk.worker.runner.comfy.graph import (
+    ReferenceBinding,
     build_prompt,
     companion_file,
     extra_model_paths_yaml,
@@ -62,8 +63,9 @@ def test_external_adapter_graph_name_matches_its_real_staged_path(
     assert len(roots) == 1 and roots[0].folder == "loras"
     assert files.dfr_spatial_lora is not None
     assert (roots[0].directory / files.dfr_spatial_lora).samefile(target)
-    params = VideoGenerationTaskParams(model=str(card.model_id), prompt="A toy boat", seconds=1, size="512x384", pipeline="dfr")
-    graph = build_prompt(plan_comfy_render(params, card), params, (), "test")
+    image = VideoReferenceSpec(slot=0, kind="image", role="first_frame", media_type="image/png", size_bytes=1, sha256="0" * 64)
+    params = VideoGenerationTaskParams(references=(image,), reference_bytes=1, total_input_chunks=1, model=str(card.model_id), prompt="A toy boat", seconds=1, size="512x384", pipeline="dfr")
+    graph = build_prompt(plan_comfy_render(params, card), params, (ReferenceBinding(spec=image, input_name="image.png"),), "test")
     assert graph["ltx_dfr_lora"]["inputs"]["lora_name"] == files.dfr_spatial_lora
     text = extra_model_paths_yaml(tmp_path / "base", roots)
     search_paths = TypeAdapter(dict[str, dict[str, str]]).validate_python(yaml.safe_load(text))

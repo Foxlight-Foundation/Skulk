@@ -13,7 +13,7 @@ import json
 import math
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -375,6 +375,58 @@ def _check_source_audio_clock(source: Path) -> dict[str, object]:
     return dict(comfy_vae_sha256=expected_hash, cases=cases, pass_all=True)
 
 
+def _check_dfr_masks(source: Path) -> dict[str, object]:
+    from skulk_comfy_ltx.dfr import detailing_frame_override, prepare_dfr_latent
+
+    hashes = {
+        "comfy_extras/nodes_lt.py": "01575b886e9abacd08c7ce39e7bde9ef7c7cc8f17063d726e2bf4a320a512d95",
+        "comfy_extras/nodes_lt_keyframes.py": "803ff1004698b6090d10026aa8e784151af4dee51c032f63255c5dae47229417",
+    }
+    namespace: dict[str, object] = {"torch": torch, "_OCCUPIED_MASK_MAX": 1.0 - 1e-4}
+    for relative, expected in hashes.items():
+        data = _reference_source(source, COMFY, relative)
+        if hashlib.sha256(data).hexdigest() != expected:
+            raise ValueError("Comfy DFR source differs from the reviewed immutable mask boundary")
+        names = ("get_noise_mask",) if relative.endswith("nodes_lt.py") else ("_as_int_set", "occupied_pixel_frames", "_spaced_positions_keep_last", "detailing_positions", "free_detailing_slots")
+        _load(namespace, data, relative, names)
+    native_mask = cast("Callable[[Mapping[str, object]], Tensor]", namespace["get_noise_mask"])
+    occupied_frames = cast("Callable[[Mapping[str, object], int, int, int], set[int]]", namespace["occupied_pixel_frames"])
+    positions = cast("Callable[[int, float], list[int]]", namespace["detailing_positions"])
+    free_slots = cast("Callable[[int, float, set[int]], list[int]]", namespace["free_detailing_slots"])
+    cases: list[dict[str, object]] = []
+    for frames in (25, 49, 97):
+        latent_frames = (frames - 1) // 8 + 1
+        for dtype in (torch.bfloat16, torch.float32):
+            dense: dict[str, object] = {"samples": torch.full((1, 4, latent_frames, 2, 3), 0.75, dtype=dtype)}
+            legacy_occupied = occupied_frames(dense, 8, frames, latent_frames)
+            try:
+                free_slots(frames, 24.0, legacy_occupied)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("the retained dense-video DFR failure was not reproduced")
+            prepared = prepare_dfr_latent(dense)
+            observed = prepared["noise_mask"]
+            assert isinstance(observed, Tensor) and prepared["samples"] is dense["samples"] and "noise_mask" not in dense
+            torch.testing.assert_close(observed, native_mask(dense), rtol=0, atol=0)
+            occupied = occupied_frames(prepared, 8, frames, latent_frames)
+            assert occupied == set() and free_slots(frames, 24.0, occupied)
+            assert detailing_frame_override(frames, occupied, positions(frames, 24.0)) == ""
+            # The real occupancy helper must retain first/last anchors; when
+            # both consume the short stock grid, choose a free interior pixel.
+            anchored_mask = observed.clone()
+            anchored_mask[:, :, 0] = 0
+            anchored_mask[:, :, -1] = 0.05
+            anchored = prepare_dfr_latent({**dense, "noise_mask": anchored_mask})
+            occupied = occupied_frames(anchored, 8, frames, latent_frames)
+            assert occupied == {0, frames - 1}
+            override = detailing_frame_override(frames, occupied, positions(frames, 24.0))
+            assert override == ("12" if frames == 25 else "")
+            torch.testing.assert_close(anchored_mask, anchored["noise_mask"], rtol=0, atol=0)
+            cases.append(dict(frames=frames, dtype=str(dtype), legacy_dense_failure_reproduced=True, sampling_mask_matches_pinned_helper=True, anchors_preserved=True, short_frame_override=override))
+    return dict(source_sha256=hashes, cases=cases, pass_all=True)
+
+
 def main() -> None:
     """Verify the wheel math, actual packed boundary and cancellation; retain a receipt."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -499,7 +551,7 @@ def main() -> None:
         assert len(predict_calls) == 2
     else:
         raise AssertionError("cancellation did not escape the sampler")
-    report = dict(source_audio_clock=_check_source_audio_clock(args.comfy_source), temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
+    report = dict(dfr_masks=_check_dfr_masks(args.comfy_source), source_audio_clock=_check_source_audio_clock(args.comfy_source), temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
     _ = args.output.write_text(json.dumps(report, indent=2) + "\n")
 
 
