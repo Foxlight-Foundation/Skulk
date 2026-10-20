@@ -12,6 +12,8 @@ draft, MTP, image and video companions, importing into a running store, and a
 dashboard preservation workflow are not supported. A successful recovery checks
 files and makes the model selectable. Inference still needs a compatible locally
 installed engine and enough hardware; recovery does not establish qualification.
+MLX can use indexed weights or unindexed `model*.safetensors`. Indices and split
+groups must be complete; index references cannot escape the captured member.
 
 ## Obtain a recovery copy
 
@@ -72,6 +74,8 @@ enters through custom admission and retains its original evidence. That flag
 does not authorize executable content. If the card needs repository code and
 you intend to authorize it for this exact recovery, separately add
 `--allow-repository-code`.
+The card's own code setting remains binding. A false setting is honored by
+family-specific repository tokenizers as well as the ordinary tokenizer loader.
 
 `--historical` explicitly allows expired registry metadata while retaining all
 signature, identity and hash checks. It reports historical publication and

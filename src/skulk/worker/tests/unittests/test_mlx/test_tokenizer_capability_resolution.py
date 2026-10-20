@@ -447,3 +447,43 @@ def test_mistral_tool_call_id_normalization() -> None:
     calls = cast(list[dict[str, object]], messages[0]["tool_calls"])
     assert calls[0]["id"] == mapped
     assert messages[1]["tool_call_id"] == mapped
+
+
+@pytest.mark.parametrize("card_trust,caller_trust", [(False, True), (False, False), (True, False)])
+def test_kimi_repository_python_requires_both_card_and_caller_permission(
+    tmp_path: Path, card_trust: bool, caller_trust: bool
+) -> None:
+    marker = tmp_path / "executed"
+    (tmp_path / "tool_declaration_ts.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n"
+    )
+    (tmp_path / "tokenization_kimi.py").write_text("raise AssertionError('repository code ran')")
+    card = ModelCard(
+        model_id=ModelId("example/kimi-k2-community"),
+        storage_size=Memory.from_bytes(1), n_layers=1, hidden_size=1,
+        supports_tensor=False, tasks=[ModelTask.TextGeneration],
+        trust_remote_code=card_trust,
+    )
+    with pytest.raises(PermissionError, match="model_trust_denied"):
+        load_tokenizer_for_model_id(
+            card.model_id, tmp_path, model_card=card, trust_remote_code=caller_trust
+        )
+    assert not marker.exists()
+
+
+def test_default_tokenizer_options_cannot_override_a_card_code_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    card = ModelCard(
+        model_id=ModelId("example/plain-community"), storage_size=Memory.from_bytes(1),
+        n_layers=1, hidden_size=1, supports_tensor=False,
+        tasks=[ModelTask.TextGeneration], trust_remote_code=False,
+    )
+    observed: list[object] = []
+    def loader(_path: Path, *, tokenizer_config_extra: dict[str, object], eos_token_ids: list[int] | None) -> _FakeTokenizer:
+        del eos_token_ids
+        observed.append(tokenizer_config_extra["trust_remote_code"])
+        return _FakeTokenizer()
+    monkeypatch.setattr(utils_mlx_module, "load_tokenizer", loader)
+    load_tokenizer_for_model_id(card.model_id, tmp_path, model_card=card)
+    assert observed == [False]

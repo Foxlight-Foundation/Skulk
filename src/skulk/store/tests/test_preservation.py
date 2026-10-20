@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
-from typing import Self, cast
+from typing import Literal, Self, cast
 
 import foxlight_model_preservation.registry_proof as proof_verifier
 import pytest
@@ -148,6 +148,17 @@ def _capture(
     complete_split: bool = False,
     composite: bool = False,
     reserved_metadata: bool = False,
+    mlx_layout: Literal[
+        "none",
+        "unindexed",
+        "indexed",
+        "missing",
+        "escape",
+        "malformed",
+        "split-missing",
+        "split-complete",
+        "no-weights",
+    ] = "none",
 ) -> _Capture:
     source = temporary / "source"
     source.mkdir()
@@ -168,6 +179,38 @@ def _capture(
         if complete_split:
             (source / "model-00002-of-00002.gguf").write_bytes(b"second")
             files += ("model-00002-of-00002.gguf",)
+    if mlx_layout != "none":
+        (source / "config.json").write_text('{"model_type":"llama"}')
+        (source / "model.safetensors").write_bytes(b"synthetic-weights")
+        files = ("LICENSE", "config.json", "model.safetensors")
+        if mlx_layout == "no-weights":
+            files = ("LICENSE", "config.json")
+        elif mlx_layout.startswith("split-"):
+            (source / "model-00001-of-00002.safetensors").write_bytes(b"first")
+            files = ("LICENSE", "config.json", "model-00001-of-00002.safetensors")
+            if mlx_layout == "split-complete":
+                (source / "model-00002-of-00002.safetensors").write_bytes(b"second")
+                files += ("model-00002-of-00002.safetensors",)
+        elif mlx_layout != "unindexed":
+            reference = (
+                "../outside.safetensors"
+                if mlx_layout == "escape"
+                else "absent.safetensors"
+                if mlx_layout == "missing"
+                else "model.safetensors"
+            )
+            (temporary / "outside.safetensors").write_bytes(b"outside")
+            (source / "model.safetensors.index.json").write_text(
+                "invalid"
+                if mlx_layout == "malformed"
+                else json.dumps(
+                    {
+                        "metadata": {"total_size": 16},
+                        "weight_map": {"tensor": reference},
+                    }
+                )
+            )
+            files += ("model.safetensors.index.json",)
     body: dict[str, JsonValue] = {
         "model_id": "example/recovered",
         "source_revision": "a" * 40,
@@ -177,7 +220,7 @@ def _capture(
         "supports_tensor": False,
         "tasks": ["TextGeneration"],
         "trust_remote_code": code,
-        "gguf_file": selected if not incomplete else None,
+        "gguf_file": selected if not incomplete and mlx_layout == "none" else None,
     }
     if composite:
         body["components"] = [
@@ -646,3 +689,55 @@ def test_nested_copied_sidecar_cannot_become_receiver_metadata(
             accept_owner_capture=True,
         )
     assert not (tmp_path / "home").exists()
+
+
+@pytest.mark.parametrize(
+    "layout,accepted",
+    [
+        ("unindexed", True),
+        ("indexed", True),
+        ("missing", False),
+        ("escape", False),
+        ("malformed", False),
+        ("split-missing", False),
+        ("split-complete", True),
+        ("no-weights", False),
+    ],
+)
+def test_mlx_layouts_are_checked_before_issuing_a_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    layout: Literal[
+        "unindexed",
+        "indexed",
+        "missing",
+        "escape",
+        "malformed",
+        "split-missing",
+        "split-complete",
+        "no-weights",
+    ],
+    accepted: bool,
+) -> None:
+    capture = _capture(tmp_path, monkeypatch, mlx_layout=layout)
+    home = tmp_path / "home"
+    if accepted:
+        preservation.recover_home(
+            capture.store,
+            capture.manifest_id,
+            capture.trust,
+            home,
+            accept_owner_capture=True,
+        )
+        record = read_installed_card(home / "model-store" / "example--recovered")
+        assert record and record.schema_version == 3
+    else:
+        with pytest.raises(PreservationError, match="weight layout"):
+            preservation.recover_home(
+                capture.store,
+                capture.manifest_id,
+                capture.trust,
+                home,
+                accept_owner_capture=True,
+            )
+        assert not home.exists()

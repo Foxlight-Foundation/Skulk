@@ -10,7 +10,7 @@ def get_hook_dirs() -> list[str]:
 
 
 def preservation_data_files() -> list[tuple[str, str]]:
-    """Collect the installed core's JSON resources and version metadata.
+    """Collect the installed core's JSON resources, version metadata and licenses.
 
     Return PyInstaller source/destination pairs without importing PyInstaller
     into a runtime. Copy only needed public metadata, excluding build-machine
@@ -20,6 +20,8 @@ def preservation_data_files() -> list[tuple[str, str]]:
     package = distribution("foxlight-model-preservation")
     resources: list[tuple[str, str]] = []
     metadata: list[tuple[str, str]] = []
+    licenses: list[tuple[str, str]] = []
+    included_licenses: set[str] = set()
     for entry in package.files or ():
         source = str(package.locate_file(entry))
         target = str(entry.parent)
@@ -27,8 +29,20 @@ def preservation_data_files() -> list[tuple[str, str]]:
             resources.append((source, target))
         if entry.name == "METADATA" and entry.parent.name.endswith(".dist-info"):
             metadata.append((source, target))
+        if (
+            len(entry.parts) > 2
+            and entry.parts[0].endswith(".dist-info")
+            and entry.parts[1] == "licenses"
+        ):
+            licenses.append((source, target))
+            included_licenses.add(Path(*entry.parts[2:]).as_posix())
     if not resources or len(metadata) != 1:
         raise FileNotFoundError(
             "installed preservation core lacks schemas or distribution metadata"
         )
-    return resources + metadata
+    declared_licenses = set(package.metadata.get_all("License-File") or ())
+    if not declared_licenses.issubset(included_licenses):
+        raise FileNotFoundError(
+            "installed preservation core lacks a declared license file"
+        )
+    return resources + metadata + licenses

@@ -43,6 +43,7 @@ from skulk.shared.models.model_cards import (
     get_card,
     multi_node_speculation_disabled,
 )
+from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 from skulk.worker.engines.mlx.constants import TRUST_REMOTE_CODE
 
 try:
@@ -1037,13 +1038,32 @@ def load_tokenizer_for_model_id(
     Args:
         model_id: The HuggingFace model ID (e.g., "moonshotai/Kimi-K2-Instruct")
         model_path: Local path where the model/tokenizer files are stored
+        model_card: Authorized card, when available; its explicit code refusal
+            remains binding even when the caller uses permissive defaults.
+        trust_remote_code: Caller permission for repository tokenizer code,
+            additionally limited by the supplied card's code setting.
 
     Returns:
         TokenizerWrapper instance configured for the model
+
+    Raises:
+        PermissionError: A family-specific repository tokenizer requires code
+            that the card or caller has declined.
     """
     model_id_lower = model_id.lower()
     eos_token_ids = get_eos_token_ids_for_model(model_id)
     model_card = model_card or get_card(model_id)
+    # The caller's permissive default cannot override an explicit card refusal.
+    # The family-specific loader executes repository Python without going
+    # through Transformers, so it needs the same decision as that loader.
+    trust_remote_code = trust_remote_code and (
+        model_card is None or model_card.trust_remote_code
+    )
+    if "kimi-k2" in model_id_lower and not trust_remote_code:
+        raise PermissionError(
+            f"{MODEL_TRUST_FAILURE_MARKER}: repository tokenizer code is disabled "
+            f"by the model card or caller: {model_id}"
+        )
     capability_profile = resolve_model_capability_profile(
         model_id,
         model_card=model_card,

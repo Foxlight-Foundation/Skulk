@@ -8,6 +8,7 @@ card authorization records and model-store index, in one directory rename.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import uuid
@@ -25,6 +26,7 @@ from foxlight_model_preservation.models import (
     Manifest,
     PreservationError,
     TrustProfile,
+    canonical_path,
 )
 from foxlight_model_preservation.operations import OperationControl
 from foxlight_model_preservation.registry_proof import ProofMode, ProofReport
@@ -33,7 +35,6 @@ from foxlight_model_preservation.storage import directory, restore, verify_store
 from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.download.download_utils import (
-    is_model_directory_complete,
     selected_gguf_group_complete,
     write_source_revision_marker,
 )
@@ -43,6 +44,7 @@ from skulk.shared.models.model_cards import (
     card_requires_newer_skulk,
 )
 from skulk.shared.models.registry import EMBEDDED_REGISTRY_ROOT
+from skulk.shared.types.worker.downloads import ModelSafetensorsIndex
 from skulk.store.config import (
     DownloadStoreConfig,
     ModelStoreConfig,
@@ -228,6 +230,44 @@ def _flush_tree(root: Path) -> None:
             os.close(descriptor)
 
 
+def _mlx_layout_complete(directory: Path) -> bool:
+    """Check indexed and unindexed weights before issuing a receiver sidecar."""
+    if not (directory / "config.json").is_file():
+        return False
+    weights = {
+        path.name for path in directory.glob("model*.safetensors") if path.is_file()
+    }
+    if not weights:
+        return False
+    for index in directory.rglob("*.safetensors.index.json"):
+        try:
+            parsed = ModelSafetensorsIndex.model_validate_json(
+                read_recovery_metadata(index)
+            )
+            if not parsed.weight_map:
+                return False
+            for selected in parsed.weight_map.values():
+                if not (index.parent / canonical_path(selected)).is_file():
+                    return False
+        except ValueError:
+            return False
+    for name in weights:
+        split = re.fullmatch(r"(.+)-(\d+)-of-(\d+)\.safetensors", name)
+        if split is None:
+            continue
+        base, index_token, total_token = split.groups()
+        total = int(total_token)
+        if not 1 <= int(index_token) <= total <= len(weights):
+            return False
+        if any(
+            f"{base}-{number:0{len(index_token)}d}-of-{total_token}.safetensors"
+            not in weights
+            for number in range(1, total + 1)
+        ):
+            return False
+    return True
+
+
 def recover_home(
     store: Path,
     manifest_id: str,
@@ -317,9 +357,12 @@ def _recover_home(
         (pending / "capture" / ".preservation").rename(pending / "preservation")
         shutil.rmtree(pending / "capture")
         load_path = model_path / (manifest.members[0].loader_root or "")
-        if not is_model_directory_complete(
-            load_path
-        ) or not selected_gguf_group_complete(model_path, card.gguf_file):
+        layout_complete = (
+            selected_gguf_group_complete(model_path, card.gguf_file)
+            if card.gguf_file is not None
+            else _mlx_layout_complete(load_path)
+        )
+        if not layout_complete:
             raise PreservationError(
                 "capture lacks the normal runtime's complete weight layout"
             )
