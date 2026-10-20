@@ -291,6 +291,8 @@ class ComfyServer:
             required.extend([("SkulkLTXEditVideoLatent", ["LATENT"]), ("SkulkLTXEditAudioLatent", ["LATENT", "AUDIO"]), ("SkulkLTXPreserveVideo", ["IMAGE"]), ("SkulkLTXPreserveAudio", ["AUDIO"])])
         if "dfr" in manifest.features:
             required.append(("SkulkLTXAddGeneratedKeyframes", ["CONDITIONING", "CONDITIONING", "LATENT"]))
+        if "prompt_relay" in manifest.features:
+            required.extend([("SkulkLTXPromptRelayEncode", ["CONDITIONING"]), ("SkulkLTXApplyPromptRelay", ["MODEL"])])
         for name, outputs in required:
             data = bytearray()
             with httpx.stream("GET", f"{self.base_url}/object_info/{name}", timeout=10.0) as response:

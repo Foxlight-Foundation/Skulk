@@ -9,6 +9,7 @@ stage wiring follows Comfy-Org/workflow_templates at immutable revision
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Final
 
 from skulk.shared.models.model_cards import ModelCard
@@ -154,6 +155,11 @@ def sampling_stage(
             "ManualSigmas", "Distilled schedule", sigmas=sigmas
         )
     guidance = render.guidance if name == "base" else None
+    if render.prompt_relay is not None:
+        # Every stage binds its own actual query grid, including DFR's denser
+        # timeline. No base-stage coordinates or per-job tensors enter a clone.
+        prompt[f"ltx_{name}_relay"] = _node("SkulkLTXApplyPromptRelay", "Route timed video prompts", model=model)
+        model = _link(f"ltx_{name}_relay")
     prompt[f"ltx_{name}_guider"] = _node(
         "LTXVDualCFGGuider",
         "Distilled guidance",
@@ -298,6 +304,8 @@ def build_ltx_prompt(
             model_name=files.spatial_upscaler,
         ),
     }
+    if render.prompt_relay is not None:
+        prompt["ltx_positive"] = _node("SkulkLTXPromptRelayEncode", "Encode timed scene prompts", clip=_link("clip"), global_prompt=params.prompt, segments_json=json.dumps([{"prompt": segment.prompt, "length": segment.length} for segment in render.prompt_relay.segments], ensure_ascii=False, separators=(",", ":")))
     frame_count: int | list[str | int] = base_frames
     if render.duration == "auto":
         if files.duration_head is None:

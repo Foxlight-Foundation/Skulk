@@ -1083,7 +1083,7 @@ class VideoCapabilitySection(BaseModel):
             automatic_duration_modes=duration_modes,
             audio_conditioning=audio_conditioning,
             editing=editing,
-            prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in native_features,
+            prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in available_features,
             guidance=VideoGuidance() if ltx_dev else None,
             min_seconds=config.min_seconds,
             max_seconds=config.max_seconds,

@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
@@ -693,7 +695,7 @@ def test_published_engine_enables_only_its_issued_workflows(backend: str, torch:
 
     wheels = published_extensions()
     builds = tuple(wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@{torch}") for wheel in wheels)
-    assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend", *(["dfr"] if "dfr" in wheel.features else [])] for wheel, build in zip(wheels, builds, strict=True)}
+    assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend", *(["prompt_relay"] if "prompt_relay" in wheel.features else []), *(["dfr"] if "dfr" in wheel.features else [])] for wheel, build in zip(wheels, builds, strict=True)}
     for wheel, build in zip(wheels, builds, strict=True):
         text_dfr = _params(pipeline="dfr")
         assert video_request_supported(_dfr_card(), text_dfr, backend, build) == ("dfr" in wheel.features)
@@ -704,6 +706,65 @@ def test_published_engine_enables_only_its_issued_workflows(backend: str, torch:
         for operation in ("retake", "extend"):
             assert video_request_supported(_card(), _editing_params(operation), backend, build)
         assert not video_request_supported(_dev_card(), _params(pipeline="hq_two_stage"), backend, build.split("/extension@")[0])
+
+
+def _relay_build(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Inject a test-only issued identity; candidate bytes create no live offer."""
+    from skulk.provisioning import comfy_extension
+
+    wheel = comfy_extension.ComfyExtensionWheel(filename="skulk_comfy_ltx-0.1.3-py3-none-any.whl", sha256="e" * 64, payload_sha256="d" * 64, size_bytes=1000, features=("res2s", "retake", "extend", "dfr", "prompt_relay"), comfy_revision=comfy_extension.COMFY_PIN, ltx_revision=comfy_extension.LTX_REFERENCE_REVISION)
+    monkeypatch.setattr(comfy_extension, "PUBLISHED_EXTENSIONS", (wheel,))
+    return wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@2.14.0+cu130")
+
+
+@pytest.mark.parametrize("backend", ["comfy-cuda", "comfy-rocm"])
+def test_relay_requires_exact_issued_feature_without_requiring_device_qualification(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    """Intrinsic model support and untested GPU eligibility survive build gating."""
+    from skulk.shared.models.video_support import video_request_supported
+
+    card = _card()
+    assert card.video is not None and card.video.prompt_relay
+    params = _params(prompt_relay={"segments": [{"prompt": "daylight", "length": 1}, {"prompt": "moonlight", "length": 2}]})
+    old = _issued_dfr_build(monkeypatch)
+    for unsupported in (None, "unknown", old):
+        assert not video_request_supported(card, params, backend, unsupported)
+        with pytest.raises(ValueError, match="timed scene prompts require their exact published extension"):
+            plan_comfy_render(params, card, engine_build=unsupported)
+    before = VideoCapabilitySection.from_model_card(card)
+    assert before is not None and not before.prompt_relay
+    issued = _relay_build(monkeypatch)
+    assert video_request_supported(card, params, backend, issued)
+    assert not video_request_supported(card, params, backend, issued.replace("d" * 64, "c" * 64))
+    metadata = VideoCapabilitySection.from_model_card(card)
+    assert metadata is not None and metadata.prompt_relay
+    assert "prompt_relay" in next(iter(metadata.engine_feature_builds.values()))
+    assert card.video.prompt_relay
+
+
+@pytest.mark.parametrize("pipeline,temporal", [("distilled_two_stage", 0), ("dev_two_stage", 0), ("hq_two_stage", 0), ("dfr", 0), ("dfr", 1)])
+@pytest.mark.parametrize("anchors", [False, True])
+def test_relay_encodes_complete_text_once_and_routes_every_sampling_stage(monkeypatch: pytest.MonkeyPatch, pipeline: str, temporal: int, anchors: bool) -> None:
+    """The request reaches both spatial stages and optional denser DFR sampling."""
+    card = _dev_card() if pipeline in ("dev_two_stage", "hq_two_stage") else _dfr_card() if pipeline == "dfr" else _card()
+    images = tuple(VideoReferenceSpec(slot=index, kind="image", role=role, media_type="image/png", size_bytes=1, sha256=str(index) * 64) for index, role in enumerate(("first_frame", "last_frame"))) if anchors else ()
+    scenes = [{"prompt": "A café in daylight", "length": 1}, {"prompt": "The café under moonlight", "length": 2}]
+    params = _params(pipeline=pipeline, temporal_upscalings=temporal, references=images, reference_bytes=len(images), total_input_chunks=len(images), prompt_relay={"segments": scenes})
+    render = plan_comfy_render(params, card, engine_build=_relay_build(monkeypatch))
+    bindings = tuple(ReferenceBinding(spec=reference, input_name=f"anchor-{reference.slot}.png") for reference in images)
+    graph = build_prompt(render, params, bindings, "relay-test")
+    encoder = graph["ltx_positive"]
+    assert encoder["class_type"] == "SkulkLTXPromptRelayEncode"
+    assert encoder["inputs"]["global_prompt"] == params.prompt
+    scene_data = cast(object, encoder["inputs"]["segments_json"])
+    assert isinstance(scene_data, str)
+    assert cast(object, json.loads(scene_data)) == scenes
+    assert "café" in scene_data
+    assert graph["ltx_negative"]["class_type"] == "CLIPTextEncode"
+    for stage in ("base", "refine", *(("temporal",) if temporal else ())):
+        assert graph[f"ltx_{stage}_guider"]["inputs"]["model"] == [f"ltx_{stage}_relay", 0]
+        assert graph[f"ltx_{stage}_relay"]["class_type"] == "SkulkLTXApplyPromptRelay"
+    assert render.engine_settings().prompt_relay == params.prompt_relay
+    assert len([node for node in graph.values() if node["class_type"] == "SkulkLTXPromptRelayEncode"]) == 1
 
 
 @pytest.mark.parametrize("operation", ["retake", "extend"])

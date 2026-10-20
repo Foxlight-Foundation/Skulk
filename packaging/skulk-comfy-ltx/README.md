@@ -17,6 +17,8 @@ checkout, request-time package resolution or model download occurs in this wheel
 
 Candidate source and tensor checks do not qualify a model or hardware class.
 
+Candidate `0.1.3` adds `prompt_relay` with combined Gemma4 encoding and clone-scoped video text-attention routing. It measures actual text columns and surviving query coordinates, uses the fixed native-compatible soft Gaussian profile, and preserves global/register/guide access. Audio keeps the combined prompt without temporal routing. Every sampling stage receives its own restorable model patch. The 32 MiB query-chunk budget avoids a full-video bias; original projections, all-head norms, position handling, gates and GPU kernels remain delegated to Comfy. Forward-scoped state clears after success, failure or cancellation; every query chunk honors Comfy's normal interrupt flag. Candidate source is absent from issued descriptors until attested publication and full read-back verification.
+
 The issued `0.1.2` wheel adds the DFR mask/keyframe bridge to Res2s and editing.
 It is 51,797 bytes, SHA256
 `6be37e297325d9ae7da2b185c0034f98e945745c6b9989f58507505f6ab7d842`,

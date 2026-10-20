@@ -23,6 +23,8 @@ import einops
 import torch
 from torch import Tensor
 
+from scripts.check_comfy_ltx_relay import check_relay_reference
+
 if TYPE_CHECKING:
     from skulk_comfy_ltx.comfy_sampler import Guider, LatentModel, SamplerProgress
     from skulk_comfy_ltx.editing import AudioClock, Modality
@@ -551,7 +553,7 @@ def main() -> None:
         assert len(predict_calls) == 2
     else:
         raise AssertionError("cancellation did not escape the sampler")
-    report = dict(dfr_masks=_check_dfr_masks(args.comfy_source), source_audio_clock=_check_source_audio_clock(args.comfy_source), temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
+    report = dict(prompt_relay=check_relay_reference(args.comfy_source), dfr_masks=_check_dfr_masks(args.comfy_source), source_audio_clock=_check_source_audio_clock(args.comfy_source), temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
     _ = args.output.write_text(json.dumps(report, indent=2) + "\n")
 
 

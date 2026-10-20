@@ -72,7 +72,7 @@ def video_request_supported(card: ModelCard, params: VideoGenerationTaskParams, 
         baseline = pipeline in ("distilled_two_stage", "dev_two_stage") or dfr
         hq = pipeline == "hq_two_stage" and "res2s" in features
         editing = params.editing is not None and params.editing.operation in features
-        return (baseline or hq or editing) and params.prompt_relay is None
+        return (baseline or hq or editing) and (params.prompt_relay is None or "prompt_relay" in features)
     # The native wheel's muxer implements H.264 only. Exclude an incompatible
     # request before dispatch instead of letting it fail in the runner planner.
     if engine != "mlx_video" or pipeline == "dfr" or params.codec not in (None, "h264"):

@@ -201,6 +201,8 @@ def _read_manifest(package: Path, wheel: ComfyExtensionWheel) -> ComfyExtensionM
         required.update(f"{_PACKAGE}/{name}" for name in ("editing.py", "editing_nodes.py"))
     if "dfr" in manifest.features:
         required.update(f"{_PACKAGE}/{name}" for name in ("dfr.py", "dfr_nodes.py"))
+    if "prompt_relay" in manifest.features:
+        required.update(f"{_PACKAGE}/{name}" for name in ("relay.py", "relay_encoding.py", "relay_geometry.py", "relay_binding.py", "relay_nodes.py"))
     if not required <= manifest.members.keys():
         raise ValueError("extension lacks its required implementation members")
     return manifest

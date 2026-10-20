@@ -41,21 +41,23 @@ def test_schema_failure_releases_server_before_the_runner_owns_it(tmp_path: Path
     assert stopped == [True]
 
 
-@pytest.mark.parametrize("temporal,dfr", [(False, False), (True, False), (True, True)])
-def test_readiness_checks_only_nodes_implemented_by_the_issued_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, temporal: bool, dfr: bool) -> None:
+@pytest.mark.parametrize("temporal,dfr,relay", [(False, False, False), (True, False, False), (True, True, False), (True, True, True)])
+def test_readiness_checks_only_nodes_implemented_by_the_issued_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, temporal: bool, dfr: bool, relay: bool) -> None:
     """An old sampler-only wheel remains valid; temporal wheels prove all four nodes."""
     from skulk.provisioning.comfy_extension import ComfyExtensionManifest
     from skulk.provisioning.manifest import COMFY_PIN
 
     package = tmp_path / "skulk_comfy_ltx"
     package.mkdir()
-    manifest = ComfyExtensionManifest(protocol=1, version="0.1.0", comfy_revision=COMFY_PIN, ltx_revision="a" * 40, features=("res2s", "retake", "extend", "dfr") if dfr else ("res2s", "retake", "extend") if temporal else ("res2s",), payload_sha256="b" * 64, members={"skulk_comfy_ltx/nodes.py": "c" * 64})
+    manifest = ComfyExtensionManifest(protocol=1, version="0.1.0", comfy_revision=COMFY_PIN, ltx_revision="a" * 40, features=("res2s", "retake", "extend", "dfr", "prompt_relay") if relay else ("res2s", "retake", "extend", "dfr") if dfr else ("res2s", "retake", "extend") if temporal else ("res2s",), payload_sha256="b" * 64, members={"skulk_comfy_ltx/nodes.py": "c" * 64})
     (package / "manifest.json").write_text(manifest.model_dump_json())
     expected = {"SkulkLTXRes2sSampler": ["SAMPLER"], "SkulkLTXGuidanceRescale": ["MODEL"]}
     if temporal:
         expected.update(SkulkLTXEditVideoLatent=["LATENT"], SkulkLTXEditAudioLatent=["LATENT", "AUDIO"], SkulkLTXPreserveVideo=["IMAGE"], SkulkLTXPreserveAudio=["AUDIO"])
     if dfr:
         expected["SkulkLTXAddGeneratedKeyframes"] = ["CONDITIONING", "CONDITIONING", "LATENT"]
+    if relay:
+        expected.update(SkulkLTXPromptRelayEncode=["CONDITIONING"], SkulkLTXApplyPromptRelay=["MODEL"])
     visited: list[str] = []
 
     @contextmanager
@@ -82,4 +84,9 @@ def test_readiness_checks_only_nodes_implemented_by_the_issued_manifest(tmp_path
         expected["SkulkLTXEditAudioLatent"] = ["LATENT", "AUDIO"]
         expected["SkulkLTXAddGeneratedKeyframes"] = ["LATENT"]
         with pytest.raises(RuntimeError, match="exact SkulkLTXAddGeneratedKeyframes"):
+            server._await_extension_schema()
+    if relay:
+        expected["SkulkLTXAddGeneratedKeyframes"] = ["CONDITIONING", "CONDITIONING", "LATENT"]
+        expected["SkulkLTXApplyPromptRelay"] = ["LATENT"]
+        with pytest.raises(RuntimeError, match="exact SkulkLTXApplyPromptRelay"):
             server._await_extension_schema()

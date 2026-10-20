@@ -45,6 +45,7 @@ from skulk.shared.types.video import (
     VideoGenerationTaskParams,
     VideoGuidance,
     VideoPipeline,
+    VideoPromptRelay,
     VideoReferenceSpec,
     VideoStage,
     derivable_guides,
@@ -534,6 +535,8 @@ class ComfyRenderPlan:
     duration_max_seconds: int | None = None
     audio_conditioning: VideoAudioConditioning | None = None
     editing: VideoEditing | None = None
+    prompt_relay: VideoPromptRelay | None = None
+    """Measured local scene prompts, enabled only by the exact placed extension."""
     transformer_variant: Literal["distilled", "dev"] | None = None
     dfr_extension: bool = False
     """Whether this placed issued build implements the DFR mask/keyframe bridge."""
@@ -586,6 +589,7 @@ class ComfyRenderPlan:
             duration=self.duration,
             audio_conditioning=self.audio_conditioning,
             editing=self.editing,
+            prompt_relay=self.prompt_relay,
             video_shift=self.video_shift,
             audio_shift=self.audio_shift,
             adapter=None if self.adapter is None else self.adapter.name,
@@ -638,7 +642,10 @@ def plan_comfy_render(
             if params.editing.operation not in extension_features_for_build(engine_build):
                 raise ValueError("LTX-2.5 temporal editing requires its exact published extension on the placed renderer; update and reload the model")
         if params.prompt_relay is not None:
-            raise ValueError("the pinned Comfy core nodes do not implement temporal prompt-relay cross-attention masks")
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if "prompt_relay" not in extension_features_for_build(engine_build):
+                raise ValueError("LTX-2.5 timed scene prompts require their exact published extension on the placed renderer; update and reload the model")
         pipeline = params.pipeline or (params.editing.operation if params.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
         if pipeline == "hq_two_stage":
             from skulk.provisioning.comfy_extension import extension_features_for_build
@@ -674,6 +681,7 @@ def plan_comfy_render(
             duration=params.duration,
             audio_conditioning=params.audio_conditioning,
             editing=params.editing,
+            prompt_relay=params.prompt_relay,
             transformer_variant=video.transformer_variant,
             minimum_frames=video.frame_count_for_seconds(minimum) if params.duration == "auto" else None,
             duration_min_seconds=minimum if params.duration == "auto" else None,
