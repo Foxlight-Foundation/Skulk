@@ -198,7 +198,9 @@ def _inspect_verified(
         unbound_file_count=len(evidence.unbound_paths),
         total_bytes=manifest.total_bytes,
         requires_owner_acceptance=owner_acceptance,
-        requires_code_permission=card.trust_remote_code,
+        # Vision processors share the runtime's repository-code authorization
+        # boundary, including cards whose primary tokenizer declines code.
+        requires_code_permission=card.trust_remote_code or card.vision is not None,
         registry_proof=evidence.proof,
         members=tuple(item.model_id for item in closure),
         runtime_requirements=manifest.runtime_requirements,

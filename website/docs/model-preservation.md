@@ -132,8 +132,10 @@ enters through custom admission and retains its original evidence. That flag
 does not authorize executable content. If the card needs repository code and
 you intend to authorize it for this exact recovery, separately add
 `--allow-repository-code`.
-The card's own code setting remains binding. A false setting is honored by
-family-specific repository tokenizers as well as the ordinary tokenizer loader.
+Vision cards conservatively require that explicit code decision too, even when
+`trust_remote_code` is false: processor loading is a separate potentially
+executable path in the runtime. The primary tokenizer's false code setting remains
+binding, including family-specific repository tokenizers and the ordinary loader.
 
 `--historical` explicitly allows expired registry metadata while retaining all
 signature, identity and hash checks. It reports historical publication and

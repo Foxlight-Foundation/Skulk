@@ -24,7 +24,7 @@ from pydantic import JsonValue
 
 import skulk.store.preservation as receiver
 from skulk.download.download_utils import write_source_revision_marker
-from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.store.installed_cards import (
     InstalledArtifactRole,
     build_installed_card_record,
@@ -171,7 +171,12 @@ def test_complete_round_trip_and_normal_offline_companion_resolution(
     assert all(member.intake.audience == "private" for member in manifest.members)
     home = tmp_path / "home"
     report = receiver.recover_home(
-        installed.archive, manifest_id, installed.trust, home, accept_owner_capture=True
+        installed.archive,
+        manifest_id,
+        installed.trust,
+        home,
+        accept_owner_capture=True,
+        allow_repository_code=installed.card.vision is not None,
     )
     assert report.members == plan.artifacts
     store = ModelStore(home / "model-store")
@@ -556,3 +561,152 @@ def test_missing_primary_image_component_is_not_a_complete_capture(
     with pytest.raises(PreservationError, match="required primary image|omits files"):
         _preserve(installed)
     assert not list(installed.archive.glob("manifests/*"))
+
+
+@pytest.mark.parametrize("role", ["vision_weights", "projector"])
+def test_vision_recovery_requires_separate_code_permission_even_when_card_declines_code(
+    tmp_path: Path, role: Role
+) -> None:
+    installed = _installation(tmp_path, role)
+    assert not installed.card.trust_remote_code
+    manifest_id = _preserve(installed)
+    report = receiver.inspect_recovery(installed.archive, manifest_id, installed.trust)
+    assert report.requires_owner_acceptance and report.requires_code_permission
+    with pytest.raises(PreservationError, match="code permission"):
+        receiver.recover_home(
+            installed.archive,
+            manifest_id,
+            installed.trust,
+            tmp_path / "home",
+            accept_owner_capture=True,
+        )
+    assert not (tmp_path / "home").exists()
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_companion_records_determine_paths_not_directory_spelling(
+    tmp_path: Path, indexed: bool
+) -> None:
+    installed = _installation(tmp_path, "assistant")
+    assert installed.companion
+    renamed = installed.companion.with_name(
+        "opaque--revision-"
+        + "b" * 40
+        + "--source-123456789abc--bundle-123456789abcdef0"
+    )
+    installed.companion.rename(renamed)
+    if indexed:
+        store = ModelStore(installed.primary.parent, recover_installed_cards=False)
+        for model_id, path in (
+            ("example/base", installed.primary),
+            ("example/companion", renamed),
+        ):
+            record = read_installed_card(path)
+            assert record
+            store.register_model(
+                model_id,
+                path,
+                [file.path for file in record.files],
+                sum(file.size_bytes for file in record.files),
+                installed_card=record,
+                source_revision=record.artifact_revision,
+                source_repository=record.artifact_repository,
+            )
+        # A retained but inactive same-identity copy must not make the active
+        # registered generation ambiguous.
+        import shutil
+
+        shutil.copytree(renamed, renamed.with_name("old-inactive-copy"))
+    assert plan_preservation(installed.primary).artifacts == (
+        "example/base",
+        "example/companion",
+    )
+    manifest_id = _preserve(installed)
+    assert receiver.recover_home(
+        installed.archive,
+        manifest_id,
+        installed.trust,
+        tmp_path / "home",
+        accept_owner_capture=True,
+    ).members == ("example/base", "example/companion")
+
+
+async def test_preserve_companion_downloaded_through_normal_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    import skulk.download.download_utils as downloads
+    from skulk.shared.types.worker.downloads import FileListEntry
+
+    installed = _installation(tmp_path, "assistant")
+    assert installed.companion
+    record = read_installed_card(installed.companion)
+    assert record
+    upstream = {
+        file.path: (installed.companion / file.path).read_bytes()
+        for file in record.files
+    }
+    installed.companion.rename(tmp_path / "upstream-fixture")
+
+    async def files(
+        model_id: ModelId, revision: str, recursive: bool
+    ) -> list[FileListEntry]:
+        assert str(model_id) == "example/companion" and revision == "b" * 40
+        return [
+            FileListEntry(type="file", path=path, size=len(data))
+            for path, data in upstream.items()
+        ]
+
+    async def download(
+        model_id: ModelId,
+        revision: str,
+        path: str,
+        target_dir: Path,
+        *_args: object,
+        **_kwargs: object,
+    ) -> Path:
+        target = target_dir / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(upstream[path])
+        return target
+
+    monkeypatch.setattr(downloads, "fetch_file_list_with_cache", files)
+    monkeypatch.setattr(downloads, "download_file_with_retry", download)
+    store = ModelStore(installed.primary.parent, recover_installed_cards=False)
+    base_record = read_installed_card(installed.primary)
+    assert base_record
+    store.register_model(
+        "example/base",
+        installed.primary,
+        [file.path for file in base_record.files],
+        sum(file.size_bytes for file in base_record.files),
+        source_revision=base_record.artifact_revision,
+        source_repository=base_record.artifact_repository,
+        installed_card=base_record,
+    )
+    status = await store.request_download(
+        "example/companion",
+        source_revision="b" * 40,
+        source_repository="example/companion",
+        model_card=installed.card,
+        artifact_role="assistant",
+        owner_model_id="example/base",
+    )
+    for _ in range(200):
+        if status.status in {"complete", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.01)
+    assert status.status == "complete"
+    entry = store.get_entry("example/companion")
+    assert entry and "--source-" in entry.store_path
+    manifest_id = await asyncio.to_thread(_preserve, installed)
+    report = await asyncio.to_thread(
+        receiver.recover_home,
+        installed.archive,
+        manifest_id,
+        installed.trust,
+        tmp_path / "home",
+        accept_owner_capture=True,
+    )
+    assert report.members == ("example/base", "example/companion")

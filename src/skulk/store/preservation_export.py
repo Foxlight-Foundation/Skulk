@@ -30,7 +30,7 @@ from foxlight_model_preservation.models import (
 )
 from foxlight_model_preservation.operations import OperationControl
 from foxlight_model_preservation.storage import copy_exact, directory, open_file, pack
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.models.registry import EMBEDDED_REGISTRY_ROOT
@@ -39,6 +39,7 @@ from skulk.store.installed_cards import (
     companion_owner_matches,
     read_installed_card,
 )
+from skulk.store.model_store import StoreModelEntry, StoreRegistryIndex
 from skulk.store.preservation import recovery_card, validate_recovery_layout
 from skulk.store.preservation_closure import companion_selections, map_recovery_members
 
@@ -102,6 +103,44 @@ def _retained(
     return original
 
 
+def _artifact_directories(root: Path, model_id: str) -> tuple[Path, ...]:
+    index_path = root / "registry.json"
+    if index_path.is_file():
+        # Read the index without constructing another ModelStore (which can
+        # recover/rewrite state). Canonical paths carry source/bundle suffixes
+        # and can change independently of a repository's human-facing alias.
+        adapter: TypeAdapter[StoreRegistryIndex | dict[str, StoreModelEntry]] = (
+            TypeAdapter(StoreRegistryIndex | dict[str, StoreModelEntry])
+        )
+        registry = adapter.validate_json(index_path.read_bytes())
+        entries = (
+            registry.entries if isinstance(registry, StoreRegistryIndex) else registry
+        )
+        entry = entries.get(model_id)
+        if entry is None:
+            return ()
+        if entry.model_id != model_id:
+            raise PreservationError(
+                "store index alias differs from its registered artifact"
+            )
+        relative = canonical_path(entry.store_path)
+        path = root / relative
+        if not path.resolve().is_relative_to(root.resolve()):
+            raise PreservationError(
+                "registered artifact path escapes its selected store"
+            )
+        return (path,)
+    if not root.is_dir():
+        return ()
+    # Standalone/staged roots need no index. Discover only adjacent installed
+    # records, then validate exact ownership/revision below; names grant no trust.
+    return tuple(
+        path
+        for path in root.iterdir()
+        if not path.name.startswith(".") and not path.is_symlink() and path.is_dir()
+    )
+
+
 def _sources(
     model_directory: Path, artifact_roots: tuple[Path, ...]
 ) -> tuple[_Source, ...]:
@@ -118,12 +157,7 @@ def _sources(
     for index, (role, selection) in enumerate(companion_selections(record.model_card)):
         matches: dict[Path, _Source] = {}
         for root in roots:
-            names = (
-                selection.model_id.normalize(),
-                f"{selection.model_id.normalize()}--revision-{selection.source_revision}",
-            )
-            for name in names:
-                candidate = root / name
+            for candidate in _artifact_directories(root, str(selection.model_id)):
                 if not candidate.is_dir():
                     continue
                 child = read_installed_card(candidate)
