@@ -24,7 +24,7 @@ const sidebars: SidebarsConfig = {
       label: "Models and inference",
       collapsed: false,
       items: [
-        "inference", "model-store", "model-cards", "model-capabilities", "engine-compatibility", "native-image-models",
+        "inference", "model-store", "model-preservation", "model-cards", "model-capabilities", "engine-compatibility", "native-image-models",
         "speech-fabric-realtime", "speculative-decoding", "kv-cache-backends",
         {
           type: "category",

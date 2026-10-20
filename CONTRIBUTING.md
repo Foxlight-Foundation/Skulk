@@ -18,6 +18,16 @@ replace existing release qualification.
 
 ## Getting Started
 
+Offline preservation recovery belongs in `store/preservation.py`; its local CLI
+is `store/preservation_cli.py`. Use synthetic bundles, generated test keys and
+new temporary homes. Never point recovery tests at live stores or personal Skulk
+homes. Validate recipient trust, tamper rejection, separate code permission,
+interrupted publication and a fresh process reading the normal offline catalog.
+The standalone public dependency remains independent of Skulk and is pinned to
+an immutable public source revision.
+The `_pyinstaller/` build hook retains its JSON schemas and version metadata;
+verify a frozen consumer outside the checkout when changing that dependency.
+
 Managed plugin adapter work belongs in `src/skulk/extensions/managed.py`; keep
 provider implementations and their dependency environments outside Skulk.
 Use isolated test state for owner connection records, never production setup.

@@ -2139,6 +2139,20 @@ still visible to operators but cannot be reconciled back into the store; owned
 companions inherit the base alias suppression. Only a successful explicit
 upstream download clears the tombstone.
 
+Offline preservation recovery uses `skulk-preservation inspect/recover` (also
+`skulk preservation`). It independently verifies owner-signed public bundles,
+actual bytes, current runtime card semantics and retained registry proof against
+the packaged root. It creates a fresh home for a self-contained text model;
+one final rename publishes normal store files, schema-3 installed evidence,
+custom admission when required, and offline configuration together. It never
+mutates a live store. Only fresh publication and complete original SHA-256
+binding retain registry verification. Other valid captures need explicit custom
+admission; repository-code permission is a separate decision. See
+[Offline model recovery](model-preservation).
+The package's `pyinstaller40` hook retains the public core's JSON resources and
+version metadata in frozen builds; this resource closure is verified separately
+from desktop signing and release qualification.
+
 On the store host itself, staging hardlinks the store's files into the staging directory instead of copying them (store files are immutable once registered, and staged files are never mutated in place), so a model staged on the same filesystem as its canonical copy costs no extra disk; a filesystem that cannot link falls back to a real copy. When a model is missing from the store, the node asks the store host to fetch it from Hugging Face and then stages from the store, keeping the store the single source of truth. A node that cannot reach the store at all is handled differently: rather than starving with a working internet path, it downloads directly from Hugging Face (preserving any pinned source revision) and logs the topology problem loudly. That is the expected shape for a remote fabric member whose route to the home store does not exist; on a node that should reach the store, the same log line is the cue to fix the route. See [Model Store](model-store) for setup details.
 
 A model card can bind its artifacts to an immutable Hugging Face commit through `source_revision`, and the repository plus pin are artifact identity rather than download hints. Metadata probes and byte downloads read from exactly that source, the store registry persists both values, and every staged copy records the revision in an on-disk marker; a staged or canonical directory carrying a different source identity is the wrong artifact and is replaced rather than reused, with the replacement landing only after the requested artifact has fully downloaded so a failed fetch never destroys the previous copy. Pinned models load from revision- and source-qualified canonical directories, so pinned bytes never occupy the mutable-`main` path and a changed upstream `main` can never silently substitute different weights for a qualified artifact.
