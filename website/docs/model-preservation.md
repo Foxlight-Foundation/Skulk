@@ -1,19 +1,76 @@
 ---
-title: Offline model recovery
+title: Preserve and recover models
 ---
 
-Skulk can inspect a signed public preservation bundle and recover a
-self-contained text model into a **new Skulk home**. Recovery needs no registry
-connection or Hugging Face account. It uses the ordinary store, installed-card
-records and custom-card admission that Skulk reads on startup.
+Skulk can preserve an exact installed model and inspect/recover a signed public
+preservation bundle into a **new Skulk home**. These local commands need no
+registry connection, Hugging Face account or running node. Recovery uses the
+ordinary store, installed-card records and custom-card admission read on startup.
 
-This importer supports one MLX or GGUF text model per bundle. Separate vision,
-draft, MTP, image and video companions, importing into a running store, and a
-dashboard preservation workflow are not supported. A successful recovery checks
-files and makes the model selectable. Inference still needs a compatible locally
-installed engine and enough hardware; recovery does not establish qualification.
-MLX can use indexed weights or unindexed `model*.safetensors`. Indices and split
-groups must be complete; index references cannot escape the captured member.
+The receiver restores the base and its declared supported companions together:
+MLX/GGUF text, split vision weights, explicitly selected same-repository GGUF
+projectors, MTP sidecars, assistants and served-engine draft models. Image/video
+and other composite selections require an exact artifact bundle; external image
+components and video companion files use their card-selected manifests. File
+recovery does not establish inference qualification for those workloads.
+
+Separate vision processor repositories and vLLM draft repositories are rejected
+because their current loaders still need an offline source adapter. Ambiguous
+companion aliases/revisions and unselected legacy GGUF projectors are rejected.
+The tool does not reduce the selected closure to get a partial success. It does
+not import into a running store, manage background jobs or supply a dashboard
+workflow. Inference still requires a compatible engine and enough hardware.
+MLX accepts indexed/unindexed `model*.safetensors`; indices and split groups must
+be complete and cannot escape the member.
+
+## Preserve an installed model
+
+Use `skulk-preservation` or `skulk preservation`; neither starts a node. The
+installed base directory must have its ordinary `.skulk/installed-card.json`.
+Companions are selected from their installed records, matched to the owning card,
+repository, immutable revision and role. The tool looks beside the base and in
+any additional explicitly supplied artifact roots. It accepts no recipe or
+caller-selected file list.
+
+```sh
+skulk-preservation plan --installed /path/to/model-store/owner--model
+mkdir /path/to/connected-drive/preserved
+skulk-preservation preserve --installed /path/to/model-store/owner--model \
+  --store /path/to/connected-drive/preserved --key /protected/owner.pem
+```
+
+The plan reports selected aliases and logical source bytes; it is not full byte
+verification or an execution grant. `preserve` copies a private snapshot, verifies
+it against every installed file digest and rechecks source generation records,
+validates the runtime-selected layout, then calls the standalone signed packer.
+The archive must already exist; verify the selected drive/NAS mount before use.
+It needs temporary space for the snapshot plus new archive objects. This is a
+local process, not a live-store snapshot lease or automatic mount-sentinel service.
+
+`--artifact-root /another/enrolled/local/root` adds companion search roots.
+Missing/ambiguous companions stop the copy. This first native selection includes
+all declared supported optional speculation companions too; it does not silently
+omit missing optional files. `--passphrase-file /protected/passphrase` unlocks an
+encrypted key. Private keys and passphrases are never bundled. Create/protect keys
+with the standalone tool's documented key workflow; this CLI does not yet provide
+capability-managed key enrollment or recovery-guide export.
+
+All new copies are **private** and receive-only. Preserving does not launch a
+server, advertise an inventory or grant redistribution rights. Original notices
+are retained when present. Otherwise a clearly labeled private owner-capture
+statement records unresolved terms; it is not a replacement public license.
+Historical source installed records are retained in a separate signed notices
+member, with previous receiving code grants removed. They are evidence, never
+incoming authorization sidecars.
+
+Without an original retained public card/proof, an effective installed card is
+exported as an owner capture. A source sidecar's `registry_verified` label cannot
+manufacture a portable registry proof. If available, supply the exact original
+`foxlight.retained-card.v1` profile with `--retained-card retained-card.json`.
+The exporter checks card agreement and any proof against Skulk's packaged root;
+expired original proof may be preserved for deliberate historical recovery.
+Unknown/local source revisions remain unsupported by portable bundle v1; no
+commit is invented. Copying does not execute model repository content.
 
 ## Obtain a recovery copy
 
@@ -50,7 +107,8 @@ runtime. Its JSON result separates:
 | --- | --- |
 | `publication` | Owner statement, fresh registry publication, or explicitly historical registry publication. |
 | `file_coverage` | Whether the original card binds every captured file by SHA-256. Capture integrity is mandatory even when original evidence is missing. |
-| `requires_owner_acceptance` | Original publication/file evidence is incomplete or historical; recovery needs explicit custom admission. |
+| `requires_owner_acceptance` | Original publication/file evidence is incomplete or historical, or companion provenance has not been independently re-established; recovery needs explicit custom admission. |
+| `members` | Exact base and companion store aliases published together. |
 | `requires_code_permission` | The card may execute repository code; a separate receiving decision is needed. |
 | `registry_proof` | Checked versions, expiry, time, and supplied-root-chain revocation scope, when present. |
 | `runtime_requirements` | Owner runtime statements, without implied execution or qualification evidence. |
@@ -74,16 +132,21 @@ enters through custom admission and retains its original evidence. That flag
 does not authorize executable content. If the card needs repository code and
 you intend to authorize it for this exact recovery, separately add
 `--allow-repository-code`.
-The card's own code setting remains binding. A false setting is honored by
-family-specific repository tokenizers as well as the ordinary tokenizer loader.
+Vision cards conservatively require that explicit code decision too, even when
+`trust_remote_code` is false: processor loading is a separate potentially
+executable path in the runtime. The primary tokenizer's false code setting remains
+binding, including family-specific repository tokenizers and the ordinary loader.
 
 `--historical` explicitly allows expired registry metadata while retaining all
 signature, identity and hash checks. It reports historical publication and
 requires custom acceptance. It cannot discover later revocations or establish
 what a destroyed or unreachable registry would authorize today.
 
-Only fresh publication **and complete original SHA-256 binding** produce a
-`registry_verified` installed record. Owner signatures, card IDs, repository
+Only fresh publication **and complete original SHA-256 binding**, for a single
+self-contained model, produce a
+`registry_verified` installed record. Multi-member closures currently require
+custom admission, retaining the original base publication report separately.
+Owner signatures, card IDs, repository
 names and self-reported installed sidecars cannot award that label.
 
 ## Open the recovered home
@@ -97,7 +160,7 @@ The new directory contains:
 - `skulk.yaml`: local store configuration with Hugging Face fallback disabled
   and staging contained inside the new home.
 - `preservation/`: original signed envelope, receiver trust snapshot and
-  inspection report. Copying evidence does not enroll trust or authorize code
+  inspection report, plus retained source observations/notices outside loader roots. Copying evidence does not enroll trust or authorize code
   for another receiver.
 
 Launch from the new directory so Skulk reads its configuration. For an isolated
@@ -137,3 +200,18 @@ Recovered installations require a Skulk build understanding sidecar schema 3.
 Ordinary schema-1/2 installations keep their existing serialization and behavior.
 This importer does not establish multi-node recovery, a signed desktop release,
 or resilience against network blocking; each needs its own validation.
+
+Preserve interruptions may leave hidden `.skulk-preserve-*` snapshot folders in
+the archive after an uncatchable process termination. They are unpublished and
+never served by the reference seed. Inspect abandoned folders before removing
+them. Completed manifests and earlier good copies remain independently verifiable.
+
+## Privacy boundaries
+
+Signatures detect substitution and corruption; they do not encrypt weights or
+hide model choices. Archives are plaintext. Use protected local storage and an
+access-controlled destination for private copies; the `private` audience label
+is not endpoint authentication or encryption. Receiving from a direct mirror
+reveals the connecting address and requested objects to that supplier. The
+standalone receiver is not an anonymity client. Receiving/recovery never enables
+public serving, discovery or automatic sharing.

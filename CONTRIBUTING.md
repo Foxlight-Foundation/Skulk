@@ -18,7 +18,9 @@ replace existing release qualification.
 
 ## Getting Started
 
-Offline preservation recovery belongs in `store/preservation.py`; its local CLI
+Native preservation export belongs in `store/preservation_export.py`; closure
+mapping in `preservation_closure.py` derives from normal card/download semantics.
+Offline recovery belongs in `store/preservation.py`; its local CLI
 is `store/preservation_cli.py`. Use synthetic bundles, generated test keys and
 new temporary homes. Never point recovery tests at live stores or personal Skulk
 homes. Validate recipient trust, tamper rejection, separate code permission,

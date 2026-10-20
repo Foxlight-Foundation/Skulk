@@ -2139,14 +2139,17 @@ still visible to operators but cannot be reconciled back into the store; owned
 companions inherit the base alias suppression. Only a successful explicit
 upstream download clears the tombstone.
 
-Offline preservation recovery uses `skulk-preservation inspect/recover` (also
+Native model preservation uses `skulk-preservation plan/preserve/inspect/recover` (also
 `skulk preservation`). It independently verifies owner-signed public bundles,
 actual bytes, current runtime card semantics and retained registry proof against
-the packaged root. It creates a fresh home for a self-contained text model;
+the packaged root. Preserve selects installed records and all supported declared
+companions, snapshots and verifies their bytes, and publishes a private signed
+copy. Recovery creates a fresh home for the complete selected closure;
 one final rename publishes normal store files, schema-3 installed evidence,
 custom admission when required, and offline configuration together. It never
-mutates a live store. Only fresh publication and complete original SHA-256
-binding retain registry verification. Other valid captures need explicit custom
+mutates a live store. Unsupported offline companion paths fail closed. Only a
+single self-contained model with fresh publication and complete original SHA-256
+binding retains registry verification. Multi-member closures and other valid captures need explicit custom
 admission; repository-code permission is a separate decision. See
 [Offline model recovery](model-preservation).
 The package's `pyinstaller40` hook retains the public core's JSON resources and
