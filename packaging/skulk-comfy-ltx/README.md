@@ -17,11 +17,18 @@ checkout, request-time package resolution or model download occurs in this wheel
 
 Candidate source and tensor checks do not qualify a model or hardware class.
 
-The issued `0.1.0` wheel provides Res2s, retake and extension on the existing CUDA
-and ROCm lanes. Its complete archive is 48,584 bytes, SHA256
+The issued `0.1.1` wheel provides Res2s, retake and extension on the existing CUDA
+and ROCm lanes, including full source-audio encoding for editing. Its complete
+archive is 48,855 bytes, SHA256
+`0b6c28318b7f0aeaded710dea7862cfb1700cda3dc421354f62de65c9f78ea4a`,
+with payload identity
+`df3189f3232051717b249cec0087d728f0808463183f866ee32e0b4414cd3b16`.
+The descriptor was registered after attestation verification, full owned-URL
+read-back and verification with the ordinary engine downloader. New placements
+prefer it even when the previous overlay is cached. The issued `0.1.0` descriptor
+remains available for retained instances: 48,584 bytes, archive SHA256
 `3ff6a292521de798de59d171474a8ec041e741d3fcd4f59b0a51aa4c7e8879e3`.
-The descriptor was registered after attestation verification and full owned-URL
-read-back. Later features require a new version; issued bytes are immutable.
+Later changes require a new version; issued bytes are immutable.
 
 The solver runs on the reference's token-major video and audio layouts, then
 restores Comfy's channel-first packed states at each prediction and callback.
@@ -39,6 +46,12 @@ nodes restore unchanged source RGB frames and normalized stereo PCM before
 container encoding. This is a pre-mux preservation contract: lossy video/audio
 codecs may change the final decoded values. A missing source audio track supplies
 silent context; preserving audible output requires an actual track.
+
+Source PCM is encoded through a shallow view of the selected audio VAE with
+generic spatial cropping disabled. The pinned Comfy wrapper otherwise crops
+audio's time axis to 4096-sample boundaries, which can discard enough context
+to reject an ordinary retake. The view shares weights and managed placement;
+the cached VAE and the normalized source waveform remain unchanged.
 
 Run `uv run pytest packaging/skulk-comfy-ltx/tests` alongside the package's
 strict type project. The numerical receipt also compares temporal masks to the

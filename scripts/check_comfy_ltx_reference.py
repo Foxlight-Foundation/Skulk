@@ -25,7 +25,7 @@ from torch import Tensor
 
 if TYPE_CHECKING:
     from skulk_comfy_ltx.comfy_sampler import Guider, LatentModel, SamplerProgress
-    from skulk_comfy_ltx.editing import Modality
+    from skulk_comfy_ltx.editing import AudioClock, Modality
     from skulk_comfy_ltx.res2s import Latents
 
 REFERENCE = "e98f6d927d83c92ef2be6aec76c8440b19306e39"
@@ -312,6 +312,69 @@ def _check_temporal_masks(source: Path) -> dict[str, object]:
     return dict(patchifier_sha256=patch_hash, region_sha256=region_hash, cases=cases, pass_all=True)
 
 
+@dataclass
+class _SourceAudioClock:
+    sample_rate: int = 16000
+    mel_hop_length: int = 160
+    latents_per_second: float = 25.0
+
+
+class _SourceAudioVae:
+    first_stage_model: AudioClock
+    crop_input: bool
+    output_channels: int = 2
+    pad_channel_value: None = None
+
+    def __init__(self) -> None:
+        self.first_stage_model = _SourceAudioClock()
+        self.crop_input = True
+
+    def spacial_compression_encode(self) -> int:
+        # Keep the pinned upstream spelling: the real crop calls this method.
+        return 4096
+
+
+class _SourceAudioCrop(Protocol):
+    first_stage_model: AudioClock
+    crop_input: bool
+    output_channels: int
+    pad_channel_value: None
+
+    def spacial_compression_encode(self) -> int: ...
+
+
+def _check_source_audio_clock(source: Path) -> dict[str, object]:
+    from skulk_comfy_ltx.editing import uncropped_audio_vae
+
+    relative = "comfy/sd.py"
+    expected_hash = "ef373b88ced93955a7147dcd3323ecac9cd5316f0ae4623adfb9b6b128c37ba7"
+    data = _reference_source(source, COMFY, relative)
+    if hashlib.sha256(data).hexdigest() != expected_hash:
+        raise ValueError("Comfy VAE source differs from the reviewed immutable crop boundary")
+    tree = ast.parse(data)
+    vae = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "VAE")
+    crop = next(node for node in vae.body if isinstance(node, ast.FunctionDef) and node.name == "vae_encode_crop_pixels")
+    namespace: dict[str, object] = {"torch": torch}
+    module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), crop], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), relative, "exec"), namespace)
+    crop_pixels = cast("Callable[[_SourceAudioCrop, Tensor], Tensor]", namespace["vae_encode_crop_pixels"])
+    cases: list[dict[str, object]] = []
+    for frames in (25, 49, 73, 97, 121, 241, 481):
+        # The pinned public audio node resamples to VAE.audio_sample_rate,
+        # which remains 44100 for LTX before its internal model resampling.
+        length = math.ceil(frames * 44100 / 24)
+        waveform = torch.arange(length, dtype=torch.float32).reshape(1, length, 1).expand(1, length, 2)
+        original = _SourceAudioVae()
+        legacy = crop_pixels(original, waveform)
+        encoder = uncropped_audio_vae(original)
+        observed = crop_pixels(encoder, waveform)
+        assert original.crop_input and encoder.first_stage_model is original.first_stage_model
+        torch.testing.assert_close(observed, waveform, rtol=0, atol=0)
+        assert legacy.shape[1] < length
+        cases.append(dict(frames=frames, fps=24, samples=length, legacy_samples=legacy.shape[1], legacy_start_sample=float(legacy[0, 0, 0]), full_waveform_exact=True))
+    return dict(comfy_vae_sha256=expected_hash, cases=cases, pass_all=True)
+
+
 def main() -> None:
     """Verify the wheel math, actual packed boundary and cancellation; retain a receipt."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -436,7 +499,7 @@ def main() -> None:
         assert len(predict_calls) == 2
     else:
         raise AssertionError("cancellation did not escape the sampler")
-    report = dict(temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
+    report = dict(source_audio_clock=_check_source_audio_clock(args.comfy_source), temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
     _ = args.output.write_text(json.dumps(report, indent=2) + "\n")
 
 

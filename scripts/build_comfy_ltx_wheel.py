@@ -10,7 +10,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 PACKAGE = "skulk_comfy_ltx"
 FILENAME = f"{PACKAGE}-{VERSION}-py3-none-any.whl"
 COMFY_REVISION = "40c4fcdf513a4523e39d54a9d391908af8df8171"

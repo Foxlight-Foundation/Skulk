@@ -3,13 +3,38 @@
 import pytest
 import torch
 from skulk_comfy_ltx.editing import (
+    AudioClock,
     AudioWave,
     edit_latent,
     normalize_source_audio,
     preserve_audio,
     preserve_video,
     temporal_mask,
+    uncropped_audio_vae,
 )
+
+
+class _SourceAudioClock:
+    sample_rate: int = 16000
+    mel_hop_length: int = 160
+    latents_per_second: float = 25.0
+
+
+class _SourceAudioVae:
+    first_stage_model: AudioClock
+    crop_input: bool
+
+    def __init__(self) -> None:
+        self.first_stage_model = _SourceAudioClock()
+        self.crop_input = True
+
+
+def test_source_encoder_view_does_not_mutate_or_duplicate_cached_model() -> None:
+    """Source encoding must preserve time without changing another cached VAE use."""
+    original = _SourceAudioVae()
+    encoder = uncropped_audio_vae(original)
+    assert encoder is not original and encoder.first_stage_model is original.first_stage_model
+    assert original.crop_input and not encoder.crop_input
 
 
 def test_causal_masks_use_each_modality_clock() -> None:

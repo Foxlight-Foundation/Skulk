@@ -22,18 +22,31 @@ SOURCE = Path(__file__).resolve().parents[4] / "packaging/skulk-comfy-ltx"
 
 def candidate(tmp_path: Path) -> tuple[extension.ComfyExtensionWheel, Path]:
     """Build actual reviewed package bytes, without publishing or executing them."""
-    subprocess.run([sys.executable, str(SOURCE.parents[1] / "scripts/build_comfy_ltx_wheel.py"), "--source", str(SOURCE), "--output", str(tmp_path / "candidate")], check=True, capture_output=True)
-    path = tmp_path / "candidate/skulk_comfy_ltx-0.1.0-py3-none-any.whl"
+    result = subprocess.run([sys.executable, str(SOURCE.parents[1] / "scripts/build_comfy_ltx_wheel.py"), "--source", str(SOURCE), "--output", str(tmp_path / "candidate")], check=True, capture_output=True, text=True)
+    path = Path(result.stdout.strip())
+    assert path.parent == tmp_path / "candidate"
     with zipfile.ZipFile(path) as archive:
         manifest = extension.ComfyExtensionManifest.model_validate_json(archive.read("skulk_comfy_ltx/manifest.json"))
     wheel = extension.ComfyExtensionWheel(filename=path.name, sha256=hashlib.sha256(path.read_bytes()).hexdigest(), payload_sha256=manifest.payload_sha256, size_bytes=path.stat().st_size, features=manifest.features, comfy_revision=manifest.comfy_revision, ltx_revision=manifest.ltx_revision)
     return wheel, path
 
 
-def test_issued_descriptor_matches_the_reproducible_package(tmp_path: Path) -> None:
-    """The offered digest, features and provenance must bind the promoted bytes."""
+def test_candidate_admission_requires_its_exact_published_descriptor(tmp_path: Path) -> None:
+    """Source candidates stay unavailable until exact-byte promotion registers them."""
     built, _ = candidate(tmp_path)
-    assert extension.published_extensions()[0] == built
+    issued = extension.published_extensions()
+    promoted = next((wheel for wheel in issued if wheel.filename == built.filename), None)
+    if promoted is not None:
+        assert promoted == issued[0] == built
+    else:
+        # CI must assemble and attest new versions before a descriptor can
+        # truthfully name their published bytes. The actual candidate must
+        # remain inadmissible while the previous issued version still works.
+        version = tuple(int(part) for part in built.filename.split("-")[1].split("."))
+        assert all(version > tuple(int(part) for part in wheel.filename.split("-")[1].split(".")) for wheel in issued)
+        build = built.build_identity(BASE_BUILD)
+        assert extension.extension_for_build(build) is None
+        assert extension.extension_features_for_build(build) == frozenset()
 
 
 def install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, offline: bool = False, stop: threading.Event | None = None, fail_probe: bool = False) -> tuple[extension.ComfyExtensionWheel, Path, list[str]]:
