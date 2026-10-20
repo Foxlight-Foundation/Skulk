@@ -9,6 +9,7 @@ from typing import Protocol, TypedDict, cast
 import torch
 from torch import Tensor
 
+from skulk_comfy_ltx.layout import patch_modalities, unpatch_modalities
 from skulk_comfy_ltx.res2s import Latents, sample_res2s
 
 
@@ -97,21 +98,24 @@ def sample_ltx_res2s(
     if mask is not None and not isinstance(mask, Tensor):
         raise ValueError("LTX denoise mask must be a packed tensor")
     shapes = model.inner_model.inner_model.latent_shapes
-    clean = unpack_latents(model.latent_image, shapes)
-    masks = unpack_latents(torch.ones_like(x) if mask is None else mask, shapes)
+    clean = patch_modalities(unpack_latents(model.latent_image, shapes))
+    masks = patch_modalities(unpack_latents(torch.ones_like(x) if mask is None else mask, shapes))
     initial = tuple(
         (value * weight + source * (1 - weight)).to(value.dtype)
-        for value, weight, source in zip(unpack_latents(x, shapes), masks, clean, strict=True)
+        for value, weight, source in zip(patch_modalities(unpack_latents(x, shapes)), masks, clean, strict=True)
     )
 
     def predict(values: Latents, sigma: Tensor) -> Latents:
         denoised = model.inner_model(
-            pack_latents(values), sigma.expand(x.shape[0]), model_options=model_options, seed=seed
+            pack_latents(unpatch_modalities(values, shapes)), sigma.expand(x.shape[0]), model_options=model_options, seed=seed
         )
-        return unpack_latents(denoised, shapes)
+        return patch_modalities(unpack_latents(denoised, shapes))
 
     def progress(index: int, denoised: Latents, values: Latents) -> None:
         if callback is not None:
-            callback({"i": index, "sigma": sigmas[index], "sigma_hat": sigmas[index], "denoised": pack_latents(denoised), "x": pack_latents(values)})
+            callback({"i": index, "sigma": sigmas[index], "sigma_hat": sigmas[index], "denoised": pack_latents(unpatch_modalities(denoised, shapes)), "x": pack_latents(unpatch_modalities(values, shapes))})
 
-    return pack_latents(sample_res2s(initial, sigmas, predict, seed=seed, masks=masks, clean=clean, callback=progress))
+    # The pinned HQ pipeline leaves step noise at the reference default -1;
+    # the render seed still controls initial noise and model evaluations.
+    result = sample_res2s(initial, sigmas, predict, seed=2**64 - 1, masks=masks, clean=clean, callback=progress)
+    return pack_latents(unpatch_modalities(result, shapes))

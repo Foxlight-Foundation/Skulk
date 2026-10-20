@@ -168,7 +168,7 @@ def _read_manifest(package: Path, wheel: ComfyExtensionWheel) -> ComfyExtensionM
     digest = hashlib.sha256(json.dumps(manifest.members, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if manifest.comfy_revision != wheel.comfy_revision or manifest.ltx_revision != wheel.ltx_revision or manifest.version != expected_version or manifest.features != wheel.features or manifest.payload_sha256 != wheel.payload_sha256 or digest != wheel.payload_sha256:
         raise ValueError("extension manifest differs from its published descriptor")
-    required = {f"{_PACKAGE}/{name}" for name in ("__init__.py", "nodes.py", "comfy_sampler.py", "res2s.py", "guidance.py", "launcher.py")}
+    required = {f"{_PACKAGE}/{name}" for name in ("__init__.py", "nodes.py", "comfy_sampler.py", "res2s.py", "guidance.py", "layout.py", "launcher.py")}
     if not required <= manifest.members.keys():
         raise ValueError("extension lacks its required implementation members")
     return manifest

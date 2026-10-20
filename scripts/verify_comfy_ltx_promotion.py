@@ -57,6 +57,13 @@ def verify_artifact(directory: Path, expected_sha256: str) -> Path:
         if package_names != {*expected, f"{PACKAGE}/manifest.json"}:
             raise ValueError("candidate package differs from the reviewed file set")
         members = {name: hashlib.sha256(archive.read(name)).hexdigest() for name in sorted(expected)}
+        # An attestation identifies the build, but cannot establish that another
+        # branch's self-consistent payload is the reviewed source being promoted.
+        source = Path(__file__).resolve().parents[1] / "packaging/skulk-comfy-ltx"
+        for name in (*SOURCE_FILES, *LICENSE_FILES):
+            path = source / PACKAGE / name if name in SOURCE_FILES else source / name
+            if path.is_symlink() or not path.is_file() or archive.read(f"{PACKAGE}/{name}") != path.read_bytes():
+                raise ValueError("candidate member differs from the reviewed checkout")
         payload_hash = hashlib.sha256(json.dumps(members, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         manifest = _object(archive.read(f"{PACKAGE}/manifest.json"))
         if descriptor.get("payload_sha256") != payload_hash or manifest != {"protocol": 1, "version": VERSION, "comfy_revision": COMFY_REVISION, "ltx_revision": LTX_REVISION, "features": list(FEATURES), "payload_sha256": payload_hash, "members": members}:

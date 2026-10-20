@@ -9,6 +9,7 @@ import torch
 from torch import Tensor
 
 from skulk_comfy_ltx.comfy_sampler import pack_latents, unpack_latents
+from skulk_comfy_ltx.layout import patch_modalities, unpatch_modalities
 
 
 @runtime_checkable
@@ -35,8 +36,8 @@ def rescale_modalities(conditioned: Tensor, prediction: Tensor, shapes: Sequence
     guide tokens. Reference float32 arithmetic and output dtype are retained;
     a degenerate prediction fails visibly rather than inventing an epsilon.
     """
-    conditioned_parts = unpack_latents(conditioned, shapes)
-    predicted_parts = unpack_latents(prediction, shapes)
+    conditioned_parts = patch_modalities(unpack_latents(conditioned, shapes))
+    predicted_parts = patch_modalities(unpack_latents(prediction, shapes))
     output: list[Tensor] = []
     for cond, pred, scale in zip(conditioned_parts, predicted_parts, (video_scale, audio_scale), strict=True):
         if not 0 <= scale <= 1:
@@ -50,7 +51,7 @@ def rescale_modalities(conditioned: Tensor, prediction: Tensor, shapes: Sequence
             raise ValueError("HQ guidance prediction has a degenerate standard deviation")
         factor = scale * (cond.float().std() / denominator) + (1 - scale)
         output.append((raw * factor).to(pred.dtype))
-    return pack_latents(tuple(output))
+    return pack_latents(unpatch_modalities(tuple(output), shapes))
 
 
 def patch_guidance_rescale(model: ModelPatcher, *, video_scale: float, audio_scale: float) -> ModelPatcher:

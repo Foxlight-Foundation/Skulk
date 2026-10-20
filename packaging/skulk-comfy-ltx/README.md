@@ -16,3 +16,12 @@ is whitelisted; other custom nodes and remote API nodes remain disabled. No sour
 checkout, request-time package resolution or model download occurs in this wheel.
 
 Candidate source and tensor checks do not qualify a model or hardware class.
+
+The solver runs on the reference's token-major video and audio layouts, then
+restores Comfy's channel-first packed states at each prediction and callback.
+Step-level SDE noise uses the pinned HQ pipeline's default seed (-1, with 9999
+for its substeps); the requested render seed still owns initial noise and the
+model call. The numerical check evaluates the pinned upstream patchifiers and
+solver independently, including fractional masks and separate modality clocks.
+Promotion also compares every package source and license member to the reviewed
+checkout; an internally consistent wheel from a different branch is rejected.

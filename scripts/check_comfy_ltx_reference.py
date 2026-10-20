@@ -19,6 +19,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import einops
 import torch
 from torch import Tensor
 
@@ -87,16 +88,75 @@ def _load(namespace: dict[str, object], data: bytes, filename: str, names: tuple
     exec(compile(ast.fix_missing_locations(module), filename, "exec"), namespace)
 
 
+@dataclass(frozen=True)
+class _PatchGeometry:
+    _patch_size: tuple[int, int, int] = (1, 1, 1)
+
+
+@dataclass(frozen=True)
+class _OutputShape:
+    frames: int
+    height: int = 1
+    width: int = 1
+    channels: int = 1
+    mel_bins: int = 1
+
+
+@dataclass(frozen=True)
+class _ReferenceLayout:
+    video_patchify: Callable[..., Tensor]
+    video_unpatchify: Callable[..., Tensor]
+    audio_patchify: Callable[..., Tensor]
+    audio_unpatchify: Callable[..., Tensor]
+    source_sha256: str
+
+    def patch(self, values: Latents) -> Latents:
+        return (self.video_patchify(_PatchGeometry(), values[0]), self.audio_patchify(_PatchGeometry(), values[1]))
+
+    def unpatch(self, values: Latents, shapes: Sequence[Sequence[int]]) -> Latents:
+        video, audio = shapes
+        return (
+            self.video_unpatchify(_PatchGeometry(), values[0], _OutputShape(video[2], video[3], video[4])),
+            self.audio_unpatchify(_PatchGeometry(), values[1], _OutputShape(audio[2], channels=audio[1], mel_bins=audio[3])),
+        )
+
+
+def _reference_layout(source: Path) -> _ReferenceLayout:
+    relative = "packages/ltx-core/src/ltx_core/components/patchifiers.py"
+    expected_hash = "9618d6adac114b8b21a91c53a582ae19ab944813b25c88ffc11a1aa7e0239e0a"
+    data = _reference_source(source, REFERENCE, relative)
+    if hashlib.sha256(data).hexdigest() != expected_hash:
+        raise ValueError("patchifier reference differs from its reviewed immutable source")
+    namespace: dict[str, object] = {"torch": torch, "einops": einops}
+    selected: list[ast.FunctionDef] = []
+    tree = ast.parse(data)
+    for class_name, prefix in (("VideoLatentPatchifier", "video"), ("AudioPatchifier", "audio")):
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+        for method_name in ("patchify", "unpatchify"):
+            method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == method_name)
+            method.name = f"{prefix}_{method_name}"
+            selected.append(method)
+    module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *selected], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), relative, "exec"), namespace)
+    return _ReferenceLayout(
+        cast("Callable[..., Tensor]", namespace["video_patchify"]),
+        cast("Callable[..., Tensor]", namespace["video_unpatchify"]),
+        cast("Callable[..., Tensor]", namespace["audio_patchify"]),
+        cast("Callable[..., Tensor]", namespace["audio_unpatchify"]),
+        expected_hash,
+    )
+
+
 def _inputs(modalities: int, terminal: bool, masked: bool) -> tuple[Latents, Latents, Latents, Tensor]:
     generator = torch.Generator(device="cpu").manual_seed(17)
-    shapes = [(1, 4, 3, 2, 2), (1, 4, 5, 4)][:modalities]
+    shapes = [(1, 12, 4), (1, 5, 16)][:modalities]
     latents = tuple(torch.randn(shape, dtype=torch.bfloat16, generator=generator) for shape in shapes)
     clean = tuple(torch.randn(value.shape, dtype=value.dtype, generator=generator) for value in latents)
     masks = tuple(torch.ones_like(value, dtype=torch.float32) for value in latents)
     if masked:
         for mask in masks:
-            mask[..., 0, :] = 0
-            mask[..., 1, 0] = 0.5
+            mask[:, 0, :] = 0
+            mask[:, 1, :] = 0.5
     sigmas = torch.tensor([0.98, 0.9, 0.72, 0.43, 0.0 if terminal else 0.1], dtype=torch.float32)
     return latents, clean, masks, sigmas
 
@@ -132,7 +192,7 @@ class _GuidanceState:
     params: _GuidanceParameters
 
 
-def _check_guidance_rescale(source: Path) -> dict[str, object]:
+def _check_guidance_rescale(source: Path, layout: _ReferenceLayout) -> dict[str, object]:
     from skulk_comfy_ltx.comfy_sampler import pack_latents
     from skulk_comfy_ltx.guidance import rescale_modalities
 
@@ -150,10 +210,10 @@ def _check_guidance_rescale(source: Path) -> dict[str, object]:
     calculate = cast("Callable[..., Tensor]", namespace["calculate"])
     generator = torch.Generator(device="cpu").manual_seed(39)
     shapes = [(1, 4, 3, 2, 2), (1, 4, 5, 4)]
-    conditioned = tuple(torch.randn(shape, generator=generator) for shape in shapes)
-    text = tuple(torch.randn(shape, generator=generator) for shape in shapes)
-    perturbed = tuple(torch.randn(shape, generator=generator) for shape in shapes)
-    modality = tuple(torch.randn(shape, generator=generator) for shape in shapes)
+    conditioned = layout.patch(tuple(torch.randn(shape, generator=generator) for shape in shapes))
+    text = layout.patch(tuple(torch.randn(shape, generator=generator) for shape in shapes))
+    perturbed = layout.patch(tuple(torch.randn(shape, generator=generator) for shape in shapes))
+    modality = layout.patch(tuple(torch.randn(shape, generator=generator) for shape in shapes))
     results: list[dict[str, object]] = []
     for video_scale, audio_scale in ((0.0, 0.0), (0.45, 1.0), (1.0, 0.45)):
         raw: list[Tensor] = []
@@ -162,8 +222,8 @@ def _check_guidance_rescale(source: Path) -> dict[str, object]:
             cfg = 3.0 if index == 0 else 7.0
             raw.append(calculate(_GuidanceState(_GuidanceParameters(cfg, 0.75, 3.0, 0.0)), cond, neg, stg, mod))
             expected.append(calculate(_GuidanceState(_GuidanceParameters(cfg, 0.75, 3.0, scale)), cond, neg, stg, mod))
-        actual = rescale_modalities(pack_latents(conditioned), pack_latents(tuple(raw)), shapes, video_scale, audio_scale)
-        target = pack_latents(tuple(expected))
+        actual = rescale_modalities(pack_latents(layout.unpatch(conditioned, shapes)), pack_latents(layout.unpatch(tuple(raw), shapes)), shapes, video_scale, audio_scale)
+        target = pack_latents(layout.unpatch(tuple(expected), shapes))
         torch.testing.assert_close(actual, target, rtol=0, atol=0)
         results.append(dict(video_scale=video_scale, audio_scale=audio_scale, max_absolute_error=float((actual - target).abs().max())))
     return dict(reference_sha256=expected_hash, cases=results, pass_all=True)
@@ -217,7 +277,23 @@ def main() -> None:
     _load(utils, _reference_source(args.comfy_source, COMFY, "comfy/utils.py"), "comfy/utils.py", ("pack_latents", "unpack_latents"))
     pack = cast("Callable[[Sequence[Tensor]], tuple[Tensor, Sequence[Sequence[int]]]]", utils["pack_latents"])
     unpack = cast("Callable[[Tensor, Sequence[Sequence[int]]], list[Tensor]]", utils["unpack_latents"])
-    latents, clean, masks, sigmas = _inputs(2, True, True)
+    layout = _reference_layout(args.ltx_source)
+    from skulk_comfy_ltx.layout import patch_modalities, unpatch_modalities
+
+    layout_cases: list[dict[str, int]] = []
+    for batch, video_frames, audio_frames in ((1, 3, 5), (2, 4, 7)):
+        raw = (torch.arange(batch * 4 * video_frames * 2 * 2).reshape(batch, 4, video_frames, 2, 2), torch.arange(batch * 4 * audio_frames * 4).reshape(batch, 4, audio_frames, 4))
+        geometry = tuple(tuple(value.shape) for value in raw)
+        for observed, expected in zip(patch_modalities(raw), layout.patch(raw), strict=True):
+            torch.testing.assert_close(observed, expected, rtol=0, atol=0)
+        for observed, expected in zip(unpatch_modalities(layout.patch(raw), geometry), raw, strict=True):
+            torch.testing.assert_close(observed, expected, rtol=0, atol=0)
+        layout_cases.append(dict(batch=batch, video_frames=video_frames, audio_frames=audio_frames))
+    token_latents, token_clean, token_masks, sigmas = _inputs(2, True, True)
+    raw_shapes = [(1, 4, 3, 2, 2), (1, 4, 5, 4)]
+    latents = layout.unpatch(token_latents, raw_shapes)
+    clean = layout.unpatch(token_clean, raw_shapes)
+    masks = layout.unpatch(token_masks, raw_shapes)
     packed, shapes = pack(latents)
     packed_clean, _ = pack(clean)
     packed_masks, _ = pack(masks)
@@ -247,10 +323,10 @@ def main() -> None:
     callbacks: list[SamplerProgress] = []
     actual = sample_ltx_res2s(PackedModel(ControlledGuider(), packed_clean), packed, sigmas, extra_args={"seed": 7, "denoise_mask": packed_masks}, callback=callbacks.append)
     initial = tuple((value * mask + source * (1 - mask)).to(value.dtype) for value, mask, source in zip(latents, masks, clean, strict=True))
-    states = tuple(_State(value, _Mask(mask), source) for value, mask, source in zip(initial, masks, clean, strict=True))
-    reference = reference_loop(sigmas, states[0], states[1], None, _denoise, noise_seed=7)
+    states = tuple(_State(value, _Mask(mask), source) for value, mask, source in zip(layout.patch(initial), layout.patch(masks), layout.patch(clean), strict=True))
+    reference = reference_loop(sigmas, states[0], states[1], None, _denoise)
     expected = tuple(state.latent for state in (reference.video, reference.audio) if state is not None)
-    torch.testing.assert_close(actual, pack(expected)[0], rtol=0, atol=0)
+    torch.testing.assert_close(actual, pack(layout.unpatch(expected, shapes))[0], rtol=0, atol=0)
     assert len(callbacks) == len(sigmas) - 1
 
     class CancelledError(Exception):
@@ -271,7 +347,7 @@ def main() -> None:
         assert len(predict_calls) == 2
     else:
         raise AssertionError("cancellation did not escape the sampler")
-    report = dict(guidance_rescale=_check_guidance_rescale(args.ltx_source), reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, comfy_commit=COMFY, callback_intervals=len(callbacks), cancellation_stops_after_first_interval=True, pass_all=True)
+    report = dict(guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, comfy_commit=COMFY, callback_intervals=len(callbacks), cancellation_stops_after_first_interval=True, pass_all=True)
     _ = args.output.write_text(json.dumps(report, indent=2) + "\n")
 
 

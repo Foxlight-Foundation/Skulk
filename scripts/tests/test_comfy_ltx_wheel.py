@@ -73,3 +73,15 @@ def test_launcher_limits_custom_search_after_operator_path_overrides(tmp_path: P
     (checkout / "folder_paths.py").write_text("import comfy.options\nassert comfy.options.args_parsing\npaths={'custom_nodes':['untrusted'], 'models':['models']}\ndef get_folder_paths(folder):\n return paths[folder]\n")
     (checkout / "main.py").write_text("import folder_paths,sys\nfrom pathlib import Path\nfolder_paths.paths['custom_nodes'].append('another-untrusted')\nactual=folder_paths.get_folder_paths('custom_nodes')\nassert len(actual)==1\nassert (Path(actual[0])/'skulk_comfy_ltx/launcher.py').is_file()\nassert folder_paths.get_folder_paths('models')==['models']\nassert sys.argv[1:]==['--disable-all-custom-nodes','--whitelist-custom-nodes','skulk_comfy_ltx']\n")
     subprocess.run([sys.executable, "-I", "-B", str(library / "skulk_comfy_ltx/launcher.py"), str(checkout), "--disable-all-custom-nodes", "--whitelist-custom-nodes", "skulk_comfy_ltx"], check=True, capture_output=True)
+
+
+def test_other_source_revision_cannot_promote_even_with_matching_descriptor(tmp_path: Path) -> None:
+    """A successful attested build from another branch is not source approval."""
+    source = tmp_path / "other-source"
+    shutil.copytree(SOURCE, source, ignore=shutil.ignore_patterns("__pycache__"))
+    nodes = source / "skulk_comfy_ltx/nodes.py"
+    nodes.write_text(nodes.read_text() + "\n# Different source revision.\n")
+    candidate = assemble_wheel(source, tmp_path / "candidate")
+    digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="reviewed checkout"):
+        verify_artifact(candidate.parent, digest)
