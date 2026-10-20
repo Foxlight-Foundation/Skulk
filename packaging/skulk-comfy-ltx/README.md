@@ -17,6 +17,12 @@ checkout, request-time package resolution or model download occurs in this wheel
 
 Candidate source and tensor checks do not qualify a model or hardware class.
 
+The issued `0.1.0` wheel provides Res2s, retake and extension on the existing CUDA
+and ROCm lanes. Its complete archive is 48,584 bytes, SHA256
+`3ff6a292521de798de59d171474a8ec041e741d3fcd4f59b0a51aa4c7e8879e3`.
+The descriptor was registered after attestation verification and full owned-URL
+read-back. Later features require a new version; issued bytes are immutable.
+
 The solver runs on the reference's token-major video and audio layouts, then
 restores Comfy's channel-first packed states at each prediction and callback.
 Step-level SDE noise uses the pinned HQ pipeline's default seed (-1, with 9999
