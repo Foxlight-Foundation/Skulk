@@ -2016,3 +2016,13 @@ x2 pass requires its pinned latent upscaler, doubles frame density and condition
 FPS together, and freezes the existing audio. Request admission checks selected
 companions and modes independently of hardware qualification. No additional
 engine installation is needed for these nodes at the pinned Comfy revision.
+
+
+Comfy workflow extensions use immutable Foxlight wheels through `InstallEngine`.
+Node facts distinguish compatible overlay offers from archive-verified installed
+payloads without hiding the installed base backend. New LTX placements bind the
+exact Comfy/torch/payload identity; existing instances retain theirs. The runner
+uses only that verified wheel's custom-node root, disables bytecode and unrelated
+custom/API nodes, checks node schemas before readiness, and tears down failed
+probes. Each issued descriptor retains its own source pins. Candidate wheel
+assembly and tensor checks do not grant model or hardware qualification.

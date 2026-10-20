@@ -88,6 +88,7 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
     probe, which tests drive with an injected environment.
     """
     from skulk.provisioning.comfy import comfy_on_demand_variants
+    from skulk.provisioning.comfy_extension import comfy_extension_inventory
     from skulk.provisioning.mlx_video import installable_video_builds
     from skulk.provisioning.stable_diffusion_cpp import (
         installable_image_builds,
@@ -112,8 +113,11 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
     if rehydrate_native_image(classes) is not None:
         facts = gather_node_facts()
     image_builds = installable_image_builds(facts, classes, offline=offline_mode())
+    extension_offers, extension_installed = comfy_extension_inventory(facts, offline=offline_mode())
     return facts.model_copy(update={
         "comfy_on_demand_variants": variants,
+        "comfy_extension_installable_builds": extension_offers,
+        "comfy_extension_installed_builds": extension_installed,
         "vllm_installable_builds": vllm_builds,
         "vllm_managed_variant": managed_vllm_variant(
             facts.vllm_binary.configured_path or ""

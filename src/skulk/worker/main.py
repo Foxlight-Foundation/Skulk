@@ -3762,7 +3762,7 @@ class Worker:
         await self.event_sender.send(
             TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Running)
         )
-        key = (task.engine, task.resolved_backend, task.expected_build) if task.engine in {"stable_diffusion_cpp", "mlx_video", "vllm"} else task.engine
+        key = (task.engine, task.resolved_backend, task.expected_build) if task.engine in {"stable_diffusion_cpp", "mlx_video", "vllm"} or (task.engine == "comfy" and task.expected_build is not None) else task.engine
         job = self._engine_install_jobs.get(key)
         if job is not None and job.finished and job.succeeded:
             await self.event_sender.send(
@@ -3793,6 +3793,10 @@ class Worker:
             ComfyInstallError,
             install_comfy_on_demand,
             stoppable_runner,
+        )
+        from skulk.provisioning.comfy_extension import (
+            extension_payload,
+            prepare_comfy_extension,
         )
         from skulk.provisioning.mlx_video import MlxVideoInstallError, install_mlx_video
         from skulk.provisioning.stable_diffusion_cpp import (
@@ -3837,6 +3841,14 @@ class Worker:
                         raise ImageEngineInstallError("the placement check", "native image placement lacks backend/build identity")
                     await to_thread.run_sync(
                         lambda: install_native_image(backend, build, hardware_class_inventory(facts), offline=self._offline, stop=stop),
+                        abandon_on_cancel=True,
+                    )
+                elif job.engine == "comfy" and extension_payload(job.expected_build) is not None:
+                    backend, build = job.resolved_backend, job.expected_build
+                    if backend is None or build is None:
+                        raise ComfyInstallError("the placement check", "Comfy overlay placement lacks backend/build identity")
+                    await to_thread.run_sync(
+                        lambda: prepare_comfy_extension(facts, build, backend, offline=self._offline, stop=stop, run=stoppable_runner(stop)),
                         abandon_on_cancel=True,
                     )
                 else:

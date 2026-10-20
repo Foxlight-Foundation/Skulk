@@ -1,0 +1,8 @@
+Res2s and per-modality guidance-rescale numerical algorithms adapted from Lightricks/LTX-2 at immutable revision
+e98f6d927d83c92ef2be6aec76c8440b19306e39:
+packages/ltx-pipelines/src/ltx_pipelines/utils/samplers.py
+packages/ltx-pipelines/src/ltx_pipelines/utils/res2s.py
+packages/ltx-core/src/ltx_core/components/diffusion_steps.py
+packages/ltx-core/src/ltx_core/components/guiders.py
+The LTX Community License in LICENSE-LTX-2_x applies to these adapted portions.
+Foxlight integration code is distributed under LICENSE-APACHE-2.0.
