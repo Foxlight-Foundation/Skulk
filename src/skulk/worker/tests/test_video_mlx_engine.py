@@ -30,7 +30,11 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import mp_channel
 from skulk.worker.runner.comfy import runner as comfy_runner_module
 from skulk.worker.runner.mlx_video import runner as runner_module
-from skulk.worker.runner.mlx_video.plan import plan_native_job, selected_model_view
+from skulk.worker.runner.mlx_video.plan import (
+    native_engine_settings,
+    plan_native_job,
+    selected_model_view,
+)
 from skulk.worker.runner.mlx_video.process import NativeProgress, run_native_job
 
 
@@ -178,3 +182,21 @@ def test_native_hq_plan_uses_its_own_step_and_guidance_defaults(tmp_path: Path) 
     job, render = plan_native_job(_params(pipeline="hq_two_stage"), card, tmp_path, tmp_path, tmp_path)
     assert job.base_steps == render.steps == 15
     assert job.guidance is not None and job.guidance.modality_scale == 3.0
+
+
+@pytest.mark.parametrize("high_quality", [True, False])
+def test_native_job_record_preserves_its_actual_backend_profile(tmp_path: Path, high_quality: bool) -> None:
+    """Public audit values follow the native job, including a nondefault adapter."""
+    card = asyncio.run(load_fixture_card(ModelId("Lightricks/LTX-2.5-dev-comfy-int8")))
+    assert card is not None
+    params = _params(pipeline="hq_two_stage" if high_quality else "dev_two_stage")
+    job, _ = plan_native_job(params, card, tmp_path, tmp_path, tmp_path)
+    job = job.model_copy(update={"refinement_strength": 0.375})
+    settings = native_engine_settings(job, steps=18 if high_quality else 33, frame_count=49)
+    assert settings.steps == (18 if high_quality else 33)
+    assert settings.adapter_strength == 0.375
+    assert settings.stage_lora_strengths == ({"base": 0.0, "refine": 0.375} if high_quality else {})
+    assert settings.guidance_video_rescale == (0.45 if high_quality else None)
+    assert settings.guidance_audio_rescale == (1.0 if high_quality else None)
+    assert settings.pipeline == job.pipeline and settings.guidance == job.guidance
+    assert settings.frame_count == 49 and settings.width == job.width

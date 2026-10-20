@@ -15,6 +15,7 @@ from skulk.shared.types.video import (
     VideoCodecName,
     VideoDecoder,
     VideoEditing,
+    VideoEngineSettings,
     VideoGenerationTaskParams,
     VideoGuidance,
     VideoPipeline,
@@ -137,3 +138,32 @@ def plan_native_job(params: VideoGenerationTaskParams, card: ModelCard, model_di
         prompt_relay=params.prompt_relay,
         transformer_variant=video.transformer_variant if params.editing is not None else None,
     ), render
+
+
+def native_engine_settings(
+    job: NativeVideoJob, *, steps: int, frame_count: int
+) -> VideoEngineSettings:
+    """Record a completed native job's settings without changing its issued runtime.
+
+    Job fields describe the exact controls sent to the engine; steps and frame
+    count come from the verified result. This pure projection retains the native
+    workflow's adapter profile rather than borrowing another backend's defaults.
+    """
+    high_quality = job.pipeline == "hq_two_stage"
+    refined_dev = job.pipeline in ("dev_two_stage", "hq_two_stage")
+    return VideoEngineSettings(
+        sampler="res_2s" if high_quality else "euler_ancestral" if job.pipeline == "distilled_two_stage" or (job.pipeline == "extend" and job.transformer_variant == "distilled") else "euler",
+        scheduler="ltx-2.5", steps=steps, seed=job.seed,
+        pipeline=job.pipeline, decoder=job.decoder, guidance=job.guidance,
+        generated_keyframe_interval=job.generated_keyframe_interval, duration=job.duration,
+        audio_conditioning=job.audio_conditioning, editing=job.editing, prompt_relay=job.prompt_relay,
+        adapter="distilled_refinement" if refined_dev else None,
+        adapter_strength=job.refinement_strength if refined_dev else None,
+        # Published native source 9e4a1a5 loads plain Dev for stage one, then
+        # fuses the selected strength only for stage two. Reporting Comfy's
+        # separate 0.25/0.5 applications here would falsify the job record.
+        stage_lora_strengths={"base": 0.0, "refine": job.refinement_strength} if high_quality else {},
+        guidance_video_rescale=0.45 if high_quality else None,
+        guidance_audio_rescale=1.0 if high_quality else None,
+        width=job.width, height=job.height, frame_count=frame_count, codec=job.codec,
+    )

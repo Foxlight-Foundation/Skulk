@@ -1995,14 +1995,17 @@ Native placement charges staged working weights with runtime headroom, rather th
 
 The video section of `GET /v1/models` includes `pipeline_defaults` and
 `engine_feature_builds`. The former supplies workflow-specific base intervals,
-sampler, stage interval counts and guidance. HQ defaults to 15 base intervals
+sampler, stage interval counts and guidance. Comfy HQ defaults to 15 base intervals
 and three refinement intervals, with video/audio CFG 3/7, modality guidance 3,
 and fixed video/audio rescaling 0.45/1.0. An explicit `steps` changes only its
 base interval count. The output retains base-stage audio after joint refinement.
 `stats.engine` records Res2s, actual stage LoRA strengths (base 0.25, refine 0.5)
 in `stage_lora_strengths`, and both rescaling values in
 `guidance_video_rescale` and `guidance_audio_rescale`. Retrieval and listing
-preserve these fields.
+preserve these fields. Native HQ reports its issued workflow: no base-stage
+LoRA application (`base: 0.0`) and the selected companion strength in `refine`,
+with video/audio rescaling 0.45/1.0. Backend-specific stage strengths describe
+actual execution rather than claiming numerical equivalence.
 
 `engine_feature_builds` lists issued code identities and their advanced features.
 Native identities match the full placed build. Comfy source/payload selectors
