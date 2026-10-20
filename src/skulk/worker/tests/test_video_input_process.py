@@ -16,35 +16,46 @@ from skulk.worker.runner import video_input, video_input_process
 from skulk.worker.runner.video_input import MediaInputRequest
 
 
-def test_linux_decoder_memory_counts_current_resident_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_linux_decoder_memory_retains_its_own_resident_peak(monkeypatch: pytest.MonkeyPatch) -> None:
     """A parent's historical peak must not reject a small decoder after exec."""
     monkeypatch.setattr(video_input.sys, "platform", "linux")
 
-    def memory_pages(_path: Path) -> str:
-        return "4096 320 128 1 0 64 0\n"
+    def memory_status(path: Path) -> str:
+        assert path == Path("/proc/self/status")
+        return "VmHWM:\t 262144 kB\nVmRSS:\t 20480 kB\n"
 
-    def page_size(_name: str) -> int:
-        return 65536
-
-    monkeypatch.setattr(video_input.Path, "read_text", memory_pages)
-    monkeypatch.setattr(video_input.os, "sysconf", page_size)
+    monkeypatch.setattr(video_input.Path, "read_text", memory_status)
 
     def inherited_peak(_who: int) -> None:
         pytest.fail("Linux decoder consulted its inherited high-water mark")
 
     monkeypatch.setattr(video_input.resource, "getrusage", inherited_peak)
-    assert video_input._resident_memory_bytes() == 320 * 65536
+    assert video_input._resident_peak_bytes() == 256 * 1024**2
+
+
+@pytest.mark.parametrize("status", ["VmRSS: 20480 kB\n", "VmHWM: 20 pages\n", "VmHWM: -1 kB\n"])
+def test_linux_decoder_refuses_missing_or_invalid_peak_accounting(monkeypatch: pytest.MonkeyPatch, status: str) -> None:
+    """An unavailable peak must refuse preparation instead of disabling its guard."""
+    monkeypatch.setattr(video_input.sys, "platform", "linux")
+
+    def memory_status(_path: Path) -> str:
+        return status
+
+    monkeypatch.setattr(video_input.Path, "read_text", memory_status)
+    with pytest.raises(ValueError, match="resident peak accounting"):
+        video_input._resident_peak_bytes()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux preserves pre-exec RSS accounting")
 def test_linux_decoder_does_not_inherit_parent_memory_charge() -> None:
     """Exercise a real exec from a larger process image, not a mocked counter."""
-    child = f"import resource,runpy;media=runpy.run_path({str(Path(video_input.__file__))!r});print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,media['_resident_memory_bytes']())"
+    child = f"import os,resource,runpy;from pathlib import Path;media=runpy.run_path({str(Path(video_input.__file__))!r});allocation=bytearray(96*1024**2);del allocation;print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,media['_resident_peak_bytes'](),int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE'))"
     parent = f"import subprocess,sys;allocation=bytearray(320*1024**2);subprocess.run([sys.executable,'-I','-c',{child!r}],check=True,start_new_session=True)"
     result = subprocess.run([sys.executable, "-I", "-c", parent], capture_output=True, text=True, check=True, timeout=20)
-    inherited_peak, decoder_resident = (int(value) for value in result.stdout.split())
+    inherited_peak, decoder_peak, decoder_resident = (int(value) for value in result.stdout.split())
     assert inherited_peak >= 320 * 1024**2
-    assert decoder_resident < inherited_peak - 128 * 1024**2
+    assert 96 * 1024**2 <= decoder_peak < inherited_peak - 128 * 1024**2
+    assert decoder_resident < decoder_peak - 64 * 1024**2
 
 
 def _await_exit(process: subprocess.Popen[str]) -> None:

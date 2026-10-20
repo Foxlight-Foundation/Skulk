@@ -301,14 +301,21 @@ class Arguments(argparse.Namespace):
     parent_pid: int
 
 
-def _resident_memory_bytes() -> int:
-    """Read decoder RSS without Linux's inherited pre-exec high-water mark."""
+def _resident_peak_bytes() -> int:
+    """Read this process image's RSS peak without Linux's inherited runner peak."""
     if sys.platform == "linux":
         # Linux carries the spawning runner's RSS peak through exec. The
         # decoder must be charged for its own pages, not model/worker memory
         # that belonged to the previous process image.
-        resident_pages = int(Path("/proc/self/statm").read_text().split()[1])
-        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+        # VmHWM retains short decoder allocations between watchdog polls but
+        # belongs to the current memory image, unlike getrusage's exec history.
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmHWM:"):
+                fields = line.split()
+                if len(fields) != 3 or fields[2] != "kB" or int(fields[1]) < 0:
+                    raise ValueError("source decoder has invalid resident peak accounting")
+                return int(fields[1]) * 1024
+        raise ValueError("source decoder lacks resident peak accounting")
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 
@@ -334,7 +341,7 @@ def main() -> None:
     def reap() -> None:
         while os.getppid() == arguments.parent_pid:
             try:
-                resident_bytes = _resident_memory_bytes()
+                resident_bytes = _resident_peak_bytes()
             except (OSError, ValueError, IndexError):
                 print("ValueError: source decoder could not measure its resident memory", file=sys.stderr, flush=True)
                 break
