@@ -89,6 +89,7 @@ from skulk.download.download_utils import (
     companion_download_specs,
     create_http_session,
     same_repo_served_draft_files,
+    selected_gguf_group_complete,
 )
 from skulk.download.shard_downloader import ShardDownloader
 from skulk.shared.models.remote_code_approval import require_remote_code_approval
@@ -675,35 +676,7 @@ def _staged_pinned_gguf_missing(shard: ShardMetadata, directory: Path) -> bool:
     Returns:
         ``True`` when a selected GGUF path is unsafe, absent, or incomplete.
     """
-    pinned = shard.model_card.gguf_file
-    if not pinned:
-        return False
-
-    relative_path = Path(pinned)
-    if relative_path.is_absolute() or ".." in relative_path.parts:
-        return True
-    selected_path = directory.joinpath(*relative_path.parts)
-    if not selected_path.is_file():
-        return True
-
-    stem_parts = selected_path.stem.rsplit("-", 3)
-    if not (
-        len(stem_parts) == 4
-        and stem_parts[1].isdigit()
-        and stem_parts[2] == "of"
-        and stem_parts[3].isdigit()
-    ):
-        return False
-
-    base, index_token, _, total_token = stem_parts
-    total_shards = int(total_token)
-    return any(
-        not (
-            selected_path.parent
-            / (f"{base}-{index:0{len(index_token)}d}-of-{total_token}.gguf")
-        ).is_file()
-        for index in range(1, total_shards + 1)
-    )
+    return not selected_gguf_group_complete(directory, shard.model_card.gguf_file)
 
 
 def _same_repo_draft_files(card: "ModelCard") -> list[str]:

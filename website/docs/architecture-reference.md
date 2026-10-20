@@ -12,6 +12,21 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
+- **Offline preservation recovery:** `store/preservation.py` and
+  `store/preservation_cli.py`; `skulk-preservation inspect/recover`, also
+  `skulk preservation`. Pinned public core dependency; no network or node launch.
+  Exact manifest + independent owner trust + packaged registry root. One
+  self-contained text model, new home only. Atomic whole-home publication includes
+  normal store/index, schema-3 installed evidence, custom TOML admission and
+  offline config. Owner acceptance and repository-code permission are distinct.
+  Only fresh registry proof plus complete original SHA-256 binding produces
+  `registry_verified`; historical/owner-only/gapped evidence is custom. No
+  companion importer, live mutation, host jobs, export, sharing or inference
+  qualification. [Contract](model-preservation).
+  `_pyinstaller/` registers a `pyinstaller40` hook for the public core's JSON
+  schema and distribution version metadata; no installer/direct-URL metadata
+  enters the binary through this hook.
+
 - **Compatibility and memory contract:** [Model and Engine Compatibility](engine-compatibility.md)
   separates model/artifact facts, real engine requirements and scoped test evidence.
   Compatible untested hardware remains eligible. Placer, reservations, context
@@ -1987,6 +2002,7 @@ shrinking model modality truth. See
 - Provisioning: `provisioning/mlx_video.py`; locked offline dependencies, cancellable download/commands, cross-process lock, integrity checks, atomic promotion, offline reuse and restart Metal probe. Integrity hashing uses bounded chunks/digest storage and temporary files for nested ZIP seeks, preserving parent memory headroom. Only published descriptors establish installable capacity.
 - Facts: installed build proof and installable builds are separate. No benchmark/GPU-name allowlist; actual OS, ARM64, CPython ABI, Metal and memory requirements apply.
 - Runner: `worker/runner/mlx_video/{plan,process,runner}.py`; common serial dispatch, bounded JSON progress, process-group cancellation and parent-death reaping. Uses existing video references/output media/retention.
+- Process ownership: native rendering and media preparation share `utils/process_groups.py`; `waitid(..., WNOWAIT)` observes exit while reserving the leader PID until TERM/KILL reaches remaining descendants. Darwin EPERM is ignored only for groups with no live member. Real cleanup failures propagate; private protocol files are removed independently of cleanup success.
 - Model pack: exact local Gemma 4 and projections, transformer, VAEs, upscaler, tokenizer and quantization configuration. Independent downloads and older-model fallback are refused. Native HQ uses Res2s; DFR remains unavailable without an exact supported detailing adapter.
 - Admission: `shared/models/video_memory.py` derives staged working weights from the selected native pack, preserving overhead and full-artifact fallback for unknown layouts. Master and worker share the same estimate. Optional `runtime.video_memory_budget_bytes` raises, never reduces, the reservation.
 - Request resources: `worker/runner/mlx_video/memory.py` reads bounded safetensors headers, accounts two streamed blocks/non-block weights and conservative geometry/joint-audio/input workspace, and checks current GPU-wireable memory. It supplies the owned `LTX2_VAE_DECODE_BUDGET_GB` value only after environment sanitization and refuses an over-budget minimum conv tile before GPU load. Live host-pressure/RSS refusal and over-reservation result peaks fail the job with process-group cleanup. This is estimate/pressure admission, not a hard Metal allocation limit or hardware benchmark gate.

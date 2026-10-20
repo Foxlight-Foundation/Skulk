@@ -4,6 +4,18 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
+Offline public-bundle recovery lives in `store/preservation.py` and
+`store/preservation_cli.py` (`skulk-preservation`, also `skulk preservation`).
+It creates a new home with ordinary model-store and custom-card records in one
+publication; it never instantiates a second writer for a live store. Receiver
+owner trust is explicit, registry proof uses the packaged root, and code
+authorization is separate from provenance acceptance. Recovery observations use
+installed-card schema 3; legacy sidecar serialization stays unchanged. See
+`website/docs/model-preservation.md` for the supported text-model scope and limits.
+The `pyinstaller40` entry point in `_pyinstaller/` includes the public core's
+JSON schemas and distribution metadata in frozen builds. Keep the resource
+closure test separate from actual desktop signing and release qualification.
+
 Skulk is a distributed AI inference system that connects multiple devices into one cluster. It runs large language models across machines using MLX as the inference backend and libp2p for peer-to-peer networking. Skulk began as a fork of exo and has substantially diverged.
 
 ## Build & Run Commands
@@ -2010,6 +2022,8 @@ shrinking model modality truth. See
 `mlx_video-metal` uses `worker/runner/mlx_video` and the existing serial served-dispatch loop. Each job runs in a separate process group with bounded JSON progress, cancellation and parent-death reaping. The `InstallEngine` worker binds an exact published build from `provisioning/mlx_video.py`, installs all locked binary dependencies offline in a versioned runtime, verifies installed code against trusted archive bytes and probes Metal before publishing resources. Engine wheels live in `packaging/skulk-mlx-video`; candidate attestation and exact-byte promotion use `.github/workflows/mlx-video-wheel.yml`. Weights remain separate immutable selected packs, exposed through a local member-only view; missing Gemma 4/projections/tokenizer/quantization/VAEs fail before loading, with Hub access disabled. Native HQ uses the pinned Res2s pipeline; Comfy sampler overrides are refused. No tested-hardware allowlist is introduced. Video remains single-host, and measured model fit/phase profiles are separate acceptance requirements; the common memory guard is preserved.
 
 LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. Published Comfy extension features `retake` and `extend` enable source-bound temporal video/audio masks. Retake and Dev extension use one full-resolution pass; distilled extension uses two passes and restores full-resolution source latent context before refinement. Each VAE uses its own causal clock. The owned nodes restore unchanged decoded source frames and normalized PCM before lossy container encoding; they never mutate cached input tensors. The worker verifies the complete source and bounds both source and output decoded pixel volumes to 2 GiB. Exact instance-build checks and startup node-schema checks keep older sampler-only extensions from offering editing. Comfy prompt relay remains unavailable without an implementation of its temporal cross-attention masks.
+
+Native rendering and media preparation share `utils/process_groups.py`: observe exit with `waitid(..., WNOWAIT)`, stop descendants before reaping the session leader, and refuse to signal an already-reaped numeric identity. Darwin EPERM is ignored only when no live group member remains. Actual cleanup errors propagate without retaining private protocol files.
 
 Native v0.2.1 decode observation is bundled from `worker/runner/video_observability.py`. It announces the actual decode-and-save boundary and disables the decoder's verbose-only allocator reset, preserving encoder/sampling/decode peaks across the complete render. Telemetry-only engine changes still require a new immutable published wheel. The wheel workflow watches both standalone bundled helper sources for candidate assembly and isolated validation.
 

@@ -1178,6 +1178,36 @@ def _gguf_shard_info(name: str) -> "tuple[str, int] | None":
     return None
 
 
+def selected_gguf_group_complete(directory: Path, selected: str | None) -> bool:
+    """Check the exact selected GGUF and all sibling shards, independently of other quants.
+
+    Args:
+        directory: Artifact installation root, before applying a loader root.
+        selected: Card's repository-relative GGUF entrypoint, or None for a
+            model without a GGUF selection.
+
+    Returns:
+        Whether the selected file and its complete split group exist safely.
+        Another complete quant cannot mask missing files from this selection.
+    """
+    if not selected:
+        return True
+    relative = Path(selected)
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+    chosen = directory.joinpath(*relative.parts)
+    if not chosen.is_file():
+        return False
+    parts = chosen.stem.rsplit("-", 3)
+    if not (len(parts) == 4 and parts[1].isdigit() and parts[2] == "of" and parts[3].isdigit()):
+        return True
+    base, index_token, _, total_token = parts
+    return all(
+        (chosen.parent / f"{base}-{index:0{len(index_token)}d}-of-{total_token}.gguf").is_file()
+        for index in range(1, int(total_token) + 1)
+    )
+
+
 def is_model_directory_complete(model_dir: Path) -> bool:
     """Check if a model directory contains all required weight files."""
     # A bundle's installed manifest is the store-verified file list and
@@ -1247,7 +1277,7 @@ def _installed_bundle_verdict(model_dir: Path) -> bool | None:
         )
     except (OSError, ValueError):
         return None
-    if record is None or record.schema_version != 2 or not record.files:
+    if record is None or record.schema_version not in {2, 3} or not record.files:
         return None
     # Same containment rule as verify_installed_file: a manifest entry must
     # resolve to a regular file beneath the artifact root, so an equal-sized

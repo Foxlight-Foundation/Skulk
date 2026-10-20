@@ -1216,6 +1216,15 @@ class ModelStore:
         entry = self._read_registry().get(model_id)
         if entry is None or has_gguf_projector(entry.files):
             return False
+        if (
+            entry.installed_card is not None
+            and entry.installed_card.preservation is not None
+            and entry.installed_card.artifact_role == "base"
+            and entry.installed_card.model_card.vision is None
+        ):
+            # The receiver already admitted this card's self-contained text
+            # workload. Its availability must not depend on a Hub repo probe.
+            return False
         # Steady state: the registration guard records whether the upstream repo
         # ships a projector, so the answer is local: no HF probe on this hot
         # path (it backs the worker's store-availability check). A vision GGUF
@@ -1399,6 +1408,7 @@ class ModelStore:
                 and verify_installed_card(model_path, entry.installed_card)
                 else None
             ),
+            previous_record=entry.installed_card,
         )
         refreshed = entry.model_copy(update={"installed_card": record})
         write_installed_card(model_path, record)
