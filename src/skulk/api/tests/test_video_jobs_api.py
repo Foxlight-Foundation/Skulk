@@ -1318,3 +1318,31 @@ def test_retrieve_reports_what_the_render_ran_with(
     assert reported["adapter"] == "turbo_fl2v_8step" and reported["steps"] == 8
     assert reported["styles"] == ["bullet_time"] and reported["codec"] == "h264"
     assert reported["reference_fidelity"] is None
+
+
+@pytest.mark.parametrize("route", ["/v1/videos/job-hq-engine", "/v1/videos"])
+def test_hq_workflow_settings_survive_public_job_projection(
+    monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """Retrieval and listing preserve the exact HQ settings retained by the runner."""
+    api = _make_api(monkeypatch)
+    engine = VideoEngineSettings(
+        sampler="res2s", scheduler="ltxv", steps=18,
+        pipeline="hq_two_stage", width=1024, height=576, frame_count=49, codec="h264",
+        stage_lora_strengths={"base": 0.25, "refine": 0.5},
+        guidance_video_rescale=0.45, guidance_audio_rescale=1.0,
+    )
+    _complete_job(
+        api, "job-hq-engine", b"clip-bytes",
+        stats=VideoGenerationStats(
+            steps=18, seconds_per_step=1.0, total_generation_time=18.0, engine=engine
+        ),
+    )
+    response = TestClient(api.app).get(route)
+    assert response.status_code == 200
+    body = response.json()
+    job = body["data"][0] if route == "/v1/videos" else body
+    reported = job["stats"]["engine"]
+    assert reported["stage_lora_strengths"] == {"base": 0.25, "refine": 0.5}
+    assert reported["guidance_video_rescale"] == 0.45
+    assert reported["guidance_audio_rescale"] == 1.0

@@ -32,9 +32,10 @@ def _plan(
     requested: Set[InstanceId] = frozenset(),
     ready: Set[InstanceId] = frozenset(),
     backend: str = "comfy-cuda",
+    build: str = "pinned-build",
 ) -> Task | None:
     shard = get_pipeline_shard_metadata(model_id=MODEL_A_ID, device_rank=0).model_copy(
-        update={"resolved_backend": backend, "resolved_engine_build": "pinned-build"}
+        update={"resolved_backend": backend, "resolved_engine_build": build}
     )
     instance = get_mlx_ring_instance(
         instance_id=INSTANCE_1_ID,
@@ -128,3 +129,15 @@ def test_native_instance_prepares_its_exact_build_independently_of_default(
     task = _plan(downloaded=True, backend=backend, on_demand=on_demand,
                  requested={INSTANCE_1_ID}, ready={INSTANCE_1_ID})
     assert isinstance(task, LoadModel)
+
+
+@pytest.mark.parametrize("on_demand", [frozenset[str](), frozenset({"comfy-cuda"})])
+def test_comfy_overlay_waits_for_its_own_verified_install(on_demand: Set[str]) -> None:
+    """An already installed base does not prove a restored instance's overlay."""
+    from skulk.provisioning.manifest import COMFY_PIN
+
+    build = f"comfy@{COMFY_PIN}/torch@2.14.0+cu130/extension@sha256:" + "a" * 64
+    task = _plan(downloaded=True, on_demand=on_demand, build=build)
+    assert isinstance(task, InstallEngine) and task.expected_build == build
+    assert _plan(downloaded=True, on_demand=on_demand, build=build, requested={INSTANCE_1_ID}) is None
+    assert isinstance(_plan(downloaded=True, on_demand=on_demand, build=build, requested={INSTANCE_1_ID}, ready={INSTANCE_1_ID}), LoadModel)
