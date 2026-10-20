@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import threading
 import time
@@ -12,46 +11,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
-import psutil
 from loguru import logger
 
 from skulk.provisioning.mlx_video import runtime_environment
+from skulk.utils.process_groups import observe_process_exit, terminate_process_group
 from skulk.worker.runner import video_input
 from skulk.worker.runner.video_input import MediaInputRequest, VerifiedMediaInput
 
 _PREPARATION_TIMEOUT_SECONDS: Final = 60.0
-
-
-def _observe_exit(process: subprocess.Popen[str]) -> os.waitid_result | None:
-    # Keep the session leader's PID reserved until its group is stopped. poll()
-    # and wait() reap it, allowing a later group signal to address a reused PID.
-    return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-
-
-def _signal_group(process: subprocess.Popen[str], sent: signal.Signals) -> None:
-    try:
-        os.killpg(process.pid, sent)
-    except ProcessLookupError:
-        return
-    except PermissionError:
-        # Darwin returns EPERM for an owned group containing only zombies.
-        # A live member must still surface the real failure; never turn an
-        # inability to stop a decoder into successful cancellation.
-        for identifier in psutil.pids():
-            try:
-                if os.getpgid(identifier) == process.pid and psutil.Process(identifier).status() != psutil.STATUS_ZOMBIE:
-                    raise
-            except (ProcessLookupError, psutil.NoSuchProcess):
-                continue
-
-
-def _reap(process: subprocess.Popen[str]) -> None:
-    _signal_group(process, signal.SIGTERM)
-    deadline = time.monotonic() + 1
-    while _observe_exit(process) is None and time.monotonic() < deadline:
-        time.sleep(0.025)
-    _signal_group(process, signal.SIGKILL)
-    process.wait(timeout=3)
 
 
 def prepare_media_input(
@@ -100,7 +67,7 @@ def prepare_media_input(
         reader = threading.Thread(target=consume, daemon=True)
         reader.start()
         deadline = time.monotonic() + _PREPARATION_TIMEOUT_SECONDS
-        while (exit_status := _observe_exit(process)) is None:
+        while (exit_status := observe_process_exit(process)) is None:
             if is_cancelled():
                 return None
             if time.monotonic() >= deadline:
@@ -125,7 +92,7 @@ def prepare_media_input(
     finally:
         try:
             if process is not None:
-                _reap(process)
+                terminate_process_group(process)
         finally:
             if reader is not None:
                 reader.join(timeout=1)

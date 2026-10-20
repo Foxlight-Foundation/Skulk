@@ -12,6 +12,7 @@ from pathlib import Path
 import psutil
 import pytest
 
+from skulk.utils import process_groups
 from skulk.worker.runner import video_input, video_input_process
 from skulk.worker.runner.video_input import MediaInputRequest
 
@@ -60,7 +61,7 @@ def test_linux_decoder_does_not_inherit_parent_memory_charge() -> None:
 
 def _await_exit(process: subprocess.Popen[str]) -> None:
     deadline = time.monotonic() + 5
-    while video_input_process._observe_exit(process) is None:
+    while process_groups.observe_process_exit(process) is None:
         assert time.monotonic() < deadline
         time.sleep(0.01)
     assert process.returncode is None
@@ -90,10 +91,23 @@ def test_exited_decoder_is_reaped_after_its_owned_group_is_stopped() -> None:
     process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True, text=True)
     try:
         _await_exit(process)
-        video_input_process._reap(process)
+        process_groups.terminate_process_group(process)
         assert process.returncode == 0
     finally:
         process.wait(timeout=3)
+
+
+def test_reaped_group_identity_is_never_signalled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A released numeric PID must never authorize a later process-group signal."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True, text=True)
+    process.wait(timeout=3)
+
+    def unrelated_group(_group: int, _sent: signal.Signals) -> None:
+        pytest.fail("cleanup signalled a group after releasing its owned leader PID")
+
+    monkeypatch.setattr(process_groups.os, "killpg", unrelated_group)
+    with pytest.raises(ValueError, match="leader was reaped"):
+        process_groups.terminate_process_group(process)
 
 
 def test_exited_decoder_still_cleans_up_a_term_resistant_descendant(tmp_path: Path) -> None:
@@ -106,7 +120,7 @@ def test_exited_decoder_still_cleans_up_a_term_resistant_descendant(tmp_path: Pa
     try:
         _await_exit(process)
         child = psutil.Process(int(marker.read_text()))
-        video_input_process._reap(process)
+        process_groups.terminate_process_group(process)
         for _ in range(40):
             if not _is_live(child):
                 break
@@ -129,10 +143,10 @@ def test_live_decoder_permission_failure_is_not_suppressed(monkeypatch: pytest.M
     def denied(_group: int, _sent: int) -> None:
         raise PermissionError("controlled live-group denial")
 
-    monkeypatch.setattr(video_input_process.os, "killpg", denied)
+    monkeypatch.setattr(process_groups.os, "killpg", denied)
     try:
         with pytest.raises(PermissionError, match="live-group denial"):
-            video_input_process._signal_group(process, signal.SIGTERM)
+            process_groups._signal_group(process, signal.SIGTERM)
     finally:
         process.kill()
         process.wait(timeout=3)
@@ -143,13 +157,13 @@ def test_protocol_files_are_removed_even_when_cleanup_raises(tmp_path: Path, mon
     interpreter = tmp_path / "interpreter"
     interpreter.write_text(f"#!{sys.executable}\n")
     interpreter.chmod(0o700)
-    original = video_input_process._reap
+    original = video_input_process.terminate_process_group
 
     def failed_cleanup(process: subprocess.Popen[str]) -> None:
         original(process)
         raise RuntimeError("controlled cleanup failure")
 
-    monkeypatch.setattr(video_input_process, "_reap", failed_cleanup)
+    monkeypatch.setattr(video_input_process, "terminate_process_group", failed_cleanup)
     request = MediaInputRequest(operation="audio", source=str(tmp_path / "source"), destination=str(tmp_path / "prepared.wav"), duration_seconds=1.0)
     with pytest.raises(RuntimeError, match="cleanup failure"):
         video_input_process.prepare_media_input(interpreter, request, tmp_path, is_cancelled=lambda: False)

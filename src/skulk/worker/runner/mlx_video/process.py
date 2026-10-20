@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import queue
-import signal
 import subprocess
 import threading
 import time
@@ -18,6 +17,7 @@ from pydantic import Field
 
 from skulk.provisioning.mlx_video import runtime_environment
 from skulk.shared.types.video import VideoStage
+from skulk.utils.process_groups import observe_process_exit, terminate_process_group
 from skulk.utils.pydantic_ext import FrozenModel
 from skulk.worker.runner.mlx_video.memory import NativeMemoryPlan
 from skulk.worker.runner.mlx_video.plan import NativeVideoJob
@@ -41,22 +41,6 @@ class NativeResult(FrozenModel):
     sampling_seconds: float = Field(ge=0, description="Observed native sampling duration in seconds.")
     total_generation_time: float = Field(ge=0, description="Wall time through encoding, sampling, decode and mux.")
     peak_memory_bytes: int = Field(ge=0, description="MLX allocator high-water bytes for this job; not whole-host RAM pressure.")
-
-
-def _terminate(process: subprocess.Popen[str]) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=3)
-    except ProcessLookupError:
-        process.wait(timeout=3)
-    finally:
-        # A crashed/exited wrapper can leave its encoder child alive. Reaping
-        # only the wrapper PID would miss those descendants on normal exit.
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
 
 
 def serialize_native_job(job: NativeVideoJob) -> str:
@@ -116,7 +100,7 @@ def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable
     started = time.monotonic()
     last_resource_check = started - 1
     try:
-        while process.poll() is None or not messages.empty():
+        while (exit_status := observe_process_exit(process)) is None or not messages.empty():
             if is_cancelled():
                 return None
             if time.monotonic() - started > 6 * 60 * 60:
@@ -131,7 +115,8 @@ def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable
             except queue.Empty:
                 continue
             progress(NativeProgress.model_validate_json(message))
-        if process.wait() != 0:
+        assert exit_status is not None
+        if exit_status.si_code != os.CLD_EXITED or exit_status.si_status != 0:
             raise ValueError("native video render failed: " + "".join(errors)[-4096:])
         result = output / "result.json"
         if not result.is_file() or result.stat().st_size > 4096:
@@ -141,7 +126,13 @@ def run_native_job(interpreter: Path, job: NativeVideoJob, *, progress: Callable
             raise ValueError("native video exceeded its reserved Metal working set; increase the video memory reservation before placing again")
         return measured
     finally:
-        _terminate(process)
-        for reader in readers:
-            reader.join(timeout=2)
-        request.unlink(missing_ok=True)
+        try:
+            terminate_process_group(process, grace_seconds=3.0)
+        finally:
+            # A real cleanup failure must propagate without retaining a
+            # command-private job containing prompts and reference paths.
+            try:
+                for reader in readers:
+                    reader.join(timeout=2)
+            finally:
+                request.unlink(missing_ok=True)
