@@ -15,12 +15,14 @@ back onto Skulk's coarse stages.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal
 
 from skulk.shared.models.model_cards import (
     ModelCard,
+    ModelId,
     VideoCompanionConfig,
     VideoCompanionKind,
     VideoMode,
@@ -38,10 +40,12 @@ from skulk.shared.types.video import (
     VIDEO_THUMBNAIL_FILENAME,
     VideoAudioConditioning,
     VideoDecoder,
+    VideoEditing,
     VideoEngineSettings,
     VideoGenerationTaskParams,
     VideoGuidance,
     VideoPipeline,
+    VideoPromptRelay,
     VideoReferenceSpec,
     VideoStage,
     derivable_guides,
@@ -107,7 +111,10 @@ _COMPONENT_TEXT_ENCODER: Final = "text_encoder"
 _COMPONENT_VIDEO_VAE: Final = "video_vae"
 _COMPONENT_AUDIO_VAE: Final = "audio_vae"
 
-MODEL_FOLDERS: Final[tuple[str, ...]] = (
+ComfyModelFolder = Literal["diffusion_models", "text_encoders", "vae", "loras", "embeddings", "model_patches", "checkpoints", "geometry_estimation", "latent_upscale_models"]
+"""Model folder keys understood by the pinned Comfy loaders."""
+
+MODEL_FOLDERS: Final[tuple[ComfyModelFolder, ...]] = (
     "diffusion_models",
     "text_encoders",
     "vae",
@@ -125,12 +132,20 @@ checkpoint loader, and Depth Anything 3 through the geometry-estimation one;
 the RT-DETR person detector shares ``diffusion_models``.
 """
 
-PREPROCESSOR_FOLDERS: Final[dict[VideoPreprocessorRole, str]] = {
+PREPROCESSOR_FOLDERS: Final[dict[VideoPreprocessorRole, ComfyModelFolder]] = {
     VideoPreprocessorRole.PoseEstimator: "checkpoints",
     VideoPreprocessorRole.PersonDetector: "diffusion_models",
     VideoPreprocessorRole.DepthEstimator: "geometry_estimation",
 }
 """The ComfyUI folder each preprocessor role's loader reads its weights from."""
+
+
+@dataclass(frozen=True, slots=True)
+class ComfyModelSearchRoot:
+    """One staged directory exposed to exactly one Comfy model folder."""
+
+    folder: ComfyModelFolder
+    directory: Path
 
 
 def stage_for_node(node_id: str) -> VideoStage | None:
@@ -160,6 +175,8 @@ class ComfyModelFiles:
     video_vae: str
     audio_vae: str | None
     spatial_upscaler: str | None = None
+    dfr_spatial_lora: str | None = None
+    temporal_upscaler: str | None = None
     duration_head: str | None = None
     diffusion_decoder: str | None = None
     refinement_lora: str | None = None
@@ -247,13 +264,15 @@ def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> Comfy
     refinement = next((item for item in video.companions if item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" and (mode is None or item.supports_mode(mode))), None) if video is not None else None
     def selected(kind: VideoCompanionKind, name: str) -> str | None:
         companion = next((item for item in video.companions if item.kind is kind and item.name == name and (mode is None or item.supports_mode(mode))), None) if video is not None else None
-        return None if companion is None else companion_file(companion)
+        return None if companion is None else companion_file(companion, card.artifact_repository)
     return ComfyModelFiles(
         diffusion_model=diffusion,
         text_encoder=text_encoder,
         video_vae=video_vae,
         audio_vae=audio_vae,
-        spatial_upscaler=None if spatial is None else companion_file(spatial),
+        spatial_upscaler=None if spatial is None else companion_file(spatial, card.artifact_repository),
+        dfr_spatial_lora=selected(VideoCompanionKind.Lora, "dfr_spatial"),
+        temporal_upscaler=selected(VideoCompanionKind.LatentUpscaler, "temporal_x2"),
         duration_head=selected(VideoCompanionKind.DurationHead, "duration_head"),
         diffusion_decoder=selected(VideoCompanionKind.VideoDecoder, "diffusion_decoder"),
         refinement_lora=selected(VideoCompanionKind.Lora, "distilled_refinement"),
@@ -261,35 +280,48 @@ def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> Comfy
     )
 
 
-def companion_file(companion: VideoCompanionConfig) -> str:
-    """The name ComfyUI lists a companion under, relative to its model folder.
-
-    A companion keeps its repository's layout wherever it is staged: inside
-    the card's artifact directory when it shares the card's repository, or
-    in its own staged directory when it is hosted elsewhere, which the
-    engine adds to ComfyUI's search roots. Either way the name is the path
-    below the folder ComfyUI reads for that kind (``loras/``,
-    ``model_patches/``, ``embeddings/``, or a preprocessor role's folder).
-    """
-    path = PurePosixPath(companion.path)
+def companion_model_folder(companion: VideoCompanionConfig) -> ComfyModelFolder:
+    """Return the pinned loader's model folder for a companion kind or role."""
+    folders: dict[VideoCompanionKind, ComfyModelFolder] = {
+        VideoCompanionKind.Lora: "loras",
+        VideoCompanionKind.ModelPatch: "model_patches",
+        VideoCompanionKind.Embedding: "embeddings",
+        VideoCompanionKind.LatentUpscaler: "latent_upscale_models",
+        VideoCompanionKind.DurationHead: "model_patches",
+        VideoCompanionKind.VideoDecoder: "vae",
+    }
     folder = (
         PREPROCESSOR_FOLDERS[companion.role]
         if companion.role is not None
-        else {
-            VideoCompanionKind.Lora: "loras",
-            VideoCompanionKind.ModelPatch: "model_patches",
-            VideoCompanionKind.Embedding: "embeddings",
-            VideoCompanionKind.LatentUpscaler: "latent_upscale_models",
-            VideoCompanionKind.DurationHead: "model_patches",
-            VideoCompanionKind.VideoDecoder: "vae",
-        }.get(companion.kind)
+        else folders.get(companion.kind)
     )
-    if folder is None or not path.parts or path.parts[0] != folder:
+    if folder is None:
+        raise ValueError(f"companion {companion.name!r} has no Comfy model folder")
+    return folder
+
+
+def companion_file(companion: VideoCompanionConfig, artifact_repository: ModelId | None = None) -> str:
+    """Return the exact name below a companion's Comfy search root.
+
+    Local bundle files retain the standard model-folder layout. An external
+    repository may publish a flat or nested file without that folder; its
+    pinned staged root is then mapped to the declared loader kind without
+    changing the signed repository-relative path or copying any weights.
+    Pass the owning artifact repository to keep explicitly same-repo files
+    on the local layout contract.
+    """
+    path = PurePosixPath(companion.path)
+    folder = companion_model_folder(companion)
+    if len(path.parts) > 1 and path.parts[0] == folder:
+        return path.relative_to(folder).as_posix()
+    if companion.repo is not None and companion.repo != artifact_repository:
+        return path.as_posix()
+    if not path.parts or path.parts[0] != folder:
         raise ValueError(
             f"companion {companion.name!r} ({companion.kind.value}) at {companion.path!r} is not "
             f"under the folder ComfyUI reads for that kind"
         )
-    return path.relative_to(folder).as_posix()
+    raise ValueError(f"companion {companion.name!r} must name a file below {folder}/")
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,7 +356,7 @@ def style_tokens(params: VideoGenerationTaskParams, card: ModelCard) -> tuple[st
             raise ValueError(f"{card.model_id} has no style embedding named {name!r}")
         tokens.append(
             "embedding:"
-            + PurePosixPath(companion_file(companion)).with_suffix("").as_posix()
+            + PurePosixPath(companion_file(companion, card.artifact_repository)).with_suffix("").as_posix()
         )
     return tuple(tokens)
 
@@ -423,7 +455,7 @@ def select_guide(
     return GuideChoice(
         kind=kind,
         files={
-            companion.role: companion_file(companion)
+            companion.role: companion_file(companion, card.artifact_repository)
             for companion in card.video.companions
             if companion.role is not None and companion.role in needed
         },
@@ -455,7 +487,7 @@ def select_control(
             continue
         return ControlChoice(
             name=companion.name,
-            file=companion_file(companion),
+            file=companion_file(companion, card.artifact_repository),
             strength=params.control_strength
             if params.control_strength is not None
             else (companion.strength if companion.strength is not None else 1.0),
@@ -495,12 +527,21 @@ class ComfyRenderPlan:
     pipeline: VideoPipeline | None = None
     decoder: VideoDecoder | None = None
     guidance: VideoGuidance | None = None
+    temporal_upscalings: Literal[0, 1] = 0
     generated_keyframe_interval: int | None = None
     duration: Literal["fixed", "auto"] = "fixed"
     minimum_frames: int | None = None
     duration_min_seconds: int | None = None
     duration_max_seconds: int | None = None
     audio_conditioning: VideoAudioConditioning | None = None
+    editing: VideoEditing | None = None
+    prompt_relay: VideoPromptRelay | None = None
+    """Measured local scene prompts, enabled only by the exact placed extension."""
+    transformer_variant: Literal["distilled", "dev"] | None = None
+    dfr_extension: bool = False
+    """Whether this placed issued build implements the DFR mask/keyframe bridge."""
+    source_frames: int | None = None
+    """Fully decoded worker facts, required before any temporal-edit graph is built."""
 
     @property
     def steps(self) -> int:
@@ -516,10 +557,15 @@ class ComfyRenderPlan:
                 REFINEMENT_SIGMAS,
             )
 
-            return {
-                "ltx_base_sampler": len(DISTILLED_SIGMAS.split(",")) - 1 if self.pipeline == "distilled_two_stage" else self.plan.steps,
+            if self.pipeline == "retake" or (self.pipeline == "extend" and self.transformer_variant == "dev"):
+                return {"ltx_base_sampler": self.plan.steps}
+            stages = {
+                "ltx_base_sampler": len(DISTILLED_SIGMAS.split(",")) - 1 if self.pipeline in ("distilled_two_stage", "dfr") else self.plan.steps,
                 "ltx_refine_sampler": len(REFINEMENT_SIGMAS.split(",")) - 1,
             }
+            if self.temporal_upscalings:
+                stages["ltx_temporal_sampler"] = 4
+            return stages
         return {NODE_SAMPLER: self.plan.steps}
 
     def prompt_text(self, prompt: str) -> str:
@@ -538,13 +584,19 @@ class ComfyRenderPlan:
             pipeline=self.pipeline,
             decoder=self.decoder,
             guidance=self.guidance,
+            temporal_upscalings=self.temporal_upscalings,
             generated_keyframe_interval=self.generated_keyframe_interval,
             duration=self.duration,
             audio_conditioning=self.audio_conditioning,
+            editing=self.editing,
+            prompt_relay=self.prompt_relay,
             video_shift=self.video_shift,
             audio_shift=self.audio_shift,
             adapter=None if self.adapter is None else self.adapter.name,
             adapter_strength=None if self.adapter is None else self.adapter.strength,
+            stage_lora_strengths={"base": 0.25, "refine": 0.5} if self.pipeline == "hq_two_stage" else {},
+            guidance_video_rescale=0.45 if self.pipeline == "hq_two_stage" else 0.7 if self.editing is not None and self.transformer_variant == "dev" else None,
+            guidance_audio_rescale=1.0 if self.pipeline == "hq_two_stage" else 0.7 if self.editing is not None and self.transformer_variant == "dev" else None,
             width=self.plan.width,
             height=self.plan.height,
             frame_count=self.plan.frame_count,
@@ -564,7 +616,7 @@ class ComfyRenderPlan:
 
 
 def plan_comfy_render(
-    params: VideoGenerationTaskParams, card: ModelCard
+    params: VideoGenerationTaskParams, card: ModelCard, *, engine_build: str | None = None
 ) -> ComfyRenderPlan:
     """Resolve a request against the card for the ComfyUI engine.
 
@@ -585,33 +637,52 @@ def plan_comfy_render(
 
         validate_ltx_request(params, card)
         if params.editing is not None:
-            raise ValueError("the pinned Comfy core nodes do not implement the required temporal video/audio retake or extension masks")
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if params.editing.operation not in extension_features_for_build(engine_build):
+                raise ValueError("LTX-2.5 temporal editing requires its exact published extension on the placed renderer; update and reload the model")
         if params.prompt_relay is not None:
-            raise ValueError("the pinned Comfy core nodes do not implement temporal prompt-relay cross-attention masks")
-        pipeline = params.pipeline or ("distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if "prompt_relay" not in extension_features_for_build(engine_build):
+                raise ValueError("LTX-2.5 timed scene prompts require their exact published extension on the placed renderer; update and reload the model")
+        pipeline = params.pipeline or (params.editing.operation if params.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
         if pipeline == "hq_two_stage":
-            raise ValueError("LTX-2.5 HQ requires the exact Res2s sampler, unavailable in the pinned Comfy core engine")
-        if pipeline == "dfr":
-            raise ValueError("LTX-2.5 DFR temporal refinement is not implemented by this pinned Comfy graph")
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if "res2s" not in extension_features_for_build(engine_build):
+                raise ValueError("LTX-2.5 HQ requires a placed renderer with the published Res2s extension; update the renderer before using HQ")
+        from skulk.provisioning.comfy_extension import extension_features_for_build
+
+        dfr_extension = pipeline == "dfr" and "dfr" in extension_features_for_build(engine_build)
+        if pipeline == "dfr" and not dfr_extension and not any(reference.kind == "image" for reference in params.references):
+            raise ValueError("LTX-2.5 text-only DFR requires its exact published detailing extension; update and reload the model")
         minimum = params.duration_min_seconds or video.min_seconds
         files = resolve_model_files(card, mode)
+        base = plan_render(params, video.model_copy(update={"canvas_multiple": 64, **({"default_steps": 15} if pipeline == "hq_two_stage" else {"default_steps": 30} if params.editing is not None and video.transformer_variant == "dev" else {})}))
+        factor = 2 ** params.temporal_upscalings
         return ComfyRenderPlan(
-            plan=plan_render(params, video.model_copy(update={"canvas_multiple": 64})),
+            plan=replace(base, fps=base.fps * factor, frame_count=(base.frame_count - 1) * factor + 1),
             mode=mode,
             files=files,
-            adapter=None if pipeline != "dev_two_stage" or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=files.refinement_strength, steps=None),
+            adapter=None if pipeline not in ("dev_two_stage", "hq_two_stage") or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=0.5 if pipeline == "hq_two_stage" else files.refinement_strength, steps=None),
             video_shift=None,
             audio_shift=None,
-            sampler="euler_ancestral" if pipeline == "distilled_two_stage" else "euler",
-            scheduler="manual" if pipeline == "distilled_two_stage" else "ltx",
+            sampler="res2s" if pipeline == "hq_two_stage" else "euler_ancestral" if pipeline == "distilled_two_stage" or (pipeline == "extend" and video.transformer_variant == "distilled") else "euler",
+            scheduler="manual" if video.transformer_variant == "distilled" else "ltx",
             codec=params.codec or CODEC_DEFAULT,
             family=card.family,
             pipeline=pipeline,
             decoder=params.decoder or "convolutional",
-            guidance=(params.guidance or VideoGuidance()) if pipeline == "dev_two_stage" else None,
-            generated_keyframe_interval=params.generated_keyframe_interval,
+            guidance=(params.guidance or VideoGuidance(modality_scale=3.0 if pipeline == "hq_two_stage" else 1.0)) if pipeline in ("dev_two_stage", "hq_two_stage") else VideoGuidance(stg_scale=1.0, modality_scale=3.0) if params.editing is not None and video.transformer_variant == "dev" else None,
+            temporal_upscalings=params.temporal_upscalings,
+            dfr_extension=dfr_extension,
+            generated_keyframe_interval=(params.generated_keyframe_interval or 24) if pipeline == "dfr" else params.generated_keyframe_interval,
             duration=params.duration,
             audio_conditioning=params.audio_conditioning,
+            editing=params.editing,
+            prompt_relay=params.prompt_relay,
+            transformer_variant=video.transformer_variant,
             minimum_frames=video.frame_count_for_seconds(minimum) if params.duration == "auto" else None,
             duration_min_seconds=minimum if params.duration == "auto" else None,
             duration_max_seconds=params.seconds if params.duration == "auto" else None,
@@ -624,7 +695,7 @@ def plan_comfy_render(
     if companion is not None:
         adapter = AdapterChoice(
             name=companion.name,
-            file=companion_file(companion),
+            file=companion_file(companion, card.artifact_repository),
             strength=params.lora_strength
             if params.lora_strength is not None
             else (companion.strength or 1.0),
@@ -880,6 +951,10 @@ def build_prompt(
     if render.family == "ltx-2.5":
         from skulk.worker.runner.comfy.ltx import build_ltx_prompt
 
+        if render.editing is not None:
+            from skulk.worker.runner.comfy.ltx_editing import build_editing_prompt
+
+            return build_editing_prompt(render, params, references, output_subdir)
         return build_ltx_prompt(render, params, references, output_subdir)
     plan = render.plan
     files = render.files
@@ -1174,21 +1249,23 @@ def _add_reference_condition(
 
 
 def extra_model_paths_yaml(
-    model_dir: Path, companion_dirs: tuple[Path, ...] = ()
+    model_dir: Path, companion_roots: tuple[ComfyModelSearchRoot, ...] = ()
 ) -> str:
     """The ``extra_model_paths.yaml`` that exposes a staged artifact to ComfyUI.
 
-    Only folders present in each root are listed; ComfyUI treats each as an
-    additional search root for that model kind, so the loader file names in
-    the graph resolve without copying weights into the checkout. The card's
-    artifact directory comes first; each externally hosted companion
-    repository's staged directory follows as a root of its own.
+    The base artifact exposes its standard model folders. Each external
+    companion exposes only its declared loader kind, with the same relative
+    name selected by ``companion_file``. Flat upstream repositories therefore
+    work without inventing paths inside signed artifacts or copying weights.
     """
     lines: list[str] = []
-    for index, root in enumerate((model_dir, *companion_dirs)):
-        lines.append("skulk:" if index == 0 else f"skulk_companion_{index}:")
-        lines.append(f"  base_path: {root.resolve().as_posix()}")
-        for folder in MODEL_FOLDERS:
-            if (root / folder).is_dir():
-                lines.append(f"  {folder}: {folder}")
+    lines.append("skulk:")
+    lines.append(f"  base_path: {json.dumps(model_dir.resolve().as_posix())}")
+    for folder in MODEL_FOLDERS:
+        if (model_dir / folder).is_dir():
+            lines.append(f"  {folder}: {folder}")
+    for index, root in enumerate(companion_roots, start=1):
+        lines.append(f"skulk_companion_{index}:")
+        lines.append(f"  base_path: {json.dumps(root.directory.resolve().as_posix())}")
+        lines.append(f"  {root.folder}: .")
     return "\n".join(lines) + "\n"

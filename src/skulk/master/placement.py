@@ -218,6 +218,21 @@ def _vllm_placement_build(backend: str, resources: NodeResources) -> str | None:
     return build
 
 
+def _comfy_placement_build(card: ModelCard, backend: str, resources: NodeResources) -> str | None:
+    """Bind new LTX instances to an issued overlay while retaining ordinary base use."""
+    from skulk.provisioning.comfy_extension import extension_for_build
+
+    installed = resources.engine_builds.get(backend) or resources.engine_builds.get("comfy")
+    offered = resources.installable_engine_builds.get(backend)
+    if card.family == "ltx-2.5":
+        if extension_for_build(offered) is not None:
+            return offered
+        return installed or offered
+    # A base-only family has no reason to acquire the LTX node wheel merely
+    # because another instance installed it on the same physical node.
+    return installed.partition("/extension@sha256:")[0] if installed is not None else None
+
+
 def add_instance_to_placements(
     command: CreateInstance,
     topology: Topology,
@@ -320,6 +335,12 @@ def add_instance_to_placements(
                         resolved_shards[runner_id] = shard.model_copy(
                             update={"resolved_engine_build": build}
                         )
+                elif engine_of(shard.resolved_backend) == "comfy" and shard.resolved_engine_build is None:
+                    if resources is None:
+                        raise PlacementError("Backend telemetry is required for exact Comfy placement")
+                    build = _comfy_placement_build(shard.model_card, shard.resolved_backend, resources)
+                    if build is not None:
+                        resolved_shards[runner_id] = shard.model_copy(update={"resolved_engine_build": build})
                 continue
             if resources is None:
                 # Production callers always supply resources. Retain the legacy
@@ -349,6 +370,10 @@ def add_instance_to_placements(
                 updates["resolved_engine_build"] = build
             if engine_of(backend) == "vllm" and shard.resolved_engine_build is None:
                 build = _vllm_placement_build(backend, resources)
+                if build is not None:
+                    updates["resolved_engine_build"] = build
+            if engine_of(backend) == "comfy" and shard.resolved_engine_build is None:
+                build = _comfy_placement_build(shard.model_card, backend, resources)
                 if build is not None:
                     updates["resolved_engine_build"] = build
             resolved_shards[runner_id] = shard.model_copy(update=updates)
@@ -1586,6 +1611,10 @@ def place_instance(
                 updates["resolved_engine_build"] = build
             if engine_of(resolved_backend) == "vllm" and resources is not None:
                 build = _vllm_placement_build(resolved_backend, resources)
+                if build is not None:
+                    updates["resolved_engine_build"] = build
+            if engine_of(resolved_backend) == "comfy" and resources is not None:
+                build = _comfy_placement_build(command.model_card, resolved_backend, resources)
                 if build is not None:
                     updates["resolved_engine_build"] = build
             stamped_runner_to_shard[runner_id] = shard.model_copy(update=updates)

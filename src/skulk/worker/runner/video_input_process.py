@@ -3,33 +3,22 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from contextlib import suppress
 from pathlib import Path
 from typing import Final
 
 from loguru import logger
 
 from skulk.provisioning.mlx_video import runtime_environment
+from skulk.utils.process_groups import observe_process_exit, terminate_process_group
 from skulk.worker.runner import video_input
 from skulk.worker.runner.video_input import MediaInputRequest, VerifiedMediaInput
 
 _PREPARATION_TIMEOUT_SECONDS: Final = 60.0
-
-
-def _reap(process: subprocess.Popen[str]) -> None:
-    with suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGTERM)
-    with suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=1)
-    with suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGKILL)
-    process.wait(timeout=3)
 
 
 def prepare_media_input(
@@ -78,7 +67,7 @@ def prepare_media_input(
         reader = threading.Thread(target=consume, daemon=True)
         reader.start()
         deadline = time.monotonic() + _PREPARATION_TIMEOUT_SECONDS
-        while process.poll() is None:
+        while (exit_status := observe_process_exit(process)) is None:
             if is_cancelled():
                 return None
             if time.monotonic() >= deadline:
@@ -87,7 +76,7 @@ def prepare_media_input(
         reader.join(timeout=1)
         if is_cancelled():
             return None
-        if process.returncode != 0:
+        if exit_status.si_code != os.CLD_EXITED or exit_status.si_status != 0:
             logger.warning("Video input preparation failed: {}", "".join(errors))
             # Decoder tracebacks belong in worker diagnostics. Our own bounded
             # validation reasons are sufficient for the operator-facing refusal.
@@ -101,9 +90,11 @@ def prepare_media_input(
             raise ValueError("source media preparation returned an unexpected local path")
         return result
     finally:
-        if process is not None:
-            _reap(process)
-        if reader is not None:
-            reader.join(timeout=1)
-        request_path.unlink(missing_ok=True)
-        result_path.unlink(missing_ok=True)
+        try:
+            if process is not None:
+                terminate_process_group(process)
+        finally:
+            if reader is not None:
+                reader.join(timeout=1)
+            request_path.unlink(missing_ok=True)
+            result_path.unlink(missing_ok=True)

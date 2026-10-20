@@ -33,6 +33,7 @@ from typing import Any, BinaryIO, Final, Literal, cast
 import aiohttp
 import httpx
 from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from skulk.shared.types.video import VideoStage
 from skulk.worker.runner.comfy.graph import NODE_SAMPLER, ComfyPrompt, stage_for_node
@@ -70,6 +71,13 @@ ComfyUI servers use as ``--user-directory``; the orphan sweep keys on it."""
 
 class ComfyRenderError(ValueError):
     """ComfyUI refused or failed this render; the server itself is fine."""
+
+
+class _TrustedNodeSchema(BaseModel):
+    """The bounded output contract required before an extension runner is ready."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="ignore")
+    output: list[str] = Field(description="Comfy wire socket types for this exact trusted node.")
 
 
 def _set_pdeathsig() -> None:
@@ -123,6 +131,7 @@ def server_args(
     temp_dir: Path,
     user_dir: Path,
     extra: Sequence[str] = (),
+    trusted_extension: Path | None = None,
 ) -> list[str]:
     """The headless launch line for one ComfyUI server.
 
@@ -131,9 +140,10 @@ def server_args(
     output metadata is off so the container carries no prompt text, and the
     input, output, temp, and user directories are Skulk's, not the checkout's.
     """
+    entrypoint = [str(root / "main.py")] if trusted_extension is None else ["-I", "-B", str(trusted_extension / "launcher.py"), str(root)]
     return [
         str(interpreter),
-        str(root / "main.py"),
+        *entrypoint,
         "--listen",
         "127.0.0.1",
         "--port",
@@ -152,6 +162,7 @@ def server_args(
         str(temp_dir),
         "--user-directory",
         str(user_dir),
+        *(["--whitelist-custom-nodes", "skulk_comfy_ltx"] if trusted_extension is not None else []),
         *extra,
     ]
 
@@ -169,6 +180,7 @@ class ComfyServer:
     user_dir: Path
     log_path: Path
     extra_args: tuple[str, ...] = ()
+    trusted_extension: Path | None = None
     base_url: str | None = None
     process: subprocess.Popen[bytes] | None = None
     _log: BinaryIO | None = field(default=None, repr=False)
@@ -179,6 +191,8 @@ class ComfyServer:
             self._spawn()
             try:
                 self._await_health()
+                if self.trusted_extension is not None:
+                    self._await_extension_schema()
             except RuntimeError as error:
                 lost_race = (
                     _ADDRESS_IN_USE_MARKER in str(error).lower()
@@ -192,6 +206,12 @@ class ComfyServer:
                 )
                 self.teardown()
                 continue
+            except (httpx.HTTPError, ValueError) as error:
+                # A failed extension schema/protocol probe happens after
+                # health but before the runner owns the server reference.
+                # Release this process here so failed readiness cannot leak it.
+                self.teardown()
+                raise RuntimeError("Comfy extension readiness probe failed") from error
             return
 
     def _spawn(self) -> None:
@@ -214,6 +234,7 @@ class ComfyServer:
             temp_dir=self.temp_dir,
             user_dir=self.user_dir,
             extra=self.extra_args,
+            trusted_extension=self.trusted_extension,
         )
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log = open(self.log_path, "wb")  # noqa: SIM115 - closed in teardown
@@ -252,6 +273,38 @@ class ComfyServer:
         raise RuntimeError(
             f"ComfyUI did not answer within {_HEALTH_DEADLINE_SECONDS:.0f}s; log tail:\n{self.log_tail()}"
         )
+
+    def _await_extension_schema(self) -> None:
+        """Refuse readiness when the archive-verified extension did not register."""
+        if self.base_url is None:
+            raise RuntimeError("Comfy extension schema probe requires a live server")
+        from skulk.provisioning.comfy_extension import ComfyExtensionManifest
+
+        if self.trusted_extension is None:
+            raise RuntimeError("Comfy extension schema probe requires its verified package")
+        manifest_path = self.trusted_extension / "manifest.json"
+        if manifest_path.stat().st_size > 131072:
+            raise RuntimeError("Comfy extension manifest exceeds its bound")
+        manifest = ComfyExtensionManifest.model_validate_json(manifest_path.read_bytes())
+        required = [("SkulkLTXRes2sSampler", ["SAMPLER"]), ("SkulkLTXGuidanceRescale", ["MODEL"])]
+        if {"retake", "extend"} & set(manifest.features):
+            required.extend([("SkulkLTXEditVideoLatent", ["LATENT"]), ("SkulkLTXEditAudioLatent", ["LATENT", "AUDIO"]), ("SkulkLTXPreserveVideo", ["IMAGE"]), ("SkulkLTXPreserveAudio", ["AUDIO"])])
+        if "dfr" in manifest.features:
+            required.append(("SkulkLTXAddGeneratedKeyframes", ["CONDITIONING", "CONDITIONING", "LATENT"]))
+        if "prompt_relay" in manifest.features:
+            required.extend([("SkulkLTXPromptRelayEncode", ["CONDITIONING"]), ("SkulkLTXApplyPromptRelay", ["MODEL"])])
+        for name, outputs in required:
+            data = bytearray()
+            with httpx.stream("GET", f"{self.base_url}/object_info/{name}", timeout=10.0) as response:
+                response.raise_for_status()
+                for chunk in response.iter_bytes(chunk_size=8192):
+                    data.extend(chunk)
+                    if len(data) > 65536:
+                        raise RuntimeError("Comfy extension schema reply exceeds its bound")
+            schemas = TypeAdapter(dict[str, _TrustedNodeSchema]).validate_json(bytes(data))
+            node = schemas.get(name)
+            if node is None or node.output != outputs:
+                raise RuntimeError(f"Comfy extension did not register its exact {name} contract")
 
     def log_tail(self, lines: int = 30) -> str:
         """The last lines of the server log, for error reports."""

@@ -419,3 +419,18 @@ async def test_a_worker_shutting_down_ends_the_install_promptly(
     # The waiters are left for the next worker, which plans the install again.
     assert not job.finished
     assert events.collect() == [] and commands.collect() == []
+
+
+async def test_comfy_overlay_waiters_never_share_different_builds(tmp_path: Path) -> None:
+    """Base installation and each exact overlay have separate completion gates."""
+    worker, _, _ = _worker(tmp_path)
+    recorder = _record_starts(worker)
+    first = InstallEngine(instance_id=_FIRST, engine="comfy", resolved_backend="comfy-cuda", expected_build="overlay-a")
+    second = InstallEngine(instance_id=_SECOND, engine="comfy", resolved_backend="comfy-cuda", expected_build="overlay-a")
+    await worker._start_engine_install(first)
+    await worker._start_engine_install(second)
+    assert len(recorder.started) == 1
+    assert len(worker._engine_install_jobs[("comfy", "comfy-cuda", "overlay-a")].waiters) == 2
+    await worker._start_engine_install(InstallEngine(instance_id=InstanceId("other-build"), engine="comfy", resolved_backend="comfy-cuda", expected_build="overlay-b"))
+    await worker._start_engine_install(InstallEngine(instance_id=InstanceId("base"), engine="comfy"))
+    assert len(recorder.started) == 3
