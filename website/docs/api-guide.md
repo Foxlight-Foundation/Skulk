@@ -1903,7 +1903,7 @@ Request fields (JSON keys or form fields):
 | `lora` | string | Name of a card companion adapter, for example a turbo LoRA |
 | `lora_strength` | number | 0.0 to 2.0 |
 | `audio` | boolean | Default `true`; the job fails at settlement if the render carries no audio track |
-| `pipeline` | string | LTX workflow: `distilled_two_stage` or `dev_two_stage`, matching the declared transformer; `retake` or `extend` requires matching `editing` controls. DFR (`dfr`) requires a distilled transformer declaring generated keyframes and an exact `dfr_spatial` IC-LoRA. HQ (`hq_two_stage`) still requires the exact Res2s sampler and is refused by the pinned Comfy core engine |
+| `pipeline` | string | LTX workflow: `distilled_two_stage` or `dev_two_stage`, matching the declared transformer; `retake` or `extend` requires matching `editing` controls. DFR (`dfr`) requires a distilled transformer declaring generated keyframes and an exact `dfr_spatial` IC-LoRA. HQ (`hq_two_stage`) requires a dev transformer and an exact issued Res2s extension on the placed Comfy instance; a base-only renderer is refused |
 | `audio_conditioning` | object | LTX distilled source-audio workflow: `start_seconds` (0–120, default 0) selects an uploaded `audio_source` segment covering the full aligned clip. Audio is frozen in both stages. Multipart supplies this object as JSON |
 | `editing` | object | Native LTX source-video workflow: `operation` is `retake` or `extend`. Retake requires inclusive `start_seconds` and exclusive `end_seconds`; `regenerate_audio` defaults true, false preserves the source waveform. The region may cover the complete aligned frame duration, which can exceed nominal `seconds` (for example 25 frames at 24 fps is 25/24 seconds). Region boundaries round outward onto the 8-frame latent grid. Extend appends to reach `seconds`, the total output length, and refuses retake-region controls. Requires `source_video` and an explicit source-matching `size` |
 | `prompt_relay` | object | Native LTX timed local prompts: `segments` contains 2–8 objects with `prompt` and positive relative `length` (1–120). Each scene receives at least one latent frame; remaining frames share the length ratio with deterministic rounding. Global plus local prompts total at most 8000 characters. Multipart supplies JSON |
@@ -1915,7 +1915,7 @@ Request fields (JSON keys or form fields):
 | `duration` | string | `fixed` (default) or LTX `auto`. Automatic prediction requires an exact `duration_head` companion and bounds the allocation before sampling. `seconds` is its maximum; omitted uses the card maximum. Actual container frames and duration are verified using PyAV from the isolated engine and recorded in the output |
 | `duration_min_seconds` | integer | LTX automatic-duration lower bound, otherwise refused. Omitted uses the card minimum; both bounds must lie within card limits and contain a complete 8n+1 grid. Timed keyframes must precede this lower bound |
 
-| `sampler` | string | Engine tier. LTX-2.5 distilled generation and extension accept only `euler_ancestral`; DFR and retake use fixed `euler`. Omitting the field selects the pipeline’s sampler. Native HQ selects Res2s through its pipeline and requires sampler overrides to be omitted. H3 omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
+| `sampler` | string | Engine tier. LTX-2.5 distilled generation and extension accept only `euler_ancestral`; DFR and retake use fixed `euler`. Omitting the field selects the pipeline’s sampler. HQ selects Res2s through its pipeline and requires sampler and scheduler overrides to be omitted. H3 omitted keeps `res_multistep`, the ComfyUI template's choice. Any sampler the pinned ComfyUI offers is accepted except those that cannot serve distilled H3, which are refused with the reason: `dpm_fast` and `dpm_adaptive` pick their own step count, and every `*_cfg_pp` variant plus `cfgpp_ud10_ab` needs a classifier-free guidance branch |
 | `scheduler` | string | Engine tier. H3 accepts `simple` (default), `normal`, `sgm_uniform`, `beta`, `kl_optimal`, `linear_quadratic`, `karras`, `exponential`, or `ddim_uniform`. LTX-2.5 distilled uses fixed manual sigma tables and requires this field to be omitted |
 | `video_shift` | number | Engine tier. Video sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's |
 | `audio_shift` | number | Engine tier. Audio sigma shift, 0.01 to 100; omitted takes the adapter's, else the card's. The audio schedule rides the video one scaled by `video_shift / audio_shift` |
@@ -1989,9 +1989,32 @@ The response is the video object with `status: "queued"`. One API node
 accepts 32 live jobs; beyond that the route returns **503** until one
 finishes.
 
-Native Apple LTX cards select `mlx_video-metal` and use the same video job endpoints and bounded reference/output contracts. Native `hq_two_stage` implements the pinned Res2s pipeline, while the pinned Comfy engine refuses that pipeline. Native metadata offers no selectable Comfy samplers/schedulers and currently lists H.264 output only. Request matching excludes native placements for explicit AV1 output before dispatch; Comfy placements retain AV1 support. Other explicit incompatible controls fail the job rather than being ignored. Generated keyframe intervals are resolved after bounded automatic duration prediction, so internal positions stay inside the actual clip. Missing exact converted-pack components fail before rendering, and the engine does not fetch alternate weights. Backend compatibility remains independent of retained hardware benchmarks; ordinary resource admission still applies.
+Native Apple LTX cards select `mlx_video-metal` and use the same video job endpoints and bounded reference/output contracts. Native `hq_two_stage` implements its pinned Res2s pipeline. Comfy HQ requires the published Res2s extension on the exact placed instance; an old instance cannot inherit support from a newer node installation. Native metadata offers no selectable Comfy samplers/schedulers and currently lists H.264 output only. Request matching excludes native placements for explicit AV1 output before dispatch; Comfy placements retain AV1 support. Other explicit incompatible controls fail the job rather than being ignored. Generated keyframe intervals are resolved after bounded automatic duration prediction, so internal positions stay inside the actual clip. Missing exact converted-pack components fail before rendering, and the engine does not fetch alternate weights. Backend compatibility remains independent of retained hardware benchmarks; ordinary resource admission still applies.
 
 Native placement charges staged working weights with runtime headroom, rather than treating all selected downloads as simultaneously resident. Each request also checks geometry, source buffers, joint sampling and decoder workspace before loading model tensors; disabling the output audio track still requires joint audio-latent sampling. A request that exceeds its placement's reservation fails with a resource explanation. Reduce duration/resolution, or raise the card's `runtime.video_memory_budget_bytes` and recreate the placement on capacity that can hold it. That setting can only raise the artifact-derived reservation. Live host pressure or excess process memory can also terminate a job, with its process group reaped. These guards do not turn an untested GPU into an incompatible GPU and do not provide a hard Metal allocator quota.
+
+The video section of `GET /v1/models` includes `pipeline_defaults` and
+`engine_feature_builds`. The former supplies workflow-specific base intervals,
+sampler, stage interval counts and guidance. Comfy HQ defaults to 15 base intervals
+and three refinement intervals, with video/audio CFG 3/7, modality guidance 3,
+and fixed video/audio rescaling 0.45/1.0. An explicit `steps` changes only its
+base interval count. The output retains base-stage audio after joint refinement.
+`stats.engine` records Res2s, actual stage LoRA strengths (base 0.25, refine 0.5)
+in `stage_lora_strengths`, and both rescaling values in
+`guidance_video_rescale` and `guidance_audio_rescale`. Retrieval and listing
+preserve these fields. Native HQ reports its issued workflow: no base-stage
+LoRA application (`base: 0.0`) and the selected companion strength in `refine`,
+with video/audio rescaling 0.45/1.0. Backend-specific stage strengths describe
+actual execution rather than claiming numerical equivalence.
+
+`engine_feature_builds` lists issued code identities and their advanced features.
+Native identities match the full placed build. Comfy source/payload selectors
+match the full instance build after removing only its `/torch@version` segment;
+source revision and extension payload must both agree. Consumers use the
+instance's `resolvedEngineBuild`, never current node inventory as evidence that
+an older instance gained features. An unpublished candidate adds no feature or
+installation offer. Normal resource admission still applies on compatible
+untested hardware.
 
 ### Poll a job
 

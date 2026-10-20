@@ -27,6 +27,7 @@ from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
     RegistryEngineSupportClaim,
 )
+from skulk.shared.models.video_support import video_engine_feature_builds
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.music import MusicJobStatus, MusicOutputManifest
@@ -51,6 +52,7 @@ from skulk.shared.types.video import (
     VideoCodecName,
     VideoDecoder,
     VideoEditing,
+    VideoExecutionFeature,
     VideoGuidance,
     VideoGuideKind,
     VideoJobStatus,
@@ -840,6 +842,18 @@ class VideoReferenceLimitsSection(BaseModel):
     )
 
 
+@final
+class VideoPipelineDefaults(BaseModel):
+    """Sampling defaults for one family workflow, independent of another workflow."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    base_steps: int = Field(ge=1, le=1000, description="Base-stage integration intervals when the caller omits steps.")
+    sampler: str = Field(description="Fixed workflow sampler recorded for execution; callers omit overrides.")
+    sampling_stage_steps: list[int] = Field(description="Default integration intervals for every stage.")
+    guidance: VideoGuidance | None = Field(default=None, description="Base-stage guidance defaults for this workflow.")
+
+
 class VideoCapabilitySection(BaseModel):
     """Declared video generation contract from the model card.
 
@@ -859,6 +873,8 @@ class VideoCapabilitySection(BaseModel):
     )
     pipelines: list[VideoPipeline] = Field(default_factory=list, description="Implemented baseline family pipelines available with this selected artifact.")
     pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by every required asset of each implemented pipeline.")
+    pipeline_defaults: dict[VideoPipeline, VideoPipelineDefaults] = Field(default_factory=dict, description="Workflow-specific defaults; a workflow does not inherit another workflow's steps or guidance.")
+    engine_feature_builds: dict[str, list[VideoExecutionFeature]] = Field(default_factory=dict, description="Issued advanced feature sets keyed by native build or Comfy source/payload identity. Match the placed instance's resolved build, not current node inventory; Comfy selectors omit only the /torch@version segment.")
     decoders: list[VideoDecoder] = Field(default_factory=list, description="Selectable decoders whose exact components are present.")
     decoder_modes: dict[VideoDecoder, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by each selected decoder and its pipeline assets.")
     temporal_upscaling: bool = Field(default=False, description="DFR temporal x2 is available with selected temporal and spatial refinement assets.")
@@ -1014,6 +1030,7 @@ class VideoCapabilitySection(BaseModel):
         dev_modes: list[VideoModeName] = [mode for mode in spatial_modes if mode in companion_modes(VideoCompanionKind.Lora, "distilled_refinement")] if config.transformer_variant == "dev" else []
         ltx_distilled, ltx_dev = bool(distilled_modes), bool(dev_modes)
         ltx_available = ltx_distilled or ltx_dev
+        feature_builds = video_engine_feature_builds(engines) if ltx else {}
         pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = {}
         if distilled_modes:
             pipeline_modes["distilled_two_stage"] = distilled_modes
@@ -1022,7 +1039,7 @@ class VideoCapabilitySection(BaseModel):
                 pipeline_modes["dfr"] = dfr_modes
         if dev_modes:
             pipeline_modes["dev_two_stage"] = dev_modes
-            if any(engine_of(backend) == "mlx_video" for backend in model_card.placement.compatible_backends):
+            if any("hq_two_stage" in features for features in feature_builds.values()):
                 pipeline_modes["hq_two_stage"] = dev_modes
         served_modes: list[VideoModeName] = distilled_modes or dev_modes
         reference_mode: list[VideoModeName] = ["ref2va"] if prerequisites and VideoMode.ReferenceToAudioVideo in config.modes else []
@@ -1048,6 +1065,8 @@ class VideoCapabilitySection(BaseModel):
             transformer_variant=config.transformer_variant,
             pipelines=list(pipeline_modes),
             pipeline_modes=pipeline_modes,
+            pipeline_defaults={"hq_two_stage": VideoPipelineDefaults(base_steps=15, sampler="res2s", sampling_stage_steps=[15, 3], guidance=VideoGuidance(modality_scale=3.0))} if "hq_two_stage" in pipeline_modes else {},
+            engine_feature_builds=feature_builds,
             codecs=["h264"] if native_only else list(VIDEO_CODECS),
             decoders=list(decoder_modes),
             decoder_modes=decoder_modes,
@@ -2989,9 +3008,9 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """The engine settings a render resolved and ran with."""
 
     sampler: str
-    """Sampler that integrated the render (a `KSamplerSelect` name)."""
+    """Sampler that integrated the render, including fixed family samplers."""
     scheduler: str
-    """Schedule that placed its noise levels (a `BasicScheduler` name)."""
+    """Schedule that placed its noise levels, including fixed family schedules."""
     steps: int
     """Sampling steps the schedule ran."""
     seed: int | None = None
@@ -3002,6 +3021,18 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Selected decoder, when applicable."""
     guidance: VideoGuidance | None = None
     """Guidance applied to the base stage."""
+    stage_lora_strengths: dict[Literal["base", "refine"], float] = Field(
+        default_factory=dict,
+        description="Exact fixed adapter strengths applied by each family workflow stage.",
+    )
+    guidance_video_rescale: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Video guidance rescaling applied after the base-stage guidance branches.",
+    )
+    guidance_audio_rescale: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Audio guidance rescaling applied after the base-stage guidance branches.",
+    )
     temporal_upscalings: Literal[0, 1] = 0
     """Executed DFR temporal x2 passes."""
     generated_keyframe_interval: int | None = None

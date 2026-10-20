@@ -141,11 +141,12 @@ def _sampling_stage(
         audio_latent=audio,
     )
     prompt[f"ltx_{name}_noise"] = _node("RandomNoise", "Noise", noise_seed=seed)
-    if name == "base" and render.pipeline == "dev_two_stage":
+    if name == "base" and render.pipeline in ("dev_two_stage", "hq_two_stage"):
         prompt[f"ltx_{name}_sigmas"] = _node(
             "LTXVScheduler", "Guided base schedule", steps=render.plan.steps,
             max_shift=2.05, base_shift=0.95, stretch=True, terminal=0.1,
-            latent=video,
+            # The reference shifts by the target canvas, before guide slots.
+            latent=_link("ltx_video_latent") if render.pipeline == "hq_two_stage" else video,
         )
     else:
         prompt[f"ltx_{name}_sigmas"] = _node(
@@ -318,6 +319,12 @@ def build_ltx_prompt(
         prompt["ltx_frozen_source_audio"] = _node("LTXVFreezeLatent", "Freeze source audio", latent=_link("ltx_encoded_source_audio"))
         audio_latent = _link("ltx_frozen_source_audio")
     base_model = _link("unet")
+    if render.pipeline == "hq_two_stage":
+        if files.refinement_lora is None:
+            raise ValueError("LTX-2.5 HQ requires its selected distilled refinement LoRA")
+        prompt["sampler_select"] = _node("SkulkLTXRes2sSampler", "Reference Res2s sampler")
+        prompt["ltx_hq_base_lora"] = _node("LoraLoaderModelOnly", "HQ guided base model", model=base_model, lora_name=files.refinement_lora, strength_model=0.25)
+        base_model = _link("ltx_hq_base_lora")
     if render.guidance is not None:
         if render.guidance.stg_scale:
             prompt["ltx_stg"] = _node("LTXVSpatioTemporalGuidance", "Spatiotemporal guidance", model=base_model, scale=render.guidance.stg_scale, blocks="28", start_percent=0.0, end_percent=1.0)
@@ -325,6 +332,9 @@ def build_ltx_prompt(
         if render.guidance.modality_scale != 1.0:
             prompt["ltx_modality"] = _node("LTXVModalityGuidance", "Audio/video guidance", model=base_model, modality_scale=render.guidance.modality_scale, start_percent=0.0, end_percent=1.0)
             base_model = _link("ltx_modality")
+    if render.pipeline == "hq_two_stage":
+        prompt["ltx_hq_rescale"] = _node("SkulkLTXGuidanceRescale", "HQ per-modality guidance rescaling", model=base_model, video_scale=0.45, audio_scale=1.0)
+        base_model = _link("ltx_hq_rescale")
     positive, negative, video, guided = _condition_images(
         prompt,
         references,
@@ -396,15 +406,16 @@ def build_ltx_prompt(
         prompt["ltx_dfr_detail_guide"] = _node("LTXVAddLatentGuide", "Half-resolution detail reference", positive=_link("ltx_refine_keyframes", 0), negative=_link("ltx_refine_keyframes", 1), vae=_link("video_vae"), latent=_link("ltx_refine_keyframes", 2), guiding_latent=base_video, latent_idx=0, strength=1.0)
         positive, negative, video = (_link("ltx_dfr_detail_guide", 0), _link("ltx_dfr_detail_guide", 1), _link("ltx_dfr_detail_guide", 2))
         guided = True
-    if render.pipeline == "dev_two_stage":
+    if render.pipeline in ("dev_two_stage", "hq_two_stage"):
         if files.refinement_lora is None:
             raise ValueError("LTX-2.5 guided refinement requires its exact distilled LoRA")
-        prompt["ltx_refinement_lora"] = _node("LoraLoaderModelOnly", "Distilled refinement model", model=refinement_model, lora_name=files.refinement_lora, strength_model=files.refinement_strength)
+        prompt["ltx_refinement_lora"] = _node("LoraLoaderModelOnly", "Distilled refinement model", model=refinement_model, lora_name=files.refinement_lora, strength_model=0.5 if render.pipeline == "hq_two_stage" else files.refinement_strength)
         refinement_model = _link("ltx_refinement_lora")
-        # Guided upstream refinement keeps stage-one audio clean; it is
-        # cross-attention context rather than a second audio generation.
-        prompt["ltx_frozen_audio"] = _node("LTXVFreezeLatent", "Keep base audio", latent=refinement_audio)
-        refinement_audio = _link("ltx_frozen_audio")
+        # HQ re-noises audio to condition its video refiner even though the
+        # output keeps base audio. The ordinary Dev path freezes that context.
+        if render.pipeline == "dev_two_stage":
+            prompt["ltx_frozen_audio"] = _node("LTXVFreezeLatent", "Keep base audio", latent=refinement_audio)
+            refinement_audio = _link("ltx_frozen_audio")
     second = _sampling_stage(
         prompt,
         "refine",

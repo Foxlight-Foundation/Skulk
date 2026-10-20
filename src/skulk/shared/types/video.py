@@ -140,6 +140,10 @@ VideoCodecName = Literal["h264", "av1"]
 VideoPipeline = Literal["distilled_two_stage", "dev_two_stage", "hq_two_stage", "dfr", "retake", "extend"]
 """Family-specific execution workflow; engines must refuse unavailable workflows."""
 
+VideoExecutionFeature = Literal["hq_two_stage", "audio_conditioning", "retake", "extend", "prompt_relay"]
+"""Advanced execution contracts selected by an instance's immutable engine build."""
+
+
 VideoDecoder = Literal["convolutional", "diffusion"]
 """Explicit decoder choice, independently bound to selected artifact files."""
 
@@ -650,8 +654,10 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError(
                 "LTX-2.5 distilled rendering uses a fixed 8-step base schedule"
             )
+        if pipeline == "hq_two_stage" and (self.sampler is not None or self.scheduler is not None):
+            raise ValueError("LTX-2.5 HQ uses its fixed Res2s sampler and family schedule; omit sampler and scheduler overrides")
         expected_sampler = "euler_ancestral" if video.transformer_variant == "distilled" and pipeline not in ("retake", "dfr") else "euler"
-        if self.sampler not in (None, expected_sampler) or self.scheduler is not None:
+        if pipeline != "hq_two_stage" and (self.sampler not in (None, expected_sampler) or self.scheduler is not None):
             raise ValueError(
                 f"LTX-2.5 {pipeline} uses its fixed {expected_sampler} sampler and family schedule"
             )
@@ -808,9 +814,9 @@ class VideoEngineSettings(CamelCaseModel):
     model_config = ConfigDict(frozen=True)
 
     sampler: str
-    """Sampler that integrated the render (a `KSamplerSelect` name)."""
+    """Sampler that integrated the render, including a workflow-owned Res2s integrator."""
     scheduler: str
-    """Schedule that placed its noise levels (a `BasicScheduler` name)."""
+    """Schedule that placed the noise levels, including fixed family schedules."""
     steps: int = Field(ge=1)
     """Sampling steps the schedule ran."""
     seed: int | None = Field(default=None, ge=0)
@@ -841,6 +847,9 @@ class VideoEngineSettings(CamelCaseModel):
     """Adapter companion name, when one was applied."""
     adapter_strength: float | None = None
     """Strength the adapter was applied at; ``None`` without an adapter."""
+    stage_lora_strengths: dict[Literal["base", "refine"], float] = Field(default_factory=dict, description="Exact fixed per-stage LoRA strengths when a family workflow owns more than one adapter application.")
+    guidance_video_rescale: float | None = Field(default=None, ge=0.0, le=1.0, description="Video guidance rescaling actually applied after the base-stage guidance branches.")
+    guidance_audio_rescale: float | None = Field(default=None, ge=0.0, le=1.0, description="Audio guidance rescaling actually applied after the base-stage guidance branches.")
     width: int = Field(ge=1)
     """Output canvas width in pixels."""
     height: int = Field(ge=1)

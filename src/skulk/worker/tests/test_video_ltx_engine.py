@@ -536,3 +536,91 @@ def test_dfr_fixed_sampler_cannot_be_replaced_by_distilled_ancestral() -> None:
     metadata = VideoCapabilitySection.from_model_card(_dfr_card())
     assert metadata is not None and metadata.samplers == ["euler_ancestral", "euler"]
     assert metadata.default_sampler == "euler_ancestral"
+
+
+def _issued_res2s_build(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Represent issued-code inventory without publishing any test candidate."""
+    from skulk.provisioning import comfy_extension
+
+    wheel = comfy_extension.ComfyExtensionWheel(filename="skulk_comfy_ltx-0.1.0-py3-none-any.whl", sha256="a" * 64, payload_sha256="b" * 64, size_bytes=1000, features=("res2s",), comfy_revision=comfy_extension.COMFY_PIN, ltx_revision=comfy_extension.LTX_REFERENCE_REVISION)
+    monkeypatch.setattr(comfy_extension, "PUBLISHED_EXTENSIONS", (wheel,))
+    return wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@2.14.0+cu130")
+
+
+@pytest.mark.parametrize("backend", ["comfy-cuda", "comfy-rocm"])
+def test_hq_requires_the_exact_issued_instance_build(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    from skulk.shared.models.video_support import video_request_supported
+
+    params, card = _params(pipeline="hq_two_stage"), _dev_card()
+    build = _issued_res2s_build(monkeypatch)
+    if backend == "comfy-rocm":
+        build = build.replace("cu130", "rocm7.4")
+    assert video_request_supported(card, params, backend, build)
+    for old in (None, "old-build", build.split("/extension@")[0], build.replace("b" * 64, "c" * 64)):
+        assert not video_request_supported(card, params, backend, old)
+        with pytest.raises(ValueError, match="published Res2s"):
+            plan_comfy_render(params, card, engine_build=old)
+
+
+def test_hq_uses_reference_stages_guidance_and_joint_refinement(monkeypatch: pytest.MonkeyPatch) -> None:
+    params = _params(pipeline="hq_two_stage")
+    render = plan_comfy_render(params, _dev_card(), engine_build=_issued_res2s_build(monkeypatch))
+    graph = build_prompt(render, params, (), "hq")
+    assert render.sampler_steps == {"ltx_base_sampler": 15, "ltx_refine_sampler": 3}
+    assert render.sampler == "res2s" and render.steps == 18
+    assert graph["sampler_select"]["class_type"] == "SkulkLTXRes2sSampler"
+    assert graph["ltx_hq_base_lora"]["inputs"]["strength_model"] == 0.25
+    assert graph["ltx_refinement_lora"]["inputs"]["strength_model"] == 0.5
+    assert graph["ltx_hq_base_lora"]["inputs"]["model"] == ["unet", 0]
+    assert graph["ltx_refinement_lora"]["inputs"]["model"] == ["unet", 0]
+    assert graph["ltx_base_guider"]["inputs"]["model"] == ["ltx_hq_rescale", 0]
+    assert graph["ltx_base_guider"]["inputs"]["video_cfg"] == 3.0
+    assert graph["ltx_base_guider"]["inputs"]["audio_cfg"] == 7.0
+    assert graph["ltx_modality"]["inputs"]["modality_scale"] == 3.0
+    assert graph["ltx_modality"]["inputs"]["model"] == ["ltx_hq_base_lora", 0]
+    assert graph["ltx_hq_rescale"]["inputs"]["video_scale"] == 0.45
+    assert graph["ltx_hq_rescale"]["inputs"]["audio_scale"] == 1.0
+    assert graph["ltx_base_sigmas"]["inputs"]["latent"] == ["ltx_video_latent", 0]
+    assert graph["ltx_refine_sigmas"]["inputs"]["sigmas"] == "0.909375, 0.725, 0.421875, 0.0"
+    assert "ltx_frozen_audio" not in graph
+    assert graph["ltx_refine_av"]["inputs"]["audio_latent"] == ["ltx_base_split", 1]
+    assert graph["decode_audio"]["inputs"]["samples"] == ["ltx_base_split", 1]
+    assert graph["ltx_refine_guider"]["inputs"]["video_cfg"] == 1.0
+    settings = render.engine_settings()
+    assert settings.stage_lora_strengths == {"base": 0.25, "refine": 0.5}
+    assert (settings.guidance_video_rescale, settings.guidance_audio_rescale) == (0.45, 1.0)
+
+
+def test_hq_standard_decode_strips_generated_slots_before_refinement(monkeypatch: pytest.MonkeyPatch) -> None:
+    params = _params(pipeline="hq_two_stage", generated_keyframe_interval=24)
+    card = _dev_card()
+    assert card.video is not None
+    card = card.model_copy(update={"video": card.video.model_copy(update={"generated_keyframes": True})})
+    graph = build_prompt(plan_comfy_render(params, card, engine_build=_issued_res2s_build(monkeypatch)), params, (), "hq")
+    assert graph["ltx_spatial_upscale"]["inputs"]["samples"] == ["ltx_strip_generated", 2]
+    assert graph["ltx_refine_av"]["inputs"]["video_latent"] == ["ltx_spatial_upscale", 0]
+    assert graph["decode_video"]["inputs"]["samples"] == ["ltx_refine_split", 0]
+    assert "ltx_refine_keyframes" not in graph and "ltx_dfr_detail_guide" not in graph
+
+
+def test_hq_metadata_binds_issued_builds_and_its_own_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skulk.shared.models.video_support import video_feature_build_key
+
+    build = _issued_res2s_build(monkeypatch)
+    metadata = VideoCapabilitySection.from_model_card(_dev_card())
+    assert metadata is not None and "hq_two_stage" in metadata.pipelines
+    defaults = metadata.pipeline_defaults["hq_two_stage"]
+    assert defaults.base_steps == 15 and defaults.sampler == "res2s"
+    assert defaults.sampling_stage_steps == [15, 3]
+    assert defaults.guidance is not None and defaults.guidance.modality_scale == 3.0
+    assert metadata.engine_feature_builds[video_feature_build_key(build) or ""] == ["hq_two_stage"]
+    assert video_feature_build_key(build + "/extra") is None
+    assert video_feature_build_key(build.replace("/torch@", "/unknown@")) is None
+    explicit = plan_comfy_render(_params(pipeline="hq_two_stage", steps=7), _dev_card(), engine_build=build)
+    assert explicit.sampler_steps == {"ltx_base_sampler": 7, "ltx_refine_sampler": 3}
+
+
+@pytest.mark.parametrize("sampler", ["euler", "euler_ancestral"])
+def test_hq_never_accepts_another_sampler_override(sampler: str) -> None:
+    with pytest.raises(ValueError, match="fixed Res2s"):
+        plan_comfy_render(_params(pipeline="hq_two_stage", sampler=sampler), _dev_card())
