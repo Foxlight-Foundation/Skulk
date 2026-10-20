@@ -46,6 +46,10 @@ from skulk.store.preservation import recovery_card, validate_recovery_layout
 from skulk.store.preservation_closure import companion_selections, map_recovery_members
 
 
+class PreservationCapacityError(PreservationError):
+    """Refuse capture before copying when snapshot/archive space is insufficient."""
+
+
 @final
 class PreservePlan(BaseModel):
     """Read-only selected installation summary; not a grant or a completed copy."""
@@ -257,13 +261,28 @@ def preserve_installed(
     active = control or OperationControl()
     with directory(destination) as archive_descriptor:
         identity = os.fstat(archive_descriptor)
-        needed = 2 * sum(
+        source_bytes = sum(
             file.size_bytes for source in sources for file in source.record.files
         )
-        if shutil.disk_usage(destination).free < needed + 16 * 1024 * 1024:
-            raise PreservationError(
-                "not enough space for a private snapshot and preservation copy"
-            )
+        snapshot_location = snapshot_parent or destination
+        snapshot_device = snapshot_location.stat().st_dev
+        reserve = 16 * 1024 * 1024
+        snapshot_free = shutil.disk_usage(snapshot_location).free
+        archive_free = shutil.disk_usage(archive_descriptor).free
+        if snapshot_device == identity.st_dev:
+            if min(snapshot_free, archive_free) < 2 * source_bytes + reserve:
+                raise PreservationCapacityError(
+                    "not enough space for a private snapshot and preservation copy"
+                )
+        else:
+            if snapshot_free < source_bytes + reserve:
+                raise PreservationCapacityError(
+                    "not enough space on private snapshot storage"
+                )
+            if archive_free < source_bytes + reserve:
+                raise PreservationCapacityError(
+                    "not enough space on preservation archive storage"
+                )
         with tempfile.TemporaryDirectory(
             prefix=".skulk-preserve-", dir=snapshot_parent or destination
         ) as temporary:

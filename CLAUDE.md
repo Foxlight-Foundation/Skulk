@@ -20,6 +20,32 @@ The `pyinstaller40` entry point in `_pyinstaller/` includes the public core's
 JSON schemas and distribution metadata in frozen builds. Keep the resource
 closure test separate from actual desktop signing and release qualification.
 
+Core-owned preservation jobs live in `store/preservation_host.py`, with private
+SQLite state in `store/preservation_journal.py` and known owned byte subprocesses
+in `store/preservation_worker.py`. The actual `ModelStoreServer` lazily binds its
+existing ModelStore; do not instantiate another live writer. Preserve uses that
+store's mutation fence until its worker stops; archive-only Check does not hold
+the canonical store fence. `api/preservation.py` adds operator-gated private
+inventory, built-in archive setup, exact plans, idempotent jobs and cancellation
+on the Core API, never the unauthenticated store-file listener.
+
+An already opened archive descriptor crosses into the worker, whose process-local
+cwd pins that filesystem. Private snapshot staging stays outside mounted archives
+and capability generations; capture checks snapshot and archive free space on
+their actual filesystems, combining the requirement when they share a device.
+Before publication the worker waits for the journal's durable expected-manifest
+acknowledgement; parent EOF exits the worker. Source and frozen launches use the
+known entry (`_preservation-worker` for frozen Core), never a browser command/path.
+
+Page/capability closure does not own Core work. Restart fails/cancels jobs that
+could not publish and retains uncertainty only with an expected manifest. An
+explicit successful Check binds the verified copy to the original expected model,
+location and manifest, then marks it reconciled without replaying the capture.
+Verification remains available when the uncertainty limit blocks new captures.
+The first host effects are private Preserve/Check; fresh-home native recovery and
+standalone public mirror/BitTorrent tools are separate surfaces. See the API guide
+and both architecture references for current contracts and remaining boundaries.
+
 Skulk is a distributed AI inference system that connects multiple devices into one cluster. It runs large language models across machines using MLX as the inference backend and libp2p for peer-to-peer networking. Skulk began as a fork of exo and has substantially diverged.
 
 ## Build & Run Commands

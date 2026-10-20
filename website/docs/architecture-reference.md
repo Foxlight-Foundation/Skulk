@@ -2013,7 +2013,8 @@ LTX advanced requests carry explicit source-audio, retake/extension and timed-lo
   process owner, immutable plans and request reservations, retained copy receipts,
   bounded control pages; restart interrupts uncertain work without replay.
 - `store/preservation_worker.py`: known subprocess entry, pinned archive descriptor,
-  process-local cwd, private snapshot staging, safe bounded progress and expected
+  process-local cwd, private snapshot staging with separate filesystem capacity
+  observations (combined on a shared device), safe bounded progress and expected
   manifest acknowledgement before signed publication. Parent EOF exits the worker.
 - `api/preservation.py`: operator-gated `/preservation/library`, `/setup/device`,
   `/plans`, `/jobs`, `/jobs/{job_id}` and `/jobs/{job_id}/cancel`. No browser-supplied

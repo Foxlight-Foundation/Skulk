@@ -5724,7 +5724,10 @@ Preserve runs under the existing store owner's mutation fence and independently
 checks the copied complete closure. Workers use an already opened archive
 directory; missing/replaced mount paths never become substitute folders. Private
 local snapshot staging and capture custody stay outside capability generations.
-Core records the expected manifest durably before acknowledging publication.
+Capture observes free space on the private snapshot and archive filesystems
+separately, combining their requirement on a shared device. A failed capacity
+check reports `insufficient_space` before model bytes are copied. Core records
+the expected manifest durably before acknowledging publication.
 Core restart marks uncertain jobs `interrupted` and requires an explicit outcome
 check; it never automatically replays them. Closing/restarting a capability does
 not cancel Core work. These controls currently provide private Preserve and

@@ -20,7 +20,11 @@ from foxlight_model_preservation.signing import load_key
 from foxlight_model_preservation.storage import verify_store
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from skulk.store.preservation_export import preservation_generation, preserve_installed
+from skulk.store.preservation_export import (
+    PreservationCapacityError,
+    preservation_generation,
+    preserve_installed,
+)
 
 
 class WorkerRequest(BaseModel):
@@ -132,7 +136,14 @@ def run_worker(request: WorkerRequest) -> int:
         )
         return 0
     except Exception as error:
-        _emit({"event": "error", "error_code": failure_code(error)})
+        _emit(
+            {
+                "event": "error",
+                "error_code": "insufficient_space"
+                if isinstance(error, PreservationCapacityError)
+                else failure_code(error),
+            }
+        )
         return 1
 
 

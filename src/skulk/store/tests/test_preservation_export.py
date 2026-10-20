@@ -710,3 +710,77 @@ async def test_preserve_companion_downloaded_through_normal_store(
         accept_owner_capture=True,
     )
     assert report.members == ("example/base", "example/companion")
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["snapshot_full", "archive_full", "shared_capacity", "separate_capacity"],
+)
+def test_snapshot_and_archive_capacity_are_checked_on_their_own_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    """Simulated filesystem observations refuse before copying; no mount qualification."""
+    import shutil
+
+    from skulk.store.preservation_export import PreservationCapacityError
+
+    installed = make_preservation_installation(tmp_path, "assistant")
+    with (installed.primary / "model.safetensors").open("wb") as weights:
+        weights.truncate(32 * 1024 * 1024)
+    write_installed_card(
+        installed.primary,
+        build_installed_card_record(installed.primary, installed.card),
+    )
+    snapshot = tmp_path / "private-snapshot"
+    snapshot.mkdir(mode=0o700)
+    selected = plan_preservation(
+        installed.primary, artifact_roots=(installed.primary.parent,)
+    )
+    reserve = 16 * 1024 * 1024
+    one_copy = selected.source_bytes + reserve + 2 * 1024 * 1024
+    real_stat = Path.stat
+    device = installed.archive.stat().st_dev
+    real_usage = shutil.disk_usage
+    usage_type = type(real_usage(tmp_path))
+
+    def observe_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        info = real_stat(path, follow_symlinks=follow_symlinks)
+        if path == snapshot and scenario != "shared_capacity":
+            values = list(info)
+            values[2] = device + 1
+            return os.stat_result(values)
+        return info
+
+    def observe_usage(path: str | Path | int) -> tuple[int, int, int]:
+        if path == snapshot:
+            free = 0 if scenario == "snapshot_full" else one_copy
+        elif isinstance(path, int) or path == installed.archive:
+            free = 0 if scenario == "archive_full" else one_copy
+        else:
+            return real_usage(path)
+        return usage_type(one_copy * 4, one_copy * 4 - free, free)
+
+    monkeypatch.setattr(Path, "stat", observe_stat)
+    monkeypatch.setattr(shutil, "disk_usage", observe_usage)
+    if scenario == "separate_capacity":
+        identity = preserve_installed(
+            installed.primary,
+            installed.archive,
+            (load_key(installed.key, None),),
+            artifact_roots=(installed.primary.parent,),
+            snapshot_parent=snapshot,
+        )
+        assert (
+            verify_store(installed.archive, identity, installed.trust).total_bytes > 0
+        )
+    else:
+        with pytest.raises(PreservationCapacityError, match="not enough space"):
+            preserve_installed(
+                installed.primary,
+                installed.archive,
+                (load_key(installed.key, None),),
+                artifact_roots=(installed.primary.parent,),
+                snapshot_parent=snapshot,
+            )
+        assert not tuple(installed.archive.iterdir())
+    assert not tuple(snapshot.iterdir())

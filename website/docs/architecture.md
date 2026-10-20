@@ -3238,7 +3238,8 @@ lifetimes. The current host effects are private Preserve and Check.
 An exclusively owned subprocess performs byte work while Core holds the store's
 existing mutation fence. Its archive directory is opened and pinned before
 launch; it uses a process-local working directory on that descriptor and private
-local snapshot staging. Before publication, the worker waits for Core's durable
+local snapshot staging. Capacity checks cover both snapshot and archive devices
+and combine their needs on a shared filesystem. Before publication, the worker waits for Core's durable
 expected-manifest acknowledgement. Parent control loss exits the worker; restart
 marks uncertain work interrupted and requires an explicit outcome check. Page
 or capability restart has no byte-worker ownership. The standalone public mirror
