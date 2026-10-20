@@ -126,10 +126,10 @@ def test_comfy_runner_limit_does_not_shrink_intrinsic_model_truth() -> None:
     assert card.video is not None
     assert card.video.editing == ("retake", "extend") and card.video.prompt_relay
     metadata = VideoCapabilitySection.from_model_card(card)
-    assert metadata is not None and not metadata.editing and not metadata.prompt_relay
+    assert metadata is not None and metadata.editing == ["retake", "extend"] and not metadata.prompt_relay
     source = _reference("video")
     params = _params(editing={"operation": "extend"}, references=(source,), reference_bytes=1, total_input_chunks=1)
-    with pytest.raises(ValueError, match="temporal"):
+    with pytest.raises(ValueError, match="published extension"):
         plan_comfy_render(params, card)
 
 

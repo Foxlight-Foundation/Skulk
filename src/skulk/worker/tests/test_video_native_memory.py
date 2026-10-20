@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
-from contextlib import suppress
+import time
 from pathlib import Path
 
 import psutil
@@ -17,6 +18,7 @@ from skulk.shared.tests.model_card_fixtures import load_fixture_card
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.video import VideoGenerationTaskParams
+from skulk.worker.runner.mlx_video import process as native_process
 from skulk.worker.runner.mlx_video.memory import (
     NativeMemoryPlan,
     NativeWeightProfile,
@@ -198,6 +200,7 @@ def test_measured_peak_over_reservation_is_a_failed_job(tmp_path: Path) -> None:
 
 
 def test_live_pressure_refusal_reaps_native_child_group(tmp_path: Path) -> None:
+    """Pressure failure keeps its resource reason after stopping every encoder."""
     interpreter = tmp_path / "interpreter"
     child_file = tmp_path / "child.pid"
     interpreter.write_text(f"#!{sys.executable}\nimport subprocess,time\nfrom pathlib import Path\nchild=subprocess.Popen([{sys.executable!r},'-c','import time;time.sleep(60)'])\nPath({str(child_file)!r}).write_text(str(child.pid))\ntime.sleep(60)\n")
@@ -205,7 +208,56 @@ def test_live_pressure_refusal_reaps_native_child_group(tmp_path: Path) -> None:
     job = _job(tmp_path)
     with pytest.raises(ValueError, match="controlled pressure refusal"):
         run_native_job(interpreter, job, progress=lambda _record: None, is_cancelled=lambda: False, resource_guard=lambda _pid: "controlled pressure refusal" if child_file.exists() else None)
-    child = int(child_file.read_text())
-    with suppress(psutil.NoSuchProcess):
-        assert psutil.Process(child).status() == psutil.STATUS_ZOMBIE
+    _assert_child_stopped(int(child_file.read_text()))
+    assert not (Path(job.output_dir) / "job.json").exists()
+
+
+def _assert_child_stopped(identifier: int) -> None:
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            if psutil.Process(identifier).status() == psutil.STATUS_ZOMBIE:
+                return
+        except psutil.NoSuchProcess:
+            return
+        time.sleep(0.025)
+    pytest.fail("native render left a live encoder child")
+
+
+def test_successful_wrapper_retains_its_pid_until_encoder_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exited wrapper cannot leave a TERM-resistant encoder or release its PID early."""
+    interpreter = _fake_interpreter(tmp_path, peak=100)
+    body = interpreter.read_text().split("\n", 1)[1]
+    child_file = tmp_path / "encoder.pid"
+    child = f"import os,signal,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path({str(child_file)!r}).write_text(str(os.getpid()));time.sleep(60)"
+    interpreter.write_text(f"#!{sys.executable}\nimport subprocess,time\nfrom pathlib import Path\nsubprocess.Popen([{sys.executable!r},'-c',{child!r}])\nwhile not Path({str(child_file)!r}).exists():time.sleep(.01)\n" + body)
+    original = native_process.terminate_process_group
+    observed: list[int] = []
+
+    def cleanup(process: subprocess.Popen[str], *, grace_seconds: float = 1.0) -> None:
+        assert process.returncode is None
+        assert native_process.observe_process_exit(process) is not None
+        observed.append(process.pid)
+        original(process, grace_seconds=grace_seconds)
+
+    monkeypatch.setattr(native_process, "terminate_process_group", cleanup)
+    job = _job(tmp_path)
+    result = run_native_job(interpreter, job, progress=lambda _record: None, is_cancelled=lambda: False)
+    assert result is not None and result.steps == 11 and len(observed) == 1
+    _assert_child_stopped(int(child_file.read_text()))
+    assert not (Path(job.output_dir) / "job.json").exists()
+
+
+def test_native_request_is_removed_when_group_cleanup_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A propagated cleanup error must not retain prompts or reference paths."""
+    original = native_process.terminate_process_group
+
+    def cleanup(process: subprocess.Popen[str], *, grace_seconds: float = 1.0) -> None:
+        original(process, grace_seconds=grace_seconds)
+        raise RuntimeError("controlled cleanup failure")
+
+    monkeypatch.setattr(native_process, "terminate_process_group", cleanup)
+    job = _job(tmp_path)
+    with pytest.raises(RuntimeError, match="controlled cleanup failure"):
+        run_native_job(_fake_interpreter(tmp_path, peak=100), job, progress=lambda _record: None, is_cancelled=lambda: False)
     assert not (Path(job.output_dir) / "job.json").exists()

@@ -46,6 +46,9 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
     services = ManagedServices(path)
     extensions = LoadedExtensions([], managed_services=services)
     extensions.run_startup_hooks(replace(context(), skulk_version="1.5.2"))
+    # Startup attachment replaces controllers when it rebinds the manager.
+    # Settle it before retaining handles to installations created below.
+    await services.refresh()
     pairing, exchange = paired_service(tmp_path / "pairing")
     app = FastAPI()
     app.include_router(create_plugins_router(extensions, pairing))

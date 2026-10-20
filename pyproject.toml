@@ -118,6 +118,8 @@ hook-dirs = "skulk._pyinstaller:get_hook_dirs"
 [dependency-groups]
 dev = [
   "basedpyright>=1.29.0",
+  # Execute the immutable upstream patchifiers in the wheel reference check.
+  "einops==0.8.1",
   # starlette >= 1.0 deprecates httpx-backed TestClient; httpx2 is its
   # supported test transport. Production HTTP-client code stays on httpx.
   "httpx2>=2.13.1",
