@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast, final
@@ -29,6 +30,7 @@ from foxlight_model_preservation.models import (
     canonical_path,
 )
 from foxlight_model_preservation.operations import OperationControl
+from foxlight_model_preservation.signing import digest, encode_record
 from foxlight_model_preservation.storage import copy_exact, directory, open_file, pack
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
@@ -42,6 +44,10 @@ from skulk.store.installed_cards import (
 from skulk.store.model_store import StoreModelEntry, StoreRegistryIndex
 from skulk.store.preservation import recovery_card, validate_recovery_layout
 from skulk.store.preservation_closure import companion_selections, map_recovery_members
+
+
+class PreservationCapacityError(PreservationError):
+    """Refuse capture before copying when snapshot/archive space is insufficient."""
 
 
 @final
@@ -209,6 +215,25 @@ def plan_preservation(
     )
 
 
+def preservation_generation(
+    model_directory: Path, *, artifact_roots: tuple[Path, ...] = ()
+) -> str:
+    """Bind the complete installed record selection without hashing model bytes.
+
+    The authoritative store owner holds its publication fence while planning or
+    executing. Execution independently hashes every selected byte before signing.
+    """
+    sources = _sources(model_directory, artifact_roots)
+    return hashlib.sha256(
+        identity_json(
+            {
+                source.member_id: source.record.model_dump(mode="json")
+                for source in sources
+            }
+        )
+    ).hexdigest()
+
+
 def preserve_installed(
     model_directory: Path,
     destination: Path,
@@ -217,6 +242,8 @@ def preserve_installed(
     artifact_roots: tuple[Path, ...] = (),
     retained_card: RetainedCard | None = None,
     control: OperationControl | None = None,
+    snapshot_parent: Path | None = None,
+    before_publish: Callable[[str], None] | None = None,
 ) -> str:
     """Snapshot and sign a complete private installed closure into an existing archive.
 
@@ -225,22 +252,39 @@ def preserve_installed(
     Copies reject changed/truncated/symlinked source files. A private snapshot
     avoids signing a mixed live generation; a future host integration must also
     hold the actual store's eviction/publication lease. This function owns no
-    durable background job and must not run on an HTTP event loop.
+    durable background job and must not run on an HTTP event loop. A host may
+    supply private local snapshot storage and a durable expected-outcome callback
+    that must return successfully before archive publication begins.
     """
     sources = _sources(model_directory, artifact_roots)
     retained = _retained(sources[0].record, retained_card)
     active = control or OperationControl()
     with directory(destination) as archive_descriptor:
         identity = os.fstat(archive_descriptor)
-        needed = 2 * sum(
+        source_bytes = sum(
             file.size_bytes for source in sources for file in source.record.files
         )
-        if shutil.disk_usage(destination).free < needed + 16 * 1024 * 1024:
-            raise PreservationError(
-                "not enough space for a private snapshot and preservation copy"
-            )
+        snapshot_location = snapshot_parent or destination
+        snapshot_device = snapshot_location.stat().st_dev
+        reserve = 16 * 1024 * 1024
+        snapshot_free = shutil.disk_usage(snapshot_location).free
+        archive_free = shutil.disk_usage(archive_descriptor).free
+        if snapshot_device == identity.st_dev:
+            if min(snapshot_free, archive_free) < 2 * source_bytes + reserve:
+                raise PreservationCapacityError(
+                    "not enough space for a private snapshot and preservation copy"
+                )
+        else:
+            if snapshot_free < source_bytes + reserve:
+                raise PreservationCapacityError(
+                    "not enough space on private snapshot storage"
+                )
+            if archive_free < source_bytes + reserve:
+                raise PreservationCapacityError(
+                    "not enough space on preservation archive storage"
+                )
         with tempfile.TemporaryDirectory(
-            prefix=".skulk-preserve-", dir=destination
+            prefix=".skulk-preserve-", dir=snapshot_parent or destination
         ) as temporary:
             snapshot = Path(temporary)
             source_paths: dict[str, Path] = {}
@@ -451,4 +495,15 @@ def preserve_installed(
                 raise PreservationError(
                     "archive changed during capture; reconnect the selected storage"
                 )
-            return pack(recipe, source_paths, destination, keys, control=active)
+            expected = digest(encode_record(manifest))
+            if before_publish is not None:
+                before_publish(expected)
+            active.checkpoint()
+            return pack(
+                recipe,
+                source_paths,
+                destination,
+                keys,
+                control=active,
+                expected_manifest_id=expected,
+            )

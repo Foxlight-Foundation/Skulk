@@ -65,11 +65,13 @@ Example requests::
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import re
 import shutil
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import cast, final
 
 import aiofiles
@@ -77,6 +79,7 @@ import aiofiles.os as aios
 import aiohttp.web as web
 from loguru import logger
 
+from skulk.shared.constants import SKULK_DATA_HOME
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -93,6 +96,8 @@ from skulk.store.installed_cards import (
     companion_artifact_role,
 )
 from skulk.store.model_store import ModelStore
+from skulk.store.preservation_host import PreservationHost
+from skulk.store.preservation_journal import PreservationHostError
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per streaming chunk
 _SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -204,9 +209,15 @@ async def _require_trusted_registry_peer_record(
         expected_file = None
         if record.artifact_role == "vision_weights" and trusted_card.vision is not None:
             expected_revision = trusted_card.vision.weights_revision
-        elif record.artifact_role == "image_component" and trusted_card.image is not None:
-            if not trusted_card.image.files_for_source(expected_repository, record.artifact_revision):
-                raise web.HTTPConflict(reason="image component revision is not declared by its owner")
+        elif (
+            record.artifact_role == "image_component" and trusted_card.image is not None
+        ):
+            if not trusted_card.image.files_for_source(
+                expected_repository, record.artifact_revision
+            ):
+                raise web.HTTPConflict(
+                    reason="image component revision is not declared by its owner"
+                )
             expected_revision = record.artifact_revision
         elif record.artifact_role == "video_companion":
             expected_revision = next(
@@ -324,12 +335,31 @@ class ModelStoreServer:
             port: TCP port to listen on.  Must match ``store_port`` in
                 ``skulk.yaml`` so that worker nodes can reach this server.
         """
+        self._preservation_stopped = False
+        self._preservation: PreservationHost | None = None
+        self._preservation_lock = asyncio.Lock()
         self._store = store
         self._host = host
         self._port = port
         self._app = web.Application()
         self._runner: web.AppRunner | None = None
         self._setup_routes()
+
+    async def preservation_host(self) -> PreservationHost:
+        """Lazily bind the private job owner to this actual running store instance."""
+        async with self._preservation_lock:
+            if self._preservation_stopped:
+                raise PreservationHostError("preservation_host_stopped")
+            if self._preservation is None:
+                self._preservation = PreservationHost(
+                    self._store, SKULK_DATA_HOME / "preservation"
+                )
+            return self._preservation
+
+    @property
+    def store_path(self) -> "Path":
+        """Return the actual store root for stale-configuration refusal."""
+        return self._store.store_path
 
     def _setup_routes(self) -> None:
         self._app.router.add_get("/health", self._handle_health)
@@ -371,6 +401,10 @@ class ModelStoreServer:
 
     async def stop(self) -> None:
         """Gracefully shut down the HTTP server."""
+        self._preservation_stopped = True
+        if self._preservation is not None:
+            await self._preservation.close()
+            self._preservation = None
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None

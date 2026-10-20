@@ -2002,3 +2002,23 @@ shrinking model modality truth. See
 LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. The pinned Comfy core nodes lack the exact temporal retake/extension and prompt-relay masks.
 
 - Native v0.2.1 decode observation: standalone `worker/runner/video_observability.py`, bundled as `skulk_mlx_video.telemetry`; hooks actual decode/save, forwards every latent/rate/seed/keyframe, propagates errors and disables the upstream verbose-only allocator reset. Final Metal peak covers all render stages.
+
+### Model preservation host jobs
+
+- `store/preservation_host.py`: lazy `ModelStoreServer`-owned controller around the
+  existing `ModelStore`; private built-in archive enrollment, exact plans, private
+  Preserve/Check and worker ownership. `ModelStore.preservation_lease()` uses the
+  actual download/import/eviction fence. No new store-file-listener admin routes.
+- `store/preservation_journal.py`: owner-only SQLite WAL/FULL journal, exclusive
+  process owner, immutable plans and request reservations, retained copy receipts,
+  bounded control pages; restart interrupts uncertain work without replay.
+- `store/preservation_worker.py`: known subprocess entry, pinned archive descriptor,
+  process-local cwd, private snapshot staging with separate filesystem capacity
+  observations (combined on a shared device), safe bounded progress and expected
+  manifest acknowledgement before signed publication. Parent EOF exits the worker.
+- `api/preservation.py`: operator-gated `/preservation/library`, `/setup/device`,
+  `/plans`, `/jobs`, `/jobs/{job_id}` and `/jobs/{job_id}/cancel`. No browser-supplied
+  filesystem/key paths; stale configured owner refuses. See API guide for methods.
+- This host surface supports private Preserve/Check. Public mirror/BitTorrent
+  tools and native fresh-home recovery are separate component surfaces; no public
+  capability distribution or live-store import is implied by these controls.
