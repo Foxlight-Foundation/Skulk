@@ -2851,6 +2851,14 @@ pending or running in `GET /state` `tasks`, carrying the same
 with `engine_install_failed` in `instanceFailures`, and the message names the
 step that failed (the download, the disk-space check, or the GPU check).
 
+A compatible Comfy renderer update can also be prepared through this flow while
+the base engine is already installed. The notice then quotes the small published
+wheel and names a renderer update. The instance retains its exact stamped build;
+ready older instances are not changed by a new install offer. Model load waits for
+that instance's archive-backed verification, and offline preparation requires an
+intact cache. Engine availability and hardware qualification remain separate.
+
+
 | Query parameter | Meaning |
 |-----------------|---------|
 | `model_id` | Required. Hugging Face-style model ID. |

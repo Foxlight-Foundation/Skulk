@@ -3219,3 +3219,28 @@ x2 pass requires its pinned latent upscaler, doubles frame density and condition
 FPS together, and freezes the existing audio. Request admission checks selected
 companions and modes independently of hardware qualification. No additional
 engine installation is needed for these nodes at the pinned Comfy revision.
+
+
+### Trusted Comfy workflow extensions
+
+Additional Comfy code uses an issued Foxlight wheel, selected through the existing
+`InstallEngine` flow. Its build identity combines the exact Comfy source, actual
+torch version and authenticated extension payload. Each wheel retains its own
+Comfy API and upstream algorithm revisions. Candidate bytes cannot create an
+installation offer. Weight companions remain separate selected model artifacts.
+
+Node facts keep an installed base advertised as installed when a compatible
+extension upgrade is available. New LTX placements bind the offered build;
+existing instances keep their recorded build. A worker verifies that exact
+payload for each instance before model load. Offline or opted-out nodes may
+reuse a complete verified cache, and explicit base overrides are measured rather
+than replaced. A missing compatible retained base fails visibly.
+
+The extension archive, package files and selected interpreter are verified before
+launch. The isolated child disables bytecode generation, all unrelated custom
+nodes and remote API nodes. Its bootstrap confines custom-node searches to the
+verified library, including when an operator has a same-named plugin elsewhere.
+Readiness additionally checks that the expected node schema registered. A failed
+probe tears down the process before the runner reports ready. Hardcoded family
+graphs and exact issued features remain separate gates; a numerical solver check
+does not qualify an advanced model workflow or a hardware class.

@@ -1,0 +1,21 @@
+[project]
+name = "skulk-comfy-ltx"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+description = "Trusted LTX workflow nodes for the managed Comfy engine"
+license = "Apache-2.0 AND LicenseRef-LTX-2.x"
+license-files = ["LICENSE-APACHE-2.0", "LICENSE-LTX-2_x", "NOTICE"]
+
+[tool.basedpyright]
+include = ["skulk_comfy_ltx", "../../scripts/check_comfy_ltx_reference.py", "../../scripts/build_comfy_ltx_wheel.py", "../../scripts/verify_comfy_ltx_promotion.py"]
+typeCheckingMode = "strict"
+pythonVersion = "3.13"
+pythonPlatform = "Linux"
+failOnWarnings = true
+extraPaths = [".", "../..", "../../.runtime/comfy"]
+stubPath = "typings"
+reportAny = "error"
+reportMissingTypeStubs = "error"
+reportUnknownVariableType = "error"
+reportUnknownParameterType = "error"
+reportUnnecessaryCast = "error"

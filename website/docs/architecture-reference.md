@@ -1996,3 +1996,14 @@ x2 pass requires its pinned latent upscaler, doubles frame density and condition
 FPS together, and freezes the existing audio. Request admission checks selected
 companions and modes independently of hardware qualification. No additional
 engine installation is needed for these nodes at the pinned Comfy revision.
+
+
+### Comfy extension build binding
+
+- `provisioning/comfy_extension.py`: issued wheel descriptors retain Comfy/LTX source pins; immutable archive/member hashes, interpreter binding, cancellable lock, atomic install, offline reuse and actual GPU/float64 probe.
+- `NodeFacts.comfy_extension_installable_builds` and `comfy_extension_installed_builds` separate an upgrade offer from an installed base; `NodeResources.installable_engine_builds` carries the former. Installed backend tags remain installed during an extension upgrade.
+- New LTX placements bind `comfy@<source>/torch@<version>/extension@sha256:<payload>` on both placement paths. Existing stamped instances retain their build; base-only families do not acquire the LTX wheel.
+- `InstallEngine` jobs separate backend/build identities. Exact extension preparation precedes `LoadModel` even when the base engine is installed. Preview and task download sizes distinguish the small wheel from a missing base runtime.
+- Comfy launcher: verified wheel path, isolated interpreter, no bytecode, sole trusted custom search root plus fixed folder whitelist; all unrelated custom/API nodes remain disabled. Node-schema failure tears down the child before readiness.
+- `comfy-ltx-wheel.yml` builds candidate bytes twice, checks types and pinned solver numerics, and attests the artifact. Explicit promotion verifies the successful source run and attestation and publishes those bytes without rebuilding. Only issued, owned-URL-verified descriptors create offers.
+- Build capability, family graph implementation, selected artifact completeness and empirical qualification remain separate. CPU tensors in numerical checks are not CPU model serving.

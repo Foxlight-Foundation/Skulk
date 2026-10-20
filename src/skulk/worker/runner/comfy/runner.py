@@ -481,6 +481,14 @@ class Runner(ServedConcurrentDispatch):
         if self.card.video is None:
             raise RuntimeError(f"{self.model_id} has no [video] section")
         interpreter, root = _configured_install(self.shard_metadata.resolved_backend)
+        from skulk.provisioning.comfy_extension import verified_comfy_extension
+
+        try:
+            extension = verified_comfy_extension(self.shard_metadata.resolved_engine_build, interpreter, root)
+        except ValueError as error:
+            # Load cannot repair missing engine bytes. Mark this terminal so
+            # the worker explains the failed engine rather than crash-looping.
+            raise RuntimeError(f"{ENGINE_UNAVAILABLE_FAILURE_MARKER}: {error}") from error
         model_dir = _model_directory(self.card)
         files = resolve_model_files(self.card)
         weight_files: list[Path] = []
@@ -507,6 +515,7 @@ class Runner(ServedConcurrentDispatch):
             temp_dir=self.work_dir / "temp",
             user_dir=self.work_dir / "user",
             log_path=self.work_dir / "server.log",
+            trusted_extension=extension,
             extra_args=launch_flags(
                 self.shard_metadata.resolved_backend,
                 weight_files,
