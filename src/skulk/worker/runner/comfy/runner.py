@@ -95,7 +95,7 @@ from skulk.worker.runner.comfy.server import (
     run_prompt,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
-from skulk.worker.runner.video_input import MediaInputRequest
+from skulk.worker.runner.video_input import MAX_SOURCE_VIDEO_BYTES, MediaInputRequest
 from skulk.worker.runner.video_input_process import prepare_media_input
 
 _HASH_CHUNK: Final = 1 << 20
@@ -481,6 +481,14 @@ class Runner(ServedConcurrentDispatch):
         if self.card.video is None:
             raise RuntimeError(f"{self.model_id} has no [video] section")
         interpreter, root = _configured_install(self.shard_metadata.resolved_backend)
+        from skulk.provisioning.comfy_extension import verified_comfy_extension
+
+        try:
+            extension = verified_comfy_extension(self.shard_metadata.resolved_engine_build, interpreter, root)
+        except ValueError as error:
+            # Load cannot repair missing engine bytes. Mark this terminal so
+            # the worker explains the failed engine rather than crash-looping.
+            raise RuntimeError(f"{ENGINE_UNAVAILABLE_FAILURE_MARKER}: {error}") from error
         model_dir = _model_directory(self.card)
         files = resolve_model_files(self.card)
         weight_files: list[Path] = []
@@ -507,6 +515,7 @@ class Runner(ServedConcurrentDispatch):
             temp_dir=self.work_dir / "temp",
             user_dir=self.work_dir / "user",
             log_path=self.work_dir / "server.log",
+            trusted_extension=extension,
             extra_args=launch_flags(
                 self.shard_metadata.resolved_backend,
                 weight_files,
@@ -523,10 +532,30 @@ class Runner(ServedConcurrentDispatch):
         server = self.server
         assert server is not None and server.base_url is not None
         started = time.monotonic()
-        render = plan_comfy_render(params, self.card)
+        render = plan_comfy_render(params, self.card, engine_build=self.shard_metadata.resolved_engine_build)
         bindings = bind_references(params.references, SKULK_VIDEO_INPUT_DIR)
         output_dir = SKULK_VIDEO_OUTPUT_DIR / str(command_id)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if render.editing is not None:
+            source = next(binding for binding in bindings if binding.spec.kind == "video" and binding.spec.role == "source")
+            if render.plan.width * render.plan.height * render.plan.frame_count * 12 > MAX_SOURCE_VIDEO_BYTES:
+                raise ValueError("editing output exceeds the bounded decoded-pixel budget; reduce its size or duration")
+            prepared = prepare_media_input(server.interpreter, MediaInputRequest(
+                operation="video", source=str(SKULK_VIDEO_INPUT_DIR / source.input_name),
+                duration_seconds=render.plan.frame_count / render.plan.fps,
+                width=render.plan.width, height=render.plan.height, fps=render.plan.fps,
+                maximum_frames=render.plan.frame_count,
+                exact_frames=render.editing.operation == "retake",
+                require_audio=render.plan.audio and not render.editing.regenerate_audio,
+            ), output_dir, is_cancelled=lambda: self._is_cancelled(task_id))
+            if prepared is None:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return
+            if prepared.audio_channels not in (None, 1, 2):
+                raise ValueError("LTX temporal editing requires mono or stereo source audio")
+            if render.editing.operation == "extend" and prepared.frames >= render.plan.frame_count:
+                raise ValueError("extension output must exceed the complete source clip")
+            render = replace(render, source_frames=prepared.frames)
         if params.audio_conditioning is not None:
             source = next(binding for binding in bindings if binding.spec.kind == "audio")
             destination = SKULK_VIDEO_INPUT_DIR / f"_prepared_{command_id}.wav"

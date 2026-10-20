@@ -40,7 +40,6 @@ from skulk.shared.types.tasks import (
 from skulk.shared.types.video import (
     VIDEO_OUTPUT_FILENAME,
     VIDEO_THUMBNAIL_FILENAME,
-    VideoEngineSettings,
     VideoGenerationStats,
     VideoOutputManifest,
 )
@@ -64,7 +63,11 @@ from skulk.worker.runner.mlx_video.memory import (
     read_native_image_pixels,
     read_native_weight_profile,
 )
-from skulk.worker.runner.mlx_video.plan import plan_native_job, selected_model_view
+from skulk.worker.runner.mlx_video.plan import (
+    native_engine_settings,
+    plan_native_job,
+    selected_model_view,
+)
 from skulk.worker.runner.mlx_video.process import NativeProgress, run_native_job
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 from skulk.worker.runner.video_input import MediaInputRequest
@@ -230,8 +233,7 @@ class Runner(ServedConcurrentDispatch):
             identity, size = _file_identity(output / VIDEO_OUTPUT_FILENAME)
             thumbnail_identity, thumbnail_size = _file_identity(output / VIDEO_THUMBNAIL_FILENAME)
             manifest = VideoOutputManifest(sha256=identity, size_bytes=size, width=plan.width, height=plan.height, frame_count=actual.frame_count, fps=plan.fps, seconds=actual.seconds, audio_sample_rate=plan.sample_rate if plan.audio else None, audio_channels=plan.channels if plan.audio else None, thumbnail_sha256=thumbnail_identity, thumbnail_size_bytes=thumbnail_size)
-            refined_dev = job.pipeline in ("dev_two_stage", "hq_two_stage")
-            stats = VideoGenerationStats(steps=result.steps, seconds_per_step=result.sampling_seconds / result.steps, total_generation_time=result.total_generation_time, peak_memory_bytes=result.peak_memory_bytes, engine=VideoEngineSettings(sampler="res_2s" if job.pipeline == "hq_two_stage" else "euler_ancestral" if job.pipeline == "distilled_two_stage" or (job.pipeline == "extend" and job.transformer_variant == "distilled") else "euler", scheduler="ltx-2.5", steps=result.steps, seed=plan.seed, pipeline=job.pipeline, decoder=task.task_params.decoder or "convolutional", guidance=job.guidance, generated_keyframe_interval=job.generated_keyframe_interval, duration=task.task_params.duration, audio_conditioning=job.audio_conditioning, editing=job.editing, prompt_relay=job.prompt_relay, adapter="distilled_refinement" if refined_dev else None, adapter_strength=job.refinement_strength if refined_dev else None, width=plan.width, height=plan.height, frame_count=actual.frame_count, codec=job.codec))
+            stats = VideoGenerationStats(steps=result.steps, seconds_per_step=result.sampling_seconds / result.steps, total_generation_time=result.total_generation_time, peak_memory_bytes=result.peak_memory_bytes, engine=native_engine_settings(job, steps=result.steps, frame_count=actual.frame_count))
             (output / "result.json").unlink()
             (output / "_source.wav").unlink(missing_ok=True)
             self.event_sender.send(ChunkGenerated(command_id=task.command_id, chunk=VideoChunk(model=self.model_id, stage="muxing", progress=1.0, output=manifest, stats=stats, finish_reason="stop")))

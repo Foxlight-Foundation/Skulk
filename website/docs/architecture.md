@@ -873,8 +873,17 @@ editing cannot declare an aggregate reference-file limit of zero. These checks
 preserve valid card identities and do not depend on hardware qualification.
 Duration prediction feeds the same bounded frame count into video and audio
 allocation; `video_probe.py` verifies actual dynamic container facts before
-publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
-absent) and DFR temporal refinement rather than silently approximating them.
+publishing a manifest. Comfy HQ requires a placed instance stamped with an issued
+Res2s extension build; the ordinary Comfy core remains insufficient. Its base
+stage uses 15 intervals by default, a 0.25 distilled LoRA, per-modality guidance
+and rescaling, followed by three joint AV refinement intervals with LoRA 0.5.
+The output keeps base-stage audio. Standard HQ decoding removes internal
+keyframe slots before upscaling; DFR carries its detailing slots through
+refinement. DFR spatial and
+optional temporal refinement retain their exact companions and fixed Euler
+sampling. Model metadata exposes workflow-specific defaults and issued
+source/payload feature identities; consumers match the instance stamp rather
+than inferring an old instance's capabilities from newer node inventory. Native HQ job records report its published profile separately: no base-stage LoRA and the selected refinement strength, with video/audio rescaling 0.45/1.0.
 
 Backend compatibility and retained hardware qualification are separate.
 A declared compatible backend does not require a benchmark for the exact
@@ -3219,6 +3228,41 @@ Each job uses one supervised process group and a bounded progress channel, with 
 
 Native staged admission uses `shared/models/video_memory.py` to charge the larger of the selected encoder/connector group and the remaining pack, retaining common runtime overhead and the worker's live capacity check. Unknown layouts keep full-artifact accounting. `worker/runner/mlx_video/memory.py` reads bounded local tensor headers before rendering and checks each request's geometry, joint sampling, source buffers and decoder workspace against that reservation. `runtime.video_memory_budget_bytes` can raise the reservation for larger workloads; it cannot lower the artifact-derived estimate. The process supervisor supplies only its checked decode budget after stripping inherited upstream tuning, refuses a convolutional decode whose smallest tile cannot fit, and reaps the group on live memory pressure or excess RSS. These estimates and pressure backstops are not a hard Metal allocator quota. Qualification coverage never supplies a GPU eligibility list.
 
-LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. The pinned Comfy core nodes lack the exact temporal retake/extension and prompt-relay masks.
+LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. Published Comfy extension features `retake` and `extend` enable source-bound temporal video/audio masks. Retake and Dev extension use one full-resolution pass; distilled extension uses two passes and restores full-resolution source latent context before refinement. Each VAE uses its own causal clock. The owned nodes restore unchanged decoded source frames and normalized PCM before lossy container encoding; they never mutate cached input tensors. The worker verifies the complete source and bounds both source and output decoded pixel volumes to 2 GiB. Exact instance-build checks and startup node-schema checks keep older sampler-only extensions from offering editing. Comfy prompt relay remains unavailable without an implementation of its temporal cross-attention masks.
 
 Native video engine v0.2.1 marks decoding at the actual decode-and-save call. The headless decoder's private verbose profiler is disabled so its counter reset cannot erase earlier encoder/sampling memory peaks. The reported Metal peak covers the complete render; it is distinct from host RSS and the two counters must not be added.
+
+
+### Comfy LTX detailing
+
+LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
+keyframe carry between base and spatial refinement. An explicit optional temporal
+x2 pass requires its pinned latent upscaler, doubles frame density and conditioning
+FPS together, and freezes the existing audio. Request admission checks selected
+companions and modes independently of hardware qualification. No additional
+engine installation is needed for these nodes at the pinned Comfy revision.
+
+
+### Trusted Comfy workflow extensions
+
+Additional Comfy code uses an issued Foxlight wheel, selected through the existing
+`InstallEngine` flow. Its build identity combines the exact Comfy source, actual
+torch version and authenticated extension payload. Each wheel retains its own
+Comfy API and upstream algorithm revisions. Candidate bytes cannot create an
+installation offer. Weight companions remain separate selected model artifacts.
+
+Node facts keep an installed base advertised as installed when a compatible
+extension upgrade is available. New LTX placements bind the offered build;
+existing instances keep their recorded build. A worker verifies that exact
+payload for each instance before model load. Offline or opted-out nodes may
+reuse a complete verified cache, and explicit base overrides are measured rather
+than replaced. A missing compatible retained base fails visibly.
+
+The extension archive, package files and selected interpreter are verified before
+launch. The isolated child disables bytecode generation, all unrelated custom
+nodes and remote API nodes. Its bootstrap confines custom-node searches to the
+verified library, including when an operator has a same-named plugin elsewhere.
+Readiness additionally checks that the expected node schema registered. A failed
+probe tears down the process before the runner reports ready. Hardcoded family
+graphs and exact issued features remain separate gates; a numerical solver check
+does not qualify an advanced model workflow or a hardware class.

@@ -15,7 +15,7 @@ back onto Skulk's coarse stages.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal
 
@@ -38,6 +38,7 @@ from skulk.shared.types.video import (
     VIDEO_THUMBNAIL_FILENAME,
     VideoAudioConditioning,
     VideoDecoder,
+    VideoEditing,
     VideoEngineSettings,
     VideoGenerationTaskParams,
     VideoGuidance,
@@ -160,6 +161,8 @@ class ComfyModelFiles:
     video_vae: str
     audio_vae: str | None
     spatial_upscaler: str | None = None
+    dfr_spatial_lora: str | None = None
+    temporal_upscaler: str | None = None
     duration_head: str | None = None
     diffusion_decoder: str | None = None
     refinement_lora: str | None = None
@@ -254,6 +257,8 @@ def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> Comfy
         video_vae=video_vae,
         audio_vae=audio_vae,
         spatial_upscaler=None if spatial is None else companion_file(spatial),
+        dfr_spatial_lora=selected(VideoCompanionKind.Lora, "dfr_spatial"),
+        temporal_upscaler=selected(VideoCompanionKind.LatentUpscaler, "temporal_x2"),
         duration_head=selected(VideoCompanionKind.DurationHead, "duration_head"),
         diffusion_decoder=selected(VideoCompanionKind.VideoDecoder, "diffusion_decoder"),
         refinement_lora=selected(VideoCompanionKind.Lora, "distilled_refinement"),
@@ -495,12 +500,17 @@ class ComfyRenderPlan:
     pipeline: VideoPipeline | None = None
     decoder: VideoDecoder | None = None
     guidance: VideoGuidance | None = None
+    temporal_upscalings: Literal[0, 1] = 0
     generated_keyframe_interval: int | None = None
     duration: Literal["fixed", "auto"] = "fixed"
     minimum_frames: int | None = None
     duration_min_seconds: int | None = None
     duration_max_seconds: int | None = None
     audio_conditioning: VideoAudioConditioning | None = None
+    editing: VideoEditing | None = None
+    transformer_variant: Literal["distilled", "dev"] | None = None
+    source_frames: int | None = None
+    """Fully decoded worker facts, required before any temporal-edit graph is built."""
 
     @property
     def steps(self) -> int:
@@ -516,10 +526,15 @@ class ComfyRenderPlan:
                 REFINEMENT_SIGMAS,
             )
 
-            return {
-                "ltx_base_sampler": len(DISTILLED_SIGMAS.split(",")) - 1 if self.pipeline == "distilled_two_stage" else self.plan.steps,
+            if self.pipeline == "retake" or (self.pipeline == "extend" and self.transformer_variant == "dev"):
+                return {"ltx_base_sampler": self.plan.steps}
+            stages = {
+                "ltx_base_sampler": len(DISTILLED_SIGMAS.split(",")) - 1 if self.pipeline in ("distilled_two_stage", "dfr") else self.plan.steps,
                 "ltx_refine_sampler": len(REFINEMENT_SIGMAS.split(",")) - 1,
             }
+            if self.temporal_upscalings:
+                stages["ltx_temporal_sampler"] = 4
+            return stages
         return {NODE_SAMPLER: self.plan.steps}
 
     def prompt_text(self, prompt: str) -> str:
@@ -538,13 +553,18 @@ class ComfyRenderPlan:
             pipeline=self.pipeline,
             decoder=self.decoder,
             guidance=self.guidance,
+            temporal_upscalings=self.temporal_upscalings,
             generated_keyframe_interval=self.generated_keyframe_interval,
             duration=self.duration,
             audio_conditioning=self.audio_conditioning,
+            editing=self.editing,
             video_shift=self.video_shift,
             audio_shift=self.audio_shift,
             adapter=None if self.adapter is None else self.adapter.name,
             adapter_strength=None if self.adapter is None else self.adapter.strength,
+            stage_lora_strengths={"base": 0.25, "refine": 0.5} if self.pipeline == "hq_two_stage" else {},
+            guidance_video_rescale=0.45 if self.pipeline == "hq_two_stage" else 0.7 if self.editing is not None and self.transformer_variant == "dev" else None,
+            guidance_audio_rescale=1.0 if self.pipeline == "hq_two_stage" else 0.7 if self.editing is not None and self.transformer_variant == "dev" else None,
             width=self.plan.width,
             height=self.plan.height,
             frame_count=self.plan.frame_count,
@@ -564,7 +584,7 @@ class ComfyRenderPlan:
 
 
 def plan_comfy_render(
-    params: VideoGenerationTaskParams, card: ModelCard
+    params: VideoGenerationTaskParams, card: ModelCard, *, engine_build: str | None = None
 ) -> ComfyRenderPlan:
     """Resolve a request against the card for the ComfyUI engine.
 
@@ -585,33 +605,42 @@ def plan_comfy_render(
 
         validate_ltx_request(params, card)
         if params.editing is not None:
-            raise ValueError("the pinned Comfy core nodes do not implement the required temporal video/audio retake or extension masks")
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if params.editing.operation not in extension_features_for_build(engine_build):
+                raise ValueError("LTX-2.5 temporal editing requires its exact published extension on the placed renderer; update and reload the model")
         if params.prompt_relay is not None:
             raise ValueError("the pinned Comfy core nodes do not implement temporal prompt-relay cross-attention masks")
-        pipeline = params.pipeline or ("distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        pipeline = params.pipeline or (params.editing.operation if params.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
         if pipeline == "hq_two_stage":
-            raise ValueError("LTX-2.5 HQ requires the exact Res2s sampler, unavailable in the pinned Comfy core engine")
-        if pipeline == "dfr":
-            raise ValueError("LTX-2.5 DFR temporal refinement is not implemented by this pinned Comfy graph")
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if "res2s" not in extension_features_for_build(engine_build):
+                raise ValueError("LTX-2.5 HQ requires a placed renderer with the published Res2s extension; update the renderer before using HQ")
         minimum = params.duration_min_seconds or video.min_seconds
         files = resolve_model_files(card, mode)
+        base = plan_render(params, video.model_copy(update={"canvas_multiple": 64, **({"default_steps": 15} if pipeline == "hq_two_stage" else {"default_steps": 30} if params.editing is not None and video.transformer_variant == "dev" else {})}))
+        factor = 2 ** params.temporal_upscalings
         return ComfyRenderPlan(
-            plan=plan_render(params, video.model_copy(update={"canvas_multiple": 64})),
+            plan=replace(base, fps=base.fps * factor, frame_count=(base.frame_count - 1) * factor + 1),
             mode=mode,
             files=files,
-            adapter=None if pipeline != "dev_two_stage" or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=files.refinement_strength, steps=None),
+            adapter=None if pipeline not in ("dev_two_stage", "hq_two_stage") or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=0.5 if pipeline == "hq_two_stage" else files.refinement_strength, steps=None),
             video_shift=None,
             audio_shift=None,
-            sampler="euler_ancestral" if pipeline == "distilled_two_stage" else "euler",
-            scheduler="manual" if pipeline == "distilled_two_stage" else "ltx",
+            sampler="res2s" if pipeline == "hq_two_stage" else "euler_ancestral" if pipeline == "distilled_two_stage" or (pipeline == "extend" and video.transformer_variant == "distilled") else "euler",
+            scheduler="manual" if video.transformer_variant == "distilled" else "ltx",
             codec=params.codec or CODEC_DEFAULT,
             family=card.family,
             pipeline=pipeline,
             decoder=params.decoder or "convolutional",
-            guidance=(params.guidance or VideoGuidance()) if pipeline == "dev_two_stage" else None,
-            generated_keyframe_interval=params.generated_keyframe_interval,
+            guidance=(params.guidance or VideoGuidance(modality_scale=3.0 if pipeline == "hq_two_stage" else 1.0)) if pipeline in ("dev_two_stage", "hq_two_stage") else VideoGuidance(stg_scale=1.0, modality_scale=3.0) if params.editing is not None and video.transformer_variant == "dev" else None,
+            temporal_upscalings=params.temporal_upscalings,
+            generated_keyframe_interval=(params.generated_keyframe_interval or 24) if pipeline == "dfr" else params.generated_keyframe_interval,
             duration=params.duration,
             audio_conditioning=params.audio_conditioning,
+            editing=params.editing,
+            transformer_variant=video.transformer_variant,
             minimum_frames=video.frame_count_for_seconds(minimum) if params.duration == "auto" else None,
             duration_min_seconds=minimum if params.duration == "auto" else None,
             duration_max_seconds=params.seconds if params.duration == "auto" else None,
@@ -880,6 +909,10 @@ def build_prompt(
     if render.family == "ltx-2.5":
         from skulk.worker.runner.comfy.ltx import build_ltx_prompt
 
+        if render.editing is not None:
+            from skulk.worker.runner.comfy.ltx_editing import build_editing_prompt
+
+            return build_editing_prompt(render, params, references, output_subdir)
         return build_ltx_prompt(render, params, references, output_subdir)
     plan = render.plan
     files = render.files

@@ -636,3 +636,21 @@ artifacts and promotes the exact selected bytes. A lock change needs a new recip
 version, updated manifest digests and a private wheel ledger entry. Test provisioning
 failure/retry, policy, cache restart and representative GPU execution before
 advancing the managed default. Never install vLLM into Skulk's Python environment.
+
+
+### Comfy workflow extension wheels
+
+`packaging/skulk-comfy-ltx/` holds the independently typed trusted node package and
+narrow stubs for the pinned Comfy API. `scripts/build_comfy_ltx_wheel.py` packages
+only its explicit reviewed source/license file set; source symlinks, extra modules
+and overwriting an existing wheel are refused. Run the package's strict type
+project with the selected Python 3.13 interpreter and the pinned Comfy checkout at
+`.runtime/comfy`. Its numerical checker compares candidate wheel code to pinned
+upstream functions without model weights. Run `uv run pytest packaging/skulk-comfy-ltx/tests` for the source-preservation and causal-clock contracts. Temporal mask checks evaluate the actual pinned upstream patchifiers and `TemporalRegionMask`, independently of the owned implementation. A new feature must update the explicit wheel source set, required installation members and startup node schema, while retaining older issued feature contracts.
+
+The `comfy-ltx-wheel` workflow builds twice, retains the numerical receipt and
+attests candidate bytes. Its explicit publication leg verifies the selected
+successful run, wheel digest and source-bound attestation, then promotes those
+same bytes to the append-only Foxlight index. Add an issued descriptor only after
+owned-URL read-back verification. Runtime model requests never resolve packages
+or install loose custom-node source.
