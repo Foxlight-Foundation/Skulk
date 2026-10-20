@@ -30,6 +30,12 @@ def candidate(tmp_path: Path) -> tuple[extension.ComfyExtensionWheel, Path]:
     return wheel, path
 
 
+def test_issued_descriptor_matches_the_reproducible_package(tmp_path: Path) -> None:
+    """The offered digest, features and provenance must bind the promoted bytes."""
+    built, _ = candidate(tmp_path)
+    assert extension.published_extensions()[0] == built
+
+
 def install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, offline: bool = False, stop: threading.Event | None = None, fail_probe: bool = False) -> tuple[extension.ComfyExtensionWheel, Path, list[str]]:
     """Drive the real installer with bounded local download and probe effects."""
     wheel, archive = candidate(tmp_path)

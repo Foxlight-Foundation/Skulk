@@ -164,7 +164,8 @@ def test_model_metadata_does_not_offer_h3_engine_controls() -> None:
     metadata = VideoCapabilitySection.from_model_card(_card())
     assert metadata is not None
     assert metadata.canvas_multiple == 64
-    assert metadata.samplers == ["euler_ancestral"]
+    assert metadata.samplers == ["euler_ancestral", "euler"]
+    assert metadata.default_sampler == "euler_ancestral"
     assert metadata.schedulers == [] and metadata.default_scheduler == "manual"
     assert metadata.shift_bounds == []
     assert metadata.sampling_stage_steps == [8, 3]
@@ -251,7 +252,7 @@ def test_duration_metadata_and_wire_roundtrip() -> None:
     assert VideoEngineSettings.model_validate_json(settings.model_dump_json()) == settings
     metadata = VideoCapabilitySection.from_model_card(_dev_card())
     assert metadata is not None
-    assert metadata.pipelines == ["dev_two_stage"]
+    assert metadata.pipelines == ["dev_two_stage", "hq_two_stage", "retake", "extend"]
     assert metadata.decoders == ["convolutional", "diffusion"]
     assert metadata.automatic_duration and metadata.guidance is not None
 
@@ -283,7 +284,7 @@ def test_scoped_companions_refuse_a_forbidden_mode_before_graph_dispatch(kind: V
         assert resolve_model_files(card, VideoMode.TextToAudioVideo).diffusion_decoder is None
         assert metadata.decoder_modes["diffusion"] == ["fl2va"]
     else:
-        assert metadata.pipeline_modes == {"dev_two_stage": ["fl2va"]}
+        assert metadata.pipeline_modes == {"dev_two_stage": ["fl2va"], "hq_two_stage": ["fl2va"], "retake": ["ref2va"], "extend": ["ref2va"]}
 
 
 @pytest.mark.parametrize("controls", [{"duration": "auto", "duration_min_seconds": 5}, {"duration_min_seconds": 2}, {"duration": "auto", "duration_min_seconds": 6}])
@@ -640,6 +641,25 @@ def _editing_params(operation: str, **changes: object) -> VideoGenerationTaskPar
     source = VideoReferenceSpec(slot=0, kind="video", role="source", media_type="video/mp4", size_bytes=1, sha256="0" * 64)
     editing = {"operation": operation, **({"start_seconds": 0.5, "end_seconds": 1.0} if operation == "retake" else {})}
     return _params(seconds=2, editing=editing, references=(source,), reference_bytes=1, total_input_chunks=1, **changes)
+
+
+@pytest.mark.parametrize("backend,torch", [("comfy-cuda", "2.14.0+cu130"), ("comfy-rocm", "2.14.0+rocm7.4")])
+def test_published_engine_enables_only_its_issued_workflows(backend: str, torch: str) -> None:
+    """Real issued code supports GPU lanes without an empirical device allowlist."""
+    from skulk.provisioning.comfy_extension import published_extensions
+    from skulk.shared.models.video_support import (
+        video_engine_feature_builds,
+        video_feature_build_key,
+        video_request_supported,
+    )
+
+    wheel = published_extensions()[0]
+    build = wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@{torch}")
+    assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend"]}
+    assert video_request_supported(_dev_card(), _params(pipeline="hq_two_stage"), backend, build)
+    for operation in ("retake", "extend"):
+        assert video_request_supported(_card(), _editing_params(operation), backend, build)
+    assert not video_request_supported(_dev_card(), _params(pipeline="hq_two_stage"), backend, build.split("/extension@")[0])
 
 
 @pytest.mark.parametrize("operation", ["retake", "extend"])
