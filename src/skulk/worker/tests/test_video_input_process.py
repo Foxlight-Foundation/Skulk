@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import psutil
@@ -21,6 +22,25 @@ def _await_exit(process: subprocess.Popen[str]) -> None:
         assert time.monotonic() < deadline
         time.sleep(0.01)
     assert process.returncode is None
+
+
+def _is_live(process: psutil.Process) -> bool:
+    try:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+def test_child_reaped_between_liveness_probes_counts_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful reap can race the test's is-running/status observations."""
+    process = psutil.Process(os.getpid())
+
+    def gone() -> str:
+        raise psutil.NoSuchProcess(process.pid)
+
+    monkeypatch.setattr(process, "is_running", lambda: True)
+    monkeypatch.setattr(process, "status", gone)
+    assert not _is_live(process)
 
 
 def test_exited_decoder_is_reaped_after_its_owned_group_is_stopped() -> None:
@@ -46,14 +66,15 @@ def test_exited_decoder_still_cleans_up_a_term_resistant_descendant(tmp_path: Pa
         child = psutil.Process(int(marker.read_text()))
         video_input_process._reap(process)
         for _ in range(40):
-            if not child.is_running() or child.status() == psutil.STATUS_ZOMBIE:
+            if not _is_live(child):
                 break
             time.sleep(0.025)
         else:
             pytest.fail("an exited decoder left its TERM-resistant child alive")
     finally:
-        if child is not None and child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-            child.kill()
+        with suppress(psutil.NoSuchProcess):
+            if child is not None and _is_live(child):
+                child.kill()
         if process.returncode is None:
             process.kill()
         process.wait(timeout=3)
