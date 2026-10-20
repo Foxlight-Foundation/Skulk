@@ -15,8 +15,8 @@ PACKAGE = "skulk_comfy_ltx"
 FILENAME = f"{PACKAGE}-{VERSION}-py3-none-any.whl"
 COMFY_REVISION = "40c4fcdf513a4523e39d54a9d391908af8df8171"
 LTX_REVISION = "e98f6d927d83c92ef2be6aec76c8440b19306e39"
-FEATURES = ("res2s",)
-SOURCE_FILES = ("__init__.py", "comfy_sampler.py", "guidance.py", "layout.py", "launcher.py", "nodes.py", "res2s.py", "py.typed")
+FEATURES = ("res2s", "retake", "extend")
+SOURCE_FILES = ("__init__.py", "comfy_sampler.py", "editing.py", "editing_nodes.py", "guidance.py", "layout.py", "launcher.py", "nodes.py", "res2s.py", "py.typed")
 LICENSE_FILES = ("LICENSE-APACHE-2.0", "LICENSE-LTX-2_x", "NOTICE")
 
 

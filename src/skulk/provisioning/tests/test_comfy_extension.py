@@ -166,7 +166,7 @@ def test_issued_overlay_retains_its_own_source_pins_when_defaults_advance(tmp_pa
     monkeypatch.setattr(extension, "COMFY_PIN", "f" * 40)
     monkeypatch.setattr(extension, "LTX_REFERENCE_REVISION", "e" * 40)
     assert extension.extension_for_build(build) == wheel
-    assert extension.extension_features_for_build(build) == frozenset({"res2s"})
+    assert extension.extension_features_for_build(build) == frozenset(wheel.features)
     assert extension.verify_extension_root(package.parents[1], wheel, BASE_BUILD, Path(sys.executable)) == package
     wrong_base = BASE_BUILD.replace(wheel.comfy_revision, "f" * 40)
     assert extension.extension_for_build(wrong_base + "/extension@sha256:" + wheel.payload_sha256) is None

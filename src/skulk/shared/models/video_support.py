@@ -3,9 +3,9 @@
 import re
 from collections.abc import Set
 
+from skulk.provisioning import mlx_video
 from skulk.provisioning.comfy_extension import published_extensions
 from skulk.provisioning.mlx_video import (
-    PUBLISHED_WHEELS,
     NativeVideoFeature,
     video_features_for_build,
 )
@@ -33,12 +33,15 @@ def video_engine_feature_builds(engines: Set[str | None]) -> dict[str, list[Vide
     """Describe only issued engine code; card controls and hardware remain separate."""
     builds: dict[str, list[VideoExecutionFeature]] = {}
     if "mlx_video" in engines:
-        for wheel in PUBLISHED_WHEELS:
+        for wheel in mlx_video.PUBLISHED_WHEELS:
             builds[wheel.build_identity] = ["hq_two_stage", *wheel.features]
     if "comfy" in engines:
         for wheel in published_extensions():
-            if "res2s" in wheel.features:
-                builds[f"comfy@{wheel.comfy_revision}/extension@sha256:{wheel.payload_sha256}"] = ["hq_two_stage"]
+            features: list[VideoExecutionFeature] = ["hq_two_stage"] if "res2s" in wheel.features else []
+            temporal: tuple[VideoExecutionFeature, ...] = ("retake", "extend", "prompt_relay")
+            features.extend(feature for feature in temporal if feature in wheel.features)
+            if features:
+                builds[f"comfy@{wheel.comfy_revision}/extension@sha256:{wheel.payload_sha256}"] = features
     return builds
 
 
@@ -62,9 +65,11 @@ def video_request_supported(card: ModelCard, params: VideoGenerationTaskParams, 
     if engine == "comfy":
         from skulk.provisioning.comfy_extension import extension_features_for_build
 
+        features = extension_features_for_build(build)
         baseline = pipeline in ("distilled_two_stage", "dev_two_stage", "dfr")
-        hq = pipeline == "hq_two_stage" and "res2s" in extension_features_for_build(build)
-        return (baseline or hq) and params.editing is None and params.prompt_relay is None
+        hq = pipeline == "hq_two_stage" and "res2s" in features
+        editing = params.editing is not None and params.editing.operation in features
+        return (baseline or hq or editing) and params.prompt_relay is None
     # The native wheel's muxer implements H.264 only. Exclude an incompatible
     # request before dispatch instead of letting it fail in the runner planner.
     if engine != "mlx_video" or pipeline == "dfr" or params.codec not in (None, "h264"):

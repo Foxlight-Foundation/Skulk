@@ -636,7 +636,7 @@ only its explicit reviewed source/license file set; source symlinks, extra modul
 and overwriting an existing wheel are refused. Run the package's strict type
 project with the selected Python 3.13 interpreter and the pinned Comfy checkout at
 `.runtime/comfy`. Its numerical checker compares candidate wheel code to pinned
-upstream functions without model weights.
+upstream functions without model weights. Run `uv run pytest packaging/skulk-comfy-ltx/tests` for the source-preservation and causal-clock contracts. Temporal mask checks evaluate the actual pinned upstream patchifiers and `TemporalRegionMask`, independently of the owned implementation. A new feature must update the explicit wheel source set, required installation members and startup node schema, while retaining older issued feature contracts.
 
 The `comfy-ltx-wheel` workflow builds twice, retains the numerical receipt and
 attests candidate bytes. Its explicit publication leg verifies the selected

@@ -7,7 +7,7 @@ license = "Apache-2.0 AND LicenseRef-LTX-2.x"
 license-files = ["LICENSE-APACHE-2.0", "LICENSE-LTX-2_x", "NOTICE"]
 
 [tool.basedpyright]
-include = ["skulk_comfy_ltx", "../../scripts/check_comfy_ltx_reference.py", "../../scripts/build_comfy_ltx_wheel.py", "../../scripts/verify_comfy_ltx_promotion.py"]
+include = ["skulk_comfy_ltx", "tests", "../../scripts/check_comfy_ltx_reference.py", "../../scripts/build_comfy_ltx_wheel.py", "../../scripts/verify_comfy_ltx_promotion.py"]
 typeCheckingMode = "strict"
 pythonVersion = "3.13"
 pythonPlatform = "Linux"

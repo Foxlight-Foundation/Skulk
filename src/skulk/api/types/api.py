@@ -883,8 +883,8 @@ class VideoCapabilitySection(BaseModel):
     automatic_duration: bool = Field(default=False, description="Whether an exact duration head is selected.")
     automatic_duration_modes: list[VideoModeName] = Field(default_factory=list, description="Implemented modes permitted by the selected duration head.")
     audio_conditioning: bool = Field(default=False, description="A selected artifact and available engine can freeze prepared source audio in both sampling stages.")
-    editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an available owned native engine.")
-    prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an available owned native engine.")
+    editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an issued owned engine build.")
+    prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an issued owned engine build.")
     guidance: VideoGuidance | None = Field(default=None, description="Default guided LTX base-stage scales; null for distilled or other families.")
     min_seconds: int = Field(description="Shortest clip length accepted.")
     max_seconds: int = Field(description="Longest clip length accepted.")
@@ -1031,6 +1031,7 @@ class VideoCapabilitySection(BaseModel):
         ltx_distilled, ltx_dev = bool(distilled_modes), bool(dev_modes)
         ltx_available = ltx_distilled or ltx_dev
         feature_builds = video_engine_feature_builds(engines) if ltx else {}
+        available_features = {feature for features in feature_builds.values() for feature in features}
         pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = {}
         if distilled_modes:
             pipeline_modes["distilled_two_stage"] = distilled_modes
@@ -1045,17 +1046,22 @@ class VideoCapabilitySection(BaseModel):
         reference_mode: list[VideoModeName] = ["ref2va"] if prerequisites and VideoMode.ReferenceToAudioVideo in config.modes else []
         spatial_reference = any(item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(VideoMode.ReferenceToAudioVideo) for item in config.companions)
         audio_conditioning = bool(reference_mode) and spatial_reference and config.transformer_variant == "distilled" and config.audio_conditioning and ("comfy" in engines or "audio_conditioning" in native_features)
-        editing: list[Literal["retake", "extend"]] = [operation for operation in config.editing if reference_mode and operation in native_features and (operation == "retake" or config.transformer_variant == "dev" or spatial_reference)]
+        editing: list[Literal["retake", "extend"]] = [operation for operation in config.editing if reference_mode and operation in available_features and (operation == "retake" or config.transformer_variant == "dev" or spatial_reference)]
         if audio_conditioning:
             pipeline_modes["distilled_two_stage"] = [*distilled_modes, *reference_mode]
         for operation in editing:
             pipeline_modes[operation] = reference_mode
+        pipeline_defaults: dict[VideoPipeline, VideoPipelineDefaults] = {"hq_two_stage": VideoPipelineDefaults(base_steps=15, sampler="res2s", sampling_stage_steps=[15, 3], guidance=VideoGuidance(modality_scale=3.0))} if "hq_two_stage" in pipeline_modes else {}
+        for operation in editing:
+            base_steps = 8 if config.transformer_variant == "distilled" else 30
+            single_stage = operation == "retake" or config.transformer_variant == "dev"
+            pipeline_defaults[operation] = VideoPipelineDefaults(base_steps=base_steps, sampler="euler" if single_stage else "euler_ancestral", sampling_stage_steps=[base_steps] if single_stage else [base_steps, 3])
         if audio_conditioning or editing:
             served_modes = [*served_modes, *reference_mode]
         decoder_modes: dict[VideoDecoder, list[VideoModeName]] = {}
         if served_modes:
             decoder_modes["convolutional"] = served_modes
-        diffusion_modes: list[VideoModeName] = [mode for mode in served_modes if mode in companion_modes(VideoCompanionKind.VideoDecoder, "diffusion_decoder")]
+        diffusion_modes: list[VideoModeName] = [mode for mode in served_modes if any(item.kind is VideoCompanionKind.VideoDecoder and item.name == "diffusion_decoder" and item.supports_mode(VideoMode(mode)) for item in config.companions)]
         if diffusion_modes:
             decoder_modes["diffusion"] = diffusion_modes
         duration_modes: list[VideoModeName] = [mode for mode in served_modes if mode in companion_modes(VideoCompanionKind.DurationHead, "duration_head")]
@@ -1065,7 +1071,7 @@ class VideoCapabilitySection(BaseModel):
             transformer_variant=config.transformer_variant,
             pipelines=list(pipeline_modes),
             pipeline_modes=pipeline_modes,
-            pipeline_defaults={"hq_two_stage": VideoPipelineDefaults(base_steps=15, sampler="res2s", sampling_stage_steps=[15, 3], guidance=VideoGuidance(modality_scale=3.0))} if "hq_two_stage" in pipeline_modes else {},
+            pipeline_defaults=pipeline_defaults,
             engine_feature_builds=feature_builds,
             codecs=["h264"] if native_only else list(VIDEO_CODECS),
             decoders=list(decoder_modes),
@@ -1094,7 +1100,7 @@ class VideoCapabilitySection(BaseModel):
             audio_channels=config.audio_channels,
             default_steps=config.default_steps,
             sampling_stage_steps=[8, 3] if ltx_distilled else [],
-            samplers=[] if native_only else (["euler_ancestral", *(["euler"] if "dfr" in pipeline_modes else [])] if ltx_distilled else ["euler"] if ltx_dev else [])
+            samplers=[] if native_only else (["euler_ancestral", *(["euler"] if "dfr" in pipeline_modes or "retake" in editing else [])] if ltx_distilled else ["euler"] if ltx_dev else [])
             if ltx
             else list(VIDEO_SAMPLERS),
             default_sampler="euler_ancestral"

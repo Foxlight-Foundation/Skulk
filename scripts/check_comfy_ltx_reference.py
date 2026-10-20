@@ -17,7 +17,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import einops
 import torch
@@ -25,6 +25,7 @@ from torch import Tensor
 
 if TYPE_CHECKING:
     from skulk_comfy_ltx.comfy_sampler import Guider, LatentModel, SamplerProgress
+    from skulk_comfy_ltx.editing import Modality
     from skulk_comfy_ltx.res2s import Latents
 
 REFERENCE = "e98f6d927d83c92ef2be6aec76c8440b19306e39"
@@ -229,6 +230,88 @@ def _check_guidance_rescale(source: Path, layout: _ReferenceLayout) -> dict[str,
     return dict(reference_sha256=expected_hash, cases=results, pass_all=True)
 
 
+@dataclass(frozen=True)
+class _VideoGrid(_OutputShape):
+    batch: int = 1
+
+
+@dataclass(frozen=True)
+class _AudioGrid(_OutputShape):
+    batch: int = 1
+
+
+@dataclass(frozen=True)
+class _Scales:
+    time: int = 8
+    height: int = 32
+    width: int = 32
+
+    @classmethod
+    def default(cls) -> _Scales:
+        return cls()
+
+
+class _MaskPatchifier(Protocol):
+    def get_patch_grid_bounds(self, output_shape: _VideoGrid | _AudioGrid, device: torch.device | None = None) -> Tensor: ...
+
+
+@dataclass(frozen=True)
+class _RegionTools:
+    patchifier: _MaskPatchifier
+    target_shape: _VideoGrid | _AudioGrid
+    scale_factors: _Scales = _Scales()
+    causal_fix: bool = True
+
+
+@dataclass(frozen=True)
+class _RegionState:
+    denoise_mask: _Mask
+
+    def clone(self) -> _RegionState:
+        return _RegionState(_Mask(self.denoise_mask.tensor.clone()))
+
+
+class _ReferenceRegion(Protocol):
+    def apply_to(self, latent_state: _RegionState, latent_tools: _RegionTools) -> _RegionState: ...
+
+
+def _check_temporal_masks(source: Path) -> dict[str, object]:
+    from skulk_comfy_ltx.editing import temporal_mask
+
+    patch_file = "packages/ltx-core/src/ltx_core/components/patchifiers.py"
+    patch_hash = "9618d6adac114b8b21a91c53a582ae19ab944813b25c88ffc11a1aa7e0239e0a"
+    region_file = "packages/ltx-core/src/ltx_core/conditioning/types/noise_mask_cond.py"
+    region_hash = "4f556155f28032a486672adeafc730cb6a461d9dfce92577b4857e7b7af5c4d2"
+    namespace: dict[str, object] = dict(torch=torch, math=math, einops=einops, Patchifier=object, ConditioningItem=object, dataclass=dataclass, AudioLatentShape=_AudioGrid, VideoLatentShape=_VideoGrid, SpatioTemporalScaleFactors=_Scales)
+    for relative, digest, names in ((patch_file, patch_hash, ("VideoLatentPatchifier", "AudioPatchifier", "get_pixel_coords")), (region_file, region_hash, ("TemporalRegionMask",))):
+        data = _reference_source(source, REFERENCE, relative)
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError("temporal mask reference differs from its reviewed immutable source")
+        _load(namespace, data, relative, names)
+    video_patch = cast("Callable[..., _MaskPatchifier]", namespace["VideoLatentPatchifier"])(patch_size=1)
+    audio_patch = cast("Callable[..., _MaskPatchifier]", namespace["AudioPatchifier"])(patch_size=1, sample_rate=16000, hop_length=160, audio_latent_downsample_factor=4)
+    region = cast("Callable[..., _ReferenceRegion]", namespace["TemporalRegionMask"])
+    cases: list[dict[str, object]] = []
+    for batch in (1, 2):
+        for fps in (24, 25):
+            modalities: tuple[tuple[Modality, _MaskPatchifier, _VideoGrid | _AudioGrid], ...] = (("video", video_patch, _VideoGrid(7, height=2, width=3, batch=batch)), ("audio", audio_patch, _AudioGrid(52, mel_bins=4, batch=batch)))
+            for modality, patchifier, grid in modalities:
+                for beginning, end in ((0.0, 0.01), (1 / fps, 9 / fps), (0.01, 0.05), (0.5, 1.0), (2.02, 2.04)):
+                    shape = (batch, 1, 7, 2, 3) if modality == "video" else (batch, 1, 52, 4)
+                    values = torch.zeros(shape)
+                    original_mask = torch.full((batch, 42 if modality == "video" else 52, 1), -1.0)
+                    expected = region(beginning, end, fps).apply_to(_RegionState(_Mask(original_mask)), _RegionTools(patchifier, grid)).denoise_mask.tensor
+                    observed = temporal_mask(values, modality=modality, start_seconds=beginning, end_seconds=end, fps=fps)
+                    if modality == "video":
+                        observed = einops.rearrange(observed.expand(batch, 1, 7, 2, 3), "b c t h w -> b (t h w) c")
+                    else:
+                        observed = observed[:, :, :, 0].expand(batch, 1, 52).movedim(1, 2)
+                    torch.testing.assert_close(observed, expected, rtol=0, atol=0)
+                    assert bool((original_mask == -1).all())
+                    cases.append(dict(batch=batch, fps=fps, modality=modality, start_seconds=beginning, end_seconds=end, exact=True))
+    return dict(patchifier_sha256=patch_hash, region_sha256=region_hash, cases=cases, pass_all=True)
+
+
 def main() -> None:
     """Verify the wheel math, actual packed boundary and cancellation; retain a receipt."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -353,7 +436,7 @@ def main() -> None:
         assert len(predict_calls) == 2
     else:
         raise AssertionError("cancellation did not escape the sampler")
-    report = dict(guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
+    report = dict(temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
     _ = args.output.write_text(json.dumps(report, indent=2) + "\n")
 
 

@@ -6,6 +6,12 @@ import comfy.samplers
 from comfy_api.latest import ComfyExtension, io
 
 from skulk_comfy_ltx.comfy_sampler import sample_ltx_res2s
+from skulk_comfy_ltx.editing_nodes import (
+    SkulkLTXEditAudioLatent,
+    SkulkLTXEditVideoLatent,
+    SkulkLTXPreserveAudio,
+    SkulkLTXPreserveVideo,
+)
 from skulk_comfy_ltx.guidance import ModelPatcher, patch_guidance_rescale
 
 
@@ -45,4 +51,4 @@ class SkulkLTXExtension(ComfyExtension):
 
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         """Return the complete allowlisted node set without installing plugins."""
-        return [SkulkLTXRes2sSampler, SkulkLTXGuidanceRescale]
+        return [SkulkLTXRes2sSampler, SkulkLTXGuidanceRescale, SkulkLTXEditVideoLatent, SkulkLTXEditAudioLatent, SkulkLTXPreserveVideo, SkulkLTXPreserveAudio]

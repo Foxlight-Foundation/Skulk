@@ -121,7 +121,7 @@ def _condition_images(
     return positive, negative, latent, guided
 
 
-def _sampling_stage(
+def sampling_stage(
     prompt: ComfyPrompt,
     name: str,
     *,
@@ -134,6 +134,7 @@ def _sampling_stage(
     render: ComfyRenderPlan,
     model: list[str | int],
 ) -> list[str | int]:
+    """Bind one joint sampling stage, retaining per-modality masks and fixed schedules."""
     prompt[f"ltx_{name}_av"] = _node(
         "LTXVConcatAVLatent",
         "Join audio/video latents",
@@ -141,7 +142,7 @@ def _sampling_stage(
         audio_latent=audio,
     )
     prompt[f"ltx_{name}_noise"] = _node("RandomNoise", "Noise", noise_seed=seed)
-    if name == "base" and render.pipeline in ("dev_two_stage", "hq_two_stage"):
+    if name == "base" and (render.pipeline in ("dev_two_stage", "hq_two_stage") or (render.editing is not None and render.transformer_variant == "dev")):
         prompt[f"ltx_{name}_sigmas"] = _node(
             "LTXVScheduler", "Guided base schedule", steps=render.plan.steps,
             max_shift=2.05, base_shift=0.95, stretch=True, terminal=0.1,
@@ -211,7 +212,7 @@ def _temporal_refinement(
     prompt["ltx_temporal_keyframes"] = _node("LTXVAddGeneratedKeyframes", "Generate intermediate detailing frames", positive=_link("ltx_temporal_guides", 0), negative=_link("ltx_temporal_guides", 1), vae=_link("video_vae"), latent=_link("ltx_temporal_guides", 2), interval_frames=render.generated_keyframe_interval, keyframes=_link("ltx_temporal_upscale"))
     prompt["ltx_temporal_condition"] = _node("LTXVConditioning", "Temporal refinement frame rate", positive=_link("ltx_temporal_keyframes", 0), negative=_link("ltx_temporal_keyframes", 1), frame_rate=render.plan.fps)
     prompt["ltx_temporal_frozen_audio"] = _node("LTXVFreezeLatent", "Preserve refined audio", latent=_link("ltx_refine_split", 1))
-    sampled = _sampling_stage(prompt, "temporal", seed=(render.plan.seed + 2) % (2**64), sigmas=DFR_TEMPORAL_SIGMAS, positive=_link("ltx_temporal_condition", 0), negative=_link("ltx_temporal_condition", 1), video=_link("ltx_temporal_keyframes", 2), audio=_link("ltx_temporal_frozen_audio"), render=render, model=model)
+    sampled = sampling_stage(prompt, "temporal", seed=(render.plan.seed + 2) % (2**64), sigmas=DFR_TEMPORAL_SIGMAS, positive=_link("ltx_temporal_condition", 0), negative=_link("ltx_temporal_condition", 1), video=_link("ltx_temporal_keyframes", 2), audio=_link("ltx_temporal_frozen_audio"), render=render, model=model)
     prompt["ltx_temporal_split"] = _node("LTXVSeparateAVLatent", "Separate temporal latents", av_latent=sampled)
     prompt["ltx_temporal_strip_generated"] = _node("LTXVSeparateGeneratedKeyframes", "Remove intermediate detailing tokens", positive=_link("ltx_temporal_keyframes", 0), negative=_link("ltx_temporal_keyframes", 1), latent=_link("ltx_temporal_split", 0), keyframes_to_batch=False)
     return _crop_guides(prompt, "temporal", _link("ltx_temporal_strip_generated", 0), _link("ltx_temporal_strip_generated", 1), _link("ltx_temporal_strip_generated", 2))
@@ -352,7 +353,7 @@ def build_ltx_prompt(
             latent=video, interval_frames=render.generated_keyframe_interval,
         )
         positive, negative, video = (_link("ltx_generated_keyframes", 0), _link("ltx_generated_keyframes", 1), _link("ltx_generated_keyframes", 2))
-    first = _sampling_stage(
+    first = sampling_stage(
         prompt,
         "base",
         seed=plan.seed,
@@ -416,7 +417,7 @@ def build_ltx_prompt(
         if render.pipeline == "dev_two_stage":
             prompt["ltx_frozen_audio"] = _node("LTXVFreezeLatent", "Keep base audio", latent=refinement_audio)
             refinement_audio = _link("ltx_frozen_audio")
-    second = _sampling_stage(
+    second = sampling_stage(
         prompt,
         "refine",
         seed=(plan.seed + 1) % (2**64),
