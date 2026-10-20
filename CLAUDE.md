@@ -615,7 +615,8 @@ A model card's `placement.compatible_backends` selects which engine serves it
   Duration prediction feeds the same bounded frame count into video and audio
   allocation; `video_probe.py` verifies actual dynamic container facts before
   publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
-  absent) and DFR temporal refinement rather than silently approximating them.
+  absent), rather than silently substituting a sampler. DFR spatial and optional
+temporal refinement use the exact selected detailing companions and fixed Euler sampling.
 
   Cards retain broad compatible GPU backends; benchmark qualification is not
   a hardware allowlist. The H3 path binds onto its MiniMax H3 node graph

@@ -874,7 +874,8 @@ preserve valid card identities and do not depend on hardware qualification.
 Duration prediction feeds the same bounded frame count into video and audio
 allocation; `video_probe.py` verifies actual dynamic container facts before
 publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
-absent) and DFR temporal refinement rather than silently approximating them.
+absent), rather than silently substituting a sampler. DFR spatial and optional
+temporal refinement use the exact selected detailing companions and fixed Euler sampling.
 
 Backend compatibility and retained hardware qualification are separate.
 A declared compatible backend does not require a benchmark for the exact
