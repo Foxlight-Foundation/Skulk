@@ -12,8 +12,39 @@ from pathlib import Path
 import psutil
 import pytest
 
-from skulk.worker.runner import video_input_process
+from skulk.worker.runner import video_input, video_input_process
 from skulk.worker.runner.video_input import MediaInputRequest
+
+
+def test_linux_decoder_memory_counts_current_resident_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A parent's historical peak must not reject a small decoder after exec."""
+    monkeypatch.setattr(video_input.sys, "platform", "linux")
+
+    def memory_pages(_path: Path) -> str:
+        return "4096 320 128 1 0 64 0\n"
+
+    def page_size(_name: str) -> int:
+        return 65536
+
+    monkeypatch.setattr(video_input.Path, "read_text", memory_pages)
+    monkeypatch.setattr(video_input.os, "sysconf", page_size)
+
+    def inherited_peak(_who: int) -> None:
+        pytest.fail("Linux decoder consulted its inherited high-water mark")
+
+    monkeypatch.setattr(video_input.resource, "getrusage", inherited_peak)
+    assert video_input._resident_memory_bytes() == 320 * 65536
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux preserves pre-exec RSS accounting")
+def test_linux_decoder_does_not_inherit_parent_memory_charge() -> None:
+    """Exercise a real exec from a larger process image, not a mocked counter."""
+    child = f"import resource,runpy;media=runpy.run_path({str(Path(video_input.__file__))!r});print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,media['_resident_memory_bytes']())"
+    parent = f"import subprocess,sys;allocation=bytearray(320*1024**2);subprocess.run([sys.executable,'-I','-c',{child!r}],check=True,start_new_session=True)"
+    result = subprocess.run([sys.executable, "-I", "-c", parent], capture_output=True, text=True, check=True, timeout=20)
+    inherited_peak, decoder_resident = (int(value) for value in result.stdout.split())
+    assert inherited_peak >= 320 * 1024**2
+    assert decoder_resident < inherited_peak - 128 * 1024**2
 
 
 def _await_exit(process: subprocess.Popen[str]) -> None:

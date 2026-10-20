@@ -301,6 +301,17 @@ class Arguments(argparse.Namespace):
     parent_pid: int
 
 
+def _resident_memory_bytes() -> int:
+    """Read decoder RSS without Linux's inherited pre-exec high-water mark."""
+    if sys.platform == "linux":
+        # Linux carries the spawning runner's RSS peak through exec. The
+        # decoder must be charged for its own pages, not model/worker memory
+        # that belonged to the previous process image.
+        resident_pages = int(Path("/proc/self/statm").read_text().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+
 def main() -> None:
     """Prepare one bounded local attachment with heap/file limits and parent reaping."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -322,8 +333,11 @@ def main() -> None:
 
     def reap() -> None:
         while os.getppid() == arguments.parent_pid:
-            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            resident_bytes = peak if sys.platform == "darwin" else peak * 1024
+            try:
+                resident_bytes = _resident_memory_bytes()
+            except (OSError, ValueError, IndexError):
+                print("ValueError: source decoder could not measure its resident memory", file=sys.stderr, flush=True)
+                break
             if resident_bytes > 512 * 1024**2:
                 print("ValueError: source decoder exceeded its resident-memory budget", file=sys.stderr, flush=True)
                 break
