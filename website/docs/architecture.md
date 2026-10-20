@@ -1025,6 +1025,15 @@ by component name), verifies they exist, and starts the server; ComfyUI
 loads weights on the first prompt and keeps them resident, so warm-up is
 the health check.
 
+External video companions keep their immutable repository-relative paths.
+The runner maps each staged companion to its declared Comfy loader folder in
+`extra_model_paths.yaml`. Standard `loras/`-style layouts use that subdirectory;
+flat or otherwise nested external repositories use their staged root. Graph
+file names and search roots are resolved together, so a root-level adapter can
+load without copying weights or changing its signed path. Primary-bundle
+companions still require the standard model-folder layout. Missing or
+wrong-revision external files fail before the Comfy server starts.
+
 A render is one graph. The request is resolved against the card exactly as
 the test engine resolves it (canvas from the trained short edge and aspect
 ratio, stepped down to the card's pixel budget; frame count on the trained

@@ -2017,6 +2017,14 @@ LTX advanced requests carry explicit source-audio, retake/extension and timed-lo
 
 ### Comfy LTX detailing
 
+External companion loading: `graph.companion_file()` binds the graph name to
+`runner._companion_search_roots()`. Each `ComfyModelSearchRoot` exposes one
+declared loader folder. Conventional external paths strip that folder and map
+its staged subdirectory; flat/nested external paths retain their full name and
+map the staged repository root. Signed paths and revisions remain unchanged;
+same-repository bundle files retain the standard folder contract. Missing or
+wrong-revision files are refused before server startup. YAML paths are quoted.
+
 LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
 keyframe carry between base and spatial refinement. An explicit optional temporal
 x2 pass requires its pinned latent upscaler, doubles frame density and conditioning

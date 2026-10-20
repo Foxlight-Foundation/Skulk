@@ -15,12 +15,14 @@ back onto Skulk's coarse stages.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal
 
 from skulk.shared.models.model_cards import (
     ModelCard,
+    ModelId,
     VideoCompanionConfig,
     VideoCompanionKind,
     VideoMode,
@@ -108,7 +110,10 @@ _COMPONENT_TEXT_ENCODER: Final = "text_encoder"
 _COMPONENT_VIDEO_VAE: Final = "video_vae"
 _COMPONENT_AUDIO_VAE: Final = "audio_vae"
 
-MODEL_FOLDERS: Final[tuple[str, ...]] = (
+ComfyModelFolder = Literal["diffusion_models", "text_encoders", "vae", "loras", "embeddings", "model_patches", "checkpoints", "geometry_estimation", "latent_upscale_models"]
+"""Model folder keys understood by the pinned Comfy loaders."""
+
+MODEL_FOLDERS: Final[tuple[ComfyModelFolder, ...]] = (
     "diffusion_models",
     "text_encoders",
     "vae",
@@ -126,12 +131,20 @@ checkpoint loader, and Depth Anything 3 through the geometry-estimation one;
 the RT-DETR person detector shares ``diffusion_models``.
 """
 
-PREPROCESSOR_FOLDERS: Final[dict[VideoPreprocessorRole, str]] = {
+PREPROCESSOR_FOLDERS: Final[dict[VideoPreprocessorRole, ComfyModelFolder]] = {
     VideoPreprocessorRole.PoseEstimator: "checkpoints",
     VideoPreprocessorRole.PersonDetector: "diffusion_models",
     VideoPreprocessorRole.DepthEstimator: "geometry_estimation",
 }
 """The ComfyUI folder each preprocessor role's loader reads its weights from."""
+
+
+@dataclass(frozen=True, slots=True)
+class ComfyModelSearchRoot:
+    """One staged directory exposed to exactly one Comfy model folder."""
+
+    folder: ComfyModelFolder
+    directory: Path
 
 
 def stage_for_node(node_id: str) -> VideoStage | None:
@@ -250,13 +263,13 @@ def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> Comfy
     refinement = next((item for item in video.companions if item.kind is VideoCompanionKind.Lora and item.name == "distilled_refinement" and (mode is None or item.supports_mode(mode))), None) if video is not None else None
     def selected(kind: VideoCompanionKind, name: str) -> str | None:
         companion = next((item for item in video.companions if item.kind is kind and item.name == name and (mode is None or item.supports_mode(mode))), None) if video is not None else None
-        return None if companion is None else companion_file(companion)
+        return None if companion is None else companion_file(companion, card.artifact_repository)
     return ComfyModelFiles(
         diffusion_model=diffusion,
         text_encoder=text_encoder,
         video_vae=video_vae,
         audio_vae=audio_vae,
-        spatial_upscaler=None if spatial is None else companion_file(spatial),
+        spatial_upscaler=None if spatial is None else companion_file(spatial, card.artifact_repository),
         dfr_spatial_lora=selected(VideoCompanionKind.Lora, "dfr_spatial"),
         temporal_upscaler=selected(VideoCompanionKind.LatentUpscaler, "temporal_x2"),
         duration_head=selected(VideoCompanionKind.DurationHead, "duration_head"),
@@ -266,35 +279,48 @@ def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> Comfy
     )
 
 
-def companion_file(companion: VideoCompanionConfig) -> str:
-    """The name ComfyUI lists a companion under, relative to its model folder.
-
-    A companion keeps its repository's layout wherever it is staged: inside
-    the card's artifact directory when it shares the card's repository, or
-    in its own staged directory when it is hosted elsewhere, which the
-    engine adds to ComfyUI's search roots. Either way the name is the path
-    below the folder ComfyUI reads for that kind (``loras/``,
-    ``model_patches/``, ``embeddings/``, or a preprocessor role's folder).
-    """
-    path = PurePosixPath(companion.path)
+def companion_model_folder(companion: VideoCompanionConfig) -> ComfyModelFolder:
+    """Return the pinned loader's model folder for a companion kind or role."""
+    folders: dict[VideoCompanionKind, ComfyModelFolder] = {
+        VideoCompanionKind.Lora: "loras",
+        VideoCompanionKind.ModelPatch: "model_patches",
+        VideoCompanionKind.Embedding: "embeddings",
+        VideoCompanionKind.LatentUpscaler: "latent_upscale_models",
+        VideoCompanionKind.DurationHead: "model_patches",
+        VideoCompanionKind.VideoDecoder: "vae",
+    }
     folder = (
         PREPROCESSOR_FOLDERS[companion.role]
         if companion.role is not None
-        else {
-            VideoCompanionKind.Lora: "loras",
-            VideoCompanionKind.ModelPatch: "model_patches",
-            VideoCompanionKind.Embedding: "embeddings",
-            VideoCompanionKind.LatentUpscaler: "latent_upscale_models",
-            VideoCompanionKind.DurationHead: "model_patches",
-            VideoCompanionKind.VideoDecoder: "vae",
-        }.get(companion.kind)
+        else folders.get(companion.kind)
     )
-    if folder is None or not path.parts or path.parts[0] != folder:
+    if folder is None:
+        raise ValueError(f"companion {companion.name!r} has no Comfy model folder")
+    return folder
+
+
+def companion_file(companion: VideoCompanionConfig, artifact_repository: ModelId | None = None) -> str:
+    """Return the exact name below a companion's Comfy search root.
+
+    Local bundle files retain the standard model-folder layout. An external
+    repository may publish a flat or nested file without that folder; its
+    pinned staged root is then mapped to the declared loader kind without
+    changing the signed repository-relative path or copying any weights.
+    Pass the owning artifact repository to keep explicitly same-repo files
+    on the local layout contract.
+    """
+    path = PurePosixPath(companion.path)
+    folder = companion_model_folder(companion)
+    if len(path.parts) > 1 and path.parts[0] == folder:
+        return path.relative_to(folder).as_posix()
+    if companion.repo is not None and companion.repo != artifact_repository:
+        return path.as_posix()
+    if not path.parts or path.parts[0] != folder:
         raise ValueError(
             f"companion {companion.name!r} ({companion.kind.value}) at {companion.path!r} is not "
             f"under the folder ComfyUI reads for that kind"
         )
-    return path.relative_to(folder).as_posix()
+    raise ValueError(f"companion {companion.name!r} must name a file below {folder}/")
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,7 +355,7 @@ def style_tokens(params: VideoGenerationTaskParams, card: ModelCard) -> tuple[st
             raise ValueError(f"{card.model_id} has no style embedding named {name!r}")
         tokens.append(
             "embedding:"
-            + PurePosixPath(companion_file(companion)).with_suffix("").as_posix()
+            + PurePosixPath(companion_file(companion, card.artifact_repository)).with_suffix("").as_posix()
         )
     return tuple(tokens)
 
@@ -428,7 +454,7 @@ def select_guide(
     return GuideChoice(
         kind=kind,
         files={
-            companion.role: companion_file(companion)
+            companion.role: companion_file(companion, card.artifact_repository)
             for companion in card.video.companions
             if companion.role is not None and companion.role in needed
         },
@@ -460,7 +486,7 @@ def select_control(
             continue
         return ControlChoice(
             name=companion.name,
-            file=companion_file(companion),
+            file=companion_file(companion, card.artifact_repository),
             strength=params.control_strength
             if params.control_strength is not None
             else (companion.strength if companion.strength is not None else 1.0),
@@ -653,7 +679,7 @@ def plan_comfy_render(
     if companion is not None:
         adapter = AdapterChoice(
             name=companion.name,
-            file=companion_file(companion),
+            file=companion_file(companion, card.artifact_repository),
             strength=params.lora_strength
             if params.lora_strength is not None
             else (companion.strength or 1.0),
@@ -1207,21 +1233,23 @@ def _add_reference_condition(
 
 
 def extra_model_paths_yaml(
-    model_dir: Path, companion_dirs: tuple[Path, ...] = ()
+    model_dir: Path, companion_roots: tuple[ComfyModelSearchRoot, ...] = ()
 ) -> str:
     """The ``extra_model_paths.yaml`` that exposes a staged artifact to ComfyUI.
 
-    Only folders present in each root are listed; ComfyUI treats each as an
-    additional search root for that model kind, so the loader file names in
-    the graph resolve without copying weights into the checkout. The card's
-    artifact directory comes first; each externally hosted companion
-    repository's staged directory follows as a root of its own.
+    The base artifact exposes its standard model folders. Each external
+    companion exposes only its declared loader kind, with the same relative
+    name selected by ``companion_file``. Flat upstream repositories therefore
+    work without inventing paths inside signed artifacts or copying weights.
     """
     lines: list[str] = []
-    for index, root in enumerate((model_dir, *companion_dirs)):
-        lines.append("skulk:" if index == 0 else f"skulk_companion_{index}:")
-        lines.append(f"  base_path: {root.resolve().as_posix()}")
-        for folder in MODEL_FOLDERS:
-            if (root / folder).is_dir():
-                lines.append(f"  {folder}: {folder}")
+    lines.append("skulk:")
+    lines.append(f"  base_path: {json.dumps(model_dir.resolve().as_posix())}")
+    for folder in MODEL_FOLDERS:
+        if (model_dir / folder).is_dir():
+            lines.append(f"  {folder}: {folder}")
+    for index, root in enumerate(companion_roots, start=1):
+        lines.append(f"skulk_companion_{index}:")
+        lines.append(f"  base_path: {json.dumps(root.directory.resolve().as_posix())}")
+        lines.append(f"  {root.folder}: .")
     return "\n".join(lines) + "\n"
