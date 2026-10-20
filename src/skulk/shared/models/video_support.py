@@ -24,7 +24,7 @@ def video_request_supported(card: ModelCard, params: VideoGenerationTaskParams, 
     pipeline = params.pipeline or (params.editing.operation if params.editing is not None else "distilled_two_stage" if card.video.transformer_variant == "distilled" else "dev_two_stage")
     engine = engine_of(backend)
     if engine == "comfy":
-        return pipeline in ("distilled_two_stage", "dev_two_stage") and params.editing is None and params.prompt_relay is None
+        return pipeline in ("distilled_two_stage", "dev_two_stage", "dfr") and params.editing is None and params.prompt_relay is None
     # The native wheel's muxer implements H.264 only. Exclude an incompatible
     # request before dispatch instead of letting it fail in the runner planner.
     if engine != "mlx_video" or pipeline == "dfr" or params.codec not in (None, "h264"):

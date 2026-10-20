@@ -861,6 +861,8 @@ class VideoCapabilitySection(BaseModel):
     pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by every required asset of each implemented pipeline.")
     decoders: list[VideoDecoder] = Field(default_factory=list, description="Selectable decoders whose exact components are present.")
     decoder_modes: dict[VideoDecoder, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by each selected decoder and its pipeline assets.")
+    temporal_upscaling: bool = Field(default=False, description="DFR temporal x2 is available with selected temporal and spatial refinement assets.")
+    temporal_upscaling_modes: list[VideoModeName] = Field(default_factory=list, description="DFR modes permitted by the selected temporal upscaler and spatial refinement assets.")
     generated_keyframes: bool = Field(default=False, description="Whether internal detailing keyframe tokens are supported by this artifact.")
     automatic_duration: bool = Field(default=False, description="Whether an exact duration head is selected.")
     automatic_duration_modes: list[VideoModeName] = Field(default_factory=list, description="Implemented modes permitted by the selected duration head.")
@@ -1015,6 +1017,9 @@ class VideoCapabilitySection(BaseModel):
         pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = {}
         if distilled_modes:
             pipeline_modes["distilled_two_stage"] = distilled_modes
+            dfr_modes: list[VideoModeName] = [mode for mode in distilled_modes if mode in companion_modes(VideoCompanionKind.Lora, "dfr_spatial")]
+            if "comfy" in engines and config.generated_keyframes and dfr_modes:
+                pipeline_modes["dfr"] = dfr_modes
         if dev_modes:
             pipeline_modes["dev_two_stage"] = dev_modes
             if any(engine_of(backend) == "mlx_video" for backend in model_card.placement.compatible_backends):
@@ -1037,6 +1042,7 @@ class VideoCapabilitySection(BaseModel):
         if diffusion_modes:
             decoder_modes["diffusion"] = diffusion_modes
         duration_modes: list[VideoModeName] = [mode for mode in served_modes if mode in companion_modes(VideoCompanionKind.DurationHead, "duration_head")]
+        temporal_modes: list[VideoModeName] = [mode for mode in pipeline_modes.get("dfr", []) if mode in companion_modes(VideoCompanionKind.LatentUpscaler, "temporal_x2")]
         return cls(
             modes=cast("list[VideoModeName]", [mode.value for mode in config.modes]),
             transformer_variant=config.transformer_variant,
@@ -1045,6 +1051,8 @@ class VideoCapabilitySection(BaseModel):
             codecs=["h264"] if native_only else list(VIDEO_CODECS),
             decoders=list(decoder_modes),
             decoder_modes=decoder_modes,
+            temporal_upscaling=bool(temporal_modes),
+            temporal_upscaling_modes=temporal_modes,
             generated_keyframes=ltx_available and config.generated_keyframes,
             automatic_duration=bool(duration_modes),
             automatic_duration_modes=duration_modes,
@@ -1067,7 +1075,7 @@ class VideoCapabilitySection(BaseModel):
             audio_channels=config.audio_channels,
             default_steps=config.default_steps,
             sampling_stage_steps=[8, 3] if ltx_distilled else [],
-            samplers=[] if native_only else (["euler_ancestral"] if ltx_distilled else ["euler"] if ltx_dev else [])
+            samplers=[] if native_only else (["euler_ancestral", *(["euler"] if "dfr" in pipeline_modes else [])] if ltx_distilled else ["euler"] if ltx_dev else [])
             if ltx
             else list(VIDEO_SAMPLERS),
             default_sampler="euler_ancestral"
@@ -2858,12 +2866,23 @@ class VideoCreateRequest(BaseModel):
     """Guided LTX negative conditioning, encoded verbatim."""
     guidance: VideoGuidance | None = None
     """LTX base-stage guidance; a multipart form supplies a JSON object."""
+    temporal_upscalings: Literal[0, 1] = 0
+    """DFR temporal x2 passes; one doubles FPS and frame density on the same timeline."""
     generated_keyframe_interval: int | None = Field(default=None, ge=1, le=1024)
     """Internal detailing keyframe spacing in pixel frames."""
     duration: Literal["fixed", "auto"] = "fixed"
     """Automatic duration uses ``seconds`` as its upper bound, or the card maximum."""
     duration_min_seconds: int | None = Field(default=None, ge=1, le=120)
     """Automatic duration lower bound; omitted uses the card minimum."""
+
+    @field_validator("temporal_upscalings", mode="before")
+    @classmethod
+    def _parse_temporal_upscalings(cls, value: object) -> object:
+        if isinstance(value, str) and value in ("0", "1"):
+            return int(value)
+        if type(value) is not int:
+            raise ValueError("temporal_upscalings must be integer 0 or 1")
+        return value
 
     @field_validator("guidance", mode="before")
     @classmethod
@@ -2983,6 +3002,8 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Selected decoder, when applicable."""
     guidance: VideoGuidance | None = None
     """Guidance applied to the base stage."""
+    temporal_upscalings: Literal[0, 1] = 0
+    """Executed DFR temporal x2 passes."""
     generated_keyframe_interval: int | None = None
     """Internal generated keyframe spacing, when used."""
     duration: Literal["fixed", "auto"] = "fixed"

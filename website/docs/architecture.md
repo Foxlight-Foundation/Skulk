@@ -874,7 +874,8 @@ preserve valid card identities and do not depend on hardware qualification.
 Duration prediction feeds the same bounded frame count into video and audio
 allocation; `video_probe.py` verifies actual dynamic container facts before
 publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
-absent) and DFR temporal refinement rather than silently approximating them.
+absent), rather than silently substituting a sampler. DFR spatial and optional
+temporal refinement use the exact selected detailing companions and fixed Euler sampling.
 
 Backend compatibility and retained hardware qualification are separate.
 A declared compatible backend does not require a benchmark for the exact
@@ -3208,3 +3209,13 @@ Native staged admission uses `shared/models/video_memory.py` to charge the large
 LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. The pinned Comfy core nodes lack the exact temporal retake/extension and prompt-relay masks.
 
 Native video engine v0.2.1 marks decoding at the actual decode-and-save call. The headless decoder's private verbose profiler is disabled so its counter reset cannot erase earlier encoder/sampling memory peaks. The reported Metal peak covers the complete render; it is distinct from host RSS and the two counters must not be added.
+
+
+### Comfy LTX detailing
+
+LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
+keyframe carry between base and spatial refinement. An explicit optional temporal
+x2 pass requires its pinned latent upscaler, doubles frame density and conditioning
+FPS together, and freezes the existing audio. Request admission checks selected
+companions and modes independently of hardware qualification. No additional
+engine installation is needed for these nodes at the pinned Comfy revision.

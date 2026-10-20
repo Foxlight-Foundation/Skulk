@@ -615,7 +615,8 @@ A model card's `placement.compatible_backends` selects which engine serves it
   Duration prediction feeds the same bounded frame count into video and audio
   allocation; `video_probe.py` verifies actual dynamic container facts before
   publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
-  absent) and DFR temporal refinement rather than silently approximating them.
+  absent), rather than silently substituting a sampler. DFR spatial and optional
+temporal refinement use the exact selected detailing companions and fixed Euler sampling.
 
   Cards retain broad compatible GPU backends; benchmark qualification is not
   a hardware allowlist. The H3 path binds onto its MiniMax H3 node graph
@@ -2005,3 +2006,13 @@ LTX advanced requests carry explicit source-audio, retake/extension and timed-lo
 Native v0.2.1 decode observation is bundled from `worker/runner/video_observability.py`. It announces the actual decode-and-save boundary and disables the decoder's verbose-only allocator reset, preserving encoder/sampling/decode peaks across the complete render. Telemetry-only engine changes still require a new immutable published wheel. The wheel workflow watches both standalone bundled helper sources for candidate assembly and isolated validation.
 
 Native staged memory admission uses `shared/models/video_memory.py` for selected encoder/connector versus remaining-pack weights, common overhead and conservative unknown-layout fallback. `worker/runner/mlx_video/memory.py` reads bounded tensor headers and admits request geometry, joint sampling (including silent output), source buffers and decoder workspace against the same reservation and live GPU-wireable memory. `runtime.video_memory_budget_bytes` raises only the reservation for larger workloads and is omitted when absent to preserve installed-card authorization projections. The supervisor sets only the checked existing `LTX2_VAE_DECODE_BUDGET_GB` after sanitizing inherited tuning, refuses an over-budget minimum conv tile, and reaps on live pressure/RSS or an over-reservation result peak. These are estimates and pressure backstops, not a hard Metal quota; qualification remains separate from hardware eligibility.
+
+
+### Comfy LTX detailing
+
+LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
+keyframe carry between base and spatial refinement. An explicit optional temporal
+x2 pass requires its pinned latent upscaler, doubles frame density and conditioning
+FPS together, and freezes the existing audio. Request admission checks selected
+companions and modes independently of hardware qualification. No additional
+engine installation is needed for these nodes at the pinned Comfy revision.
