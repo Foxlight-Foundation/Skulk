@@ -1163,6 +1163,15 @@ object mismatch. Bundle identity is part of installed generations and store
 keys, so aliases sharing one repository/revision cannot collide. V1 cards keep
 their existing repository-wide tensor and pinned-GGUF behavior.
 
+Canonical-store downloads can share files between signed bundles at the same
+immutable repository revision. Reuse requires the selected member's exact path,
+size and SHA-256 to match a currently registered file after hashing its bytes.
+The store hardlinks verified members before calculating additional disk space;
+failed links receive no capacity credit and use the ordinary download path.
+Each bundle retains its own installed record. Deleting one alias only removes
+its links, while another bundle's shared bytes remain available. This does not
+change the 10 GiB reserve or permit automatic eviction from the canonical store.
+
 The authoritative store host periodically reconciles node caches through
 bounded `/store/storage` inventories and capability-bound range exports.
 Inventory covers staging, direct-download, and configured read-only model
