@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from copy import copy
 from typing import Literal, Protocol, TypedDict
 
 import torch
@@ -38,6 +39,21 @@ class AudioVae(Protocol):
     """The selected Comfy audio VAE's clock, without importing its implementation."""
 
     first_stage_model: AudioClock
+    crop_input: bool
+
+
+def uncropped_audio_vae[AudioVaeType: AudioVae](audio_vae: AudioVaeType) -> AudioVaeType:
+    """Return an encoder view preserving the complete normalized source waveform.
+
+    Share the selected weights and placement, while disabling the generic
+    spatial crop on this view. The cached VAE's configuration stays unchanged.
+    """
+    # The pinned Comfy VAE applies its 4096-sample spatial crop to audio's
+    # time axis, dropping context at both ends before the causal encoder.
+    # A shallow view retains model management without mutating cached inputs.
+    encoder = copy(audio_vae)
+    encoder.crop_input = False
+    return encoder
 
 
 def _validate_tensor(value: Tensor, dimensions: int) -> None:

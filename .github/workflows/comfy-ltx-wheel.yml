@@ -64,9 +64,9 @@ jobs:
           uv run basedpyright --project packaging/skulk-comfy-ltx/pyproject.toml --pythonpath .venv/bin/python
           uv run pytest -q packaging/skulk-comfy-ltx/tests scripts/tests/test_comfy_ltx_wheel.py src/skulk/provisioning/tests/test_comfy_extension.py
           uv run python scripts/check_comfy_ltx_reference.py --ltx-source reference-ltx --comfy-source .runtime/comfy \
-            --wheel candidate-wheels/skulk_comfy_ltx-0.1.0-py3-none-any.whl --output candidate-wheels/reference-check.json
+            --wheel candidate-wheels/skulk_comfy_ltx-0.1.1-py3-none-any.whl --output candidate-wheels/reference-check.json
           uv run python -I -B -c 'import sys; sys.path.insert(0,sys.argv[1]); from skulk_comfy_ltx import manifest_json; assert manifest_json(); assert "torch" not in sys.modules and "comfy" not in sys.modules' \
-            candidate-wheels/skulk_comfy_ltx-0.1.0-py3-none-any.whl
+            candidate-wheels/skulk_comfy_ltx-0.1.1-py3-none-any.whl
       - uses: actions/attest-build-provenance@v3
         with:
           subject-path: candidate-wheels/*.whl

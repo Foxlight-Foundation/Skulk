@@ -40,6 +40,12 @@ container encoding. This is a pre-mux preservation contract: lossy video/audio
 codecs may change the final decoded values. A missing source audio track supplies
 silent context; preserving audible output requires an actual track.
 
+Source PCM is encoded through a shallow view of the selected audio VAE with
+generic spatial cropping disabled. The pinned Comfy wrapper otherwise crops
+audio's time axis to 4096-sample boundaries, which can discard enough context
+to reject an ordinary retake. The view shares weights and managed placement;
+the cached VAE and the normalized source waveform remain unchanged.
+
 Run `uv run pytest packaging/skulk-comfy-ltx/tests` alongside the package's
 strict type project. The numerical receipt also compares temporal masks to the
 actual immutable upstream patchifiers and region-conditioning implementation.

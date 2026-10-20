@@ -17,6 +17,7 @@ from skulk_comfy_ltx.editing import (
     normalize_source_audio,
     preserve_audio,
     preserve_video,
+    uncropped_audio_vae,
 )
 
 
@@ -69,7 +70,7 @@ class SkulkLTXEditAudioLatent(io.ComfyNode):
         downsample = round(factor)
         if not 1 <= downsample <= 16 or not math.isclose(factor, downsample, rel_tol=1e-6):
             raise ValueError("the selected audio VAE has an unsupported causal downsample")
-        encoded = LTXVAudioVAEEncode.execute(source, audio_vae).result[0]["samples"]
+        encoded = LTXVAudioVAEEncode.execute(source, uncropped_audio_vae(audio_vae)).result[0]["samples"]
         samples, mask = edit_latent(encoded, _samples(target), modality="audio", operation=operation, fps=fps, start_seconds=start_seconds, end_seconds=end_seconds, regenerate_audio=regenerate_audio, sample_rate=clock.sample_rate, hop_length=clock.mel_hop_length, downsample_factor=downsample)
         return io.NodeOutput({**target, "samples": samples, "noise_mask": mask}, source)
 
