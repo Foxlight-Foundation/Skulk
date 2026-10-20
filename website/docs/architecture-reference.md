@@ -12,6 +12,21 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
+- **Offline preservation recovery:** `store/preservation.py` and
+  `store/preservation_cli.py`; `skulk-preservation inspect/recover`, also
+  `skulk preservation`. Pinned public core dependency; no network or node launch.
+  Exact manifest + independent owner trust + packaged registry root. One
+  self-contained text model, new home only. Atomic whole-home publication includes
+  normal store/index, schema-3 installed evidence, custom TOML admission and
+  offline config. Owner acceptance and repository-code permission are distinct.
+  Only fresh registry proof plus complete original SHA-256 binding produces
+  `registry_verified`; historical/owner-only/gapped evidence is custom. No
+  companion importer, live mutation, host jobs, export, sharing or inference
+  qualification. [Contract](model-preservation).
+  `_pyinstaller/` registers a `pyinstaller40` hook for the public core's JSON
+  schema and distribution version metadata; no installer/direct-URL metadata
+  enters the binary through this hook.
+
 - **Compatibility and memory contract:** [Model and Engine Compatibility](engine-compatibility.md)
   separates model/artifact facts, real engine requirements and scoped test evidence.
   Compatible untested hardware remains eligible. Placer, reservations, context

@@ -3398,6 +3398,14 @@ as `registry_card_id`: when the installed bundle is the signed card's bundle
 the store rewrites the sidecar and answers `complete` without transferring
 bytes, otherwise a download of the signed artifact starts.
 
+An installed-card schema-3 record recovered through the local preservation
+tool additionally carries `preservation`: exact owner manifest/card IDs,
+independently checked publication assurance, original SHA-256 file coverage and
+the receiver's separate repository-code observation. These fields are evidence,
+not another receiver's trust enrollment or permission. Legacy schema-1/2 records
+omit this field. See [Offline model recovery](model-preservation) for admission
+rules; the store registry read endpoint does not import or authorize bundles.
+
 The top-level `cache_inventory` reports `observed_nodes`, `expected_nodes`, and a
 coverage state. Its additive `store_nodes` list identifies live nodes currently
 advertising the canonical-store role, including when a legacy entry has not yet

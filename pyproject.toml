@@ -32,6 +32,8 @@ dependencies = [
   "ddgs>=9.6.1",
   "tomlkit>=0.14.0",
   "tuf>=6,<7",
+  # Public offline preservation core, pinned to the reviewed v0.3.0 release.
+  "foxlight-model-preservation @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@06808aac30b13ef66251a57476f704572761d11b",
   # mflux from PyPI: the Foxlight fork existed only because released mflux
   # capped mlx below 0.32, which upstream lifted in 0.19.2 (#692); the fork
   # carried no other change. Darwin-only because mflux pins Linux to
@@ -104,9 +106,13 @@ dependencies = [
 
 [project.scripts]
 skulk = "skulk.main:main"
+skulk-preservation = "skulk.store.preservation_cli:main"
 skulk-plugin-service = "skulk.extensions.service_setup:main"
 skulk-build-macos-local-network-probe-app = "skulk.connectivity.local_network_probe_app:main"
 skulk-macos-local-network-probe = "skulk.connectivity.local_network_probe:main"
+
+[project.entry-points.pyinstaller40]
+hook-dirs = "skulk._pyinstaller:get_hook_dirs"
 
 # dependencies only required for development
 [dependency-groups]
@@ -234,6 +240,10 @@ extend-exclude = [
 
 [tool.ruff.lint]
 extend-select = ["I", "N", "B", "A", "PIE", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# PyInstaller resolves hooks by its required hook-<import-name>.py filename.
+"src/skulk/_pyinstaller/hook-*.py" = ["N999"]
 
 [tool.pytest.ini_options]
 pythonpath = "."

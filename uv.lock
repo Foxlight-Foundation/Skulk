@@ -612,6 +612,18 @@ wheels = [
 ]
 
 [[package]]
+name = "foxlight-model-preservation"
+version = "0.3.0"
+source = { git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=06808aac30b13ef66251a57476f704572761d11b#06808aac30b13ef66251a57476f704572761d11b" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "jsonschema" },
+    { name = "pydantic" },
+    { name = "rfc8785" },
+    { name = "tuf" },
+]
+
+[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2418,6 +2430,15 @@ wheels = [
 ]
 
 [[package]]
+name = "rfc8785"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/2f/fa1d2e740c490191b572d33dbca5daa180cb423c24396b856f5886371d8b/rfc8785-0.1.4.tar.gz", hash = "sha256:e545841329fe0eee4f6a3b44e7034343100c12b4ec566dc06ca9735681deb4da", size = 14321, upload-time = "2024-09-27T16:33:31.206Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4d/78/119878110660b2ad709888c8a1614fce7e2fab39080ab960656dc8605bf6/rfc8785-0.1.4-py3-none-any.whl", hash = "sha256:520d690b448ecf0703691c76e1a34a24ddcd4fc5bc41d589cb7c58ec651bcd48", size = 9240, upload-time = "2024-09-27T16:33:29.683Z" },
+]
+
+[[package]]
 name = "rich"
 version = "14.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2740,6 +2761,7 @@ dependencies = [
     { name = "ddgs" },
     { name = "fastapi" },
     { name = "filelock" },
+    { name = "foxlight-model-preservation" },
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "hypercorn" },
@@ -2804,6 +2826,7 @@ requires-dist = [
     { name = "ddgs", specifier = ">=9.6.1" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "filelock", specifier = ">=3.18.0" },
+    { name = "foxlight-model-preservation", git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=06808aac30b13ef66251a57476f704572761d11b" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=1.8.0" },
     { name = "hypercorn", specifier = ">=0.18.0" },

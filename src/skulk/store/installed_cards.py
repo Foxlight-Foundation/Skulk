@@ -110,6 +110,37 @@ class InstalledFileManifestEntry(BaseModel):
 
 
 @final
+class PreservationEvidence(BaseModel):
+    """Receiver observations for an offline recovery, never a portable grant.
+
+    The original signed envelope is retained in the recovery home. A copied
+    observation does not enroll its signer or authorize another import.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    manifest_id: str = Field(
+        pattern=r"^[0-9a-f]{64}$", description="Verified owner manifest digest."
+    )
+    card_id: str = Field(
+        pattern=r"^card_[a-z2-7]{52}$", description="Original public card identity."
+    )
+    publication: Literal["owner-only", "registry-fresh", "registry-historical"] = Field(
+        description="Publication evidence checked independently of the owner signature."
+    )
+    file_coverage: Literal["complete-sha256", "partial-or-missing"] = Field(
+        description="Whether the original card binds every recovered file by SHA-256."
+    )
+    repository_code_authorized: bool = Field(
+        description="Separate local recovery decision about repository code."
+    )
+
+
+def _absent_preservation(value: PreservationEvidence | None) -> bool:
+    return value is None
+
+
+@final
 class InstalledCardRecord(BaseModel):
     """Complete local card and byte identity for one installed artifact.
 
@@ -121,7 +152,7 @@ class InstalledCardRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    schema_version: Literal[1, 2] = Field(
+    schema_version: Literal[1, 2, 3] = Field(
         default=1,
         description="Installed-card sidecar schema version.",
     )
@@ -139,6 +170,11 @@ class InstalledCardRecord(BaseModel):
     )
     model_card: ModelCard = Field(
         description="Complete effective model card retained for offline operation."
+    )
+    preservation: PreservationEvidence | None = Field(
+        default=None,
+        exclude_if=_absent_preservation,
+        description="Optional receiver recovery observations, not transferable trust or execution authority.",
     )
     verification: InstalledCardVerification = Field(
         description=(
@@ -211,6 +247,14 @@ class InstalledCardRecord(BaseModel):
 
         ModelId(self.artifact_model_id)
         ModelId(self.artifact_repository)
+        if (self.schema_version == 3) != (self.preservation is not None):
+            raise ValueError("preservation observations require installed-card schema 3")
+        if self.preservation is not None and self.verification == "registry_verified" and (
+            self.preservation.publication != "registry-fresh"
+            or self.preservation.file_coverage != "complete-sha256"
+            or self.preservation.card_id != self.model_card.registry_card_id
+        ):
+            raise ValueError("recovered registry verification requires fresh publication and complete original SHA-256 evidence")
         if self.owner_model_id is not None:
             ModelId(self.owner_model_id)
         if self.artifact_role == "base" and (

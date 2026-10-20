@@ -2105,6 +2105,10 @@ class Node:
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "preservation":
+        from skulk.store.preservation_cli import main as preservation_main
+
+        sys.exit(preservation_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "operator":
         # Operator commands are local administration and never launch a node.
         from skulk.operator.cli import main as operator_main
