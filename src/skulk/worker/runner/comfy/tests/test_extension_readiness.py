@@ -1,5 +1,8 @@
+# pyright: reportPrivateUsage=false
 """Trusted-node startup is isolated and failed readiness releases its process."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -36,3 +39,39 @@ def test_schema_failure_releases_server_before_the_runner_owns_it(tmp_path: Path
     with pytest.raises(RuntimeError):
         server.start()
     assert stopped == [True]
+
+
+@pytest.mark.parametrize("temporal", [False, True])
+def test_readiness_checks_only_nodes_implemented_by_the_issued_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, temporal: bool) -> None:
+    """An old sampler-only wheel remains valid; temporal wheels prove all four nodes."""
+    from skulk.provisioning.comfy_extension import ComfyExtensionManifest
+    from skulk.provisioning.manifest import COMFY_PIN
+
+    package = tmp_path / "skulk_comfy_ltx"
+    package.mkdir()
+    manifest = ComfyExtensionManifest(protocol=1, version="0.1.0", comfy_revision=COMFY_PIN, ltx_revision="a" * 40, features=("res2s", "retake", "extend") if temporal else ("res2s",), payload_sha256="b" * 64, members={"skulk_comfy_ltx/nodes.py": "c" * 64})
+    (package / "manifest.json").write_text(manifest.model_dump_json())
+    expected = {"SkulkLTXRes2sSampler": ["SAMPLER"], "SkulkLTXGuidanceRescale": ["MODEL"]}
+    if temporal:
+        expected.update(SkulkLTXEditVideoLatent=["LATENT"], SkulkLTXEditAudioLatent=["LATENT", "AUDIO"], SkulkLTXPreserveVideo=["IMAGE"], SkulkLTXPreserveAudio=["AUDIO"])
+    visited: list[str] = []
+
+    @contextmanager
+    def response(method: str, url: str, **_options: object) -> Iterator[httpx.Response]:
+        assert method == "GET"
+        name = url.rsplit("/", 1)[1]
+        visited.append(name)
+        with (
+            httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={name: {"output": expected[name]}}))) as client,
+            client.stream(method, url) as reply,
+        ):
+            yield reply
+
+    monkeypatch.setattr(httpx, "stream", response)
+    server = ComfyServer(interpreter=tmp_path / "python", root=tmp_path / "comfy", extra_model_paths=tmp_path / "models.yaml", input_dir=tmp_path / "input", output_dir=tmp_path / "output", temp_dir=tmp_path / "temp", user_dir=tmp_path / "user", log_path=tmp_path / "log", trusted_extension=package, base_url="http://127.0.0.1:55000")
+    server._await_extension_schema()
+    assert visited == list(expected)
+    if temporal:
+        expected["SkulkLTXEditAudioLatent"] = ["LATENT"]
+        with pytest.raises(RuntimeError, match="exact SkulkLTXEditAudioLatent"):
+            server._await_extension_schema()

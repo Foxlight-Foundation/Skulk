@@ -278,7 +278,18 @@ class ComfyServer:
         """Refuse readiness when the archive-verified extension did not register."""
         if self.base_url is None:
             raise RuntimeError("Comfy extension schema probe requires a live server")
-        for name, outputs in (("SkulkLTXRes2sSampler", ["SAMPLER"]), ("SkulkLTXGuidanceRescale", ["MODEL"])):
+        from skulk.provisioning.comfy_extension import ComfyExtensionManifest
+
+        if self.trusted_extension is None:
+            raise RuntimeError("Comfy extension schema probe requires its verified package")
+        manifest_path = self.trusted_extension / "manifest.json"
+        if manifest_path.stat().st_size > 131072:
+            raise RuntimeError("Comfy extension manifest exceeds its bound")
+        manifest = ComfyExtensionManifest.model_validate_json(manifest_path.read_bytes())
+        required = [("SkulkLTXRes2sSampler", ["SAMPLER"]), ("SkulkLTXGuidanceRescale", ["MODEL"])]
+        if {"retake", "extend"} & set(manifest.features):
+            required.extend([("SkulkLTXEditVideoLatent", ["LATENT"]), ("SkulkLTXEditAudioLatent", ["LATENT", "AUDIO"]), ("SkulkLTXPreserveVideo", ["IMAGE"]), ("SkulkLTXPreserveAudio", ["AUDIO"])])
+        for name, outputs in required:
             data = bytearray()
             with httpx.stream("GET", f"{self.base_url}/object_info/{name}", timeout=10.0) as response:
                 response.raise_for_status()

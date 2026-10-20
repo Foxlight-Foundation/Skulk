@@ -25,3 +25,15 @@ model call. The numerical check evaluates the pinned upstream patchifiers and
 solver independently, including fractional masks and separate modality clocks.
 Promotion also compares every package source and license member to the reviewed
 checkout; an internally consistent wheel from a different branch is rejected.
+
+Temporal editing keeps video and audio on their own causal VAE clocks. Retake
+masks only the requested interval; extension freezes the complete source prefix
+and restores its full-resolution context before spatial refinement. The output
+nodes restore unchanged source RGB frames and normalized stereo PCM before
+container encoding. This is a pre-mux preservation contract: lossy video/audio
+codecs may change the final decoded values. A missing source audio track supplies
+silent context; preserving audible output requires an actual track.
+
+Run `uv run pytest packaging/skulk-comfy-ltx/tests` alongside the package's
+strict type project. The numerical receipt also compares temporal masks to the
+actual immutable upstream patchifiers and region-conditioning implementation.

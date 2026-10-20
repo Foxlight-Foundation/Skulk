@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -624,3 +625,124 @@ def test_hq_metadata_binds_issued_builds_and_its_own_defaults(monkeypatch: pytes
 def test_hq_never_accepts_another_sampler_override(sampler: str) -> None:
     with pytest.raises(ValueError, match="fixed Res2s"):
         plan_comfy_render(_params(pipeline="hq_two_stage", sampler=sampler), _dev_card())
+
+
+def _issued_editing_build(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Represent a distinct issued editing payload, with no hardware qualification."""
+    from skulk.provisioning import comfy_extension
+
+    wheel = comfy_extension.ComfyExtensionWheel(filename="skulk_comfy_ltx-0.1.0-py3-none-any.whl", sha256="c" * 64, payload_sha256="d" * 64, size_bytes=1000, features=("res2s", "retake", "extend"), comfy_revision=comfy_extension.COMFY_PIN, ltx_revision=comfy_extension.LTX_REFERENCE_REVISION)
+    monkeypatch.setattr(comfy_extension, "PUBLISHED_EXTENSIONS", (wheel,))
+    return wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@2.14.0+cu130")
+
+
+def _editing_params(operation: str, **changes: object) -> VideoGenerationTaskParams:
+    source = VideoReferenceSpec(slot=0, kind="video", role="source", media_type="video/mp4", size_bytes=1, sha256="0" * 64)
+    editing = {"operation": operation, **({"start_seconds": 0.5, "end_seconds": 1.0} if operation == "retake" else {})}
+    return _params(seconds=2, editing=editing, references=(source,), reference_bytes=1, total_input_chunks=1, **changes)
+
+
+@pytest.mark.parametrize("operation", ["retake", "extend"])
+@pytest.mark.parametrize("backend", ["comfy-cuda", "comfy-rocm"])
+def test_temporal_edits_require_the_issued_instance_payload(monkeypatch: pytest.MonkeyPatch, operation: str, backend: str) -> None:
+    from skulk.shared.models.video_support import video_request_supported
+
+    params, card = _editing_params(operation), _card()
+    build = _issued_editing_build(monkeypatch)
+    if backend == "comfy-rocm":
+        build = build.replace("cu130", "rocm7.4")
+    assert video_request_supported(card, params, backend, build)
+    for unknown in (None, build.split("/extension@")[0], build.replace("d" * 64, "e" * 64)):
+        assert not video_request_supported(card, params, backend, unknown)
+        with pytest.raises(ValueError, match="published extension"):
+            plan_comfy_render(params, card, engine_build=unknown)
+    sampler_only = _issued_res2s_build(monkeypatch)
+    assert not video_request_supported(card, params, backend, sampler_only)
+
+
+@pytest.mark.parametrize("dev", [False, True])
+def test_retake_uses_one_complete_source_pass_and_preserves_decoded_regions(monkeypatch: pytest.MonkeyPatch, dev: bool) -> None:
+    params, card = _editing_params("retake"), _dev_card() if dev else _card()
+    render = plan_comfy_render(params, card, engine_build=_issued_editing_build(monkeypatch))
+    assert render.steps == (30 if dev else 8)
+    assert render.sampler_steps == {"ltx_base_sampler": 30 if dev else 8}
+    assert render.sampler == "euler"
+    with pytest.raises(ValueError, match="verified source facts"):
+        build_prompt(render, params, (), "edit")
+    render = replace(render, source_frames=49)
+    graph = build_prompt(render, params, (ReferenceBinding(spec=params.references[0], input_name="verified.mp4"),), "edit")
+    assert graph["ltx_video_latent"]["inputs"]["width"] == 768
+    assert graph["ltx_source_video"]["inputs"]["file"] == "verified.mp4"
+    assert graph["ltx_edit_audio"]["inputs"]["source_frames"] == 49
+    assert "ltx_refine_sampler" not in graph and "ltx_spatial_upscale" not in graph
+    assert graph["create_video"]["inputs"]["images"] == ["ltx_preserve_video", 0]
+    assert graph["thumbnail_frame"]["inputs"]["image"] == ["ltx_preserve_video", 0]
+    assert graph["create_video"]["inputs"]["audio"] == ["ltx_preserve_audio", 0]
+    assert graph["ltx_preserve_audio"]["inputs"]["source"] == ["ltx_edit_audio", 1]
+    assert graph["ltx_base_guider"]["inputs"]["video_cfg"] == (3.0 if dev else 1.0)
+    if dev:
+        assert graph["ltx_base_sigmas"]["class_type"] == "LTXVScheduler"
+        assert graph["ltx_edit_stg"]["inputs"]["scale"] == 1.0
+        assert graph["ltx_base_guider"]["inputs"]["audio_cfg"] == 7.0
+        assert render.engine_settings().guidance_video_rescale == 0.7
+    else:
+        assert graph["ltx_base_sigmas"]["inputs"]["sigmas"] == DISTILLED_SIGMAS
+
+
+@pytest.mark.parametrize("dev", [False, True])
+def test_extension_restores_full_resolution_source_context_before_refinement(monkeypatch: pytest.MonkeyPatch, dev: bool) -> None:
+    params = _editing_params("extend")
+    render = replace(plan_comfy_render(params, _dev_card() if dev else _card(), engine_build=_issued_editing_build(monkeypatch)), source_frames=9)
+    graph = build_prompt(render, params, (ReferenceBinding(spec=params.references[0], input_name="source.mp4"),), "extend")
+    assert graph["ltx_edit_base_video"]["inputs"]["operation"] == "extend"
+    assert graph["ltx_preserve_video"]["inputs"]["source"] == ["ltx_source_components", 0]
+    if dev:
+        assert render.steps == 30 and "ltx_refine_sampler" not in graph
+        assert graph["ltx_video_latent"]["inputs"]["width"] == 768
+        assert render.engine_settings().adapter is None
+    else:
+        assert render.steps == 11 and render.sampler == "euler_ancestral"
+        assert graph["ltx_video_latent"]["inputs"]["width"] == 384
+        assert graph["ltx_edit_refine_video"]["inputs"]["source"] == ["ltx_source_full_encoded", 0]
+        assert graph["ltx_edit_refine_video"]["inputs"]["target"] == ["ltx_spatial_upscale", 0]
+        assert graph["ltx_refine_av"]["inputs"]["video_latent"] == ["ltx_edit_refine_video", 0]
+        assert graph["ltx_refine_av"]["inputs"]["audio_latent"] == ["ltx_base_split", 1]
+        assert graph["decode_audio"]["inputs"]["samples"] == ["ltx_refine_split", 1]
+
+
+@pytest.mark.parametrize("silent", [False, True])
+def test_retake_preserved_audio_bypasses_the_lossy_audio_vae(monkeypatch: pytest.MonkeyPatch, silent: bool) -> None:
+    params = _editing_params("retake", audio=not silent)
+    assert params.editing is not None
+    params = params.model_copy(update={"editing": params.editing.model_copy(update={"regenerate_audio": False})})
+    render = replace(plan_comfy_render(params, _card(), engine_build=_issued_editing_build(monkeypatch)), source_frames=49)
+    graph = build_prompt(render, params, (ReferenceBinding(spec=params.references[0], input_name="source.mp4"),), "hold")
+    assert "decode_audio" not in graph and "ltx_audio_latent" in graph
+    assert graph["ltx_edit_audio"]["inputs"]["regenerate_audio"] is False
+    if silent:
+        assert "audio" not in graph["create_video"]["inputs"]
+    else:
+        assert graph["create_video"]["inputs"]["audio"] == ["ltx_edit_audio", 1]
+
+
+def test_editing_metadata_exposes_own_defaults_and_scoped_decoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    _issued_editing_build(monkeypatch)
+    distilled = VideoCapabilitySection.from_model_card(_card())
+    dev = VideoCapabilitySection.from_model_card(_dev_card())
+    assert distilled is not None and dev is not None
+    assert distilled.editing == ["retake", "extend"]
+    assert distilled.pipeline_defaults["retake"].sampling_stage_steps == [8]
+    assert distilled.pipeline_defaults["retake"].sampler == "euler"
+    assert "euler" in distilled.samplers
+    assert distilled.pipeline_defaults["extend"].sampling_stage_steps == [8, 3]
+    assert dev.pipeline_defaults["extend"].sampling_stage_steps == [30]
+    assert "ref2va" in dev.decoder_modes["diffusion"]
+    assert dev.pipeline_defaults["retake"].guidance is None
+
+
+@pytest.mark.parametrize("operation,frames", [("retake", 41), ("extend", 49), ("extend", 57)])
+def test_editing_refuses_incomplete_or_oversized_source_facts(monkeypatch: pytest.MonkeyPatch, operation: str, frames: int) -> None:
+    params = _editing_params(operation)
+    render = replace(plan_comfy_render(params, _card(), engine_build=_issued_editing_build(monkeypatch)), source_frames=frames)
+    with pytest.raises(ValueError, match="complete output|exceed the complete"):
+        build_prompt(render, params, (ReferenceBinding(spec=params.references[0], input_name="source.mp4"),), "invalid")
