@@ -2000,7 +2000,9 @@ and three refinement intervals, with video/audio CFG 3/7, modality guidance 3,
 and fixed video/audio rescaling 0.45/1.0. An explicit `steps` changes only its
 base interval count. The output retains base-stage audio after joint refinement.
 `stats.engine` records Res2s, actual stage LoRA strengths (base 0.25, refine 0.5)
-and both rescaling values.
+in `stage_lora_strengths`, and both rescaling values in
+`guidance_video_rescale` and `guidance_audio_rescale`. Retrieval and listing
+preserve these fields.
 
 `engine_feature_builds` lists issued code identities and their advanced features.
 Native identities match the full placed build. Comfy source/payload selectors

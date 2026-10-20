@@ -3008,9 +3008,9 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """The engine settings a render resolved and ran with."""
 
     sampler: str
-    """Sampler that integrated the render (a `KSamplerSelect` name)."""
+    """Sampler that integrated the render, including fixed family samplers."""
     scheduler: str
-    """Schedule that placed its noise levels (a `BasicScheduler` name)."""
+    """Schedule that placed its noise levels, including fixed family schedules."""
     steps: int
     """Sampling steps the schedule ran."""
     seed: int | None = None
@@ -3021,6 +3021,18 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Selected decoder, when applicable."""
     guidance: VideoGuidance | None = None
     """Guidance applied to the base stage."""
+    stage_lora_strengths: dict[Literal["base", "refine"], float] = Field(
+        default_factory=dict,
+        description="Exact fixed adapter strengths applied by each family workflow stage.",
+    )
+    guidance_video_rescale: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Video guidance rescaling applied after the base-stage guidance branches.",
+    )
+    guidance_audio_rescale: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Audio guidance rescaling applied after the base-stage guidance branches.",
+    )
     temporal_upscalings: Literal[0, 1] = 0
     """Executed DFR temporal x2 passes."""
     generated_keyframe_interval: int | None = None
