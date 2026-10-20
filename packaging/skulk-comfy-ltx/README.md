@@ -17,7 +17,16 @@ checkout, request-time package resolution or model download occurs in this wheel
 
 Candidate source and tensor checks do not qualify a model or hardware class.
 
-Candidate `0.1.3` adds `prompt_relay` with combined Gemma4 encoding and clone-scoped video text-attention routing. It measures actual text columns and surviving query coordinates, uses the fixed native-compatible soft Gaussian profile, and preserves global/register/guide access. Audio keeps the combined prompt without temporal routing. Every sampling stage receives its own restorable model patch. The 32 MiB query-chunk budget avoids a full-video bias; original projections, all-head norms, position handling, gates and GPU kernels remain delegated to Comfy. Forward-scoped state clears after success, failure or cancellation; every query chunk honors Comfy's normal interrupt flag. Candidate source is absent from issued descriptors until attested publication and full read-back verification.
+The issued `0.1.3` wheel adds `prompt_relay` with combined Gemma4 encoding and clone-scoped video text-attention routing. It measures actual text columns and surviving query coordinates, uses the fixed native-compatible soft Gaussian profile, and preserves global/register/guide access. Audio keeps the combined prompt without temporal routing. Every sampling stage receives its own restorable model patch. The 32 MiB query-chunk budget avoids a full-video bias; original projections, all-head norms, position handling, gates and GPU kernels remain delegated to Comfy. Forward-scoped state clears after success, failure or cancellation; every query chunk honors Comfy's normal interrupt flag.
+
+Its complete archive is 63,228 bytes, SHA256
+`dade727b886fbcf3980f11c991ac35c70f1f5f98896c63ecf6a7cd06dac27b5e`,
+with payload identity
+`6b6a6b719952f292252fe78c1d02b851ad334cca8defc6dc2fd5878f49b4a7fd`.
+The hosted candidate, reviewed source members, source-bound attestation, full
+owned-URL/index read-back and ordinary engine downloader were verified before
+registration. Earlier issued archives are unchanged. New placements prefer this
+compatible issued version; workflow and hardware qualification remain separate.
 
 The issued `0.1.2` wheel adds the DFR mask/keyframe bridge to Res2s and editing.
 It is 51,797 bytes, SHA256
@@ -26,7 +35,7 @@ with payload identity
 `91edc941109ab83734c55a65c34eb47a6040ef502dd868457c41fa867b901184`.
 The original hosted candidate's attestation, reviewed package/license bytes,
 complete owned-URL download and ordinary downloader were verified before its
-descriptor was registered. New placements prefer it; hardware/model acceptance
+descriptor was registered. At that registration, new placements preferred it; hardware/model acceptance
 remains separately scoped.
 
 The earlier issued `0.1.1` wheel provides Res2s, retake and extension on the existing CUDA

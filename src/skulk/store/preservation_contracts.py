@@ -1,0 +1,314 @@
+"""Bounded operator controls for host-owned model preservation jobs."""
+
+from __future__ import annotations
+
+from typing import Annotated, Literal, final
+
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
+
+Handle = Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")]
+OperationId = Annotated[
+    str, Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._:@-]+$")
+]
+Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+JobKind = Literal[
+    "preserve",
+    "check",
+    "recover",
+    "publish",
+    "torrent_export",
+    "http_share",
+    "torrent_share",
+]
+JobState = Literal[
+    "queued", "running", "cancelling", "succeeded", "failed", "cancelled", "interrupted"
+]
+
+
+class PreservationContract(BaseModel):
+    """Immutable strict local-control contract; never a filesystem authority grant."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+
+@final
+class PreservationLocation(PreservationContract):
+    """An enrolled location without its host path or signing-key material."""
+
+    location_id: Handle = Field(description="Opaque host-enrolled storage identity.")
+    label: str = Field(
+        min_length=1, max_length=80, description="Owner-chosen storage label."
+    )
+    purpose: Literal["private", "public"] = Field(
+        description="Private captures or separately published public copies."
+    )
+    reachable: bool = Field(
+        description="Whether the actual enrolled directory is presently available."
+    )
+    free_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Observed available bytes, or unknown when offline.",
+    )
+    publisher_key_id: str = Field(
+        max_length=80,
+        description="Public fingerprint of this location's capture or publishing identity.",
+    )
+
+
+@final
+class PreservationModel(PreservationContract):
+    """One exact installed base generation selectable for preservation."""
+
+    model_id: str = Field(
+        min_length=1, max_length=512, description="Installed model alias."
+    )
+    generation_id: Digest = Field(
+        description="Digest of the observed exact installed record."
+    )
+    size_bytes: int = Field(
+        ge=0, description="Observed base artifact bytes; plans expand companions."
+    )
+    verification: str = Field(
+        max_length=64,
+        description="Existing installed verification class, not a portable proof.",
+    )
+
+
+@final
+class PreservationCopy(PreservationContract):
+    """A completed copy and independent current availability/check observations."""
+
+    copy_id: Handle = Field(description="Opaque retained-copy handle.")
+    model_id: str = Field(
+        min_length=1, max_length=512, description="Exact selected model alias."
+    )
+    location_id: Handle = Field(description="Enrolled location holding this copy.")
+    manifest_id: Digest = Field(
+        description="Exact signed preservation manifest identity."
+    )
+    audience: Literal["private", "public"] = Field(
+        description="Signed copy audience; not authentication or encryption."
+    )
+    size_bytes: int = Field(ge=0, description="Declared complete closure bytes.")
+    created_at: int = Field(ge=0, description="Host completion time as Unix seconds.")
+    checked_at: int = Field(
+        ge=0, description="Last successful actual file verification as Unix seconds."
+    )
+    member_count: int = Field(ge=1, description="Number of required retained members.")
+
+
+@final
+class PreservationPlanRequest(PreservationContract):
+    """Select exact opaque resources; callers never provide host/key paths."""
+
+    kind: JobKind = Field(description="Requested bounded effect.")
+    location_id: Handle = Field(description="Enrolled source or destination archive.")
+    model_id: str | None = Field(
+        default=None, max_length=512, description="Installed base alias for Preserve."
+    )
+    generation_id: Digest | None = Field(
+        default=None, description="Exact installed observation selected by the caller."
+    )
+    copy_id: Handle | None = Field(
+        default=None,
+        description="Exact retained copy for check/recovery/publication/sharing.",
+    )
+    destination_id: Handle | None = Field(
+        default=None,
+        description="Separate enrolled public destination when publishing.",
+    )
+    historical: bool = Field(
+        default=False, description="Explicit historical registry-proof evaluation."
+    )
+    public_request: dict[str, JsonValue] | None = Field(
+        default=None,
+        description="Reviewed public metadata and per-member terms; never private paths or keys.",
+    )
+    duration_seconds: int = Field(
+        default=3600,
+        ge=1,
+        le=86400,
+        description="Maximum explicit sharing-session lifetime.",
+    )
+    upload_rate_bytes: int = Field(
+        default=1048576,
+        ge=1024,
+        le=104857600,
+        description="Native BitTorrent upload rate; bytes per second.",
+    )
+    upload_limit_bytes: int = Field(
+        default=1073741824,
+        ge=1,
+        le=2**53 - 1,
+        description="HTTP response allowance or observed BitTorrent stop threshold, which can overshoot.",
+    )
+
+
+@final
+class PreservationPlan(PreservationContract):
+    """Exact reviewed plan summary; large manifests and private paths stay on host."""
+
+    plan_id: Digest = Field(description="Immutable host plan identity.")
+    kind: JobKind = Field(description="Reviewed effect kind.")
+    model_id: str = Field(
+        min_length=1, max_length=512, description="Bound selected model alias."
+    )
+    location_id: Handle = Field(description="Bound enrolled archive.")
+    destination_id: Handle | None = Field(
+        default=None, description="Bound separate destination, if applicable."
+    )
+    copy_id: Handle | None = Field(
+        default=None, description="Bound retained source copy."
+    )
+    manifest_id: Digest | None = Field(
+        default=None,
+        description="Selected or planned signed identity, when already known.",
+    )
+    generation_id: Digest | None = Field(
+        default=None, description="Exact installed generation reviewed for Preserve."
+    )
+    size_bytes: int = Field(ge=0, description="Complete logical closure size.")
+    members: tuple[str, ...] = Field(
+        default=(),
+        max_length=16,
+        description="First required aliases; details remain paged and the complete plan stays bound.",
+    )
+    member_count: int = Field(ge=1, description="Full number of selected members.")
+    requires_owner_acceptance: bool = Field(
+        default=False, description="Recovery requires deliberate exact-copy acceptance."
+    )
+    requires_code_permission: bool = Field(
+        default=False, description="Separate repository-code permission is required."
+    )
+    deleted_aliases: tuple[str, ...] = Field(
+        default=(),
+        max_length=16,
+        description="Removed aliases requiring explicit restore acknowledgement.",
+    )
+    expires_at: int = Field(
+        ge=0, description="Last time this reviewed plan may start a new job."
+    )
+    publication: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Independently inspected original-publication class, if available.",
+    )
+    file_coverage: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Original signed file binding, separate from captured hashes.",
+    )
+
+
+@final
+class PreservationStart(PreservationContract):
+    """A deliberate start bound to an exact plan and retained idempotency identity."""
+
+    plan_id: Digest = Field(description="Exact plan the operator reviewed.")
+    operation_id: OperationId = Field(
+        description="Caller-retained idempotency key; never reused for changed input."
+    )
+    owner_id: Handle = Field(
+        default="operator",
+        description="Stable workflow owner; used for scoped management cancellation.",
+    )
+    accept_owner_capture: bool = Field(
+        default=False,
+        description="Accept this exact non-registry/historical copy, not other models.",
+    )
+    allow_repository_code: bool = Field(
+        default=False,
+        description="Separate explicit permission for this selected potentially executable card.",
+    )
+    restore_deleted: bool = Field(
+        default=False,
+        description="Explicitly restore the removed aliases displayed by this plan.",
+    )
+    public_participation: bool = Field(
+        default=False,
+        description="Explicit public hosting or swarm participation for a sharing plan.",
+    )
+
+
+@final
+class PreservationJob(PreservationContract):
+    """Canonical durable host status; cancellation intent is not proof of stop."""
+
+    job_id: Handle = Field(description="Durable host-owned job handle.")
+    operation_id: OperationId = Field(
+        description="Original caller idempotency identity."
+    )
+    owner_id: Handle = Field(description="Stable workflow owner.")
+    plan_id: Digest = Field(description="Exact retained plan.")
+    kind: JobKind = Field(description="Actual owned effect.")
+    model_id: str = Field(
+        min_length=1,
+        max_length=512,
+        description="Target model; completion actions must use this identity.",
+    )
+    state: JobState = Field(description="Actual host lifecycle state.")
+    stage: str = Field(
+        default="queued",
+        max_length=64,
+        description="Safe current stage code, not a success assertion.",
+    )
+    created_at: int = Field(ge=0, description="Initial accepted time as Unix seconds.")
+    updated_at: int = Field(
+        ge=0, description="Most recent persisted observation as Unix seconds."
+    )
+    finished_at: int | None = Field(
+        default=None, ge=0, description="Confirmed terminal time, when known."
+    )
+    attempts: int = Field(
+        default=0,
+        ge=0,
+        description="Retained execution attempts; restart never resets this count.",
+    )
+    bytes_copied: int = Field(
+        default=0,
+        ge=0,
+        description="Observed copy work, not unique verified coverage or a percentage.",
+    )
+    bytes_hashed: int = Field(
+        default=0,
+        ge=0,
+        description="Observed hashing work, which may read bytes more than once.",
+    )
+    expected_manifest_id: Digest | None = Field(
+        default=None,
+        description="Durably recorded expected outcome before publication is allowed.",
+    )
+    copy_id: Handle | None = Field(
+        default=None, description="Actual completed retained copy, if any."
+    )
+    error_code: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Safe stable error code; no paths, keys or raw exception text.",
+    )
+    result: dict[str, JsonValue] | None = Field(
+        default=None,
+        description="Bounded safe terminal receipt, independently checked by the host.",
+    )
+
+
+@final
+class PreservationPage(PreservationContract):
+    """A bounded page of private host observations."""
+
+    locations: tuple[PreservationLocation, ...] = Field(
+        default=(), max_length=32, description="Enrolled roots on this page."
+    )
+    models: tuple[PreservationModel, ...] = Field(
+        default=(), max_length=16, description="Installed bases on this page."
+    )
+    copies: tuple[PreservationCopy, ...] = Field(
+        default=(), max_length=16, description="Retained copies on this page."
+    )
+    jobs: tuple[PreservationJob, ...] = Field(
+        default=(), max_length=16, description="Durable operations on this page."
+    )
+    next_offset: int | None = Field(
+        default=None, ge=0, description="Next bounded listing offset, if present."
+    )

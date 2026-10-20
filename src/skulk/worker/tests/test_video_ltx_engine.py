@@ -697,6 +697,11 @@ def test_published_engine_enables_only_its_issued_workflows(backend: str, torch:
     builds = tuple(wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@{torch}") for wheel in wheels)
     assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend", *(["prompt_relay"] if "prompt_relay" in wheel.features else []), *(["dfr"] if "dfr" in wheel.features else [])] for wheel, build in zip(wheels, builds, strict=True)}
     for wheel, build in zip(wheels, builds, strict=True):
+        relay = _params(prompt_relay={"segments": [{"prompt": "day", "length": 1}, {"prompt": "night", "length": 2}]})
+        assert video_request_supported(_card(), relay, backend, build) == ("prompt_relay" in wheel.features)
+        if "prompt_relay" in wheel.features:
+            relayed = build_prompt(plan_comfy_render(relay, _card(), engine_build=build), relay, (), "issued-relay")
+            assert relayed["ltx_positive"]["class_type"] == "SkulkLTXPromptRelayEncode"
         text_dfr = _params(pipeline="dfr")
         assert video_request_supported(_dfr_card(), text_dfr, backend, build) == ("dfr" in wheel.features)
         if "dfr" in wheel.features:

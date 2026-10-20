@@ -71,7 +71,8 @@ import hashlib
 import json
 import os
 import shutil
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -609,6 +610,17 @@ class ModelStore:
             model_id: HuggingFace-style model ID.
         """
         return self.get_store_path(model_id) is not None
+
+    @asynccontextmanager
+    async def preservation_lease(self) -> AsyncIterator[None]:
+        """Fence exact installed preservation against this owner's byte mutations.
+
+        The caller retains the lease until its exclusively owned byte process
+        has stopped. This is the existing download/import/eviction fence, not a
+        second ModelStore writer or a lease on a different store instance.
+        """
+        async with self._download_transfer_lock:
+            yield
 
     def get_store_path(self, model_id: str) -> Path | None:
         """Return the absolute path to *model_id*'s directory, or ``None``.

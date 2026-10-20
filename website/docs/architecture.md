@@ -3259,6 +3259,24 @@ Media preparation and native rendering share `utils/process_groups.py`. Supervis
 
 Native video engine v0.2.1 marks decoding at the actual decode-and-save call. The headless decoder's private verbose profiler is disabled so its counter reset cannot erase earlier encoder/sampling memory peaks. The reported Metal peak covers the complete render; it is distinct from host RSS and the two counters must not be added.
 
+### Durable model preservation owner
+
+The actual `ModelStoreServer` lazily owns a `PreservationHost` around its existing
+`ModelStore`; it does not instantiate a competing store writer. Private operator
+controls on the Core API expose enrolled storage, exact expiring plans and a
+bounded Library/Activity view. Core's protected SQLite journal holds permanent
+request reservations, jobs and verified-copy receipts outside capability
+lifetimes. The current host effects are private Preserve and Check.
+
+An exclusively owned subprocess performs byte work while Core holds the store's
+existing mutation fence. Its archive directory is opened and pinned before
+launch; it uses a process-local working directory on that descriptor and private
+local snapshot staging. Capacity checks cover both snapshot and archive devices
+and combine their needs on a shared filesystem. Before publication, the worker waits for Core's durable
+expected-manifest acknowledgement. Parent control loss exits the worker; restart
+marks uncertain work interrupted and requires an explicit outcome check. Page
+or capability restart has no byte-worker ownership. The standalone public mirror
+and recovery tools retain their independent trust/transport boundaries.
 
 ### Comfy LTX detailing
 

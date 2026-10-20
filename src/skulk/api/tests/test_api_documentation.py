@@ -25,6 +25,8 @@ from skulk.utils.channels import channel
 # need an explicit decision here, so a raw Request handler cannot accidentally
 # lose its public request schema without making the omission visible in review.
 _BODYLESS_MUTATIONS = {
+    ("POST", "/preservation/setup/device"),
+    ("POST", "/preservation/jobs/{job_id}/cancel"),
     ("POST", "/models/remote-code-approvals/{card_id}"),
     ("POST", "/v1/plugins/managed/service/setup"),
     ("POST", "/v1/videos/{video_id}/cancel"),

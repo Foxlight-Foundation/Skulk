@@ -115,6 +115,9 @@ class _FakeApi:
     def refresh_config_dependent_capabilities(self) -> None:
         self._events.append("api.refresh_config_dependent_capabilities")
 
+    def set_preservation_provider(self, _provider: object) -> None:
+        """Retain the test API's supported provider seam without byte effects."""
+
     def set_model_store_runtime(
         self,
         _skulk_config: SkulkConfig | None,
@@ -162,9 +165,8 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
 
     monkeypatch.setattr("skulk.main.EventRouter", NewEventRouter)
     monkeypatch.setattr("skulk.main.Worker", NewWorker)
-    async def _fake_request_cluster_config(
-        *_args: Any, **_kwargs: Any
-    ) -> str | None:
+
+    async def _fake_request_cluster_config(*_args: Any, **_kwargs: Any) -> str | None:
         return None
 
     monkeypatch.setattr(Node, "_request_cluster_config", _fake_request_cluster_config)
@@ -286,18 +288,14 @@ async def test_election_attaches_capacity_guard_before_coordinator_start(
         _fake_shard_downloader,
     )
 
-    async def _fake_request_cluster_config(
-        *_args: Any, **_kwargs: Any
-    ) -> str | None:
+    async def _fake_request_cluster_config(*_args: Any, **_kwargs: Any) -> str | None:
         return None
 
     async def _skip_config_broadcast(*_args: Any, **_kwargs: Any) -> None:
         return
 
     monkeypatch.setattr(Node, "_request_cluster_config", _fake_request_cluster_config)
-    monkeypatch.setattr(
-        Node, "_broadcast_config_if_store_host", _skip_config_broadcast
-    )
+    monkeypatch.setattr(Node, "_broadcast_config_if_store_host", _skip_config_broadcast)
 
     election_sender, election_receiver = channel[ElectionResult]()
     node = Node(

@@ -42,7 +42,7 @@ Role = Literal[
 
 
 @dataclass(frozen=True)
-class _Installation:
+class PreservationInstallation:
     primary: Path
     companion: Path | None
     archive: Path
@@ -51,9 +51,9 @@ class _Installation:
     card: ModelCard
 
 
-def _installation(
+def make_preservation_installation(
     root: Path, role: Role = "none", *, notices: bool = True, code: bool = False
-) -> _Installation:
+) -> PreservationInstallation:
     primary = root / "installed" / "example--base"
     primary.mkdir(parents=True)
     gguf = role in {"none", "served_draft", "projector"}
@@ -146,10 +146,10 @@ def _installation(
     archive.mkdir()
     key = root / "owner.pem"
     trust = create_key(key, None)
-    return _Installation(primary, companion, archive, key, trust, card)
+    return PreservationInstallation(primary, companion, archive, key, trust, card)
 
 
-def _preserve(installed: _Installation) -> str:
+def _preserve(installed: PreservationInstallation) -> str:
     return preserve_installed(
         installed.primary, installed.archive, (load_key(installed.key, None),)
     )
@@ -162,7 +162,7 @@ def _preserve(installed: _Installation) -> str:
 def test_complete_round_trip_and_normal_offline_companion_resolution(
     tmp_path: Path, role: Role
 ) -> None:
-    installed = _installation(tmp_path, role)
+    installed = make_preservation_installation(tmp_path, role)
     plan = plan_preservation(installed.primary)
     assert plan.audience == "private" and not plan.retains_registry_proof
     assert len(plan.artifacts) == (1 if installed.companion is None else 2)
@@ -245,7 +245,7 @@ asyncio.run(check())
 
 
 def test_missing_companion_never_publishes_partial_copy(tmp_path: Path) -> None:
-    installed = _installation(tmp_path, "vision_weights")
+    installed = make_preservation_installation(tmp_path, "vision_weights")
     assert installed.companion
     (installed.companion / ".skulk" / "installed-card.json").unlink()
     with pytest.raises(PreservationError, match="required companions"):
@@ -255,7 +255,7 @@ def test_missing_companion_never_publishes_partial_copy(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("role", ["assistant", "projector"])
 def test_missing_load_bearing_file_never_publishes(tmp_path: Path, role: Role) -> None:
-    installed = _installation(tmp_path, role)
+    installed = make_preservation_installation(tmp_path, role)
     path = installed.companion or installed.primary
     selected = "model.safetensors" if installed.companion else "mmproj.gguf"
     (path / selected).unlink()
@@ -276,7 +276,7 @@ def test_missing_load_bearing_file_never_publishes(tmp_path: Path, role: Role) -
 
 
 def test_same_size_source_tampering_is_not_signed(tmp_path: Path) -> None:
-    installed = _installation(tmp_path)
+    installed = make_preservation_installation(tmp_path)
     path = installed.primary / "model.gguf"
     path.write_bytes(b"x" * path.stat().st_size)
     with pytest.raises(PreservationError, match="recorded identity"):
@@ -286,7 +286,7 @@ def test_same_size_source_tampering_is_not_signed(tmp_path: Path) -> None:
 
 
 def test_corrupt_companion_blocks_whole_recovery(tmp_path: Path) -> None:
-    installed = _installation(tmp_path, "assistant")
+    installed = make_preservation_installation(tmp_path, "assistant")
     manifest_id = _preserve(installed)
     digest = hashlib.sha256(b"companion-weight-fixture").hexdigest()
     path = installed.archive / "objects" / "sha256" / digest
@@ -305,7 +305,7 @@ def test_corrupt_companion_blocks_whole_recovery(tmp_path: Path) -> None:
 def test_late_companion_failure_is_atomic_and_retryable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    installed = _installation(tmp_path, "assistant")
+    installed = make_preservation_installation(tmp_path, "assistant")
     manifest_id = _preserve(installed)
     original = receiver.validate_recovery_layout
 
@@ -340,7 +340,7 @@ def test_late_companion_failure_is_atomic_and_retryable(
 def test_capture_notice_and_cli_without_recipe(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    installed = _installation(tmp_path, notices=False)
+    installed = make_preservation_installation(tmp_path, notices=False)
     assert main(["plan", "--installed", str(installed.primary)]) == 0
     assert '"audience": "private"' in capsys.readouterr().out
     assert (
@@ -366,7 +366,7 @@ def test_capture_notice_and_cli_without_recipe(
 
 
 def test_repository_code_acceptance_remains_separate(tmp_path: Path) -> None:
-    installed = _installation(tmp_path, "assistant", code=True)
+    installed = make_preservation_installation(tmp_path, "assistant", code=True)
     manifest_id = _preserve(installed)
     with pytest.raises(PreservationError, match="code permission"):
         receiver.recover_home(
@@ -380,7 +380,7 @@ def test_repository_code_acceptance_remains_separate(tmp_path: Path) -> None:
 
 
 def test_unknown_revision_and_missing_archive_are_actionable(tmp_path: Path) -> None:
-    installed = _installation(tmp_path)
+    installed = make_preservation_installation(tmp_path)
     with pytest.raises(OSError):
         preserve_installed(
             installed.primary,
@@ -405,10 +405,10 @@ def test_unknown_revision_and_missing_archive_are_actionable(tmp_path: Path) -> 
         plan_preservation(installed.primary)
 
 
-def _composite_installation(
+def _compositemake_preservation_installation(
     root: Path, kind: Literal["image", "video"]
-) -> _Installation:
-    installed = _installation(root)
+) -> PreservationInstallation:
+    installed = make_preservation_installation(root)
     body = installed.card.model_dump(mode="json")
     child = installed.primary.parent / "example--components"
     child.mkdir()
@@ -515,7 +515,7 @@ def _composite_installation(
             artifact_format="safetensors",
         ),
     )
-    return _Installation(
+    return PreservationInstallation(
         installed.primary,
         child,
         installed.archive,
@@ -529,7 +529,7 @@ def _composite_installation(
 def test_manifest_selected_composite_closure_round_trip(
     tmp_path: Path, kind: Literal["image", "video"]
 ) -> None:
-    installed = _composite_installation(tmp_path, kind)
+    installed = _compositemake_preservation_installation(tmp_path, kind)
     manifest_id = _preserve(installed)
     report = receiver.recover_home(
         installed.archive,
@@ -552,7 +552,7 @@ def test_manifest_selected_composite_closure_round_trip(
 def test_missing_primary_image_component_is_not_a_complete_capture(
     tmp_path: Path,
 ) -> None:
-    installed = _composite_installation(tmp_path, "image")
+    installed = _compositemake_preservation_installation(tmp_path, "image")
     (installed.primary / "vae.safetensors").unlink()
     write_installed_card(
         installed.primary,
@@ -567,7 +567,7 @@ def test_missing_primary_image_component_is_not_a_complete_capture(
 def test_vision_recovery_requires_separate_code_permission_even_when_card_declines_code(
     tmp_path: Path, role: Role
 ) -> None:
-    installed = _installation(tmp_path, role)
+    installed = make_preservation_installation(tmp_path, role)
     assert not installed.card.trust_remote_code
     manifest_id = _preserve(installed)
     report = receiver.inspect_recovery(installed.archive, manifest_id, installed.trust)
@@ -587,7 +587,7 @@ def test_vision_recovery_requires_separate_code_permission_even_when_card_declin
 def test_companion_records_determine_paths_not_directory_spelling(
     tmp_path: Path, indexed: bool
 ) -> None:
-    installed = _installation(tmp_path, "assistant")
+    installed = make_preservation_installation(tmp_path, "assistant")
     assert installed.companion
     renamed = installed.companion.with_name(
         "opaque--revision-"
@@ -639,7 +639,7 @@ async def test_preserve_companion_downloaded_through_normal_store(
     import skulk.download.download_utils as downloads
     from skulk.shared.types.worker.downloads import FileListEntry
 
-    installed = _installation(tmp_path, "assistant")
+    installed = make_preservation_installation(tmp_path, "assistant")
     assert installed.companion
     record = read_installed_card(installed.companion)
     assert record
@@ -710,3 +710,77 @@ async def test_preserve_companion_downloaded_through_normal_store(
         accept_owner_capture=True,
     )
     assert report.members == ("example/base", "example/companion")
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["snapshot_full", "archive_full", "shared_capacity", "separate_capacity"],
+)
+def test_snapshot_and_archive_capacity_are_checked_on_their_own_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    """Simulated filesystem observations refuse before copying; no mount qualification."""
+    import shutil
+
+    from skulk.store.preservation_export import PreservationCapacityError
+
+    installed = make_preservation_installation(tmp_path, "assistant")
+    with (installed.primary / "model.safetensors").open("wb") as weights:
+        weights.truncate(32 * 1024 * 1024)
+    write_installed_card(
+        installed.primary,
+        build_installed_card_record(installed.primary, installed.card),
+    )
+    snapshot = tmp_path / "private-snapshot"
+    snapshot.mkdir(mode=0o700)
+    selected = plan_preservation(
+        installed.primary, artifact_roots=(installed.primary.parent,)
+    )
+    reserve = 16 * 1024 * 1024
+    one_copy = selected.source_bytes + reserve + 2 * 1024 * 1024
+    real_stat = Path.stat
+    device = installed.archive.stat().st_dev
+    real_usage = shutil.disk_usage
+    usage_type = type(real_usage(tmp_path))
+
+    def observe_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        info = real_stat(path, follow_symlinks=follow_symlinks)
+        if path == snapshot and scenario != "shared_capacity":
+            values = list(info)
+            values[2] = device + 1
+            return os.stat_result(values)
+        return info
+
+    def observe_usage(path: str | Path | int) -> tuple[int, int, int]:
+        if path == snapshot:
+            free = 0 if scenario == "snapshot_full" else one_copy
+        elif isinstance(path, int) or path == installed.archive:
+            free = 0 if scenario == "archive_full" else one_copy
+        else:
+            return real_usage(path)
+        return usage_type(one_copy * 4, one_copy * 4 - free, free)
+
+    monkeypatch.setattr(Path, "stat", observe_stat)
+    monkeypatch.setattr(shutil, "disk_usage", observe_usage)
+    if scenario == "separate_capacity":
+        identity = preserve_installed(
+            installed.primary,
+            installed.archive,
+            (load_key(installed.key, None),),
+            artifact_roots=(installed.primary.parent,),
+            snapshot_parent=snapshot,
+        )
+        assert (
+            verify_store(installed.archive, identity, installed.trust).total_bytes > 0
+        )
+    else:
+        with pytest.raises(PreservationCapacityError, match="not enough space"):
+            preserve_installed(
+                installed.primary,
+                installed.archive,
+                (load_key(installed.key, None),),
+                artifact_roots=(installed.primary.parent,),
+                snapshot_parent=snapshot,
+            )
+        assert not tuple(installed.archive.iterdir())
+    assert not tuple(snapshot.iterdir())

@@ -1095,6 +1095,11 @@ class Node:
         else:
             api = None
 
+        if api is not None:
+            api.set_preservation_provider(
+                store_server.preservation_host if store_server is not None else None
+            )
+
         if download_coordinator is not None and api is not None:
             download_coordinator.config_applied_callback = (
                 api.refresh_config_dependent_capabilities
@@ -1702,6 +1707,11 @@ class Node:
                 get_current_registry_cards(),
             )
         if self.api is not None:
+            self.api.set_preservation_provider(
+                self.store_server.preservation_host
+                if self.store_server is not None
+                else None
+            )
             self.api.set_model_store_runtime(
                 self.skulk_config,
                 self.store_client,
@@ -2105,6 +2115,12 @@ class Node:
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "_preservation-worker":
+        from skulk.store.preservation_worker import main as worker_main
+
+        del sys.argv[1]
+        worker_main()
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "preservation":
         from skulk.store.preservation_cli import main as preservation_main
 

@@ -2018,8 +2018,9 @@ an older instance gained features. An unpublished candidate adds no feature or
 installation offer. Normal resource admission still applies on compatible
 untested hardware.
 
-New Comfy LTX placements select the issued `0.1.2` extension through ordinary
-on-demand engine installation. Its `dfr` feature preserves dense upscaled video
+New Comfy LTX placements select the issued `0.1.3` extension through ordinary
+on-demand engine installation. Its `prompt_relay` feature adds timed video scene
+prompts while audio uses the complete combined text. Its `dfr` feature preserves dense upscaled video
 and real image/guide masks for detailing, including text-only input and a free
 interior slot when short-clip anchors occupy every default position. Its editing
 encoder retains the complete source
@@ -5742,3 +5743,37 @@ After installation, fresh telemetry removes the on-demand tags. A managed build
 identity includes vLLM's exact GPU build and the recipe SHA-256. Qualification
 records are evidence and do not limit compatible untested hardware. See
 [The vLLM engine](vllm-engine.md) for installation, cache and override semantics.
+
+## Model preservation jobs
+
+These operator controls run on the configured **model-store-owning host**. The
+same direct loopback/trusted-fabric or authenticated operator-gateway policy
+protects private reads and mutations. A node without the owner returns
+`503 configure_model_store_on_this_host`; a changed store binding requires a
+restart. No preservation controls are exposed on the unauthenticated store file
+listener. Responses contain enrolled handles and public fingerprints, not host
+paths or signing keys.
+
+| Method | Path | Parameters and behavior |
+| --- | --- | --- |
+| GET | `/preservation/library` | Optional `offset` (default 0); up to 4 installed selections, copies and jobs (bounded for SDK wire encoding), enrolled storage availability and `next_offset`. Reads never start/replay jobs or sharing. |
+| POST | `/preservation/setup/device` | Explicitly enroll **Use this device** private storage and its protected capture identity. No arbitrary path/key input. Repeating setup retains the identity; unavailable enrolled storage is not recreated. |
+| POST | `/preservation/plans` | `kind` (`preserve` or `check`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Other effect kinds currently refuse. |
+| GET | `/preservation/plans/{plan_id}` | Read an exact retained safe plan without refreshing expiry or executing it. |
+| POST | `/preservation/jobs` | `plan_id`, caller-retained `operation_id`, optional `owner_id` (default `operator`) and explicit consent flags. Returns 202 with a durable job immediately. Exact repeated requests return the original job; changed input refuses. |
+| GET | `/preservation/jobs/{job_id}` | Observe one exact retained job and bounded result. Does not queue, retry or reconcile byte work. |
+| POST | `/preservation/jobs/{job_id}/cancel` | Persist cancellation intent, request stop, then bound the wait for the exclusively owned process. A committed verified result may win. Copies are retained. |
+
+Preserve runs under the existing store owner's mutation fence and independently
+checks the copied complete closure. Workers use an already opened archive
+directory; missing/replaced mount paths never become substitute folders. Private
+local snapshot staging and capture custody stay outside capability generations.
+Capture observes free space on the private snapshot and archive filesystems
+separately, combining their requirement on a shared device. A failed capacity
+check reports `insufficient_space` before model bytes are copied. Core records
+the expected manifest durably before acknowledging publication.
+Core restart marks uncertain jobs `interrupted` and requires an explicit outcome
+check; it never automatically replays them. Closing/restarting a capability does
+not cancel Core work. These controls currently provide private Preserve and
+Check; public publication/sharing and fresh-home recovery remain available through
+the standalone/native tools rather than these host endpoints.
