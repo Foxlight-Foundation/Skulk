@@ -31,7 +31,11 @@ from pydantic import (
 )
 
 from skulk.shared.constants import SKULK_INSTALLED_CARD_RECORDS_DIR, SKULK_MODELS_DIR
-from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    same_authorized_model_card,
+)
 from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 
 INSTALLED_CARD_RELATIVE_PATH = Path(".skulk") / "installed-card.json"
@@ -552,12 +556,17 @@ def build_installed_card_record(
     artifact_file: str | None = None,
     artifact_format: str | None = None,
     file_manifest: tuple[InstalledFileManifestEntry, ...] | None = None,
+    previous_record: InstalledCardRecord | None = None,
 ) -> InstalledCardRecord:
     """Create an honest installed-card record from local bytes and card truth.
 
     ``file_manifest`` may reuse a previously verified size-complete manifest
     during a metadata-only card refresh. New downloads and imports omit it and
     hash the artifact bytes before first publication.
+
+    ``previous_record`` may retain observations from this receiver's installed
+    state during an unchanged metadata refresh. Never supply an archive or
+    peer's record here as a substitute for independent receiving verification.
     """
 
     files = file_manifest or build_file_manifest(model_directory)
@@ -593,7 +602,7 @@ def build_installed_card_record(
             effective_artifact_file = model_card.gguf_file
         elif artifact_role == "served_draft" and model_card.runtime is not None:
             effective_artifact_file = model_card.runtime.served_spec_draft_file
-    return InstalledCardRecord(
+    record = InstalledCardRecord(
         schema_version=2 if model_card.artifact_bundle is not None else 1,
         installed_identity=installed_identity,
         artifact_model_id=artifact_model_id or str(model_card.model_id),
@@ -616,6 +625,21 @@ def build_installed_card_record(
         files=files,
         captured_at=datetime.now(UTC),
     )
+    metadata = {"schema_version", "captured_at", "preservation", "model_card"}
+    if (
+        previous_record is not None
+        and previous_record.preservation is not None
+        and same_authorized_model_card(previous_record.model_card, record.model_card)
+        and previous_record.model_dump(exclude=metadata) == record.model_dump(exclude=metadata)
+    ):
+        # This remains the original capture observation, not a new proof or a
+        # new repository-code grant from a metadata-only refresh.
+        return record.model_copy(update={
+            "schema_version": 3,
+            "preservation": previous_record.preservation,
+            "captured_at": previous_record.captured_at,
+        })
+    return record
 
 
 def installed_card_path(model_directory: Path) -> Path:
@@ -1076,6 +1100,7 @@ def refresh_registry_installed_card_if_same_artifact(
         artifact_revision=model_card.source_revision,
         artifact_file=model_card.gguf_file,
         file_manifest=retained.files,
+        previous_record=retained,
     )
     write_installed_card_with_fallback(model_directory, refreshed)
     return refreshed

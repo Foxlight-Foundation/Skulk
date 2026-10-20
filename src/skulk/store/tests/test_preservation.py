@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -43,9 +44,11 @@ from foxlight_model_preservation.signing import (
 from foxlight_model_preservation.storage import pack, restore
 from pydantic import JsonValue
 
+import skulk.download.download_utils as download_utils
 import skulk.store.preservation as preservation
 from skulk.shared.models.registry import EMBEDDED_REGISTRY_ROOT
-from skulk.store.installed_cards import read_installed_card
+from skulk.shared.types.worker.downloads import FileListEntry
+from skulk.store.installed_cards import build_installed_card_record, read_installed_card
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation_cli import main
 
@@ -741,3 +744,82 @@ def test_mlx_layouts_are_checked_before_issuing_a_sidecar(
                 accept_owner_capture=True,
             )
         assert not home.exists()
+
+
+@pytest.mark.parametrize("publication", ["owner", "fresh", "historical"])
+@pytest.mark.parametrize("format_name", ["mlx", "gguf"])
+async def test_normal_complete_store_request_retains_receiving_evidence_without_hub(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publication: Literal["owner", "fresh", "historical"],
+    format_name: Literal["mlx", "gguf"],
+) -> None:
+    capture = _capture(
+        tmp_path,
+        monkeypatch,
+        registry=publication != "owner",
+        expired=publication == "historical",
+        mlx_layout="unindexed" if format_name == "mlx" else "none",
+    )
+    home = tmp_path / "home"
+    await asyncio.to_thread(
+        preservation.recover_home,
+        capture.store,
+        capture.manifest_id,
+        capture.trust,
+        home,
+        mode="historical" if publication == "historical" else "fresh",
+        accept_owner_capture=publication != "fresh",
+    )
+    directory = home / "model-store" / "example--recovered"
+    before = read_installed_card(directory)
+    assert before and before.preservation
+    probes: list[str] = []
+
+    async def forbidden_probe(*_args: object, **_kwargs: object) -> list[FileListEntry]:
+        probes.append("hub")
+        raise AssertionError("a complete recovered model must not contact the Hub")
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", forbidden_probe)
+    store = ModelStore(home / "model-store")
+    status = await store.request_download(
+        before.artifact_model_id,
+        pinned_gguf=before.artifact_file,
+        source_revision=before.artifact_revision,
+        source_repository=before.artifact_repository,
+        model_card=before.model_card,
+    )
+    assert status.status == "complete" and probes == []
+    assert read_installed_card(directory) == before
+    entry = store.get_entry(before.artifact_model_id)
+    assert entry and entry.installed_card == before
+
+
+@pytest.mark.parametrize("change", ["snapshot", "card", "bytes"])
+def test_receiving_observations_are_scoped_to_unchanged_card_and_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: Literal["snapshot", "card", "bytes"],
+) -> None:
+    capture = _capture(tmp_path, monkeypatch, registry=True, mlx_layout="unindexed")
+    home = tmp_path / "home"
+    preservation.recover_home(capture.store, capture.manifest_id, capture.trust, home)
+    directory = home / "model-store" / "example--recovered"
+    before = read_installed_card(directory)
+    assert before and before.preservation
+    card = before.model_card
+    if change == "snapshot":
+        card = card.model_copy(
+            update={"registry_snapshot_id": "new-observation-of-same-card"}
+        )
+    elif change == "card":
+        card = card.model_copy(update={"trust_remote_code": True})
+    else:
+        path = directory / "model.safetensors"
+        path.write_bytes(b"x" * path.stat().st_size)
+    after = build_installed_card_record(directory, card, previous_record=before)
+    if change == "snapshot":
+        assert after.preservation == before.preservation and after.schema_version == 3
+        assert after.captured_at == before.captured_at
+    else:
+        assert after.preservation is None and after.schema_version == 2
