@@ -691,9 +691,15 @@ def test_published_engine_enables_only_its_issued_workflows(backend: str, torch:
         video_request_supported,
     )
 
-    builds = tuple(wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@{torch}") for wheel in published_extensions())
-    assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend"] for build in builds}
-    for build in builds:
+    wheels = published_extensions()
+    builds = tuple(wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@{torch}") for wheel in wheels)
+    assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend", *(["dfr"] if "dfr" in wheel.features else [])] for wheel, build in zip(wheels, builds, strict=True)}
+    for wheel, build in zip(wheels, builds, strict=True):
+        text_dfr = _params(pipeline="dfr")
+        assert video_request_supported(_dfr_card(), text_dfr, backend, build) == ("dfr" in wheel.features)
+        if "dfr" in wheel.features:
+            graph = build_prompt(plan_comfy_render(text_dfr, _dfr_card(), engine_build=build), text_dfr, (), "issued-dfr")
+            assert graph["ltx_refine_keyframes"]["class_type"] == "SkulkLTXAddGeneratedKeyframes"
         assert video_request_supported(_dev_card(), _params(pipeline="hq_two_stage"), backend, build)
         for operation in ("retake", "extend"):
             assert video_request_supported(_card(), _editing_params(operation), backend, build)

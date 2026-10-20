@@ -17,7 +17,17 @@ checkout, request-time package resolution or model download occurs in this wheel
 
 Candidate source and tensor checks do not qualify a model or hardware class.
 
-The issued `0.1.1` wheel provides Res2s, retake and extension on the existing CUDA
+The issued `0.1.2` wheel adds the DFR mask/keyframe bridge to Res2s and editing.
+It is 51,797 bytes, SHA256
+`6be37e297325d9ae7da2b185c0034f98e945745c6b9989f58507505f6ab7d842`,
+with payload identity
+`91edc941109ab83734c55a65c34eb47a6040ef502dd868457c41fa867b901184`.
+The original hosted candidate's attestation, reviewed package/license bytes,
+complete owned-URL download and ordinary downloader were verified before its
+descriptor was registered. New placements prefer it; hardware/model acceptance
+remains separately scoped.
+
+The earlier issued `0.1.1` wheel provides Res2s, retake and extension on the existing CUDA
 and ROCm lanes, including full source-audio encoding for editing. Its complete
 archive is 48,855 bytes, SHA256
 `0b6c28318b7f0aeaded710dea7862cfb1700cda3dc421354f62de65c9f78ea4a`,
@@ -25,12 +35,12 @@ with payload identity
 `df3189f3232051717b249cec0087d728f0808463183f866ee32e0b4414cd3b16`.
 The descriptor was registered after attestation verification, full owned-URL
 read-back and verification with the ordinary engine downloader. New placements
-prefer it even when the previous overlay is cached. The issued `0.1.0` descriptor
+prefer the latest compatible issued overlay even when an older one is cached. The issued `0.1.0` descriptor
 remains available for retained instances: 48,584 bytes, archive SHA256
 `3ff6a292521de798de59d171474a8ec041e741d3fcd4f59b0a51aa4c7e8879e3`.
 Later changes require a new version; issued bytes are immutable.
 
-The `0.1.2` source candidate adds a `dfr` feature and the
+The `0.1.2` wheel implements a `dfr` feature and the
 `SkulkLTXAddGeneratedKeyframes` bridge. It preserves dense upscaled video while
 restoring a five-dimensional sampling mask; real image/guide masks are cloned
 unchanged. Default grid positions retain stock behavior. If anchors occupy every
@@ -38,8 +48,8 @@ candidate, one detail frame uses the largest free interior gap (earliest on ties
 A fully occupied canvas is rejected rather than dropping detailing. Actual token
 creation and conditioning remain delegated to the pinned Comfy node.
 
-Only an issued descriptor can enable text-only DFR; a source candidate does not
-create an engine offer. Existing image-conditioned stock-node DFR and issued
+Only the exact issued descriptor enables text-only DFR; candidate source alone
+creates no engine offer. Existing image-conditioned stock-node DFR and issued
 0.1.0/0.1.1 identities remain intact. Candidate validation reproduces the original
 dense-video failure against hash-bound pinned occupancy helpers, then checks
 correct masks, preserved anchors and the short-clip fallback on bounded tensors.

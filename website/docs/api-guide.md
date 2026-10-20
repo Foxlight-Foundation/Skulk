@@ -2016,8 +2016,11 @@ an older instance gained features. An unpublished candidate adds no feature or
 installation offer. Normal resource admission still applies on compatible
 untested hardware.
 
-New Comfy LTX placements select the issued `0.1.1` extension through ordinary
-on-demand engine installation. Its editing encoder retains the complete source
+New Comfy LTX placements select the issued `0.1.2` extension through ordinary
+on-demand engine installation. Its `dfr` feature preserves dense upscaled video
+and real image/guide masks for detailing, including text-only input and a free
+interior slot when short-clip anchors occupy every default position. Its editing
+encoder retains the complete source
 waveform instead of applying Comfy's generic spatial crop to the audio timeline.
 Existing placements retain their exact engine build; place a new instance to
 use the update.
