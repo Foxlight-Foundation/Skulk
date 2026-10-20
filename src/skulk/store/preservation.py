@@ -57,6 +57,7 @@ from skulk.store.installed_cards import (
     verify_installed_card,
 )
 from skulk.store.model_store import ModelStore
+from skulk.store.preservation_closure import RecoveryMember, map_recovery_members
 
 
 @final
@@ -91,6 +92,10 @@ class RecoveryInspection(BaseModel):
     registry_proof: ProofReport | None = Field(
         description="Checked versions, expiry and supplied-chain revocation scope; no latest-registry claim."
     )
+    members: tuple[str, ...] = Field(
+        default=(),
+        description="Exact base and companion store aliases restored together.",
+    )
     runtime_requirements: tuple[str, ...] = Field(
         description="Owner statements about required runtimes; not a qualification result."
     )
@@ -105,12 +110,11 @@ def read_recovery_metadata(path: Path) -> bytes:
     return data
 
 
-def _runtime_card(manifest: Manifest) -> ModelCard:
-    if len(manifest.members) != 1:
-        raise PreservationError(
-            "this importer supports one self-contained text model; companion sets need the closure importer"
-        )
-    member = manifest.members[0]
+def recovery_card(manifest: Manifest) -> ModelCard:
+    """Validate the public root card and complete supported loader mapping."""
+    member = next(
+        item for item in manifest.members if item.member_id == manifest.root_member
+    )
     if member.retained_card is None:
         raise PreservationError("recovery requires a retained public model card")
     envelope = load_retained_card(identity_json(member.retained_card)).envelope
@@ -121,32 +125,19 @@ def _runtime_card(manifest: Manifest) -> ModelCard:
     card.require_immutable_external_companions(context="preservation recovery")
     if reason := card_requires_newer_skulk(card):
         raise PreservationError(reason)
-    if (
+    if card.artifact_bundle is None and (
         card.tasks != [ModelTask.TextGeneration]
-        or card.vision is not None
         or card.image is not None
         or card.video is not None
         or card.audio is not None
         or card.music is not None
         or card.components is not None
-        or member.dependencies
-        or member.role != "base"
-        or envelope.artifact.format not in {"mlx", "gguf"}
+        or member.format not in {"mlx", "gguf"}
     ):
         raise PreservationError(
-            "recovery currently supports self-contained MLX/GGUF text models only"
+            "non-text or composite recovery requires an exact artifact bundle"
         )
-    if card.runtime is not None and any(
-        (
-            card.runtime.mtp_sidecar_repo,
-            card.runtime.assistant_model_repo,
-            card.runtime.served_spec_draft_repo,
-            card.runtime.vllm_spec_draft_repo,
-        )
-    ):
-        raise PreservationError(
-            "recovery of separate runtime companions is not supported yet"
-        )
+    map_recovery_members(manifest, card)
     # These names belong to the receiving store. Captured sidecars must never
     # be confused with a freshly issued receiver authorization record.
     reserved = {
@@ -157,6 +148,8 @@ def _runtime_card(manifest: Manifest) -> ModelCard:
     }
     if any(
         any(part.casefold() in reserved for part in file.path.split("/"))
+        for member in manifest.members
+        if member.role != "notices"
         for file in member.files
     ):
         raise PreservationError("capture contains reserved Skulk installation metadata")
@@ -166,13 +159,23 @@ def _runtime_card(manifest: Manifest) -> ModelCard:
 def _inspect_verified(
     manifest: Manifest, manifest_id: str, mode: ProofMode
 ) -> tuple[RecoveryInspection, ModelCard]:
-    card = _runtime_card(manifest)
-    evidence = inspect_member_evidence(
-        manifest.members[0], trusted_root=EMBEDDED_REGISTRY_ROOT.read_bytes(), mode=mode
+    card = recovery_card(manifest)
+    root = next(
+        item for item in manifest.members if item.member_id == manifest.root_member
     )
+    closure = map_recovery_members(manifest, card)
+    evidence = inspect_member_evidence(
+        root, trusted_root=EMBEDDED_REGISTRY_ROOT.read_bytes(), mode=mode
+    )
+    for item in closure[1:]:
+        if item.member.retained_card is not None:
+            inspect_member_evidence(
+                item.member, trusted_root=EMBEDDED_REGISTRY_ROOT.read_bytes(), mode=mode
+            )
     owner_acceptance = (
         evidence.publication != "registry-fresh"
         or evidence.file_coverage != "complete-sha256"
+        or len(closure) > 1
     )
     # Project registry identity only after independent publication AND complete
     # original SHA-256 binding. A card signature alone does not bind v1 bytes.
@@ -181,7 +184,7 @@ def _inspect_verified(
     if not owner_acceptance:
         payload["registry_card_id"] = evidence.card_id
         payload["registry_snapshot_id"] = "retained-proof:" + manifest_id
-        payload["registry_artifact_format"] = manifest.members[0].format
+        payload["registry_artifact_format"] = root.format
         payload["registry_provenance"] = (
             evidence.proof.provenance if evidence.proof else None
         )
@@ -197,6 +200,7 @@ def _inspect_verified(
         requires_owner_acceptance=owner_acceptance,
         requires_code_permission=card.trust_remote_code,
         registry_proof=evidence.proof,
+        members=tuple(item.model_id for item in closure),
         runtime_requirements=manifest.runtime_requirements,
     ), card
 
@@ -266,6 +270,128 @@ def _mlx_layout_complete(directory: Path) -> bool:
         ):
             return False
     return True
+
+
+def validate_recovery_layout(
+    directory: Path, item: RecoveryMember, owner: ModelCard
+) -> None:
+    """Check the runtime-selected layout before generating any receiving sidecar."""
+    selection = item.selection
+    bundle = selection.artifact_bundle
+    load_path = directory / (item.member.loader_root or "")
+    if bundle is not None:
+        actual = {file.path: file for file in item.member.files}
+        for file in bundle.files:
+            captured = actual.get(file.path)
+            if captured is None or captured.size != file.size_bytes:
+                raise PreservationError(
+                    "capture lacks the complete selected artifact bundle"
+                )
+            if (
+                file.object_id is not None
+                and file.object_id.startswith("sha256:")
+                and file.object_id != "sha256:" + captured.sha256
+            ):
+                raise PreservationError(
+                    "capture differs from the selected artifact bundle"
+                )
+    if item.role == "mtp_sidecar":
+        # The runner reads the pinned tensor file directly; real sidecar
+        # repositories need not contain a model configuration or tokenizer.
+        if not (load_path / "mtp.safetensors").is_file():
+            raise PreservationError("capture lacks the complete MTP companion layout")
+    elif item.role == "video_companion":
+        for companion in owner.video.companions if owner.video is not None else ():
+            if (
+                companion.repo == item.member.origin_repository
+                and companion.revision == item.member.origin_revision
+            ):
+                path = directory / canonical_path(companion.path)
+                if not path.is_file() or (
+                    companion.size_bytes is not None
+                    and path.stat().st_size != companion.size_bytes
+                ):
+                    raise PreservationError("capture lacks a required video companion")
+    elif (
+        bundle is None
+        or item.role in {"assistant", "vision_weights", "served_draft"}
+        or (item.role == "base" and owner.tasks == [ModelTask.TextGeneration])
+    ):
+        complete = (
+            selected_gguf_group_complete(directory, selection.gguf_file)
+            if selection.gguf_file is not None
+            else _mlx_layout_complete(load_path)
+        )
+        if not complete:
+            raise PreservationError(
+                "capture lacks the normal runtime's complete weight layout"
+            )
+    if item.role == "base":
+        if owner.image is not None:
+            captured = {file.path: file for file in item.member.files}
+            for component in owner.image.components:
+                if component.repository != str(owner.artifact_repository):
+                    continue
+                for expected in component.files:
+                    actual = captured.get(expected.path)
+                    if (
+                        actual is None
+                        or actual.size != expected.size_bytes
+                        or (
+                            expected.object_id.startswith("sha256:")
+                            and expected.object_id != "sha256:" + actual.sha256
+                        )
+                    ):
+                        raise PreservationError(
+                            "capture lacks a required primary image component"
+                        )
+        if owner.video is not None:
+            for companion in owner.video.companions:
+                if companion.repo is not None and str(companion.repo) != str(
+                    owner.artifact_repository
+                ):
+                    continue
+                path = directory / canonical_path(companion.path)
+                if not path.is_file() or (
+                    companion.size_bytes is not None
+                    and path.stat().st_size != companion.size_bytes
+                ):
+                    raise PreservationError(
+                        "capture lacks a required primary video companion"
+                    )
+        vision = owner.vision
+        if owner.gguf_file is not None and vision is not None:
+            projector = vision.projector_file
+            if projector is None:
+                raise PreservationError(
+                    "vision recovery requires an explicitly selected projector file"
+                )
+            path = directory / canonical_path(projector)
+            if not path.is_file() or (
+                vision.projector_size is not None
+                and path.stat().st_size != vision.projector_size
+            ):
+                raise PreservationError("capture lacks the required vision projector")
+        runtime = owner.runtime
+        if runtime is not None:
+            if (
+                runtime.mtp_sidecar_repo == str(owner.artifact_repository)
+                and runtime.mtp_heads
+                and not (directory / "mtp.safetensors").is_file()
+            ):
+                raise PreservationError(
+                    "capture lacks the required same-repository MTP companion"
+                )
+            if (
+                runtime.served_spec_draft_repo == str(owner.artifact_repository)
+                and runtime.served_spec_draft_file
+                and not selected_gguf_group_complete(
+                    directory, runtime.served_spec_draft_file
+                )
+            ):
+                raise PreservationError(
+                    "capture lacks the required same-repository draft companion"
+                )
 
 
 def recover_home(
@@ -352,48 +478,67 @@ def _recover_home(
         inspection, card = _inspect_verified(manifest, manifest_id, mode)
         store_path = pending / "model-store"
         store_path.mkdir()
-        model_path = store_path / card.model_id.normalize()
-        (pending / "capture" / "members" / manifest.root_member).rename(model_path)
+        receiver_store = ModelStore(store_path, recover_installed_cards=False)
+        closure = map_recovery_members(manifest, card)
+        for item in closure:
+            model_path = store_path / item.selection.model_id.normalize()
+            (pending / "capture" / "members" / item.member.member_id).rename(model_path)
+            validate_recovery_layout(model_path, item, card)
+            write_source_revision_marker(model_path, item.member.origin_revision)
+            record = build_installed_card_record(
+                model_path,
+                card,
+                artifact_role=item.role,
+                artifact_model_id=item.model_id,
+                owner_model_id=str(card.model_id) if item.role != "base" else None,
+                owner_card_id=card.registry_card_id if item.role != "base" else None,
+                artifact_repository=item.member.origin_repository,
+                artifact_revision=item.member.origin_revision,
+                artifact_format=item.member.format,
+                artifact_file=item.selection.gguf_file,
+            )
+            record = record.model_copy(
+                update={
+                    "schema_version": 3,
+                    "preservation": PreservationEvidence(
+                        manifest_id=manifest_id,
+                        card_id=inspection.card_id,
+                        publication=inspection.publication
+                        if item.role == "base"
+                        else "owner-only",
+                        file_coverage=inspection.file_coverage
+                        if item.role == "base"
+                        else "partial-or-missing",
+                        repository_code_authorized=allow_repository_code
+                        and inspection.requires_code_permission,
+                    ),
+                }
+            )
+            if not verify_installed_card(model_path, record, verify_hashes=True):
+                raise PreservationError(
+                    "normal store verification rejected the recovered installation"
+                )
+            receiver_store.register_model(
+                item.model_id,
+                model_path,
+                [file.path for file in record.files],
+                sum(file.size_bytes for file in record.files),
+                repo_has_projector=card.vision is not None
+                and card.gguf_file is not None
+                if item.role == "base"
+                else False,
+                source_revision=item.member.origin_revision,
+                source_repository=item.member.origin_repository,
+                installed_card=record,
+            )
+        # Original notices/installed observations remain signed evidence only;
+        # they are never copied over the receiver's authorization sidecars.
         (pending / "capture" / ".preservation").rename(pending / "preservation")
+        if (pending / "capture" / "members").exists():
+            (pending / "capture" / "members").rename(
+                pending / "preservation" / "source-evidence"
+            )
         shutil.rmtree(pending / "capture")
-        load_path = model_path / (manifest.members[0].loader_root or "")
-        layout_complete = (
-            selected_gguf_group_complete(model_path, card.gguf_file)
-            if card.gguf_file is not None
-            else _mlx_layout_complete(load_path)
-        )
-        if not layout_complete:
-            raise PreservationError(
-                "capture lacks the normal runtime's complete weight layout"
-            )
-        write_source_revision_marker(model_path, card.source_revision)
-        record = build_installed_card_record(model_path, card)
-        record = record.model_copy(
-            update={
-                "schema_version": 3,
-                "preservation": PreservationEvidence(
-                    manifest_id=manifest_id,
-                    card_id=inspection.card_id,
-                    publication=inspection.publication,
-                    file_coverage=inspection.file_coverage,
-                    repository_code_authorized=allow_repository_code
-                    and inspection.requires_code_permission,
-                ),
-            }
-        )
-        if not verify_installed_card(model_path, record, verify_hashes=True):
-            raise PreservationError(
-                "normal store verification rejected the recovered installation"
-            )
-        ModelStore(store_path, recover_installed_cards=False).register_model(
-            str(card.model_id),
-            model_path,
-            [file.path for file in record.files],
-            inspection.total_bytes,
-            source_revision=card.source_revision,
-            source_repository=str(card.artifact_repository),
-            installed_card=record,
-        )
         if card.is_custom:
             custom_directory = pending / "custom_model_cards"
             custom_directory.mkdir()
@@ -423,6 +568,9 @@ def _recover_home(
             trust.model_dump_json(indent=2)
         )
         _flush_tree(pending)
+        # Flushing a large closure can outlive the previously checked proof.
+        # Fresh publication must still be valid at the final commit boundary.
+        _inspect_verified(manifest, manifest_id, mode)
         # Exclusive reservation prevents replacing an existing operator home.
         if not parent_unchanged():
             raise PreservationError("recovery parent changed before publication")
