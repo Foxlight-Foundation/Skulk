@@ -149,6 +149,7 @@ from skulk.api.performance_envelope import (
     PerformanceEnvelopeReport,
 )
 from skulk.api.plugins import create_plugins_router
+from skulk.api.preservation import HostProvider, create_preservation_router
 from skulk.api.provider_diagnostics import ProviderObserver
 from skulk.api.realtime import (
     REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -658,6 +659,8 @@ from skulk.store.config import (
     served_context_default,
     update_skulk_config_atomic,
 )
+from skulk.store.preservation_host import PreservationHost
+from skulk.store.preservation_journal import PreservationHostError
 from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
 from skulk.utils.channels import Receiver, Sender, channel
@@ -2099,6 +2102,7 @@ class API:
         # registration and _terminate_command_stream would silently no-op,
         # hanging the caller. Bounded FIFO; consumed at stream registration.
         self._pending_stream_failures: dict[CommandId, ErrorChunk] = {}
+        self._preservation_provider: HostProvider | None = None
         self._store_client = store_client
         self._pending_override_retirements: set[ModelId] = set()
         self._model_list_store_records_cache: dict[ModelId, InstalledCardRecord] = {}
@@ -2180,6 +2184,11 @@ class API:
         self._setup_exception_handlers()
         self._setup_cors()
         self._setup_routes()
+        self.app.include_router(
+            create_preservation_router(
+                self.preservation_host, self.require_preservation_operator
+            )
+        )
         self.app.include_router(
             create_plugins_router(
                 self._extensions or LoadedExtensions([]),
@@ -7558,6 +7567,32 @@ class API:
         """Refresh capability advertisements after local config application."""
 
         self._sync_builtin_speech_capability()
+
+    @classmethod
+    def require_preservation_operator(cls, request: Request) -> None:
+        """Apply the existing operator boundary to private preservation controls."""
+        cls._require_operator_mutation(request)
+
+    def set_preservation_provider(self, provider: HostProvider | None) -> None:
+        """Bind preservation to the actual local owner after config convergence."""
+        self._preservation_provider = provider
+
+    async def preservation_host(self) -> PreservationHost:
+        """Refuse absent or stale owners before accepting private controls/effects."""
+        if self._preservation_provider is None:
+            raise PreservationHostError("configure_model_store_on_this_host")
+        owner = await self._preservation_provider()
+        configured = (
+            self._store_client.local_store_path
+            if self._store_client is not None
+            else None
+        )
+        if (
+            configured is None
+            or configured.absolute() != owner.store.store_path.absolute()
+        ):
+            raise PreservationHostError("store_configuration_changed_restart_required")
+        return owner
 
     def set_model_store_runtime(
         self,
