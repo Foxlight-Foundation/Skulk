@@ -16,7 +16,7 @@ on:
         type: string
         default: ""
   push:
-    branches: ["initiative/**", dev, "feature/ltx25-comfy-extension"]
+    branches: ["initiative/**", dev, "feature/ltx25-*"]
     paths:
       - ".github/workflows/comfy-ltx-wheel.yml"
       - "packaging/skulk-comfy-ltx/**"

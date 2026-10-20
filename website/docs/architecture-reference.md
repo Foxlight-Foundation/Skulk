@@ -97,9 +97,17 @@ editing cannot declare an aggregate reference-file limit of zero. These checks
 preserve valid card identities and do not depend on hardware qualification.
 Duration prediction feeds the same bounded frame count into video and audio
 allocation; `video_probe.py` verifies actual dynamic container facts before
-publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
-absent), rather than silently substituting a sampler. DFR spatial and optional
-temporal refinement use the exact selected detailing companions and fixed Euler sampling.
+publishing a manifest. HQ requires a placed instance stamped with an issued
+Res2s extension build; the ordinary Comfy core remains insufficient. Its base
+stage uses 15 intervals by default, a 0.25 distilled LoRA, per-modality guidance
+and rescaling, followed by three joint AV refinement intervals with LoRA 0.5.
+The output keeps base-stage audio. Standard HQ decoding removes internal
+keyframe slots before upscaling; DFR carries its detailing slots through
+refinement. DFR spatial and
+optional temporal refinement retain their exact companions and fixed Euler
+sampling. Model metadata exposes workflow-specific defaults and issued
+source/payload feature identities; consumers match the instance stamp rather
+than inferring an old instance's capabilities from newer node inventory.
 
 Family graph dispatch: `worker/runner/comfy/graph.py` retains H3 graphs and
 dispatches `family = "ltx-2.5"` to `comfy/ltx.py`. The distilled graph uses

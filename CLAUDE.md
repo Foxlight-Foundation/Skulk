@@ -614,9 +614,17 @@ A model card's `placement.compatible_backends` selects which engine serves it
   auxiliary files. Generated keyframe tokens are stripped before upscaling.
   Duration prediction feeds the same bounded frame count into video and audio
   allocation; `video_probe.py` verifies actual dynamic container facts before
-  publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
-  absent), rather than silently substituting a sampler. DFR spatial and optional
-temporal refinement use the exact selected detailing companions and fixed Euler sampling.
+  publishing a manifest. HQ requires a placed instance stamped with an issued
+  Res2s extension build; the ordinary Comfy core remains insufficient. Its base
+  stage uses 15 intervals by default, a 0.25 distilled LoRA, per-modality guidance
+  and rescaling, followed by three joint AV refinement intervals with LoRA 0.5.
+  The output keeps base-stage audio. Standard HQ decoding removes internal
+  keyframe slots before upscaling; DFR carries its detailing slots through
+  refinement. DFR spatial and
+  optional temporal refinement retain their exact companions and fixed Euler
+  sampling. Model metadata exposes workflow-specific defaults and issued
+  source/payload feature identities; consumers match the instance stamp rather
+  than inferring an old instance's capabilities from newer node inventory.
 
   Cards retain broad compatible GPU backends; benchmark qualification is not
   a hardware allowlist. The H3 path binds onto its MiniMax H3 node graph

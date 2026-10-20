@@ -169,3 +169,12 @@ def test_cancel_terminates_native_process_group(tmp_path: Path) -> None:
     except psutil.NoSuchProcess:
         pass
     assert not (tmp_path / "output/job.json").exists()
+
+
+def test_native_hq_plan_uses_its_own_step_and_guidance_defaults(tmp_path: Path) -> None:
+    """HQ metadata and the native job agree without loading model weights."""
+    card = asyncio.run(load_fixture_card(ModelId("Lightricks/LTX-2.5-dev-comfy-int8")))
+    assert card is not None
+    job, render = plan_native_job(_params(pipeline="hq_two_stage"), card, tmp_path, tmp_path, tmp_path)
+    assert job.base_steps == render.steps == 15
+    assert job.guidance is not None and job.guidance.modality_scale == 3.0

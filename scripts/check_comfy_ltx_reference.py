@@ -147,10 +147,10 @@ def _reference_layout(source: Path) -> _ReferenceLayout:
     )
 
 
-def _inputs(modalities: int, terminal: bool, masked: bool) -> tuple[Latents, Latents, Latents, Tensor]:
+def _inputs(modalities: int, terminal: bool, masked: bool, *, dtype: torch.dtype = torch.bfloat16) -> tuple[Latents, Latents, Latents, Tensor]:
     generator = torch.Generator(device="cpu").manual_seed(17)
     shapes = [(1, 12, 4), (1, 5, 16)][:modalities]
-    latents = tuple(torch.randn(shape, dtype=torch.bfloat16, generator=generator) for shape in shapes)
+    latents = tuple(torch.randn(shape, dtype=dtype, generator=generator) for shape in shapes)
     clean = tuple(torch.randn(value.shape, dtype=value.dtype, generator=generator) for value in latents)
     masks = tuple(torch.ones_like(value, dtype=torch.float32) for value in latents)
     if masked:
@@ -257,22 +257,23 @@ def main() -> None:
     # output state contracts are represented above, separately from the wheel.
     reference_loop = cast("Callable[..., _AudioVideo]", namespace["res2s_audio_video_denoising_loop"])
     results: list[dict[str, object]] = []
-    for prediction_dtype in (torch.bfloat16, torch.float32):
-        for modalities in (1, 2):
-            for terminal in (False, True):
-                for masked in (False, True):
-                    latents, clean, masks, sigmas = _inputs(modalities, terminal, masked)
-                    states = tuple(_State(value, _Mask(mask), source) for value, mask, source in zip(latents, masks, clean, strict=True))
-                    reference = reference_loop(sigmas, states[0], states[1] if modalities == 2 else None, None, partial(_denoise, prediction_dtype=prediction_dtype), noise_seed=7)
-                    observed = candidate.sample_res2s(latents, sigmas, partial(_predict, dtype=prediction_dtype), seed=7, masks=masks, clean=clean)
-                    expected = tuple(state.latent for state in (reference.video, reference.audio) if state is not None)
-                    diffs = [float((left.float() - right.float()).abs().max()) for left, right in zip(observed, expected, strict=True)]
-                    for left, right in zip(observed, expected, strict=True):
-                        torch.testing.assert_close(left, right, rtol=0, atol=0)
-                    if masked:
-                        for value, source, mask in zip(observed, clean, masks, strict=True):
-                            torch.testing.assert_close(value[mask == 0], source[mask == 0], rtol=0, atol=0)
-                    results.append(dict(prediction_dtype=str(prediction_dtype), modalities=modalities, terminal=terminal, masked=masked, max_absolute_errors=diffs))
+    for initial_dtype in (torch.bfloat16, torch.float32):
+        for prediction_dtype in (torch.bfloat16, torch.float32):
+            for modalities in (1, 2):
+                for terminal in (False, True):
+                    for masked in (False, True):
+                        latents, clean, masks, sigmas = _inputs(modalities, terminal, masked, dtype=initial_dtype)
+                        states = tuple(_State(value, _Mask(mask), source) for value, mask, source in zip(latents, masks, clean, strict=True))
+                        reference = reference_loop(sigmas, states[0], states[1] if modalities == 2 else None, None, partial(_denoise, prediction_dtype=prediction_dtype), noise_seed=7)
+                        observed = candidate.sample_res2s(latents, sigmas, partial(_predict, dtype=prediction_dtype), seed=7, masks=masks, clean=clean)
+                        expected = tuple(state.latent for state in (reference.video, reference.audio) if state is not None)
+                        diffs = [float((left.float() - right.float()).abs().max()) for left, right in zip(observed, expected, strict=True)]
+                        for left, right in zip(observed, expected, strict=True):
+                            torch.testing.assert_close(left, right, rtol=0, atol=0)
+                        if masked:
+                            for value, source, mask in zip(observed, clean, masks, strict=True):
+                                torch.testing.assert_close(value[mask == 0], source.to(value.dtype)[mask == 0], rtol=0, atol=0)
+                        results.append(dict(initial_dtype=str(initial_dtype), prediction_dtype=str(prediction_dtype), modalities=modalities, terminal=terminal, masked=masked, max_absolute_errors=diffs))
     utils: dict[str, object] = {"torch": torch, "math": math}
     _load(utils, _reference_source(args.comfy_source, COMFY, "comfy/utils.py"), "comfy/utils.py", ("pack_latents", "unpack_latents"))
     pack = cast("Callable[[Sequence[Tensor]], tuple[Tensor, Sequence[Sequence[int]]]]", utils["pack_latents"])
@@ -289,45 +290,50 @@ def main() -> None:
         for observed, expected in zip(unpatch_modalities(layout.patch(raw), geometry), raw, strict=True):
             torch.testing.assert_close(observed, expected, rtol=0, atol=0)
         layout_cases.append(dict(batch=batch, video_frames=video_frames, audio_frames=audio_frames))
-    token_latents, token_clean, token_masks, sigmas = _inputs(2, True, True)
-    raw_shapes = [(1, 4, 3, 2, 2), (1, 4, 5, 4)]
-    latents = layout.unpatch(token_latents, raw_shapes)
-    clean = layout.unpatch(token_clean, raw_shapes)
-    masks = layout.unpatch(token_masks, raw_shapes)
-    packed, shapes = pack(latents)
-    packed_clean, _ = pack(clean)
-    packed_masks, _ = pack(masks)
+    packed_cases: list[dict[str, object]] = []
+    for initial_dtype in (torch.bfloat16, torch.float32):
+        token_latents, token_clean, token_masks, sigmas = _inputs(2, True, True, dtype=initial_dtype)
+        raw_shapes = [(1, 4, 3, 2, 2), (1, 4, 5, 4)]
+        latents = layout.unpatch(token_latents, raw_shapes)
+        clean = layout.unpatch(token_clean, raw_shapes)
+        masks = layout.unpatch(token_masks, raw_shapes)
+        packed, shapes = pack(latents)
+        packed_clean, _ = pack(clean)
+        packed_masks, _ = pack(masks)
 
-    @dataclass
-    class Geometry:
-        """The pinned Comfy model's packed modality dimensions."""
+        @dataclass
+        class Geometry:
+            """The pinned Comfy model's packed modality dimensions."""
 
-        latent_shapes: Sequence[Sequence[int]]
+            latent_shapes: Sequence[Sequence[int]]
 
-    class ControlledGuider:
-        """Use a fixed denoiser at the real Comfy sampler boundary."""
+        class ControlledGuider:
+            """Use a fixed denoiser at the real Comfy sampler boundary."""
 
-        inner_model: LatentModel = Geometry(shapes)
+            inner_model: LatentModel = Geometry(shapes)
 
-        def __call__(self, values: Tensor, sigma: Tensor, *, model_options: dict[str, object], seed: int) -> Tensor:
-            del model_options, seed
-            return pack(_predict(tuple(unpack(values, shapes)), sigma[0]))[0]
+            def __call__(self, values: Tensor, sigma: Tensor, *, model_options: dict[str, object], seed: int) -> Tensor:
+                del model_options, seed
+                return pack(_predict(tuple(unpack(values, self.inner_model.latent_shapes)), sigma[0], dtype=torch.float32))[0]
 
-    @dataclass
-    class PackedModel:
-        """Represent the exact x0 inpaint wrapper contract without its extra blend."""
+        @dataclass
+        class PackedModel:
+            """Represent the exact x0 inpaint wrapper contract without its extra blend."""
 
-        inner_model: Guider
-        latent_image: Tensor
+            inner_model: Guider
+            latent_image: Tensor
 
-    callbacks: list[SamplerProgress] = []
-    actual = sample_ltx_res2s(PackedModel(ControlledGuider(), packed_clean), packed, sigmas, extra_args={"seed": 7, "denoise_mask": packed_masks}, callback=callbacks.append)
-    initial = tuple((value * mask + source * (1 - mask)).to(value.dtype) for value, mask, source in zip(latents, masks, clean, strict=True))
-    states = tuple(_State(value, _Mask(mask), source) for value, mask, source in zip(layout.patch(initial), layout.patch(masks), layout.patch(clean), strict=True))
-    reference = reference_loop(sigmas, states[0], states[1], None, _denoise)
-    expected = tuple(state.latent for state in (reference.video, reference.audio) if state is not None)
-    torch.testing.assert_close(actual, pack(layout.unpatch(expected, shapes))[0], rtol=0, atol=0)
-    assert len(callbacks) == len(sigmas) - 1
+        callbacks: list[SamplerProgress] = []
+        actual = sample_ltx_res2s(PackedModel(ControlledGuider(), packed_clean), packed, sigmas, extra_args={"seed": 7, "denoise_mask": packed_masks}, callback=callbacks.append)
+        initial = tuple((value * mask + source * (1 - mask)).to(value.dtype) for value, mask, source in zip(latents, masks, clean, strict=True))
+        states = tuple(_State(value, _Mask(mask), source) for value, mask, source in zip(layout.patch(initial), layout.patch(masks), layout.patch(clean), strict=True))
+        reference = reference_loop(sigmas, states[0], states[1], None, partial(_denoise, prediction_dtype=torch.float32))
+        expected = tuple(state.latent for state in (reference.video, reference.audio) if state is not None)
+        torch.testing.assert_close(actual, pack(layout.unpatch(expected, shapes))[0], rtol=0, atol=0)
+        assert len(callbacks) == len(sigmas) - 1
+        packed_cases.append(dict(initial_dtype=str(initial_dtype), prediction_dtype=str(torch.float32), callback_intervals=len(callbacks), exact=True))
+
+    latents, clean, masks, sigmas = _inputs(2, True, True, dtype=torch.float32)
 
     class CancelledError(Exception):
         """A controlled owner cancellation during sampler progress."""
@@ -347,7 +353,7 @@ def main() -> None:
         assert len(predict_calls) == 2
     else:
         raise AssertionError("cancellation did not escape the sampler")
-    report = dict(guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, comfy_commit=COMFY, callback_intervals=len(callbacks), cancellation_stops_after_first_interval=True, pass_all=True)
+    report = dict(guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
     _ = args.output.write_text(json.dumps(report, indent=2) + "\n")
 
 

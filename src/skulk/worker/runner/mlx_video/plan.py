@@ -112,7 +112,7 @@ def plan_native_job(params: VideoGenerationTaskParams, card: ModelCard, model_di
     codec = params.codec or "h264"
     if codec != "h264":
         raise ValueError("this native build implements H.264 MP4 output")
-    render = plan_render(params, video.model_copy(update={"canvas_multiple": 64}))
+    render = plan_render(params, video.model_copy(update={"canvas_multiple": 64, **({"default_steps": 15} if pipeline == "hq_two_stage" else {})}))
     if min(render.width, render.height) < 128:
         raise ValueError("LTX two-stage generation requires edges of at least 128 pixels")
     base_steps = params.steps or (8 if video.transformer_variant == "distilled" else 15 if pipeline == "hq_two_stage" else 30)
@@ -129,7 +129,7 @@ def plan_native_job(params: VideoGenerationTaskParams, card: ModelCard, model_di
         width=render.width, height=render.height, fps=render.fps, frame_count=render.frame_count,
         seed=render.seed, audio=render.audio, pipeline=pipeline, decoder=params.decoder or "convolutional",
         codec=codec, base_steps=base_steps, negative_prompt=params.negative_prompt,
-        guidance=(params.guidance or VideoGuidance()) if pipeline in ("dev_two_stage", "hq_two_stage") else None,
+        guidance=(params.guidance or VideoGuidance(modality_scale=3.0 if pipeline == "hq_two_stage" else 1.0)) if pipeline in ("dev_two_stage", "hq_two_stage") else None,
         generated_keyframe_interval=params.generated_keyframe_interval, duration=params.duration,
         minimum_seconds=params.duration_min_seconds or video.min_seconds, maximum_seconds=params.seconds,
         refinement_strength=refinement_strength, images=tuple(anchors),

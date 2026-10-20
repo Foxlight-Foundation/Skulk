@@ -532,7 +532,7 @@ class Runner(ServedConcurrentDispatch):
         server = self.server
         assert server is not None and server.base_url is not None
         started = time.monotonic()
-        render = plan_comfy_render(params, self.card)
+        render = plan_comfy_render(params, self.card, engine_build=self.shard_metadata.resolved_engine_build)
         bindings = bind_references(params.references, SKULK_VIDEO_INPUT_DIR)
         output_dir = SKULK_VIDEO_OUTPUT_DIR / str(command_id)
         output_dir.mkdir(parents=True, exist_ok=True)

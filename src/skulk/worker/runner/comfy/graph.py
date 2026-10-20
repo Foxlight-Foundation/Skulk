@@ -554,6 +554,9 @@ class ComfyRenderPlan:
             audio_shift=self.audio_shift,
             adapter=None if self.adapter is None else self.adapter.name,
             adapter_strength=None if self.adapter is None else self.adapter.strength,
+            stage_lora_strengths={"base": 0.25, "refine": 0.5} if self.pipeline == "hq_two_stage" else {},
+            guidance_video_rescale=0.45 if self.pipeline == "hq_two_stage" else None,
+            guidance_audio_rescale=1.0 if self.pipeline == "hq_two_stage" else None,
             width=self.plan.width,
             height=self.plan.height,
             frame_count=self.plan.frame_count,
@@ -573,7 +576,7 @@ class ComfyRenderPlan:
 
 
 def plan_comfy_render(
-    params: VideoGenerationTaskParams, card: ModelCard
+    params: VideoGenerationTaskParams, card: ModelCard, *, engine_build: str | None = None
 ) -> ComfyRenderPlan:
     """Resolve a request against the card for the ComfyUI engine.
 
@@ -599,25 +602,28 @@ def plan_comfy_render(
             raise ValueError("the pinned Comfy core nodes do not implement temporal prompt-relay cross-attention masks")
         pipeline = params.pipeline or ("distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
         if pipeline == "hq_two_stage":
-            raise ValueError("LTX-2.5 HQ requires the exact Res2s sampler, unavailable in the pinned Comfy core engine")
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if "res2s" not in extension_features_for_build(engine_build):
+                raise ValueError("LTX-2.5 HQ requires a placed renderer with the published Res2s extension; update the renderer before using HQ")
         minimum = params.duration_min_seconds or video.min_seconds
         files = resolve_model_files(card, mode)
-        base = plan_render(params, video.model_copy(update={"canvas_multiple": 64}))
+        base = plan_render(params, video.model_copy(update={"canvas_multiple": 64, **({"default_steps": 15} if pipeline == "hq_two_stage" else {})}))
         factor = 2 ** params.temporal_upscalings
         return ComfyRenderPlan(
             plan=replace(base, fps=base.fps * factor, frame_count=(base.frame_count - 1) * factor + 1),
             mode=mode,
             files=files,
-            adapter=None if pipeline != "dev_two_stage" or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=files.refinement_strength, steps=None),
+            adapter=None if pipeline not in ("dev_two_stage", "hq_two_stage") or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=0.5 if pipeline == "hq_two_stage" else files.refinement_strength, steps=None),
             video_shift=None,
             audio_shift=None,
-            sampler="euler_ancestral" if pipeline == "distilled_two_stage" else "euler",
+            sampler="res2s" if pipeline == "hq_two_stage" else "euler_ancestral" if pipeline == "distilled_two_stage" else "euler",
             scheduler="manual" if pipeline in ("distilled_two_stage", "dfr") else "ltx",
             codec=params.codec or CODEC_DEFAULT,
             family=card.family,
             pipeline=pipeline,
             decoder=params.decoder or "convolutional",
-            guidance=(params.guidance or VideoGuidance()) if pipeline == "dev_two_stage" else None,
+            guidance=(params.guidance or VideoGuidance(modality_scale=3.0 if pipeline == "hq_two_stage" else 1.0)) if pipeline in ("dev_two_stage", "hq_two_stage") else None,
             temporal_upscalings=params.temporal_upscalings,
             generated_keyframe_interval=(params.generated_keyframe_interval or 24) if pipeline == "dfr" else params.generated_keyframe_interval,
             duration=params.duration,
