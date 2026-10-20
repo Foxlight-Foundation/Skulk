@@ -2,11 +2,14 @@
 
 The fixed tables and stage wiring follow workflow templates 0.11.57. Audio
 latents participate in both stages even when the caller asks for a silent
-container: muting the mux is different from changing the joint model.
+container: muting the mux is different from changing the joint model. DFR
+stage wiring follows Comfy-Org/workflow_templates at immutable revision
+86ce86e92ec77e3c3c6d4a754e69cfce37886542, video_ltx2_5_dfr_i2v.json.
 """
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Final
 
 from skulk.shared.models.model_cards import ModelCard
@@ -22,6 +25,8 @@ if TYPE_CHECKING:
 DISTILLED_SIGMAS: Final = (
     "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
 )
+DFR_REFINEMENT_SIGMAS: Final = "0.909375, 0.725, 0.421875, 0.0"
+DFR_TEMPORAL_SIGMAS: Final = "0.975, 0.909375, 0.725, 0.421875, 0.0"
 REFINEMENT_SIGMAS: Final = "0.85, 0.7250, 0.4219, 0.0"
 """The pinned Comfy template's refinement schedule, not a guessed step count."""
 
@@ -117,7 +122,7 @@ def _condition_images(
     return positive, negative, latent, guided
 
 
-def _sampling_stage(
+def sampling_stage(
     prompt: ComfyPrompt,
     name: str,
     *,
@@ -130,6 +135,7 @@ def _sampling_stage(
     render: ComfyRenderPlan,
     model: list[str | int],
 ) -> list[str | int]:
+    """Bind one joint sampling stage, retaining per-modality masks and fixed schedules."""
     prompt[f"ltx_{name}_av"] = _node(
         "LTXVConcatAVLatent",
         "Join audio/video latents",
@@ -137,17 +143,23 @@ def _sampling_stage(
         audio_latent=audio,
     )
     prompt[f"ltx_{name}_noise"] = _node("RandomNoise", "Noise", noise_seed=seed)
-    if name == "base" and render.pipeline == "dev_two_stage":
+    if name == "base" and (render.pipeline in ("dev_two_stage", "hq_two_stage") or (render.editing is not None and render.transformer_variant == "dev")):
         prompt[f"ltx_{name}_sigmas"] = _node(
             "LTXVScheduler", "Guided base schedule", steps=render.plan.steps,
             max_shift=2.05, base_shift=0.95, stretch=True, terminal=0.1,
-            latent=video,
+            # The reference shifts by the target canvas, before guide slots.
+            latent=_link("ltx_video_latent") if render.pipeline == "hq_two_stage" else video,
         )
     else:
         prompt[f"ltx_{name}_sigmas"] = _node(
             "ManualSigmas", "Distilled schedule", sigmas=sigmas
         )
     guidance = render.guidance if name == "base" else None
+    if render.prompt_relay is not None:
+        # Every stage binds its own actual query grid, including DFR's denser
+        # timeline. No base-stage coordinates or per-job tensors enter a clone.
+        prompt[f"ltx_{name}_relay"] = _node("SkulkLTXApplyPromptRelay", "Route timed video prompts", model=model)
+        model = _link(f"ltx_{name}_relay")
     prompt[f"ltx_{name}_guider"] = _node(
         "LTXVDualCFGGuider",
         "Distilled guidance",
@@ -188,6 +200,30 @@ def _crop_guides(
     return _link(node, 2)
 
 
+
+def _temporal_refinement(
+    prompt: ComfyPrompt,
+    render: ComfyRenderPlan,
+    references: tuple[ReferenceBinding, ...],
+    video: list[str | int],
+    model: list[str | int],
+) -> list[str | int]:
+    """Densify the refined timeline while preserving its audio and keyframes."""
+    if render.files.temporal_upscaler is None:
+        raise ValueError("DFR temporal refinement requires the selected temporal_x2 upscaler")
+    prompt["ltx_temporal_model"] = _node("LatentUpscaleModelLoader", "Load temporal x2 upscaler", model_name=render.files.temporal_upscaler)
+    prompt["ltx_temporal_upscale"] = _node("LTXVLatentUpsampler", "Double temporal density", samples=video, upscale_model=_link("ltx_temporal_model"), vae=_link("video_vae"))
+    positive, negative, video, _ = _condition_images(prompt, references, stage="temporal", positive=_link("condition", 0), negative=_link("condition", 1), latent=_link("ltx_temporal_upscale"), fps=render.plan.fps, refinement=True)
+    prompt["ltx_temporal_guides"] = _node("LTXVGeneratedKeyframesToGuides", "Pin previous detailing frames", positive=positive, negative=negative, vae=_link("video_vae"), latent=video, keyframes=_link("ltx_refine_strip_generated", 3), strength=0.95)
+    prompt["ltx_temporal_keyframes"] = _node("SkulkLTXAddGeneratedKeyframes" if render.dfr_extension else "LTXVAddGeneratedKeyframes", "Generate intermediate detailing frames", positive=_link("ltx_temporal_guides", 0), negative=_link("ltx_temporal_guides", 1), vae=_link("video_vae"), latent=_link("ltx_temporal_guides", 2), interval_frames=render.generated_keyframe_interval, keyframes=_link("ltx_temporal_upscale"))
+    prompt["ltx_temporal_condition"] = _node("LTXVConditioning", "Temporal refinement frame rate", positive=_link("ltx_temporal_keyframes", 0), negative=_link("ltx_temporal_keyframes", 1), frame_rate=render.plan.fps)
+    prompt["ltx_temporal_frozen_audio"] = _node("LTXVFreezeLatent", "Preserve refined audio", latent=_link("ltx_refine_split", 1))
+    sampled = sampling_stage(prompt, "temporal", seed=(render.plan.seed + 2) % (2**64), sigmas=DFR_TEMPORAL_SIGMAS, positive=_link("ltx_temporal_condition", 0), negative=_link("ltx_temporal_condition", 1), video=_link("ltx_temporal_keyframes", 2), audio=_link("ltx_temporal_frozen_audio"), render=render, model=model)
+    prompt["ltx_temporal_split"] = _node("LTXVSeparateAVLatent", "Separate temporal latents", av_latent=sampled)
+    prompt["ltx_temporal_strip_generated"] = _node("LTXVSeparateGeneratedKeyframes", "Remove intermediate detailing tokens", positive=_link("ltx_temporal_keyframes", 0), negative=_link("ltx_temporal_keyframes", 1), latent=_link("ltx_temporal_split", 0), keyframes_to_batch=False)
+    return _crop_guides(prompt, "temporal", _link("ltx_temporal_strip_generated", 0), _link("ltx_temporal_strip_generated", 1), _link("ltx_temporal_strip_generated", 2))
+
+
 def build_ltx_prompt(
     render: ComfyRenderPlan,
     params: VideoGenerationTaskParams,
@@ -209,6 +245,11 @@ def build_ltx_prompt(
         ValueError: A required audio decoder or spatial upscaler is absent.
     """
     plan, files = render.plan, render.files
+    # Temporal refinement doubles frame density and RoPE FPS together. The base
+    # model still samples the original timeline at the card's trained rate.
+    factor = 2 ** render.temporal_upscalings
+    base_fps = plan.fps // factor
+    base_frames = (plan.frame_count - 1) // factor + 1
     if files.audio_vae is None or files.spatial_upscaler is None:
         raise ValueError(
             "LTX-2.5 two-stage rendering requires audio VAE and spatial_x2 upscaler"
@@ -236,21 +277,21 @@ def build_ltx_prompt(
             "Frame-rate conditioning",
             positive=_link("ltx_positive"),
             negative=_link("ltx_negative"),
-            frame_rate=plan.fps,
+            frame_rate=base_fps,
         ),
         "ltx_video_latent": _node(
             "EmptyLTXVLatentVideo",
             "Half-resolution video latent",
             width=plan.width // 2,
             height=plan.height // 2,
-            length=plan.frame_count,
+            length=base_frames,
             batch_size=1,
         ),
         "ltx_audio_latent": _node(
             "LTXVEmptyLatentAudio",
             "Audio latent",
-            frames_number=plan.frame_count,
-            frame_rate=plan.fps,
+            frames_number=base_frames,
+            frame_rate=base_fps,
             batch_size=1,
             audio_vae=_link("audio_vae"),
         ),
@@ -263,7 +304,9 @@ def build_ltx_prompt(
             model_name=files.spatial_upscaler,
         ),
     }
-    frame_count: int | list[str | int] = plan.frame_count
+    if render.prompt_relay is not None:
+        prompt["ltx_positive"] = _node("SkulkLTXPromptRelayEncode", "Encode timed scene prompts", clip=_link("clip"), global_prompt=params.prompt, segments_json=json.dumps([{"prompt": segment.prompt, "length": segment.length} for segment in render.prompt_relay.segments], ensure_ascii=False, separators=(",", ":")))
+    frame_count: int | list[str | int] = base_frames
     if render.duration == "auto":
         if files.duration_head is None:
             raise ValueError("LTX-2.5 automatic duration requires a selected duration head")
@@ -285,6 +328,12 @@ def build_ltx_prompt(
         prompt["ltx_frozen_source_audio"] = _node("LTXVFreezeLatent", "Freeze source audio", latent=_link("ltx_encoded_source_audio"))
         audio_latent = _link("ltx_frozen_source_audio")
     base_model = _link("unet")
+    if render.pipeline == "hq_two_stage":
+        if files.refinement_lora is None:
+            raise ValueError("LTX-2.5 HQ requires its selected distilled refinement LoRA")
+        prompt["sampler_select"] = _node("SkulkLTXRes2sSampler", "Reference Res2s sampler")
+        prompt["ltx_hq_base_lora"] = _node("LoraLoaderModelOnly", "HQ guided base model", model=base_model, lora_name=files.refinement_lora, strength_model=0.25)
+        base_model = _link("ltx_hq_base_lora")
     if render.guidance is not None:
         if render.guidance.stg_scale:
             prompt["ltx_stg"] = _node("LTXVSpatioTemporalGuidance", "Spatiotemporal guidance", model=base_model, scale=render.guidance.stg_scale, blocks="28", start_percent=0.0, end_percent=1.0)
@@ -292,6 +341,9 @@ def build_ltx_prompt(
         if render.guidance.modality_scale != 1.0:
             prompt["ltx_modality"] = _node("LTXVModalityGuidance", "Audio/video guidance", model=base_model, modality_scale=render.guidance.modality_scale, start_percent=0.0, end_percent=1.0)
             base_model = _link("ltx_modality")
+    if render.pipeline == "hq_two_stage":
+        prompt["ltx_hq_rescale"] = _node("SkulkLTXGuidanceRescale", "HQ per-modality guidance rescaling", model=base_model, video_scale=0.45, audio_scale=1.0)
+        base_model = _link("ltx_hq_rescale")
     positive, negative, video, guided = _condition_images(
         prompt,
         references,
@@ -299,17 +351,17 @@ def build_ltx_prompt(
         positive=_link("condition", 0),
         negative=_link("condition", 1),
         latent=_link("ltx_video_latent"),
-        fps=plan.fps,
+        fps=base_fps,
         refinement=False,
     )
     if render.generated_keyframe_interval is not None:
         prompt["ltx_generated_keyframes"] = _node(
-            "LTXVAddGeneratedKeyframes", "Internal detailing keyframes",
+            "SkulkLTXAddGeneratedKeyframes" if render.dfr_extension else "LTXVAddGeneratedKeyframes", "Internal detailing keyframes",
             positive=positive, negative=negative, vae=_link("video_vae"),
             latent=video, interval_frames=render.generated_keyframe_interval,
         )
         positive, negative, video = (_link("ltx_generated_keyframes", 0), _link("ltx_generated_keyframes", 1), _link("ltx_generated_keyframes", 2))
-    first = _sampling_stage(
+    first = sampling_stage(
         prompt,
         "base",
         seed=plan.seed,
@@ -348,25 +400,36 @@ def build_ltx_prompt(
         positive=_link("condition", 0),
         negative=_link("condition", 1),
         latent=_link("ltx_spatial_upscale"),
-        fps=plan.fps,
+        fps=base_fps,
         refinement=True,
     )
     refinement_model = _link("unet")
     refinement_audio = audio_latent if params.audio_conditioning is not None else _link("ltx_base_split", 1)
-    if render.pipeline == "dev_two_stage":
+    if render.pipeline == "dfr":
+        if files.dfr_spatial_lora is None:
+            raise ValueError("LTX-2.5 DFR requires its selected pixel-spatial IC-LoRA")
+        prompt["ltx_dfr_lora"] = _node("LoraLoaderModelOnly", "DFR spatial detail model", model=refinement_model, lora_name=files.dfr_spatial_lora, strength_model=1.0)
+        refinement_model = _link("ltx_dfr_lora")
+        prompt["ltx_upscale_keyframes"] = _node("LTXVLatentUpsampler", "Upscale detailing keyframes", samples=_link("ltx_strip_generated", 3), upscale_model=_link("ltx_spatial_model"), vae=_link("video_vae"))
+        prompt["ltx_refine_keyframes"] = _node("SkulkLTXAddGeneratedKeyframes" if render.dfr_extension else "LTXVAddGeneratedKeyframes", "Carry detailing keyframes", positive=positive, negative=negative, vae=_link("video_vae"), latent=video, interval_frames=render.generated_keyframe_interval, keyframes=_link("ltx_upscale_keyframes"))
+        prompt["ltx_dfr_detail_guide"] = _node("LTXVAddLatentGuide", "Half-resolution detail reference", positive=_link("ltx_refine_keyframes", 0), negative=_link("ltx_refine_keyframes", 1), vae=_link("video_vae"), latent=_link("ltx_refine_keyframes", 2), guiding_latent=base_video, latent_idx=0, strength=1.0)
+        positive, negative, video = (_link("ltx_dfr_detail_guide", 0), _link("ltx_dfr_detail_guide", 1), _link("ltx_dfr_detail_guide", 2))
+        guided = True
+    if render.pipeline in ("dev_two_stage", "hq_two_stage"):
         if files.refinement_lora is None:
             raise ValueError("LTX-2.5 guided refinement requires its exact distilled LoRA")
-        prompt["ltx_refinement_lora"] = _node("LoraLoaderModelOnly", "Distilled refinement model", model=refinement_model, lora_name=files.refinement_lora, strength_model=files.refinement_strength)
+        prompt["ltx_refinement_lora"] = _node("LoraLoaderModelOnly", "Distilled refinement model", model=refinement_model, lora_name=files.refinement_lora, strength_model=0.5 if render.pipeline == "hq_two_stage" else files.refinement_strength)
         refinement_model = _link("ltx_refinement_lora")
-        # Guided upstream refinement keeps stage-one audio clean; it is
-        # cross-attention context rather than a second audio generation.
-        prompt["ltx_frozen_audio"] = _node("LTXVFreezeLatent", "Keep base audio", latent=refinement_audio)
-        refinement_audio = _link("ltx_frozen_audio")
-    second = _sampling_stage(
+        # HQ re-noises audio to condition its video refiner even though the
+        # output keeps base audio. The ordinary Dev path freezes that context.
+        if render.pipeline == "dev_two_stage":
+            prompt["ltx_frozen_audio"] = _node("LTXVFreezeLatent", "Keep base audio", latent=refinement_audio)
+            refinement_audio = _link("ltx_frozen_audio")
+    second = sampling_stage(
         prompt,
         "refine",
         seed=(plan.seed + 1) % (2**64),
-        sigmas=REFINEMENT_SIGMAS if render.pipeline == "distilled_two_stage" else "0.909375, 0.725, 0.421875, 0.0",
+        sigmas=REFINEMENT_SIGMAS if render.pipeline == "distilled_two_stage" else DFR_REFINEMENT_SIGMAS,
         positive=positive,
         negative=negative,
         video=video,
@@ -378,8 +441,13 @@ def build_ltx_prompt(
         "LTXVSeparateAVLatent", "Separate refined latents", av_latent=second
     )
     final_video = _link("ltx_refine_split", 0)
+    if render.pipeline == "dfr":
+        prompt["ltx_refine_strip_generated"] = _node("LTXVSeparateGeneratedKeyframes", "Separate refined detailing keyframes", positive=positive, negative=negative, latent=final_video, keyframes_to_batch=False)
+        positive, negative, final_video = (_link("ltx_refine_strip_generated", 0), _link("ltx_refine_strip_generated", 1), _link("ltx_refine_strip_generated", 2))
     if guided:
         final_video = _crop_guides(prompt, "refine", positive, negative, final_video)
+    if render.temporal_upscalings:
+        final_video = _temporal_refinement(prompt, render, references, final_video, refinement_model)
     decoder = _link("video_vae")
     if render.decoder == "diffusion":
         if files.diffusion_decoder is None:
@@ -408,7 +476,7 @@ def build_ltx_prompt(
         prompt["decode_audio"] = _node(
             "LTXVAudioVAEDecode",
             "Decode audio",
-            samples=_link("ltx_refine_split", 1) if render.pipeline == "distilled_two_stage" else _link("ltx_base_split", 1),
+            samples=_link("ltx_refine_split", 1) if render.pipeline in ("distilled_two_stage", "dfr") else _link("ltx_base_split", 1),
             audio_vae=_link("audio_vae"),
         )
         create["audio"] = _link("decode_audio")

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -59,6 +60,7 @@ from skulk.worker.runner.comfy.graph import (
     NODE_SAVE_VIDEO,
     NODE_SCHEDULER,
     NODE_SHIFT,
+    ComfyModelSearchRoot,
     bind_references,
     build_prompt,
     companion_file,
@@ -388,7 +390,7 @@ def test_extra_model_paths_lists_the_folders_the_artifact_has(tmp_path: Path) ->
         (tmp_path / folder).mkdir()
     text = extra_model_paths_yaml(tmp_path)
     assert text.splitlines()[0] == "skulk:"
-    assert f"  base_path: {tmp_path.resolve().as_posix()}" in text
+    assert f"  base_path: {json.dumps(tmp_path.resolve().as_posix())}" in text
     assert "  diffusion_models: diffusion_models" in text and "  loras: loras" in text
     assert "text_encoders" not in text and "embeddings" not in text
 
@@ -399,11 +401,11 @@ def test_each_staged_companion_repository_is_a_search_root(tmp_path: Path) -> No
     pose = tmp_path / "pose"
     for folder in (base / "diffusion_models", pose / "checkpoints", pose / "diffusion_models"):
         folder.mkdir(parents=True)
-    lines = extra_model_paths_yaml(base, (pose,)).splitlines()
-    assert lines[0] == "skulk:" and lines[1] == f"  base_path: {base.resolve().as_posix()}"
+    lines = extra_model_paths_yaml(base, (ComfyModelSearchRoot("checkpoints", pose / "checkpoints"),)).splitlines()
+    assert lines[0] == "skulk:" and lines[1] == f"  base_path: {json.dumps(base.resolve().as_posix())}"
     second = lines.index("skulk_companion_1:")
-    assert lines[second + 1] == f"  base_path: {pose.resolve().as_posix()}"
-    assert "  checkpoints: checkpoints" in lines[second:]
+    assert lines[second + 1] == f"  base_path: {json.dumps((pose / 'checkpoints').resolve().as_posix())}"
+    assert lines[second + 2:] == ["  checkpoints: ."]
 
 
 def test_preprocessor_weights_load_by_their_repository_path() -> None:
@@ -431,14 +433,15 @@ def test_a_missing_companion_file_is_named_before_the_engine_starts(
     card = _card(FL2VA_ID)
     monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
     _stage_companions(card, tmp_path)
-    roots = runner_module._companion_directories(card)
-    assert [root.name for root in roots] == [
-        "Comfy-Org--SDPose--revision-acb43fbe8142b54d9ebd52b720b81dd4e14c8d81",
-        "Comfy-Org--Depth-Anything-3--revision-1aaeea516f22fb2f4c7fae761c8ed470c6cf9f93",
+    roots = runner_module._companion_search_roots(card)
+    assert [(root.folder, root.directory.name) for root in roots] == [
+        ("checkpoints", "checkpoints"),
+        ("diffusion_models", "diffusion_models"),
+        ("geometry_estimation", "geometry_estimation"),
     ]
-    (roots[1] / "geometry_estimation" / "depth_anything_3_mono_large.safetensors").unlink()
+    (roots[2].directory / "depth_anything_3_mono_large.safetensors").unlink()
     with pytest.raises(RuntimeError, match="depth_anything_3_mono_large .* is not staged"):
-        runner_module._companion_directories(card)
+        runner_module._companion_search_roots(card)
 
 
 def test_server_args_are_headless_and_skulk_owned(tmp_path: Path) -> None:

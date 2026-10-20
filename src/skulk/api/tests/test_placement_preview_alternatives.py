@@ -31,7 +31,7 @@ from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import NodeResources
-from skulk.shared.types.telemetry import NodeTelemetry
+from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.shared.types.worker.instances import (
     Instance,
     InstanceId,
@@ -44,7 +44,7 @@ from skulk.utils.channels import channel
 _MODEL_ID = ModelId("unsloth/preview-alt-test-GGUF")
 
 
-def _build_api(node_id: str = "local-node") -> API:
+def _build_api(node_id: str = "local-node", *, telemetry_view: TelemetryView | None = None) -> API:
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     _, event_receiver = channel[IndexedEvent]()
@@ -58,6 +58,7 @@ def _build_api(node_id: str = "local-node") -> API:
         election_receiver=election_receiver,
         enable_event_log=False,
         mount_dashboard=False,
+        telemetry_view=telemetry_view,
     )
 
 
@@ -77,6 +78,7 @@ def _single_node_instance(
     *,
     model_card: ModelCard | None = None,
     resolved_backend: str | None = None,
+    resolved_engine_build: str | None = None,
 ) -> MlxRingInstance:
     runner = RunnerId(f"runner-{node}")
     card = _card() if model_card is None else model_card
@@ -88,6 +90,7 @@ def _single_node_instance(
         end_layer=8,
         n_layers=8,
         resolved_backend=resolved_backend,
+        resolved_engine_build=resolved_engine_build,
     )
     return MlxRingInstance(
         instance_id=InstanceId(f"instance-{node}"),
@@ -851,3 +854,41 @@ def test_quick_launch_documents_its_response_in_openapi() -> None:
     assert '"#/components/schemas/CreateInstanceResponse"' in json.dumps(responses["200"])
     schemas = cast(dict[str, object], schema["components"]["schemas"])
     assert '"engine_install"' in json.dumps(schemas["CreateInstanceResponse"])
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_quick_launch_quotes_the_overlay_without_claiming_the_base_is_absent(monkeypatch: pytest.MonkeyPatch, installed: bool) -> None:
+    """The ordinary placement response discloses the small renderer update."""
+    from skulk.provisioning import comfy_extension
+    from skulk.provisioning.manifest import COMFY_PIN
+
+    wheel = comfy_extension.ComfyExtensionWheel(filename="skulk_comfy_ltx-0.1.0-py3-none-any.whl", sha256="a" * 64, payload_sha256="b" * 64, size_bytes=40115, comfy_revision=COMFY_PIN, ltx_revision=comfy_extension.LTX_REFERENCE_REVISION, features=("res2s",))
+    monkeypatch.setattr(comfy_extension, "PUBLISHED_EXTENSIONS", (wheel,))
+    base = f"comfy@{COMFY_PIN}/torch@2.14.0+cu130"
+    target = wheel.build_identity(base)
+    node = NodeId("video-node")
+    telemetry = TelemetryView()
+    telemetry.apply(NodeTelemetry(node_id=node, info=NodeResources(backends=frozenset({"comfy-cuda"}), engine_builds={"comfy-cuda": target if installed else base}, installable_engine_builds={"comfy-cuda": target})))
+    api = _build_api(telemetry_view=telemetry)
+
+    async def load(_model_id: object) -> ModelCard:
+        return _card()
+
+    def dry_run(command: PlaceInstance, **_kwargs: object) -> dict[InstanceId, Instance]:
+        return {InstanceId(str(command.command_id)): _single_node_instance(str(node), resolved_backend="comfy-cuda", resolved_engine_build=target)}
+
+    async def send(_command: object) -> None:
+        return None
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(load))
+    monkeypatch.setattr(api_main, "get_instance_placements", dry_run)
+    monkeypatch.setattr(api, "_send", send)
+    response = TestClient(api.app).post("/place_instance", json={"model_id": str(_MODEL_ID)})
+    assert response.status_code == 200, response.text
+    body = cast(dict[str, object], response.json())
+    if installed:
+        assert body["engine_install"] is None
+    else:
+        notice = cast(dict[str, object], body["engine_install"])
+        assert notice["engine"] == "comfy" and notice["approximate_download_bytes"] == 40115
+        assert "renderer update" in str(notice["detail"]) and "39 KB" in str(notice["detail"])

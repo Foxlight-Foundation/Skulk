@@ -4842,7 +4842,11 @@ class API:
         preview says so before the operator places it.
         """
         node_resources = self._telemetry_view.node_resources
+        from skulk.provisioning.comfy_extension import extension_for_build
+
         installing: dict[EngineType, list[str]] = {}
+        sizes: dict[EngineType, int] = {}
+        extension_only: dict[EngineType, bool] = {}
         assignments = instance.shard_assignments
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard.get(runner_id)
@@ -4851,21 +4855,33 @@ class API:
             if (
                 resources is None
                 or backend is None
-                or backend not in resources.on_demand_backends
             ):
                 continue
             engine = engine_of(backend)
             if engine is not None:
+                base_missing = backend in resources.on_demand_backends
+                wheel = extension_for_build(shard.resolved_engine_build) if engine == "comfy" and shard is not None else None
+                target_installed = shard is not None and resources.engine_builds.get(backend) == shard.resolved_engine_build
+                if not base_missing and (wheel is None or target_installed):
+                    continue
+                size = ON_DEMAND_ENGINE_DOWNLOAD_BYTES.get(engine, 0) if base_missing else 0
+                if wheel is not None:
+                    size += wheel.size_bytes
+                sizes[engine] = max(sizes.get(engine, 0), size)
+                extension_only[engine] = extension_only.get(engine, True) and wheel is not None and not base_missing
                 installing.setdefault(engine, []).append(str(node_id))
         if not installing:
             return None
         engine, node_ids = next(iter(installing.items()))
-        size = ON_DEMAND_ENGINE_DOWNLOAD_BYTES.get(engine, 0)
+        size = sizes[engine]
+        detail = engine_install_notice(engine, size)
+        if extension_only[engine]:
+            detail = detail.replace("video engine", "video renderer update")
         return PlacementEngineInstall(
             engine=engine,
             node_ids=node_ids,
             approximate_download_bytes=size,
-            detail=engine_install_notice(engine, size),
+            detail=detail,
         )
 
     def get_instance(self, instance_id: InstanceId) -> Instance:
@@ -12200,6 +12216,10 @@ class API:
                     pipeline=engine.pipeline,
                     decoder=engine.decoder,
                     guidance=engine.guidance,
+                    stage_lora_strengths=dict(engine.stage_lora_strengths),
+                    guidance_video_rescale=engine.guidance_video_rescale,
+                    guidance_audio_rescale=engine.guidance_audio_rescale,
+                    temporal_upscalings=engine.temporal_upscalings,
                     generated_keyframe_interval=engine.generated_keyframe_interval,
                     duration=engine.duration,
                     audio_conditioning=engine.audio_conditioning,
@@ -12544,6 +12564,7 @@ class API:
                 decoder=create.decoder,
                 negative_prompt=create.negative_prompt,
                 guidance=create.guidance,
+                temporal_upscalings=create.temporal_upscalings,
                 generated_keyframe_interval=create.generated_keyframe_interval,
                 duration=create.duration,
                 duration_min_seconds=create.duration_min_seconds,

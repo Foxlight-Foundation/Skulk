@@ -317,6 +317,13 @@ class NodeFacts(CamelCaseModel):
     missing). Non-empty makes the node advertise the video engine before it is
     installed."""
 
+    comfy_extension_installable_builds: dict[str, str] = Field(
+        default_factory=dict, description="Exact issued Comfy overlays installable on first use, including upgrades while the base remains installed."
+    )
+    comfy_extension_installed_builds: dict[str, str] = Field(
+        default_factory=dict, description="Archive-verified Comfy overlays bound to this snapshot's actual base interpreter; existing instances retain their stamped build."
+    )
+
     audio_cpp_binary: EngineBinaryFact = Field(
         default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_BIN")
     )

@@ -66,8 +66,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
+import os
 import shutil
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -1905,6 +1907,85 @@ class ModelStore:
                 raise RuntimeError("peer import committed without a registry entry")
             return imported
 
+    async def _reuse_verified_bundle_files(
+        self,
+        target_directory: Path,
+        model_card: ModelCard,
+    ) -> frozenset[str]:
+        """Hardlink exact signed members from registered immutable artifacts.
+
+        The caller holds the canonical transfer lock through reuse, capacity
+        admission and registration. Hashing only reads in a thread; linking
+        happens after the await so cancellation cannot leave a background writer
+        running after that lock is released.
+        """
+        bundle = model_card.artifact_bundle
+        revision = model_card.source_revision
+        if bundle is None or revision is None or model_card.registry_card_id is None:
+            return frozenset()
+        repository = str(model_card.artifact_repository)
+        target_root = target_directory.resolve()
+        store_root = self._store_path.resolve()
+        if target_root == store_root or not target_root.is_relative_to(store_root):
+            raise ValueError("bundle reuse destination must remain within the store")
+        entries = tuple(
+            entry
+            for entry in self._read_registry().values()
+            if entry.source_revision == revision
+            and (entry.source_repository or entry.model_id) == repository
+        )
+        reused: set[str] = set()
+        for member in bundle.files:
+            if member.object_id is None or not member.object_id.startswith("sha256:"):
+                continue
+            destination = target_root / member.path
+            if destination.exists() or destination.is_symlink():
+                continue
+            for entry in entries:
+                if member.path not in entry.files:
+                    continue
+                source_root = _resolve_store_child_path(
+                    self._store_path, entry.store_path
+                )
+                if source_root is None or source_root == target_root:
+                    continue
+                source = (source_root / member.path).resolve()
+                if not source.is_relative_to(source_root) or not source.is_file():
+                    continue
+                try:
+                    if source.stat().st_size != member.size_bytes:
+                        continue
+                    digest = await asyncio.to_thread(_sha256_path, source)
+                except OSError as error:
+                    logger.debug(
+                        f"ModelStore: cannot verify reusable {member.path}: {error}"
+                    )
+                    continue
+                if f"sha256:{digest}" != member.object_id:
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if not destination.parent.resolve().is_relative_to(target_root):
+                    raise ValueError("bundle reuse member escapes its destination")
+                try:
+                    # Immutable generations can share data blocks. Never copy
+                    # on link failure: ordinary admission must budget the bytes.
+                    os.link(source, destination, follow_symlinks=False)
+                except OSError as error:
+                    if error.errno not in {
+                        errno.EXDEV,
+                        errno.EPERM,
+                        errno.EOPNOTSUPP,
+                        errno.EMLINK,
+                        errno.ENOENT,
+                        errno.EEXIST,
+                    }:
+                        raise
+                    logger.debug(f"ModelStore: cannot hardlink {member.path}: {error}")
+                    continue
+                reused.add(member.path)
+                break
+        return frozenset(reused)
+
     async def _do_download(
         self,
         model_id: str,
@@ -2049,6 +2130,14 @@ class ModelStore:
             # pending time from their no-progress stall budget; switching only
             # after lock acquisition makes that status truthful.
             status.status = "downloading"
+            reused_files = (
+                await self._reuse_verified_bundle_files(target_dir, model_card)
+                if model_card is not None
+                and bundle is not None
+                and model_card.source_revision == source_revision
+                and str(model_card.artifact_repository) == artifact_repository
+                else frozenset()
+            )
             additional_bytes = await asyncio.to_thread(
                 _remaining_store_download_bytes,
                 target_dir,
@@ -2111,6 +2200,11 @@ class ModelStore:
             for f in file_list:
                 file_size = f.size or 0
                 expected_file = expected_files.get(f.path)
+
+                if f.path in reused_files:
+                    downloaded_bytes += file_size
+                    status.progress = downloaded_bytes / max(total_bytes, 1)
+                    continue
 
                 def make_progress_cb(fsize: int):
                     def cb(curr: int, total: int, is_renamed: bool) -> None:
