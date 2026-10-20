@@ -140,6 +140,7 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `packaging/skulk-audio-cpp-vulkan/`: separate Linux amd64 Vulkan music server wheel, built by the same pinned workflow; its cache and executable digest remain distinct from the CPU package
 - `packaging/skulk-audio-cpp-cuda/`: separate native Linux amd64 (SM 8.9) and arm64 (GB10 SM 12.1) CUDA music server wheels; each platform artifact and exact hardware/model claim requires its own qualification
 - `src/skulk/shared/tests/fixtures/model_cards/`: fixture copies of a few registry cards (and their architecture sidecars), for tests only; tests load them through `src/skulk/shared/tests/model_card_fixtures.py`
+- `src/skulk/worker/tests/fixtures/`: exact published artifact fixtures for runner integration regressions, including external companion repository layouts; these are test data and never a runtime catalog
 - `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
 - `src/skulk/operator/` — Stable operator identity, quorum certification,
   crash-fault consensus, bounded dormant proposal lifecycle, and

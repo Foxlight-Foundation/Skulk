@@ -80,9 +80,12 @@ from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.comfy.graph import (
     NODE_SAVE_THUMBNAIL,
     NODE_SAVE_VIDEO,
+    ComfyModelSearchRoot,
     ComfyRenderPlan,
     bind_references,
     build_prompt,
+    companion_file,
+    companion_model_folder,
     extra_model_paths_yaml,
     plan_comfy_render,
     resolve_model_files,
@@ -267,8 +270,8 @@ def _model_directory(card: ModelCard) -> Path:
     return artifact_install_directory(load_directory, root)
 
 
-def _companion_directories(card: ModelCard) -> tuple[Path, ...]:
-    """The staged directory of each companion repository hosted outside the card's.
+def _companion_search_roots(card: ModelCard) -> tuple[ComfyModelSearchRoot, ...]:
+    """Resolve each external companion's exact staged path and loader search root.
 
     Every file the card names from such a repository must be present: the
     downloader fetches them with the card and treats them as load-bearing, so
@@ -279,7 +282,7 @@ def _companion_directories(card: ModelCard) -> tuple[Path, ...]:
 
     if card.video is None:
         return ()
-    roots: list[Path] = []
+    roots: list[ComfyModelSearchRoot] = []
     for repository, revision in card.external_video_companions():
         for item in card.video.companions:
             if item.repo is None or str(item.repo) != repository or item.revision != revision:
@@ -289,9 +292,13 @@ def _companion_directories(card: ModelCard) -> tuple[Path, ...]:
                 raise RuntimeError(
                     f"{card.model_id}: companion {item.name} ({repository} {item.path}) is not staged"
                 )
-            # The file keeps its repository-relative path, so the staged root
-            # sits as many levels up as that path is deep.
-            root = found.parents[len(PurePosixPath(item.path).parts) - 1]
+            # Root files and conventional loras/foo layouts must produce the
+            # same loader name while retaining their immutable upstream paths.
+            name = companion_file(item, card.artifact_repository)
+            root = ComfyModelSearchRoot(
+                folder=companion_model_folder(item),
+                directory=found.parents[len(PurePosixPath(name).parts) - 1],
+            )
             if root not in roots:
                 roots.append(root)
     return tuple(roots)
@@ -505,7 +512,7 @@ class Runner(ServedConcurrentDispatch):
             weight_files.append(model_dir / folder / name)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         extra_paths = self.work_dir / "extra_model_paths.yaml"
-        extra_paths.write_text(extra_model_paths_yaml(model_dir, _companion_directories(self.card)))
+        extra_paths.write_text(extra_model_paths_yaml(model_dir, _companion_search_roots(self.card)))
         server = ComfyServer(
             interpreter=interpreter,
             root=root,

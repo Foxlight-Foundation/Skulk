@@ -602,7 +602,12 @@ A model card's `placement.compatible_backends` selects which engine serves it
   fixed 8+3 two-stage sampling and a pinned `latent_upscaler` companion.
   Exact-bundle card validation binds local upscalers, duration heads and
   alternative decoders to manifest paths/sizes and the primary revision;
-  separately pinned external packs keep separate downloads. Source conditioning
+  separately pinned external packs keep separate downloads and per-loader
+  search roots: standard folder layouts strip
+  their folder prefix, while flat/nested upstream paths remain relative to the
+  exact staged repository root. Graph names and roots resolve together without
+  copying or rewriting signed weights; primary bundle layouts stay strict.
+  Source conditioning
   cannot advertise an aggregate input-file limit of zero. Valid card identities
   and compatibility remain independent of qualification coverage.
   LTX CUDA servers additionally use `--fast-disk` for disk-backed dynamic
