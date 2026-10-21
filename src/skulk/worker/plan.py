@@ -291,7 +291,7 @@ def _init_distributed_backend(
 
 
 def awaited_engine(
-    shard: ShardMetadata, on_demand_backends: Set[str], *, native_image_ready: bool = False
+    shard: ShardMetadata, on_demand_backends: Set[str], *, native_image_ready: bool = False, comfy_extension_ready: bool = False
 ) -> EngineType | None:
     """The on-demand engine a shard still waits for on this node, if any.
 
@@ -306,6 +306,11 @@ def awaited_engine(
         return None
     if engine_of(backend) == "stable_diffusion_cpp":
         return None if native_image_ready else "stable_diffusion_cpp"
+    if engine_of(backend) == "comfy":
+        from skulk.provisioning.comfy_extension import extension_payload
+
+        if extension_payload(shard.resolved_engine_build) is not None:
+            return None if comfy_extension_ready else "comfy"
     if backend not in on_demand_backends:
         return None
     return engine_of(backend)
@@ -328,12 +333,20 @@ def _engine_needs_install(
             continue
         engine = awaited_engine(runner.bound_instance.bound_shard, on_demand_backends)
         if engine is not None:
+            download_bytes = ON_DEMAND_ENGINE_DOWNLOAD_BYTES.get(engine, 0)
+            if engine == "comfy":
+                from skulk.provisioning.comfy_extension import extension_for_build
+
+                wheel = extension_for_build(runner.bound_instance.bound_shard.resolved_engine_build)
+                if wheel is not None:
+                    base_bytes = download_bytes if runner.bound_instance.bound_shard.resolved_backend in on_demand_backends else 0
+                    download_bytes = base_bytes + wheel.size_bytes
             return InstallEngine(
                 instance_id=instance_id,
                 engine=engine,
                 resolved_backend=runner.bound_instance.bound_shard.resolved_backend,
                 expected_build=runner.bound_instance.bound_shard.resolved_engine_build,
-                approximate_download_bytes=ON_DEMAND_ENGINE_DOWNLOAD_BYTES.get(engine, 0),
+                approximate_download_bytes=download_bytes,
             )
     return None
 
@@ -354,6 +367,7 @@ def _load_model(
             runner.bound_instance.bound_shard,
             on_demand_backends,
             native_image_ready=instance.instance_id in engine_install_ready,
+            comfy_extension_ready=instance.instance_id in engine_install_ready,
         ):
             continue
 

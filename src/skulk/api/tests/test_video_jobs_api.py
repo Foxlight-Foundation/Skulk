@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import tempfile
 import time
 from collections.abc import Callable, Coroutine, Iterator
@@ -1097,6 +1098,68 @@ def test_ltx_audio_source_preserves_explicit_segment_controls(monkeypatch: pytes
     assert api._video_upload_inflight_bytes == 0
 
 
+def test_ltx_union_control_retains_its_typed_settings_and_media_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Union uses bounded structural ingress without inventing an H3 patch."""
+    from skulk.shared.models.model_cards import VideoCompanionConfig, VideoCompanionKind
+
+    api = _make_api(monkeypatch)
+    baseline = asyncio.run(load_fixture_card(ModelId("Lightricks/LTX-2.5-distilled-comfy-int8")))
+    assert baseline is not None and baseline.video is not None
+    adapter = VideoCompanionConfig(kind=VideoCompanionKind.Lora, name="union_control", path="loras/union.safetensors")
+    card = baseline.model_copy(update={"video": baseline.video.model_copy(update={"companions": (*baseline.video.companions, adapter)})})
+
+    async def load(_model_id: ModelId) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(load))
+    response = TestClient(api.app).post("/v1/videos", data={"model": str(card.model_id), "prompt": "fox", "seconds": "2", "size": "512x384", "union_control": '{"guide":"pose","preprocessed":true,"guide_strength":0.7}'}, files=[("control", ("guide.mp4", b"bounded guide bytes", "video/mp4"))])
+    assert response.status_code == 200, response.text
+    command = _sent_command(api)
+    assert command.task_params.union_control is not None
+    assert command.task_params.union_control.preprocessed
+    assert command.task_params.union_control.guide == "pose"
+    assert command.task_params.union_control.guide_strength == 0.7
+    assert command.task_params.references[0].role == "control"
+    assert command.task_params.references[0].kind == "video"
+    assert command.task_params.implied_mode() is VideoMode.TextToAudioVideo
+    assert api._video_upload_inflight_bytes == 0
+
+
+@pytest.mark.parametrize("frames,content_type,expected_status,seconds,size", [(25, "application/json", 200, 1, "512x384"), (25, "application/json", 200, 1, None), (17, "application/json", 400, 1, "512x384"), (25, "video/mp4", 400, 1, "512x384"), (481, "application/json", 400, 20, "512x384"), (481, "application/json", 400, 20, None), (25, "application/json", 400, 1, "4096x128"), (25, "application/json", 400, 1, "4160x128")])
+def test_ltx_motion_paths_travel_as_verified_json_media(monkeypatch: pytest.MonkeyPatch, frames: int, content_type: str, expected_status: int, seconds: int, size: str | None) -> None:
+    """The API validates geometry, preserves MIME truth and releases admission."""
+    from skulk.shared.models.model_cards import VideoCompanionConfig, VideoCompanionKind
+
+    api = _make_api(monkeypatch)
+    baseline = asyncio.run(load_fixture_card(ModelId("Lightricks/LTX-2.5-distilled-comfy-int8")))
+    assert baseline is not None and baseline.video is not None
+    adapter = VideoCompanionConfig(kind=VideoCompanionKind.Lora, name="motion_tracks", path="loras/motion.safetensors")
+    card = baseline.model_copy(update={"video": baseline.video.model_copy(update={"companions": (*baseline.video.companions, adapter)})})
+
+    async def load(_model_id: ModelId) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(load))
+    data = json.dumps({"version": 1, "frame_count": frames, "tracks": [[{"x": 0.25, "y": 0.5}] * frames]}).encode()
+    fields = {"model": str(card.model_id), "prompt": "fox", "seconds": str(seconds), "motion_tracks": '{"guide_strength":0.7}'}
+    if size is not None:
+        fields["size"] = size
+    response = TestClient(api.app).post("/v1/videos", data=fields, files=[("first_frame", ("opening.png", b"opening image", "image/png")), ("motion_track_data", ("tracks.json", data, content_type))])
+    assert response.status_code == expected_status, response.text
+    assert api._video_upload_inflight_bytes == 0
+    if expected_status == 200:
+        command = _sent_command(api)
+        assert command.task_params.motion_tracks is not None
+        assert command.task_params.motion_tracks.guide_strength == 0.7
+        assert command.task_params.references[1].role == "motion_tracks"
+        assert command.task_params.references[1].kind == "data"
+        assert command.task_params.references[1].media_type == "application/json"
+        assert "tracks" not in command.task_params.motion_tracks.model_dump()
+        assert command.task_params.implied_mode() is VideoMode.FramesToAudioVideo
+    else:
+        assert not api._video_jobs.list()
+
+
 def test_ltx_retake_source_does_not_require_an_h3_controlnet(monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicit LTX timeline source has different semantics from an H3 mask."""
     api = _make_api(monkeypatch)
@@ -1318,3 +1381,31 @@ def test_retrieve_reports_what_the_render_ran_with(
     assert reported["adapter"] == "turbo_fl2v_8step" and reported["steps"] == 8
     assert reported["styles"] == ["bullet_time"] and reported["codec"] == "h264"
     assert reported["reference_fidelity"] is None
+
+
+@pytest.mark.parametrize("route", ["/v1/videos/job-hq-engine", "/v1/videos"])
+def test_hq_workflow_settings_survive_public_job_projection(
+    monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """Retrieval and listing preserve the exact HQ settings retained by the runner."""
+    api = _make_api(monkeypatch)
+    engine = VideoEngineSettings(
+        sampler="res2s", scheduler="ltxv", steps=18,
+        pipeline="hq_two_stage", width=1024, height=576, frame_count=49, codec="h264",
+        stage_lora_strengths={"base": 0.25, "refine": 0.5},
+        guidance_video_rescale=0.45, guidance_audio_rescale=1.0,
+    )
+    _complete_job(
+        api, "job-hq-engine", b"clip-bytes",
+        stats=VideoGenerationStats(
+            steps=18, seconds_per_step=1.0, total_generation_time=18.0, engine=engine
+        ),
+    )
+    response = TestClient(api.app).get(route)
+    assert response.status_code == 200
+    body = response.json()
+    job = body["data"][0] if route == "/v1/videos" else body
+    reported = job["stats"]["engine"]
+    assert reported["stage_lora_strengths"] == {"base": 0.25, "refine": 0.5}
+    assert reported["guidance_video_rescale"] == 0.45
+    assert reported["guidance_audio_rescale"] == 1.0

@@ -536,6 +536,15 @@ wheels = [
 ]
 
 [[package]]
+name = "einops"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e5/81/df4fbe24dff8ba3934af99044188e20a98ed441ad17a274539b74e82e126/einops-0.8.1.tar.gz", hash = "sha256:de5d960a7a761225532e0f1959e5315ebeafc0cd43394732f103ca44b9837e84", size = 54805, upload-time = "2025-02-09T03:17:00.434Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/87/62/9773de14fe6c45c23649e98b83231fffd7b9892b6cf863251dc2afa73643/einops-0.8.1-py3-none-any.whl", hash = "sha256:919387eb55330f5757c6bea9165c5ff5cfe63a642682ea788a6d472576d81737", size = 64359, upload-time = "2025-02-09T03:17:01.998Z" },
+]
+
+[[package]]
 name = "evaluate"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -613,8 +622,8 @@ wheels = [
 
 [[package]]
 name = "foxlight-model-preservation"
-version = "0.5.0"
-source = { git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=12a4b4fa0663cc7e0fd478b292860a776d4d7b05#12a4b4fa0663cc7e0fd478b292860a776d4d7b05" }
+version = "0.5.1"
+source = { git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=e46ee7bf9749b63669464efa74fbdb73b08837bc#e46ee7bf9749b63669464efa74fbdb73b08837bc" }
 dependencies = [
     { name = "cryptography" },
     { name = "jsonschema" },
@@ -2809,6 +2818,7 @@ llama-cpp = [
 [package.dev-dependencies]
 dev = [
     { name = "basedpyright" },
+    { name = "einops" },
     { name = "httpx2" },
     { name = "pyinstaller" },
     { name = "pytest" },
@@ -2826,7 +2836,7 @@ requires-dist = [
     { name = "ddgs", specifier = ">=9.6.1" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "filelock", specifier = ">=3.18.0" },
-    { name = "foxlight-model-preservation", git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=12a4b4fa0663cc7e0fd478b292860a776d4d7b05" },
+    { name = "foxlight-model-preservation", git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=e46ee7bf9749b63669464efa74fbdb73b08837bc" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=1.8.0" },
     { name = "hypercorn", specifier = ">=0.18.0" },
@@ -2871,6 +2881,7 @@ provides-extras = ["llama-cpp"]
 [package.metadata.requires-dev]
 dev = [
     { name = "basedpyright", specifier = ">=1.29.0" },
+    { name = "einops", specifier = "==0.8.1" },
     { name = "httpx2", specifier = ">=2.13.1" },
     { name = "pyinstaller", specifier = ">=6.17.0" },
     { name = "pytest", specifier = ">=8.4.0" },

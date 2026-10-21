@@ -14,6 +14,14 @@ and other composite selections require an exact artifact bundle; external image
 components and video companion files use their card-selected manifests. File
 recovery does not establish inference qualification for those workloads.
 
+Preservation library 0.5.1 and later retain additive descriptive card properties
+and future string vocabulary names, including them in the card identity. Existing cards and
+signed captures keep their identities. Known structure still validates; artifact
+selection, file manifests, envelope versions and receiver trust remain strict.
+This lets model metadata grow without updating the preservation library for each
+new property. Skulk separately validates its supported runtime semantics before
+installation; retaining a newer card does not make an older runtime support it.
+
 Separate vision processor repositories and vLLM draft repositories are rejected
 because their current loaders still need an offline source adapter. Ambiguous
 companion aliases/revisions and unselected legacy GGUF projectors are rejected.

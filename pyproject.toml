@@ -32,8 +32,8 @@ dependencies = [
   "ddgs>=9.6.1",
   "tomlkit>=0.14.0",
   "tuf>=6,<7",
-  # Public offline preservation core, pinned to the reviewed v0.5.0 recovery-kit source.
-  "foxlight-model-preservation @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@12a4b4fa0663cc7e0fd478b292860a776d4d7b05",
+  # Public offline preservation core with additive, identity-bound card metadata.
+  "foxlight-model-preservation @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@e46ee7bf9749b63669464efa74fbdb73b08837bc",
   # mflux from PyPI: the Foxlight fork existed only because released mflux
   # capped mlx below 0.32, which upstream lifted in 0.19.2 (#692); the fork
   # carried no other change. Darwin-only because mflux pins Linux to
@@ -118,6 +118,8 @@ hook-dirs = "skulk._pyinstaller:get_hook_dirs"
 [dependency-groups]
 dev = [
   "basedpyright>=1.29.0",
+  # Execute the immutable upstream patchifiers in the wheel reference check.
+  "einops==0.8.1",
   # starlette >= 1.0 deprecates httpx-backed TestClient; httpx2 is its
   # supported test transport. Production HTTP-client code stays on httpx.
   "httpx2>=2.13.1",

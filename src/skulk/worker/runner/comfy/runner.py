@@ -63,6 +63,7 @@ from skulk.shared.types.video import (
     VideoOutputManifest,
     VideoStage,
 )
+from skulk.shared.types.video_motion import MAX_MOTION_TRACK_BYTES, VideoMotionTrackData
 from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import (
     RunnerConnected,
@@ -80,9 +81,12 @@ from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.comfy.graph import (
     NODE_SAVE_THUMBNAIL,
     NODE_SAVE_VIDEO,
+    ComfyModelSearchRoot,
     ComfyRenderPlan,
     bind_references,
     build_prompt,
+    companion_file,
+    companion_model_folder,
     extra_model_paths_yaml,
     plan_comfy_render,
     resolve_model_files,
@@ -95,7 +99,7 @@ from skulk.worker.runner.comfy.server import (
     run_prompt,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
-from skulk.worker.runner.video_input import MediaInputRequest
+from skulk.worker.runner.video_input import MAX_SOURCE_VIDEO_BYTES, MediaInputRequest
 from skulk.worker.runner.video_input_process import prepare_media_input
 
 _HASH_CHUNK: Final = 1 << 20
@@ -267,8 +271,8 @@ def _model_directory(card: ModelCard) -> Path:
     return artifact_install_directory(load_directory, root)
 
 
-def _companion_directories(card: ModelCard) -> tuple[Path, ...]:
-    """The staged directory of each companion repository hosted outside the card's.
+def _companion_search_roots(card: ModelCard) -> tuple[ComfyModelSearchRoot, ...]:
+    """Resolve each external companion's exact staged path and loader search root.
 
     Every file the card names from such a repository must be present: the
     downloader fetches them with the card and treats them as load-bearing, so
@@ -279,7 +283,7 @@ def _companion_directories(card: ModelCard) -> tuple[Path, ...]:
 
     if card.video is None:
         return ()
-    roots: list[Path] = []
+    roots: list[ComfyModelSearchRoot] = []
     for repository, revision in card.external_video_companions():
         for item in card.video.companions:
             if item.repo is None or str(item.repo) != repository or item.revision != revision:
@@ -289,9 +293,13 @@ def _companion_directories(card: ModelCard) -> tuple[Path, ...]:
                 raise RuntimeError(
                     f"{card.model_id}: companion {item.name} ({repository} {item.path}) is not staged"
                 )
-            # The file keeps its repository-relative path, so the staged root
-            # sits as many levels up as that path is deep.
-            root = found.parents[len(PurePosixPath(item.path).parts) - 1]
+            # Root files and conventional loras/foo layouts must produce the
+            # same loader name while retaining their immutable upstream paths.
+            name = companion_file(item, card.artifact_repository)
+            root = ComfyModelSearchRoot(
+                folder=companion_model_folder(item),
+                directory=found.parents[len(PurePosixPath(name).parts) - 1],
+            )
             if root not in roots:
                 roots.append(root)
     return tuple(roots)
@@ -481,6 +489,14 @@ class Runner(ServedConcurrentDispatch):
         if self.card.video is None:
             raise RuntimeError(f"{self.model_id} has no [video] section")
         interpreter, root = _configured_install(self.shard_metadata.resolved_backend)
+        from skulk.provisioning.comfy_extension import verified_comfy_extension
+
+        try:
+            extension = verified_comfy_extension(self.shard_metadata.resolved_engine_build, interpreter, root)
+        except ValueError as error:
+            # Load cannot repair missing engine bytes. Mark this terminal so
+            # the worker explains the failed engine rather than crash-looping.
+            raise RuntimeError(f"{ENGINE_UNAVAILABLE_FAILURE_MARKER}: {error}") from error
         model_dir = _model_directory(self.card)
         files = resolve_model_files(self.card)
         weight_files: list[Path] = []
@@ -497,7 +513,7 @@ class Runner(ServedConcurrentDispatch):
             weight_files.append(model_dir / folder / name)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         extra_paths = self.work_dir / "extra_model_paths.yaml"
-        extra_paths.write_text(extra_model_paths_yaml(model_dir, _companion_directories(self.card)))
+        extra_paths.write_text(extra_model_paths_yaml(model_dir, _companion_search_roots(self.card)))
         server = ComfyServer(
             interpreter=interpreter,
             root=root,
@@ -507,6 +523,7 @@ class Runner(ServedConcurrentDispatch):
             temp_dir=self.work_dir / "temp",
             user_dir=self.work_dir / "user",
             log_path=self.work_dir / "server.log",
+            trusted_extension=extension,
             extra_args=launch_flags(
                 self.shard_metadata.resolved_backend,
                 weight_files,
@@ -523,10 +540,51 @@ class Runner(ServedConcurrentDispatch):
         server = self.server
         assert server is not None and server.base_url is not None
         started = time.monotonic()
-        render = plan_comfy_render(params, self.card)
+        render = plan_comfy_render(params, self.card, engine_build=self.shard_metadata.resolved_engine_build)
         bindings = bind_references(params.references, SKULK_VIDEO_INPUT_DIR)
         output_dir = SKULK_VIDEO_OUTPUT_DIR / str(command_id)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if render.motion_tracks is not None:
+            source = next(binding for binding in bindings if binding.spec.role == "motion_tracks")
+            path = SKULK_VIDEO_INPUT_DIR / source.input_name
+            if path.stat().st_size > MAX_MOTION_TRACK_BYTES:
+                raise ValueError("Motion Track data exceeds the four-MiB bound")
+            tracks = VideoMotionTrackData.model_validate_json(path.read_bytes())
+            if tracks.frame_count != render.plan.frame_count:
+                raise ValueError("Motion Track data must match the complete requested frame count")
+        if render.union_control is not None:
+            source = next(binding for binding in bindings if binding.spec.role == "control")
+            # Validate every frame before Comfy materializes the IMAGE batch.
+            # Exact alignment avoids an implicit retime, loop or held last frame.
+            prepared = prepare_media_input(server.interpreter, MediaInputRequest(
+                operation="video", source=str(SKULK_VIDEO_INPUT_DIR / source.input_name),
+                duration_seconds=render.plan.frame_count / render.plan.fps,
+                width=render.plan.width, height=render.plan.height, fps=render.plan.fps,
+                maximum_frames=render.plan.frame_count, exact_frames=True,
+            ), output_dir, is_cancelled=lambda: self._is_cancelled(task_id))
+            if prepared is None:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return
+        if render.editing is not None:
+            source = next(binding for binding in bindings if binding.spec.kind == "video" and binding.spec.role == "source")
+            if render.plan.width * render.plan.height * render.plan.frame_count * 12 > MAX_SOURCE_VIDEO_BYTES:
+                raise ValueError("editing output exceeds the bounded decoded-pixel budget; reduce its size or duration")
+            prepared = prepare_media_input(server.interpreter, MediaInputRequest(
+                operation="video", source=str(SKULK_VIDEO_INPUT_DIR / source.input_name),
+                duration_seconds=render.plan.frame_count / render.plan.fps,
+                width=render.plan.width, height=render.plan.height, fps=render.plan.fps,
+                maximum_frames=render.plan.frame_count,
+                exact_frames=render.editing.operation == "retake",
+                require_audio=render.plan.audio and not render.editing.regenerate_audio,
+            ), output_dir, is_cancelled=lambda: self._is_cancelled(task_id))
+            if prepared is None:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return
+            if prepared.audio_channels not in (None, 1, 2):
+                raise ValueError("LTX temporal editing requires mono or stereo source audio")
+            if render.editing.operation == "extend" and prepared.frames >= render.plan.frame_count:
+                raise ValueError("extension output must exceed the complete source clip")
+            render = replace(render, source_frames=prepared.frames)
         if params.audio_conditioning is not None:
             source = next(binding for binding in bindings if binding.spec.kind == "audio")
             destination = SKULK_VIDEO_INPUT_DIR / f"_prepared_{command_id}.wav"

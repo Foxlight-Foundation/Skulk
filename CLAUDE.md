@@ -11,7 +11,10 @@ lives in `store/preservation.py` and
 It creates a new home with ordinary model-store and custom-card records in one
 publication; it never instantiates a second writer for a live store. Receiver
 owner trust is explicit, registry proof uses the packaged root, and code
-authorization is separate from provenance acceptance. Recovery observations use
+authorization is separate from provenance acceptance. The preservation reader
+retains additive descriptive properties and string
+vocabularies; artifact/file and envelope contracts stay strict. Runtime admission
+remains independent. Recovery observations use
 installed-card schema 3; legacy sidecar serialization stays unchanged. See
 `website/docs/model-preservation.md` for supported companions, conservative multi-member custom admission and limits.
 `plan` is inventory only; `preserve` is a local private snapshot, not a lease on
@@ -632,7 +635,12 @@ A model card's `placement.compatible_backends` selects which engine serves it
   fixed 8+3 two-stage sampling and a pinned `latent_upscaler` companion.
   Exact-bundle card validation binds local upscalers, duration heads and
   alternative decoders to manifest paths/sizes and the primary revision;
-  separately pinned external packs keep separate downloads. Source conditioning
+  separately pinned external packs keep separate downloads and per-loader
+  search roots: standard folder layouts strip
+  their folder prefix, while flat/nested upstream paths remain relative to the
+  exact staged repository root. Graph names and roots resolve together without
+  copying or rewriting signed weights; primary bundle layouts stay strict.
+  Source conditioning
   cannot advertise an aggregate input-file limit of zero. Valid card identities
   and compatibility remain independent of qualification coverage.
   LTX CUDA servers additionally use `--fast-disk` for disk-backed dynamic
@@ -656,8 +664,17 @@ A model card's `placement.compatible_backends` selects which engine serves it
   auxiliary files. Generated keyframe tokens are stripped before upscaling.
   Duration prediction feeds the same bounded frame count into video and audio
   allocation; `video_probe.py` verifies actual dynamic container facts before
-  publishing a manifest. The pinned core Comfy graph refuses HQ (Res2s is
-  absent) and DFR temporal refinement rather than silently approximating them.
+  publishing a manifest. Comfy HQ requires a placed instance stamped with an issued
+  Res2s extension build; the ordinary Comfy core remains insufficient. Its base
+  stage uses 15 intervals by default, a 0.25 distilled LoRA, per-modality guidance
+  and rescaling, followed by three joint AV refinement intervals with LoRA 0.5.
+  The output keeps base-stage audio. Standard HQ decoding removes internal
+  keyframe slots before upscaling; DFR carries its detailing slots through
+  refinement. DFR spatial and
+  optional temporal refinement retain their exact companions and fixed Euler
+  sampling. Model metadata exposes workflow-specific defaults and issued
+  source/payload feature identities; consumers match the instance stamp rather
+  than inferring an old instance's capabilities from newer node inventory. Native HQ job records report its published profile separately: no base-stage LoRA and the selected refinement strength, with video/audio rescaling 0.45/1.0.
 
   Cards retain broad compatible GPU backends; benchmark qualification is not
   a hardware allowlist. The H3 path binds onto its MiniMax H3 node graph
@@ -1183,6 +1200,15 @@ only that allow-list, preserve its layout, and fail on path, size, or upstream
 object mismatch. Bundle identity is part of installed generations and store
 keys, so aliases sharing one repository/revision cannot collide. V1 cards keep
 their existing repository-wide tensor and pinned-GGUF behavior.
+
+Canonical-store downloads can share files between signed bundles at the same
+immutable repository revision. Reuse requires the selected member's exact path,
+size and SHA-256 to match a currently registered file after hashing its bytes.
+The store hardlinks verified members before calculating additional disk space;
+failed links receive no capacity credit and use the ordinary download path.
+Each bundle retains its own installed record. Deleting one alias only removes
+its links, while another bundle's shared bytes remain available. This does not
+change the 10 GiB reserve or permit automatic eviction from the canonical store.
 
 The authoritative store host periodically reconciles node caches through
 bounded `/store/storage` inventories and capability-bound range exports.
@@ -2042,7 +2068,18 @@ shrinking model modality truth. See
 
 `mlx_video-metal` uses `worker/runner/mlx_video` and the existing serial served-dispatch loop. Each job runs in a separate process group with bounded JSON progress, cancellation and parent-death reaping. The `InstallEngine` worker binds an exact published build from `provisioning/mlx_video.py`, installs all locked binary dependencies offline in a versioned runtime, verifies installed code against trusted archive bytes and probes Metal before publishing resources. Engine wheels live in `packaging/skulk-mlx-video`; candidate attestation and exact-byte promotion use `.github/workflows/mlx-video-wheel.yml`. Weights remain separate immutable selected packs, exposed through a local member-only view; missing Gemma 4/projections/tokenizer/quantization/VAEs fail before loading, with Hub access disabled. Native HQ uses the pinned Res2s pipeline; Comfy sampler overrides are refused. No tested-hardware allowlist is introduced. Video remains single-host, and measured model fit/phase profiles are separate acceptance requirements; the common memory guard is preserved.
 
-LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. The pinned Comfy core nodes lack the exact temporal retake/extension and prompt-relay masks.
+LTX advanced requests carry explicit source-audio, retake/extension and timed-local-prompt controls. `shared/models/video_support.py` filters request placement by the exact installed engine protocol without requiring hardware qualification. `worker/runner/video_input.py` is the standalone bounded PyAV preparation source bundled in the owned native wheel and executed by the selected Comfy interpreter; `video_input_process.py` owns deadline, cancellation and descendant cleanup. Normalized source audio is frozen in both sampling stages and its waveform supplies audible output. Native timeline operations bind upstream probing to fully decoded worker facts, so no host ffprobe is required. New controls remain absent on baseline JSON jobs for immutable v0.1.0 compatibility; advanced support is bound to published wheel features. Published Comfy extension features `retake` and `extend` enable source-bound temporal video/audio masks. Retake and Dev extension use one full-resolution pass; distilled extension uses two passes and restores full-resolution source latent context before refinement. Each VAE uses its own causal clock. The owned nodes restore unchanged decoded source frames and normalized PCM before lossy container encoding; they never mutate cached input tensors. The worker verifies the complete source and bounds both source and output decoded pixel volumes to 2 GiB. Exact instance-build checks and startup node-schema checks keep older sampler-only extensions from offering editing.
+
+
+Model metadata projects Union preprocessing under `union_guides`, separate from ordinary ControlNet `guides`; each offer binds to its explicit request contract.
+
+LTX Union control uses the selected `union_control` IC-LoRA only in the distilled base stage. `VideoUnionControl` separates prepared guides from native Comfy Canny, SDPose/RT-DETR and DA3 preprocessing; preprocessor weights remain selected companions. The worker fully decodes and bounds an exactly aligned control video before the graph loads it. Output dimensions use a 128-pixel grid because the half-resolution stage carries a half-size reference. The owned `SkulkLTXUnionGuide` validates the actual loaded adapter metadata and delegates dilation, masks, causal positions and attention entries to pinned Comfy. Guide tokens are cropped before upscaling; the original transformer performs refinement. Union capability derives from the selected LoRA companion without a redundant persisted card flag. Card truth, issued feature builds and hardware qualification remain separate; unpublished candidates and old instances add no Union execution eligibility.
+
+Comfy timed scene prompts require an exact issued extension declaring `prompt_relay`. The encoder measures text columns using the placed Gemma4 tokenizer, encodes the combined global and local text once, and retains a positive-only constant through conditioning. Video text attention applies the fixed native-compatible soft Gaussian profile on actual surviving query coordinates; start tokens, global text, connector registers and appended guide rows remain free. Audio uses the complete prompt without temporal routing. Each base, spatial-refinement and temporal-refinement stage binds its own actual grid. Query chunks bound temporary bias storage to 32 MiB while retaining Comfy's original projections, all-head normalization, position handling, gating and selected attention kernel. Cloned object patches and forward-scoped context restore original methods and clear job tensors after success, failure or cancellation. Each query chunk honors Comfy's normal interrupt flag, including its BaseException cancellation path. Candidate source alone creates no installation offer or hardware qualification.
+
+The Comfy source-audio bridge encodes through a shallow VAE view with `crop_input=False`. This disables the pinned wrapper's generic 4096-sample spatial crop on audio's time axis while sharing the selected weights and managed placement. The cached VAE and normalized PCM are unchanged; the source encoder retains its complete causal timeline. Immutable issued wheels retain their original behavior; a new candidate becomes installable only after exact-byte publication registers its descriptor.
+
+Native rendering and media preparation share `utils/process_groups.py`: observe exit with `waitid(..., WNOWAIT)`, stop descendants before reaping the session leader, and refuse to signal an already-reaped numeric identity. Darwin EPERM is ignored only when no live group member remains. Actual cleanup errors propagate without retaining private protocol files.
 
 Native v0.2.1 decode observation is bundled from `worker/runner/video_observability.py`. It announces the actual decode-and-save boundary and disables the decoder's verbose-only allocator reset, preserving encoder/sampling/decode peaks across the complete render. Telemetry-only engine changes still require a new immutable published wheel. The wheel workflow watches both standalone bundled helper sources for candidate assembly and isolated validation.
 
@@ -2069,3 +2106,48 @@ The normal base, model-companion and sidecar path resolvers consult the committe
 local recovery index before legacy directory names. They verify the indexed
 installed record without constructing a second store owner; hidden unindexed
 staging never becomes a loader candidate.
+
+
+### Comfy LTX detailing
+
+LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
+keyframe carry between base and spatial refinement. An explicit optional temporal
+x2 pass requires its pinned latent upscaler, doubles frame density and conditioning
+FPS together, and freezes the existing audio. Request admission checks selected
+companions and modes independently of hardware qualification. Image-conditioned
+DFR retains the stock-node path. Text-only DFR requires a placed issued extension
+advertising `dfr`; unknown/base-only builds are refused before dispatch. The owned
+`SkulkLTXAddGeneratedKeyframes` bridge supplies a compact float32 five-dimensional
+sampling mask after upsampling removes it, preserves existing image/guide masks,
+and delegates token/conditioning creation to the pinned stock node. If anchors
+occupy every default detailing candidate, it selects one interior pixel in the
+largest free gap (earliest on ties); a fully occupied canvas is refused. Samples
+and metadata remain intact, and input masks are cloned. Schema readiness and
+archive-member checks require the bridge for a build advertising that feature.
+Candidate source alone creates no issued build or installation offer.
+
+
+Comfy workflow extensions use immutable Foxlight wheels through `InstallEngine`.
+Node facts distinguish compatible overlay offers from archive-verified installed
+payloads without hiding the installed base backend. New LTX placements bind the
+exact Comfy/torch/payload identity; existing instances retain theirs. The runner
+uses only that verified wheel's custom-node root, disables bytecode and unrelated
+custom/API nodes, checks node schemas before readiness, and tears down failed
+probes. Each issued descriptor retains its own source pins. Candidate wheel
+assembly and tensor checks do not grant model or hardware qualification.
+
+### Comfy Motion Track media
+
+Motion Track is a distinct single-stage LTX workflow. `shared/types/video_motion.py`
+validates bounded version-one trajectory media and strength-only task controls.
+Coordinates use `application/json` data references on the existing verified
+reference-media plane; replicated state and events contain only media metadata.
+Both API and worker check the complete requested timeline. The exact selected
+adapter and issued engine feature are required independently of qualification.
+The managed wheel draws the pinned BGR trail format one high-resolution frame
+at a time, with cancellation between frames and a bounded retained guide. The
+full-resolution base applies its opening image and half-grid IC-LoRA guide, then
+crops guide tokens before ordinary tiled decoding; it has no spatial refiner.
+Existing Union/H3 and retained older engine builds keep their own contracts.
+
+Motion Track admission resolves canvas defaults before dispatch, independently of opening-image delivery. The Core and independent wheel retain byte-identical pure geometry policy, checked by the package tests. Retained guide pixels and transient trained-resolution raster/overlap/resize workspace have separate bounds. Single-stage offers publish their own frame mode and eight-step defaults, and do not require an unused spatial upscaler.

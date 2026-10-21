@@ -202,6 +202,11 @@ def _declared_engine_builds(environ: Mapping[str, str]) -> dict[str, str]:
     return {str(key).strip(): str(value).strip() for key, value in entries.items()}
 
 
+def comfy_base_build(facts: NodeFacts) -> str | None:
+    """Read the configured Comfy checkout and its actual interpreter's torch build."""
+    return _comfy_build(facts)
+
+
 def engine_build_inventory(
     backends: frozenset[str],
     facts: NodeFacts,
@@ -270,6 +275,10 @@ def engine_build_inventory(
         elif engine == "vllm" and "/recipe@sha256:" in discovered.get(engine, ""):
             # A managed recipe is measured runtime truth, not a declaration.
             build = discovered[engine]
+        elif engine == "comfy" and backend in facts.comfy_extension_installed_builds:
+            # Overlay verification binds these bytes to the measured base and
+            # interpreter; a declaration cannot rewrite that runtime identity.
+            build = facts.comfy_extension_installed_builds[backend]
         else:
             build = declared.get(backend) or declared.get(engine) or discovered.get(engine)
         if build is None:
