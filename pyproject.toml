@@ -123,6 +123,10 @@ dev = [
   "basedpyright>=1.29.0",
   # Execute the immutable upstream patchifiers in the wheel reference check.
   "einops==0.8.1",
+  # The native inpaint oracle uses the same pyramid math as the Comfy runtime.
+  # Its mandatory candidate check runs on macOS; avoid pulling a CUDA torch
+  # dependency set into base Linux tooling for this reference-only dependency.
+  "kornia==0.8.3; sys_platform == 'darwin'",
   # starlette >= 1.0 deprecates httpx-backed TestClient; httpx2 is its
   # supported test transport. Production HTTP-client code stays on httpx.
   "httpx2>=2.13.1",

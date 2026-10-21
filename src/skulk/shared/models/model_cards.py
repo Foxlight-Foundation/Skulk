@@ -1852,6 +1852,15 @@ class VideoCardConfig(CamelCaseModel):
         return any(item.kind is VideoCompanionKind.Lora and item.name == "motion_tracks" for item in self.companions)
 
     @property
+    def inpainting(self) -> bool:
+        """Whether the selected pack contains the exact named inpainting adapter.
+
+        Mode applicability and issued engine execution support are checked
+        separately; this derived property adds no persisted card schema field.
+        """
+        return any(item.kind is VideoCompanionKind.Lora and item.name == "inpaint" for item in self.companions)
+
+    @property
     def union_control(self) -> bool:
         """Return whether a selected Union adapter provides structural guidance.
 

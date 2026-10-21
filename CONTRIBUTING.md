@@ -657,3 +657,16 @@ successful run, wheel digest and source-bound attestation, then promotes those
 same bytes to the append-only Foxlight index. Add an issued descriptor only after
 owned-URL read-back verification. Runtime model requests never resolve packages
 or install loose custom-node source.
+
+Inpainting numerical checks additionally require a checkout of
+`Lightricks/ComfyUI-LTXVideo` containing immutable revision
+`44c8a36b7c31ee00b4271daed11dc2a4aa481140`, supplied as
+`--ltx-comfy-source`. The checker selects hash-bound native numerical methods
+without initializing the plugin or loading weights. It compares green context,
+spatial masks, Laplacian blending and encoded source-audio token layout. The
+macOS candidate job installs its pinned Kornia oracle dependency through
+`uv sync --frozen --group dev`; Linux base development does not install that
+reference-only dependency. Run pyramid tests in that oracle environment or the
+managed Comfy environment, which already provides Kornia. No new workflow may
+be advertised until its complete runner contract and issued wheel are ready;
+these tensor checks alone do not qualify a hardware class or model render.

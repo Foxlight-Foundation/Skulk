@@ -297,6 +297,10 @@ class ComfyServer:
             required.append(("SkulkLTXMotionTracks", ["IMAGE"]))
         if {"union_control", "motion_tracks"} & set(manifest.features):
             required.append(("SkulkLTXUnionGuide", ["CONDITIONING", "CONDITIONING", "LATENT"]))
+        if "inpaint" in manifest.features:
+            if not {"retake", "extend"} & set(manifest.features):
+                required.append(("SkulkLTXEditAudioLatent", ["LATENT", "AUDIO"]))
+            required.extend([("SkulkLTXInpaintSource", ["IMAGE", "MASK"]), ("SkulkLTXInpaintStage", ["IMAGE", "MASK"]), ("SkulkLTXInpaintBlend", ["IMAGE"]), ("SkulkLTXInpaintAudioReference", ["CONDITIONING", "CONDITIONING", "LATENT"]), ("SkulkLTXInpaintGuide", ["CONDITIONING", "CONDITIONING", "LATENT"])])
         for name, outputs in required:
             data = bytearray()
             with httpx.stream("GET", f"{self.base_url}/object_info/{name}", timeout=10.0) as response:

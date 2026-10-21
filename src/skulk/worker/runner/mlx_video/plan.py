@@ -102,6 +102,8 @@ def plan_native_job(params: VideoGenerationTaskParams, card: ModelCard, model_di
     video = card.video
     if card.family != "ltx-2.5" or video is None:
         raise ValueError("this native engine serves LTX-2.5 video packs")
+    if params.inpainting is not None:
+        raise ValueError("This native video build does not implement masked inpainting")
     params.validate_family(card.family, video)
     if params.implied_mode() not in video.modes:
         raise ValueError("the selected native artifact does not implement this mode")

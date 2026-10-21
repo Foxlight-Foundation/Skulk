@@ -1,13 +1,13 @@
 [project]
 name = "skulk-comfy-ltx"
-version = "0.1.5"
+version = "0.1.6"
 requires-python = ">=3.13,<3.14"
 description = "Trusted LTX workflow nodes for the managed Comfy engine"
 license = "Apache-2.0 AND LicenseRef-LTX-2.x AND LicenseRef-LTX-2"
 license-files = ["LICENSE-APACHE-2.0", "LICENSE-LTX-2_x", "LICENSE-LTX-2", "NOTICE"]
 
 [tool.basedpyright]
-include = ["skulk_comfy_ltx", "tests", "../../scripts/check_comfy_ltx_reference.py", "../../scripts/check_comfy_ltx_relay.py", "../../scripts/build_comfy_ltx_wheel.py", "../../scripts/verify_comfy_ltx_promotion.py"]
+include = ["skulk_comfy_ltx", "tests", "../../scripts/check_comfy_ltx_reference.py", "../../scripts/check_comfy_ltx_relay.py", "../../scripts/check_comfy_ltx_inpaint.py", "../../scripts/build_comfy_ltx_wheel.py", "../../scripts/verify_comfy_ltx_promotion.py"]
 typeCheckingMode = "strict"
 pythonVersion = "3.13"
 pythonPlatform = "Linux"

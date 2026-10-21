@@ -14,3 +14,11 @@ Lightricks/ComfyUI-LTXVideo at immutable revision
 44c8a36b7c31ee00b4271daed11dc2a4aa481140: sparse_tracks.py.
 The LTX-2 Community License in LICENSE-LTX-2 applies to these adapted portions.
 The bounded trajectory-file contract and allocation-lifetime integration are Foxlight code.
+
+Inpainting green-context, spatial mask-dilation, Laplacian blending and
+reference-audio token numerical operations adapted
+from Lightricks/ComfyUI-LTXVideo at immutable revision
+44c8a36b7c31ee00b4271daed11dc2a4aa481140:
+vanish_nodes.py, pyramid_blending.py and iclora.py.
+The LTX-2 Community License in LICENSE-LTX-2 applies to these adapted portions.
+The strict complete-timeline, cancellation and allocation-budget boundary is Foxlight code.

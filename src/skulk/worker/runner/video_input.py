@@ -148,13 +148,13 @@ class MediaInputRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    operation: Literal["audio", "video"] = Field(description="Normalize one audio segment or verify a source video.")
+    operation: Literal["audio", "video", "inpaint", "image"] = Field(description="Normalize audio, verify an exact-size video, or measure an inpainting video/still inside its output bounds.")
     source: str = Field(max_length=4096, description="Verified worker-staged local attachment.")
     destination: str | None = Field(default=None, max_length=4096, description="Worker-owned WAV destination for audio preparation.")
     start_seconds: float = Field(default=0.0, ge=0.0, le=120.0, description="Audio segment offset measured in decoded waveform samples.")
     duration_seconds: float = Field(gt=0.0, le=121.0, description="Maximum output duration, including trained-frame-grid alignment.")
-    width: int = Field(default=128, ge=128, le=65535, description="Required source-video width.")
-    height: int = Field(default=128, ge=128, le=65535, description="Required source-video height.")
+    width: int = Field(default=128, ge=128, le=65535, description="Exact legacy video width, or the maximum canvas width for measured inpainting media.")
+    height: int = Field(default=128, ge=128, le=65535, description="Exact legacy video height, or the maximum canvas height for measured inpainting media.")
     fps: int = Field(default=24, ge=1, le=1000, description="Required constant source-video frame rate.")
     maximum_frames: int = Field(default=1, ge=1, le=120001, description="Maximum source frame count before any encoder allocation.")
     exact_frames: bool = Field(default=False, description="Require the complete requested frame count for a retake.")
@@ -172,6 +172,8 @@ class VerifiedMediaInput(BaseModel):
     has_audio: bool = Field(description="Whether a finite decoded audio track is present.")
     audio_sample_rate: int | None = Field(default=None, description="Verified source sample rate; normalized audio uses 48 kHz.")
     audio_channels: int | None = Field(default=None, description="Verified source channel count; normalized audio is stereo.")
+    width: int | None = Field(default=None, ge=1, le=65535, description="Width measured by decoding all inpainting video or still-image frames; absent from legacy protocol replies.")
+    height: int | None = Field(default=None, ge=1, le=65535, description="Height measured by decoding all inpainting video or still-image frames; never caller-declared source geometry.")
 
 
 def validate_audio_frame(frame: AudioFrame) -> None:
@@ -252,9 +254,12 @@ def verify_video_input(request: MediaInputRequest) -> VerifiedMediaInput:
         if len(container.streams.video) != 1 or len(container.streams.audio) > 1 or len(container.streams) != 1 + len(container.streams.audio):
             raise ValueError("editing requires one video track and at most one audio track")
         stream = container.streams.video[0]
-        if stream.codec_context.width != request.width or stream.codec_context.height != request.height or stream.average_rate != request.fps:
+        width, height = stream.codec_context.width, stream.codec_context.height
+        measured = request.operation == "inpaint"
+        geometry_matches = 1 <= width <= request.width and 1 <= height <= request.height if measured else width == request.width and height == request.height
+        if not geometry_matches or stream.average_rate != request.fps:
             raise ValueError("source video must match the requested size and frame rate")
-        pixels = request.width * request.height * 12
+        pixels = width * height * 12
         if pixels > MAX_SOURCE_FRAME_BYTES or (stream.frames > 0 and pixels * stream.frames > MAX_SOURCE_VIDEO_BYTES):
             raise ValueError("source video exceeds the bounded decoded-pixel budget")
         audio_stream = next(iter(container.streams.audio), None)
@@ -264,7 +269,7 @@ def verify_video_input(request: MediaInputRequest) -> VerifiedMediaInput:
         sample_rate = audio_stream.codec_context.sample_rate if audio_stream is not None else None
         channels = audio_stream.codec_context.channels if audio_stream is not None else None
         for frame in container.decode(video=0):
-            if frame.is_corrupt or frame.width != request.width or frame.height != request.height or frame.pts is None or frame.time_base is None:
+            if frame.is_corrupt or frame.width != width or frame.height != height or frame.pts is None or frame.time_base is None:
                 raise ValueError("source video contains corrupt, resized or untimed frames")
             timestamp = frame.pts * frame.time_base
             if initial_time is None:
@@ -290,7 +295,38 @@ def verify_video_input(request: MediaInputRequest) -> VerifiedMediaInput:
                     raise ValueError("source audio exceeds the bounded source duration")
         if sample_rate is None or decoded_audio / sample_rate < frames / request.fps - 0.05:
             raise ValueError("source audio does not cover the source video timeline")
-    return VerifiedMediaInput(path=request.source, frames=frames, has_audio=has_audio, audio_sample_rate=sample_rate, audio_channels=channels)
+    return VerifiedMediaInput(path=request.source, frames=frames, has_audio=has_audio, audio_sample_rate=sample_rate, audio_channels=channels, width=width if measured else None, height=height if measured else None)
+
+
+def verify_image_input(request: MediaInputRequest) -> VerifiedMediaInput:
+    """Measure one bounded still frame without trusting attachment metadata.
+
+    The output canvas supplies only an upper bound. The runner compares the
+    measured mask against the measured source and checks opening images against
+    the final canvas before Comfy can materialize any complete pixel batches.
+    Animated images are refused instead of truncated. The same Pillow loader
+    and EXIF orientation policy as Comfy supplies the measured dimensions.
+    """
+    from PIL import Image, ImageOps
+
+    with Image.open(request.source) as source:
+        # Match Comfy's actual LoadImage orientation instead of measuring a
+        # JPEG's unrotated codec header and silently resizing its displayed form.
+        short_edge, long_edge = sorted(source.size)
+        if short_edge > min(request.width, request.height) or long_edge > max(request.width, request.height) or source.width * source.height * 12 > MAX_SOURCE_FRAME_BYTES:
+            raise ValueError("inpainting image exceeds its canvas or decoded-frame budget")
+        try:
+            source.seek(1)
+        except EOFError:
+            source.seek(0)
+        else:
+            raise ValueError("inpainting still masks and opening images cannot be animated")
+        source.load()
+        with ImageOps.exif_transpose(source) as image:
+            width, height = image.size
+            if not 1 <= width <= request.width or not 1 <= height <= request.height:
+                raise ValueError("inpainting image exceeds its oriented output canvas")
+    return VerifiedMediaInput(path=request.source, frames=1, has_audio=False, width=width, height=height)
 
 
 class Arguments(argparse.Namespace):
@@ -299,6 +335,15 @@ class Arguments(argparse.Namespace):
     request: Path
     result: Path
     parent_pid: int
+
+
+def serialize_media_input_result(request: MediaInputRequest, result: VerifiedMediaInput) -> str:
+    """Keep legacy strict native replies unchanged while adding measured geometry.
+
+    Only the new inpainting and still-image operations return width and height.
+    Older issued native wheels continue using the original audio/video packet.
+    """
+    return result.model_dump_json(exclude={"width", "height"} if request.operation in ("audio", "video") else None)
 
 
 def _resident_peak_bytes() -> int:
@@ -352,8 +397,8 @@ def main() -> None:
         os.killpg(os.getpgrp(), signal.SIGKILL)
 
     threading.Thread(target=reap, daemon=True).start()
-    result = prepare_audio_input(request) if request.operation == "audio" else verify_video_input(request)
-    arguments.result.write_text(result.model_dump_json())
+    result = prepare_audio_input(request) if request.operation == "audio" else verify_image_input(request) if request.operation == "image" else verify_video_input(request)
+    arguments.result.write_text(serialize_media_input_result(request, result))
 
 
 if __name__ == "__main__":

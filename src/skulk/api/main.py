@@ -3058,6 +3058,8 @@ class API:
                 "JSON `union_control` steers an LTX base stage from one aligned control clip. "
                 "Motion Track pairs JSON `motion_tracks` settings with an opening image "
                 "and an `application/json` `motion_track_data` file. "
+                "Masked inpainting pairs JSON `inpainting` placement with "
+                "`source_video`, a source-sized `mask`, and an explicit output `size`. "
                 "These controls require the selected artifact and installed engine "
                 "to implement them; unavailable workflows are refused. Poll "
                 "`GET /v1/videos/{video_id}` "
@@ -12230,6 +12232,7 @@ class API:
                     duration=engine.duration,
                     audio_conditioning=engine.audio_conditioning,
                     editing=engine.editing,
+                    inpainting=engine.inpainting,
                     prompt_relay=engine.prompt_relay,
                     union_control=engine.union_control,
                     motion_tracks=engine.motion_tracks,
@@ -12568,6 +12571,7 @@ class API:
                 audio=create.audio,
                 audio_conditioning=create.audio_conditioning,
                 editing=create.editing,
+                inpainting=create.inpainting,
                 prompt_relay=create.prompt_relay,
                 union_control=create.union_control,
                 motion_tracks=create.motion_tracks,
@@ -12627,6 +12631,7 @@ class API:
             if spec.role in VIDEO_STRUCTURAL_ROLES
             and not (card.family == "ltx-2.5" and (
                 (spec.role == "source" and params.editing is not None)
+                or (spec.role in ("source", "mask") and params.inpainting is not None)
                 or (spec.role == "control" and params.union_control is not None)
                 or (spec.role == "motion_tracks" and params.motion_tracks is not None)
             ))

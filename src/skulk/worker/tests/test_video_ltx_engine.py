@@ -695,7 +695,7 @@ def test_published_engine_enables_only_its_issued_workflows(backend: str, torch:
 
     wheels = published_extensions()
     builds = tuple(wheel.build_identity(f"comfy@{wheel.comfy_revision}/torch@{torch}") for wheel in wheels)
-    assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend", *(["prompt_relay"] if "prompt_relay" in wheel.features else []), *(["dfr"] if "dfr" in wheel.features else []), *(["union_control"] if "union_control" in wheel.features else []), *(["motion_tracks"] if "motion_tracks" in wheel.features else [])] for wheel, build in zip(wheels, builds, strict=True)}
+    assert video_engine_feature_builds({"comfy"}) == {video_feature_build_key(build): ["hq_two_stage", "retake", "extend", *(["prompt_relay"] if "prompt_relay" in wheel.features else []), *(["dfr"] if "dfr" in wheel.features else []), *(["union_control"] if "union_control" in wheel.features else []), *(["motion_tracks"] if "motion_tracks" in wheel.features else []), *(["inpaint"] if "inpaint" in wheel.features else [])] for wheel, build in zip(wheels, builds, strict=True)}
     for wheel, build in zip(wheels, builds, strict=True):
         relay = _params(prompt_relay={"segments": [{"prompt": "day", "length": 1}, {"prompt": "night", "length": 2}]})
         assert video_request_supported(_card(), relay, backend, build) == ("prompt_relay" in wheel.features)
