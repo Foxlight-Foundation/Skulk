@@ -34,6 +34,7 @@ from skulk.store.preservation_contracts import (
     PreservationPlan,
     PreservationPlanRequest,
     PreservationStart,
+    RecoveryCleanup,
 )
 from skulk.store.preservation_export import plan_preservation, preservation_generation
 from skulk.store.preservation_journal import (
@@ -547,6 +548,54 @@ class PreservationHost:
                     await process.wait()
         return self.journal.job(job_id)
 
+    async def reclaim_recovery(self, job_id: str) -> RecoveryCleanup:
+        """Explicitly free stopped recovery work, retaining all indexed models."""
+        from skulk.store.preservation_reclaim import reclaim_recovery_files
+
+        if self._closed:
+            raise PreservationHostError("preservation_host_closed")
+        async with self._queue:
+            if self._closed:
+                raise PreservationHostError("preservation_host_closed")
+            job = self.journal.job(job_id)
+            if (
+                job.kind != "recover"
+                or job.state not in {"interrupted", "failed", "cancelled"}
+                or job_id in self._tasks
+                or job_id in self._processes
+            ):
+                raise PreservationHostError("recovery_job_not_stopped")
+            plan, payload = self.journal.plan(job.plan_id)
+            if plan.manifest_id is None or (
+                job.expected_manifest_id is not None
+                and job.expected_manifest_id != plan.manifest_id
+            ):
+                raise PreservationHostError("recovery_manifest_changed")
+            location = _Location.model_validate_json(safe_json(payload["location"]))
+            async with self.store.preservation_lease():
+                maintenance = asyncio.create_task(
+                    asyncio.to_thread(
+                        reclaim_recovery_files,
+                        self.store,
+                        self.journal,
+                        job_id,
+                        plan.manifest_id,
+                        location.trust,
+                    )
+                )
+                try:
+                    return await asyncio.shield(maintenance)
+                except asyncio.CancelledError:
+                    # Disconnecting an HTTP caller cannot release the mutation
+                    # fence while its filesystem maintenance thread still runs.
+                    while not maintenance.done():
+                        try:
+                            await asyncio.shield(maintenance)
+                        except asyncio.CancelledError:
+                            continue
+                    maintenance.result()
+                    raise
+
     async def close(self) -> None:
         """Drain owned workers before releasing the exclusive host journal owner."""
         self._closed = True
@@ -554,7 +603,8 @@ class PreservationHost:
             await self.cancel(job_id)
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks.values()), return_exceptions=True)
-        self.journal.close()
+        async with self._queue:
+            self.journal.close()
 
     async def _execute(self, job_id: str) -> None:
         try:

@@ -283,6 +283,29 @@ the archive after an uncatchable process termination. They are unpublished and
 never served by the reference seed. Inspect abandoned folders before removing
 them. Completed manifests and earlier good copies remain independently verifiable.
 
+## Reclaim a stopped Library restore
+
+A Core interruption after moving a complete recovery generation but before
+committing the store index can leave unused model-sized files. Trusted operators
+can explicitly call `POST /preservation/jobs/{job_id}/reclaim` for the stopped
+recovery job, then request a fresh recovery plan and confirm it again. This is
+separate from the standalone new-home import described above.
+
+Core holds the actual store mutation lease, authenticates the known generation
+against the job's exact signed manifest and checks a strictly readable canonical
+index. Any reference to the generation retains it. The operation can also remove
+that job's abandoned worker staging after checking its retained request. It never
+scans other hidden generations, deletes an indexed model, removes a saved kit,
+re-enrolls trust or replays execution permission. A missing, corrupt, oversized or
+linked index refuses deletion; repair the index before attempting maintenance.
+
+Before deletion, Core retains a protected local device/inode receipt and moves
+the known directory to private quarantine. If cleanup itself is interrupted,
+repeat the same request; the receipt permits removing the remaining temporary
+files even when their original metadata has already been deleted. Reads do not
+start cleanup. A disconnected caller cannot release the store lease while
+cleanup is still running. A new restore still needs current review and consent.
+
 ## Privacy boundaries
 
 Signatures detect substitution and corruption; they do not encrypt weights or

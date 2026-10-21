@@ -253,6 +253,20 @@ class PreservationStart(PreservationContract):
 
 
 @final
+class RecoveryCleanup(PreservationContract):
+    """Result of explicit temporary-file reclamation; never a restore receipt."""
+
+    job_id: Digest = Field(description="Exact stopped recovery job inspected.")
+    generation_removed: bool = Field(description="An unindexed generation was removed.")
+    temporary_removed: bool = Field(
+        description="Known worker temporary files were removed."
+    )
+    indexed_generation_retained: bool = Field(
+        description="An indexed generation was retained."
+    )
+
+
+@final
 class PreservationJob(PreservationContract):
     """Canonical durable host status; cancellation intent is not proof of stop."""
 
