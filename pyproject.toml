@@ -32,8 +32,11 @@ dependencies = [
   "ddgs>=9.6.1",
   "tomlkit>=0.14.0",
   "tuf>=6,<7",
-  # Public offline preservation core, pinned to the reviewed v0.5.0 recovery-kit source.
-  "foxlight-model-preservation @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@12a4b4fa0663cc7e0fd478b292860a776d4d7b05",
+  # Public preservation core; serving remains an explicit operator action.
+  "foxlight-model-preservation @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@93d45e37ddaac42f9aa86c55126c7730812bfb7b",
+  # Native peer wheels are qualified on Python 3.13; other supported Python
+  # versions retain HTTP mirrors and receive-only preservation.
+  "libtorrent==2.0.14; python_version < '3.14'",
   # mflux from PyPI: the Foxlight fork existed only because released mflux
   # capped mlx below 0.32, which upstream lifted in 0.19.2 (#692); the fork
   # carried no other change. Darwin-only because mflux pins Linux to

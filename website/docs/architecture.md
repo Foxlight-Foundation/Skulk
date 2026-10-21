@@ -3266,3 +3266,13 @@ The normal base, model-companion and sidecar path resolvers consult the committe
 local recovery index before legacy directory names. They verify the indexed
 installed record without constructing a second store owner; hidden unindexed
 staging never becomes a loader candidate.
+
+The preservation host also owns explicit public-data mirror import and bounded
+HTTP/BitTorrent sessions. Public copies occupy separate immutable archives;
+mirroring never parses a runtime model card or grants model-store admission.
+Two serving slots operate separately from the single preservation/recovery byte
+queue. Owned worker processes verify files before binding, enforce reviewed
+session allowances, and stop on control-pipe loss. Core restart records stopped
+sessions and never replays participation. Standard torrent metadata and public
+verification keys use authenticated operator downloads; the public data listener
+exposes neither control routes nor private archives.

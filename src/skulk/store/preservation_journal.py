@@ -278,6 +278,7 @@ class PreservationJournal:
                 job = PreservationJob(
                     job_id=job_id,
                     location_id=plan.location_id,
+                    sharing_policy=plan.sharing,
                     restore_deleted=request.restore_deleted,
                     accept_owner_capture=request.accept_owner_capture,
                     allow_repository_code=request.allow_repository_code,
@@ -347,6 +348,7 @@ class PreservationJournal:
                 previous.restore_deleted,
                 previous.accept_owner_capture,
                 previous.allow_repository_code,
+                previous.sharing_policy,
             ) != (
                 job.plan_id,
                 job.operation_id,
@@ -358,6 +360,7 @@ class PreservationJournal:
                 job.restore_deleted,
                 job.accept_owner_capture,
                 job.allow_repository_code,
+                job.sharing_policy,
             ):
                 raise PreservationHostError("job_identity_changed")
             if (
@@ -415,7 +418,13 @@ class PreservationJournal:
             )
             for row in rows:
                 previous = PreservationJob.model_validate_json(row[0])
-                uncertain = previous.expected_manifest_id is not None
+                sharing = previous.sharing
+                serving = previous.kind in {"http_share", "torrent_share"}
+                if sharing is not None:
+                    sharing = sharing.model_copy(
+                        update={"ready": False, "listen_port": 0, "connected_peers": 0}
+                    )
+                uncertain = previous.expected_manifest_id is not None and not serving
                 state = (
                     "interrupted"
                     if uncertain
@@ -427,8 +436,15 @@ class PreservationJournal:
                 job = previous.model_copy(
                     update={
                         "state": state,
-                        "stage": "check_outcome" if uncertain else state,
-                        "error_code": None
+                        "sharing": sharing,
+                        "stage": "stopped"
+                        if serving
+                        else "check_outcome"
+                        if uncertain
+                        else state,
+                        "error_code": "host_restart_stopped_sharing"
+                        if serving
+                        else None
                         if uncertain
                         else "host_restart_before_publication",
                         "updated_at": now,

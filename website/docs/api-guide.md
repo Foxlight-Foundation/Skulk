@@ -5751,3 +5751,42 @@ archive Check cannot establish their destination outcome. The retry rechecks any
 already committed exact closure before finishing admission. A Core-owned 24-hour
 worker watchdog bounds active byte work; queue/store-fence wait is separate.
 Public publication/sharing and new-home CLI recovery remain separate tools.
+
+### Public bundle mirroring and bounded sharing
+
+`POST /preservation/plans` also accepts `mirror_import` with a completed
+`upload_id` and `location_id: public-kit`. Every signed member must already
+have a public audience. Start requires `accept_owner_capture` for that exact
+manifest and its bundled keys. Core verifies all bytes into a separate immutable
+public archive; it does not parse a runtime card, install a model or grant
+registry authority. Unknown additive card metadata is retained unchanged.
+Private kits require a separate public publication review with the standalone
+tools; this route never relabels a private copy.
+
+`http_share` and `torrent_share` select an exact public `copy_id` and its
+`location_id`. Review binds `public_network` (default false: loopback preview),
+`listen_port` (zero selects an available port), `duration_seconds` (up to 24 hours),
+`upload_limit_bytes` and `upload_rate_bytes` (BitTorrent only). An optional
+`advertised_url` is an operator-supplied HTTP hint, not a reachability check.
+Starting either requires fresh `public_participation: true`. File verification
+finishes before a listener opens. Two independent serving slots leave private
+preservation and recovery work available. Closing the UI leaves Core's session
+running; stopping or restarting Core ends it, with no automatic replay.
+
+Job `sharing` reports readiness, actual port and aggregate counters. HTTP charges
+reserved response bytes before sending and has no speed cap. BitTorrent reports
+observed payload bytes; its stop threshold may overshoot in flight. Neither
+includes network overhead. No peer addresses or request history are retained.
+Public mirrors and swarms expose addresses and participation; they are not
+anonymous. Public BitTorrent discovery is opt-in; UPnP, NAT-PMP and LAN discovery
+remain disabled. Python builds without a compatible native adapter retain HTTP
+sharing and refuse BitTorrent explicitly.
+
+`GET /preservation/torrents/{job_id}` downloads hash-checked standard torrent
+metadata once the owned worker has prepared it, including after a session stops.
+This download itself joins no swarm. `GET /preservation/public-copies/{copy_id}/trust`
+returns only accepted public verification keys. Both require the ordinary trusted
+operator gate. Recipients need the exact manifest ID and independently
+authenticated fingerprints; self-signatures alone establish neither publisher
+identity nor redistribution rights. Network routing, TLS and independent hosting
+remain the operator's responsibility.
