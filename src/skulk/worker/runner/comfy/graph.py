@@ -53,7 +53,9 @@ from skulk.shared.types.video import (
     derivable_guides,
     derivable_union_guides,
 )
+from skulk.shared.types.video_inpainting import VideoInpainting
 from skulk.shared.types.video_motion import VideoMotionTracks
+from skulk.worker.runner.comfy.inpaint_input import InpaintInputFacts
 from skulk.worker.runner.video_plan import RenderPlan, plan_render
 
 ComfyPrompt = dict[str, dict[str, Any]]
@@ -187,6 +189,7 @@ class ComfyModelFiles:
     refinement_strength: float = 1.0
     union_control_lora: str | None = None
     motion_tracks_lora: str | None = None
+    inpaint_lora: str | None = None
 
 
 def _bundle_paths(card: ModelCard) -> tuple[PurePosixPath, ...]:
@@ -284,6 +287,7 @@ def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> Comfy
         refinement_lora=selected(VideoCompanionKind.Lora, "distilled_refinement"),
         union_control_lora=selected(VideoCompanionKind.Lora, "union_control"),
         motion_tracks_lora=selected(VideoCompanionKind.Lora, "motion_tracks"),
+        inpaint_lora=selected(VideoCompanionKind.Lora, "inpaint"),
         refinement_strength=1.0 if refinement is None or refinement.strength is None else refinement.strength,
     )
 
@@ -555,6 +559,10 @@ class ComfyRenderPlan:
     """Whether this placed issued build implements the DFR mask/keyframe bridge."""
     source_frames: int | None = None
     """Fully decoded worker facts, required before any temporal-edit graph is built."""
+    inpainting: VideoInpainting | None = None
+    """Explicit source offset for the distinct pixel-refined inpainting graph."""
+    inpaint_inputs: InpaintInputFacts | None = None
+    """Private complete-source geometry and combined graph allocation reservation."""
 
     @property
     def steps(self) -> int:
@@ -572,6 +580,8 @@ class ComfyRenderPlan:
 
             if self.motion_tracks is not None:
                 return {"ltx_base_sampler": 8}
+            if self.inpainting is not None:
+                return {"ltx_base_sampler": 8, "ltx_refine_sampler": 2}
             if self.pipeline == "retake" or (self.pipeline == "extend" and self.transformer_variant == "dev"):
                 return {"ltx_base_sampler": self.plan.steps}
             stages = {
@@ -604,6 +614,7 @@ class ComfyRenderPlan:
             duration=self.duration,
             audio_conditioning=self.audio_conditioning,
             editing=self.editing,
+            inpainting=self.inpainting,
             prompt_relay=self.prompt_relay,
             union_control=self.union_control,
             motion_tracks=self.motion_tracks,
@@ -612,7 +623,7 @@ class ComfyRenderPlan:
             adapter=None if self.adapter is None else self.adapter.name,
             adapter_strength=None if self.adapter is None else self.adapter.strength,
             stage_lora_strengths={"base": 0.25, "refine": 0.5} if self.pipeline == "hq_two_stage" else {},
-            stage_samplers={"base": "euler_ancestral", "refine": "euler"} if self.union_control is not None else {},
+            stage_samplers={"base": "euler_ancestral", "refine": "euler"} if self.union_control is not None or self.inpainting is not None else {},
             guidance_video_rescale=0.45 if self.pipeline == "hq_two_stage" else 0.7 if self.editing is not None and self.transformer_variant == "dev" else None,
             guidance_audio_rescale=1.0 if self.pipeline == "hq_two_stage" else 0.7 if self.editing is not None and self.transformer_variant == "dev" else None,
             width=self.plan.width,
@@ -674,7 +685,12 @@ def plan_comfy_render(
 
             if "union_control" not in extension_features_for_build(engine_build):
                 raise ValueError("LTX Union requires its exact published extension on the placed renderer; update and reload the model")
-        pipeline = params.pipeline or ("motion_tracks" if params.motion_tracks is not None else params.editing.operation if params.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        if params.inpainting is not None:
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if "inpaint" not in extension_features_for_build(engine_build):
+                raise ValueError("LTX-2.5 inpainting requires its exact published extension on the placed renderer; update and reload the model")
+        pipeline = params.pipeline or ("inpaint" if params.inpainting is not None else "motion_tracks" if params.motion_tracks is not None else params.editing.operation if params.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
         if pipeline == "hq_two_stage":
             from skulk.provisioning.comfy_extension import extension_features_for_build
 
@@ -696,7 +712,7 @@ def plan_comfy_render(
             adapter=None if pipeline not in ("dev_two_stage", "hq_two_stage") or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=0.5 if pipeline == "hq_two_stage" else files.refinement_strength, steps=None),
             video_shift=None,
             audio_shift=None,
-            sampler="res2s" if pipeline == "hq_two_stage" else "euler_ancestral" if pipeline in ("distilled_two_stage", "motion_tracks") or (pipeline == "extend" and video.transformer_variant == "distilled") else "euler",
+            sampler="res2s" if pipeline == "hq_two_stage" else "euler_ancestral" if pipeline in ("distilled_two_stage", "motion_tracks", "inpaint") or (pipeline == "extend" and video.transformer_variant == "distilled") else "euler",
             scheduler="manual" if video.transformer_variant == "distilled" else "ltx",
             codec=params.codec or CODEC_DEFAULT,
             family=card.family,
@@ -709,6 +725,7 @@ def plan_comfy_render(
             duration=params.duration,
             audio_conditioning=params.audio_conditioning,
             editing=params.editing,
+            inpainting=params.inpainting,
             prompt_relay=params.prompt_relay,
             union_control=params.union_control,
             motion_tracks=params.motion_tracks,
@@ -982,6 +999,10 @@ def build_prompt(
     if render.family == "ltx-2.5":
         from skulk.worker.runner.comfy.ltx import build_ltx_prompt
 
+        if render.inpainting is not None:
+            from skulk.worker.runner.comfy.ltx_inpainting import build_inpainting_prompt
+
+            return build_inpainting_prompt(render, params, references, output_subdir)
         if render.editing is not None:
             from skulk.worker.runner.comfy.ltx_editing import build_editing_prompt
 

@@ -99,7 +99,11 @@ from skulk.worker.runner.comfy.server import (
     run_prompt,
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
-from skulk.worker.runner.video_input import MAX_SOURCE_VIDEO_BYTES, MediaInputRequest
+from skulk.worker.runner.video_input import (
+    MAX_SOURCE_VIDEO_BYTES,
+    MediaInputRequest,
+    VerifiedMediaInput,
+)
 from skulk.worker.runner.video_input_process import prepare_media_input
 
 _HASH_CHUNK: Final = 1 << 20
@@ -585,6 +589,17 @@ class Runner(ServedConcurrentDispatch):
             if render.editing.operation == "extend" and prepared.frames >= render.plan.frame_count:
                 raise ValueError("extension output must exceed the complete source clip")
             render = replace(render, source_frames=prepared.frames)
+        if render.inpainting is not None:
+            from skulk.worker.runner.comfy.inpaint_input import prepare_inpaint_media
+
+            def prepare_inpaint(request: MediaInputRequest) -> VerifiedMediaInput | None:
+                return prepare_media_input(server.interpreter, request, output_dir, is_cancelled=lambda: self._is_cancelled(task_id))
+
+            facts = prepare_inpaint_media(render.plan, render.inpainting, bindings, SKULK_VIDEO_INPUT_DIR, prepare=prepare_inpaint)
+            if facts is None:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return
+            render = replace(render, inpaint_inputs=facts)
         if params.audio_conditioning is not None:
             source = next(binding for binding in bindings if binding.spec.kind == "audio")
             destination = SKULK_VIDEO_INPUT_DIR / f"_prepared_{command_id}.wav"

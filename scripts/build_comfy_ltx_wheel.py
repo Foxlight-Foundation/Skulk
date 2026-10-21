@@ -15,8 +15,8 @@ PACKAGE = "skulk_comfy_ltx"
 FILENAME = f"{PACKAGE}-{VERSION}-py3-none-any.whl"
 COMFY_REVISION = "40c4fcdf513a4523e39d54a9d391908af8df8171"
 LTX_REVISION = "e98f6d927d83c92ef2be6aec76c8440b19306e39"
-FEATURES = ("res2s", "retake", "extend", "dfr", "prompt_relay", "union_control", "motion_tracks")
-SOURCE_FILES = ("__init__.py", "comfy_sampler.py", "dfr.py", "dfr_nodes.py", "editing.py", "editing_nodes.py", "guidance.py", "inpaint_audio.py", "inpaint_blend.py", "inpaint_pixels.py", "layout.py", "launcher.py", "motion_geometry.py", "motion_tracks.py", "motion_nodes.py", "nodes.py", "relay.py", "relay_encoding.py", "relay_geometry.py", "relay_binding.py", "relay_nodes.py", "res2s.py", "union_control.py", "union_nodes.py", "py.typed")
+FEATURES = ("res2s", "retake", "extend", "dfr", "prompt_relay", "union_control", "motion_tracks", "inpaint")
+SOURCE_FILES = ("__init__.py", "comfy_sampler.py", "dfr.py", "dfr_nodes.py", "editing.py", "editing_nodes.py", "guidance.py", "inpaint_audio.py", "inpaint_blend.py", "inpaint_control.py", "inpaint_nodes.py", "inpaint_pixels.py", "layout.py", "launcher.py", "motion_geometry.py", "motion_tracks.py", "motion_nodes.py", "nodes.py", "relay.py", "relay_encoding.py", "relay_geometry.py", "relay_binding.py", "relay_nodes.py", "res2s.py", "union_control.py", "union_nodes.py", "py.typed")
 LICENSE_FILES = ("LICENSE-APACHE-2.0", "LICENSE-LTX-2_x", "LICENSE-LTX-2", "NOTICE")
 
 

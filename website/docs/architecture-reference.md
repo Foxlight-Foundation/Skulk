@@ -2118,3 +2118,32 @@ crops guide tokens before ordinary tiled decoding; it has no spatial refiner.
 Existing Union/H3 and retained older engine builds keep their own contracts.
 
 Motion Track admission resolves canvas defaults before dispatch, independently of opening-image delivery. The Core and independent wheel retain byte-identical pure geometry policy, checked by the package tests. Retained guide pixels and transient trained-resolution raster/overlap/resize workspace have separate bounds. Single-stage offers publish their own frame mode and eight-step defaults, and do not require an unused spatial upscaler.
+
+Masked inpainting uses strict `VideoInpainting` source placement, distinct from
+temporal editing. Source dimensions belong to decoded worker facts; requests
+carry only nonnegative offsets on an explicit bounded canvas. Intrinsic pack
+support derives from the named `inpaint` LoRA without a persisted duplicate flag.
+Capability projection and placement require an exact issued `inpaint` engine
+feature; a candidate alone supplies no execution authority. Hardware qualification
+remains separate from this code compatibility check.
+Native runners refuse this unavailable workflow before reading weights, and
+Comfy planning repeats the issued-build guard before constructing a graph.
+
+Inpainting preflight uses the selected interpreter's bounded media helper to
+measure complete source/mask geometry and verify their native frame clock. Still
+masks alone broadcast; video masks are complete, silent timelines. The worker
+checks offsets and a combined 16-GiB cached pixel/audio/latent plus framewise
+pyramid reservation before Comfy constructs full image batches. This bound is
+separate from model weights and sampling memory, with no hardware allowlist.
+Legacy helper requests retain their exact reply shape; only inpainting reports
+new private measured dimensions.
+
+The issued extension supplies strict source placement, area-mask preparation,
+framewise native Laplacian blending, actual factor-one adapter metadata checks,
+and frozen causal reference audio. The eight-interval base appends its guide,
+crops it before tiled decode and blends at half resolution. Lanczos pixels are
+re-encoded for the two-interval Euler refiner, which shares the LoRA and frozen
+audio but does not append another source guide. Both stage contexts use the
+native SDR green cue. A full-canvas opening uses JPEG18/strength0.7 at base and
+uncompressed strength1 at refinement. Normal output, progress and cancellation
+lifecycles apply; startup verifies all advertised node output contracts.

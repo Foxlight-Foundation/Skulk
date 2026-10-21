@@ -1903,8 +1903,9 @@ Request fields (JSON keys or form fields):
 | `lora` | string | Name of a card companion adapter, for example a turbo LoRA |
 | `lora_strength` | number | 0.0 to 2.0 |
 | `audio` | boolean | Default `true`; the job fails at settlement if the render carries no audio track |
-| `pipeline` | string | LTX workflow: `motion_tracks` requires Motion Track controls and one opening image; `distilled_two_stage` or `dev_two_stage`, matching the declared transformer; `retake` or `extend` requires matching `editing` controls. DFR (`dfr`) requires a distilled transformer declaring generated keyframes and an exact `dfr_spatial` IC-LoRA. HQ (`hq_two_stage`) requires a dev transformer and an exact issued Res2s extension on the placed Comfy instance; a base-only renderer is refused |
+| `pipeline` | string | LTX workflow: `motion_tracks` requires Motion Track controls and one opening image; `inpaint` requires explicit `inpainting`, source and mask; `distilled_two_stage` or `dev_two_stage`, matching the declared transformer; `retake` or `extend` requires matching `editing` controls. DFR (`dfr`) requires a distilled transformer declaring generated keyframes and an exact `dfr_spatial` IC-LoRA. HQ (`hq_two_stage`) requires a dev transformer and an exact issued Res2s extension on the placed Comfy instance; a base-only renderer is refused |
 | `audio_conditioning` | object | LTX distilled source-audio workflow: `start_seconds` (0–120, default 0) selects an uploaded `audio_source` segment covering the full aligned clip. Audio is frozen in both stages. Multipart supplies this object as JSON |
+| `inpainting` | object | Masked LTX source placement: integer `left` and `top` (0–4095, default 0) position the complete source on the explicit output `size`. Requires `source_video`, one source-sized image/video `mask`, the exact `inpaint` IC-LoRA and an issued engine advertising `inpaint`. Optional full-canvas `first_frame`. Selects `pipeline=inpaint`; multipart supplies JSON |
 | `editing` | object | Native LTX source-video workflow: `operation` is `retake` or `extend`. Retake requires inclusive `start_seconds` and exclusive `end_seconds`; `regenerate_audio` defaults true, false preserves the source waveform. The region may cover the complete aligned frame duration, which can exceed nominal `seconds` (for example 25 frames at 24 fps is 25/24 seconds). Region boundaries round outward onto the 8-frame latent grid. Extend appends to reach `seconds`, the total output length, and refuses retake-region controls. Requires `source_video` and an explicit source-matching `size` |
 | `motion_tracks` | object | LTX Motion Track strengths: `adapter_strength` (>0–2, default 1), `guide_strength` (0–1, default 1). Requires one opening `first_frame` image and one `motion_track_data` JSON attachment, a selected `motion_tracks` LoRA and an issued engine feature. Uses one full-resolution eight-step ancestral-Euler stage; incompatible workflows are refused. Multipart supplies JSON |
 | `union_control` | object | LTX Union IC-LoRA: `guide` (`edges`, `depth`, `pose`; default `edges`), `preprocessed` (default false), `adapter_strength` (>0–2, default 1), `guide_strength` (0–1, default 1). Requires one `control` video, an exact compatible `union_control` LoRA companion and an issued engine feature. Optional opening image. Uses the fixed distilled two-stage workflow; incompatible editing, relay, automatic-duration and H3 controls are refused. Output dimensions must be divisible by 128. Multipart supplies JSON |
@@ -1984,6 +1985,41 @@ Union control requires a card selecting the exact `union_control` LoRA companion
 
 Timed local prompts require a card declaring `prompt_relay` and an exact placed build advertising that feature in `engine_feature_builds`. Native and Comfy use a fixed soft Gaussian video-attention profile. Comfy measures the complete plain, unweighted prompt with its loaded Gemma4 tokenizer; unstable scene boundaries or truncated text fail before sampling. The global prompt remains available throughout the clip. Audio uses the full combined prompt without scene timing. Scene lengths are relative weights on each stage's actual latent timeline, including optional DFR temporal refinement. This control requires fixed duration and cannot combine with source-audio conditioning or temporal editing. An unpublished candidate creates no installation offer.
 
+Masked inpainting is offered only when `video.inpainting` and an exact issued
+`inpaint` entry in `engine_feature_builds` agree with the selected pack. Candidate
+code and a named adapter alone do not authorize execution. Its explicit output
+canvas uses a 64-pixel grid, from 128 through 4096 pixels per edge, within the
+card's pixel limit. Source pixels retain their dimensions and complete timeline;
+`left` and `top` must fit the entire source without cropping. White mask regions
+and the canvas outside the placed source are regenerated. A still mask broadcasts
+over all source frames; a video mask must cover the exact same timeline. An
+opening image, when supplied, describes the full output canvas. This fixed
+distilled workflow is separate from temporal editing, Union, Motion Track,
+audio-source conditioning, prompt relay, automatic duration, generated keyframes
+and diffusion decoding. Source/mask structural attachments do not consume ordinary
+reference limits. An unavailable renderer is refused without falling through to
+ordinary video generation.
+
+The worker fully decodes every source and video-mask frame before constructing
+the graph. Dimensions and frame rate must stay constant, and both clips must
+match the complete requested trained frame count; no truncation, looping,
+retiming or source resizing is performed. Masks use their red channel and mask
+videos cannot contain audio. Source audio must be finite mono/stereo; a missing
+track supplies silent context. Both sampling stages freeze the normalized causal
+audio latent, and audible output is its VAE reconstruction, not a promise of
+bit-exact original PCM. `audio=false` mutes the container without removing the
+joint audio context.
+
+The fixed recipe uses eight Euler Ancestral base intervals, native tiled decode
+and Laplacian blending, Lanczos pixel upscaling and tiled re-encoding, then two
+Euler refinement intervals and a final blend. Blending intentionally softens mask
+boundaries, so untouched regions are not a bit-exact MP4 pixel guarantee. Complete
+decoded source batches remain subject to the two-GiB input bound. Cached pixel,
+mask, audio and latent buffers plus framewise pyramid workspace have a combined
+16-GiB graph bound, checked before Comfy allocates full batches. Model weights and
+sampling require additional memory; this bound is not a hardware eligibility
+list or a model memory estimate. Reduce output size or duration on refusal.
+
 File parts (multipart only), in slot order:
 
 | Part | Role | Notes |
@@ -1996,7 +2032,7 @@ File parts (multipart only), in slot order:
 | `control` | control | One ordinary clip (or a still) whose motion or structure the render follows. The render derives the guide from it (`control_kind`): whole-body pose (people detected with RT-DETR, keypoints from SDPose), depth (Depth Anything 3), or Canny edges, as ComfyUI's own H3 ControlNet template does. The engine holds the guide's last frame when it is short, cuts it when it is long, and scales and centre-crops each frame to the canvas |
 | `mask` | mask | One image or clip for the ControlNet, read from its red channel; white marks what to regenerate |
 | `motion_track_data` | motion_tracks | One version-one `application/json` trajectory file paired with explicit `motion_tracks` controls and an opening image; four MiB maximum |
-| `source_video` | source | One source clip paired with LTX `editing`, or an H3 clip behind a `mask`. LTX editing counts it against reference video limits; ordinary H3 structural inputs do not |
+| `source_video` | source | One source clip paired with LTX `editing` or explicit `inpainting`, or an H3 clip behind a `mask`. LTX temporal editing counts it against reference video limits; structural inpainting and ordinary H3 inputs do not |
 
 Media parts must carry an `image/*`, `video/*`, or `audio/*` content type;
 `motion_track_data` requires `application/json`. At

@@ -469,8 +469,29 @@ class _UnionReferenceAdapter:
         return {"reference_downscale_factor": "2"}
 
 
+class _InpaintReferenceVae:
+    """Bounded full-grid encoder stand-in for the actual native guide contract."""
+
+    downscale_index_formula: tuple[int, int, int] = (8, 32, 32)
+
+    def encode(self, pixels: Tensor) -> Tensor:
+        """Require the complete current-stage canvas, with no half-grid resize."""
+        assert pixels.shape[1:3] == (64, 128)
+        return torch.full((1, 128, (pixels.shape[0] - 1) // 8 + 1, 2, 4), 3.0, dtype=pixels.dtype)
+
+
+class _InpaintReferenceAdapter:
+    """Expose the actual factor-one metadata attachment of the inpainting recipe."""
+
+    def get_attachment(self, name: str) -> object:
+        """Return the loaded adapter's full-grid scale, rather than a fallback."""
+        assert name == "lora_metadata"
+        return {"reference_downscale_factor": "1"}
+
+
 def _check_union_reference(source: Path) -> dict[str, object]:
     """Run pinned guide, dilation and crop methods on bounded reference tensors."""
+    from skulk_comfy_ltx.inpaint_control import validate_inpaint_guide
     from skulk_comfy_ltx.union_control import validate_union_inputs
 
     hashes = {
@@ -526,7 +547,33 @@ def _check_union_reference(source: Path) -> dict[str, object]:
                 assert bool((restored_latent["noise_mask"] == 1).all())
                 assert "noise_mask" not in latent and positive[0][1] == {} and negative[0][1] == {}
                 cases.append(dict(frames=frames, dtype=str(dtype), guide_strength=strength, exact_crop=True, original_inputs_preserved=True))
-    return dict(source_sha256=hashes, cases=cases, actual_packed_bridge=True, encoder_standin_only=True, model_weights_used=False, native_reference_factor=2, pass_all=True)
+    namespace.update(validate_inpaint_guide=validate_inpaint_guide, comfy=SimpleNamespace(utils=SimpleNamespace(common_upscale=namespace["common_upscale"]), model_management=SimpleNamespace(throw_exception_if_processing_interrupted=lambda: None)))
+    _load(namespace, files("skulk_comfy_ltx").joinpath("inpaint_nodes.py").read_bytes(), "candidate_inpaint_nodes.py", ("SkulkLTXInpaintGuide",))
+    inpaint_bridge = cast(_ReferenceNode, namespace["SkulkLTXInpaintGuide"]).execute
+    inpaint_cases: list[dict[str, object]] = []
+    for frames in (9, 25):
+        for dtype in (torch.float32, torch.bfloat16):
+            latent = {"samples": torch.full((1, 128, (frames - 1) // 8 + 1, 2, 4), 7.0, dtype=dtype)}
+            images = torch.zeros(frames, 64, 128, 3)
+            positive = [[torch.zeros(1, 2, 8), {}]]
+            negative = [[torch.ones(1, 2, 8), {}]]
+            reference = add(positive, negative, _InpaintReferenceVae(), latent, images, frame_idx=0, strength=1.0, iclora_parameters={"reference_downscale_factor": 1})
+            actual = inpaint_bridge(positive, negative, _InpaintReferenceVae(), latent, images, _InpaintReferenceAdapter(), frames)
+            expected_latent = cast("Mapping[str, Tensor]", reference.result[2])
+            actual_latent = cast("Mapping[str, Tensor]", actual.result[2])
+            for key in ("samples", "noise_mask"):
+                torch.testing.assert_close(actual_latent[key], expected_latent[key], rtol=0, atol=0)
+            samples = actual_latent["samples"]
+            assert bool((samples[:, :, samples.shape[2] // 2:] == 3).all())
+            restored = crop(actual.result[0], actual.result[1], actual_latent)
+            expected_crop = crop(reference.result[0], reference.result[1], expected_latent)
+            restored_samples = cast("Mapping[str, Tensor]", restored.result[2])["samples"]
+            torch.testing.assert_close(restored_samples, cast("Mapping[str, Tensor]", expected_crop.result[2])["samples"], rtol=0, atol=0)
+            # Native concatenation promotes BF16 targets when the VAE guide is
+            # FP32. Preserve that reference behavior instead of forcing a dtype.
+            torch.testing.assert_close(restored_samples, cast(Tensor, latent["samples"]).to(restored_samples.dtype), rtol=0, atol=0)
+            inpaint_cases.append(dict(frames=frames, input_latent_dtype=str(dtype), native_guided_dtype=str(samples.dtype), reference_factor=1, native_guide_and_crop_exact=True))
+    return dict(source_sha256=hashes, cases=cases, inpaint_cases=inpaint_cases, actual_packed_bridge=True, encoder_standin_only=True, model_weights_used=False, native_reference_factor=2, pass_all=True)
 
 
 def main() -> None:

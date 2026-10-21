@@ -38,7 +38,7 @@ def video_engine_feature_builds(engines: Set[str | None]) -> dict[str, list[Vide
     if "comfy" in engines:
         for wheel in published_extensions():
             features: list[VideoExecutionFeature] = ["hq_two_stage"] if "res2s" in wheel.features else []
-            temporal: tuple[VideoExecutionFeature, ...] = ("retake", "extend", "prompt_relay", "dfr", "union_control", "motion_tracks")
+            temporal: tuple[VideoExecutionFeature, ...] = ("retake", "extend", "prompt_relay", "dfr", "union_control", "motion_tracks", "inpaint")
             features.extend(feature for feature in temporal if feature in wheel.features)
             if features:
                 builds[f"comfy@{wheel.comfy_revision}/extension@sha256:{wheel.payload_sha256}"] = features
@@ -60,7 +60,7 @@ def video_request_supported(card: ModelCard, params: VideoGenerationTaskParams, 
         params.validate_family(card.family, card.video)
     except ValueError:
         return False
-    pipeline = params.pipeline or ("motion_tracks" if params.motion_tracks is not None else params.editing.operation if params.editing is not None else "distilled_two_stage" if card.video.transformer_variant == "distilled" else "dev_two_stage")
+    pipeline = params.pipeline or ("inpaint" if params.inpainting is not None else "motion_tracks" if params.motion_tracks is not None else params.editing.operation if params.editing is not None else "distilled_two_stage" if card.video.transformer_variant == "distilled" else "dev_two_stage")
     engine = engine_of(backend)
     if engine == "comfy":
         from skulk.provisioning.comfy_extension import extension_features_for_build
@@ -72,10 +72,11 @@ def video_request_supported(card: ModelCard, params: VideoGenerationTaskParams, 
         baseline = pipeline in ("distilled_two_stage", "dev_two_stage", "motion_tracks") or dfr
         hq = pipeline == "hq_two_stage" and "res2s" in features
         editing = params.editing is not None and params.editing.operation in features
-        return (baseline or hq or editing) and (params.prompt_relay is None or "prompt_relay" in features) and (params.union_control is None or "union_control" in features) and (params.motion_tracks is None or "motion_tracks" in features)
+        inpainting = params.inpainting is not None and "inpaint" in features
+        return (baseline or hq or editing or inpainting) and (params.prompt_relay is None or "prompt_relay" in features) and (params.union_control is None or "union_control" in features) and (params.motion_tracks is None or "motion_tracks" in features)
     # The native wheel's muxer implements H.264 only. Exclude an incompatible
     # request before dispatch instead of letting it fail in the runner planner.
-    if engine != "mlx_video" or params.union_control is not None or params.motion_tracks is not None or pipeline == "dfr" or params.codec not in (None, "h264"):
+    if engine != "mlx_video" or params.union_control is not None or params.motion_tracks is not None or params.inpainting is not None or pipeline == "dfr" or params.codec not in (None, "h264"):
         return False
     if pipeline == "hq_two_stage" and video_feature_build_key(build) not in video_engine_feature_builds({"mlx_video"}):
         return False

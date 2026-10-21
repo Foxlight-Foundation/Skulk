@@ -175,10 +175,10 @@ def sampling_stage(
     )
     sampler = f"ltx_{name}_sampler"
     sampler_select = "sampler_select"
-    if render.union_control is not None and name == "refine":
-        # Union's refiner uses Euler, distinct from its ancestral base sampler.
+    if (render.union_control is not None or render.inpainting is not None) and name == "refine":
+        # These reference refiners use Euler after an ancestral base sampler.
         sampler_select = "ltx_refine_sampler_select"
-        prompt[sampler_select] = _node("KSamplerSelect", "Union refinement sampler", sampler_name="euler")
+        prompt[sampler_select] = _node("KSamplerSelect", "Reference refinement sampler", sampler_name="euler")
     prompt[sampler] = _node(
         "SamplerCustomAdvanced",
         "Base sampling" if name == "base" else "Refinement sampling",

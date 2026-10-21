@@ -55,6 +55,7 @@ from skulk.shared.types.video import (
     VideoExecutionFeature,
     VideoGuidance,
     VideoGuideKind,
+    VideoInpainting,
     VideoJobStatus,
     VideoPipeline,
     VideoPromptRelay,
@@ -888,6 +889,7 @@ class VideoCapabilitySection(BaseModel):
     audio_conditioning: bool = Field(default=False, description="A selected artifact and available engine can freeze prepared source audio in both sampling stages.")
     editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an issued owned engine build.")
     motion_tracks: bool = Field(default=False, description="The selected pack and an issued engine implement Motion Track conditioning.")
+    inpainting: bool = Field(default=False, description="The selected pack and an issued engine implement masked inpainting and larger-canvas source placement.")
     union_control: bool = Field(default=False, description="Union IC-LoRA execution is available in an issued owned engine build.")
     union_guides: list[VideoGuideSection] = Field(default_factory=list, description="Native preprocessing choices for explicit union_control requests; these do not authorize ordinary control_kind requests.")
     prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an issued owned engine build.")
@@ -1059,18 +1061,25 @@ class VideoCapabilitySection(BaseModel):
         spatial_reference = any(item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(VideoMode.ReferenceToAudioVideo) for item in config.companions)
         audio_conditioning = bool(reference_mode) and spatial_reference and config.transformer_variant == "distilled" and config.audio_conditioning and ("comfy" in engines or "audio_conditioning" in native_features)
         editing: list[Literal["retake", "extend"]] = [operation for operation in config.editing if reference_mode and operation in available_features and (operation == "retake" or config.transformer_variant == "dev" or spatial_reference)]
+        inpaint_modes: list[VideoModeName] = reference_mode if prerequisites and config.transformer_variant == "distilled" and "comfy" in engines and "inpaint" in available_features and any(item.kind is VideoCompanionKind.Lora and item.name == "inpaint" and item.supports_mode(VideoMode.ReferenceToAudioVideo) for item in config.companions) else []
         if audio_conditioning:
             pipeline_modes["distilled_two_stage"] = [*distilled_modes, *reference_mode]
+        if inpaint_modes:
+            # This workflow upsamples decoded pixels between stages. It does
+            # not depend on the ordinary spatial_x2 latent-upscaler companion.
+            pipeline_modes["inpaint"] = inpaint_modes
         for operation in editing:
             pipeline_modes[operation] = reference_mode
         pipeline_defaults: dict[VideoPipeline, VideoPipelineDefaults] = {"hq_two_stage": VideoPipelineDefaults(base_steps=15, sampler="res2s", sampling_stage_steps=[15, 3], guidance=VideoGuidance(modality_scale=3.0))} if "hq_two_stage" in pipeline_modes else {}
         if motion_modes:
             pipeline_defaults["motion_tracks"] = VideoPipelineDefaults(base_steps=8, sampler="euler_ancestral", sampling_stage_steps=[8])
+        if inpaint_modes:
+            pipeline_defaults["inpaint"] = VideoPipelineDefaults(base_steps=8, sampler="euler_ancestral", sampling_stage_steps=[8, 2])
         for operation in editing:
             base_steps = 8 if config.transformer_variant == "distilled" else 30
             single_stage = operation == "retake" or config.transformer_variant == "dev"
             pipeline_defaults[operation] = VideoPipelineDefaults(base_steps=base_steps, sampler="euler" if single_stage else "euler_ancestral", sampling_stage_steps=[base_steps] if single_stage else [base_steps, 3])
-        if audio_conditioning or editing:
+        if audio_conditioning or editing or inpaint_modes:
             served_modes = [*served_modes, *reference_mode]
         decoder_modes: dict[VideoDecoder, list[VideoModeName]] = {}
         if served_modes:
@@ -1098,6 +1107,7 @@ class VideoCapabilitySection(BaseModel):
             audio_conditioning=audio_conditioning,
             editing=editing,
             motion_tracks=bool(motion_modes),
+            inpainting=bool(inpaint_modes),
             union_control=ltx_available and config.union_control and "union_control" in available_features,
             union_guides=_guide_sections(config, guide_contract="union") if ltx_available and config.union_control and "union_control" in available_features else [],
             prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in available_features,
@@ -2899,6 +2909,7 @@ class VideoCreateRequest(BaseModel):
     """Freeze one uploaded audio segment; multipart forms supply a JSON object."""
     editing: VideoEditing | None = None
     """Retake or extend source_video; seconds always describes total output length."""
+    inpainting: VideoInpainting | None = Field(default=None, description="Masked source-video placement; upload source_video and mask with an explicit size. Multipart forms supply a JSON object.")
     motion_tracks: VideoMotionTracks | None = Field(default=None, description="Motion Track settings; path coordinates arrive in the application/json motion_track_data attachment.")
     union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None
@@ -2945,6 +2956,11 @@ class VideoCreateRequest(BaseModel):
     @classmethod
     def _parse_editing(cls, value: object) -> object:
         return VideoEditing.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("inpainting", mode="before")
+    @classmethod
+    def _parse_inpainting(cls, value: object) -> object:
+        return VideoInpainting.model_validate_json(value) if isinstance(value, str) else value
 
     @field_validator("motion_tracks", mode="before")
     @classmethod
@@ -3080,6 +3096,7 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Source waveform offset used as frozen context."""
     editing: VideoEditing | None = None
     """Executed source operation and requested retake interval."""
+    inpainting: VideoInpainting | None = Field(default=None, description="Source position used by masked inpainting on the recorded output canvas.")
     motion_tracks: VideoMotionTracks | None = Field(default=None, description="Motion Track settings; path coordinates arrive in the application/json motion_track_data attachment.")
     union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None

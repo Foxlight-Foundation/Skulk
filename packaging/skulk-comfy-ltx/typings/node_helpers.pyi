@@ -1,0 +1,3 @@
+from collections.abc import Mapping
+
+def conditioning_set_values(conditioning: list[list[object]], values: Mapping[str, object], append: bool = False) -> list[list[object]]: ...

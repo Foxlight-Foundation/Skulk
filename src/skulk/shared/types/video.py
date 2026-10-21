@@ -27,6 +27,7 @@ from skulk.shared.types.motion_geometry import (
     resolve_motion_canvas,
     validate_motion_geometry,
 )
+from skulk.shared.types.video_inpainting import VideoInpainting
 from skulk.shared.types.video_motion import MAX_MOTION_TRACK_BYTES, VideoMotionTracks
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -142,10 +143,10 @@ slower by the node's own account)."""
 VideoCodecName = Literal["h264", "av1"]
 """Video codecs the pinned ComfyUI's ``SaveVideo`` writes into MP4."""
 
-VideoPipeline = Literal["distilled_two_stage", "dev_two_stage", "hq_two_stage", "dfr", "retake", "extend", "motion_tracks"]
+VideoPipeline = Literal["distilled_two_stage", "dev_two_stage", "hq_two_stage", "dfr", "retake", "extend", "motion_tracks", "inpaint"]
 """Family-specific execution workflow; engines must refuse unavailable workflows."""
 
-VideoExecutionFeature = Literal["hq_two_stage", "dfr", "audio_conditioning", "retake", "extend", "prompt_relay", "union_control", "motion_tracks"]
+VideoExecutionFeature = Literal["hq_two_stage", "dfr", "audio_conditioning", "retake", "extend", "prompt_relay", "union_control", "motion_tracks", "inpaint"]
 """Advanced execution contracts selected by an instance's immutable engine build."""
 
 
@@ -447,6 +448,8 @@ class VideoGenerationTaskParams(BaseModel):
     """Freeze one uploaded audio segment as context; output muting remains independent."""
     editing: VideoEditing | None = None
     """Retake or extend a source clip, with seconds describing total output duration."""
+    inpainting: VideoInpainting | None = None
+    """Regenerate one source mask and optional larger-canvas padding, without retiming."""
     prompt_relay: VideoPromptRelay | None = None
     """Ordered scene prompts applied to successive portions of a generated clip."""
     motion_tracks: VideoMotionTracks | None = None
@@ -605,6 +608,10 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError("motion_tracks controls require one motion_track_data attachment and vice versa")
         if self.union_control is not None and not any(item.role == "control" and item.kind == "video" for item in self.references):
             raise ValueError("LTX Union requires one video attachment with the control role")
+        if self.inpainting is not None:
+            source = next((item for item in self.references if item.role == "source"), None)
+            if source is None or source.kind != "video" or "mask" not in roles or any(role not in ("source", "mask", "first_frame") for role in roles):
+                raise ValueError("Inpainting requires one source video, one source-sized mask and at most one opening image")
         steered = "control" in roles or "mask" in roles
         if not steered and (
             self.control_strength is not None
@@ -636,7 +643,7 @@ class VideoGenerationTaskParams(BaseModel):
         """Derive the generation mode from the attachments."""
         if self.mode is not None:
             return self.mode
-        if self.editing is not None or self.audio_conditioning is not None:
+        if self.editing is not None or self.audio_conditioning is not None or self.inpainting is not None:
             return VideoMode.ReferenceToAudioVideo
         roles = {item.role for item in self.references}
         if "reference" in roles:
@@ -660,7 +667,7 @@ class VideoGenerationTaskParams(BaseModel):
                 or self.negative_prompt is not None or self.guidance is not None
                 or self.temporal_upscalings != 0
                 or self.generated_keyframe_interval is not None
-                or self.audio_conditioning is not None or self.editing is not None
+                or self.audio_conditioning is not None or self.editing is not None or self.inpainting is not None
                 or self.prompt_relay is not None
                 or self.union_control is not None or self.motion_tracks is not None
                 or self.duration != "fixed" or self.duration_min_seconds is not None):
@@ -670,7 +677,18 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError(
                 "LTX-2.5 requires a declared distilled transformer or dev transformer"
             )
-        pipeline = self.pipeline or ("motion_tracks" if self.motion_tracks is not None else self.editing.operation if self.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        pipeline = self.pipeline or ("inpaint" if self.inpainting is not None else "motion_tracks" if self.motion_tracks is not None else self.editing.operation if self.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        if self.inpainting is not None:
+            if pipeline != "inpaint" or video.transformer_variant != "distilled" or self.implied_mode() is not VideoMode.ReferenceToAudioVideo:
+                raise ValueError("Inpainting uses its fixed distilled source-video workflow")
+            if not video.inpainting or not any(item.kind is VideoCompanionKind.Lora and item.name == "inpaint" and item.supports_mode(VideoMode.ReferenceToAudioVideo) for item in video.companions):
+                raise ValueError("Inpainting requires the selected pack's exact compatible inpaint IC-LoRA")
+            if self.duration != "fixed" or self.editing is not None or self.audio_conditioning is not None or self.union_control is not None or self.motion_tracks is not None or self.prompt_relay is not None or self.generated_keyframe_interval is not None or self.decoder not in (None, "convolutional"):
+                raise ValueError("Inpainting does not combine with temporal editing, other controls, duration prediction or a diffusion decoder")
+            if self.width_height is None or self.aspect_ratio is not None or max(self.width_height) > 4096:
+                raise ValueError("Inpainting requires an explicit output size bounded to 4096 pixels per edge")
+        elif pipeline == "inpaint":
+            raise ValueError("The inpaint pipeline requires explicit inpainting controls, source video and mask")
         if self.motion_tracks is not None:
             if pipeline != "motion_tracks" or video.transformer_variant != "distilled" or self.duration != "fixed" or self.union_control is not None or self.editing is not None or self.audio_conditioning is not None or self.prompt_relay is not None or self.generated_keyframe_interval is not None or self.decoder not in (None, "convolutional"):
                 raise ValueError("Motion Track uses its fixed single-stage distilled workflow")
@@ -698,7 +716,7 @@ class VideoGenerationTaskParams(BaseModel):
                 raise ValueError("an editing pipeline requires matching editing controls and a source clip")
         elif self.editing is not None:
             raise ValueError("editing cannot select a generation pipeline")
-        elif (pipeline in ("distilled_two_stage", "dfr", "motion_tracks")) != (video.transformer_variant == "distilled"):
+        elif (pipeline in ("distilled_two_stage", "dfr", "motion_tracks", "inpaint")) != (video.transformer_variant == "distilled"):
             raise ValueError("LTX-2.5 pipeline does not match the declared transformer variant")
         if self.temporal_upscalings and pipeline != "dfr":
             raise ValueError("temporal_upscalings requires the LTX-2.5 DFR pipeline")
@@ -723,7 +741,7 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError(
                 "LTX-2.5 distilled rendering accepts text and image keyframes"
             )
-        if self.implied_mode() is VideoMode.ReferenceToAudioVideo and self.audio_conditioning is None and self.editing is None:
+        if self.implied_mode() is VideoMode.ReferenceToAudioVideo and self.audio_conditioning is None and self.editing is None and self.inpainting is None:
             raise ValueError("LTX-2.5 reference mode requires explicit source audio or video editing controls")
         if video.transformer_variant == "distilled" and (self.steps not in (None, 8) or video.default_steps != 8):
             raise ValueError(
@@ -797,7 +815,7 @@ class VideoGenerationTaskParams(BaseModel):
                 raise ValueError("editing requires an explicit source-matching size")
             if self.guidance is not None:
                 raise ValueError("this editing workflow uses its fixed single CFG/STG defaults, not two-stage per-modality guidance")
-        elif self.union_control is None and self.motion_tracks is None and any(item.kind != "image" or item.role not in ("first_frame", "last_frame", "keyframe") for item in self.references):
+        elif self.union_control is None and self.motion_tracks is None and self.inpainting is None and any(item.kind != "image" or item.role not in ("first_frame", "last_frame", "keyframe") for item in self.references):
             raise ValueError("LTX-2.5 generation accepts image anchors; audio/video references require explicit conditioning or editing controls")
         if self.audio_conditioning is not None or self.editing is not None:
             if self.duration != "fixed" or self.generated_keyframe_interval is not None or self.prompt_relay is not None:
@@ -824,7 +842,7 @@ class VideoGenerationTaskParams(BaseModel):
             )
         if self.seed is not None and self.seed >= 2**64:
             raise ValueError("LTX-2.5 noise seeds must fit an unsigned 64-bit integer")
-        requires_upscaler = pipeline not in ("retake", "motion_tracks") and not (pipeline == "extend" and video.transformer_variant == "dev")
+        requires_upscaler = pipeline not in ("retake", "motion_tracks", "inpaint") and not (pipeline == "extend" and video.transformer_variant == "dev")
         if requires_upscaler and not any(
             item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(self.implied_mode())
             for item in video.companions
@@ -920,6 +938,8 @@ class VideoEngineSettings(CamelCaseModel):
     """Single-stage Motion Track controls, with coordinates on the media plane."""
     union_control: VideoUnionControl | None = None
     """Exact Union guide and adapter settings used by the base stage."""
+    inpainting: VideoInpainting | None = None
+    """Exact source position used for masked inpainting on the recorded output canvas."""
     video_shift: float | None = None
     """Video sigma shift applied; ``None`` leaves the loader default."""
     audio_shift: float | None = None

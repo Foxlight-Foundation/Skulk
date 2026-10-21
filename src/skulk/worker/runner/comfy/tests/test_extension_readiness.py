@@ -41,8 +41,8 @@ def test_schema_failure_releases_server_before_the_runner_owns_it(tmp_path: Path
     assert stopped == [True]
 
 
-@pytest.mark.parametrize("temporal,dfr,relay,union", [(False, False, False, False), (True, False, False, False), (True, True, False, False), (True, True, True, False), (True, True, True, True)])
-def test_readiness_checks_only_nodes_implemented_by_the_issued_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, temporal: bool, dfr: bool, relay: bool, union: bool) -> None:
+@pytest.mark.parametrize("temporal,dfr,relay,union,inpaint", [(False, False, False, False, False), (True, False, False, False, False), (True, True, False, False, False), (True, True, True, False, False), (True, True, True, True, False), (True, True, True, True, True), (False, False, False, False, True)])
+def test_readiness_checks_only_nodes_implemented_by_the_issued_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, temporal: bool, dfr: bool, relay: bool, union: bool, inpaint: bool) -> None:
     """An old sampler-only wheel remains valid; temporal wheels prove all four nodes."""
     from skulk.provisioning.comfy_extension import ComfyExtensionManifest
     from skulk.provisioning.manifest import COMFY_PIN
@@ -50,6 +50,8 @@ def test_readiness_checks_only_nodes_implemented_by_the_issued_manifest(tmp_path
     package = tmp_path / "skulk_comfy_ltx"
     package.mkdir()
     manifest = ComfyExtensionManifest(protocol=1, version="0.1.0", comfy_revision=COMFY_PIN, ltx_revision="a" * 40, features=("res2s", "retake", "extend", "dfr", "prompt_relay", "union_control") if union else ("res2s", "retake", "extend", "dfr", "prompt_relay") if relay else ("res2s", "retake", "extend", "dfr") if dfr else ("res2s", "retake", "extend") if temporal else ("res2s",), payload_sha256="b" * 64, members={"skulk_comfy_ltx/nodes.py": "c" * 64})
+    if inpaint:
+        manifest = manifest.model_copy(update={"features": (*manifest.features, "inpaint")})
     (package / "manifest.json").write_text(manifest.model_dump_json())
     expected = {"SkulkLTXRes2sSampler": ["SAMPLER"], "SkulkLTXGuidanceRescale": ["MODEL"]}
     if temporal:
@@ -60,6 +62,10 @@ def test_readiness_checks_only_nodes_implemented_by_the_issued_manifest(tmp_path
         expected.update(SkulkLTXPromptRelayEncode=["CONDITIONING"], SkulkLTXApplyPromptRelay=["MODEL"])
     if union:
         expected["SkulkLTXUnionGuide"] = ["CONDITIONING", "CONDITIONING", "LATENT"]
+    if inpaint:
+        if not temporal:
+            expected["SkulkLTXEditAudioLatent"] = ["LATENT", "AUDIO"]
+        expected.update(SkulkLTXInpaintSource=["IMAGE", "MASK"], SkulkLTXInpaintStage=["IMAGE", "MASK"], SkulkLTXInpaintBlend=["IMAGE"], SkulkLTXInpaintAudioReference=["CONDITIONING", "CONDITIONING", "LATENT"], SkulkLTXInpaintGuide=["CONDITIONING", "CONDITIONING", "LATENT"])
     visited: list[str] = []
 
     @contextmanager
@@ -98,3 +104,11 @@ def test_readiness_checks_only_nodes_implemented_by_the_issued_manifest(tmp_path
         expected["SkulkLTXUnionGuide"] = ["LATENT"]
         with pytest.raises(RuntimeError, match="exact SkulkLTXUnionGuide"):
             server._await_extension_schema()
+        expected["SkulkLTXUnionGuide"] = ["CONDITIONING", "CONDITIONING", "LATENT"]
+    if inpaint:
+        for name in ("SkulkLTXInpaintSource", "SkulkLTXInpaintStage", "SkulkLTXInpaintBlend", "SkulkLTXInpaintAudioReference", "SkulkLTXInpaintGuide"):
+            outputs = expected[name]
+            expected[name] = []
+            with pytest.raises(RuntimeError, match=f"exact {name}"):
+                server._await_extension_schema()
+            expected[name] = outputs

@@ -234,6 +234,8 @@ def _read_manifest(package: Path, wheel: ComfyExtensionWheel) -> ComfyExtensionM
         required.update(f"{_PACKAGE}/{name}" for name in ("union_control.py", "union_nodes.py"))
     if "motion_tracks" in manifest.features:
         required.update(f"{_PACKAGE}/{name}" for name in ("motion_geometry.py", "motion_tracks.py", "motion_nodes.py"))
+    if "inpaint" in manifest.features:
+        required.update(f"{_PACKAGE}/{name}" for name in ("editing.py", "editing_nodes.py", "inpaint_pixels.py", "inpaint_blend.py", "inpaint_audio.py", "inpaint_control.py", "inpaint_nodes.py"))
     if not required <= manifest.members.keys():
         raise ValueError("extension lacks its required implementation members")
     return manifest

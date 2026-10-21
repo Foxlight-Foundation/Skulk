@@ -158,3 +158,49 @@ def dilate_inpaint_mask(mask: Tensor, spatial_radius: int, *, maximum_bytes: int
         expanded = functional.max_pool2d(frame, kernel_size=spatial_radius * 2 + 1, stride=1, padding=spatial_radius) if spatial_radius else frame
         output[index].copy_((expanded[0, 0] > 0.5).float())
     return output
+
+
+def prepare_inpaint_stage(images: Tensor, mask: Tensor, spatial_radius: int, *, maximum_bytes: int, output_device: torch.device, check_cancelled: Callable[[], None]) -> tuple[Tensor, Tensor]:
+    """Area-resize each complete mask before dilation and trained green compositing.
+
+    Args:
+        images: Complete float32 RGB source at the actual stage resolution.
+        mask: Full-canvas float32 mask with one explicit frame per source frame.
+        spatial_radius: Native stage radius; the fixed graph uses 15 then 30.
+        maximum_bytes: Runner budget for retained inputs, outputs and workspace.
+        output_device: Managed intermediate device receiving green images and masks.
+        check_cancelled: Raise normal cancellation between bounded frame operations.
+
+    Returns:
+        Green-prepared source and binary stage mask, with no timeline truncation.
+
+    Raises:
+        ValueError: Pixels, geometry, timeline, radius or budget are invalid.
+        Exception: Cancellation propagates without changing source images or masks.
+    """
+    _validate_mask(mask)
+    if images.ndim != 4 or images.dtype != torch.float32 or images.shape[-1] != 3 or images.shape[0] != mask.shape[0] or min(images.shape[1:3]) < 1 or max(images.shape[1:3]) > 4096 or images.device != mask.device:
+        raise ValueError("Inpainting stage requires a complete aligned float32 source and mask")
+    if isinstance(spatial_radius, bool) or not 0 <= spatial_radius <= 300:
+        raise ValueError("Inpainting spatial dilation radius must lie between zero and 300")
+    frames, height, width, _ = images.shape
+    # Reserve the binary staging mask and a returned mask on a different
+    # intermediate device, even when torch can reuse the same-device tensor.
+    retained = (images.numel() * 2 + mask.numel() + frames * height * width * 2) * 4
+    workspace = (height * width + mask.shape[1] * mask.shape[2]) * 32 + 4096
+    _require_budget(retained, workspace, maximum_bytes)
+    for index in range(frames):
+        check_cancelled()
+        _validate_values(images[index])
+        _validate_values(mask[index])
+    check_cancelled()
+    stage_mask = torch.empty((frames, height, width), dtype=torch.float32, device=images.device)
+    for index in range(frames):
+        check_cancelled()
+        resized = functional.interpolate(mask[index:index + 1].unsqueeze(1), size=(height, width), mode="area")[:, 0]
+        dilated = dilate_inpaint_mask(resized, spatial_radius, maximum_bytes=maximum_bytes, check_cancelled=check_cancelled)
+        stage_mask[index].copy_(dilated[0])
+        del resized, dilated
+    green = green_inpaint_context(images, stage_mask, maximum_bytes=maximum_bytes, output_device=output_device, check_cancelled=check_cancelled)
+    check_cancelled()
+    return green, stage_mask.to(output_device)
