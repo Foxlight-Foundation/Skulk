@@ -60,6 +60,7 @@ from skulk.shared.types.video import (
     VideoPromptRelay,
     VideoReferenceFidelity,
     VideoSchedulerName,
+    VideoUnionControl,
     derivable_guides,
 )
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
@@ -884,6 +885,7 @@ class VideoCapabilitySection(BaseModel):
     automatic_duration_modes: list[VideoModeName] = Field(default_factory=list, description="Implemented modes permitted by the selected duration head.")
     audio_conditioning: bool = Field(default=False, description="A selected artifact and available engine can freeze prepared source audio in both sampling stages.")
     editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an issued owned engine build.")
+    union_control: bool = Field(default=False, description="Union IC-LoRA execution is available in an issued owned engine build.")
     prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an issued owned engine build.")
     guidance: VideoGuidance | None = Field(default=None, description="Default guided LTX base-stage scales; null for distilled or other families.")
     min_seconds: int = Field(description="Shortest clip length accepted.")
@@ -1083,6 +1085,7 @@ class VideoCapabilitySection(BaseModel):
             automatic_duration_modes=duration_modes,
             audio_conditioning=audio_conditioning,
             editing=editing,
+            union_control=ltx_available and config.union_control and "union_control" in available_features,
             prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in available_features,
             guidance=VideoGuidance() if ltx_dev else None,
             min_seconds=config.min_seconds,
@@ -2881,6 +2884,7 @@ class VideoCreateRequest(BaseModel):
     """Freeze one uploaded audio segment; multipart forms supply a JSON object."""
     editing: VideoEditing | None = None
     """Retake or extend source_video; seconds always describes total output length."""
+    union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None
     """Ordered local scene prompts; multipart forms supply a JSON object."""
     pipeline: VideoPipeline | None = None
@@ -2925,6 +2929,11 @@ class VideoCreateRequest(BaseModel):
     @classmethod
     def _parse_editing(cls, value: object) -> object:
         return VideoEditing.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("union_control", mode="before")
+    @classmethod
+    def _parse_union_control(cls, value: object) -> object:
+        return VideoUnionControl.model_validate_json(value) if isinstance(value, str) else value
 
     @field_validator("prompt_relay", mode="before")
     @classmethod
@@ -3031,6 +3040,7 @@ class VideoEngineInfo(BaseModel, frozen=True):
         default_factory=dict,
         description="Exact fixed adapter strengths applied by each family workflow stage.",
     )
+    stage_samplers: dict[Literal["base", "refine"], str] = Field(default_factory=dict, description="Actual stage-specific integrators; sampler remains the base-stage name.")
     guidance_video_rescale: float | None = Field(
         default=None, ge=0.0, le=1.0,
         description="Video guidance rescaling applied after the base-stage guidance branches.",
@@ -3049,6 +3059,7 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Source waveform offset used as frozen context."""
     editing: VideoEditing | None = None
     """Executed source operation and requested retake interval."""
+    union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None
     """Executed local prompts and relative timeline lengths."""
     video_shift: float | None

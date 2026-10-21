@@ -1097,6 +1097,33 @@ def test_ltx_audio_source_preserves_explicit_segment_controls(monkeypatch: pytes
     assert api._video_upload_inflight_bytes == 0
 
 
+def test_ltx_union_control_retains_its_typed_settings_and_media_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Union uses bounded structural ingress without inventing an H3 patch."""
+    from skulk.shared.models.model_cards import VideoCompanionConfig, VideoCompanionKind
+
+    api = _make_api(monkeypatch)
+    baseline = asyncio.run(load_fixture_card(ModelId("Lightricks/LTX-2.5-distilled-comfy-int8")))
+    assert baseline is not None and baseline.video is not None
+    adapter = VideoCompanionConfig(kind=VideoCompanionKind.Lora, name="union_control", path="loras/union.safetensors")
+    card = baseline.model_copy(update={"video": baseline.video.model_copy(update={"companions": (*baseline.video.companions, adapter)})})
+
+    async def load(_model_id: ModelId) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(load))
+    response = TestClient(api.app).post("/v1/videos", data={"model": str(card.model_id), "prompt": "fox", "seconds": "2", "size": "512x384", "union_control": '{"guide":"pose","preprocessed":true,"guide_strength":0.7}'}, files=[("control", ("guide.mp4", b"bounded guide bytes", "video/mp4"))])
+    assert response.status_code == 200, response.text
+    command = _sent_command(api)
+    assert command.task_params.union_control is not None
+    assert command.task_params.union_control.preprocessed
+    assert command.task_params.union_control.guide == "pose"
+    assert command.task_params.union_control.guide_strength == 0.7
+    assert command.task_params.references[0].role == "control"
+    assert command.task_params.references[0].kind == "video"
+    assert command.task_params.implied_mode() is VideoMode.TextToAudioVideo
+    assert api._video_upload_inflight_bytes == 0
+
+
 def test_ltx_retake_source_does_not_require_an_h3_controlnet(monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicit LTX timeline source has different semantics from an H3 mask."""
     api = _make_api(monkeypatch)

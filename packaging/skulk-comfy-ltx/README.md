@@ -17,6 +17,8 @@ checkout, request-time package resolution or model download occurs in this wheel
 
 Candidate source and tensor checks do not qualify a model or hardware class.
 
+Candidate `0.1.4` adds a validated Union IC-LoRA bridge. It requires the actual loaded adapter to declare reference downscale factor two and a complete aligned guide clip, then delegates to pinned native Comfy guide creation and crop semantics. Prepared guides bypass annotation; RGB inputs use explicitly selected native Comfy Canny, SDPose/RT-DETR or DA3 chains. The publication checker evaluates the actual packed bridge against hash-bound native guide/dilation/crop methods on bounded tensors. This source contract does not qualify model weights or hardware, and the candidate does not create offers before attested publication and descriptor registration.
+
 The issued `0.1.3` wheel adds `prompt_relay` with combined Gemma4 encoding and clone-scoped video text-attention routing. It measures actual text columns and surviving query coordinates, uses the fixed native-compatible soft Gaussian profile, and preserves global/register/guide access. Audio keeps the combined prompt without temporal routing. Every sampling stage receives its own restorable model patch. The 32 MiB query-chunk budget avoids a full-video bias; original projections, all-head norms, position handling, gates and GPU kernels remain delegated to Comfy. Forward-scoped state clears after success, failure or cancellation; every query chunk honors Comfy's normal interrupt flag.
 
 Its complete archive is 63,228 bytes, SHA256

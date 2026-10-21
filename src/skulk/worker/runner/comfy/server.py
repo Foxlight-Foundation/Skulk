@@ -293,6 +293,8 @@ class ComfyServer:
             required.append(("SkulkLTXAddGeneratedKeyframes", ["CONDITIONING", "CONDITIONING", "LATENT"]))
         if "prompt_relay" in manifest.features:
             required.extend([("SkulkLTXPromptRelayEncode", ["CONDITIONING"]), ("SkulkLTXApplyPromptRelay", ["MODEL"])])
+        if "union_control" in manifest.features:
+            required.append(("SkulkLTXUnionGuide", ["CONDITIONING", "CONDITIONING", "LATENT"]))
         for name, outputs in required:
             data = bytearray()
             with httpx.stream("GET", f"{self.base_url}/object_info/{name}", timeout=10.0) as response:

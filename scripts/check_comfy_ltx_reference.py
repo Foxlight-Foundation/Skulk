@@ -13,11 +13,14 @@ import json
 import math
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
+from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Protocol, cast, final
 
 import einops
 import torch
@@ -429,6 +432,101 @@ def _check_dfr_masks(source: Path) -> dict[str, object]:
     return dict(source_sha256=hashes, cases=cases, pass_all=True)
 
 
+class _ReferenceNodeOutput:
+    """Capture native node results without importing GPU process startup."""
+
+    def __init__(self, *values: object) -> None:
+        self.result = values
+
+
+class _ReferenceNode(Protocol):
+    """Explicit call boundary for dynamically evaluated upstream node classes."""
+
+    def execute(self, *arguments: object, **keywords: object) -> _ReferenceNodeOutput:
+        """Execute the selected native or packed bridge method."""
+        ...
+
+
+class _UnionReferenceVae:
+    """Bounded encoder stand-in; model weights are tested separately on GPU."""
+
+    downscale_index_formula: tuple[int, int, int] = (8, 32, 32)
+
+    def encode(self, pixels: Tensor) -> Tensor:
+        """Check the native half-grid resize and return deterministic latents."""
+        assert pixels.shape[1:3] == (32, 64)
+        return torch.full((1, 128, (pixels.shape[0] - 1) // 8 + 1, 1, 2), 3.0, dtype=pixels.dtype)
+
+
+class _UnionReferenceAdapter:
+    """Represent the native loader's metadata attachment protocol."""
+
+    def get_attachment(self, name: str) -> object:
+        """Return the actual reference scale from the selected adapter."""
+        assert name == "lora_metadata"
+        return {"reference_downscale_factor": "2"}
+
+
+def _check_union_reference(source: Path) -> dict[str, object]:
+    """Run pinned guide, dilation and crop methods on bounded reference tensors."""
+    from skulk_comfy_ltx.union_control import validate_union_inputs
+
+    hashes = {
+        "comfy_extras/nodes_lt.py": "01575b886e9abacd08c7ce39e7bde9ef7c7cc8f17063d726e2bf4a320a512d95",
+        "node_helpers.py": "22317a033cce556331bfedc5f4ab6c2833184fd2bbdf9496c9182a4973a7098a",
+        "comfy/utils.py": "f3ee59baf72f6910b7662224854e372c713ba3ad01c89739ba092e5ee22460e6",
+        "comfy/ldm/lightricks/symmetric_patchifier.py": "e2d9b8de7a5cc003e74eaba6d0b8303b596df80e59a431eda2d3593ec06c2633",
+    }
+    sources = {name: _reference_source(source, COMFY, name) for name in hashes}
+    if any(hashlib.sha256(data).hexdigest() != hashes[name] for name, data in sources.items()):
+        raise ValueError("Union source differs from its reviewed immutable guide contract")
+    namespace: dict[str, object] = {"torch": torch, "ABC": ABC, "abstractmethod": abstractmethod, "rearrange": einops.rearrange, "io": SimpleNamespace(ComfyNode=object, NodeOutput=_ReferenceNodeOutput)}
+    _load(namespace, sources["node_helpers.py"], "node_helpers.py", ("conditioning_set_values",))
+    namespace["node_helpers"] = SimpleNamespace(conditioning_set_values=namespace["conditioning_set_values"])
+    _load(namespace, sources["comfy/utils.py"], "comfy/utils.py", ("common_upscale",))
+    namespace["comfy"] = SimpleNamespace(utils=SimpleNamespace(common_upscale=namespace["common_upscale"]))
+    _load(namespace, sources["comfy/ldm/lightricks/symmetric_patchifier.py"], "symmetric_patchifier.py", ("latent_to_pixel_coords", "Patchifier", "SymmetricPatchifier"))
+    _load(namespace, sources["comfy_extras/nodes_lt.py"], "nodes_lt.py", ("conditioning_get_any_value", "get_noise_mask", "get_keyframe_idxs", "_append_guide_attention_entry", "LTXVAddGuide", "LTXVCropGuides", "GetICLoRAParameters"))
+    add = cast(_ReferenceNode, namespace["LTXVAddGuide"]).execute
+    crop = cast(_ReferenceNode, namespace["LTXVCropGuides"]).execute
+    parameters = cast(_ReferenceNode, namespace["GetICLoRAParameters"]).execute
+    # The selected wheel's own bridge delegates to the actual pinned native
+    # class here; no import initializes a GPU or loads model weights.
+    namespace.update(final=final, validate_union_inputs=validate_union_inputs)
+    _load(namespace, files("skulk_comfy_ltx").joinpath("union_nodes.py").read_bytes(), "candidate_union_nodes.py", ("SkulkLTXUnionGuide",))
+    bridge = cast(_ReferenceNode, namespace["SkulkLTXUnionGuide"]).execute
+    adapter = _UnionReferenceAdapter()
+    actual_parameters = parameters(adapter).result[0]
+    assert actual_parameters == {"reference_downscale_factor": 2}
+    cases: list[dict[str, object]] = []
+    for frames in (9, 25):
+        for dtype in (torch.float32, torch.bfloat16):
+            for strength in (0.0, 0.7, 1.0):
+                latent: dict[str, object] = {"samples": torch.full((1, 128, (frames - 1) // 8 + 1, 2, 4), 7.0, dtype=dtype)}
+                images = torch.zeros(frames, 64, 128, 3, dtype=dtype)
+                validate_union_inputs(adapter.get_attachment("lora_metadata"), latent, images, frames)
+                positive: list[list[object]] = [[torch.zeros(1, 2, 8), {}]]
+                negative: list[list[object]] = [[torch.ones(1, 2, 8), {}]]
+                result = add(positive, negative, _UnionReferenceVae(), latent, images, frame_idx=0, strength=strength, iclora_parameters=actual_parameters)
+                bridged = bridge(positive, negative, _UnionReferenceVae(), latent, images, adapter, strength, frames)
+                appended = cast("Mapping[str, Tensor]", result.result[2])
+                bridged_latent = cast("Mapping[str, Tensor]", bridged.result[2])
+                for key in ("samples", "noise_mask"):
+                    torch.testing.assert_close(appended[key], bridged_latent[key], rtol=0, atol=0)
+                samples = appended["samples"]
+                assert samples.shape[2] == 2 * ((frames - 1) // 8 + 1)
+                guide = samples[:, :, samples.shape[2] // 2:]
+                assert bool((guide[..., ::2, ::2] == 3).all())
+                assert bool((guide[..., 1::2, :] == 0).all())
+                restored = crop(result.result[0], result.result[1], appended)
+                restored_latent = cast("Mapping[str, Tensor]", restored.result[2])
+                torch.testing.assert_close(restored_latent["samples"], cast(Tensor, latent["samples"]), rtol=0, atol=0)
+                assert bool((restored_latent["noise_mask"] == 1).all())
+                assert "noise_mask" not in latent and positive[0][1] == {} and negative[0][1] == {}
+                cases.append(dict(frames=frames, dtype=str(dtype), guide_strength=strength, exact_crop=True, original_inputs_preserved=True))
+    return dict(source_sha256=hashes, cases=cases, actual_packed_bridge=True, encoder_standin_only=True, model_weights_used=False, native_reference_factor=2, pass_all=True)
+
+
 def main() -> None:
     """Verify the wheel math, actual packed boundary and cancellation; retain a receipt."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -553,7 +651,7 @@ def main() -> None:
         assert len(predict_calls) == 2
     else:
         raise AssertionError("cancellation did not escape the sampler")
-    report = dict(prompt_relay=check_relay_reference(args.comfy_source), dfr_masks=_check_dfr_masks(args.comfy_source), source_audio_clock=_check_source_audio_clock(args.comfy_source), temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
+    report = dict(union_control=_check_union_reference(args.comfy_source), prompt_relay=check_relay_reference(args.comfy_source), dfr_masks=_check_dfr_masks(args.comfy_source), source_audio_clock=_check_source_audio_clock(args.comfy_source), temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
     _ = args.output.write_text(json.dumps(report, indent=2) + "\n")
 
 
