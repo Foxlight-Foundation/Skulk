@@ -625,6 +625,7 @@ from skulk.shared.types.video import (
     VideoReferenceSpec,
     derivable_guides,
 )
+from skulk.shared.types.video_motion import MAX_MOTION_TRACK_BYTES, VideoMotionTrackData
 from skulk.shared.types.worker.downloads import (
     DownloadAttemptId,
     DownloadCompleted,
@@ -1306,6 +1307,7 @@ def _video_create_multipart_schema() -> dict[str, object]:
         **binary,
         "description": "Source clip for explicit LTX editing, or the clip behind an H3 mask.",
     }
+    properties["motion_track_data"] = {**binary, "description": "Bounded version-one application/json paths for explicit Motion Track controls; one position per path per output frame."}
     return {**schema, "title": "VideoCreateMultipart", "properties": properties}
 
 
@@ -3054,6 +3056,8 @@ class API:
                 "JSON `audio_conditioning`; source editing pairs `source_video` "
                 "with JSON `editing`, `prompt_relay` describes timed local scenes, and "
                 "JSON `union_control` steers an LTX base stage from one aligned control clip. "
+                "Motion Track pairs JSON `motion_tracks` settings with an opening image "
+                "and an `application/json` `motion_track_data` file. "
                 "These controls require the selected artifact and installed engine "
                 "to implement them; unavailable workflows are refused. Poll "
                 "`GET /v1/videos/{video_id}` "
@@ -12228,6 +12232,7 @@ class API:
                     editing=engine.editing,
                     prompt_relay=engine.prompt_relay,
                     union_control=engine.union_control,
+                    motion_tracks=engine.motion_tracks,
                     video_shift=engine.video_shift,
                     audio_shift=engine.audio_shift,
                     adapter=engine.adapter,
@@ -12379,6 +12384,7 @@ class API:
             ("control", "control"),
             ("mask", "mask"),
             ("source_video", "source"),
+            ("motion_track_data", "motion_tracks"),
         )
         recognized = {field_name for field_name, _role in fields}
         keyframe_times = _keyframe_times(form)
@@ -12405,7 +12411,7 @@ class API:
                     detail=(
                         f"{key} is not an attachment field; use input_reference, "
                         "first_frame, last_frame, keyframe, audio_source, reference, control, "
-                        "mask, or source_video"
+                        "mask, source_video, or motion_track_data"
                     ),
                 )
         try:
@@ -12443,8 +12449,8 @@ class API:
                         detail=f"at most {MAX_VIDEO_REFERENCES} attachments are accepted",
                     )
                 media_type = (upload.content_type or "").lower()
-                kind = media_type.split("/", 1)[0]
-                if kind not in ("image", "video", "audio"):
+                kind = "data" if field_name == "motion_track_data" and media_type == "application/json" else media_type.split("/", 1)[0]
+                if kind not in ("image", "video", "audio", "data"):
                     raise HTTPException(
                         status_code=400,
                         detail=(
@@ -12454,7 +12460,7 @@ class API:
                     )
                 if field_name == "audio_source" and kind != "audio":
                     raise HTTPException(status_code=400, detail="audio_source must declare an audio content type")
-                attachment = await self._read_video_attachment(upload, remaining)
+                attachment = await self._read_video_attachment(upload, min(remaining, MAX_MOTION_TRACK_BYTES) if role == "motion_tracks" else remaining)
                 if attachment.size_bytes == 0:
                     raise HTTPException(
                         status_code=400, detail=f"{field_name} is empty"
@@ -12564,6 +12570,7 @@ class API:
                 editing=create.editing,
                 prompt_relay=create.prompt_relay,
                 union_control=create.union_control,
+                motion_tracks=create.motion_tracks,
                 pipeline=create.pipeline,
                 decoder=create.decoder,
                 negative_prompt=create.negative_prompt,
@@ -12591,6 +12598,15 @@ class API:
             raise HTTPException(
                 status_code=400, detail=_validation_detail(error)
             ) from error
+        for spec, attachment in zip(references, attachments, strict=True):
+            if spec.role != "motion_tracks":
+                continue
+            try:
+                tracks = VideoMotionTrackData.model_validate_json(b"".join(attachment.chunks))
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail="motion_track_data must contain bounded version-1 trajectories on the complete output timeline") from error
+            if tracks.frame_count != card.video.frame_count_for_seconds(seconds):
+                raise HTTPException(status_code=400, detail="motion_track_data frame_count must equal the requested model timeline")
         embeddings = {
             companion.name
             for companion in card.video.companions
@@ -12612,6 +12628,7 @@ class API:
             and not (card.family == "ltx-2.5" and (
                 (spec.role == "source" and params.editing is not None)
                 or (spec.role == "control" and params.union_control is not None)
+                or (spec.role == "motion_tracks" and params.motion_tracks is not None)
             ))
         ]
         if steering:

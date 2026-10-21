@@ -363,6 +363,19 @@ def test_capture_notice_and_cli_without_recipe(
     assert isinstance(manifest_id, str)
     manifest = verify_store(installed.archive, manifest_id, installed.trust)
     assert manifest.members[0].intake.notice_paths == (".foxlight-capture-notice.txt",)
+    home = tmp_path / "recovered-with-generated-notice"
+    receiver.recover_home(
+        installed.archive, manifest_id, installed.trust, home, accept_owner_capture=True
+    )
+    archive = tmp_path / "recaptured"
+    archive.mkdir()
+    repeated = preserve_installed(
+        home / "model-store/example--base",
+        archive,
+        (load_key(installed.key, None),),
+    )
+    second = verify_store(archive, repeated, installed.trust)
+    assert second.members[0].intake.notice_paths == (".foxlight-capture-notice.txt",)
 
 
 def test_repository_code_acceptance_remains_separate(tmp_path: Path) -> None:

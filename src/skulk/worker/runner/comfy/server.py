@@ -293,7 +293,9 @@ class ComfyServer:
             required.append(("SkulkLTXAddGeneratedKeyframes", ["CONDITIONING", "CONDITIONING", "LATENT"]))
         if "prompt_relay" in manifest.features:
             required.extend([("SkulkLTXPromptRelayEncode", ["CONDITIONING"]), ("SkulkLTXApplyPromptRelay", ["MODEL"])])
-        if "union_control" in manifest.features:
+        if "motion_tracks" in manifest.features:
+            required.append(("SkulkLTXMotionTracks", ["IMAGE"]))
+        if {"union_control", "motion_tracks"} & set(manifest.features):
             required.append(("SkulkLTXUnionGuide", ["CONDITIONING", "CONDITIONING", "LATENT"]))
         for name, outputs in required:
             data = bytearray()

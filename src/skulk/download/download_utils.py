@@ -358,6 +358,19 @@ def _commit_replacement_model_dir(replacement_dir: Path, target_dir: Path) -> No
         )
 
 
+def _artifact_candidates(
+    root: Path, model_id: ModelId, source_revision: str | None
+) -> list[Path]:
+    from skulk.store.installed_cards import indexed_recovery_artifact
+
+    recovered = indexed_recovery_artifact(root, model_id)
+    result = [recovered] if recovered is not None else []
+    result.append(root / model_id.normalize())
+    if source_revision is not None:
+        result.append(root / f"{model_id.normalize()}--revision-{source_revision}")
+    return result
+
+
 def resolve_model_in_path(
     model_id: ModelId,
     source_revision: str | None = None,
@@ -393,13 +406,8 @@ def resolve_model_in_path(
     import skulk.shared.constants as _constants
 
     search_path: tuple[Path, ...] = _constants.SKULK_MODELS_PATH or ()
-    normalized = model_id.normalize()
-    candidate_names = [normalized]
-    if source_revision is not None:
-        candidate_names.append(f"{normalized}--revision-{source_revision}")
     for search_dir in search_path:
-        for candidate_name in candidate_names:
-            candidate = search_dir / candidate_name
+        for candidate in _artifact_candidates(search_dir, model_id, source_revision):
             load_candidate = (
                 candidate / artifact_root if artifact_root is not None else candidate
             )
@@ -447,14 +455,9 @@ def build_sidecar_path(
     """
     import skulk.shared.constants as _constants
 
-    normalized = model_id.normalize()
-    candidate_names = [normalized]
-    if source_revision is not None:
-        candidate_names.append(f"{normalized}--revision-{source_revision}")
     search_dirs = [*(_constants.SKULK_MODELS_PATH or ()), SKULK_MODELS_DIR]
     for search_dir in search_dirs:
-        for candidate_name in candidate_names:
-            directory = search_dir / candidate_name
+        for directory in _artifact_candidates(search_dir, model_id, source_revision):
             candidate = directory / sidecar_filename
             if candidate.exists() and _source_revision_matches(
                 directory, source_revision
@@ -478,14 +481,9 @@ def build_companion_model_path(
     """
     import skulk.shared.constants as _constants
 
-    normalized = model_id.normalize()
-    candidate_names = [normalized]
-    if source_revision is not None:
-        candidate_names.append(f"{normalized}--revision-{source_revision}")
     search_dirs = [*(_constants.SKULK_MODELS_PATH or ()), SKULK_MODELS_DIR]
     for search_dir in search_dirs:
-        for candidate_name in candidate_names:
-            candidate = search_dir / candidate_name
+        for candidate in _artifact_candidates(search_dir, model_id, source_revision):
             if (
                 (candidate / "config.json").is_file()
                 and (candidate / "model.safetensors").is_file()

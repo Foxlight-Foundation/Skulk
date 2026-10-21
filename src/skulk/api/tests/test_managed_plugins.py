@@ -288,6 +288,9 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
                 LifecycleOperation.model_validate_json(response.content).request
                 == activate
             )
+            # Source-trust reconfiguration may replace the idle controller.
+            # Observe the owner that actually accepted this HTTP operation.
+            controller = manager.controllers["managed.fixture"]
             assert controller.work is not None
             await controller.work
             assert controller.service is not None

@@ -64,6 +64,7 @@ from skulk.shared.types.video import (
     derivable_guides,
     derivable_union_guides,
 )
+from skulk.shared.types.video_motion import VideoMotionTracks
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.store.installed_cards import InstalledArtifactRole, InstalledCardRecord
@@ -886,6 +887,7 @@ class VideoCapabilitySection(BaseModel):
     automatic_duration_modes: list[VideoModeName] = Field(default_factory=list, description="Implemented modes permitted by the selected duration head.")
     audio_conditioning: bool = Field(default=False, description="A selected artifact and available engine can freeze prepared source audio in both sampling stages.")
     editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an issued owned engine build.")
+    motion_tracks: bool = Field(default=False, description="The selected pack and an issued engine implement Motion Track conditioning.")
     union_control: bool = Field(default=False, description="Union IC-LoRA execution is available in an issued owned engine build.")
     union_guides: list[VideoGuideSection] = Field(default_factory=list, description="Native preprocessing choices for explicit union_control requests; these do not authorize ordinary control_kind requests.")
     prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an issued owned engine build.")
@@ -1046,7 +1048,13 @@ class VideoCapabilitySection(BaseModel):
             pipeline_modes["dev_two_stage"] = dev_modes
             if any("hq_two_stage" in features for features in feature_builds.values()):
                 pipeline_modes["hq_two_stage"] = dev_modes
+        motion_modes: list[VideoModeName] = ["fl2va"] if prerequisites and config.transformer_variant == "distilled" and "comfy" in engines and "motion_tracks" in available_features and "fl2va" in companion_modes(VideoCompanionKind.Lora, "motion_tracks") else []
+        if motion_modes:
+            # Motion Track samples once at the final canvas; an unrelated
+            # spatial-upscaler dependency must not hide this executable path.
+            pipeline_modes["motion_tracks"] = motion_modes
         served_modes: list[VideoModeName] = distilled_modes or dev_modes
+        served_modes = list(dict.fromkeys([*served_modes, *motion_modes]))
         reference_mode: list[VideoModeName] = ["ref2va"] if prerequisites and VideoMode.ReferenceToAudioVideo in config.modes else []
         spatial_reference = any(item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(VideoMode.ReferenceToAudioVideo) for item in config.companions)
         audio_conditioning = bool(reference_mode) and spatial_reference and config.transformer_variant == "distilled" and config.audio_conditioning and ("comfy" in engines or "audio_conditioning" in native_features)
@@ -1056,6 +1064,8 @@ class VideoCapabilitySection(BaseModel):
         for operation in editing:
             pipeline_modes[operation] = reference_mode
         pipeline_defaults: dict[VideoPipeline, VideoPipelineDefaults] = {"hq_two_stage": VideoPipelineDefaults(base_steps=15, sampler="res2s", sampling_stage_steps=[15, 3], guidance=VideoGuidance(modality_scale=3.0))} if "hq_two_stage" in pipeline_modes else {}
+        if motion_modes:
+            pipeline_defaults["motion_tracks"] = VideoPipelineDefaults(base_steps=8, sampler="euler_ancestral", sampling_stage_steps=[8])
         for operation in editing:
             base_steps = 8 if config.transformer_variant == "distilled" else 30
             single_stage = operation == "retake" or config.transformer_variant == "dev"
@@ -1087,6 +1097,7 @@ class VideoCapabilitySection(BaseModel):
             automatic_duration_modes=duration_modes,
             audio_conditioning=audio_conditioning,
             editing=editing,
+            motion_tracks=bool(motion_modes),
             union_control=ltx_available and config.union_control and "union_control" in available_features,
             union_guides=_guide_sections(config, guide_contract="union") if ltx_available and config.union_control and "union_control" in available_features else [],
             prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in available_features,
@@ -2888,6 +2899,7 @@ class VideoCreateRequest(BaseModel):
     """Freeze one uploaded audio segment; multipart forms supply a JSON object."""
     editing: VideoEditing | None = None
     """Retake or extend source_video; seconds always describes total output length."""
+    motion_tracks: VideoMotionTracks | None = Field(default=None, description="Motion Track settings; path coordinates arrive in the application/json motion_track_data attachment.")
     union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None
     """Ordered local scene prompts; multipart forms supply a JSON object."""
@@ -2933,6 +2945,11 @@ class VideoCreateRequest(BaseModel):
     @classmethod
     def _parse_editing(cls, value: object) -> object:
         return VideoEditing.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("motion_tracks", mode="before")
+    @classmethod
+    def _parse_motion_tracks(cls, value: object) -> object:
+        return VideoMotionTracks.model_validate_json(value) if isinstance(value, str) else value
 
     @field_validator("union_control", mode="before")
     @classmethod
@@ -3063,6 +3080,7 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Source waveform offset used as frozen context."""
     editing: VideoEditing | None = None
     """Executed source operation and requested retake interval."""
+    motion_tracks: VideoMotionTracks | None = Field(default=None, description="Motion Track settings; path coordinates arrive in the application/json motion_track_data attachment.")
     union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None
     """Executed local prompts and relative timeline lengths."""

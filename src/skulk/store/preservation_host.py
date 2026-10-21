@@ -14,13 +14,18 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal, cast, final
 
+from foxlight_model_preservation.kits import inspect_kit
 from foxlight_model_preservation.models import TrustProfile
-from foxlight_model_preservation.signing import create_key
-from pydantic import BaseModel, ConfigDict, JsonValue
+from foxlight_model_preservation.signing import create_key, verify_manifest
+from foxlight_model_preservation.storage import manifest_path, read_metadata
+from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
+from skulk.shared.constants import SKULK_CUSTOM_MODEL_CARDS_DIR
 from skulk.store.installed_cards import read_installed_card
 from skulk.store.model_store import ModelStore
+from skulk.store.preservation import inspect_verified_manifest
 from skulk.store.preservation_contracts import (
+    KitUploadStatus,
     PreservationCopy,
     PreservationJob,
     PreservationLocation,
@@ -37,6 +42,8 @@ from skulk.store.preservation_journal import (
     safe_json,
     secure_directory,
 )
+from skulk.store.preservation_live import publish_recovered_home
+from skulk.store.preservation_uploads import KitUploads
 from skulk.store.preservation_worker import WorkerRequest
 
 
@@ -89,7 +96,9 @@ class PreservationHost:
     downloads and peer imports for a Preserve source lease.
     """
 
-    def __init__(self, store: ModelStore, root: Path) -> None:
+    def __init__(
+        self, store: ModelStore, root: Path, *, custom_cards: Path | None = None
+    ) -> None:
         self.store = store
         self.root = root
         self.journal = PreservationJournal(root)
@@ -99,6 +108,19 @@ class PreservationHost:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._closed = False
         self._setup_lock = asyncio.Lock()
+        self.uploads = KitUploads(root / "uploads", self.journal)
+        self.upload_lock = asyncio.Lock()
+        self.custom_cards = custom_cards or Path(str(SKULK_CUSTOM_MODEL_CARDS_DIR))
+
+    def kit_path(self, job_id: str) -> Path:
+        """Resolve only a completed owned kit artifact, never arbitrary host files."""
+        job = self.journal.job(job_id)
+        if job.kind != "kit_export" or job.state != "succeeded":
+            raise PreservationHostError("kit_not_ready")
+        path = self.root / "kits" / (job.job_id + ".foxkit")
+        if inspect_kit(path).manifest_id != job.expected_manifest_id:
+            raise PreservationHostError("kit_identity_changed")
+        return path
 
     def _location(self, location_id: str) -> _Location:
         value = self.journal.setting("location:" + location_id)
@@ -220,7 +242,16 @@ class PreservationHost:
             or len(self.journal.copies(offset + 4)) > 0
             or len(self.journal.jobs(offset + 4)) > 0
         )
+        uploads: list[KitUploadStatus] = []
+        for path in tuple(self.uploads.root.iterdir())[:8]:
+            try:
+                uploads.append(
+                    KitUploadStatus.model_validate(self.uploads.status(path.name))
+                )
+            except (ValueError, OSError):
+                continue
         return PreservationPage(
+            uploads=tuple(uploads),
             locations=locations,
             models=tuple(models),
             copies=copies,
@@ -232,11 +263,29 @@ class PreservationHost:
         """Bind a no-byte-write plan to the exact source generation and enrolled root."""
         if self._closed:
             raise PreservationHostError("preservation_host_closed")
-        if request.kind not in {"preserve", "check"}:
+        if request.kind not in {"preserve", "check", "kit_export", "recover"}:
             raise PreservationHostError("operation_not_available_in_this_host_version")
-        location = self._location(request.location_id)
-        async with self._archive(location):
-            pass
+        kit = None
+        if request.upload_id is not None:
+            if request.kind != "recover" or request.location_id != "kit":
+                raise PreservationHostError("kit_recovery_selection_required")
+            if not self.uploads.status(request.upload_id)["complete"]:
+                raise PreservationHostError("kit_upload_incomplete")
+            kit = inspect_kit(self.uploads.path(request.upload_id))
+            info = self.uploads.root.stat()
+            location = _Location(
+                location_id="kit",
+                label="Selected recovery kit",
+                path=self.uploads.root.absolute(),
+                device=info.st_dev,
+                inode=info.st_ino,
+                trust=kit.trust,
+                key_path=self.root / "unused",
+            )
+        else:
+            location = self._location(request.location_id)
+            async with self._archive(location):
+                pass
         payload: dict[str, JsonValue] = {
             "location": cast(dict[str, JsonValue], location.model_dump(mode="json"))
         }
@@ -263,6 +312,13 @@ class PreservationHost:
                     selection.source_bytes,
                     selection.artifacts,
                 )
+        elif kit is not None:
+            manifest, model_id, size = kit.manifest_id, "", kit.manifest.total_bytes
+            members = ()
+            payload["kit_path"] = str(
+                self.uploads.path(cast(str, request.upload_id)).absolute()
+            )
+            payload["manifest_id"] = manifest
         else:
             if copy_id is None:
                 raise PreservationHostError("selected_copy_required")
@@ -275,12 +331,28 @@ class PreservationHost:
                     copy.model_id,
                     copy.size_bytes,
                 )
-                members = (model_id,)
+                async with self._archive(location) as descriptor:
+                    metadata = verify_manifest(
+                        read_metadata(descriptor, manifest_path(manifest)),
+                        location.trust,
+                        manifest,
+                    )
+                members = tuple(
+                    model_id
+                    if member.member_id == metadata.root_member
+                    else f"{member.role}: {member.origin_repository}"
+                    for member in metadata.members
+                    if member.role != "notices"
+                )
             except PreservationHostError as error:
                 if error.code != "copy_not_found":
                     raise
                 previous = self.journal.job(copy_id)
                 prior_plan, _ = self.journal.plan(previous.plan_id)
+                if previous.kind != "preserve":
+                    raise PreservationHostError(
+                        "explicit_recovery_retry_required"
+                    ) from error
                 if (
                     previous.state != "interrupted"
                     or previous.expected_manifest_id is None
@@ -294,6 +366,102 @@ class PreservationHost:
                 )
                 members = prior_plan.members
             payload["manifest_id"] = manifest
+        inspection = None
+        if request.kind == "recover":
+            if manifest is None:
+                raise PreservationHostError("selected_copy_required")
+            if kit is not None:
+                signed = kit.manifest
+            else:
+                async with self._archive(location) as descriptor:
+                    signed = verify_manifest(
+                        read_metadata(descriptor, manifest_path(manifest)),
+                        location.trust,
+                        manifest,
+                    )
+            inspection, projected_card = inspect_verified_manifest(
+                signed, manifest, "historical" if request.historical else "fresh"
+            )
+            model_id, size, members = (
+                inspection.model_id,
+                inspection.total_bytes,
+                inspection.members,
+            )
+            conflicts = set(members) & {
+                entry.model_id for entry in self.store.list_models()
+            }
+            from skulk.store.preservation_closure import map_recovery_members
+            from skulk.store.preservation_compatibility import compatible_file_tables
+            from skulk.store.preservation_export import public_card_body
+
+            selections = {
+                item.model_id: item
+                for item in map_recovery_members(signed, projected_card)
+            }
+            matching: dict[str, JsonValue] = {}
+            for alias in conflicts:
+                entry = self.store.get_entry(alias)
+                existing = entry.installed_card if entry is not None else None
+                if (
+                    existing is not None
+                    and existing.preservation is not None
+                    and existing.preservation.manifest_id == manifest
+                ):
+                    continue
+                item = selections[alias]
+                if (
+                    existing is None
+                    or entry is None
+                    or item.role == "base"
+                    or existing.artifact_role != item.role
+                    or existing.owner_model_id != model_id
+                    or existing.artifact_repository != item.member.origin_repository
+                    or existing.artifact_revision != item.member.origin_revision
+                ):
+                    raise PreservationHostError("existing_model_conflict")
+                old = existing.model_card.model_copy(
+                    update={
+                        "source_repository": existing.model_card.artifact_repository
+                    }
+                )
+                new = projected_card.model_copy(
+                    update={"source_repository": projected_card.artifact_repository}
+                )
+                expected = {
+                    (file.path, file.size, file.sha256) for file in item.member.files
+                }
+                actual = {
+                    (file.path, file.size_bytes, file.sha256) for file in existing.files
+                }
+                if not compatible_file_tables(actual, expected) or public_card_body(
+                    old
+                ) != public_card_body(new):
+                    raise PreservationHostError("existing_model_conflict")
+                matching[alias] = hashlib.sha256(
+                    entry.model_dump_json().encode()
+                ).hexdigest()
+            payload["existing_companions"] = matching
+            from skulk.store.model_store import StoreReconciliationTombstones
+
+            tombstone_path = (
+                self.store.store_path / ".skulk" / "reconciliation-tombstones.json"
+            )
+            tombstones = (
+                StoreReconciliationTombstones.model_validate_json(
+                    tombstone_path.read_bytes()
+                ).deleted_aliases
+                if tombstone_path.exists()
+                else {}
+            )
+            payload["deletions"] = {
+                alias: stamp for alias, stamp in tombstones.items() if alias in members
+            }
+            if (
+                shutil.disk_usage(self.store.store_path).free
+                < size * (2 if kit is not None else 1) + 32 * 1024 * 1024
+            ):
+                raise PreservationHostError("insufficient_space")
+            payload["historical"] = request.historical
         if len(members) > 16:
             raise PreservationHostError("selection_needs_paged_review")
         expires = int(time.time()) + 600
@@ -318,6 +486,24 @@ class PreservationHost:
             members=members[:16],
             member_count=len(members),
             expires_at=expires,
+            existing_companions=tuple(
+                sorted(
+                    cast(dict[str, JsonValue], payload.get("existing_companions", {}))
+                )
+            ),
+            deleted_aliases=tuple(
+                sorted(cast(dict[str, JsonValue], payload.get("deletions", {})))
+            ),
+            upload_id=request.upload_id,
+            historical=request.historical,
+            publisher_key_ids=tuple(key.key_id for key in location.trust.keys),
+            requires_owner_acceptance=bool(kit)
+            or (inspection.requires_owner_acceptance if inspection else False),
+            requires_code_permission=inspection.requires_code_permission
+            if inspection
+            else False,
+            publication=inspection.publication if inspection else None,
+            file_coverage=inspection.file_coverage if inspection else None,
         )
         if (
             len(json.dumps(plan.model_dump(mode="json"), ensure_ascii=True).encode())
@@ -386,18 +572,30 @@ class PreservationHost:
                         }
                     )
                 )
-                if job.kind == "preserve":
-                    async with self.store.preservation_lease():
-                        await self._run(job_id)
+                if job.kind in {"preserve", "recover"}:
+                    async with self.store.preservation_lease(
+                        cancelled=lambda: self.journal.job(job_id).state == "cancelling"
+                    ):
+                        async with asyncio.timeout(86400):
+                            await self._run(job_id)
                 else:
-                    await self._run(job_id)
-        except Exception:
+                    async with asyncio.timeout(86400):
+                        await self._run(job_id)
+        except Exception as error:
             job = self.journal.job(job_id)
             if job.state in {"queued", "running", "cancelling"}:
                 self._finish(
                     job_id,
-                    "interrupted" if job.expected_manifest_id else "failed",
-                    "worker_unavailable",
+                    "interrupted"
+                    if job.expected_manifest_id
+                    else "cancelled"
+                    if job.state == "cancelling"
+                    else "failed",
+                    "cancelled"
+                    if job.state == "cancelling"
+                    else "deadline_exceeded"
+                    if isinstance(error, TimeoutError)
+                    else "worker_unavailable",
                 )
         finally:
             self._tasks.pop(job_id, None)
@@ -428,8 +626,14 @@ class PreservationHost:
             return
         plan, payload = self.journal.plan(job.plan_id)
         location = _Location.model_validate_json(safe_json(payload["location"]))
-        work = self.root / "work" / job_id
+        work = (
+            self.store.store_path / ".recovery-work"
+            if plan.kind == "recover"
+            else self.root / "work"
+        ) / job_id
         secure_directory(work)
+        if plan.kind == "kit_export":
+            secure_directory(self.root / "kits")
         async with self._archive(location) as descriptor:
             model_path = (
                 self._selected(plan.model_id) if plan.kind == "preserve" else None
@@ -438,8 +642,14 @@ class PreservationHost:
                 model_path, artifact_roots=(self.store.store_path,)
             ) != payload.get("generation_id"):
                 raise PreservationHostError("installed_selection_changed")
+            submitted_value = self.journal.setting("request:" + job_id)
+            submitted = PreservationStart.model_validate_json(
+                safe_json(submitted_value)
+            )
             request = WorkerRequest(
-                kind=cast(Literal["preserve", "check"], plan.kind),
+                kind=cast(
+                    Literal["preserve", "check", "kit_export", "recover"], plan.kind
+                ),
                 archive_descriptor=descriptor,
                 archive_device=location.device,
                 archive_inode=location.inode,
@@ -450,6 +660,18 @@ class PreservationHost:
                 key_path=location.key_path,
                 trust=location.trust,
                 manifest_id=plan.manifest_id,
+                output_path=(self.root / "kits" / (job_id + ".foxkit")).absolute()
+                if plan.kind == "kit_export"
+                else (work / "recovered").absolute()
+                if plan.kind == "recover"
+                else None,
+                kit_path=Path(cast(str, payload["kit_path"]))
+                if "kit_path" in payload
+                else None,
+                historical=plan.historical,
+                accept_owner_capture=submitted.accept_owner_capture,
+                allow_repository_code=submitted.allow_repository_code,
+                existing_companions=plan.existing_companions,
             )
             request_path = work / "request.json"
             fd = os.open(
@@ -474,8 +696,7 @@ class PreservationHost:
                 self.journal.job(job_id).state == "cancelling"
                 and process.stdin is not None
             ):
-                process.stdin.write(b"cancel\n")
-                await process.stdin.drain()
+                await self.cancel(job_id)
             result: _Observation | None = None
             error_code = "worker_interrupted"
             try:
@@ -529,16 +750,60 @@ class PreservationHost:
                 ):
                     expected = (
                         current.expected_manifest_id
-                        if plan.kind == "preserve"
+                        if plan.kind in {"preserve", "kit_export", "recover"}
                         else plan.manifest_id
                     )
                     if (
                         result.manifest_id != expected
                         or result.size_bytes is None
                         or result.member_count is None
-                        or result.audience != "private"
+                        or (result.audience != "private" and plan.kind != "recover")
                     ):
                         raise PreservationHostError("worker_outcome_mismatch")
+                    if plan.kind in {"kit_export", "recover"}:
+                        if current.state == "cancelling" and plan.kind == "recover":
+                            self._finish(
+                                job_id,
+                                "interrupted",
+                                "cancelled_before_store_publication",
+                            )
+                            return
+                        if plan.kind == "recover":
+                            await publish_recovered_home(
+                                self.store,
+                                work / "recovered",
+                                job_id,
+                                self.custom_cards,
+                                manifest_id=result.manifest_id,
+                                trust=location.trust,
+                                mode="historical" if plan.historical else "fresh",
+                                deletions=TypeAdapter(dict[str, str]).validate_python(
+                                    payload.get("deletions", {})
+                                ),
+                                existing_companions=TypeAdapter(
+                                    dict[str, str]
+                                ).validate_python(
+                                    payload.get("existing_companions", {})
+                                ),
+                            )
+                        now = int(time.time())
+                        self.journal.update_job(
+                            current.model_copy(
+                                update={
+                                    "state": "succeeded",
+                                    "stage": "complete",
+                                    "updated_at": now,
+                                    "finished_at": now,
+                                    "result": {
+                                        "manifest_id": result.manifest_id,
+                                        "restored": plan.kind == "recover",
+                                        "kit_ready": plan.kind == "kit_export",
+                                        "member_count": result.member_count,
+                                    },
+                                }
+                            )
+                        )
+                        return
                     now = int(time.time())
                     copy_id = hashlib.sha256(
                         (plan.location_id + result.manifest_id).encode()

@@ -1847,6 +1847,11 @@ class VideoCardConfig(CamelCaseModel):
     """Pinned adapters, patches, embeddings, and graph templates."""
 
     @property
+    def motion_tracks(self) -> bool:
+        """Whether the selected pack contains the named Motion Track adapter."""
+        return any(item.kind is VideoCompanionKind.Lora and item.name == "motion_tracks" for item in self.companions)
+
+    @property
     def union_control(self) -> bool:
         """Return whether a selected Union adapter provides structural guidance.
 

@@ -14,6 +14,7 @@ Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 JobKind = Literal[
     "preserve",
     "check",
+    "kit_export",
     "recover",
     "publish",
     "torrent_export",
@@ -103,6 +104,9 @@ class PreservationPlanRequest(PreservationContract):
     """Select exact opaque resources; callers never provide host/key paths."""
 
     kind: JobKind = Field(description="Requested bounded effect.")
+    upload_id: Handle | None = Field(
+        default=None, description="Completed local kit upload; no host path."
+    )
     location_id: Handle = Field(description="Enrolled source or destination archive.")
     model_id: str | None = Field(
         default=None, max_length=512, description="Installed base alias for Preserve."
@@ -149,6 +153,23 @@ class PreservationPlanRequest(PreservationContract):
 class PreservationPlan(PreservationContract):
     """Exact reviewed plan summary; large manifests and private paths stay on host."""
 
+    existing_companions: tuple[str, ...] = Field(
+        default=(),
+        max_length=16,
+        description="Reviewed matching owned companions; old files remain intact while the complete generation is prepared.",
+    )
+    upload_id: Handle | None = Field(
+        default=None, description="Exact selected kit upload, if any."
+    )
+    publisher_key_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=32,
+        description="Candidate capture keys; never registry authority.",
+    )
+    historical: bool = Field(
+        default=False,
+        description="Allow historical proof inspection; never current revocation assurance.",
+    )
     plan_id: Digest = Field(description="Immutable host plan identity.")
     kind: JobKind = Field(description="Reviewed effect kind.")
     model_id: str = Field(
@@ -235,6 +256,21 @@ class PreservationStart(PreservationContract):
 class PreservationJob(PreservationContract):
     """Canonical durable host status; cancellation intent is not proof of stop."""
 
+    restore_deleted: bool = Field(
+        default=False,
+        description="This receiver's confirmation of the exact reviewed removals.",
+    )
+    accept_owner_capture: bool = Field(
+        default=False,
+        description="This receiver's exact job consent, never an imported grant.",
+    )
+    allow_repository_code: bool = Field(
+        default=False,
+        description="This receiver's separate exact repository-code consent.",
+    )
+    location_id: Handle | None = Field(
+        default=None, description="Exact source location retained by this job's plan."
+    )
     job_id: Handle = Field(description="Durable host-owned job handle.")
     operation_id: OperationId = Field(
         description="Original caller idempotency identity."
@@ -294,9 +330,35 @@ class PreservationJob(PreservationContract):
 
 
 @final
+class KitUploadRequest(PreservationContract):
+    """Declare a bounded kit byte transfer before any ingress."""
+
+    size_bytes: int = Field(
+        ge=1, le=8 * 1024**4, description="Exact whole kit file length."
+    )
+
+
+@final
+class KitUploadStatus(PreservationContract):
+    """Durable ingress observation, not a signature or admission result."""
+
+    upload_id: Handle = Field(description="Opaque host-created ingress handle.")
+    size_bytes: int = Field(ge=1, description="Declared exact kit length.")
+    offset: int = Field(ge=0, description="Flushed bytes; resume at this offset.")
+    complete: bool = Field(
+        description="Transfer length reached; actual hashing occurs during restore."
+    )
+
+
+@final
 class PreservationPage(PreservationContract):
     """A bounded page of private host observations."""
 
+    uploads: tuple[KitUploadStatus, ...] = Field(
+        default=(),
+        max_length=8,
+        description="Retained resumable kit transfers; reads do not start work.",
+    )
     locations: tuple[PreservationLocation, ...] = Field(
         default=(), max_length=32, description="Enrolled roots on this page."
     )

@@ -63,6 +63,7 @@ from skulk.shared.types.video import (
     VideoOutputManifest,
     VideoStage,
 )
+from skulk.shared.types.video_motion import MAX_MOTION_TRACK_BYTES, VideoMotionTrackData
 from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import (
     RunnerConnected,
@@ -543,6 +544,14 @@ class Runner(ServedConcurrentDispatch):
         bindings = bind_references(params.references, SKULK_VIDEO_INPUT_DIR)
         output_dir = SKULK_VIDEO_OUTPUT_DIR / str(command_id)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if render.motion_tracks is not None:
+            source = next(binding for binding in bindings if binding.spec.role == "motion_tracks")
+            path = SKULK_VIDEO_INPUT_DIR / source.input_name
+            if path.stat().st_size > MAX_MOTION_TRACK_BYTES:
+                raise ValueError("Motion Track data exceeds the four-MiB bound")
+            tracks = VideoMotionTrackData.model_validate_json(path.read_bytes())
+            if tracks.frame_count != render.plan.frame_count:
+                raise ValueError("Motion Track data must match the complete requested frame count")
         if render.union_control is not None:
             source = next(binding for binding in bindings if binding.spec.role == "control")
             # Validate every frame before Comfy materializes the IMAGE batch.

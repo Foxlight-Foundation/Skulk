@@ -14,6 +14,7 @@ from skulk_comfy_ltx.editing_nodes import (
     SkulkLTXPreserveVideo,
 )
 from skulk_comfy_ltx.guidance import ModelPatcher, patch_guidance_rescale
+from skulk_comfy_ltx.motion_nodes import SkulkLTXMotionTracks
 from skulk_comfy_ltx.relay_nodes import (
     SkulkLTXApplyPromptRelay,
     SkulkLTXPromptRelayEncode,
@@ -57,4 +58,4 @@ class SkulkLTXExtension(ComfyExtension):
 
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         """Return the complete allowlisted node set without installing plugins."""
-        return [SkulkLTXAddGeneratedKeyframes, SkulkLTXRes2sSampler, SkulkLTXGuidanceRescale, SkulkLTXEditVideoLatent, SkulkLTXEditAudioLatent, SkulkLTXPreserveVideo, SkulkLTXPreserveAudio, SkulkLTXPromptRelayEncode, SkulkLTXApplyPromptRelay, SkulkLTXUnionGuide]
+        return [SkulkLTXAddGeneratedKeyframes, SkulkLTXRes2sSampler, SkulkLTXGuidanceRescale, SkulkLTXEditVideoLatent, SkulkLTXEditAudioLatent, SkulkLTXPreserveVideo, SkulkLTXPreserveAudio, SkulkLTXPromptRelayEncode, SkulkLTXApplyPromptRelay, SkulkLTXUnionGuide, SkulkLTXMotionTracks]

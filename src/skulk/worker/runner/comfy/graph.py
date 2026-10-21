@@ -53,6 +53,7 @@ from skulk.shared.types.video import (
     derivable_guides,
     derivable_union_guides,
 )
+from skulk.shared.types.video_motion import VideoMotionTracks
 from skulk.worker.runner.video_plan import RenderPlan, plan_render
 
 ComfyPrompt = dict[str, dict[str, Any]]
@@ -185,6 +186,7 @@ class ComfyModelFiles:
     refinement_lora: str | None = None
     refinement_strength: float = 1.0
     union_control_lora: str | None = None
+    motion_tracks_lora: str | None = None
 
 
 def _bundle_paths(card: ModelCard) -> tuple[PurePosixPath, ...]:
@@ -281,6 +283,7 @@ def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> Comfy
         diffusion_decoder=selected(VideoCompanionKind.VideoDecoder, "diffusion_decoder"),
         refinement_lora=selected(VideoCompanionKind.Lora, "distilled_refinement"),
         union_control_lora=selected(VideoCompanionKind.Lora, "union_control"),
+        motion_tracks_lora=selected(VideoCompanionKind.Lora, "motion_tracks"),
         refinement_strength=1.0 if refinement is None or refinement.strength is None else refinement.strength,
     )
 
@@ -542,6 +545,7 @@ class ComfyRenderPlan:
     editing: VideoEditing | None = None
     prompt_relay: VideoPromptRelay | None = None
     """Measured local scene prompts, enabled only by the exact placed extension."""
+    motion_tracks: VideoMotionTracks | None = None
     union_control: VideoUnionControl | None = None
     """Base-stage LTX IC-LoRA settings, never an H3 ControlNet patch."""
     union_guide: GuideChoice | None = None
@@ -566,6 +570,8 @@ class ComfyRenderPlan:
                 REFINEMENT_SIGMAS,
             )
 
+            if self.motion_tracks is not None:
+                return {"ltx_base_sampler": 8}
             if self.pipeline == "retake" or (self.pipeline == "extend" and self.transformer_variant == "dev"):
                 return {"ltx_base_sampler": self.plan.steps}
             stages = {
@@ -600,6 +606,7 @@ class ComfyRenderPlan:
             editing=self.editing,
             prompt_relay=self.prompt_relay,
             union_control=self.union_control,
+            motion_tracks=self.motion_tracks,
             video_shift=self.video_shift,
             audio_shift=self.audio_shift,
             adapter=None if self.adapter is None else self.adapter.name,
@@ -657,12 +664,17 @@ def plan_comfy_render(
 
             if "prompt_relay" not in extension_features_for_build(engine_build):
                 raise ValueError("LTX-2.5 timed scene prompts require their exact published extension on the placed renderer; update and reload the model")
+        if params.motion_tracks is not None:
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if "motion_tracks" not in extension_features_for_build(engine_build):
+                raise ValueError("Motion Track requires its exact published extension on the placed renderer; update and reload the model")
         if params.union_control is not None:
             from skulk.provisioning.comfy_extension import extension_features_for_build
 
             if "union_control" not in extension_features_for_build(engine_build):
                 raise ValueError("LTX Union requires its exact published extension on the placed renderer; update and reload the model")
-        pipeline = params.pipeline or (params.editing.operation if params.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        pipeline = params.pipeline or ("motion_tracks" if params.motion_tracks is not None else params.editing.operation if params.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
         if pipeline == "hq_two_stage":
             from skulk.provisioning.comfy_extension import extension_features_for_build
 
@@ -684,7 +696,7 @@ def plan_comfy_render(
             adapter=None if pipeline not in ("dev_two_stage", "hq_two_stage") or files.refinement_lora is None else AdapterChoice(name="distilled_refinement", file=files.refinement_lora, strength=0.5 if pipeline == "hq_two_stage" else files.refinement_strength, steps=None),
             video_shift=None,
             audio_shift=None,
-            sampler="res2s" if pipeline == "hq_two_stage" else "euler_ancestral" if pipeline == "distilled_two_stage" or (pipeline == "extend" and video.transformer_variant == "distilled") else "euler",
+            sampler="res2s" if pipeline == "hq_two_stage" else "euler_ancestral" if pipeline in ("distilled_two_stage", "motion_tracks") or (pipeline == "extend" and video.transformer_variant == "distilled") else "euler",
             scheduler="manual" if video.transformer_variant == "distilled" else "ltx",
             codec=params.codec or CODEC_DEFAULT,
             family=card.family,
@@ -699,6 +711,7 @@ def plan_comfy_render(
             editing=params.editing,
             prompt_relay=params.prompt_relay,
             union_control=params.union_control,
+            motion_tracks=params.motion_tracks,
             union_guide=select_guide(params, card, mode, kind=params.union_control.guide, guide_contract="union") if params.union_control is not None and not params.union_control.preprocessed else None,
             transformer_variant=video.transformer_variant,
             minimum_frames=video.frame_count_for_seconds(minimum) if params.duration == "auto" else None,
