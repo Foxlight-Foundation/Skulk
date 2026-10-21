@@ -622,8 +622,8 @@ wheels = [
 
 [[package]]
 name = "foxlight-model-preservation"
-version = "0.5.1"
-source = { git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=e46ee7bf9749b63669464efa74fbdb73b08837bc#e46ee7bf9749b63669464efa74fbdb73b08837bc" }
+version = "0.5.3"
+source = { git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=7f0f0fe318346bf44da0353a3215e411302001f8#7f0f0fe318346bf44da0353a3215e411302001f8" }
 dependencies = [
     { name = "cryptography" },
     { name = "jsonschema" },
@@ -1078,6 +1078,20 @@ wheels = [
 [package.optional-dependencies]
 antlr4-11-0 = [
     { name = "antlr4-python3-runtime" },
+]
+
+[[package]]
+name = "libtorrent"
+version = "2.0.14"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/b3/da5e940e74b77dad3dce7a168a454cefa5e9702ae32cbb715982563cb0ff/libtorrent-2.0.14-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:b92844662dc3fd57a2b7fccfed1a6efaffed46fd5317cde4da19af2bc591d491", size = 5879304, upload-time = "2026-08-10T17:25:57.471Z" },
+    { url = "https://files.pythonhosted.org/packages/01/94/bfd36d4967b90216b141f19349957a42e98bb78174c259a6b4e1ffb56491/libtorrent-2.0.14-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:f814afb0fec150f232149749c4853920c6dbe791e3324c26e33d42898a3978c3", size = 5865590, upload-time = "2026-08-10T17:25:59.936Z" },
+    { url = "https://files.pythonhosted.org/packages/23/2b/45a32166b6f13e2d874f4914c0916c8a91055512cdd7dc09f92d79c86156/libtorrent-2.0.14-cp313-cp313-macosx_15_0_x86_64.whl", hash = "sha256:2cddbf3f2c8a83c76b6c58ffd7883def0372b0885877f003d51f08d707c7ed10", size = 5768628, upload-time = "2026-08-10T17:26:01.678Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/3e/f5719027d6f75588dee2c07e7977c74762c8299ac6abff45222ceae3994c/libtorrent-2.0.14-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:02667cda693df5529eb201311f780b808ebfcd61f40cf770f2aeabf6945bd1df", size = 6503513, upload-time = "2026-08-10T17:26:03.234Z" },
+    { url = "https://files.pythonhosted.org/packages/f7/58/902deca35349ea82c2dff1a8c19467289d847d1edb6b382f4403b524e524/libtorrent-2.0.14-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b3ebb640e74b77893661c3d4df791f48f955ed34b1570bf7d85e218bc25d3ff4", size = 6253970, upload-time = "2026-08-10T17:26:05.447Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/f8/daa8d6017abf3575d1d56da62896bf5ce6d4825940cb968882c3245315fb/libtorrent-2.0.14-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:291529c78f297421a5c679e8a0c9015b99b97ccea6aefad00795eb05a3fad395", size = 12162801, upload-time = "2026-08-10T17:26:07.598Z" },
+    { url = "https://files.pythonhosted.org/packages/26/0f/29b7dfe2c1e6b9b1f2fbcef9a22020986a48ce1bd98e05b8510e6aa8f1a3/libtorrent-2.0.14-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:1cae6ea2a5b5f02464f5c27d249e505e9739cae71e7c3b57eca42367574d1b89", size = 12210388, upload-time = "2026-08-10T17:26:10.052Z" },
 ]
 
 [[package]]
@@ -2805,6 +2819,7 @@ dependencies = [
     { name = "hypercorn" },
     { name = "imageio-ffmpeg", marker = "sys_platform != 'linux'" },
     { name = "jsonschema" },
+    { name = "libtorrent", marker = "python_full_version < '3.14'" },
     { name = "loguru" },
     { name = "mflux", marker = "sys_platform != 'linux'" },
     { name = "mlx" },
@@ -2866,12 +2881,13 @@ requires-dist = [
     { name = "ddgs", specifier = ">=9.6.1" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "filelock", specifier = ">=3.18.0" },
-    { name = "foxlight-model-preservation", git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=e46ee7bf9749b63669464efa74fbdb73b08837bc" },
+    { name = "foxlight-model-preservation", git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=7f0f0fe318346bf44da0353a3215e411302001f8" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=1.8.0" },
     { name = "hypercorn", specifier = ">=0.18.0" },
     { name = "imageio-ffmpeg", marker = "sys_platform == 'darwin'", specifier = ">=0.6.0" },
     { name = "jsonschema", specifier = ">=4.26.0" },
+    { name = "libtorrent", marker = "python_full_version < '3.14'", specifier = "==2.0.14" },
     { name = "llama-cpp-python", marker = "extra == 'llama-cpp'", specifier = ">=0.3.3" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mflux", marker = "sys_platform == 'darwin'", specifier = "==0.22.0" },

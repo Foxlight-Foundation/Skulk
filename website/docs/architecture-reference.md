@@ -2065,6 +2065,19 @@ local recovery index before legacy directory names. They verify the indexed
 installed record without constructing a second store owner; hidden unindexed
 staging never becomes a loader candidate.
 
+### Preservation public data workers
+
+- `store/preservation_sharing.py`: public-only exact bundle import, HTTP mirror,
+  native seed-only BitTorrent; no runtime-card parsing or model admission.
+- `PreservationHost`: one byte queue and two distinct serving slots; explicit
+  immutable consent/limits, owned subprocess lifecycle, restart stops sharing.
+- `SharingPolicy`/`SharingStatus`: loopback by default; public discovery requires
+  explicit participation; aggregate accounting only, no peer/request history.
+- Operator artifacts: `/preservation/torrents/{job_id}` and
+  `/preservation/public-copies/{copy_id}/trust`; no arbitrary host paths.
+- HTTP accounting reserves full response allowance; torrent accounting observes
+  payload and may overshoot. No network-overhead or anonymity guarantee.
+
 
 ### Comfy LTX detailing
 
