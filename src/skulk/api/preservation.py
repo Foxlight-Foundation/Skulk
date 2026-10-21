@@ -19,6 +19,7 @@ from skulk.store.preservation_contracts import (
     PreservationPlan,
     PreservationPlanRequest,
     PreservationStart,
+    RecoveryCleanup,
 )
 from skulk.store.preservation_host import PreservationHost
 from skulk.store.preservation_journal import PreservationHostError
@@ -157,6 +158,19 @@ def create_preservation_router(
             raise refusal(error) from error
 
     @router.post(
+        "/jobs/{job_id}/reclaim",
+        response_model=RecoveryCleanup,
+        summary="Reclaim stopped recovery temporary files",
+        description="Explicitly inspect one stopped recovery job under the live store lease. Authenticate its known generation against the retained signed manifest and require a readable canonical index before removing unreferenced files. Indexed models, saved kits, cards and permissions remain intact. Interrupted cleanup is safely retryable; this never resumes or admits a model.",
+    )
+    async def reclaim(request: Request, job_id: Handle) -> RecoveryCleanup:
+        owner = await host(request)
+        try:
+            return await owner.reclaim_recovery(job_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
         "/kit-uploads",
         response_model=KitUploadStatus,
         summary="Reserve a recovery kit upload",
@@ -285,6 +299,7 @@ def create_preservation_router(
         start,
         observe,
         cancel,
+        reclaim,
         create_upload,
         upload_status,
         upload_chunk,
