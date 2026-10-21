@@ -20,6 +20,7 @@ JobKind = Literal[
     "torrent_export",
     "http_share",
     "torrent_share",
+    "mirror_import",
 ]
 JobState = Literal[
     "queued", "running", "cancelling", "succeeded", "failed", "cancelled", "interrupted"
@@ -81,6 +82,11 @@ class PreservationCopy(PreservationContract):
     """A completed copy and independent current availability/check observations."""
 
     copy_id: Handle = Field(description="Opaque retained-copy handle.")
+    publisher_key_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=32,
+        description="Exact public-copy signature fingerprints; not registry authority.",
+    )
     model_id: str = Field(
         min_length=1, max_length=512, description="Exact selected model alias."
     )
@@ -104,6 +110,21 @@ class PreservationPlanRequest(PreservationContract):
     """Select exact opaque resources; callers never provide host/key paths."""
 
     kind: JobKind = Field(description="Requested bounded effect.")
+    public_network: bool = Field(
+        default=False,
+        description="Explicit network binding and public BitTorrent discovery; false is a loopback preview.",
+    )
+    listen_port: int = Field(
+        default=0,
+        ge=0,
+        le=65535,
+        description="Reviewed listener port; zero asks the OS for an available port.",
+    )
+    advertised_url: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="Operator-supplied public HTTP mirror base; never fetched or asserted reachable.",
+    )
     upload_id: Handle | None = Field(
         default=None, description="Completed local kit upload; no host path."
     )
@@ -150,6 +171,69 @@ class PreservationPlanRequest(PreservationContract):
 
 
 @final
+class SharingPolicy(PreservationContract):
+    """Exact operator-reviewed listener, discovery and session allowances."""
+
+    public_network: bool = Field(
+        description="Network binding/public peer discovery; false is loopback only."
+    )
+    listen_port: int = Field(
+        ge=0, le=65535, description="Requested port, zero for an OS-selected port."
+    )
+    duration_seconds: int = Field(
+        ge=1, le=86400, description="Maximum owned serving-session lifetime."
+    )
+    upload_limit_bytes: int = Field(
+        ge=1,
+        le=2**53 - 1,
+        description="HTTP response allowance or observed torrent payload stop threshold.",
+    )
+    upload_rate_bytes: int = Field(
+        ge=1024,
+        le=104857600,
+        description="Native BitTorrent payload-rate limit; not HTTP rate shaping.",
+    )
+    advertised_url: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="User-supplied mirror hint, not verified reachability.",
+    )
+
+
+@final
+class SharingStatus(PreservationContract):
+    """Safe owned session observations without peer addresses or request history."""
+
+    metainfo_sha256: Digest | None = Field(
+        default=None,
+        description="Retained standard torrent metadata hash, available before seeding.",
+    )
+
+    ready: bool = Field(
+        default=False, description="Observed owned listener/seed readiness."
+    )
+    listen_port: int = Field(
+        default=0,
+        ge=0,
+        le=65535,
+        description="Actual owned listener port; zero after stop.",
+    )
+    charged_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="Conservative HTTP reservation or observed torrent payload bytes.",
+    )
+    accounting: Literal["reserved-response", "observed-torrent-payload"] = Field(
+        description="Exact meaning of charged_bytes; neither includes network overhead."
+    )
+    connected_peers: int = Field(
+        default=0,
+        ge=0,
+        description="Aggregate BitTorrent peer count; no identities retained.",
+    )
+
+
+@final
 class PreservationPlan(PreservationContract):
     """Exact reviewed plan summary; large manifests and private paths stay on host."""
 
@@ -157,6 +241,10 @@ class PreservationPlan(PreservationContract):
         default=(),
         max_length=16,
         description="Reviewed matching owned companions; old files remain intact while the complete generation is prepared.",
+    )
+    sharing: SharingPolicy | None = Field(
+        default=None,
+        description="Exact reviewed sharing controls, never inherited from a kit.",
     )
     upload_id: Handle | None = Field(
         default=None, description="Exact selected kit upload, if any."
@@ -270,9 +358,18 @@ class RecoveryCleanup(PreservationContract):
 class PreservationJob(PreservationContract):
     """Canonical durable host status; cancellation intent is not proof of stop."""
 
+    sharing_policy: SharingPolicy | None = Field(
+        default=None,
+        description="Immutable reviewed session exposure and allowances, retained after plan expiry.",
+    )
+
     restore_deleted: bool = Field(
         default=False,
         description="This receiver's confirmation of the exact reviewed removals.",
+    )
+    sharing: SharingStatus | None = Field(
+        default=None,
+        description="Latest safe owned serving observation; not a public availability guarantee.",
     )
     accept_owner_capture: bool = Field(
         default=False,
@@ -372,6 +469,15 @@ class PreservationPage(PreservationContract):
         default=(),
         max_length=8,
         description="Retained resumable kit transfers; reads do not start work.",
+    )
+    bittorrent_available: bool = Field(
+        default=False,
+        description="Native transport module is installed; execution still verifies its binding before participation.",
+    )
+    public_copies: tuple[PreservationCopy, ...] = Field(
+        default=(),
+        max_length=16,
+        description="Explicitly imported signed public bundles, separate from private captures.",
     )
     locations: tuple[PreservationLocation, ...] = Field(
         default=(), max_length=32, description="Enrolled roots on this page."

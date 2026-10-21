@@ -2107,6 +2107,12 @@ local recovery index before legacy directory names. They verify the indexed
 installed record without constructing a second store owner; hidden unindexed
 staging never becomes a loader candidate.
 
+Public preservation mirroring uses separate public archives and owned data-only
+workers (`preservation_sharing.py`), without runtime-card admission. Two serving
+slots are separate from the ordinary byte queue. HTTP/BitTorrent sessions require
+explicit reviewed participation, stop on Core loss/restart, and never auto-replay.
+See both architecture documents and the API guide for limits and artifact routes.
+
 
 ### Comfy LTX detailing
 

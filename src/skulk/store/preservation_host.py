@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
+import stat
 import sys
 import time
 from collections.abc import AsyncIterator
@@ -35,6 +37,8 @@ from skulk.store.preservation_contracts import (
     PreservationPlanRequest,
     PreservationStart,
     RecoveryCleanup,
+    SharingPolicy,
+    SharingStatus,
 )
 from skulk.store.preservation_export import plan_preservation, preservation_generation
 from skulk.store.preservation_journal import (
@@ -53,6 +57,7 @@ class _Location(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     location_id: str
+    purpose: Literal["private", "public"] = "private"
     label: str
     path: Path
     device: int
@@ -65,7 +70,8 @@ class _Observation(BaseModel):
     """Bounded safe protocol from an exclusively owned known byte worker."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    event: Literal["progress", "expected", "result", "error"]
+    event: Literal["progress", "expected", "result", "error", "sharing"]
+    sharing: SharingStatus | None = None
     stage: str | None = None
     bytes_hashed: int = 0
     bytes_copied: int = 0
@@ -105,6 +111,7 @@ class PreservationHost:
         self.journal = PreservationJournal(root)
         self.journal.interrupt_active()
         self._queue = asyncio.Lock()
+        self._serving = asyncio.Semaphore(2)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._closed = False
@@ -122,6 +129,56 @@ class PreservationHost:
         if inspect_kit(path).manifest_id != job.expected_manifest_id:
             raise PreservationHostError("kit_identity_changed")
         return path
+
+    def torrent_path(self, job_id: str) -> Path:
+        """Return the hash-checked standard metainfo for one owned torrent job.
+
+        Args:
+            job_id: Exact retained job handle; never a host filename.
+
+        Returns:
+            Its regular, bounded metadata file after comparing the worker receipt.
+
+        This reads at most 8 MiB, starts no network, and exposes no signing key.
+        """
+        job = self.journal.job(job_id)
+        if (
+            job.kind != "torrent_share"
+            or job.sharing is None
+            or job.sharing.metainfo_sha256 is None
+        ):
+            raise PreservationHostError("torrent_not_ready")
+        path = self.root / "torrents" / (job.job_id + ".torrent")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or not 0 < info.st_size <= 8 * 1024 * 1024
+            ):
+                raise PreservationHostError("torrent_metadata_changed")
+            encoded = stream.read(8 * 1024 * 1024 + 1)
+        if hashlib.sha256(encoded).hexdigest() != job.sharing.metainfo_sha256:
+            raise PreservationHostError("torrent_metadata_changed")
+        return path
+
+    def public_trust(self, copy_id: str) -> TrustProfile:
+        """Return accepted public verification keys for one retained public copy.
+
+        Args:
+            copy_id: Exact public-copy handle selected by the operator.
+
+        Returns:
+            Its immutable public trust profile, without private key material.
+
+        This grants no registry authority, performs no network IO and does not
+        admit or execute any model. Recipients must authenticate keys independently.
+        """
+        copy = self.journal.copy(copy_id)
+        location = self._location(copy.location_id)
+        if copy.audience != "public" or location.purpose != "public":
+            raise PreservationHostError("public_copy_required")
+        return location.trust
 
     def _location(self, location_id: str) -> _Location:
         value = self.journal.setting("location:" + location_id)
@@ -190,7 +247,7 @@ class PreservationHost:
         return PreservationLocation(
             location_id=location.location_id,
             label=location.label,
-            purpose="private",
+            purpose=location.purpose,
             reachable=available,
             free_bytes=free,
             publisher_key_id=location.trust.keys[0].key_id,
@@ -252,10 +309,12 @@ class PreservationHost:
             except (ValueError, OSError):
                 continue
         return PreservationPage(
+            bittorrent_available=importlib.util.find_spec("libtorrent") is not None,
             uploads=tuple(uploads),
             locations=locations,
             models=tuple(models),
-            copies=copies,
+            copies=tuple(copy for copy in copies if copy.audience == "private"),
+            public_copies=tuple(copy for copy in copies if copy.audience == "public"),
             jobs=jobs,
             next_offset=offset + 4 if more else None,
         )
@@ -264,6 +323,8 @@ class PreservationHost:
         """Bind a no-byte-write plan to the exact source generation and enrolled root."""
         if self._closed:
             raise PreservationHostError("preservation_host_closed")
+        if request.kind in {"mirror_import", "http_share", "torrent_share"}:
+            return await self._sharing_plan(request)
         if request.kind not in {"preserve", "check", "kit_export", "recover"}:
             raise PreservationHostError("operation_not_available_in_this_host_version")
         kit = None
@@ -285,6 +346,8 @@ class PreservationHost:
             )
         else:
             location = self._location(request.location_id)
+            if request.kind == "preserve" and location.purpose != "private":
+                raise PreservationHostError("private_archive_required")
             async with self._archive(location):
                 pass
         payload: dict[str, JsonValue] = {
@@ -514,6 +577,135 @@ class PreservationHost:
         self.journal.add_plan(plan, payload)
         return plan
 
+    async def _sharing_plan(self, request: PreservationPlanRequest) -> PreservationPlan:
+        """Bind public-copy import or serving without parsing a runtime card."""
+        from urllib.parse import urlsplit
+
+        from foxlight_model_preservation.models import Manifest
+
+        payload: dict[str, JsonValue] = {}
+        policy = None
+        if request.kind == "mirror_import":
+            if request.upload_id is None or request.location_id != "public-kit":
+                raise PreservationHostError("public_kit_selection_required")
+            if not self.uploads.status(request.upload_id)["complete"]:
+                raise PreservationHostError("kit_upload_incomplete")
+            kit = inspect_kit(self.uploads.path(request.upload_id))
+            manifest: Manifest = kit.manifest
+            identity = kit.manifest_id
+            info = self.uploads.root.stat()
+            location = _Location(
+                location_id="public-kit",
+                purpose="public",
+                label="Selected public bundle",
+                path=self.uploads.root.absolute(),
+                device=info.st_dev,
+                inode=info.st_ino,
+                trust=kit.trust,
+                key_path=self.root / "unused-public-key",
+            )
+            token = hashlib.sha256(
+                (identity + safe_json(kit.trust.model_dump(mode="json"))).encode()
+            ).hexdigest()
+            destination_id = "public-" + token
+            destination = self.root / "public-copies" / token
+            payload.update(
+                {
+                    "kit_path": str(self.uploads.path(request.upload_id).absolute()),
+                    "destination": str(destination.absolute()),
+                    "destination_id": destination_id,
+                }
+            )
+            if (
+                not destination.exists()
+                and shutil.disk_usage(self.root).free
+                < manifest.total_bytes + 32 * 1024 * 1024
+            ):
+                raise PreservationHostError("insufficient_space")
+        else:
+            if (
+                request.kind == "torrent_share"
+                and importlib.util.find_spec("libtorrent") is None
+            ):
+                raise PreservationHostError("bittorrent_unavailable")
+            if request.copy_id is None:
+                raise PreservationHostError("public_copy_required")
+            copy = self.journal.copy(request.copy_id)
+            if copy.audience != "public" or copy.location_id != request.location_id:
+                raise PreservationHostError("public_copy_required")
+            location = self._location(copy.location_id)
+            if location.purpose != "public":
+                raise PreservationHostError("public_copy_required")
+            identity = copy.manifest_id
+            async with self._archive(location) as descriptor:
+                manifest = verify_manifest(
+                    read_metadata(descriptor, manifest_path(identity)),
+                    location.trust,
+                    identity,
+                )
+            destination_id = None
+            if (
+                request.kind == "torrent_share"
+                and shutil.disk_usage(self.root).free
+                < manifest.total_bytes + 32 * 1024 * 1024
+            ):
+                raise PreservationHostError("insufficient_space")
+            if request.advertised_url is not None:
+                parsed = urlsplit(request.advertised_url)
+                if (
+                    parsed.scheme not in {"http", "https"}
+                    or not parsed.hostname
+                    or parsed.username
+                    or parsed.password
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise PreservationHostError("invalid_mirror_hint")
+            policy = SharingPolicy(
+                public_network=request.public_network,
+                listen_port=request.listen_port,
+                duration_seconds=request.duration_seconds,
+                upload_limit_bytes=request.upload_limit_bytes,
+                upload_rate_bytes=request.upload_rate_bytes,
+                advertised_url=request.advertised_url,
+            )
+        if any(member.intake.audience != "public" for member in manifest.members):
+            raise PreservationHostError("public_bundle_required")
+        expires = int(time.time()) + 600
+        payload["location"] = cast(
+            dict[str, JsonValue], location.model_dump(mode="json")
+        )
+        payload["manifest_id"] = identity
+        plan_id = hashlib.sha256(
+            safe_json(
+                {
+                    "request": request.model_dump(mode="json"),
+                    "payload": payload,
+                    "expires": expires,
+                }
+            ).encode()
+        ).hexdigest()
+        plan = PreservationPlan(
+            plan_id=plan_id,
+            kind=request.kind,
+            model_id=manifest.name,
+            location_id=request.location_id,
+            destination_id=destination_id,
+            copy_id=request.copy_id,
+            manifest_id=identity,
+            size_bytes=manifest.total_bytes,
+            members=tuple(member.origin_repository for member in manifest.members[:16]),
+            member_count=len(manifest.members),
+            expires_at=expires,
+            upload_id=request.upload_id,
+            sharing=policy,
+            publisher_key_ids=tuple(key.key_id for key in location.trust.keys),
+            requires_owner_acceptance=request.kind == "mirror_import",
+            publication="public-publisher-declaration",
+        )
+        self.journal.add_plan(plan, payload)
+        return plan
+
     def start(self, request: PreservationStart) -> PreservationJob:
         """Reserve exact idempotency and return promptly; the host owns completion."""
         if self._closed:
@@ -608,7 +800,9 @@ class PreservationHost:
 
     async def _execute(self, job_id: str) -> None:
         try:
-            async with self._queue:
+            serving = self.journal.job(job_id).kind in {"http_share", "torrent_share"}
+            gate = self._serving if serving else self._queue
+            async with gate:
                 job = self.journal.job(job_id)
                 if job.state == "cancelling":
                     self._finish(job_id, "cancelled", "cancelled")
@@ -636,7 +830,12 @@ class PreservationHost:
             if job.state in {"queued", "running", "cancelling"}:
                 self._finish(
                     job_id,
-                    "interrupted"
+                    "cancelled"
+                    if job.kind in {"http_share", "torrent_share"}
+                    and job.state == "cancelling"
+                    else "failed"
+                    if job.kind in {"http_share", "torrent_share"}
+                    else "interrupted"
                     if job.expected_manifest_id
                     else "cancelled"
                     if job.state == "cancelling"
@@ -657,6 +856,11 @@ class PreservationHost:
         code: str,
     ) -> None:
         job = self.journal.job(job_id)
+        sharing = job.sharing
+        if sharing is not None:
+            sharing = sharing.model_copy(
+                update={"ready": False, "listen_port": 0, "connected_peers": 0}
+            )
         self.journal.update_job(
             job.model_copy(
                 update={
@@ -665,6 +869,7 @@ class PreservationHost:
                     "error_code": code,
                     "updated_at": int(time.time()),
                     "finished_at": int(time.time()),
+                    "sharing": sharing,
                 }
             )
         )
@@ -682,8 +887,12 @@ class PreservationHost:
             else self.root / "work"
         ) / job_id
         secure_directory(work)
+        if plan.kind == "mirror_import":
+            secure_directory(self.root / "public-copies")
         if plan.kind == "kit_export":
             secure_directory(self.root / "kits")
+        if plan.kind == "torrent_share":
+            secure_directory(self.root / "torrents")
         async with self._archive(location) as descriptor:
             model_path = (
                 self._selected(plan.model_id) if plan.kind == "preserve" else None
@@ -698,7 +907,16 @@ class PreservationHost:
             )
             request = WorkerRequest(
                 kind=cast(
-                    Literal["preserve", "check", "kit_export", "recover"], plan.kind
+                    Literal[
+                        "preserve",
+                        "check",
+                        "kit_export",
+                        "recover",
+                        "mirror_import",
+                        "http_share",
+                        "torrent_share",
+                    ],
+                    plan.kind,
                 ),
                 archive_descriptor=descriptor,
                 archive_device=location.device,
@@ -714,6 +932,8 @@ class PreservationHost:
                 if plan.kind == "kit_export"
                 else (work / "recovered").absolute()
                 if plan.kind == "recover"
+                else Path(cast(str, payload["destination"]))
+                if plan.kind == "mirror_import"
                 else None,
                 kit_path=Path(cast(str, payload["kit_path"]))
                 if "kit_path" in payload
@@ -722,6 +942,13 @@ class PreservationHost:
                 accept_owner_capture=submitted.accept_owner_capture,
                 allow_repository_code=submitted.allow_repository_code,
                 existing_companions=plan.existing_companions,
+                sharing=plan.sharing,
+                public_participation=submitted.public_participation,
+                metainfo_path=(
+                    self.root / "torrents" / (job_id + ".torrent")
+                ).absolute()
+                if plan.kind == "torrent_share"
+                else None,
             )
             request_path = work / "request.json"
             fd = os.open(
@@ -757,7 +984,32 @@ class PreservationHost:
                         raise PreservationHostError("worker_observation_too_large")
                     observation = _Observation.model_validate_json(data)
                     current = self.journal.job(job_id)
-                    if observation.event == "expected":
+                    if observation.event == "sharing":
+                        if (
+                            plan.kind not in {"http_share", "torrent_share"}
+                            or observation.sharing is None
+                        ):
+                            raise PreservationHostError(
+                                "unexpected_serving_observation"
+                            )
+                        if (
+                            current.sharing is not None
+                            and observation.sharing.charged_bytes
+                            < current.sharing.charged_bytes
+                        ):
+                            raise PreservationHostError("serving_observation_regressed")
+                        self.journal.update_job(
+                            current.model_copy(
+                                update={
+                                    "sharing": observation.sharing,
+                                    "stage": "sharing"
+                                    if observation.sharing.ready
+                                    else "checking_public_files",
+                                    "updated_at": int(time.time()),
+                                }
+                            )
+                        )
+                    elif observation.event == "expected":
                         if observation.manifest_id is None:
                             raise PreservationHostError("invalid_expected_outcome")
                         self.journal.update_job(
@@ -807,9 +1059,81 @@ class PreservationHost:
                         result.manifest_id != expected
                         or result.size_bytes is None
                         or result.member_count is None
-                        or (result.audience != "private" and plan.kind != "recover")
+                        or (
+                            result.audience
+                            != (
+                                "public"
+                                if location.purpose == "public"
+                                or plan.kind == "mirror_import"
+                                else "private"
+                            )
+                            and plan.kind != "recover"
+                        )
                     ):
                         raise PreservationHostError("worker_outcome_mismatch")
+                    if plan.kind in {"mirror_import", "http_share", "torrent_share"}:
+                        now = int(time.time())
+                        copy_id = plan.copy_id
+                        if plan.kind == "mirror_import":
+                            destination = Path(cast(str, payload["destination"]))
+                            info = destination.stat()
+                            enrolled = _Location(
+                                location_id=cast(str, payload["destination_id"]),
+                                purpose="public",
+                                label="Public bundle copy",
+                                path=destination,
+                                device=info.st_dev,
+                                inode=info.st_ino,
+                                trust=location.trust,
+                                key_path=self.root / "unused-public-key",
+                            )
+                            self.journal.set_setting(
+                                "location:" + enrolled.location_id,
+                                cast(
+                                    dict[str, JsonValue],
+                                    enrolled.model_dump(mode="json"),
+                                ),
+                            )
+                            copy_id = hashlib.sha256(
+                                (enrolled.location_id + result.manifest_id).encode()
+                            ).hexdigest()
+                            self.journal.add_copy(
+                                PreservationCopy(
+                                    copy_id=copy_id,
+                                    model_id=plan.model_id,
+                                    location_id=enrolled.location_id,
+                                    manifest_id=result.manifest_id,
+                                    audience="public",
+                                    size_bytes=result.size_bytes,
+                                    created_at=now,
+                                    checked_at=now,
+                                    member_count=result.member_count,
+                                    publisher_key_ids=tuple(
+                                        key.key_id for key in location.trust.keys
+                                    ),
+                                )
+                            )
+                        self.journal.update_job(
+                            current.model_copy(
+                                update={
+                                    "state": "cancelled"
+                                    if current.state == "cancelling"
+                                    else "succeeded",
+                                    "stage": "stopped"
+                                    if plan.kind != "mirror_import"
+                                    else "complete",
+                                    "copy_id": copy_id,
+                                    "updated_at": now,
+                                    "finished_at": now,
+                                    "result": {
+                                        "manifest_id": result.manifest_id,
+                                        "copy_id": copy_id,
+                                        "public_copy": True,
+                                    },
+                                }
+                            )
+                        )
+                        return
                     if plan.kind in {"kit_export", "recover"}:
                         if current.state == "cancelling" and plan.kind == "recover":
                             self._finish(
@@ -864,7 +1188,12 @@ class PreservationHost:
                             model_id=plan.model_id,
                             location_id=plan.location_id,
                             manifest_id=result.manifest_id,
-                            audience="private",
+                            audience=location.purpose,
+                            publisher_key_ids=tuple(
+                                key.key_id for key in location.trust.keys
+                            )
+                            if location.purpose == "public"
+                            else (),
                             size_bytes=result.size_bytes,
                             created_at=now,
                             checked_at=now,
@@ -890,7 +1219,12 @@ class PreservationHost:
                     )
                 else:
                     state = (
-                        "interrupted"
+                        "cancelled"
+                        if plan.kind in {"http_share", "torrent_share"}
+                        and (current.state == "cancelling" or error_code == "cancelled")
+                        else "failed"
+                        if plan.kind in {"http_share", "torrent_share"}
+                        else "interrupted"
                         if current.expected_manifest_id is not None
                         else "cancelled"
                         if current.state == "cancelling" or error_code == "cancelled"

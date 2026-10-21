@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
+from foxlight_model_preservation.models import TrustProfile
 
 from skulk.store.preservation import RecoveryCompatibilityError
 from skulk.store.preservation_contracts import (
@@ -88,7 +89,7 @@ def create_preservation_router(
         "/plans",
         response_model=PreservationPlan,
         summary="Review an exact preservation effect",
-        description="Bind an expiring review to an installed generation, retained copy or completed kit upload. Supports Preserve, Check, recovery kit export and whole-closure recovery. Recovery metadata is inspected before start; actual weights are verified by the owned worker before publication. No byte job starts at review.",
+        description="Bind an expiring review to an installed generation, retained copy or completed kit upload. Supports Preserve, Check, recovery kit export, whole-closure recovery, public-bundle mirror import, bounded HTTP mirrors and opt-in BitTorrent. Public mirroring preserves opaque cards and grants no runtime trust. Serving requires separate public_participation consent; review never starts a listener. Recovery metadata is inspected before start; actual weights are verified by the owned worker before publication. No byte job starts at review.",
     )
     async def plan(
         request: Request, selection: PreservationPlanRequest
@@ -290,6 +291,40 @@ def create_preservation_router(
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
+    @router.get(
+        "/torrents/{job_id}",
+        response_class=FileResponse,
+        summary="Download standard public torrent metadata",
+        description="Trusted operators download the exact hash-checked metainfo from an explicitly started torrent job, including while it is serving. This route joins no swarm and exposes no private key or arbitrary path. It remains available after the session stops.",
+    )
+    async def download_torrent(request: Request, job_id: Handle) -> FileResponse:
+        owner = await host(request)
+        try:
+            return FileResponse(
+                owner.torrent_path(job_id),
+                media_type="application/x-bittorrent",
+                filename="model-" + job_id + ".torrent",
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/public-copies/{copy_id}/trust",
+        response_model=TrustProfile,
+        summary="Download accepted public-copy verification keys",
+        description="Return only the public verification profile accepted for this exact public copy. Recipients must independently authenticate its fingerprints and selected manifest ID. Self-signatures are not registry authority or a new redistribution grant. Reading starts no sharing or model admission.",
+    )
+    async def download_trust(request: Request, copy_id: Handle) -> TrustProfile:
+        owner = await host(request)
+        try:
+            return owner.public_trust(copy_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
     # Keep explicit references to the registered handlers for strict static tooling.
     _ = (
         library,
@@ -305,5 +340,7 @@ def create_preservation_router(
         upload_chunk,
         remove_upload,
         download_kit,
+        download_torrent,
+        download_trust,
     )
     return router
