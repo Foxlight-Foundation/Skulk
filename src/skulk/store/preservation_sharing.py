@@ -44,37 +44,64 @@ def import_public_bundle(
     destination: Path,
     manifest_id: str,
     trust: TrustProfile,
+    work: Path,
     control: OperationControl,
+    import_control: OperationControl,
+    before_publish: Callable[[str], None],
 ) -> Manifest:
-    """Keep one exact public kit without rewriting its cards or signatures.
+    """Verify a public kit before recording intent or exposing its complete copy.
 
     Args:
         kit: Host-selected completed ingress file.
         destination: Host-selected immutable public-copy directory.
         manifest_id: Independently reviewed exact signed identity.
-        trust: The exact public keys accepted for this selected copy.
-        control: Owned byte-worker cancellation and progress.
+        trust: Public keys accepted for this selected copy.
+        work: Host-owned job staging directory on the destination filesystem.
+        control: Live parent cancellation, separate from the one-use importer.
+        import_control: One-use byte verification/copy progress and cancellation.
+        before_publish: Durable parent intent/acknowledgement after verification.
 
     Returns:
         The complete byte-verified public manifest.
 
-    The caller must inspect the signed public audience before invoking. This
-    copies bytes and publishes only a complete portable store. An existing exact
-    directory is reverified for explicit outcome reconciliation; it is not replaced.
-    No signing key, model-store mutation, registry lookup or network is used.
+    Corrupt data fails before publication intent. Existing exact copies are
+    reverified and never replaced. New verified staging is atomically renamed;
+    a late cancellation can lose to completed publication. This uses no signing
+    key, runtime card parsing, model admission or network.
     """
     if destination.exists() or destination.is_symlink():
-        manifest = verify_store(destination, manifest_id, trust, control=control)
-    else:
-        imported = import_kit(
-            kit,
-            destination,
-            expected_manifest_id=manifest_id,
-            trust=trust,
-            control=control,
-        )
-        manifest = imported.manifest
+        manifest = verify_store(destination, manifest_id, trust, control=import_control)
+        require_public_bundle(manifest)
+        control.checkpoint()
+        before_publish(manifest_id)
+        return manifest
+    verified = work / "public-copy"
+    imported = import_kit(
+        kit,
+        verified,
+        expected_manifest_id=manifest_id,
+        trust=trust,
+        control=import_control,
+    )
+    manifest = imported.manifest
     require_public_bundle(manifest)
+    control.checkpoint()
+    parent = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        # Intent can now represent a real publication uncertainty. No ordinary
+        # bad-object/length/signature failure consumes the uncertainty allowance.
+        before_publish(manifest_id)
+        control.checkpoint()
+        os.mkdir(destination.name, mode=0o700, dir_fd=parent)
+        try:
+            os.rename(verified, destination.name, dst_dir_fd=parent)
+        except BaseException:
+            os.rmdir(destination.name, dir_fd=parent)
+            raise
+        os.fsync(parent)
+        control.mark_committed()
+    finally:
+        os.close(parent)
     return manifest
 
 

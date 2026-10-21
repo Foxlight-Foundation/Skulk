@@ -109,7 +109,7 @@ def run_worker(request: WorkerRequest) -> int:
     controls_lock = threading.Lock()
     cancelled = threading.Event()
 
-    def export_control() -> OperationControl:
+    def byte_control() -> OperationControl:
         active = OperationControl(observe, interval_seconds=0.25)
         active.limit_deadline(time.monotonic() + 86400)
         with controls_lock:
@@ -179,13 +179,15 @@ def run_worker(request: WorkerRequest) -> int:
                 raise ValueError("public kit changed")
             require_public_bundle(info.manifest)
             manifest_id = request.manifest_id
-            commit_intent(manifest_id)
             manifest = import_public_bundle(
                 request.kit_path,
                 request.output_path,
                 manifest_id,
                 request.trust,
+                request.snapshot_parent,
                 control,
+                byte_control(),
+                commit_intent,
             )
         elif request.kind in {"http_share", "torrent_share"}:
             if (
@@ -225,7 +227,7 @@ def run_worker(request: WorkerRequest) -> int:
                     request.snapshot_parent,
                     request.metainfo_path,
                     control,
-                    export_control(),
+                    byte_control(),
                     sharing_observation,
                 )
         elif request.kind == "check":

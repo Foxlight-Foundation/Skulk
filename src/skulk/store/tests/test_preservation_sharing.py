@@ -342,6 +342,7 @@ async def test_corrupt_public_objects_never_enroll_or_serve(tmp_path: Path) -> N
     publisher.mkdir()
     content, _, _ = public_kit(publisher)
     assert b"synthetic community bytes" in content
+    original_content = content
     tampered = bytearray(content)
     tampered[content.index(b"synthetic community bytes")] ^= 1
     content = bytes(tampered)
@@ -361,9 +362,12 @@ async def test_corrupt_public_objects_never_enroll_or_serve(tmp_path: Path) -> N
             )
         )
         failed = await settled(host, job.job_id)
-        assert failed.state in {"failed", "interrupted"}
+        assert failed.state == "failed" and failed.expected_manifest_id is None
         assert not (await host.page()).public_copies
         assert not host.store.list_models()
+        # Fresh explicit intake is still available after a rejected payload.
+        restored = await import_copy(host, original_content, "valid-after-rejection")
+        assert restored.audience == "public"
     finally:
         await host.close()
 
