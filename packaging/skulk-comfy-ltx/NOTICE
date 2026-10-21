@@ -8,3 +8,9 @@ packages/ltx-core/src/ltx_core/components/patchifiers.py
 packages/ltx-core/src/ltx_core/conditioning/types/noise_mask_cond.py
 The LTX Community License in LICENSE-LTX-2_x applies to these adapted portions.
 Foxlight integration code is distributed under LICENSE-APACHE-2.0.
+
+Sparse Motion Track rasterization adapted from
+Lightricks/ComfyUI-LTXVideo at immutable revision
+44c8a36b7c31ee00b4271daed11dc2a4aa481140: sparse_tracks.py.
+The LTX-2 Community License in LICENSE-LTX-2 applies to these adapted portions.
+The bounded trajectory-file contract and allocation-lifetime integration are Foxlight code.

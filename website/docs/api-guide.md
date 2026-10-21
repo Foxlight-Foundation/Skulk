@@ -1906,6 +1906,7 @@ Request fields (JSON keys or form fields):
 | `pipeline` | string | LTX workflow: `distilled_two_stage` or `dev_two_stage`, matching the declared transformer; `retake` or `extend` requires matching `editing` controls. DFR (`dfr`) requires a distilled transformer declaring generated keyframes and an exact `dfr_spatial` IC-LoRA. HQ (`hq_two_stage`) requires a dev transformer and an exact issued Res2s extension on the placed Comfy instance; a base-only renderer is refused |
 | `audio_conditioning` | object | LTX distilled source-audio workflow: `start_seconds` (0–120, default 0) selects an uploaded `audio_source` segment covering the full aligned clip. Audio is frozen in both stages. Multipart supplies this object as JSON |
 | `editing` | object | Native LTX source-video workflow: `operation` is `retake` or `extend`. Retake requires inclusive `start_seconds` and exclusive `end_seconds`; `regenerate_audio` defaults true, false preserves the source waveform. The region may cover the complete aligned frame duration, which can exceed nominal `seconds` (for example 25 frames at 24 fps is 25/24 seconds). Region boundaries round outward onto the 8-frame latent grid. Extend appends to reach `seconds`, the total output length, and refuses retake-region controls. Requires `source_video` and an explicit source-matching `size` |
+| `motion_tracks` | object | LTX Motion Track strengths: `adapter_strength` (>0–2, default 1), `guide_strength` (0–1, default 1). Requires one opening `first_frame` image and one `motion_track_data` JSON attachment, a selected `motion_tracks` LoRA and an issued engine feature. Uses one full-resolution eight-step ancestral-Euler stage; incompatible workflows are refused. Multipart supplies JSON |
 | `union_control` | object | LTX Union IC-LoRA: `guide` (`edges`, `depth`, `pose`; default `edges`), `preprocessed` (default false), `adapter_strength` (>0–2, default 1), `guide_strength` (0–1, default 1). Requires one `control` video, an exact compatible `union_control` LoRA companion and an issued engine feature. Optional opening image. Uses the fixed distilled two-stage workflow; incompatible editing, relay, automatic-duration and H3 controls are refused. Output dimensions must be divisible by 128. Multipart supplies JSON |
 | `prompt_relay` | object | LTX timed local prompts, requiring an exact issued engine feature: `segments` contains 2–8 objects with `prompt` and positive relative `length` (1–120). Each scene receives at least one latent frame; remaining frames share the length ratio with deterministic rounding. Global plus local prompts total at most 8000 characters. Multipart supplies JSON |
 | `decoder` | string | LTX `convolutional` (default) or `diffusion`; the latter requires the exact `video_decoder` companion named `diffusion_decoder`. The convolutional VAE still conditions images and upscales latents |
@@ -1944,7 +1945,7 @@ outside those constraints are refused. Seeds must fit an unsigned 64-bit
 integer.
 
 The model video metadata additionally exposes `pipelines`, `decoders`,
-`generated_keyframes`, `temporal_upscaling`, `temporal_upscaling_modes`, `automatic_duration`, `audio_conditioning`, `editing`, `prompt_relay`, `union_control`, `union_guides` and guided defaults.
+`generated_keyframes`, `temporal_upscaling`, `temporal_upscaling_modes`, `automatic_duration`, `audio_conditioning`, `editing`, `prompt_relay`, `union_control`, `union_guides`, `motion_tracks` and guided defaults.
 
 `guides` and `default_guide` describe ordinary ControlNet requests using
 `control_kind`. `union_guides` separately describes native preprocessing choices
@@ -1969,6 +1970,16 @@ Source audio is decoded in an isolated engine helper to an exact 48 kHz stereo P
 
 Distilled retake uses one deterministic Euler stage with eight intervals, so its step total is eight. Comfy Dev retake and extension use one guided Euler stage (30 intervals by default), with fixed video/audio CFG 3/7, STG 1 on block 28, modality guidance 3 and rescale 0.7. Caller guidance overrides remain unavailable for editing. Distilled extension and source-audio generation use the eight-plus-three ancestral workflow. Source workflows do not combine with automatic duration, generated keyframes or prompt relay. The pinned Comfy core engine implements source-audio conditioning. Retake, extension and Comfy timed scene prompts additionally require the exact published owned extension declaring each feature. A sampler-only extension cannot execute editing. Native advanced controls also require an exact published wheel that declares the corresponding feature. Comfy editing restores original source frames outside the retake interval (or the extension prefix) and normalized stereo PCM before muxing. Preserved audio bypasses VAE decoding. Lossy H.264/AV1 and AAC encoding may change the final decoded pixels and samples. Comfy editing also bounds the complete output to 2 GiB of decoded fp32 RGB pixels. Routing chooses an instance with that build support; no capable mounted instance yields a terminal failure. DFR requires a distilled pack with its exact `dfr_spatial` adapter and generated keyframes; optional temporal refinement also requires `temporal_x2`. It uses Euler with fixed duration, preserving the endpoint timeline when frame density and FPS double. Text-only Comfy DFR additionally requires an exact placed issued build declaring `dfr` in `engine_feature_builds`; an unpublished candidate or older image-only path cannot provide that feature. The owned detailing bridge preserves upscaled samples and real image/guide masks. When all default stride candidates are anchored, it places one detail token in the largest free interior gap, choosing the earliest tied gap; a fully occupied canvas fails explicitly. Motion tracks and spatial in/outpainting remain unavailable. Engine availability and artifact completeness determine offered controls; tested hardware is not an execution allowlist.
 
+Motion Track uses a selected `motion_tracks` IC-LoRA and an exact placed engine build implementing `motion_tracks`. Its dedicated `motion_tracks` pipeline is selected automatically by the controls. Upload an opening `first_frame` image and a `motion_track_data` file with MIME type `application/json`. The attachment is a versioned object:
+
+```json
+{"version":1,"frame_count":25,"tracks":[[{"x":0.25,"y":0.5}]]}
+```
+
+The example illustrates the shape; each path must actually contain **25 positions** for this timeline. `frame_count` must equal the card's complete 8n+1 timeline for the requested seconds. One to sixteen paths are accepted; every position contains only finite `x` and `y` numbers normalized to [0,1] on the final canvas. The attachment is limited to four MiB. Coordinates travel through the bounded reference-media plane; replicated state and graph inputs retain only their verified file reference. No missing points, retiming or held-frame fallback is applied.
+
+The output canvas uses a 64-pixel grid. The rendered half-precision guide is independently limited to 512 MiB, with one transient 1080-short-side raster frame at a time. The pinned training format retains fifty-frame trails, the age-dependent colors/radii, painter ordering, bilinear downsampling and BGR channel order. The opening image is applied without JPEG preprocessing at strength 0.7. The actual adapter must declare reference downscale factor two; guides are cropped after the single full-resolution eight-step stage, before tiled decoding. There is no spatial-refinement stage. Generated audio may be included or muted normally. Union, temporal editing, prompt relay, automatic duration, DFR, diffusion decoding and H3 controls do not combine with this workflow. Candidate source creates no installation offer until an immutable wheel is published and registered.
+
 Union control requires a card selecting the exact `union_control` LoRA companion and an exact placed build advertising that feature. Upload one `control` clip matching the final canvas, frame rate and complete trained-grid frame count. Every frame is decoded and bounded before Comfy allocates its guide batch; mismatched timelines are refused rather than looped or retimed. Prepared pose/depth/edge guides bypass annotation. Otherwise the selected pack must include the native Comfy preprocessor companions: SDPose plus RT-DETR for pose, Depth Anything 3 for depth, and weight-free Canny for edges. These are explicit native Comfy recipes; the upstream example uses different optional pose/depth preprocessors. An optional opening image is pinned at strength 1 without the ordinary I2V JPEG preprocessing. The base sampler is ancestral Euler; refinement uses plain Euler, retained in `engine.stage_samplers`. The adapter applies only to the base stage, its real metadata must declare reference scale two, and guide tokens are cropped before spatial refinement. The original transformer refines with the pinned `0.909375, 0.725, 0.421875, 0.0` schedule. Source audio is not copied; joint model audio is generated normally or omitted from the mux. A candidate wheel alone does not enable this feature.
 
 Timed local prompts require a card declaring `prompt_relay` and an exact placed build advertising that feature in `engine_feature_builds`. Native and Comfy use a fixed soft Gaussian video-attention profile. Comfy measures the complete plain, unweighted prompt with its loaded Gemma4 tokenizer; unstable scene boundaries or truncated text fail before sampling. The global prompt remains available throughout the clip. Audio uses the full combined prompt without scene timing. Scene lengths are relative weights on each stage's actual latent timeline, including optional DFR temporal refinement. This control requires fixed duration and cannot combine with source-audio conditioning or temporal editing. An unpublished candidate creates no installation offer.
@@ -1984,9 +1995,11 @@ File parts (multipart only), in slot order:
 | `reference` | reference | Repeatable; images, video clips, or audio in the order given |
 | `control` | control | One ordinary clip (or a still) whose motion or structure the render follows. The render derives the guide from it (`control_kind`): whole-body pose (people detected with RT-DETR, keypoints from SDPose), depth (Depth Anything 3), or Canny edges, as ComfyUI's own H3 ControlNet template does. The engine holds the guide's last frame when it is short, cuts it when it is long, and scales and centre-crops each frame to the canvas |
 | `mask` | mask | One image or clip for the ControlNet, read from its red channel; white marks what to regenerate |
+| `motion_track_data` | motion_tracks | One version-one `application/json` trajectory file paired with explicit `motion_tracks` controls and an opening image; four MiB maximum |
 | `source_video` | source | One source clip paired with LTX `editing`, or an H3 clip behind a `mask`. LTX editing counts it against reference video limits; ordinary H3 structural inputs do not |
 
-Each part must carry an `image/*`, `video/*`, or `audio/*` content type. At
+Media parts must carry an `image/*`, `video/*`, or `audio/*` content type;
+`motion_track_data` requires `application/json`. At
 most 16 attachments and 256 MiB per request; larger uploads return
 **413**. Keyframe roles allow one first and one last frame. The card's
 `reference_limits` bound the counts per kind; `control`, `mask`, and
@@ -5768,11 +5781,16 @@ paths or signing keys.
 | --- | --- | --- |
 | GET | `/preservation/library` | Optional `offset` (default 0); up to 4 installed selections, copies and jobs (bounded for SDK wire encoding), enrolled storage availability and `next_offset`. Reads never start/replay jobs or sharing. |
 | POST | `/preservation/setup/device` | Explicitly enroll **Use this device** private storage and its protected capture identity. No arbitrary path/key input. Repeating setup retains the identity; unavailable enrolled storage is not recreated. |
-| POST | `/preservation/plans` | `kind` (`preserve` or `check`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Other effect kinds currently refuse. |
+| POST | `/preservation/plans` | `kind` (`preserve`, `check`, `kit_export` or `recover`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Kit export selects `copy_id`; recovery selects that copy or a completed `upload_id` with `location_id=kit`. `historical=true` explicitly permits historical proof inspection. Recovery reviews exact members, candidate key fingerprints, original publication/file assurance and separate receiver consent requirements. Existing aliases and deletion tombstones are protected. |
 | GET | `/preservation/plans/{plan_id}` | Read an exact retained safe plan without refreshing expiry or executing it. |
 | POST | `/preservation/jobs` | `plan_id`, caller-retained `operation_id`, optional `owner_id` (default `operator`) and explicit consent flags. Returns 202 with a durable job immediately. Exact repeated requests return the original job; changed input refuses. |
 | GET | `/preservation/jobs/{job_id}` | Observe one exact retained job and bounded result. Does not queue, retry or reconcile byte work. |
 | POST | `/preservation/jobs/{job_id}/cancel` | Persist cancellation intent, request stop, then bound the wait for the exclusively owned process. A committed verified result may win. Copies are retained. |
+| POST | `/preservation/kit-uploads` | Exact `size_bytes` (up to 8 TiB). Observe actual free space and at most eight retained transfers; return an opaque `upload_id` and flushed offset. No publisher trust or runtime admission. |
+| GET | `/preservation/kit-uploads/{upload_id}` | Read the retained offset for explicit resume. Library inventory also lists bounded transfer handles so a new browser/capability can find them. |
+| PUT | `/preservation/kit-uploads/{upload_id}` | Required `offset` query, `application/octet-stream` body up to 4 MiB. Exact-offset append; identical completed-chunk replay works after response loss. All weights stay outside SDK/control JSON. |
+| DELETE | `/preservation/kit-uploads/{upload_id}` | Remove an unused transfer; queued/running/cancelling job references refuse removal. Frees ingress storage, preserving completed restored models. |
+| GET | `/preservation/kits/{job_id}` | Download a completed `kit_export` artifact with ordinary file/range responses. No arbitrary path or key selection. Save outside the original Core’s storage. |
 
 Preserve runs under the existing store owner's mutation fence and independently
 checks the copied complete closure. Workers use an already opened archive
@@ -5788,6 +5806,18 @@ check reports `insufficient_space` before model bytes are copied. Core records
 the expected manifest durably before acknowledging publication.
 Core restart marks uncertain jobs `interrupted` and requires an explicit outcome
 check; it never automatically replays them. Closing/restarting a capability does
-not cancel Core work. These controls currently provide private Preserve and
-Check; public publication/sharing and fresh-home recovery remain available through
-the standalone/native tools rather than these host endpoints.
+not cancel Core work. These controls provide private Preserve, Check, portable kit export and complete
+live-store recovery. Recovery holds the actual owner’s mutation lease, stages the
+whole closure on the store filesystem, then publishes every member through one
+index update before creating the new receiver’s custom-card admission. The signed
+envelope, public trust snapshot and original evidence stay with that generation.
+Different existing primary captures refuse replacement. Exact matching owned
+companions are reviewed and byte-verified before the new generation is committed.
+`restore_deleted=true` separately confirms the plan’s exact operator-deletion
+records. Receiver-only consent receipts reconcile a committed whole closure after
+a crash; they cannot override a later deletion.
+Interrupted kit exports/restores need a new explicit review and retry; a source
+archive Check cannot establish their destination outcome. The retry rechecks any
+already committed exact closure before finishing admission. A Core-owned 24-hour
+worker watchdog bounds active byte work; queue/store-fence wait is separate.
+Public publication/sharing and new-home CLI recovery remain separate tools.

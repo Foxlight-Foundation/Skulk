@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import tempfile
 import time
 from collections.abc import Callable, Coroutine, Iterator
@@ -1122,6 +1123,36 @@ def test_ltx_union_control_retains_its_typed_settings_and_media_role(monkeypatch
     assert command.task_params.references[0].kind == "video"
     assert command.task_params.implied_mode() is VideoMode.TextToAudioVideo
     assert api._video_upload_inflight_bytes == 0
+
+
+@pytest.mark.parametrize("frames,content_type,expected_status", [(25, "application/json", 200), (17, "application/json", 400), (25, "video/mp4", 400)])
+def test_ltx_motion_paths_travel_as_verified_json_media(monkeypatch: pytest.MonkeyPatch, frames: int, content_type: str, expected_status: int) -> None:
+    """The API validates geometry, preserves MIME truth and releases admission."""
+    from skulk.shared.models.model_cards import VideoCompanionConfig, VideoCompanionKind
+
+    api = _make_api(monkeypatch)
+    baseline = asyncio.run(load_fixture_card(ModelId("Lightricks/LTX-2.5-distilled-comfy-int8")))
+    assert baseline is not None and baseline.video is not None
+    adapter = VideoCompanionConfig(kind=VideoCompanionKind.Lora, name="motion_tracks", path="loras/motion.safetensors")
+    card = baseline.model_copy(update={"video": baseline.video.model_copy(update={"companions": (*baseline.video.companions, adapter)})})
+
+    async def load(_model_id: ModelId) -> ModelCard:
+        return card
+
+    monkeypatch.setattr(ModelCard, "load", staticmethod(load))
+    data = json.dumps({"version": 1, "frame_count": frames, "tracks": [[{"x": 0.25, "y": 0.5}] * frames]}).encode()
+    response = TestClient(api.app).post("/v1/videos", data={"model": str(card.model_id), "prompt": "fox", "seconds": "1", "size": "512x384", "motion_tracks": '{"guide_strength":0.7}'}, files=[("first_frame", ("opening.png", b"opening image", "image/png")), ("motion_track_data", ("tracks.json", data, content_type))])
+    assert response.status_code == expected_status, response.text
+    assert api._video_upload_inflight_bytes == 0
+    if expected_status == 200:
+        command = _sent_command(api)
+        assert command.task_params.motion_tracks is not None
+        assert command.task_params.motion_tracks.guide_strength == 0.7
+        assert command.task_params.references[1].role == "motion_tracks"
+        assert command.task_params.references[1].kind == "data"
+        assert command.task_params.references[1].media_type == "application/json"
+        assert "tracks" not in command.task_params.motion_tracks.model_dump()
+        assert command.task_params.implied_mode() is VideoMode.FramesToAudioVideo
 
 
 def test_ltx_retake_source_does_not_require_an_h3_controlnet(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1077,7 +1077,7 @@ def _reference_media_extension(spec: VideoReferenceSpec) -> str:
     guessed = mimetypes.guess_extension(spec.media_type)
     if guessed:
         return guessed
-    return {"image": ".img", "video": ".video", "audio": ".audio"}[spec.kind]
+    return {"image": ".img", "video": ".video", "audio": ".audio", "data": ".json"}[spec.kind]
 
 
 def _inject_reference_paths(

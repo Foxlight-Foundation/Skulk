@@ -32,7 +32,7 @@ from foxlight_model_preservation.operations import OperationControl
 from foxlight_model_preservation.registry_proof import ProofMode, ProofReport
 from foxlight_model_preservation.signing import load_trust
 from foxlight_model_preservation.storage import directory, restore, verify_store
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from skulk.download.download_utils import (
     selected_gguf_group_complete,
@@ -110,6 +110,10 @@ def read_recovery_metadata(path: Path) -> bytes:
     return data
 
 
+class RecoveryCompatibilityError(PreservationError):
+    """Captured bytes remain recoverable, but this runtime cannot project the card."""
+
+
 def recovery_card(manifest: Manifest) -> ModelCard:
     """Validate the public root card and complete supported loader mapping."""
     member = next(
@@ -117,14 +121,27 @@ def recovery_card(manifest: Manifest) -> ModelCard:
     )
     if member.retained_card is None:
         raise PreservationError("recovery requires a retained public model card")
-    envelope = load_retained_card(identity_json(member.retained_card)).envelope
-    payload = dict(envelope.card)
-    payload["model_id"] = envelope.alias
-    payload["source_repository"] = envelope.artifact.repository
-    card = ModelCard.model_validate_json(identity_json(payload))
+    try:
+        retained = load_retained_card(identity_json(member.retained_card))
+        envelope = retained.envelope
+        payload = dict(envelope.card)
+        payload["model_id"] = envelope.alias
+        if (
+            retained.registry_proof is not None
+            or envelope.artifact.repository != envelope.alias
+            or payload.get("source_repository") is not None
+        ):
+            payload["source_repository"] = envelope.artifact.repository
+        else:
+            payload.pop("source_repository", None)
+        card = ModelCard.model_validate_json(identity_json(payload))
+    except ValidationError as error:
+        raise RecoveryCompatibilityError(
+            "this reader cannot interpret the retained card; keep the kit and use a compatible reader"
+        ) from error
     card.require_immutable_external_companions(context="preservation recovery")
     if reason := card_requires_newer_skulk(card):
-        raise PreservationError(reason)
+        raise RecoveryCompatibilityError(reason)
     if card.artifact_bundle is None and (
         card.tasks != [ModelTask.TextGeneration]
         or card.image is not None
@@ -156,9 +173,14 @@ def recovery_card(manifest: Manifest) -> ModelCard:
     return card
 
 
-def _inspect_verified(
+def inspect_verified_manifest(
     manifest: Manifest, manifest_id: str, mode: ProofMode
 ) -> tuple[RecoveryInspection, ModelCard]:
+    """Inspect authenticated metadata; the caller must separately verify weights.
+
+    Keeping this projection separate from exact retained bytes allows receiving
+    runtimes to evolve without rewriting original card/provenance identities.
+    """
     card = recovery_card(manifest)
     root = next(
         item for item in manifest.members if item.member_id == manifest.root_member
@@ -221,7 +243,7 @@ def inspect_recovery(
     fail, including when the caller intends to accept a community capture.
     """
     manifest = verify_store(store, manifest_id, trust, control=control)
-    return _inspect_verified(manifest, manifest_id, mode)[0]
+    return inspect_verified_manifest(manifest, manifest_id, mode)[0]
 
 
 def _flush_tree(root: Path) -> None:
@@ -456,7 +478,7 @@ def _recover_home(
     if destination.exists() or destination.is_symlink():
         raise PreservationError("recovery destination must be a new home")
     manifest = verify_store(store, manifest_id, trust)
-    inspection, card = _inspect_verified(manifest, manifest_id, mode)
+    inspection, card = inspect_verified_manifest(manifest, manifest_id, mode)
     if inspection.requires_owner_acceptance and not accept_owner_capture:
         raise PreservationError(
             "original registry/file assurance is incomplete or historical; inspect and explicitly accept this owner capture"
@@ -477,7 +499,7 @@ def _recover_home(
         restore(store, manifest_id, trust, pending / "capture")
         # Large copies can outlive signed metadata. Do not admit a formerly
         # fresh proof after it expires during materialization.
-        inspection, card = _inspect_verified(manifest, manifest_id, mode)
+        inspection, card = inspect_verified_manifest(manifest, manifest_id, mode)
         store_path = pending / "model-store"
         store_path.mkdir()
         receiver_store = ModelStore(store_path, recover_installed_cards=False)
@@ -572,7 +594,7 @@ def _recover_home(
         _flush_tree(pending)
         # Flushing a large closure can outlive the previously checked proof.
         # Fresh publication must still be valid at the final commit boundary.
-        _inspect_verified(manifest, manifest_id, mode)
+        inspect_verified_manifest(manifest, manifest_id, mode)
         # Exclusive reservation prevents replacing an existing operator home.
         if not parent_unchanged():
             raise PreservationError("recovery parent changed before publication")

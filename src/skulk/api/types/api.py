@@ -64,6 +64,7 @@ from skulk.shared.types.video import (
     derivable_guides,
     derivable_union_guides,
 )
+from skulk.shared.types.video_motion import VideoMotionTracks
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.store.installed_cards import InstalledArtifactRole, InstalledCardRecord
@@ -886,6 +887,7 @@ class VideoCapabilitySection(BaseModel):
     automatic_duration_modes: list[VideoModeName] = Field(default_factory=list, description="Implemented modes permitted by the selected duration head.")
     audio_conditioning: bool = Field(default=False, description="A selected artifact and available engine can freeze prepared source audio in both sampling stages.")
     editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an issued owned engine build.")
+    motion_tracks: bool = Field(default=False, description="The selected pack and an issued engine implement Motion Track conditioning.")
     union_control: bool = Field(default=False, description="Union IC-LoRA execution is available in an issued owned engine build.")
     union_guides: list[VideoGuideSection] = Field(default_factory=list, description="Native preprocessing choices for explicit union_control requests; these do not authorize ordinary control_kind requests.")
     prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an issued owned engine build.")
@@ -1087,6 +1089,7 @@ class VideoCapabilitySection(BaseModel):
             automatic_duration_modes=duration_modes,
             audio_conditioning=audio_conditioning,
             editing=editing,
+            motion_tracks=ltx_available and config.motion_tracks and "motion_tracks" in available_features,
             union_control=ltx_available and config.union_control and "union_control" in available_features,
             union_guides=_guide_sections(config, guide_contract="union") if ltx_available and config.union_control and "union_control" in available_features else [],
             prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in available_features,
@@ -2888,6 +2891,7 @@ class VideoCreateRequest(BaseModel):
     """Freeze one uploaded audio segment; multipart forms supply a JSON object."""
     editing: VideoEditing | None = None
     """Retake or extend source_video; seconds always describes total output length."""
+    motion_tracks: VideoMotionTracks | None = Field(default=None, description="Motion Track settings; path coordinates arrive in the application/json motion_track_data attachment.")
     union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None
     """Ordered local scene prompts; multipart forms supply a JSON object."""
@@ -2933,6 +2937,11 @@ class VideoCreateRequest(BaseModel):
     @classmethod
     def _parse_editing(cls, value: object) -> object:
         return VideoEditing.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("motion_tracks", mode="before")
+    @classmethod
+    def _parse_motion_tracks(cls, value: object) -> object:
+        return VideoMotionTracks.model_validate_json(value) if isinstance(value, str) else value
 
     @field_validator("union_control", mode="before")
     @classmethod
@@ -3063,6 +3072,7 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Source waveform offset used as frozen context."""
     editing: VideoEditing | None = None
     """Executed source operation and requested retake interval."""
+    motion_tracks: VideoMotionTracks | None = Field(default=None, description="Motion Track settings; path coordinates arrive in the application/json motion_track_data attachment.")
     union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None
     """Executed local prompts and relative timeline lengths."""

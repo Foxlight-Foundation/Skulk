@@ -3286,6 +3286,28 @@ marks uncertain work interrupted and requires an explicit outcome check. Page
 or capability restart has no byte-worker ownership. The standalone public mirror
 and recovery tools retain their independent trust/transport boundaries.
 
+### Library recovery kits
+
+The existing `PreservationHost` also owns portable kit export and whole-closure
+restore. `preservation_uploads.py` separates bounded resumable binary ingress
+from JSON controls. `preservation_live.py` coordinates the known byte worker’s
+verified isolated home with the actual ModelStore owner; one nested generation
+and one durable index commit precede receiver custom-card admission. Explicit
+retry verifies an already committed exact closure; existing aliases and deletion
+tombstones remain protected. `preservation_provenance.py` retains matching offline
+registry evidence and reuses recovered original cards without rewriting signed
+bytes. Installed-card discovery follows indexed nested generations, while hidden
+unindexed staging remains ineligible. `/preservation/kit-uploads` and `/kits/{job_id}`
+provide operator-gated byte transfer, separate from SDK envelopes. The 24-hour
+active-worker watchdog kills only the owned process; EOF, cancellation and
+uncertainty retain the journal’s established semantics. Public sharing and public
+capability distribution remain separate component surfaces.
+
+The normal base, model-companion and sidecar path resolvers consult the committed
+local recovery index before legacy directory names. They verify the indexed
+installed record without constructing a second store owner; hidden unindexed
+staging never becomes a loader candidate.
+
 ### Comfy LTX detailing
 
 LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated
@@ -3328,3 +3350,17 @@ Readiness additionally checks that the expected node schema registered. A failed
 probe tears down the process before the runner reports ready. Hardcoded family
 graphs and exact issued features remain separate gates; a numerical solver check
 does not qualify an advanced model workflow or a hardware class.
+
+### Comfy Motion Track media
+
+Motion Track is a distinct single-stage LTX workflow. `shared/types/video_motion.py`
+validates bounded version-one trajectory media and strength-only task controls.
+Coordinates use `application/json` data references on the existing verified
+reference-media plane; replicated state and events contain only media metadata.
+Both API and worker check the complete requested timeline. The exact selected
+adapter and issued engine feature are required independently of qualification.
+The managed wheel draws the pinned BGR trail format one high-resolution frame
+at a time, with cancellation between frames and a bounded retained guide. The
+full-resolution base applies its opening image and half-grid IC-LoRA guide, then
+crops guide tokens before ordinary tiled decoding; it has no spatial refiner.
+Existing Union/H3 and retained older engine builds keep their own contracts.

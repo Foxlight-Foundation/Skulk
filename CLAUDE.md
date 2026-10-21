@@ -2085,6 +2085,28 @@ Native v0.2.1 decode observation is bundled from `worker/runner/video_observabil
 
 Native staged memory admission uses `shared/models/video_memory.py` for selected encoder/connector versus remaining-pack weights, common overhead and conservative unknown-layout fallback. `worker/runner/mlx_video/memory.py` reads bounded tensor headers and admits request geometry, joint sampling (including silent output), source buffers and decoder workspace against the same reservation and live GPU-wireable memory. `runtime.video_memory_budget_bytes` raises only the reservation for larger workloads and is omitted when absent to preserve installed-card authorization projections. The supervisor sets only the checked existing `LTX2_VAE_DECODE_BUDGET_GB` after sanitizing inherited tuning, refuses an over-budget minimum conv tile, and reaps on live pressure/RSS or an over-reservation result peak. These are estimates and pressure backstops, not a hard Metal quota; qualification remains separate from hardware eligibility.
 
+### Library recovery kits
+
+The existing `PreservationHost` also owns portable kit export and whole-closure
+restore. `preservation_uploads.py` separates bounded resumable binary ingress
+from JSON controls. `preservation_live.py` coordinates the known byte worker’s
+verified isolated home with the actual ModelStore owner; one nested generation
+and one durable index commit precede receiver custom-card admission. Explicit
+retry verifies an already committed exact closure; existing aliases and deletion
+tombstones remain protected. `preservation_provenance.py` retains matching offline
+registry evidence and reuses recovered original cards without rewriting signed
+bytes. Installed-card discovery follows indexed nested generations, while hidden
+unindexed staging remains ineligible. `/preservation/kit-uploads` and `/kits/{job_id}`
+provide operator-gated byte transfer, separate from SDK envelopes. The 24-hour
+active-worker watchdog kills only the owned process; EOF, cancellation and
+uncertainty retain the journal’s established semantics. Public sharing and public
+capability distribution remain separate component surfaces.
+
+The normal base, model-companion and sidecar path resolvers consult the committed
+local recovery index before legacy directory names. They verify the indexed
+installed record without constructing a second store owner; hidden unindexed
+staging never becomes a loader candidate.
+
 
 ### Comfy LTX detailing
 
@@ -2113,3 +2135,17 @@ uses only that verified wheel's custom-node root, disables bytecode and unrelate
 custom/API nodes, checks node schemas before readiness, and tears down failed
 probes. Each issued descriptor retains its own source pins. Candidate wheel
 assembly and tensor checks do not grant model or hardware qualification.
+
+### Comfy Motion Track media
+
+Motion Track is a distinct single-stage LTX workflow. `shared/types/video_motion.py`
+validates bounded version-one trajectory media and strength-only task controls.
+Coordinates use `application/json` data references on the existing verified
+reference-media plane; replicated state and events contain only media metadata.
+Both API and worker check the complete requested timeline. The exact selected
+adapter and issued engine feature are required independently of qualification.
+The managed wheel draws the pinned BGR trail format one high-resolution frame
+at a time, with cancellation between frames and a bounded retained guide. The
+full-resolution base applies its opening image and half-grid IC-LoRA guide, then
+crops guide tokens before ordinary tiled decoding; it has no spatial refiner.
+Existing Union/H3 and retained older engine builds keep their own contracts.

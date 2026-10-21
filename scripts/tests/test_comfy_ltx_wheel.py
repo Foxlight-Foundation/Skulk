@@ -26,6 +26,9 @@ def test_builds_repeat_exactly_and_manifest_probe_initializes_no_gpu(tmp_path: P
         assemble_wheel(SOURCE, first.parent)
     with zipfile.ZipFile(first) as archive:
         assert "skulk_comfy_ltx/LICENSE-LTX-2_x" in archive.namelist()
+        assert "skulk_comfy_ltx/LICENSE-LTX-2" in archive.namelist()
+        metadata = archive.read(next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))).decode()
+        assert "LicenseRef-LTX-2.x AND LicenseRef-LTX-2" in metadata
         assert "skulk_comfy_ltx/LICENSE-APACHE-2.0" in archive.namelist()
         assert "skulk_comfy_ltx/NOTICE" in archive.namelist()
 

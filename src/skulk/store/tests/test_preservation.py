@@ -871,6 +871,15 @@ def test_preserve_retains_explicit_original_registry_proof(
         and not report.requires_owner_acceptance
     )
     assert retained.registry_proof
+    automatic_archive = tmp_path / "automatic-archive"
+    automatic_archive.mkdir()
+    automatic = exporter.preserve_installed(
+        source_home / "model-store" / "example--recovered",
+        automatic_archive,
+        (load_key(tmp_path / "owner.pem", None),),
+    )
+    automatic_manifest = verify_store(automatic_archive, automatic, capture.trust)
+    assert automatic_manifest.members[0].retained_card == original
     forged = retained.model_copy(
         update={
             "registry_proof": retained.registry_proof.model_copy(
@@ -886,3 +895,136 @@ def test_preserve_retains_explicit_original_registry_proof(
             retained_card=forged,
         )
     assert len(list((archive / "manifests").glob("*.json"))) == 1
+
+
+def test_future_card_properties_remain_verifiable_without_unsafe_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import base64
+
+    from foxlight_model_preservation.assurance import load_retained_card
+    from foxlight_model_preservation.cards import create_card
+    from foxlight_model_preservation.signing import digest, encode_record, sign_manifest
+    from foxlight_model_preservation.storage import (
+        atomic_bytes,
+        directory,
+        manifest_path,
+        verify_store,
+    )
+
+    capture = _capture(tmp_path, monkeypatch)
+    manifest = verify_store(capture.store, capture.manifest_id, capture.trust)
+    original = manifest.members[0].retained_card
+    assert original is not None
+    retained = load_retained_card(identity_json(original))
+    raw_card = dict(retained.envelope.card)
+    raw_card["future_runtime_contract"] = {"required": True, "version": 99}
+    # Use the ordinary public writer: additive metadata is identity-bound and
+    # preservable even though this runtime cannot interpret the new requirement.
+    future_card = create_card(raw_card, alias=retained.envelope.alias)
+    envelope = future_card.model_dump(mode="json")
+    future = {
+        **original,
+        "card_base64": base64.b64encode(identity_json(envelope)).decode(),
+    }
+    member = manifest.members[0].model_copy(update={"retained_card": future})
+    updated = manifest.model_copy(update={"members": (member, *manifest.members[1:])})
+    identity = digest(encode_record(updated))
+    signed = sign_manifest(updated, (load_key(tmp_path / "owner.pem", None),))
+    with directory(capture.store) as root:
+        atomic_bytes(root, manifest_path(identity), encode_record(signed))
+    assert (
+        verify_store(capture.store, identity, capture.trust).members[0].retained_card
+        == future
+    )
+    restore(capture.store, identity, capture.trust, tmp_path / "future-files")
+    with pytest.raises(
+        preservation.RecoveryCompatibilityError, match="compatible reader"
+    ):
+        preservation.inspect_recovery(capture.store, identity, capture.trust)
+
+
+def test_derived_runtime_view_keeps_original_signed_source_across_recapture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foxlight_model_preservation.assurance import load_retained_card
+    from foxlight_model_preservation.storage import object_path, verify_store
+
+    import skulk.store.preservation_export as exporter
+    import skulk.store.preservation_provenance as provenance
+    from skulk.store.installed_cards import write_installed_card
+
+    capture = _capture(tmp_path, monkeypatch, registry=True)
+    first_home = tmp_path / "first-view"
+    preservation.recover_home(
+        capture.store, capture.manifest_id, capture.trust, first_home
+    )
+    original_manifest = verify_store(capture.store, capture.manifest_id, capture.trust)
+    original = original_manifest.members[0].retained_card
+    assert original is not None
+    primary = first_home / "model-store/example--recovered"
+    record = read_installed_card(primary)
+    assert record is not None
+    # Runtime-derived header facts can differ from the original signed view.
+    write_installed_card(
+        primary,
+        record.model_copy(
+            update={
+                "model_card": record.model_card.model_copy(
+                    update={"hidden_size": record.model_card.hidden_size + 16}
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        exporter, "EMBEDDED_REGISTRY_ROOT", preservation.EMBEDDED_REGISTRY_ROOT
+    )
+
+    def no_cached_card(card_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(provenance, "cached_registry_card", no_cached_card)
+    for number in (1, 2):
+        archive = tmp_path / f"derived-archive-{number}"
+        archive.mkdir()
+        identity = exporter.preserve_installed(
+            primary, archive, (load_key(tmp_path / "owner.pem", None),)
+        )
+        manifest = verify_store(archive, identity, capture.trust)
+        root = load_retained_card(identity_json(manifest.members[0].retained_card))
+        assert root.registry_proof is None
+        assert (
+            preservation.inspect_recovery(archive, identity, capture.trust).publication
+            == "owner-only"
+        )
+        evidence = next(
+            member
+            for member in manifest.members
+            if member.member_id == "source-evidence"
+        )
+        source = next(
+            file for file in evidence.files if file.path == "registry-source-card.json"
+        )
+        assert (
+            load_retained_card(
+                (archive / object_path(source.sha256)).read_bytes()
+            ).model_dump(mode="json")
+            == original
+        )
+        if number == 1:
+            second_home = tmp_path / "second-view"
+            preservation.recover_home(
+                archive, identity, capture.trust, second_home, accept_owner_capture=True
+            )
+            primary = second_home / "model-store/example--recovered"
+    retained_file = (
+        primary.parent.parent
+        / "preservation/source-evidence/source-evidence/registry-source-card.json"
+    )
+    retained_file.write_bytes(retained_file.read_bytes() + b"x")
+    rejected = tmp_path / "bad-source-archive"
+    rejected.mkdir()
+    with pytest.raises(PreservationError, match="integrity"):
+        exporter.preserve_installed(
+            primary, rejected, (load_key(tmp_path / "owner.pem", None),)
+        )

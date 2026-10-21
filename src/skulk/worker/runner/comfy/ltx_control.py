@@ -49,3 +49,29 @@ def add_union_control(
     prompt["ltx_union_lora"] = node("LoraLoaderModelOnly", "Union base model", model=model, lora_name=filename, strength_model=control.adapter_strength)
     prompt["ltx_union_guide"] = node("SkulkLTXUnionGuide", "Half-grid Union reference", positive=positive, negative=negative, vae=link("video_vae"), latent=latent, image=link("ltx_union_resize"), iclora_model=link("ltx_union_lora"), strength=control.guide_strength, expected_frames=render.plan.frame_count)
     return link("ltx_union_guide", 0), link("ltx_union_guide", 1), link("ltx_union_guide", 2), link("ltx_union_lora")
+
+
+def add_motion_tracks(
+    prompt: ComfyPrompt,
+    render: ComfyRenderPlan,
+    references: tuple[ReferenceBinding, ...],
+    positive: list[str | int],
+    negative: list[str | int],
+    latent: list[str | int],
+    model: list[str | int],
+) -> tuple[list[str | int], list[str | int], list[str | int], list[str | int]]:
+    """Render verified paths and apply the trained half-grid Motion Track guide.
+
+    Coordinates remain in their bounded input file, outside the task and graph.
+    The caller samples at full output resolution and crops guide tokens before
+    decoding; this recipe has no spatial refinement stage.
+    """
+    control = render.motion_tracks
+    filename = render.files.motion_tracks_lora
+    if control is None or filename is None:
+        raise ValueError("Motion Track requires its selected adapter and explicit controls")
+    source = next(binding for binding in references if binding.spec.role == "motion_tracks")
+    prompt["ltx_tracks"] = {"class_type": "SkulkLTXMotionTracks", "inputs": {"tracks_file": source.input_name, "width": render.plan.width, "height": render.plan.height, "expected_frames": render.plan.frame_count}}
+    prompt["ltx_motion_lora"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": model, "lora_name": filename, "strength_model": control.adapter_strength}}
+    prompt["ltx_motion_guide"] = {"class_type": "SkulkLTXUnionGuide", "inputs": {"positive": positive, "negative": negative, "vae": ["video_vae", 0], "latent": latent, "image": ["ltx_tracks", 0], "iclora_model": ["ltx_motion_lora", 0], "strength": control.guide_strength, "expected_frames": render.plan.frame_count}}
+    return ["ltx_motion_guide", 0], ["ltx_motion_guide", 1], ["ltx_motion_guide", 2], ["ltx_motion_lora", 0]

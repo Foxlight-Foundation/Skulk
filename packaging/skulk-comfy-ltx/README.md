@@ -105,3 +105,5 @@ the cached VAE and the normalized source waveform remain unchanged.
 Run `uv run pytest packaging/skulk-comfy-ltx/tests` alongside the package's
 strict type project. The numerical receipt also compares temporal masks to the
 actual immutable upstream patchifiers and region-conditioning implementation.
+
+The `0.1.5` candidate adds Motion Track rasterization. It consumes bounded version-one JSON trajectory files, retains the pinned upstream BGR trail pixels, and reduces peak allocation by drawing one high-resolution frame at a time. Tests compare all output pixels with pinned upstream golden hashes, including overlaps and trail expiry. Source and candidate bytes do not create an installation offer; publication and exact descriptor registration remain separate.

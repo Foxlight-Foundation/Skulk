@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+from foxlight_model_preservation.kits import export_kit, import_kit
 from foxlight_model_preservation.models import TrustProfile
 from foxlight_model_preservation.operations import (
     OperationControl,
@@ -20,10 +21,15 @@ from foxlight_model_preservation.signing import load_key
 from foxlight_model_preservation.storage import verify_store
 from pydantic import BaseModel, ConfigDict, JsonValue
 
+from skulk.store.preservation import RecoveryCompatibilityError, recover_home
 from skulk.store.preservation_export import (
     PreservationCapacityError,
     preservation_generation,
     preserve_installed,
+)
+from skulk.store.preservation_live import (
+    validate_existing_recovery,
+    validate_prepared_home,
 )
 
 
@@ -31,7 +37,7 @@ class WorkerRequest(BaseModel):
     """Private host-authored input; never accepted as a browser filesystem grant."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["preserve", "check"]
+    kind: Literal["preserve", "check", "kit_export", "recover"]
     archive_descriptor: int
     archive_device: int
     archive_inode: int
@@ -42,6 +48,12 @@ class WorkerRequest(BaseModel):
     key_path: Path
     trust: TrustProfile
     manifest_id: str | None = None
+    output_path: Path | None = None
+    kit_path: Path | None = None
+    historical: bool = False
+    accept_owner_capture: bool = False
+    allow_repository_code: bool = False
+    existing_companions: tuple[str, ...] = ()
 
 
 def _emit(value: dict[str, JsonValue]) -> None:
@@ -118,13 +130,57 @@ def run_worker(request: WorkerRequest) -> int:
             )
             # A separate final check does not reuse the consumed capture control.
             manifest = verify_store(Path("."), manifest_id, request.trust)
-        else:
+        elif request.kind == "check":
             if request.manifest_id is None:
                 raise ValueError("selected copy required")
             manifest_id = request.manifest_id
             manifest = verify_store(
                 Path("."), manifest_id, request.trust, control=control
             )
+        else:
+            if request.manifest_id is None or request.output_path is None:
+                raise ValueError("exact selected copy and output required")
+            manifest_id = request.manifest_id
+            if request.kind == "kit_export":
+                commit_intent(manifest_id)
+                info = export_kit(
+                    Path("."),
+                    manifest_id,
+                    request.trust,
+                    request.output_path,
+                    control=control,
+                )
+                manifest = info.manifest
+            else:
+                archive = Path(".")
+                if request.kit_path is not None:
+                    archive = request.snapshot_parent / "kit-store"
+                    import_kit(
+                        request.kit_path,
+                        archive,
+                        expected_manifest_id=manifest_id,
+                        trust=request.trust,
+                        control=control,
+                    )
+                manifest = verify_store(archive, manifest_id, request.trust)
+                control.checkpoint()
+                recover_home(
+                    archive,
+                    manifest_id,
+                    request.trust,
+                    request.output_path,
+                    mode="historical" if request.historical else "fresh",
+                    accept_owner_capture=request.accept_owner_capture,
+                    allow_repository_code=request.allow_repository_code,
+                )
+                validate_prepared_home(request.output_path)
+                validate_existing_recovery(
+                    request.output_path,
+                    request.source_root,
+                    request.existing_companions,
+                )
+                control.checkpoint()
+                commit_intent(manifest_id)
         _emit(
             {
                 "event": "result",
@@ -141,6 +197,8 @@ def run_worker(request: WorkerRequest) -> int:
                 "event": "error",
                 "error_code": "insufficient_space"
                 if isinstance(error, PreservationCapacityError)
+                else "unsupported_model_card"
+                if isinstance(error, RecoveryCompatibilityError)
                 else failure_code(error),
             }
         )
