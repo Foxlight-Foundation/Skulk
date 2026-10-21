@@ -11,7 +11,10 @@ lives in `store/preservation.py` and
 It creates a new home with ordinary model-store and custom-card records in one
 publication; it never instantiates a second writer for a live store. Receiver
 owner trust is explicit, registry proof uses the packaged root, and code
-authorization is separate from provenance acceptance. Recovery observations use
+authorization is separate from provenance acceptance. The preservation reader
+retains additive descriptive properties and string
+vocabularies; artifact/file and envelope contracts stay strict. Runtime admission
+remains independent. Recovery observations use
 installed-card schema 3; legacy sidecar serialization stays unchanged. See
 `website/docs/model-preservation.md` for supported companions, conservative multi-member custom admission and limits.
 `plan` is inventory only; `preserve` is a local private snapshot, not a lease on

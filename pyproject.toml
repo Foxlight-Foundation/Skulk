@@ -32,8 +32,8 @@ dependencies = [
   "ddgs>=9.6.1",
   "tomlkit>=0.14.0",
   "tuf>=6,<7",
-  # Public offline preservation core, pinned to the reviewed v0.3.0 release.
-  "foxlight-model-preservation @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@06808aac30b13ef66251a57476f704572761d11b",
+  # Public offline preservation core with additive, identity-bound card metadata.
+  "foxlight-model-preservation @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@2c6526f789d8a49808f91c68b31235f943b2f135",
   # mflux from PyPI: the Foxlight fork existed only because released mflux
   # capped mlx below 0.32, which upstream lifted in 0.19.2 (#692); the fork
   # carried no other change. Darwin-only because mflux pins Linux to

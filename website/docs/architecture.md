@@ -2171,7 +2171,10 @@ Native model preservation uses `skulk-preservation plan/preserve/inspect/recover
 actual bytes, current runtime card semantics and retained registry proof against
 the packaged root. Preserve selects installed records and all supported declared
 companions, snapshots and verifies their bytes, and publishes a private signed
-copy. Recovery creates a fresh home for the complete selected closure;
+copy. The preservation reader retains additive descriptive properties and string
+vocabularies without changing old card identities. Artifact/envelope and signed
+file contracts remain strict, and runtime admission validates supported semantics.
+Recovery creates a fresh home for the complete selected closure;
 one final rename publishes normal store files, schema-3 installed evidence,
 custom admission when required, and offline configuration together. It never
 mutates a live store. Unsupported offline companion paths fail closed. Only a

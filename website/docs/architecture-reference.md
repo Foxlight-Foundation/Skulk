@@ -18,7 +18,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   home; `preservation_cli.py` exposes `skulk-preservation plan/preserve/inspect/recover`
   (also `skulk preservation`). No network/node launch, GUI, durable host job or
   second live-store writer. Independent owner trust and packaged registry root;
-  code consent stays separate. Supported pinned companions publish together with
+  code consent stays separate. The extensible preservation reader retains new descriptive card properties
+  and vocabulary names in the exact identity. Artifact/file and envelope contracts
+  remain strict; preservation never expands runtime admission. Supported companions publish with
   normal store/index, schema-3 observations, custom admission and offline config.
   Unsupported processor/vLLM offline paths fail closed. Exact bundles are required
   for non-text/composite selections. Only single self-contained models with fresh

@@ -5771,6 +5771,10 @@ Preserve runs under the existing store owner's mutation fence and independently
 checks the copied complete closure. Workers use an already opened archive
 directory; missing/replaced mount paths never become substitute folders. Private
 local snapshot staging and capture custody stay outside capability generations.
+The pinned preservation reader retains new descriptive card properties in the
+original identity without requiring a library update for each capability field.
+Selected artifacts, signed file manifests and envelope versions remain strict;
+runtime installation still requires a card and dependency mapping Skulk supports.
 Capture observes free space on the private snapshot and archive filesystems
 separately, combining their requirement on a shared device. A failed capacity
 check reports `insufficient_space` before model bytes are copied. Core records
