@@ -100,8 +100,11 @@ def test_motion_metadata_does_not_require_an_unused_spatial_upscaler(motion_card
     assert render.files.spatial_upscaler is None and render.steps == 8
 
 
-def test_unissued_motion_code_does_not_advertise_a_workflow(motion_card: ModelCard) -> None:
+def test_unissued_motion_code_does_not_advertise_a_workflow(motion_card: ModelCard, monkeypatch: pytest.MonkeyPatch) -> None:
     """Candidate source and adapter truth cannot create an executable offer."""
+    from skulk.provisioning import comfy_extension
+
+    monkeypatch.setattr(comfy_extension, "PUBLISHED_EXTENSIONS", tuple(wheel for wheel in comfy_extension.published_extensions() if "motion_tracks" not in wheel.features))
     section = VideoCapabilitySection.from_model_card(motion_card)
     assert section is not None and not section.motion_tracks
     assert "motion_tracks" not in section.pipelines
