@@ -116,6 +116,15 @@ are published. A build artifact alone does not authorize a reader pin or claim.
 validation, and reproducible development shells; it should not silently swap
 in a different MLX runtime contract.
 
+The Comfy LTX candidate workflow also evaluates hash-bound inpainting methods
+from `ComfyUI-LTXVideo` revision `44c8a36b7c31ee00b4271daed11dc2a4aa481140`.
+Its numerical checker requires `--ltx-comfy-source` beside the existing LTX and
+Comfy reference paths. The macOS candidate job gets its exact Kornia oracle
+dependency from locked `uv` development dependencies. This checks the packaged
+green/mask, pyramid-blend and reference-audio math without loading weights or
+initializing an upstream plugin; it does not enable a new runtime feature or
+replace physical model qualification. See `CONTRIBUTING.md` for the workflow.
+
 ## Docs Build Commands
 
 ```bash

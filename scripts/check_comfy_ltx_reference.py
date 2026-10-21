@@ -26,6 +26,7 @@ import einops
 import torch
 from torch import Tensor
 
+from scripts.check_comfy_ltx_inpaint import check_inpaint_reference
 from scripts.check_comfy_ltx_relay import check_relay_reference
 
 if TYPE_CHECKING:
@@ -173,6 +174,7 @@ class _Arguments(argparse.Namespace):
 
     ltx_source: Path = Path(".")
     comfy_source: Path = Path(".")
+    ltx_comfy_source: Path = Path(".")
     wheel: Path = Path(".")
     output: Path = Path(".")
 
@@ -532,6 +534,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ltx-source", type=Path, required=True)
     parser.add_argument("--comfy-source", type=Path, required=True)
+    parser.add_argument("--ltx-comfy-source", type=Path, required=True)
     parser.add_argument("--wheel", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(namespace=_Arguments())
@@ -651,7 +654,7 @@ def main() -> None:
         assert len(predict_calls) == 2
     else:
         raise AssertionError("cancellation did not escape the sampler")
-    report = dict(union_control=_check_union_reference(args.comfy_source), prompt_relay=check_relay_reference(args.comfy_source), dfr_masks=_check_dfr_masks(args.comfy_source), source_audio_clock=_check_source_audio_clock(args.comfy_source), temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
+    report = dict(inpaint_pixels=check_inpaint_reference(args.ltx_comfy_source), union_control=_check_union_reference(args.comfy_source), prompt_relay=check_relay_reference(args.comfy_source), dfr_masks=_check_dfr_masks(args.comfy_source), source_audio_clock=_check_source_audio_clock(args.comfy_source), temporal_masks=_check_temporal_masks(args.ltx_source), guidance_rescale=_check_guidance_rescale(args.ltx_source, layout), patchifier_sha256=layout.source_sha256, layout_cases=layout_cases, reference_state_layout="batch_tokens_channels", reference_step_noise_seed=-1, reference_commit=REFERENCE, reference_sha256=HASHES, results=results, packed_adapter_exact=True, packed_adapter_cases=packed_cases, comfy_commit=COMFY, callback_intervals=len(sigmas) - 1, cancellation_stops_after_first_interval=True, pass_all=True)
     _ = args.output.write_text(json.dumps(report, indent=2) + "\n")
 
 

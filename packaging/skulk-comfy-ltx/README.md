@@ -106,4 +106,16 @@ Run `uv run pytest packaging/skulk-comfy-ltx/tests` alongside the package's
 strict type project. The numerical receipt also compares temporal masks to the
 actual immutable upstream patchifiers and region-conditioning implementation.
 
-The `0.1.5` candidate adds Motion Track rasterization. It consumes bounded version-one JSON trajectory files, retains the pinned upstream BGR trail pixels, and reduces peak allocation by drawing one high-resolution frame at a time. Tests compare all output pixels with pinned upstream golden hashes, including overlaps and trail expiry. Source and candidate bytes do not create an installation offer; publication and exact descriptor registration remain separate.
+The issued `0.1.5` wheel adds Motion Track rasterization. It consumes bounded version-one JSON trajectory files, retains the pinned upstream BGR trail pixels, and reduces peak allocation by drawing one high-resolution frame at a time. Tests compare all output pixels with pinned upstream golden hashes, including overlaps and trail expiry. Publication and exact descriptor registration remain separate from local candidate validation.
+
+The unissued `0.1.6` continuation adds bounded inpainting primitives: explicit
+source placement on a larger canvas, static-mask expansion, native green context,
+spatial dilation, framewise Laplacian blending and frozen source-audio tokens.
+Complete-timeline, cancellation and allocation guards are tested independently.
+The mandatory packed-wheel check compares green pixels and dilation exactly with
+hash-bound native LTXVideo source, compares all blend pixels within `2e-6`
+absolute tolerance across the native eight-frame chunk boundary, and checks exact
+audio-token order. These bounded tensor checks do not load model weights or
+qualify a renderer. This foundation alone does not enable an inpainting renderer
+or create an installation offer; the manifest retains only previously implemented
+execution features until the complete graph and worker contract are ready.

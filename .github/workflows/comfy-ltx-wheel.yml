@@ -23,6 +23,7 @@ on:
       - "scripts/build_comfy_ltx_wheel.py"
       - "scripts/check_comfy_ltx_reference.py"
       - "scripts/check_comfy_ltx_relay.py"
+      - "scripts/check_comfy_ltx_inpaint.py"
       - "scripts/verify_comfy_ltx_promotion.py"
 
 permissions:
@@ -56,6 +57,10 @@ jobs:
           git -C .runtime/comfy remote add origin https://github.com/Comfy-Org/ComfyUI.git
           git -C .runtime/comfy fetch --depth=1 origin 40c4fcdf513a4523e39d54a9d391908af8df8171
           git -C .runtime/comfy checkout --detach 40c4fcdf513a4523e39d54a9d391908af8df8171
+          git init reference-ltx-comfy
+          git -C reference-ltx-comfy remote add origin https://github.com/Lightricks/ComfyUI-LTXVideo.git
+          git -C reference-ltx-comfy fetch --depth=1 origin 44c8a36b7c31ee00b4271daed11dc2a4aa481140
+          git -C reference-ltx-comfy checkout --detach 44c8a36b7c31ee00b4271daed11dc2a4aa481140
       - name: Build twice and verify typed wheel and numerical contracts
         run: |
           set -euo pipefail
@@ -64,10 +69,10 @@ jobs:
           cmp candidate-wheels/*.whl independent-rebuild/*.whl
           uv run basedpyright --project packaging/skulk-comfy-ltx/pyproject.toml --pythonpath .venv/bin/python
           uv run pytest -q packaging/skulk-comfy-ltx/tests scripts/tests/test_comfy_ltx_wheel.py src/skulk/provisioning/tests/test_comfy_extension.py
-          uv run python -m scripts.check_comfy_ltx_reference --ltx-source reference-ltx --comfy-source .runtime/comfy \
-            --wheel candidate-wheels/skulk_comfy_ltx-0.1.5-py3-none-any.whl --output candidate-wheels/reference-check.json
+          uv run python -m scripts.check_comfy_ltx_reference --ltx-source reference-ltx --comfy-source .runtime/comfy --ltx-comfy-source reference-ltx-comfy \
+            --wheel candidate-wheels/skulk_comfy_ltx-0.1.6-py3-none-any.whl --output candidate-wheels/reference-check.json
           uv run python -I -B -c 'import sys; sys.path.insert(0,sys.argv[1]); from skulk_comfy_ltx import manifest_json; assert manifest_json(); assert "torch" not in sys.modules and "comfy" not in sys.modules' \
-            candidate-wheels/skulk_comfy_ltx-0.1.5-py3-none-any.whl
+            candidate-wheels/skulk_comfy_ltx-0.1.6-py3-none-any.whl
       - uses: actions/attest-build-provenance@v3
         with:
           subject-path: candidate-wheels/*.whl
