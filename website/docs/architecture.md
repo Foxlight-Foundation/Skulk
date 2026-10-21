@@ -3244,3 +3244,25 @@ expected-manifest acknowledgement. Parent control loss exits the worker; restart
 marks uncertain work interrupted and requires an explicit outcome check. Page
 or capability restart has no byte-worker ownership. The standalone public mirror
 and recovery tools retain their independent trust/transport boundaries.
+
+### Library recovery kits
+
+The existing `PreservationHost` also owns portable kit export and whole-closure
+restore. `preservation_uploads.py` separates bounded resumable binary ingress
+from JSON controls. `preservation_live.py` coordinates the known byte worker’s
+verified isolated home with the actual ModelStore owner; one nested generation
+and one durable index commit precede receiver custom-card admission. Explicit
+retry verifies an already committed exact closure; existing aliases and deletion
+tombstones remain protected. `preservation_provenance.py` retains matching offline
+registry evidence and reuses recovered original cards without rewriting signed
+bytes. Installed-card discovery follows indexed nested generations, while hidden
+unindexed staging remains ineligible. `/preservation/kit-uploads` and `/kits/{job_id}`
+provide operator-gated byte transfer, separate from SDK envelopes. The 24-hour
+active-worker watchdog kills only the owned process; EOF, cancellation and
+uncertainty retain the journal’s established semantics. Public sharing and public
+capability distribution remain separate component surfaces.
+
+The normal base, model-companion and sidecar path resolvers consult the committed
+local recovery index before legacy directory names. They verify the indexed
+installed record without constructing a second store owner; hidden unindexed
+staging never becomes a loader candidate.

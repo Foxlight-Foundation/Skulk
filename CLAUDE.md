@@ -2047,3 +2047,25 @@ LTX advanced requests carry explicit source-audio, retake/extension and timed-lo
 Native v0.2.1 decode observation is bundled from `worker/runner/video_observability.py`. It announces the actual decode-and-save boundary and disables the decoder's verbose-only allocator reset, preserving encoder/sampling/decode peaks across the complete render. Telemetry-only engine changes still require a new immutable published wheel. The wheel workflow watches both standalone bundled helper sources for candidate assembly and isolated validation.
 
 Native staged memory admission uses `shared/models/video_memory.py` for selected encoder/connector versus remaining-pack weights, common overhead and conservative unknown-layout fallback. `worker/runner/mlx_video/memory.py` reads bounded tensor headers and admits request geometry, joint sampling (including silent output), source buffers and decoder workspace against the same reservation and live GPU-wireable memory. `runtime.video_memory_budget_bytes` raises only the reservation for larger workloads and is omitted when absent to preserve installed-card authorization projections. The supervisor sets only the checked existing `LTX2_VAE_DECODE_BUDGET_GB` after sanitizing inherited tuning, refuses an over-budget minimum conv tile, and reaps on live pressure/RSS or an over-reservation result peak. These are estimates and pressure backstops, not a hard Metal quota; qualification remains separate from hardware eligibility.
+
+### Library recovery kits
+
+The existing `PreservationHost` also owns portable kit export and whole-closure
+restore. `preservation_uploads.py` separates bounded resumable binary ingress
+from JSON controls. `preservation_live.py` coordinates the known byte worker’s
+verified isolated home with the actual ModelStore owner; one nested generation
+and one durable index commit precede receiver custom-card admission. Explicit
+retry verifies an already committed exact closure; existing aliases and deletion
+tombstones remain protected. `preservation_provenance.py` retains matching offline
+registry evidence and reuses recovered original cards without rewriting signed
+bytes. Installed-card discovery follows indexed nested generations, while hidden
+unindexed staging remains ineligible. `/preservation/kit-uploads` and `/kits/{job_id}`
+provide operator-gated byte transfer, separate from SDK envelopes. The 24-hour
+active-worker watchdog kills only the owned process; EOF, cancellation and
+uncertainty retain the journal’s established semantics. Public sharing and public
+capability distribution remain separate component surfaces.
+
+The normal base, model-companion and sidecar path resolvers consult the committed
+local recovery index before legacy directory names. They verify the indexed
+installed record without constructing a second store owner; hidden unindexed
+staging never becomes a loader candidate.

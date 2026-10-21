@@ -68,8 +68,9 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
 import shutil
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -610,15 +611,30 @@ class ModelStore:
         return self.get_store_path(model_id) is not None
 
     @asynccontextmanager
-    async def preservation_lease(self) -> AsyncIterator[None]:
+    async def preservation_lease(
+        self, *, cancelled: Callable[[], bool] | None = None
+    ) -> AsyncIterator[None]:
         """Fence exact installed preservation against this owner's byte mutations.
 
         The caller retains the lease until its exclusively owned byte process
         has stopped. This is the existing download/import/eviction fence, not a
         second ModelStore writer or a lease on a different store instance.
         """
-        async with self._download_transfer_lock:
+        if cancelled is None:
+            await self._download_transfer_lock.acquire()
+        else:
+            while True:
+                if cancelled():
+                    raise ValueError("preservation lease cancelled before byte work")
+                try:
+                    await asyncio.wait_for(self._download_transfer_lock.acquire(), 0.1)
+                except TimeoutError:
+                    continue
+                break
+        try:
             yield
+        finally:
+            self._download_transfer_lock.release()
 
     def get_store_path(self, model_id: str) -> Path | None:
         """Return the absolute path to *model_id*'s directory, or ``None``.
@@ -890,6 +906,131 @@ class ModelStore:
             f"({total_bytes:,} bytes, {len(effective_files)} files)"
         )
 
+    def publish_recovery_generation(
+        self,
+        home: Path,
+        generation_id: str,
+        index: StoreRegistryIndex,
+        *,
+        deletions: dict[str, str],
+        existing_companions: dict[str, str],
+    ) -> Path:
+        """Commit an already verified whole recovery under this owner's lease.
+
+        The known byte worker owns staging, while only this live store instance
+        writes the canonical index. Hidden unindexed generations are never
+        discovered as partial companion installations after a crash.
+        """
+        if len(generation_id) != 64 or any(
+            char not in "0123456789abcdef" for char in generation_id
+        ):
+            raise ValueError("invalid recovery generation identity")
+        registry = self._read_registry()
+        current_deletions = self._read_reconciliation_tombstone_index().deleted_aliases
+        selected_deletions = {
+            alias: stamp
+            for alias, stamp in current_deletions.items()
+            if alias in index.entries
+        }
+        if selected_deletions != deletions:
+            raise ValueError("reviewed operator deletions changed")
+        for alias, entry in index.entries.items():
+            previous = registry.get(alias)
+            if (
+                alias in existing_companions
+                and previous is not None
+                and previous.installed_card is not None
+                and entry.installed_card is not None
+            ):
+                from skulk.store.preservation_compatibility import compatible_companion
+
+                if hashlib.sha256(
+                    previous.model_dump_json().encode()
+                ).hexdigest() != existing_companions[alias] or not compatible_companion(
+                    previous.installed_card, entry.installed_card
+                ):
+                    raise ValueError("reviewed companion generation changed")
+                continue
+            if previous is not None and (
+                previous.installed_card is None
+                or entry.installed_card is None
+                or previous.installed_card.preservation
+                != entry.installed_card.preservation
+                or previous.installed_card.files != entry.installed_card.files
+                or previous.installed_card.model_card != entry.installed_card.model_card
+            ):
+                raise ValueError("recovery cannot replace an existing alias")
+        existing = [alias in registry for alias in index.entries]
+        if all(existing):
+            if existing_companions:
+                raise ValueError("an existing primary cannot be replaced")
+            self._reconcile_recovery_deletions()
+            return home
+        if deletions:
+            from skulk.store.preservation_admissions import write_recovery_admission
+
+            manifest = next(iter(index.entries.values())).installed_card
+            if manifest is None or manifest.preservation is None:
+                raise ValueError("missing recovery consent identity")
+            write_recovery_admission(
+                home, manifest.preservation.manifest_id, tuple(index.entries), deletions
+            )
+        generations = self._store_path / ".recoveries"
+        generations.mkdir(mode=0o700, exist_ok=True)
+        target = generations / generation_id
+        if target.exists():
+            raise ValueError("unindexed recovery generation needs reconciliation")
+        # Both trees are staged on the store filesystem, so this cannot degrade
+        # to a partial cross-device copy.
+        home.rename(target)
+        descriptor = os.open(generations, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        for alias, entry in index.entries.items():
+            relative = str(
+                (target / "model-store" / entry.store_path).relative_to(
+                    self._store_path
+                )
+            )
+            registry[alias] = entry.model_copy(update={"store_path": relative})
+        self._write_registry(registry, durable=True)
+        with (self._registry_path).open("rb") as stream:
+            os.fsync(stream.fileno())
+        descriptor = os.open(self._store_path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self._reconcile_recovery_deletions()
+        return target
+
+    def _reconcile_recovery_deletions(self) -> None:
+        """Honor only committed local restore consent; never replay byte work."""
+        from skulk.store.preservation_admissions import (
+            committed_deletion_acknowledgements,
+        )
+
+        tombstones = self._read_reconciliation_tombstone_index()
+        if not tombstones.deleted_aliases:
+            return
+        acknowledged = committed_deletion_acknowledgements(
+            self._store_path, self._read_registry(), tombstones.deleted_aliases
+        )
+        if acknowledged:
+            self._write_reconciliation_tombstone_index(
+                tombstones.model_copy(
+                    update={
+                        "deleted_aliases": {
+                            alias: stamp
+                            for alias, stamp in tombstones.deleted_aliases.items()
+                            if alias not in acknowledged
+                        }
+                    }
+                )
+            )
+
     def list_files_for_model(self, model_id: str) -> list[str] | None:
         """Return the file list for *model_id* from the registry, or ``None``.
 
@@ -938,7 +1079,9 @@ class ModelStore:
         registry[entry.model_id] = entry
         self._write_registry(registry)
 
-    def _write_registry(self, registry: dict[str, StoreModelEntry]) -> None:
+    def _write_registry(
+        self, registry: dict[str, StoreModelEntry], *, durable: bool = False
+    ) -> None:
         """Atomically replace the versioned rebuildable registry index."""
 
         self._store_path.mkdir(parents=True, exist_ok=True)
@@ -963,9 +1106,13 @@ class ModelStore:
                 # legacy index to preserve as the migration backup.
                 pass
         temporary = self._registry_path.with_name(".registry.json.tmp")
-        temporary.write_text(
-            StoreRegistryIndex(entries=registry).model_dump_json(indent=2)
-        )
+        with temporary.open("w") as stream:
+            _ = stream.write(
+                StoreRegistryIndex(entries=registry).model_dump_json(indent=2)
+            )
+            stream.flush()
+            if durable:
+                os.fsync(stream.fileno())
         temporary.replace(self._registry_path)
 
     def _read_reconciliation_tombstone_index(
@@ -1064,6 +1211,7 @@ class ModelStore:
         if not self._store_path.is_dir():
             return
         registry = self._read_registry()
+        self._reconcile_recovery_deletions()
         tombstoned_aliases = frozenset(
             self._read_reconciliation_tombstone_index().deleted_aliases
         )
@@ -1159,6 +1307,15 @@ class ModelStore:
             )
         for model_id, candidates in recovered_by_model.items():
             previous = registry.get(model_id)
+            if (
+                previous is not None
+                and previous.installed_card is not None
+                and previous.installed_card.preservation is not None
+                and previous.store_path.startswith(".recoveries/")
+            ):
+                # A complete committed recovery is an explicit receiver choice.
+                # Healthy legacy copies left for running readers cannot undo it.
+                continue
             previous_identity = (
                 previous.installed_card.installed_identity
                 if previous is not None and previous.installed_card is not None

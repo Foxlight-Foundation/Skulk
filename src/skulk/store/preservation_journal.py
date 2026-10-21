@@ -277,6 +277,10 @@ class PreservationJournal:
                     raise PreservationHostError("job_queue_full")
                 job = PreservationJob(
                     job_id=job_id,
+                    location_id=plan.location_id,
+                    restore_deleted=request.restore_deleted,
+                    accept_owner_capture=request.accept_owner_capture,
+                    allow_repository_code=request.allow_repository_code,
                     operation_id=request.operation_id,
                     owner_id=request.owner_id,
                     plan_id=plan.plan_id,
@@ -339,6 +343,10 @@ class PreservationJournal:
                 previous.kind,
                 previous.model_id,
                 previous.created_at,
+                previous.location_id,
+                previous.restore_deleted,
+                previous.accept_owner_capture,
+                previous.allow_repository_code,
             ) != (
                 job.plan_id,
                 job.operation_id,
@@ -346,6 +354,10 @@ class PreservationJournal:
                 job.kind,
                 job.model_id,
                 job.created_at,
+                job.location_id,
+                job.restore_deleted,
+                job.accept_owner_capture,
+                job.allow_repository_code,
             ):
                 raise PreservationHostError("job_identity_changed")
             if (

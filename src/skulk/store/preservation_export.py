@@ -71,6 +71,9 @@ class PreservePlan(BaseModel):
     )
 
 
+CAPTURE_NOTICE = b"Private owner capture. Original license/attribution may be incomplete. No redistribution rights, upstream authorship or runtime qualification are granted.\n"
+
+
 @dataclass(frozen=True)
 class _Source:
     path: Path
@@ -78,7 +81,8 @@ class _Source:
     member_id: str
 
 
-def _public_body(card: ModelCard) -> dict[str, JsonValue]:
+def public_card_body(card: ModelCard) -> dict[str, JsonValue]:
+    """Project public model semantics while withholding receiver authority fields."""
     # Local authorization and verified registry projections are receiver state,
     # not fields an owner may assert in an original public card.
     excluded = {name for name in ModelCard.model_fields if name.startswith("registry_")}
@@ -93,7 +97,7 @@ def _retained(
     record: InstalledCardRecord, original: RetainedCard | None
 ) -> RetainedCard:
     if original is None:
-        return retain_card(create_card(_public_body(record.model_card)))
+        return retain_card(create_card(public_card_body(record.model_card)))
     envelope = original.envelope
     payload = dict(envelope.card)
     payload["model_id"] = envelope.alias
@@ -102,7 +106,7 @@ def _retained(
     installed = record.model_card.model_copy(
         update={"source_repository": record.model_card.artifact_repository}
     )
-    if _public_body(selected) != _public_body(installed):
+    if public_card_body(selected) != public_card_body(installed):
         raise PreservationError(
             "retained original card differs from the selected installed card"
         )
@@ -257,6 +261,36 @@ def preserve_installed(
     that must return successfully before archive publication begins.
     """
     sources = _sources(model_directory, artifact_roots)
+    registry_source: RetainedCard | None = None
+    if retained_card is None:
+        from skulk.store.preservation_provenance import (
+            cached_registry_card,
+            retained_recovery_card,
+            retained_registry_source,
+        )
+
+        registry_source = retained_registry_source(model_directory, sources[0].record)
+        candidate = retained_recovery_card(model_directory, sources[0].record)
+        if candidate is not None:
+            try:
+                retained_card = _retained(sources[0].record, candidate)
+            except PreservationError:
+                registry_source = candidate
+        if (
+            retained_card is None
+            and sources[0].record.model_card.registry_card_id is not None
+        ):
+            candidate = cached_registry_card(
+                sources[0].record.model_card.registry_card_id
+            )
+            if candidate is not None:
+                # Auxiliary runtime projections can differ from an original card.
+                # Never falsely bind a different installed selection to that proof.
+                try:
+                    retained_card = _retained(sources[0].record, candidate)
+                except PreservationError:
+                    registry_source = candidate
+                    retained_card = None
     retained = _retained(sources[0].record, retained_card)
     active = control or OperationControl()
     with directory(destination) as archive_descriptor:
@@ -335,6 +369,11 @@ def preserve_installed(
                     for file in captured
                     if Path(file.path).name.lower()
                     in {
+                        *(
+                            (".foxlight-capture-notice.txt",)
+                            if source.record.preservation is not None
+                            else ()
+                        ),
                         "license",
                         "license.txt",
                         "license.md",
@@ -349,7 +388,7 @@ def preserve_installed(
                         raise PreservationError(
                             "source conflicts with the generated capture notice"
                         )
-                    notice = b"Private owner capture. Original license/attribution may be incomplete. No redistribution rights, upstream authorship or runtime qualification are granted.\n"
+                    notice = CAPTURE_NOTICE
                     (target / name).write_bytes(notice)
                     captured.append(
                         FileIdentity(
@@ -428,6 +467,19 @@ def preserve_installed(
             (evidence / "NOTICE.txt").write_text(
                 "Source installed records are historical observations, not receiver trust or code permission.\n"
             )
+            evidence_names = ["installed-records.json", "NOTICE.txt"]
+            if registry_source is not None:
+                (evidence / "registry-source-card.json").write_bytes(
+                    identity_json(registry_source.model_dump(mode="json"))
+                )
+                evidence_names.append("registry-source-card.json")
+            if retained.registry_proof is not None or registry_source is not None:
+                # Transport this public anchor as evidence only. A receiver must
+                # still independently recognize it before granting registry trust.
+                (evidence / "registry-root.json").write_bytes(
+                    EMBEDDED_REGISTRY_ROOT.read_bytes()
+                )
+                evidence_names.append("registry-root.json")
             root = sources[0].record
             members.append(
                 RecipeMember(
@@ -444,10 +496,7 @@ def preserve_installed(
                         decision="Retained evidence only; not transferable authorization.",
                         notice_paths=("NOTICE.txt",),
                     ),
-                    files=(
-                        SourceFile(path="installed-records.json"),
-                        SourceFile(path="NOTICE.txt"),
-                    ),
+                    files=tuple(SourceFile(path=name) for name in evidence_names),
                 )
             )
             source_paths["source-evidence"] = evidence
@@ -467,7 +516,7 @@ def preserve_installed(
                     size=(evidence / name).stat().st_size,
                     sha256=hashlib.sha256((evidence / name).read_bytes()).hexdigest(),
                 )
-                for name in ("installed-records.json", "NOTICE.txt")
+                for name in evidence_names
             )
             observed.append(
                 ManifestMember.model_validate(
