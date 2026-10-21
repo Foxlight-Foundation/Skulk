@@ -141,11 +141,23 @@ def test_union_metadata_keeps_its_request_contract_separate(union_card: ModelCar
     plan_comfy_render(_request(), union_card, engine_build=issued_union)
 
 
-def test_unissued_union_engine_does_not_offer_preprocessing(union_card: ModelCard) -> None:
+def test_unissued_union_engine_does_not_offer_preprocessing(union_card: ModelCard, monkeypatch: pytest.MonkeyPatch) -> None:
     """Intrinsic adapter presence cannot invent an issued executable feature."""
+    older = tuple(wheel for wheel in comfy_extension.PUBLISHED_EXTENSIONS if "union_control" not in wheel.features)
+    monkeypatch.setattr(comfy_extension, "PUBLISHED_EXTENSIONS", older)
     section = VideoCapabilitySection.from_model_card(union_card)
     assert section is not None
     assert not section.union_control and not section.union_guides
+
+
+def test_published_union_does_not_upgrade_an_older_instance(union_card: ModelCard) -> None:
+    """Issuing a wheel enables its exact build without changing retained instances."""
+    current = next(wheel for wheel in comfy_extension.PUBLISHED_EXTENSIONS if "union_control" in wheel.features)
+    older = next(wheel for wheel in comfy_extension.PUBLISHED_EXTENSIONS if "union_control" not in wheel.features)
+    base = f"comfy@{COMFY_PIN}/torch@2.14.0+cu130"
+    assert video_request_supported(union_card, _request(), "comfy-cuda", current.build_identity(base))
+    assert not video_request_supported(union_card, _request(), "comfy-cuda", older.build_identity(base))
+    assert not video_request_supported(union_card, _request(), "comfy-cuda", base + "/extension@sha256:" + "f" * 64)
 
 
 def test_union_multipart_json_has_the_same_strict_typed_contract() -> None:
