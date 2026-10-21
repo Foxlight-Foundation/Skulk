@@ -193,7 +193,7 @@ def engine_install_notice(engine: str, size_bytes: int) -> str:
         A one-sentence notice naming the engine and its approximate size.
     """
     name = "video engine" if engine == "comfy" else "Apple video engine" if engine == "mlx_video" else f"{engine} engine"
-    size = (f" (about {round(size_bytes / 1024**3)} GB)" if size_bytes >= 1024**3 else f" (about {round(size_bytes / 1024**2)} MB)") if size_bytes else ""
+    size = (f" (about {round(size_bytes / 1024**3)} GB)" if size_bytes >= 1024**3 else f" (about {round(size_bytes / 1024**2)} MB)" if size_bytes >= 1024**2 else f" (about {max(1, round(size_bytes / 1024))} KB)") if size_bytes else ""
     return (
         f"The {name}{size} will be installed with this model, so placement will "
         "take longer."

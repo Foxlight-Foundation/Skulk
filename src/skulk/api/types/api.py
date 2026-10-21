@@ -27,6 +27,7 @@ from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
     RegistryEngineSupportClaim,
 )
+from skulk.shared.models.video_support import video_engine_feature_builds
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.music import MusicJobStatus, MusicOutputManifest
@@ -51,6 +52,7 @@ from skulk.shared.types.video import (
     VideoCodecName,
     VideoDecoder,
     VideoEditing,
+    VideoExecutionFeature,
     VideoGuidance,
     VideoGuideKind,
     VideoJobStatus,
@@ -58,8 +60,11 @@ from skulk.shared.types.video import (
     VideoPromptRelay,
     VideoReferenceFidelity,
     VideoSchedulerName,
+    VideoUnionControl,
     derivable_guides,
+    derivable_union_guides,
 )
+from skulk.shared.types.video_motion import VideoMotionTracks
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
 from skulk.store.installed_cards import InstalledArtifactRole, InstalledCardRecord
@@ -801,7 +806,7 @@ class VideoGuideSection(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True)
 
     kind: VideoGuideKind = Field(
-        description="Value of the video job `control_kind` field: pose, depth, or edges."
+        description="Signal kind: `control_kind` for ControlNet requests or `union_control.guide` for explicit Union requests."
     )
     modes: list[VideoModeName] = Field(
         description="Generation modes the card derives this guide for."
@@ -840,6 +845,18 @@ class VideoReferenceLimitsSection(BaseModel):
     )
 
 
+@final
+class VideoPipelineDefaults(BaseModel):
+    """Sampling defaults for one family workflow, independent of another workflow."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    base_steps: int = Field(ge=1, le=1000, description="Base-stage integration intervals when the caller omits steps.")
+    sampler: str = Field(description="Fixed workflow sampler recorded for execution; callers omit overrides.")
+    sampling_stage_steps: list[int] = Field(description="Default integration intervals for every stage.")
+    guidance: VideoGuidance | None = Field(default=None, description="Base-stage guidance defaults for this workflow.")
+
+
 class VideoCapabilitySection(BaseModel):
     """Declared video generation contract from the model card.
 
@@ -859,14 +876,21 @@ class VideoCapabilitySection(BaseModel):
     )
     pipelines: list[VideoPipeline] = Field(default_factory=list, description="Implemented baseline family pipelines available with this selected artifact.")
     pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by every required asset of each implemented pipeline.")
+    pipeline_defaults: dict[VideoPipeline, VideoPipelineDefaults] = Field(default_factory=dict, description="Workflow-specific defaults; a workflow does not inherit another workflow's steps or guidance.")
+    engine_feature_builds: dict[str, list[VideoExecutionFeature]] = Field(default_factory=dict, description="Issued advanced feature sets keyed by native build or Comfy source/payload identity. Match the placed instance's resolved build, not current node inventory; Comfy selectors omit only the /torch@version segment.")
     decoders: list[VideoDecoder] = Field(default_factory=list, description="Selectable decoders whose exact components are present.")
     decoder_modes: dict[VideoDecoder, list[VideoModeName]] = Field(default_factory=dict, description="Modes permitted by each selected decoder and its pipeline assets.")
+    temporal_upscaling: bool = Field(default=False, description="DFR temporal x2 is available with selected temporal and spatial refinement assets.")
+    temporal_upscaling_modes: list[VideoModeName] = Field(default_factory=list, description="DFR modes permitted by the selected temporal upscaler and spatial refinement assets.")
     generated_keyframes: bool = Field(default=False, description="Whether internal detailing keyframe tokens are supported by this artifact.")
     automatic_duration: bool = Field(default=False, description="Whether an exact duration head is selected.")
     automatic_duration_modes: list[VideoModeName] = Field(default_factory=list, description="Implemented modes permitted by the selected duration head.")
     audio_conditioning: bool = Field(default=False, description="A selected artifact and available engine can freeze prepared source audio in both sampling stages.")
-    editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an available owned native engine.")
-    prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an available owned native engine.")
+    editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an issued owned engine build.")
+    motion_tracks: bool = Field(default=False, description="The selected pack and an issued engine implement Motion Track conditioning.")
+    union_control: bool = Field(default=False, description="Union IC-LoRA execution is available in an issued owned engine build.")
+    union_guides: list[VideoGuideSection] = Field(default_factory=list, description="Native preprocessing choices for explicit union_control requests; these do not authorize ordinary control_kind requests.")
+    prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an issued owned engine build.")
     guidance: VideoGuidance | None = Field(default=None, description="Default guided LTX base-stage scales; null for distilled or other families.")
     min_seconds: int = Field(description="Shortest clip length accepted.")
     max_seconds: int = Field(description="Longest clip length accepted.")
@@ -1012,45 +1036,71 @@ class VideoCapabilitySection(BaseModel):
         dev_modes: list[VideoModeName] = [mode for mode in spatial_modes if mode in companion_modes(VideoCompanionKind.Lora, "distilled_refinement")] if config.transformer_variant == "dev" else []
         ltx_distilled, ltx_dev = bool(distilled_modes), bool(dev_modes)
         ltx_available = ltx_distilled or ltx_dev
+        feature_builds = video_engine_feature_builds(engines) if ltx else {}
+        available_features = {feature for features in feature_builds.values() for feature in features}
         pipeline_modes: dict[VideoPipeline, list[VideoModeName]] = {}
         if distilled_modes:
             pipeline_modes["distilled_two_stage"] = distilled_modes
+            dfr_modes: list[VideoModeName] = [mode for mode in distilled_modes if mode in companion_modes(VideoCompanionKind.Lora, "dfr_spatial")]
+            if "comfy" in engines and config.generated_keyframes and dfr_modes:
+                pipeline_modes["dfr"] = dfr_modes
         if dev_modes:
             pipeline_modes["dev_two_stage"] = dev_modes
-            if any(engine_of(backend) == "mlx_video" for backend in model_card.placement.compatible_backends):
+            if any("hq_two_stage" in features for features in feature_builds.values()):
                 pipeline_modes["hq_two_stage"] = dev_modes
+        motion_modes: list[VideoModeName] = ["fl2va"] if prerequisites and config.transformer_variant == "distilled" and "comfy" in engines and "motion_tracks" in available_features and "fl2va" in companion_modes(VideoCompanionKind.Lora, "motion_tracks") else []
+        if motion_modes:
+            # Motion Track samples once at the final canvas; an unrelated
+            # spatial-upscaler dependency must not hide this executable path.
+            pipeline_modes["motion_tracks"] = motion_modes
         served_modes: list[VideoModeName] = distilled_modes or dev_modes
+        served_modes = list(dict.fromkeys([*served_modes, *motion_modes]))
         reference_mode: list[VideoModeName] = ["ref2va"] if prerequisites and VideoMode.ReferenceToAudioVideo in config.modes else []
         spatial_reference = any(item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(VideoMode.ReferenceToAudioVideo) for item in config.companions)
         audio_conditioning = bool(reference_mode) and spatial_reference and config.transformer_variant == "distilled" and config.audio_conditioning and ("comfy" in engines or "audio_conditioning" in native_features)
-        editing: list[Literal["retake", "extend"]] = [operation for operation in config.editing if reference_mode and operation in native_features and (operation == "retake" or config.transformer_variant == "dev" or spatial_reference)]
+        editing: list[Literal["retake", "extend"]] = [operation for operation in config.editing if reference_mode and operation in available_features and (operation == "retake" or config.transformer_variant == "dev" or spatial_reference)]
         if audio_conditioning:
             pipeline_modes["distilled_two_stage"] = [*distilled_modes, *reference_mode]
         for operation in editing:
             pipeline_modes[operation] = reference_mode
+        pipeline_defaults: dict[VideoPipeline, VideoPipelineDefaults] = {"hq_two_stage": VideoPipelineDefaults(base_steps=15, sampler="res2s", sampling_stage_steps=[15, 3], guidance=VideoGuidance(modality_scale=3.0))} if "hq_two_stage" in pipeline_modes else {}
+        if motion_modes:
+            pipeline_defaults["motion_tracks"] = VideoPipelineDefaults(base_steps=8, sampler="euler_ancestral", sampling_stage_steps=[8])
+        for operation in editing:
+            base_steps = 8 if config.transformer_variant == "distilled" else 30
+            single_stage = operation == "retake" or config.transformer_variant == "dev"
+            pipeline_defaults[operation] = VideoPipelineDefaults(base_steps=base_steps, sampler="euler" if single_stage else "euler_ancestral", sampling_stage_steps=[base_steps] if single_stage else [base_steps, 3])
         if audio_conditioning or editing:
             served_modes = [*served_modes, *reference_mode]
         decoder_modes: dict[VideoDecoder, list[VideoModeName]] = {}
         if served_modes:
             decoder_modes["convolutional"] = served_modes
-        diffusion_modes: list[VideoModeName] = [mode for mode in served_modes if mode in companion_modes(VideoCompanionKind.VideoDecoder, "diffusion_decoder")]
+        diffusion_modes: list[VideoModeName] = [mode for mode in served_modes if any(item.kind is VideoCompanionKind.VideoDecoder and item.name == "diffusion_decoder" and item.supports_mode(VideoMode(mode)) for item in config.companions)]
         if diffusion_modes:
             decoder_modes["diffusion"] = diffusion_modes
         duration_modes: list[VideoModeName] = [mode for mode in served_modes if mode in companion_modes(VideoCompanionKind.DurationHead, "duration_head")]
+        temporal_modes: list[VideoModeName] = [mode for mode in pipeline_modes.get("dfr", []) if mode in companion_modes(VideoCompanionKind.LatentUpscaler, "temporal_x2")]
         return cls(
             modes=cast("list[VideoModeName]", [mode.value for mode in config.modes]),
             transformer_variant=config.transformer_variant,
             pipelines=list(pipeline_modes),
             pipeline_modes=pipeline_modes,
+            pipeline_defaults=pipeline_defaults,
+            engine_feature_builds=feature_builds,
             codecs=["h264"] if native_only else list(VIDEO_CODECS),
             decoders=list(decoder_modes),
             decoder_modes=decoder_modes,
+            temporal_upscaling=bool(temporal_modes),
+            temporal_upscaling_modes=temporal_modes,
             generated_keyframes=ltx_available and config.generated_keyframes,
             automatic_duration=bool(duration_modes),
             automatic_duration_modes=duration_modes,
             audio_conditioning=audio_conditioning,
             editing=editing,
-            prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in native_features,
+            motion_tracks=bool(motion_modes),
+            union_control=ltx_available and config.union_control and "union_control" in available_features,
+            union_guides=_guide_sections(config, guide_contract="union") if ltx_available and config.union_control and "union_control" in available_features else [],
+            prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in available_features,
             guidance=VideoGuidance() if ltx_dev else None,
             min_seconds=config.min_seconds,
             max_seconds=config.max_seconds,
@@ -1067,7 +1117,7 @@ class VideoCapabilitySection(BaseModel):
             audio_channels=config.audio_channels,
             default_steps=config.default_steps,
             sampling_stage_steps=[8, 3] if ltx_distilled else [],
-            samplers=[] if native_only else (["euler_ancestral"] if ltx_distilled else ["euler"] if ltx_dev else [])
+            samplers=[] if native_only else (["euler_ancestral", *(["euler"] if "dfr" in pipeline_modes or "retake" in editing else [])] if ltx_distilled else ["euler"] if ltx_dev else [])
             if ltx
             else list(VIDEO_SAMPLERS),
             default_sampler="euler_ancestral"
@@ -1144,12 +1194,13 @@ class VideoCapabilitySection(BaseModel):
         )
 
 
-def _guide_sections(config: VideoCardConfig) -> list[VideoGuideSection]:
-    """Each guide kind the card derives, with the modes it derives it for."""
+def _guide_sections(config: VideoCardConfig, *, guide_contract: Literal["controlnet", "union"] = "controlnet") -> list[VideoGuideSection]:
+    """Project preprocessing choices for one explicit control request contract."""
     sections: list[VideoGuideSection] = []
+    derive = derivable_union_guides if guide_contract == "union" else derivable_guides
     for kind in VIDEO_GUIDE_KINDS:
         modes = [
-            mode for mode in config.modes if kind in derivable_guides(config, mode)
+            mode for mode in config.modes if kind in derive(config, mode)
         ]
         if not modes:
             continue
@@ -2848,6 +2899,8 @@ class VideoCreateRequest(BaseModel):
     """Freeze one uploaded audio segment; multipart forms supply a JSON object."""
     editing: VideoEditing | None = None
     """Retake or extend source_video; seconds always describes total output length."""
+    motion_tracks: VideoMotionTracks | None = Field(default=None, description="Motion Track settings; path coordinates arrive in the application/json motion_track_data attachment.")
+    union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None
     """Ordered local scene prompts; multipart forms supply a JSON object."""
     pipeline: VideoPipeline | None = None
@@ -2858,12 +2911,23 @@ class VideoCreateRequest(BaseModel):
     """Guided LTX negative conditioning, encoded verbatim."""
     guidance: VideoGuidance | None = None
     """LTX base-stage guidance; a multipart form supplies a JSON object."""
+    temporal_upscalings: Literal[0, 1] = 0
+    """DFR temporal x2 passes; one doubles FPS and frame density on the same timeline."""
     generated_keyframe_interval: int | None = Field(default=None, ge=1, le=1024)
     """Internal detailing keyframe spacing in pixel frames."""
     duration: Literal["fixed", "auto"] = "fixed"
     """Automatic duration uses ``seconds`` as its upper bound, or the card maximum."""
     duration_min_seconds: int | None = Field(default=None, ge=1, le=120)
     """Automatic duration lower bound; omitted uses the card minimum."""
+
+    @field_validator("temporal_upscalings", mode="before")
+    @classmethod
+    def _parse_temporal_upscalings(cls, value: object) -> object:
+        if isinstance(value, str) and value in ("0", "1"):
+            return int(value)
+        if type(value) is not int:
+            raise ValueError("temporal_upscalings must be integer 0 or 1")
+        return value
 
     @field_validator("guidance", mode="before")
     @classmethod
@@ -2881,6 +2945,16 @@ class VideoCreateRequest(BaseModel):
     @classmethod
     def _parse_editing(cls, value: object) -> object:
         return VideoEditing.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("motion_tracks", mode="before")
+    @classmethod
+    def _parse_motion_tracks(cls, value: object) -> object:
+        return VideoMotionTracks.model_validate_json(value) if isinstance(value, str) else value
+
+    @field_validator("union_control", mode="before")
+    @classmethod
+    def _parse_union_control(cls, value: object) -> object:
+        return VideoUnionControl.model_validate_json(value) if isinstance(value, str) else value
 
     @field_validator("prompt_relay", mode="before")
     @classmethod
@@ -2970,9 +3044,9 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """The engine settings a render resolved and ran with."""
 
     sampler: str
-    """Sampler that integrated the render (a `KSamplerSelect` name)."""
+    """Sampler that integrated the render, including fixed family samplers."""
     scheduler: str
-    """Schedule that placed its noise levels (a `BasicScheduler` name)."""
+    """Schedule that placed its noise levels, including fixed family schedules."""
     steps: int
     """Sampling steps the schedule ran."""
     seed: int | None = None
@@ -2983,6 +3057,21 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Selected decoder, when applicable."""
     guidance: VideoGuidance | None = None
     """Guidance applied to the base stage."""
+    stage_lora_strengths: dict[Literal["base", "refine"], float] = Field(
+        default_factory=dict,
+        description="Exact fixed adapter strengths applied by each family workflow stage.",
+    )
+    stage_samplers: dict[Literal["base", "refine"], str] = Field(default_factory=dict, description="Actual stage-specific integrators; sampler remains the base-stage name.")
+    guidance_video_rescale: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Video guidance rescaling applied after the base-stage guidance branches.",
+    )
+    guidance_audio_rescale: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Audio guidance rescaling applied after the base-stage guidance branches.",
+    )
+    temporal_upscalings: Literal[0, 1] = 0
+    """Executed DFR temporal x2 passes."""
     generated_keyframe_interval: int | None = None
     """Internal generated keyframe spacing, when used."""
     duration: Literal["fixed", "auto"] = "fixed"
@@ -2991,6 +3080,8 @@ class VideoEngineInfo(BaseModel, frozen=True):
     """Source waveform offset used as frozen context."""
     editing: VideoEditing | None = None
     """Executed source operation and requested retake interval."""
+    motion_tracks: VideoMotionTracks | None = Field(default=None, description="Motion Track settings; path coordinates arrive in the application/json motion_track_data attachment.")
+    union_control: VideoUnionControl | None = Field(default=None, description="LTX Union guide and adapter settings; forms supply a JSON object.")
     prompt_relay: VideoPromptRelay | None = None
     """Executed local prompts and relative timeline lengths."""
     video_shift: float | None

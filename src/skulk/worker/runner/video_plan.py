@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from skulk.shared.models.model_cards import VideoCardConfig
+from skulk.shared.types.motion_geometry import resolve_motion_canvas
 from skulk.shared.types.video import VideoGenerationTaskParams, VideoStage
 from skulk.worker.runner.image_dimensions import image_dimensions
 
@@ -117,7 +118,7 @@ def plan_render(
     so an unseeded request is still reproducible.
     """
 
-    canvas = params.width_height
+    canvas = resolve_motion_canvas(params.width_height, video.default_short_edge, params.aspect_ratio, video.max_pixels) if params.motion_tracks is not None else params.width_height
     if canvas is None:
         short = video.default_short_edge or DEFAULT_SHORT_EDGE
         shape = keyframe_shape(params) if params.aspect_ratio is None else None

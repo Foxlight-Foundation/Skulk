@@ -505,6 +505,7 @@ class NodeResources(CamelCaseModel):
             engine_builds=engine_builds,
             native_image_families=native_image_family_inventory(facts),
             installable_engine_builds={
+                **facts.comfy_extension_installable_builds,
                 **facts.stable_diffusion_cpp_installable_builds,
                 **facts.vllm_installable_builds,
                 **facts.mlx_video_installable_builds,

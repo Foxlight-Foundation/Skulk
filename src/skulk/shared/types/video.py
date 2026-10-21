@@ -23,13 +23,18 @@ from skulk.shared.models.model_cards import (
     VideoMode,
     VideoPreprocessorRole,
 )
+from skulk.shared.types.motion_geometry import (
+    resolve_motion_canvas,
+    validate_motion_geometry,
+)
+from skulk.shared.types.video_motion import MAX_MOTION_TRACK_BYTES, VideoMotionTracks
 from skulk.utils.pydantic_ext import CamelCaseModel
 
-VideoReferenceKind = Literal["image", "video", "audio"]
+VideoReferenceKind = Literal["image", "video", "audio", "data"]
 """Media families a request may attach as conditioning input."""
 
 VideoReferenceRole = Literal[
-    "first_frame", "last_frame", "keyframe", "reference", "control", "mask", "source"
+    "first_frame", "last_frame", "keyframe", "reference", "control", "mask", "source", "motion_tracks"
 ]
 """How one attachment conditions generation.
 
@@ -40,7 +45,7 @@ video (edges, depth, pose) the render follows, a mask whose white marks what
 to regenerate, and the clip behind that mask.
 """
 
-VIDEO_STRUCTURAL_ROLES: Final = frozenset({"control", "mask", "source"})
+VIDEO_STRUCTURAL_ROLES: Final = frozenset({"control", "mask", "source", "motion_tracks"})
 """Roles that steer the model through its ControlNet rather than condition it.
 
 They never decide the mode, never count against the card's reference limits,
@@ -137,8 +142,12 @@ slower by the node's own account)."""
 VideoCodecName = Literal["h264", "av1"]
 """Video codecs the pinned ComfyUI's ``SaveVideo`` writes into MP4."""
 
-VideoPipeline = Literal["distilled_two_stage", "dev_two_stage", "hq_two_stage", "dfr", "retake", "extend"]
+VideoPipeline = Literal["distilled_two_stage", "dev_two_stage", "hq_two_stage", "dfr", "retake", "extend", "motion_tracks"]
 """Family-specific execution workflow; engines must refuse unavailable workflows."""
+
+VideoExecutionFeature = Literal["hq_two_stage", "dfr", "audio_conditioning", "retake", "extend", "prompt_relay", "union_control", "motion_tracks"]
+"""Advanced execution contracts selected by an instance's immutable engine build."""
+
 
 VideoDecoder = Literal["convolutional", "diffusion"]
 """Explicit decoder choice, independently bound to selected artifact files."""
@@ -239,6 +248,18 @@ VIDEO_GUIDE_PREPROCESSORS: Final[dict[str, tuple[VideoPreprocessorRole, ...]]] =
 """The preprocessor weights each guide needs from the card; edges need none."""
 
 
+@final
+class VideoUnionControl(BaseModel):
+    """Condition LTX with one aligned Union guide clip, independently of H3."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    guide: VideoGuideKind = Field(default="edges", description="Pose, depth or edge signal supplied to the Union IC-LoRA.")
+    preprocessed: bool = Field(default=False, description="True consumes uploaded guide pixels directly; false derives the guide using the selected card's native Comfy preprocessors.")
+    adapter_strength: float = Field(default=1.0, gt=0.0, le=2.0, description="Union IC-LoRA strength in the base stage; refinement uses the original transformer.")
+    guide_strength: float = Field(default=1.0, ge=0.0, le=1.0, description="Appended reference-guide strength, separate from adapter weight.")
+
+
 def derivable_guides(video: VideoCardConfig, mode: VideoMode) -> tuple[str, ...]:
     """The guide kinds a card can derive for ``mode``, in offer order.
 
@@ -253,8 +274,29 @@ def derivable_guides(video: VideoCardConfig, mode: VideoMode) -> tuple[str, ...]
     )
     if not has_controlnet:
         return ()
+    return _preprocessor_guides(video, mode)
+
+
+def derivable_union_guides(video: VideoCardConfig, mode: VideoMode) -> tuple[str, ...]:
+    """Return native preprocessing choices for the explicit Union request contract.
+
+    A mode-compatible named Union adapter is required. These choices never
+    authorize ordinary ControlNet requests through ``control_kind``.
+    """
+    has_union = any(
+        companion.kind is VideoCompanionKind.Lora
+        and companion.name == "union_control"
+        and companion.supports_mode(mode)
+        for companion in video.companions
+    )
+    if not has_union:
+        return ()
+    return _preprocessor_guides(video, mode)
+
+
+def _preprocessor_guides(video: VideoCardConfig, mode: VideoMode) -> tuple[str, ...]:
     roles = {
-        companion.role for companion in video.companions if companion.role is not None
+        companion.role for companion in video.companions if companion.role is not None and companion.supports_mode(mode)
     }
     return tuple(
         kind
@@ -349,6 +391,12 @@ class VideoReferenceSpec(CamelCaseModel):
             raise ValueError("keyframe roles require an image attachment")
         if (self.role == "keyframe") != (self.at_seconds is not None):
             raise ValueError("a keyframe carries at_seconds and no other role does")
+        if self.role == "motion_tracks" or self.kind == "data":
+            if self.role != "motion_tracks" or self.kind != "data" or self.media_type != "application/json":
+                raise ValueError("motion tracks require a data attachment with application/json")
+            if self.size_bytes > MAX_MOTION_TRACK_BYTES:
+                raise ValueError("motion track data exceeds its four-MiB bound")
+            return self
         if self.role in VIDEO_STRUCTURAL_ROLES and self.kind not in ("image", "video"):
             raise ValueError(f"a {self.role} attachment is an image or a video")
         family = self.media_type.split("/", 1)[0]
@@ -401,6 +449,10 @@ class VideoGenerationTaskParams(BaseModel):
     """Retake or extend a source clip, with seconds describing total output duration."""
     prompt_relay: VideoPromptRelay | None = None
     """Ordered scene prompts applied to successive portions of a generated clip."""
+    motion_tracks: VideoMotionTracks | None = None
+    """Single-stage Motion Track controls, with coordinates on the media plane."""
+    union_control: VideoUnionControl | None = None
+    """LTX Union conditioning from the control attachment, with explicit preprocessing."""
     pipeline: VideoPipeline | None = None
     """Explicit family workflow; omitted selects the card's transformer variant."""
     decoder: VideoDecoder | None = None
@@ -409,6 +461,8 @@ class VideoGenerationTaskParams(BaseModel):
     """Negative conditioning for guided LTX generation."""
     guidance: VideoGuidance | None = None
     """Guided LTX base-stage controls; distilled stages always use unity CFG."""
+    temporal_upscalings: Literal[0, 1] = 0
+    """DFR temporal x2 passes; zero keeps the card frame rate, one doubles density."""
     generated_keyframe_interval: int | None = Field(default=None, ge=1, le=1024)
     """Generate an internal detailing keyframe every this many pixel frames."""
     duration: Literal["fixed", "auto"] = "fixed"
@@ -450,6 +504,13 @@ class VideoGenerationTaskParams(BaseModel):
     """Number of reference-media frames the worker must verify before dispatch."""
     reference_bytes: int = Field(default=0, ge=0)
     """Total attachment bytes, for admission accounting."""
+
+    @field_validator("temporal_upscalings", mode="before")
+    @classmethod
+    def _validate_temporal_upscalings(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("temporal_upscalings must be integer 0 or 1")
+        return value
 
     @field_validator("references", mode="before")
     @classmethod
@@ -540,6 +601,10 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError("a source clip is read only behind a mask")
         if self.prompt_relay is not None and len(self.prompt) + sum(len(segment.prompt) for segment in self.prompt_relay.segments) > MAX_VIDEO_PROMPT_CHARS:
             raise ValueError("the global and local scene prompts exceed the combined prompt limit")
+        if (self.motion_tracks is not None) != ("motion_tracks" in roles):
+            raise ValueError("motion_tracks controls require one motion_track_data attachment and vice versa")
+        if self.union_control is not None and not any(item.role == "control" and item.kind == "video" for item in self.references):
+            raise ValueError("LTX Union requires one video attachment with the control role")
         steered = "control" in roles or "mask" in roles
         if not steered and (
             self.control_strength is not None
@@ -593,9 +658,11 @@ class VideoGenerationTaskParams(BaseModel):
         if family != "ltx-2.5":
             if (self.pipeline is not None or self.decoder is not None
                 or self.negative_prompt is not None or self.guidance is not None
+                or self.temporal_upscalings != 0
                 or self.generated_keyframe_interval is not None
                 or self.audio_conditioning is not None or self.editing is not None
                 or self.prompt_relay is not None
+                or self.union_control is not None or self.motion_tracks is not None
                 or self.duration != "fixed" or self.duration_min_seconds is not None):
                 raise ValueError("LTX pipeline controls require an LTX-2.5 model")
             return
@@ -603,14 +670,47 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError(
                 "LTX-2.5 requires a declared distilled transformer or dev transformer"
             )
-        pipeline = self.pipeline or (self.editing.operation if self.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        pipeline = self.pipeline or ("motion_tracks" if self.motion_tracks is not None else self.editing.operation if self.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
+        if self.motion_tracks is not None:
+            if pipeline != "motion_tracks" or video.transformer_variant != "distilled" or self.duration != "fixed" or self.union_control is not None or self.editing is not None or self.audio_conditioning is not None or self.prompt_relay is not None or self.generated_keyframe_interval is not None or self.decoder not in (None, "convolutional"):
+                raise ValueError("Motion Track uses its fixed single-stage distilled workflow")
+            if not video.motion_tracks or not any(item.kind is VideoCompanionKind.Lora and item.name == "motion_tracks" and item.supports_mode(self.implied_mode()) for item in video.companions):
+                raise ValueError("Motion Track requires the selected pack's compatible motion_tracks IC-LoRA")
+            if len(self.references) != 2 or {item.role for item in self.references} != {"first_frame", "motion_tracks"}:
+                raise ValueError("Motion Track requires exactly one opening image and one trajectory attachment")
+            canvas = resolve_motion_canvas(self.width_height, video.default_short_edge, self.aspect_ratio, video.max_pixels)
+            validate_motion_geometry(*canvas, video.frame_count_for_seconds(self.seconds))
+        elif pipeline == "motion_tracks":
+            raise ValueError("the motion_tracks pipeline requires explicit motion_tracks controls")
+        if self.union_control is not None:
+            if not video.union_control or not any(item.kind is VideoCompanionKind.Lora and item.name == "union_control" and item.supports_mode(self.implied_mode()) for item in video.companions):
+                raise ValueError("LTX Union requires the selected pack's compatible union_control IC-LoRA")
+            if pipeline != "distilled_two_stage" or self.duration != "fixed" or self.generated_keyframe_interval is not None or self.prompt_relay is not None or self.audio_conditioning is not None or self.editing is not None:
+                raise ValueError("LTX Union uses its fixed distilled two-stage workflow without editing, duration prediction, relay or generated-keyframe controls")
+            if any(item.role not in ("control", "first_frame") for item in self.references):
+                raise ValueError("LTX Union accepts one aligned control video and an optional opening image")
+            if not self.union_control.preprocessed and self.union_control.guide not in derivable_union_guides(video, self.implied_mode()):
+                raise ValueError("The Union pack lacks the requested guide preprocessor companions; supply a prepared guide or choose a complete pack")
+            if self.width_height is not None and any(edge % 128 for edge in self.width_height):
+                raise ValueError("LTX Union output dimensions must be divisible by 128 for its half-size reference grid")
         if pipeline in ("retake", "extend"):
             if self.editing is None or self.editing.operation != pipeline:
                 raise ValueError("an editing pipeline requires matching editing controls and a source clip")
         elif self.editing is not None:
             raise ValueError("editing cannot select a generation pipeline")
-        elif (pipeline in ("distilled_two_stage", "dfr")) != (video.transformer_variant == "distilled"):
+        elif (pipeline in ("distilled_two_stage", "dfr", "motion_tracks")) != (video.transformer_variant == "distilled"):
             raise ValueError("LTX-2.5 pipeline does not match the declared transformer variant")
+        if self.temporal_upscalings and pipeline != "dfr":
+            raise ValueError("temporal_upscalings requires the LTX-2.5 DFR pipeline")
+        if pipeline == "dfr":
+            if not video.generated_keyframes:
+                raise ValueError("LTX-2.5 DFR requires generated keyframe support")
+            if not any(item.kind is VideoCompanionKind.Lora and item.name == "dfr_spatial" and item.supports_mode(self.implied_mode()) for item in video.companions):
+                raise ValueError("LTX-2.5 DFR requires its exact dfr_spatial IC-LoRA")
+            if self.temporal_upscalings and not any(item.kind is VideoCompanionKind.LatentUpscaler and item.name == "temporal_x2" and item.supports_mode(self.implied_mode()) for item in video.companions):
+                raise ValueError("LTX-2.5 DFR temporal refinement requires its temporal_x2 upscaler")
+            if self.duration != "fixed":
+                raise ValueError("LTX-2.5 DFR currently requires fixed duration")
         if not video.audio_output:
             raise ValueError("LTX-2.5 requires its audio VAE even for silent output")
         if video.frame_grid_multiple != 8 or video.frame_grid_offset != 1:
@@ -629,8 +729,10 @@ class VideoGenerationTaskParams(BaseModel):
             raise ValueError(
                 "LTX-2.5 distilled rendering uses a fixed 8-step base schedule"
             )
-        expected_sampler = "euler_ancestral" if video.transformer_variant == "distilled" and pipeline != "retake" else "euler"
-        if self.sampler not in (None, expected_sampler) or self.scheduler is not None:
+        if pipeline == "hq_two_stage" and (self.sampler is not None or self.scheduler is not None):
+            raise ValueError("LTX-2.5 HQ uses its fixed Res2s sampler and family schedule; omit sampler and scheduler overrides")
+        expected_sampler = "euler_ancestral" if video.transformer_variant == "distilled" and pipeline not in ("retake", "dfr") else "euler"
+        if pipeline != "hq_two_stage" and (self.sampler not in (None, expected_sampler) or self.scheduler is not None):
             raise ValueError(
                 f"LTX-2.5 {pipeline} uses its fixed {expected_sampler} sampler and family schedule"
             )
@@ -667,6 +769,8 @@ class VideoGenerationTaskParams(BaseModel):
             self.styles
             or self.control_kind is not None
             or self.control_strength is not None
+            or self.control_start != 0.0
+            or self.control_end != 1.0
         ):
             raise ValueError(
                 "LTX-2.5 distilled rendering does not accept H3 styles or ControlNet controls"
@@ -693,7 +797,7 @@ class VideoGenerationTaskParams(BaseModel):
                 raise ValueError("editing requires an explicit source-matching size")
             if self.guidance is not None:
                 raise ValueError("this editing workflow uses its fixed single CFG/STG defaults, not two-stage per-modality guidance")
-        elif any(item.kind != "image" or item.role not in ("first_frame", "last_frame", "keyframe") for item in self.references):
+        elif self.union_control is None and self.motion_tracks is None and any(item.kind != "image" or item.role not in ("first_frame", "last_frame", "keyframe") for item in self.references):
             raise ValueError("LTX-2.5 generation accepts image anchors; audio/video references require explicit conditioning or editing controls")
         if self.audio_conditioning is not None or self.editing is not None:
             if self.duration != "fixed" or self.generated_keyframe_interval is not None or self.prompt_relay is not None:
@@ -720,7 +824,7 @@ class VideoGenerationTaskParams(BaseModel):
             )
         if self.seed is not None and self.seed >= 2**64:
             raise ValueError("LTX-2.5 noise seeds must fit an unsigned 64-bit integer")
-        requires_upscaler = pipeline != "retake" and not (pipeline == "extend" and video.transformer_variant == "dev")
+        requires_upscaler = pipeline not in ("retake", "motion_tracks") and not (pipeline == "extend" and video.transformer_variant == "dev")
         if requires_upscaler and not any(
             item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(self.implied_mode())
             for item in video.companions
@@ -787,9 +891,9 @@ class VideoEngineSettings(CamelCaseModel):
     model_config = ConfigDict(frozen=True)
 
     sampler: str
-    """Sampler that integrated the render (a `KSamplerSelect` name)."""
+    """Sampler that integrated the render, including a workflow-owned Res2s integrator."""
     scheduler: str
-    """Schedule that placed its noise levels (a `BasicScheduler` name)."""
+    """Schedule that placed the noise levels, including fixed family schedules."""
     steps: int = Field(ge=1)
     """Sampling steps the schedule ran."""
     seed: int | None = Field(default=None, ge=0)
@@ -800,6 +904,8 @@ class VideoEngineSettings(CamelCaseModel):
     """Decoder applied to the final video latent."""
     guidance: VideoGuidance | None = None
     """Guidance applied to the guided base stage."""
+    temporal_upscalings: Literal[0, 1] = 0
+    """Executed DFR temporal x2 passes, independent of spatial refinement."""
     generated_keyframe_interval: int | None = None
     """Internal detailing keyframe spacing, when used."""
     duration: Literal["fixed", "auto"] = "fixed"
@@ -810,6 +916,10 @@ class VideoEngineSettings(CamelCaseModel):
     """Source operation and requested interval, quantized on the latent grid."""
     prompt_relay: VideoPromptRelay | None = None
     """Local prompts and relative lengths actually used by temporal attention."""
+    motion_tracks: VideoMotionTracks | None = None
+    """Single-stage Motion Track controls, with coordinates on the media plane."""
+    union_control: VideoUnionControl | None = None
+    """Exact Union guide and adapter settings used by the base stage."""
     video_shift: float | None = None
     """Video sigma shift applied; ``None`` leaves the loader default."""
     audio_shift: float | None = None
@@ -818,6 +928,10 @@ class VideoEngineSettings(CamelCaseModel):
     """Adapter companion name, when one was applied."""
     adapter_strength: float | None = None
     """Strength the adapter was applied at; ``None`` without an adapter."""
+    stage_lora_strengths: dict[Literal["base", "refine"], float] = Field(default_factory=dict, description="Exact fixed per-stage LoRA strengths when a family workflow owns more than one adapter application.")
+    stage_samplers: dict[Literal["base", "refine"], str] = Field(default_factory=dict, description="Actual per-stage integrators when a workflow uses different samplers; sampler retains the base-stage name.")
+    guidance_video_rescale: float | None = Field(default=None, ge=0.0, le=1.0, description="Video guidance rescaling actually applied after the base-stage guidance branches.")
+    guidance_audio_rescale: float | None = Field(default=None, ge=0.0, le=1.0, description="Audio guidance rescaling actually applied after the base-stage guidance branches.")
     width: int = Field(ge=1)
     """Output canvas width in pixels."""
     height: int = Field(ge=1)
