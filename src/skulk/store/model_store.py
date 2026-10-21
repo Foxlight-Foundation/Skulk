@@ -975,6 +975,11 @@ class ModelStore:
             write_recovery_admission(
                 home, manifest.preservation.manifest_id, tuple(index.entries), deletions
             )
+        # A missing index after an uncertain commit cannot prove that a hidden
+        # generation was never indexed. Establish a durable empty baseline on
+        # first publication so explicit cleanup can fail closed on index loss.
+        if not self._registry_path.exists():
+            self._write_registry(registry, durable=True)
         generations = self._store_path / ".recoveries"
         generations.mkdir(mode=0o700, exist_ok=True)
         target = generations / generation_id
