@@ -93,13 +93,18 @@ async def settled(host: PreservationHost, job_id: str) -> PreservationJob:
 
 
 async def ready(host: PreservationHost, job_id: str) -> PreservationJob:
-    async with asyncio.timeout(30):
-        while True:
-            job = host.journal.job(job_id)
-            if job.sharing is not None and job.sharing.ready:
-                return job
-            assert job.state in {"queued", "running"}, job
-            await asyncio.sleep(0.025)
+    try:
+        async with asyncio.timeout(30):
+            while True:
+                job = host.journal.job(job_id)
+                if job.sharing is not None and job.sharing.ready:
+                    return job
+                assert job.state in {"queued", "running"}, job
+                await asyncio.sleep(0.025)
+    except TimeoutError:
+        pytest.fail(
+            "Sharing readiness deadline: " + host.journal.job(job_id).model_dump_json()
+        )
 
 
 async def import_copy(
