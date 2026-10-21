@@ -267,14 +267,29 @@ def derivable_guides(video: VideoCardConfig, mode: VideoMode) -> tuple[str, ...]
         and (not companion.modes or mode in companion.modes)
         for companion in video.companions
     )
-    has_union = video.union_control and any(
+    if not has_controlnet:
+        return ()
+    return _preprocessor_guides(video, mode)
+
+
+def derivable_union_guides(video: VideoCardConfig, mode: VideoMode) -> tuple[str, ...]:
+    """Return native preprocessing choices for the explicit Union request contract.
+
+    A mode-compatible named Union adapter is required. These choices never
+    authorize ordinary ControlNet requests through ``control_kind``.
+    """
+    has_union = any(
         companion.kind is VideoCompanionKind.Lora
         and companion.name == "union_control"
         and companion.supports_mode(mode)
         for companion in video.companions
     )
-    if not has_controlnet and not has_union:
+    if not has_union:
         return ()
+    return _preprocessor_guides(video, mode)
+
+
+def _preprocessor_guides(video: VideoCardConfig, mode: VideoMode) -> tuple[str, ...]:
     roles = {
         companion.role for companion in video.companions if companion.role is not None and companion.supports_mode(mode)
     }
@@ -648,7 +663,7 @@ class VideoGenerationTaskParams(BaseModel):
                 raise ValueError("LTX Union uses its fixed distilled two-stage workflow without editing, duration prediction, relay or generated-keyframe controls")
             if any(item.role not in ("control", "first_frame") for item in self.references):
                 raise ValueError("LTX Union accepts one aligned control video and an optional opening image")
-            if not self.union_control.preprocessed and self.union_control.guide not in derivable_guides(video, self.implied_mode()):
+            if not self.union_control.preprocessed and self.union_control.guide not in derivable_union_guides(video, self.implied_mode()):
                 raise ValueError("The Union pack lacks the requested guide preprocessor companions; supply a prepared guide or choose a complete pack")
             if self.width_height is not None and any(edge % 128 for edge in self.width_height):
                 raise ValueError("LTX Union output dimensions must be divisible by 128 for its half-size reference grid")

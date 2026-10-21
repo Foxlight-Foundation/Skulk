@@ -1944,7 +1944,12 @@ outside those constraints are refused. Seeds must fit an unsigned 64-bit
 integer.
 
 The model video metadata additionally exposes `pipelines`, `decoders`,
-`generated_keyframes`, `temporal_upscaling`, `temporal_upscaling_modes`, `automatic_duration`, `audio_conditioning`, `editing`, `prompt_relay`, `union_control` and guided defaults.
+`generated_keyframes`, `temporal_upscaling`, `temporal_upscaling_modes`, `automatic_duration`, `audio_conditioning`, `editing`, `prompt_relay`, `union_control`, `union_guides` and guided defaults.
+
+`guides` and `default_guide` describe ordinary ControlNet requests using
+`control_kind`. `union_guides` separately describes native preprocessing choices
+for explicit `union_control.guide` requests, including modes and selected weights.
+A Union-only pack never advertises its preprocessing as ordinary ControlNet.
 `pipeline_modes` and `decoder_modes` map each offered choice to its permitted
 modes; `automatic_duration_modes` lists the modes allowed by the selected
 head. Companion mode limits are enforced before graph dispatch, including

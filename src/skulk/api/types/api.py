@@ -62,6 +62,7 @@ from skulk.shared.types.video import (
     VideoSchedulerName,
     VideoUnionControl,
     derivable_guides,
+    derivable_union_guides,
 )
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from skulk.shared.types.worker.shards import Sharding, ShardMetadata
@@ -804,7 +805,7 @@ class VideoGuideSection(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True)
 
     kind: VideoGuideKind = Field(
-        description="Value of the video job `control_kind` field: pose, depth, or edges."
+        description="Signal kind: `control_kind` for ControlNet requests or `union_control.guide` for explicit Union requests."
     )
     modes: list[VideoModeName] = Field(
         description="Generation modes the card derives this guide for."
@@ -886,6 +887,7 @@ class VideoCapabilitySection(BaseModel):
     audio_conditioning: bool = Field(default=False, description="A selected artifact and available engine can freeze prepared source audio in both sampling stages.")
     editing: list[Literal["retake", "extend"]] = Field(default_factory=list, description="Source-video operations implemented by an issued owned engine build.")
     union_control: bool = Field(default=False, description="Union IC-LoRA execution is available in an issued owned engine build.")
+    union_guides: list[VideoGuideSection] = Field(default_factory=list, description="Native preprocessing choices for explicit union_control requests; these do not authorize ordinary control_kind requests.")
     prompt_relay: bool = Field(default=False, description="Timed local prompts are implemented by an issued owned engine build.")
     guidance: VideoGuidance | None = Field(default=None, description="Default guided LTX base-stage scales; null for distilled or other families.")
     min_seconds: int = Field(description="Shortest clip length accepted.")
@@ -1086,6 +1088,7 @@ class VideoCapabilitySection(BaseModel):
             audio_conditioning=audio_conditioning,
             editing=editing,
             union_control=ltx_available and config.union_control and "union_control" in available_features,
+            union_guides=_guide_sections(config, guide_contract="union") if ltx_available and config.union_control and "union_control" in available_features else [],
             prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in available_features,
             guidance=VideoGuidance() if ltx_dev else None,
             min_seconds=config.min_seconds,
@@ -1180,12 +1183,13 @@ class VideoCapabilitySection(BaseModel):
         )
 
 
-def _guide_sections(config: VideoCardConfig) -> list[VideoGuideSection]:
-    """Each guide kind the card derives, with the modes it derives it for."""
+def _guide_sections(config: VideoCardConfig, *, guide_contract: Literal["controlnet", "union"] = "controlnet") -> list[VideoGuideSection]:
+    """Project preprocessing choices for one explicit control request contract."""
     sections: list[VideoGuideSection] = []
+    derive = derivable_union_guides if guide_contract == "union" else derivable_guides
     for kind in VIDEO_GUIDE_KINDS:
         modes = [
-            mode for mode in config.modes if kind in derivable_guides(config, mode)
+            mode for mode in config.modes if kind in derive(config, mode)
         ]
         if not modes:
             continue

@@ -51,6 +51,7 @@ from skulk.shared.types.video import (
     VideoStage,
     VideoUnionControl,
     derivable_guides,
+    derivable_union_guides,
 )
 from skulk.worker.runner.video_plan import RenderPlan, plan_render
 
@@ -439,17 +440,17 @@ class ControlChoice:
 
 
 def select_guide(
-    params: VideoGenerationTaskParams, card: ModelCard, mode: VideoMode, *, kind: VideoGuideKind | None = None
+    params: VideoGenerationTaskParams, card: ModelCard, mode: VideoMode, *, kind: VideoGuideKind | None = None, guide_contract: Literal["controlnet", "union"] = "controlnet"
 ) -> GuideChoice:
     """The guide to derive from the request's control clip, with its weights.
 
     The clip is ordinary footage: the render derives the pose, depth or
-    edges the ControlNet follows. A kind the card cannot derive for the mode
-    is refused with the kinds it can.
+    edges the selected ControlNet or explicit Union contract follows. A kind
+    the card cannot derive for that contract and mode is refused.
     """
     assert card.video is not None
     kind = kind or params.control_kind or VIDEO_DEFAULT_GUIDE
-    available = derivable_guides(card.video, mode)
+    available = (derivable_union_guides if guide_contract == "union" else derivable_guides)(card.video, mode)
     if kind not in available:
         raise ValueError(
             f"{card.model_id} cannot derive a {kind} guide for mode {mode.value}; "
@@ -698,7 +699,7 @@ def plan_comfy_render(
             editing=params.editing,
             prompt_relay=params.prompt_relay,
             union_control=params.union_control,
-            union_guide=select_guide(params, card, mode, kind=params.union_control.guide) if params.union_control is not None and not params.union_control.preprocessed else None,
+            union_guide=select_guide(params, card, mode, kind=params.union_control.guide, guide_contract="union") if params.union_control is not None and not params.union_control.preprocessed else None,
             transformer_variant=video.transformer_variant,
             minimum_frames=video.frame_count_for_seconds(minimum) if params.duration == "auto" else None,
             duration_min_seconds=minimum if params.duration == "auto" else None,

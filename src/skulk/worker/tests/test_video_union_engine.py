@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from skulk.api.types.api import VideoCreateRequest
+from skulk.api.types.api import VideoCapabilitySection, VideoCreateRequest
 from skulk.provisioning import comfy_extension
 from skulk.provisioning.manifest import COMFY_PIN
 from skulk.shared.models.model_cards import (
@@ -19,6 +19,8 @@ from skulk.shared.types.video import (
     VideoGenerationTaskParams,
     VideoReferenceSpec,
     VideoUnionControl,
+    derivable_guides,
+    derivable_union_guides,
 )
 from skulk.worker.runner.comfy.graph import (
     ReferenceBinding,
@@ -124,6 +126,26 @@ def test_union_capability_does_not_add_a_redundant_persisted_card_flag(union_car
     """Existing card readers and preservation schemas retain their body contract."""
     assert union_card.video is not None and union_card.video.union_control
     assert "union_control" not in union_card.video.model_dump(mode="json")
+
+
+def test_union_metadata_keeps_its_request_contract_separate(union_card: ModelCard, issued_union: str) -> None:
+    """A guide offer must lead to the explicit request the engine actually accepts."""
+    assert union_card.video is not None
+    mode = _request().implied_mode()
+    assert derivable_guides(union_card.video, mode) == ()
+    assert derivable_union_guides(union_card.video, mode) == ("edges",)
+    section = VideoCapabilitySection.from_model_card(union_card)
+    assert section is not None and section.union_control
+    assert section.guides == [] and section.default_guide is None
+    assert [guide.kind for guide in section.union_guides] == ["edges"]
+    plan_comfy_render(_request(), union_card, engine_build=issued_union)
+
+
+def test_unissued_union_engine_does_not_offer_preprocessing(union_card: ModelCard) -> None:
+    """Intrinsic adapter presence cannot invent an issued executable feature."""
+    section = VideoCapabilitySection.from_model_card(union_card)
+    assert section is not None
+    assert not section.union_control and not section.union_guides
 
 
 def test_union_multipart_json_has_the_same_strict_typed_contract() -> None:
