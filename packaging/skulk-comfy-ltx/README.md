@@ -17,7 +17,18 @@ checkout, request-time package resolution or model download occurs in this wheel
 
 Candidate source and tensor checks do not qualify a model or hardware class.
 
-Candidate `0.1.4` adds a validated Union IC-LoRA bridge. It requires the actual loaded adapter to declare reference downscale factor two and a complete aligned guide clip, then delegates to pinned native Comfy guide creation and crop semantics. Prepared guides bypass annotation; RGB inputs use explicitly selected native Comfy Canny, SDPose/RT-DETR or DA3 chains. The publication checker evaluates the actual packed bridge against hash-bound native guide/dilation/crop methods on bounded tensors. This source contract does not qualify model weights or hardware, and the candidate does not create offers before attested publication and descriptor registration.
+The issued `0.1.4` wheel adds a validated Union IC-LoRA bridge. It requires the actual loaded adapter to declare reference downscale factor two and a complete aligned guide clip, then delegates to pinned native Comfy guide creation and crop semantics. Prepared guides bypass annotation; RGB inputs use explicitly selected native Comfy Canny, SDPose/RT-DETR or DA3 chains. The publication checker evaluates the actual packed bridge against hash-bound native guide/dilation/crop methods on bounded tensors. This source contract does not qualify model weights or hardware.
+
+Its complete archive is 65,552 bytes, SHA256
+`bcafacf142ec1d782f192e5f7f0305e91203f589017db6f89d6424c17534f909`,
+with payload identity
+`9cb0a7990934537f50daaea9573aaf3f35860bf06e95486159236c5a8e35962c`.
+The successful hosted candidate was promoted without rebuilding after verification
+of its source-bound attestation and packed numerical contracts. Complete owned-URL
+read-back through the ordinary downloader matches the attested archive and
+reviewed source. All four earlier archives and index entries are unchanged. New
+placements prefer this compatible issued version; retained instances keep their
+original builds. GPU and model qualification remain separate.
 
 The issued `0.1.3` wheel adds `prompt_relay` with combined Gemma4 encoding and clone-scoped video text-attention routing. It measures actual text columns and surviving query coordinates, uses the fixed native-compatible soft Gaussian profile, and preserves global/register/guide access. Audio keeps the combined prompt without temporal routing. Every sampling stage receives its own restorable model patch. The 32 MiB query-chunk budget avoids a full-video bias; original projections, all-head norms, position handling, gates and GPU kernels remain delegated to Comfy. Forward-scoped state clears after success, failure or cancellation; every query chunk honors Comfy's normal interrupt flag.
 
@@ -27,8 +38,9 @@ with payload identity
 `6b6a6b719952f292252fe78c1d02b851ad334cca8defc6dc2fd5878f49b4a7fd`.
 The hosted candidate, reviewed source members, source-bound attestation, full
 owned-URL/index read-back and ordinary engine downloader were verified before
-registration. Earlier issued archives are unchanged. New placements prefer this
-compatible issued version; workflow and hardware qualification remain separate.
+registration. Earlier issued archives are unchanged. At its registration, new
+placements preferred this compatible issued version; workflow and hardware
+qualification remain separate.
 
 The issued `0.1.2` wheel adds the DFR mask/keyframe bridge to Res2s and editing.
 It is 51,797 bytes, SHA256
