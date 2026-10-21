@@ -6,7 +6,9 @@ from typing import Literal, cast, final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-MAX_MOTION_TRACK_BYTES = 4 * 1024 * 1024
+from skulk.shared.types.motion_geometry import MAX_TRACK_BYTES
+
+MAX_MOTION_TRACK_BYTES = MAX_TRACK_BYTES
 """Maximum encoded trajectory attachment, independently of the video budget."""
 MAX_MOTION_TRACKS = 16
 """Maximum simultaneous paths in one motion guide."""

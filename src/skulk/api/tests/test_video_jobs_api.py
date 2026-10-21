@@ -1125,8 +1125,8 @@ def test_ltx_union_control_retains_its_typed_settings_and_media_role(monkeypatch
     assert api._video_upload_inflight_bytes == 0
 
 
-@pytest.mark.parametrize("frames,content_type,expected_status", [(25, "application/json", 200), (17, "application/json", 400), (25, "video/mp4", 400)])
-def test_ltx_motion_paths_travel_as_verified_json_media(monkeypatch: pytest.MonkeyPatch, frames: int, content_type: str, expected_status: int) -> None:
+@pytest.mark.parametrize("frames,content_type,expected_status,seconds,size", [(25, "application/json", 200, 1, "512x384"), (25, "application/json", 200, 1, None), (17, "application/json", 400, 1, "512x384"), (25, "video/mp4", 400, 1, "512x384"), (481, "application/json", 400, 20, "512x384"), (481, "application/json", 400, 20, None), (25, "application/json", 400, 1, "4096x128"), (25, "application/json", 400, 1, "4160x128")])
+def test_ltx_motion_paths_travel_as_verified_json_media(monkeypatch: pytest.MonkeyPatch, frames: int, content_type: str, expected_status: int, seconds: int, size: str | None) -> None:
     """The API validates geometry, preserves MIME truth and releases admission."""
     from skulk.shared.models.model_cards import VideoCompanionConfig, VideoCompanionKind
 
@@ -1141,7 +1141,10 @@ def test_ltx_motion_paths_travel_as_verified_json_media(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(ModelCard, "load", staticmethod(load))
     data = json.dumps({"version": 1, "frame_count": frames, "tracks": [[{"x": 0.25, "y": 0.5}] * frames]}).encode()
-    response = TestClient(api.app).post("/v1/videos", data={"model": str(card.model_id), "prompt": "fox", "seconds": "1", "size": "512x384", "motion_tracks": '{"guide_strength":0.7}'}, files=[("first_frame", ("opening.png", b"opening image", "image/png")), ("motion_track_data", ("tracks.json", data, content_type))])
+    fields = {"model": str(card.model_id), "prompt": "fox", "seconds": str(seconds), "motion_tracks": '{"guide_strength":0.7}'}
+    if size is not None:
+        fields["size"] = size
+    response = TestClient(api.app).post("/v1/videos", data=fields, files=[("first_frame", ("opening.png", b"opening image", "image/png")), ("motion_track_data", ("tracks.json", data, content_type))])
     assert response.status_code == expected_status, response.text
     assert api._video_upload_inflight_bytes == 0
     if expected_status == 200:
@@ -1153,6 +1156,8 @@ def test_ltx_motion_paths_travel_as_verified_json_media(monkeypatch: pytest.Monk
         assert command.task_params.references[1].media_type == "application/json"
         assert "tracks" not in command.task_params.motion_tracks.model_dump()
         assert command.task_params.implied_mode() is VideoMode.FramesToAudioVideo
+    else:
+        assert not api._video_jobs.list()
 
 
 def test_ltx_retake_source_does_not_require_an_h3_controlnet(monkeypatch: pytest.MonkeyPatch) -> None:

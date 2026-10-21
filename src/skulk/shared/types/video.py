@@ -23,6 +23,10 @@ from skulk.shared.models.model_cards import (
     VideoMode,
     VideoPreprocessorRole,
 )
+from skulk.shared.types.motion_geometry import (
+    resolve_motion_canvas,
+    validate_motion_geometry,
+)
 from skulk.shared.types.video_motion import MAX_MOTION_TRACK_BYTES, VideoMotionTracks
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -674,6 +678,8 @@ class VideoGenerationTaskParams(BaseModel):
                 raise ValueError("Motion Track requires the selected pack's compatible motion_tracks IC-LoRA")
             if len(self.references) != 2 or {item.role for item in self.references} != {"first_frame", "motion_tracks"}:
                 raise ValueError("Motion Track requires exactly one opening image and one trajectory attachment")
+            canvas = resolve_motion_canvas(self.width_height, video.default_short_edge, self.aspect_ratio, video.max_pixels)
+            validate_motion_geometry(*canvas, video.frame_count_for_seconds(self.seconds))
         elif pipeline == "motion_tracks":
             raise ValueError("the motion_tracks pipeline requires explicit motion_tracks controls")
         if self.union_control is not None:
@@ -818,7 +824,7 @@ class VideoGenerationTaskParams(BaseModel):
             )
         if self.seed is not None and self.seed >= 2**64:
             raise ValueError("LTX-2.5 noise seeds must fit an unsigned 64-bit integer")
-        requires_upscaler = pipeline != "retake" and not (pipeline == "extend" and video.transformer_variant == "dev")
+        requires_upscaler = pipeline not in ("retake", "motion_tracks") and not (pipeline == "extend" and video.transformer_variant == "dev")
         if requires_upscaler and not any(
             item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(self.implied_mode())
             for item in video.companions

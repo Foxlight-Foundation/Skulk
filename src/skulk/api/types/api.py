@@ -1048,7 +1048,13 @@ class VideoCapabilitySection(BaseModel):
             pipeline_modes["dev_two_stage"] = dev_modes
             if any("hq_two_stage" in features for features in feature_builds.values()):
                 pipeline_modes["hq_two_stage"] = dev_modes
+        motion_modes: list[VideoModeName] = ["fl2va"] if prerequisites and config.transformer_variant == "distilled" and "comfy" in engines and "motion_tracks" in available_features and "fl2va" in companion_modes(VideoCompanionKind.Lora, "motion_tracks") else []
+        if motion_modes:
+            # Motion Track samples once at the final canvas; an unrelated
+            # spatial-upscaler dependency must not hide this executable path.
+            pipeline_modes["motion_tracks"] = motion_modes
         served_modes: list[VideoModeName] = distilled_modes or dev_modes
+        served_modes = list(dict.fromkeys([*served_modes, *motion_modes]))
         reference_mode: list[VideoModeName] = ["ref2va"] if prerequisites and VideoMode.ReferenceToAudioVideo in config.modes else []
         spatial_reference = any(item.kind is VideoCompanionKind.LatentUpscaler and item.name == "spatial_x2" and item.supports_mode(VideoMode.ReferenceToAudioVideo) for item in config.companions)
         audio_conditioning = bool(reference_mode) and spatial_reference and config.transformer_variant == "distilled" and config.audio_conditioning and ("comfy" in engines or "audio_conditioning" in native_features)
@@ -1058,6 +1064,8 @@ class VideoCapabilitySection(BaseModel):
         for operation in editing:
             pipeline_modes[operation] = reference_mode
         pipeline_defaults: dict[VideoPipeline, VideoPipelineDefaults] = {"hq_two_stage": VideoPipelineDefaults(base_steps=15, sampler="res2s", sampling_stage_steps=[15, 3], guidance=VideoGuidance(modality_scale=3.0))} if "hq_two_stage" in pipeline_modes else {}
+        if motion_modes:
+            pipeline_defaults["motion_tracks"] = VideoPipelineDefaults(base_steps=8, sampler="euler_ancestral", sampling_stage_steps=[8])
         for operation in editing:
             base_steps = 8 if config.transformer_variant == "distilled" else 30
             single_stage = operation == "retake" or config.transformer_variant == "dev"
@@ -1089,7 +1097,7 @@ class VideoCapabilitySection(BaseModel):
             automatic_duration_modes=duration_modes,
             audio_conditioning=audio_conditioning,
             editing=editing,
-            motion_tracks=ltx_available and config.motion_tracks and "motion_tracks" in available_features,
+            motion_tracks=bool(motion_modes),
             union_control=ltx_available and config.union_control and "union_control" in available_features,
             union_guides=_guide_sections(config, guide_contract="union") if ltx_available and config.union_control and "union_control" in available_features else [],
             prompt_relay=ltx_available and config.prompt_relay and "prompt_relay" in available_features,

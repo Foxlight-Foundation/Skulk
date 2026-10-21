@@ -61,6 +61,26 @@ def test_guide_budget_and_input_size_are_checked_before_allocating(monkeypatch: 
         parse_motion_tracks(b" " * (4 * 1024 * 1024 + 1), 9)
 
 
+@pytest.mark.parametrize("width,height", [(4096, 128), (128, 4096)])
+def test_extreme_aspect_workspace_is_refused_before_allocating(width: int, height: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A small final guide cannot conceal a huge trained-resolution raster."""
+    def refuse_allocation(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise AssertionError("over-budget workspace allocated a tensor")
+
+    monkeypatch.setattr(torch, "tensor", refuse_allocation)
+    raw = json.dumps({"version": 1, "frame_count": 9, "tracks": [[{"x": 0.1, "y": 0.2}] * 9]}).encode()
+    with pytest.raises(ValueError, match="raster workspace"):
+        render_motion_tracks(raw, width, height, 9, torch.device("cpu"), check_cancelled=lambda: None)
+
+
+def test_core_and_independent_engine_use_identical_geometry_policy() -> None:
+    """The engine's isolated interpreter cannot import Core's admission module."""
+    repository = Path(__file__).resolve().parents[3]
+    core = repository / "src/skulk/shared/types/motion_geometry.py"
+    engine = repository / "packaging/skulk-comfy-ltx/skulk_comfy_ltx/motion_geometry.py"
+    assert core.read_bytes() == engine.read_bytes()
+
+
 def test_track_render_cancellation_does_not_finish_a_long_batch() -> None:
     """A request's normal cancellation check runs before each expensive frame."""
     raw = json.dumps({"version": 1, "frame_count": 9, "tracks": [[{"x": 0.1, "y": 0.2}] * 9]}).encode()

@@ -2149,3 +2149,5 @@ at a time, with cancellation between frames and a bounded retained guide. The
 full-resolution base applies its opening image and half-grid IC-LoRA guide, then
 crops guide tokens before ordinary tiled decoding; it has no spatial refiner.
 Existing Union/H3 and retained older engine builds keep their own contracts.
+
+Motion Track admission resolves canvas defaults before dispatch, independently of opening-image delivery. The Core and independent wheel retain byte-identical pure geometry policy, checked by the package tests. Retained guide pixels and transient trained-resolution raster/overlap/resize workspace have separate bounds. Single-stage offers publish their own frame mode and eight-step defaults, and do not require an unused spatial upscaler.

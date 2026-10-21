@@ -81,7 +81,49 @@ def test_motion_requires_exact_issued_feature_without_hardware_allowlist(motion_
         plan_comfy_render(params, motion_card)
     section = VideoCapabilitySection.from_model_card(motion_card)
     assert section is not None and section.motion_tracks
+    assert section.pipeline_modes["motion_tracks"] == ["fl2va"]
+    assert section.pipeline_defaults["motion_tracks"].sampling_stage_steps == [8]
+    assert section.pipeline_defaults["motion_tracks"].sampler == "euler_ancestral"
     assert motion_card.video is not None and "motion_tracks" not in motion_card.video.model_dump(mode="json")
+
+
+def test_motion_metadata_does_not_require_an_unused_spatial_upscaler(motion_card: ModelCard, issued_motion: str) -> None:
+    """Its single-stage offer must not inherit a two-stage recipe's dependency."""
+    assert motion_card.video is not None
+    video = motion_card.video.model_copy(update={"companions": tuple(item for item in motion_card.video.companions if item.kind is not VideoCompanionKind.LatentUpscaler)})
+    card = motion_card.model_copy(update={"video": video})
+    section = VideoCapabilitySection.from_model_card(card)
+    assert section is not None and section.motion_tracks
+    assert section.pipelines == ["motion_tracks"]
+    assert section.decoders == ["convolutional"]
+    render = plan_comfy_render(_request(), card, engine_build=issued_motion)
+    assert render.files.spatial_upscaler is None and render.steps == 8
+
+
+def test_unissued_motion_code_does_not_advertise_a_workflow(motion_card: ModelCard) -> None:
+    """Candidate source and adapter truth cannot create an executable offer."""
+    section = VideoCapabilitySection.from_model_card(motion_card)
+    assert section is not None and not section.motion_tracks
+    assert "motion_tracks" not in section.pipelines
+
+
+@pytest.mark.parametrize("changes,reason", [({"seconds": 20}, "decoded-pixel budget"), ({"seconds": 20, "size": None}, "decoded-pixel budget"), ({"size": "4096x128"}, "raster workspace"), ({"size": "128x4096"}, "raster workspace"), ({"size": "4160x128"}, "canvas grid")])
+def test_motion_allocation_bounds_apply_during_family_admission(motion_card: ModelCard, changes: dict[str, object], reason: str) -> None:
+    """No accelerator qualification or model load is needed to reject bad fits."""
+    assert motion_card.video is not None
+    with pytest.raises(ValueError, match=reason):
+        _request(**changes).validate_family(motion_card.family, motion_card.video)
+
+
+def test_motion_defaults_are_identical_before_and_after_media_delivery(motion_card: ModelCard, issued_motion: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opening-image paths cannot change a canvas after admission checked it."""
+    def refuse_image_geometry(_params: VideoGenerationTaskParams) -> tuple[int, int]:
+        raise AssertionError("Motion geometry inspected worker-only image bytes")
+
+    monkeypatch.setattr("skulk.worker.runner.video_plan.keyframe_shape", refuse_image_geometry)
+    params = _request(size=None, aspect_ratio="4:3")
+    render = plan_comfy_render(params, motion_card, engine_build=issued_motion)
+    assert (render.plan.width, render.plan.height) == (704, 512)
 
 
 @pytest.mark.parametrize("changes", [{"pipeline": "distilled_two_stage"}, {"union_control": {}}, {"duration": "auto"}, {"prompt_relay": {"segments": [{"prompt": "one", "length": 1}, {"prompt": "two", "length": 1}]}}, {"decoder": "diffusion"}, {"control_kind": "pose"}, {"temporal_upscalings": 1}])

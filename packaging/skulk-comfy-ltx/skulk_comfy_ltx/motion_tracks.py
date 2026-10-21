@@ -8,9 +8,12 @@ from typing import cast
 import torch
 from torch import Tensor
 
-MAX_TRACK_BYTES = 4 * 1024 * 1024
-MAX_TRACK_IMAGE_BYTES = 512 * 1024 * 1024
-"""Bound the retained half-precision guide independently of transient frames."""
+from skulk_comfy_ltx.motion_geometry import (
+    MAX_TRACK_BYTES as MAX_TRACK_BYTES,
+)
+from skulk_comfy_ltx.motion_geometry import (
+    validate_motion_geometry,
+)
 
 
 def parse_motion_tracks(raw: bytes, expected_frames: int) -> tuple[tuple[tuple[float, float], ...], ...]:
@@ -95,12 +98,7 @@ def render_motion_tracks(raw: bytes, width: int, height: int, expected_frames: i
     never retained. Cancellation is checked between frames.
     """
     paths = parse_motion_tracks(raw, expected_frames)
-    if min(width, height) < 128 or max(width, height) > 4096 or width % 64 or height % 64:
-        raise ValueError("Motion Track output requires a bounded 64-pixel canvas grid")
-    if width * height * expected_frames * 6 > MAX_TRACK_IMAGE_BYTES:
-        raise ValueError("Motion Track guide exceeds its decoded-pixel budget; reduce canvas or duration")
-    render_width = int(width * 1080 / height) if height <= width else 1080
-    render_height = 1080 if height <= width else int(height * 1080 / width)
+    render_width, render_height = validate_motion_geometry(width, height, expected_frames)
     points = torch.tensor(paths, dtype=torch.float32, device=device)
     points[..., 0] *= (width - 1) * render_width / width
     points[..., 1] *= (height - 1) * render_height / height
@@ -121,4 +119,6 @@ def render_motion_tracks(raw: bytes, width: int, height: int, expected_frames: i
         _rasterise(frame, points[:, start:frame_index + 1].reshape(-1, 2)[order], radii[order], colors[order], distance_squared)
         resized = torch.nn.functional.interpolate(frame.permute(2, 0, 1).unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False).squeeze(0).permute(1, 2, 0)
         result[frame_index] = resized[..., [2, 1, 0]].half()
+        # Release frame views before allocating the next high-resolution raster.
+        del frame, resized
     return result
