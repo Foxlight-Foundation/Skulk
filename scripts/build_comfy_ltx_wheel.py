@@ -10,13 +10,13 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 PACKAGE = "skulk_comfy_ltx"
 FILENAME = f"{PACKAGE}-{VERSION}-py3-none-any.whl"
 COMFY_REVISION = "40c4fcdf513a4523e39d54a9d391908af8df8171"
 LTX_REVISION = "e98f6d927d83c92ef2be6aec76c8440b19306e39"
-FEATURES = ("res2s", "retake", "extend", "dfr", "prompt_relay")
-SOURCE_FILES = ("__init__.py", "comfy_sampler.py", "dfr.py", "dfr_nodes.py", "editing.py", "editing_nodes.py", "guidance.py", "layout.py", "launcher.py", "nodes.py", "relay.py", "relay_encoding.py", "relay_geometry.py", "relay_binding.py", "relay_nodes.py", "res2s.py", "py.typed")
+FEATURES = ("res2s", "retake", "extend", "dfr", "prompt_relay", "union_control")
+SOURCE_FILES = ("__init__.py", "comfy_sampler.py", "dfr.py", "dfr_nodes.py", "editing.py", "editing_nodes.py", "guidance.py", "layout.py", "launcher.py", "nodes.py", "relay.py", "relay_encoding.py", "relay_geometry.py", "relay_binding.py", "relay_nodes.py", "res2s.py", "union_control.py", "union_nodes.py", "py.typed")
 LICENSE_FILES = ("LICENSE-APACHE-2.0", "LICENSE-LTX-2_x", "NOTICE")
 
 

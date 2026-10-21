@@ -18,6 +18,7 @@ from skulk_comfy_ltx.relay_nodes import (
     SkulkLTXApplyPromptRelay,
     SkulkLTXPromptRelayEncode,
 )
+from skulk_comfy_ltx.union_nodes import SkulkLTXUnionGuide
 
 
 @final
@@ -56,4 +57,4 @@ class SkulkLTXExtension(ComfyExtension):
 
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         """Return the complete allowlisted node set without installing plugins."""
-        return [SkulkLTXAddGeneratedKeyframes, SkulkLTXRes2sSampler, SkulkLTXGuidanceRescale, SkulkLTXEditVideoLatent, SkulkLTXEditAudioLatent, SkulkLTXPreserveVideo, SkulkLTXPreserveAudio, SkulkLTXPromptRelayEncode, SkulkLTXApplyPromptRelay]
+        return [SkulkLTXAddGeneratedKeyframes, SkulkLTXRes2sSampler, SkulkLTXGuidanceRescale, SkulkLTXEditVideoLatent, SkulkLTXEditAudioLatent, SkulkLTXPreserveVideo, SkulkLTXPreserveAudio, SkulkLTXPromptRelayEncode, SkulkLTXApplyPromptRelay, SkulkLTXUnionGuide]

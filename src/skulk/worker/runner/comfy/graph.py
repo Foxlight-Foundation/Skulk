@@ -44,11 +44,14 @@ from skulk.shared.types.video import (
     VideoEngineSettings,
     VideoGenerationTaskParams,
     VideoGuidance,
+    VideoGuideKind,
     VideoPipeline,
     VideoPromptRelay,
     VideoReferenceSpec,
     VideoStage,
+    VideoUnionControl,
     derivable_guides,
+    derivable_union_guides,
 )
 from skulk.worker.runner.video_plan import RenderPlan, plan_render
 
@@ -181,6 +184,7 @@ class ComfyModelFiles:
     diffusion_decoder: str | None = None
     refinement_lora: str | None = None
     refinement_strength: float = 1.0
+    union_control_lora: str | None = None
 
 
 def _bundle_paths(card: ModelCard) -> tuple[PurePosixPath, ...]:
@@ -276,6 +280,7 @@ def resolve_model_files(card: ModelCard, mode: VideoMode | None = None) -> Comfy
         duration_head=selected(VideoCompanionKind.DurationHead, "duration_head"),
         diffusion_decoder=selected(VideoCompanionKind.VideoDecoder, "diffusion_decoder"),
         refinement_lora=selected(VideoCompanionKind.Lora, "distilled_refinement"),
+        union_control_lora=selected(VideoCompanionKind.Lora, "union_control"),
         refinement_strength=1.0 if refinement is None or refinement.strength is None else refinement.strength,
     )
 
@@ -435,17 +440,17 @@ class ControlChoice:
 
 
 def select_guide(
-    params: VideoGenerationTaskParams, card: ModelCard, mode: VideoMode
+    params: VideoGenerationTaskParams, card: ModelCard, mode: VideoMode, *, kind: VideoGuideKind | None = None, guide_contract: Literal["controlnet", "union"] = "controlnet"
 ) -> GuideChoice:
     """The guide to derive from the request's control clip, with its weights.
 
     The clip is ordinary footage: the render derives the pose, depth or
-    edges the ControlNet follows. A kind the card cannot derive for the mode
-    is refused with the kinds it can.
+    edges the selected ControlNet or explicit Union contract follows. A kind
+    the card cannot derive for that contract and mode is refused.
     """
     assert card.video is not None
-    kind = params.control_kind or VIDEO_DEFAULT_GUIDE
-    available = derivable_guides(card.video, mode)
+    kind = kind or params.control_kind or VIDEO_DEFAULT_GUIDE
+    available = (derivable_union_guides if guide_contract == "union" else derivable_guides)(card.video, mode)
     if kind not in available:
         raise ValueError(
             f"{card.model_id} cannot derive a {kind} guide for mode {mode.value}; "
@@ -537,6 +542,10 @@ class ComfyRenderPlan:
     editing: VideoEditing | None = None
     prompt_relay: VideoPromptRelay | None = None
     """Measured local scene prompts, enabled only by the exact placed extension."""
+    union_control: VideoUnionControl | None = None
+    """Base-stage LTX IC-LoRA settings, never an H3 ControlNet patch."""
+    union_guide: GuideChoice | None = None
+    """Selected Comfy preprocessing chain; absent for already prepared guides."""
     transformer_variant: Literal["distilled", "dev"] | None = None
     dfr_extension: bool = False
     """Whether this placed issued build implements the DFR mask/keyframe bridge."""
@@ -590,11 +599,13 @@ class ComfyRenderPlan:
             audio_conditioning=self.audio_conditioning,
             editing=self.editing,
             prompt_relay=self.prompt_relay,
+            union_control=self.union_control,
             video_shift=self.video_shift,
             audio_shift=self.audio_shift,
             adapter=None if self.adapter is None else self.adapter.name,
             adapter_strength=None if self.adapter is None else self.adapter.strength,
             stage_lora_strengths={"base": 0.25, "refine": 0.5} if self.pipeline == "hq_two_stage" else {},
+            stage_samplers={"base": "euler_ancestral", "refine": "euler"} if self.union_control is not None else {},
             guidance_video_rescale=0.45 if self.pipeline == "hq_two_stage" else 0.7 if self.editing is not None and self.transformer_variant == "dev" else None,
             guidance_audio_rescale=1.0 if self.pipeline == "hq_two_stage" else 0.7 if self.editing is not None and self.transformer_variant == "dev" else None,
             width=self.plan.width,
@@ -646,6 +657,11 @@ def plan_comfy_render(
 
             if "prompt_relay" not in extension_features_for_build(engine_build):
                 raise ValueError("LTX-2.5 timed scene prompts require their exact published extension on the placed renderer; update and reload the model")
+        if params.union_control is not None:
+            from skulk.provisioning.comfy_extension import extension_features_for_build
+
+            if "union_control" not in extension_features_for_build(engine_build):
+                raise ValueError("LTX Union requires its exact published extension on the placed renderer; update and reload the model")
         pipeline = params.pipeline or (params.editing.operation if params.editing is not None else "distilled_two_stage" if video.transformer_variant == "distilled" else "dev_two_stage")
         if pipeline == "hq_two_stage":
             from skulk.provisioning.comfy_extension import extension_features_for_build
@@ -659,7 +675,7 @@ def plan_comfy_render(
             raise ValueError("LTX-2.5 text-only DFR requires its exact published detailing extension; update and reload the model")
         minimum = params.duration_min_seconds or video.min_seconds
         files = resolve_model_files(card, mode)
-        base = plan_render(params, video.model_copy(update={"canvas_multiple": 64, **({"default_steps": 15} if pipeline == "hq_two_stage" else {"default_steps": 30} if params.editing is not None and video.transformer_variant == "dev" else {})}))
+        base = plan_render(params, video.model_copy(update={"canvas_multiple": 128 if params.union_control is not None else 64, **({"default_steps": 15} if pipeline == "hq_two_stage" else {"default_steps": 30} if params.editing is not None and video.transformer_variant == "dev" else {})}))
         factor = 2 ** params.temporal_upscalings
         return ComfyRenderPlan(
             plan=replace(base, fps=base.fps * factor, frame_count=(base.frame_count - 1) * factor + 1),
@@ -682,6 +698,8 @@ def plan_comfy_render(
             audio_conditioning=params.audio_conditioning,
             editing=params.editing,
             prompt_relay=params.prompt_relay,
+            union_control=params.union_control,
+            union_guide=select_guide(params, card, mode, kind=params.union_control.guide, guide_contract="union") if params.union_control is not None and not params.union_control.preprocessed else None,
             transformer_variant=video.transformer_variant,
             minimum_frames=video.frame_count_for_seconds(minimum) if params.duration == "auto" else None,
             duration_min_seconds=minimum if params.duration == "auto" else None,
@@ -741,7 +759,7 @@ def plan_comfy_render(
     )
 
 
-def _frames(
+def load_reference_frames(
     prompt: ComfyPrompt, name: str, title: str, binding: ReferenceBinding
 ) -> list[Any]:
     """Load one structural attachment as an IMAGE batch: a still, or a clip's frames."""
@@ -781,23 +799,23 @@ def _add_control(
     }
     if "control" in structural:
         assert control.guide is not None
-        clip = _frames(prompt, "control_video", "Control clip", structural["control"])
-        inputs["control_video"] = _derive_guide(prompt, control.guide, clip)
+        clip = load_reference_frames(prompt, "control_video", "Control clip", structural["control"])
+        inputs["control_video"] = derive_guide(prompt, control.guide, clip)
     if "mask" in structural:
-        frames = _frames(prompt, "mask", "Mask", structural["mask"])
+        frames = load_reference_frames(prompt, "mask", "Mask", structural["mask"])
         prompt["mask_channel"] = _node(
             "ImageToMask", "Mask from red", image=frames, channel="red"
         )
         inputs["mask"] = _link("mask_channel", 0)
         if "source" in structural:
-            inputs["source_video"] = _frames(
+            inputs["source_video"] = load_reference_frames(
                 prompt, "source_video", "Source clip", structural["source"]
             )
     prompt[NODE_CONTROL] = _node("MiniMaxH3FunControlNetApply", "ControlNet", **inputs)
     return _link(NODE_CONTROL)
 
 
-def _derive_guide(
+def derive_guide(
     prompt: ComfyPrompt, guide: GuideChoice, frames: list[Any]
 ) -> list[Any]:
     """Turn the control clip's frames into the guide the ControlNet follows.

@@ -67,6 +67,8 @@ def _condition_images(
     latent: list[str | int],
     fps: int,
     refinement: bool,
+    opening_strength: float = 0.7,
+    preprocess_images: bool = True,
 ) -> tuple[list[str | int], list[str | int], list[str | int], bool]:
     guided = False
     for binding in references:
@@ -76,12 +78,14 @@ def _condition_images(
         load = f"load_ltx_{reference.slot}"
         preprocess = f"ltx_image_{reference.slot}"
         prompt[load] = _node("LoadImage", "Load keyframe", image=binding.input_name)
-        prompt[preprocess] = _node(
-            "LTXVPreprocess",
-            "LTX image compression",
-            image=_link(load),
-            img_compression=18,
-        )
+        if preprocess_images:
+            prompt[preprocess] = _node(
+                "LTXVPreprocess",
+                "LTX image compression",
+                image=_link(load),
+                img_compression=18,
+            )
+        image_node = preprocess if preprocess_images else load
         anchor = f"guide_ltx_{stage}_{reference.slot}"
         if reference.role == "first_frame":
             # The official I2V template pins its first image in place, so no
@@ -90,9 +94,9 @@ def _condition_images(
                 "LTXVImgToVideoInplace",
                 "Pin first frame",
                 vae=_link("video_vae"),
-                image=_link(preprocess),
+                image=_link(image_node),
                 latent=latent,
-                strength=1.0 if refinement else 0.7,
+                strength=1.0 if refinement else opening_strength,
                 bypass=False,
             )
             latent = _link(anchor)
@@ -109,7 +113,7 @@ def _condition_images(
             negative=negative,
             vae=_link("video_vae"),
             latent=latent,
-            image=_link(preprocess),
+            image=_link(image_node),
             frame_idx=frame,
             strength=0.7,
         )
@@ -170,12 +174,17 @@ def sampling_stage(
         audio_cfg=1.0 if guidance is None else guidance.audio_cfg,
     )
     sampler = f"ltx_{name}_sampler"
+    sampler_select = "sampler_select"
+    if render.union_control is not None and name == "refine":
+        # Union's refiner uses Euler, distinct from its ancestral base sampler.
+        sampler_select = "ltx_refine_sampler_select"
+        prompt[sampler_select] = _node("KSamplerSelect", "Union refinement sampler", sampler_name="euler")
     prompt[sampler] = _node(
         "SamplerCustomAdvanced",
         "Base sampling" if name == "base" else "Refinement sampling",
         noise=_link(f"ltx_{name}_noise"),
         guider=_link(f"ltx_{name}_guider"),
-        sampler=_link("sampler_select"),
+        sampler=_link(sampler_select),
         sigmas=_link(f"ltx_{name}_sigmas"),
         latent_image=_link(f"ltx_{name}_av"),
     )
@@ -353,7 +362,15 @@ def build_ltx_prompt(
         latent=_link("ltx_video_latent"),
         fps=base_fps,
         refinement=False,
+        # Union's reference pins uncompressed opening pixels at full strength.
+        opening_strength=1.0 if render.union_control is not None else 0.7,
+        preprocess_images=render.union_control is None,
     )
+    if render.union_control is not None:
+        from skulk.worker.runner.comfy.ltx_control import add_union_control
+
+        positive, negative, video, base_model = add_union_control(prompt, render, references, positive, negative, video, base_model)
+        guided = True
     if render.generated_keyframe_interval is not None:
         prompt["ltx_generated_keyframes"] = _node(
             "SkulkLTXAddGeneratedKeyframes" if render.dfr_extension else "LTXVAddGeneratedKeyframes", "Internal detailing keyframes",
@@ -402,6 +419,7 @@ def build_ltx_prompt(
         latent=_link("ltx_spatial_upscale"),
         fps=base_fps,
         refinement=True,
+        preprocess_images=render.union_control is None,
     )
     refinement_model = _link("unet")
     refinement_audio = audio_latent if params.audio_conditioning is not None else _link("ltx_base_split", 1)
@@ -429,7 +447,7 @@ def build_ltx_prompt(
         prompt,
         "refine",
         seed=(plan.seed + 1) % (2**64),
-        sigmas=REFINEMENT_SIGMAS if render.pipeline == "distilled_two_stage" else DFR_REFINEMENT_SIGMAS,
+        sigmas=REFINEMENT_SIGMAS if render.pipeline == "distilled_two_stage" and render.union_control is None else DFR_REFINEMENT_SIGMAS,
         positive=positive,
         negative=negative,
         video=video,

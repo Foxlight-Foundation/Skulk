@@ -3052,7 +3052,8 @@ class API:
                 "with a `keyframe_at` value in seconds, repeated `reference`). "
                 "LTX source conditioning additionally accepts `audio_source` with "
                 "JSON `audio_conditioning`; source editing pairs `source_video` "
-                "with JSON `editing`, and `prompt_relay` describes timed local scenes. "
+                "with JSON `editing`, `prompt_relay` describes timed local scenes, and "
+                "JSON `union_control` steers an LTX base stage from one aligned control clip. "
                 "These controls require the selected artifact and installed engine "
                 "to implement them; unavailable workflows are refused. Poll "
                 "`GET /v1/videos/{video_id}` "
@@ -12217,6 +12218,7 @@ class API:
                     decoder=engine.decoder,
                     guidance=engine.guidance,
                     stage_lora_strengths=dict(engine.stage_lora_strengths),
+                    stage_samplers=dict(engine.stage_samplers),
                     guidance_video_rescale=engine.guidance_video_rescale,
                     guidance_audio_rescale=engine.guidance_audio_rescale,
                     temporal_upscalings=engine.temporal_upscalings,
@@ -12225,6 +12227,7 @@ class API:
                     audio_conditioning=engine.audio_conditioning,
                     editing=engine.editing,
                     prompt_relay=engine.prompt_relay,
+                    union_control=engine.union_control,
                     video_shift=engine.video_shift,
                     audio_shift=engine.audio_shift,
                     adapter=engine.adapter,
@@ -12560,6 +12563,7 @@ class API:
                 audio_conditioning=create.audio_conditioning,
                 editing=create.editing,
                 prompt_relay=create.prompt_relay,
+                union_control=create.union_control,
                 pipeline=create.pipeline,
                 decoder=create.decoder,
                 negative_prompt=create.negative_prompt,
@@ -12603,7 +12607,12 @@ class API:
                 ),
             )
         steering = [
-            spec.role for spec in params.references if spec.role in VIDEO_STRUCTURAL_ROLES and not (spec.role == "source" and params.editing is not None and card.family == "ltx-2.5")
+            spec.role for spec in params.references
+            if spec.role in VIDEO_STRUCTURAL_ROLES
+            and not (card.family == "ltx-2.5" and (
+                (spec.role == "source" and params.editing is not None)
+                or (spec.role == "control" and params.union_control is not None)
+            ))
         ]
         if steering:
             # A control clip or a mask means nothing without the card's

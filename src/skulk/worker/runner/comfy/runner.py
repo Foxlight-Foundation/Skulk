@@ -543,6 +543,19 @@ class Runner(ServedConcurrentDispatch):
         bindings = bind_references(params.references, SKULK_VIDEO_INPUT_DIR)
         output_dir = SKULK_VIDEO_OUTPUT_DIR / str(command_id)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if render.union_control is not None:
+            source = next(binding for binding in bindings if binding.spec.role == "control")
+            # Validate every frame before Comfy materializes the IMAGE batch.
+            # Exact alignment avoids an implicit retime, loop or held last frame.
+            prepared = prepare_media_input(server.interpreter, MediaInputRequest(
+                operation="video", source=str(SKULK_VIDEO_INPUT_DIR / source.input_name),
+                duration_seconds=render.plan.frame_count / render.plan.fps,
+                width=render.plan.width, height=render.plan.height, fps=render.plan.fps,
+                maximum_frames=render.plan.frame_count, exact_frames=True,
+            ), output_dir, is_cancelled=lambda: self._is_cancelled(task_id))
+            if prepared is None:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return
         if render.editing is not None:
             source = next(binding for binding in bindings if binding.spec.kind == "video" and binding.spec.role == "source")
             if render.plan.width * render.plan.height * render.plan.frame_count * 12 > MAX_SOURCE_VIDEO_BYTES:

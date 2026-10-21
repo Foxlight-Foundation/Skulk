@@ -1846,6 +1846,16 @@ class VideoCardConfig(CamelCaseModel):
     companions: tuple[VideoCompanionConfig, ...] = ()
     """Pinned adapters, patches, embeddings, and graph templates."""
 
+    @property
+    def union_control(self) -> bool:
+        """Return whether a selected Union adapter provides structural guidance.
+
+        Derive this from the existing exact companion contract so historical
+        card readers and preservation schemas need no redundant persisted flag.
+        Preprocessing weights and mode applicability are validated separately.
+        """
+        return any(item.kind is VideoCompanionKind.Lora and item.name == "union_control" for item in self.companions)
+
     @field_validator("modes", mode="before")
     @classmethod
     def _coerce_modes(cls, value: object) -> tuple[VideoMode, ...]:
