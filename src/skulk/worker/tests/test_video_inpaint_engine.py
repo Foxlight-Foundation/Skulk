@@ -182,8 +182,9 @@ def test_inpainting_form_parses_only_the_strict_source_position() -> None:
         VideoCreateRequest.model_validate({"prompt": "Masked edit", "model": "model", "inpainting": '{"resize":true}'})
 
 
-def test_unissued_inpainting_is_not_advertised_by_the_api(inpaint_card: ModelCard) -> None:
+def test_unissued_inpainting_is_not_advertised_by_the_api(inpaint_card: ModelCard, monkeypatch: pytest.MonkeyPatch) -> None:
     """A signed card and candidate source alone cannot advertise executable work."""
+    monkeypatch.setattr(comfy_extension, "PUBLISHED_EXTENSIONS", tuple(wheel for wheel in comfy_extension.published_extensions() if "inpaint" not in wheel.features))
     section = VideoCapabilitySection.from_model_card(inpaint_card)
     assert section is not None and not section.inpainting
     assert "inpaint" not in section.pipelines

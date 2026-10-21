@@ -52,13 +52,23 @@ def test_candidate_admission_requires_its_exact_published_descriptor(tmp_path: P
 @pytest.mark.parametrize("torch_build", ["2.14.0+cu130", "2.14.0+rocm7.3"])
 def test_issued_motion_features_do_not_upgrade_an_older_overlay(torch_build: str) -> None:
     """Both GPU lanes require the new issued payload; older Union stays unchanged."""
-    newest, previous, *_ = extension.published_extensions()
-    assert newest.filename == "skulk_comfy_ltx-0.1.5-py3-none-any.whl"
-    assert previous.filename == "skulk_comfy_ltx-0.1.4-py3-none-any.whl"
+    newest = next(wheel for wheel in extension.published_extensions() if wheel.filename == "skulk_comfy_ltx-0.1.5-py3-none-any.whl")
+    previous = next(wheel for wheel in extension.published_extensions() if wheel.filename == "skulk_comfy_ltx-0.1.4-py3-none-any.whl")
     base = f"comfy@{COMFY_PIN}/torch@{torch_build}"
     assert extension.extension_features_for_build(newest.build_identity(base)) == frozenset((*previous.features, "motion_tracks"))
     assert "motion_tracks" not in extension.extension_features_for_build(previous.build_identity(base))
     assert "union_control" in extension.extension_features_for_build(previous.build_identity(base))
+
+
+@pytest.mark.parametrize("torch_build", ["2.14.0+cu130", "2.14.0+rocm7.3"])
+def test_issued_inpaint_features_never_expand_an_older_payload(torch_build: str) -> None:
+    """The new exact wheel is executable without relabeling retained Motion builds."""
+    newest, previous, *_ = extension.published_extensions()
+    assert newest.filename == "skulk_comfy_ltx-0.1.6-py3-none-any.whl"
+    assert previous.filename == "skulk_comfy_ltx-0.1.5-py3-none-any.whl"
+    base = f"comfy@{COMFY_PIN}/torch@{torch_build}"
+    assert extension.extension_features_for_build(newest.build_identity(base)) == frozenset((*previous.features, "inpaint"))
+    assert "inpaint" not in extension.extension_features_for_build(previous.build_identity(base))
 
 
 def install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, offline: bool = False, stop: threading.Event | None = None, fail_probe: bool = False) -> tuple[extension.ComfyExtensionWheel, Path, list[str]]:
