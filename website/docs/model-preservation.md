@@ -84,9 +84,13 @@ recovery. A public registry-root snapshot is retained as evidence, never enrolle
 automatically. Re-preservation carries that original source forward with signed
 file-hash checks; it never grants registry status to the changed runtime view.
 
-New model-card properties require a compatible runtime/structural profile and
-backward-compatibility fixtures. The archive contract does not require every
-future property to be understood just to keep or recover its captured bytes.
+The preservation reader accepts additive descriptive properties at every metadata
+depth and future string vocabulary names while keeping known field constraints.
+Selected-artifact, envelope and manifest contracts stay strict and independently
+versioned. A new property needs compatible runtime interpretation and backward-
+compatibility fixtures; changes to selected-artifact/security semantics need an
+explicit supported contract. The archive does not require every future property
+to be understood just to retain or recover its captured bytes.
 
 ## Preserve an installed model
 

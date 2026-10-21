@@ -903,7 +903,7 @@ def test_future_card_properties_remain_verifiable_without_unsafe_projection(
     import base64
 
     from foxlight_model_preservation.assurance import load_retained_card
-    from foxlight_model_preservation.cards import card_identity
+    from foxlight_model_preservation.cards import create_card
     from foxlight_model_preservation.signing import digest, encode_record, sign_manifest
     from foxlight_model_preservation.storage import (
         atomic_bytes,
@@ -917,13 +917,12 @@ def test_future_card_properties_remain_verifiable_without_unsafe_projection(
     original = manifest.members[0].retained_card
     assert original is not None
     retained = load_retained_card(identity_json(original))
-    envelope = cast(dict[str, JsonValue], retained.envelope.model_dump(mode="json"))
-    raw_card = envelope["card"]
-    assert isinstance(raw_card, dict)
+    raw_card = dict(retained.envelope.card)
     raw_card["future_runtime_contract"] = {"required": True, "version": 99}
-    envelope["card_id"] = card_identity(
-        {key: value for key, value in envelope.items() if key != "card_id"}
-    )
+    # Use the ordinary public writer: additive metadata is identity-bound and
+    # preservable even though this runtime cannot interpret the new requirement.
+    future_card = create_card(raw_card, alias=retained.envelope.alias)
+    envelope = future_card.model_dump(mode="json")
     future = {
         **original,
         "card_base64": base64.b64encode(identity_json(envelope)).decode(),
