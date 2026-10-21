@@ -23,6 +23,75 @@ workflow. Inference still requires a compatible engine and enough hardware.
 MLX accepts indexed/unindexed `model*.safetensors`; indices and split groups must
 be complete and cannot escape the member.
 
+## Recovery kits and Library restore
+
+On a configured Model Store host with the separately installed Model Preservation
+capability, **Save recovery kit** reviews an existing preserved copy, then creates
+one complete `.foxkit` file. Activity offers **Download recovery kit** after the
+owned export job succeeds. Save that file on a NAS, removable drive or another
+backup location separate from this Core. A kit retained only on the original
+Core cannot survive losing that Core’s storage.
+
+On a new Core, open **Restore from recovery kit**, even before archive setup.
+Choose the file, transfer it, review the complete selected model/companion closure
+and public capture fingerprints, and acknowledge the stated provenance limits.
+If repository code is required, approve it separately. The old Core’s permissions
+are never applied. The kit’s keys are candidates: replacing both a kit and its
+keys can create a different self-signed capture. Compare independently retained
+fingerprints when possible. Registry proof, if present, is checked against this
+reader’s packaged root; historical acceptance never asserts current revocation
+knowledge. Missing publication proof remains an owner capture, not registry truth.
+
+The browser transfers at most 4 MiB per request. Reselect the same file to resume
+a flushed transfer after browser/capability/Core restart. Core keeps at most eight
+transfers; remove unused ones from the restore screen to release storage. Transfer
+completion does not establish authenticity. Core verifies every actual signed
+object and stages the entire required closure before the single canonical store
+index update. It then records this receiver’s new card admission. Closing the page
+does not stop submitted jobs. Stop waits for the owned byte process; an already
+published result may win.
+
+Existing primary aliases with different captures are protected. Matching owned
+companions may join the restored generation after exact artifact, card and byte
+checks; their prior files stay available to running readers. Deliberately removed
+models require a separate confirmation in the review. That consent binds the exact
+local deletion record: crash reconciliation can complete that choice but cannot
+undo a later removal. Interrupted restores/exports require **Review again** and
+a new deliberate start. An exact already committed closure is checked
+before finishing admission. Hidden unindexed generations cannot become partially
+admitted companions. Retained envelope, trust and source evidence remain beside
+the indexed generation. Source integration does not establish a frozen desktop
+release or public capability-store availability; the capability SDK distribution
+is a separate prerequisite. The standalone kit CLI is independently available in
+[preservation core 0.5.0](https://github.com/Foxlight-Foundation/foxlight-model-preservation/releases/tag/v0.5.0).
+
+### Cards can evolve without rewriting backup evidence
+
+The kit container, original signed card and receiving runtime projection are
+separate contracts. Container verification and generic file recovery retain
+unknown future evidence/properties without deserializing them through today’s
+ModelCard. Original encoded card bytes, numeric representations, identities and
+signatures remain intact. Runtime recovery applies this build’s compatible defaults
+and interpretation; unfamiliar required card semantics or version floors refuse
+with a reader-compatibility error. Retain the kit and use a compatible reader;
+never remove unknown runtime/security requirements merely to force admission.
+A derived runtime view does not replace the signed original. Re-preserving a
+recovered installation reuses its retained original card/proof when present.
+If runtime-derived properties differ from the original signed card, the capture
+uses an owner-view card and retains the exact original card/proof separately in
+`preservation/source-evidence/source-evidence/registry-source-card.json` after
+recovery. A public registry-root snapshot is retained as evidence, never enrolled
+automatically. Re-preservation carries that original source forward with signed
+file-hash checks; it never grants registry status to the changed runtime view.
+
+The preservation reader accepts additive descriptive properties at every metadata
+depth and future string vocabulary names while keeping known field constraints.
+Selected-artifact, envelope and manifest contracts stay strict and independently
+versioned. A new property needs compatible runtime interpretation and backward-
+compatibility fixtures; changes to selected-artifact/security semantics need an
+explicit supported contract. The archive does not require every future property
+to be understood just to retain or recover its captured bytes.
+
 ## Preserve an installed model
 
 Use `skulk-preservation` or `skulk preservation`; neither starts a node. The

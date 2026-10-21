@@ -1146,6 +1146,53 @@ def verify_installed_file(
         return False
 
 
+def indexed_recovery_artifact(root: Path, model_id: ModelId) -> Path | None:
+    """Resolve only a complete recovery artifact referenced by the local index.
+
+    Reads local state without constructing another store owner or discovering
+    unindexed staging. The ordinary loader still checks its selected revision,
+    card identity and layout before use.
+    """
+    from skulk.store.model_store import (
+        StoreRegistryIndex,
+        read_reconciliation_tombstones,
+    )
+
+    try:
+        index = StoreRegistryIndex.model_validate_json(
+            (root / "registry.json").read_bytes()
+        )
+        entry = index.entries.get(str(model_id))
+        if entry is None or entry.installed_card is None:
+            return None
+        parts = Path(entry.store_path).parts
+        if (
+            len(parts) != 4
+            or parts[0] != ".recoveries"
+            or len(parts[1]) != 64
+            or any(c not in "0123456789abcdef" for c in parts[1])
+            or parts[2] != "model-store"
+            or parts[3] != model_id.normalize()
+        ):
+            return None
+        record = entry.installed_card
+        deleted = read_reconciliation_tombstones(root)
+        path = root / entry.store_path
+        if (
+            record.artifact_model_id != str(model_id)
+            or record.preservation is None
+            or record.artifact_model_id in deleted
+            or record.owner_model_id in deleted
+            or not path.resolve().is_relative_to(root.resolve())
+            or read_installed_card(path) != record
+            or not verify_installed_card(path, record)
+        ):
+            return None
+        return path
+    except (OSError, ValueError):
+        return None
+
+
 def discover_installed_cards(roots: Iterable[Path]) -> list[InstalledCardRecord]:
     """Discover complete installed records below model-search roots.
 
@@ -1157,7 +1204,29 @@ def discover_installed_cards(roots: Iterable[Path]) -> list[InstalledCardRecord]
     for root in roots:
         if not root.is_dir():
             continue
-        for model_directory in root.iterdir():
+        # Recovery commits one nested closure through the authoritative index;
+        # its hidden staging/generation directories are never scanned blindly.
+        from skulk.store.model_store import (
+            StoreRegistryIndex,
+            read_reconciliation_tombstones,
+        )
+
+        candidates = list(root.iterdir())
+        tombstones = read_reconciliation_tombstones(root)
+        index_path = root / "registry.json"
+        if index_path.is_file():
+            try:
+                index = StoreRegistryIndex.model_validate_json(index_path.read_bytes())
+                for entry in index.entries.values():
+                    candidate = root / entry.store_path
+                    if (
+                        candidate.resolve().is_relative_to(root.resolve())
+                        and candidate.resolve() != root.resolve()
+                    ):
+                        candidates.append(candidate)
+            except (OSError, ValueError):
+                pass
+        for model_directory in candidates:
             if not model_directory.is_dir() or model_directory.name.startswith("."):
                 continue
             try:
@@ -1165,6 +1234,11 @@ def discover_installed_cards(roots: Iterable[Path]) -> list[InstalledCardRecord]
             except (OSError, ValueError):
                 continue
             if record is None or not verify_installed_card(model_directory, record):
+                continue
+            if (
+                record.artifact_model_id in tombstones
+                or record.owner_model_id in tombstones
+            ):
                 continue
             records_by_identity.setdefault(record.installed_identity, record)
     return list(records_by_identity.values())

@@ -5714,11 +5714,16 @@ paths or signing keys.
 | --- | --- | --- |
 | GET | `/preservation/library` | Optional `offset` (default 0); up to 4 installed selections, copies and jobs (bounded for SDK wire encoding), enrolled storage availability and `next_offset`. Reads never start/replay jobs or sharing. |
 | POST | `/preservation/setup/device` | Explicitly enroll **Use this device** private storage and its protected capture identity. No arbitrary path/key input. Repeating setup retains the identity; unavailable enrolled storage is not recreated. |
-| POST | `/preservation/plans` | `kind` (`preserve` or `check`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Other effect kinds currently refuse. |
+| POST | `/preservation/plans` | `kind` (`preserve`, `check`, `kit_export` or `recover`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Kit export selects `copy_id`; recovery selects that copy or a completed `upload_id` with `location_id=kit`. `historical=true` explicitly permits historical proof inspection. Recovery reviews exact members, candidate key fingerprints, original publication/file assurance and separate receiver consent requirements. Existing aliases and deletion tombstones are protected. |
 | GET | `/preservation/plans/{plan_id}` | Read an exact retained safe plan without refreshing expiry or executing it. |
 | POST | `/preservation/jobs` | `plan_id`, caller-retained `operation_id`, optional `owner_id` (default `operator`) and explicit consent flags. Returns 202 with a durable job immediately. Exact repeated requests return the original job; changed input refuses. |
 | GET | `/preservation/jobs/{job_id}` | Observe one exact retained job and bounded result. Does not queue, retry or reconcile byte work. |
 | POST | `/preservation/jobs/{job_id}/cancel` | Persist cancellation intent, request stop, then bound the wait for the exclusively owned process. A committed verified result may win. Copies are retained. |
+| POST | `/preservation/kit-uploads` | Exact `size_bytes` (up to 8 TiB). Observe actual free space and at most eight retained transfers; return an opaque `upload_id` and flushed offset. No publisher trust or runtime admission. |
+| GET | `/preservation/kit-uploads/{upload_id}` | Read the retained offset for explicit resume. Library inventory also lists bounded transfer handles so a new browser/capability can find them. |
+| PUT | `/preservation/kit-uploads/{upload_id}` | Required `offset` query, `application/octet-stream` body up to 4 MiB. Exact-offset append; identical completed-chunk replay works after response loss. All weights stay outside SDK/control JSON. |
+| DELETE | `/preservation/kit-uploads/{upload_id}` | Remove an unused transfer; queued/running/cancelling job references refuse removal. Frees ingress storage, preserving completed restored models. |
+| GET | `/preservation/kits/{job_id}` | Download a completed `kit_export` artifact with ordinary file/range responses. No arbitrary path or key selection. Save outside the original Core’s storage. |
 
 Preserve runs under the existing store owner's mutation fence and independently
 checks the copied complete closure. Workers use an already opened archive
@@ -5730,6 +5735,18 @@ check reports `insufficient_space` before model bytes are copied. Core records
 the expected manifest durably before acknowledging publication.
 Core restart marks uncertain jobs `interrupted` and requires an explicit outcome
 check; it never automatically replays them. Closing/restarting a capability does
-not cancel Core work. These controls currently provide private Preserve and
-Check; public publication/sharing and fresh-home recovery remain available through
-the standalone/native tools rather than these host endpoints.
+not cancel Core work. These controls provide private Preserve, Check, portable kit export and complete
+live-store recovery. Recovery holds the actual owner’s mutation lease, stages the
+whole closure on the store filesystem, then publishes every member through one
+index update before creating the new receiver’s custom-card admission. The signed
+envelope, public trust snapshot and original evidence stay with that generation.
+Different existing primary captures refuse replacement. Exact matching owned
+companions are reviewed and byte-verified before the new generation is committed.
+`restore_deleted=true` separately confirms the plan’s exact operator-deletion
+records. Receiver-only consent receipts reconcile a committed whole closure after
+a crash; they cannot override a later deletion.
+Interrupted kit exports/restores need a new explicit review and retry; a source
+archive Check cannot establish their destination outcome. The retry rechecks any
+already committed exact closure before finishing admission. A Core-owned 24-hour
+worker watchdog bounds active byte work; queue/store-fence wait is separate.
+Public publication/sharing and new-home CLI recovery remain separate tools.

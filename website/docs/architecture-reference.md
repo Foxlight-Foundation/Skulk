@@ -2019,6 +2019,26 @@ LTX advanced requests carry explicit source-audio, retake/extension and timed-lo
 - `api/preservation.py`: operator-gated `/preservation/library`, `/setup/device`,
   `/plans`, `/jobs`, `/jobs/{job_id}` and `/jobs/{job_id}/cancel`. No browser-supplied
   filesystem/key paths; stale configured owner refuses. See API guide for methods.
-- This host surface supports private Preserve/Check. Public mirror/BitTorrent
-  tools and native fresh-home recovery are separate component surfaces; no public
-  capability distribution or live-store import is implied by these controls.
+- This host surface supports private Preserve/Check, portable kit export and whole-closure live-store recovery. Public mirror/BitTorrent tools and native fresh-home recovery remain separate; no public capability distribution is implied.
+
+### Library recovery kits
+
+The existing `PreservationHost` also owns portable kit export and whole-closure
+restore. `preservation_uploads.py` separates bounded resumable binary ingress
+from JSON controls. `preservation_live.py` coordinates the known byte worker’s
+verified isolated home with the actual ModelStore owner; one nested generation
+and one durable index commit precede receiver custom-card admission. Explicit
+retry verifies an already committed exact closure; existing aliases and deletion
+tombstones remain protected. `preservation_provenance.py` retains matching offline
+registry evidence and reuses recovered original cards without rewriting signed
+bytes. Installed-card discovery follows indexed nested generations, while hidden
+unindexed staging remains ineligible. `/preservation/kit-uploads` and `/kits/{job_id}`
+provide operator-gated byte transfer, separate from SDK envelopes. The 24-hour
+active-worker watchdog kills only the owned process; EOF, cancellation and
+uncertainty retain the journal’s established semantics. Public sharing and public
+capability distribution remain separate component surfaces.
+
+The normal base, model-companion and sidecar path resolvers consult the committed
+local recovery index before legacy directory names. They verify the indexed
+installed record without constructing a second store owner; hidden unindexed
+staging never becomes a loader candidate.
