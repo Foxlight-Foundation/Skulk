@@ -3287,6 +3287,10 @@ or capability restart has no byte-worker ownership. The standalone public mirror
 and recovery tools retain their independent trust/transport boundaries.
 
 
+Mounted preservation I/O uses `preservation_io.py`: two active off-loop calls,
+250-ms reused availability probes, cancellation draining and retained directory
+leases. Journal ownership is released only after actual filesystem work finishes.
+
 Explicit trusted-operator folder setup (`preservation_folders.py`) reviews one
 existing private folder or one new leaf below an already mounted parent. Consent
 binds a ten-minute review to parent/root device and inode. No recursive mount

@@ -5853,6 +5853,15 @@ recorded folder and confirm again to finish. Unknown populated folders are not
 adopted. A crash-created empty leaf can be explicitly reviewed again. Up to 16
 private destinations are retained; unavailable roots are never recreated. These
 setup controls copy no model bytes and start no listener, swarm or model load.
+
+Mounted-destination opens, trust/manifest reads, folder setup, free-space checks
+and descriptor closes run in a two-slot owned filesystem lane. Library probes
+reuse a pending observation and wait at most 250 ms per location; a busy or
+unfinished check reports unavailable rather than blocking the node event loop
+or queueing another probe. Effects retain setup ownership through cancellation.
+Core drains outstanding filesystem calls and directory leases before releasing
+its journal; an operating-system mount that never responds can delay shutdown.
+No timed-out operation is abandoned, restarted or allowed to finish ownerless.
  Private
 local snapshot staging and capture custody stay outside capability generations.
 The pinned preservation reader retains new descriptive card properties in the

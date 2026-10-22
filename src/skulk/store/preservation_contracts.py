@@ -47,7 +47,7 @@ class PreservationLocation(PreservationContract):
         description="Private captures or separately published public copies."
     )
     reachable: bool = Field(
-        description="Whether the actual enrolled directory is presently available."
+        description="Whether a bounded observation confirmed the enrolled directory; false also covers a pending or busy filesystem check."
     )
     free_bytes: int | None = Field(
         default=None,

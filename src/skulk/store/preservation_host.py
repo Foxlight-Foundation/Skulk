@@ -78,6 +78,7 @@ from skulk.store.preservation_folders import (
     observe_folder,
     private_folder,
 )
+from skulk.store.preservation_io import PreservationIO
 from skulk.store.preservation_journal import (
     PreservationHostError,
     PreservationJournal,
@@ -161,6 +162,7 @@ class PreservationHost:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._closed = False
         self._setup_lock = asyncio.Lock()
+        self._storage = PreservationIO()
         self.uploads = KitUploads(root / "uploads", self.journal)
         self.upload_lock = asyncio.Lock()
         self.custom_cards = custom_cards or Path(str(SKULK_CUSTOM_MODEL_CARDS_DIR))
@@ -231,8 +233,7 @@ class PreservationHost:
             raise PreservationHostError("archive_not_configured")
         return _Location.model_validate_json(safe_json(value))
 
-    @asynccontextmanager
-    async def _archive(self, location: _Location) -> AsyncIterator[int]:
+    def _open_archive(self, location: _Location) -> int:
         try:
             descriptor = os.open(
                 location.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -251,9 +252,27 @@ class PreservationHost:
                     raise PreservationHostError("storage_setup_incomplete") from error
                 if snapshot != encode_record(location.trust):
                     raise PreservationHostError("storage_setup_incomplete")
-            yield descriptor
-        finally:
+            return descriptor
+        except BaseException:
             os.close(descriptor)
+            raise
+
+    @asynccontextmanager
+    async def _archive(self, location: _Location) -> AsyncIterator[int]:
+        async with self._storage.directory(
+            lambda: self._open_archive(location)
+        ) as descriptor:
+            yield descriptor
+
+    async def _manifest(self, location: _Location, identity: str) -> Manifest:
+        async with self._archive(location) as descriptor:
+            return await self._storage.run(
+                lambda: verify_manifest(
+                    read_metadata(descriptor, manifest_path(identity)),
+                    location.trust,
+                    identity,
+                )
+            )
 
     async def setup_device(self) -> PreservationLocation:
         """Explicitly enroll the built-in private archive with protected capture custody."""
@@ -287,38 +306,31 @@ class PreservationHost:
             return await self.location_view("device")
 
     async def review_folder(self, request: FolderReviewRequest) -> FolderReview:
-        """Review a dedicated host folder without creating storage or custody.
-
-        The path is accepted only by trusted operator setup, never by a card,
-        invitation or governed copy operation. Registered roots can be reviewed
-        again to finish a previously interrupted public-trust snapshot write.
-        """
+        """Review a host folder off-loop, retaining setup ownership until it finishes."""
         async with self._setup_lock:
-            if self._closed:
-                raise PreservationHostError("preservation_host_closed")
-            selected = Path(request.path)
-            path = selected.parent.resolve(strict=True) / selected.name
-            enrolled = tuple(
-                self._location(identity)
-                for identity in self.journal.private_location_ids()
-            )
-            known = next(
-                (location for location in enrolled if location.path == path), None
-            )
-            observation = observe_folder(
-                request,
-                forbidden=(self.root, self.store.store_path, self.custom_cards),
-                enrolled_id=None if known is None else known.location_id,
-            )
-            if known is not None and (observation.device, observation.inode) != (
-                known.device,
-                known.inode,
-            ):
-                raise PreservationHostError("archive_identity_changed")
-            self.journal.set_setting(
-                "folder-review", observation.model_dump(mode="json")
-            )
-            return observation.view
+            return await self._storage.run(lambda: self._review_folder(request))
+
+    def _review_folder(self, request: FolderReviewRequest) -> FolderReview:
+        if self._closed:
+            raise PreservationHostError("preservation_host_closed")
+        selected = Path(request.path)
+        path = selected.parent.resolve(strict=True) / selected.name
+        enrolled = tuple(
+            self._location(identity) for identity in self.journal.private_location_ids()
+        )
+        known = next((location for location in enrolled if location.path == path), None)
+        observation = observe_folder(
+            request,
+            forbidden=(self.root, self.store.store_path, self.custom_cards),
+            enrolled_id=None if known is None else known.location_id,
+        )
+        if known is not None and (observation.device, observation.inode) != (
+            known.device,
+            known.inode,
+        ):
+            raise PreservationHostError("archive_identity_changed")
+        self.journal.set_setting("folder-review", observation.model_dump(mode="json"))
+        return observation.view
 
     async def setup_folder(self, request: FolderConfirmation) -> PreservationLocation:
         """Confirm exact private storage; keys stay in protected Core custody.
@@ -342,62 +354,76 @@ class PreservationHost:
             raise PreservationHostError("storage_review_expired")
         await self.setup_device()
         async with self._setup_lock:
-            if self._closed:
-                raise PreservationHostError("preservation_host_closed")
-            current = FolderObservation.model_validate_json(
-                safe_json(self.journal.setting("folder-review"))
+            return await self._storage.run(
+                lambda: self._setup_folder(request, observation)
             )
-            if current != observation or observation.view.expires_at <= int(
-                time.time()
-            ):
-                raise PreservationHostError("storage_review_expired")
-            identity = observation.enrolled_id or "folder_" + request.review_id[:32]
-            recorded = self.journal.setting("location:" + identity)
-            if recorded is not None:
-                enrolled = self._location(identity)
-                observation = observation.model_copy(
-                    update={
-                        "device": enrolled.device,
-                        "inode": enrolled.inode,
-                        "enrolled_id": identity,
-                    }
-                )
-            elif len(self.journal.private_location_ids()) >= 16:
-                raise PreservationHostError("storage_location_limit")
-            with confirmed_folder(observation) as descriptor:
-                info = os.fstat(descriptor)
-                capture = self._location("device")
-                location = _Location(
-                    location_id=identity,
-                    label=observation.view.label,
-                    path=observation.path,
-                    device=info.st_dev,
-                    inode=info.st_ino,
-                    trust=capture.trust,
-                    key_path=capture.key_path,
-                    requires_trust_snapshot=True,
-                )
-                self.journal.set_setting(
-                    "location:" + identity, location.model_dump(mode="json")
-                )
-                atomic_bytes(
-                    descriptor, "archive-trust.json", encode_record(location.trust)
-                )
-            async with self._archive(location):
-                self.journal.set_setting("default-private-location", identity)
-            return await self.location_view(identity)
+
+    def _setup_folder(
+        self, request: FolderConfirmation, observation: FolderObservation
+    ) -> PreservationLocation:
+        if self._closed:
+            raise PreservationHostError("preservation_host_closed")
+        current = FolderObservation.model_validate_json(
+            safe_json(self.journal.setting("folder-review"))
+        )
+        if current != observation or observation.view.expires_at <= int(time.time()):
+            raise PreservationHostError("storage_review_expired")
+        identity = observation.enrolled_id or "folder_" + request.review_id[:32]
+        recorded = self.journal.setting("location:" + identity)
+        if recorded is not None:
+            enrolled = self._location(identity)
+            observation = observation.model_copy(
+                update={
+                    "device": enrolled.device,
+                    "inode": enrolled.inode,
+                    "enrolled_id": identity,
+                }
+            )
+        elif len(self.journal.private_location_ids()) >= 16:
+            raise PreservationHostError("storage_location_limit")
+        with confirmed_folder(observation) as descriptor:
+            info = os.fstat(descriptor)
+            capture = self._location("device")
+            location = _Location(
+                location_id=identity,
+                label=observation.view.label,
+                path=observation.path,
+                device=info.st_dev,
+                inode=info.st_ino,
+                trust=capture.trust,
+                key_path=capture.key_path,
+                requires_trust_snapshot=True,
+            )
+            self.journal.set_setting(
+                "location:" + identity, location.model_dump(mode="json")
+            )
+            atomic_bytes(
+                descriptor, "archive-trust.json", encode_record(location.trust)
+            )
+        descriptor = self._open_archive(location)
+        try:
+            self.journal.set_setting("default-private-location", identity)
+        finally:
+            os.close(descriptor)
+        return self._observe_location(location)
 
     async def default_location(self, location_id: str) -> PreservationLocation:
-        """Persist one available private destination; never move existing copies."""
+        """Persist available private storage while retaining setup ownership."""
         async with self._setup_lock:
-            if self._closed:
-                raise PreservationHostError("preservation_host_closed")
-            location = self._location(location_id)
-            if location.purpose != "private":
-                raise PreservationHostError("private_archive_required")
-            async with self._archive(location):
-                self.journal.set_setting("default-private-location", location_id)
-            return await self.location_view(location_id)
+            return await self._storage.run(lambda: self._set_default(location_id))
+
+    def _set_default(self, location_id: str) -> PreservationLocation:
+        if self._closed:
+            raise PreservationHostError("preservation_host_closed")
+        location = self._location(location_id)
+        if location.purpose != "private":
+            raise PreservationHostError("private_archive_required")
+        descriptor = self._open_archive(location)
+        try:
+            self.journal.set_setting("default-private-location", location_id)
+        finally:
+            os.close(descriptor)
+        return self._observe_location(location)
 
     def _public_copy_parent(self) -> os.stat_result:
         parent = self.root / "public-copies"
@@ -464,12 +490,7 @@ class PreservationHost:
     ) -> tuple[PreservationCopy, _Location, Manifest]:
         copy = self.journal.copy(copy_id)
         location = self._location(copy.location_id)
-        async with self._archive(location) as descriptor:
-            manifest = verify_manifest(
-                read_metadata(descriptor, manifest_path(copy.manifest_id)),
-                location.trust,
-                copy.manifest_id,
-            )
+        manifest = await self._manifest(location, copy.manifest_id)
         return copy, location, manifest
 
     async def publication_source(self, copy_id: str) -> PublicationSource:
@@ -550,7 +571,9 @@ class PreservationHost:
         if copy.audience != "public" or location.purpose != "public":
             raise PreservationHostError("public_copy_required")
         async with self._archive(location) as descriptor:
-            envelope = read_metadata(descriptor, manifest_path(copy.manifest_id))
+            envelope = await self._storage.run(
+                lambda: read_metadata(descriptor, manifest_path(copy.manifest_id))
+            )
         return encode_record(
             invitation_from_envelope(
                 envelope, copy.manifest_id, location.trust, request.mirrors
@@ -576,17 +599,10 @@ class PreservationHost:
             raise PreservationHostError("public_review_changed")
         return encoded
 
-    async def location_view(self, location_id: str) -> PreservationLocation:
-        """Observe actual enrolled storage without creating any archive pathname."""
-        location = self._location(location_id)
-        available = False
-        free: int | None = None
-        try:
-            async with self._archive(location) as descriptor:
-                free = shutil.disk_usage(descriptor).free
-                available = True
-        except (OSError, PreservationHostError):
-            pass
+    @staticmethod
+    def _location_result(
+        location: _Location, available: bool, free: int | None
+    ) -> PreservationLocation:
         return PreservationLocation(
             location_id=location.location_id,
             label=location.label,
@@ -594,6 +610,26 @@ class PreservationHost:
             reachable=available,
             free_bytes=free,
             publisher_key_id=location.trust.keys[0].key_id,
+        )
+
+    def _observe_location(self, location: _Location) -> PreservationLocation:
+        try:
+            descriptor = self._open_archive(location)
+            try:
+                free = shutil.disk_usage(descriptor).free
+            finally:
+                os.close(descriptor)
+        except (OSError, PreservationHostError):
+            return self._location_result(location, False, None)
+        return self._location_result(location, True, free)
+
+    async def location_view(self, location_id: str) -> PreservationLocation:
+        """Bound availability reads without recreating paths or queueing stalled probes."""
+        location = self._location(location_id)
+        return await self._storage.probe(
+            location_id,
+            lambda: self._observe_location(location),
+            self._location_result(location, False, None),
         )
 
     def _selected(self, model_id: str) -> Path:
@@ -760,12 +796,7 @@ class PreservationHost:
                     copy.model_id,
                     copy.size_bytes,
                 )
-                async with self._archive(location) as descriptor:
-                    metadata = verify_manifest(
-                        read_metadata(descriptor, manifest_path(manifest)),
-                        location.trust,
-                        manifest,
-                    )
+                metadata = await self._manifest(location, manifest)
                 members = tuple(
                     model_id
                     if member.member_id == metadata.root_member
@@ -802,12 +833,7 @@ class PreservationHost:
             if kit is not None:
                 signed = kit.manifest
             else:
-                async with self._archive(location) as descriptor:
-                    signed = verify_manifest(
-                        read_metadata(descriptor, manifest_path(manifest)),
-                        location.trust,
-                        manifest,
-                    )
+                signed = await self._manifest(location, manifest)
             inspection, projected_card = inspect_verified_manifest(
                 signed, manifest, "historical" if request.historical else "fresh"
             )
@@ -1208,12 +1234,7 @@ class PreservationHost:
             if location.purpose != "public":
                 raise PreservationHostError("public_copy_required")
             identity = copy.manifest_id
-            async with self._archive(location) as descriptor:
-                manifest = verify_manifest(
-                    read_metadata(descriptor, manifest_path(identity)),
-                    location.trust,
-                    identity,
-                )
+            manifest = await self._manifest(location, identity)
             destination_id = None
             if (
                 request.kind == "torrent_share"
@@ -1443,7 +1464,8 @@ class PreservationHost:
             await self.cancel(job_id)
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks.values()), return_exceptions=True)
-        async with self._queue:
+        async with self._queue, self._setup_lock:
+            await self._storage.close()
             self.journal.close()
 
     async def _execute(self, job_id: str) -> None:
