@@ -10812,6 +10812,7 @@ class API:
                     tags=["system", "steward"],
                     tasks=["TextGeneration"],
                     system_role="steward",
+                    catalog_source="bundled",
                 )
             )
         return ModelList(data=entries)

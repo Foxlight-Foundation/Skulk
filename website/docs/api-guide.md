@@ -3886,7 +3886,7 @@ Important fields:
 | `base_model` | string | Base family or upstream source model when known |
 | `artifact_repository` | string | Upstream repository containing the artifact bytes; may differ from `id` when several exact files or quants share one repository |
 | `artifact_file` | string or null | Exact selected file for file-addressed artifacts such as GGUF |
-| `catalog_source` | string | `registry` (signed registry card), `installed` (a card recorded with an installed model that carries no registry identity), or `custom` (operator-added card) |
+| `catalog_source` | string | `registry` (signed registry card), `installed` (a card recorded with an installed model that carries no registry identity), `bundled` (a built-in virtual service descriptor, without claiming installed model weights), or `custom` (operator-added card) |
 | `registry_card_id` | string or null | Immutable content-derived identity of the active installed card, or the effective catalog card when not installed |
 | `registry_snapshot_id` | string or null | Signed catalog snapshot that supplied the card |
 | `registry_provenance` | string or null | Audited signed-registry origin (`foxlight`, `agent`, or `community`); null for `installed` and `custom` entries |
