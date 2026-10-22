@@ -36,6 +36,7 @@ from skulk.store.preservation_contracts import (
     ReceivingPolicy,
 )
 from skulk.store.preservation_journal import PreservationHostError, secure_directory
+from skulk.utils.directory_publication import publish_directory
 
 
 def publication_members(manifest: Manifest) -> tuple[PublicationMember, ...]:
@@ -143,13 +144,7 @@ def _commit_copy(
     before_publish(manifest_id)
     control.checkpoint()
     _parent_current(destination, parent)
-    os.mkdir(destination.name, mode=0o700, dir_fd=parent)
-    try:
-        os.rename(verified, destination.name, dst_dir_fd=parent)
-    except BaseException:
-        os.rmdir(destination.name, dir_fd=parent)
-        raise
-    os.fsync(parent)
+    publish_directory(verified, destination.name, parent)
     control.mark_committed()
 
 

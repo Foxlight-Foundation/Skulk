@@ -58,6 +58,7 @@ from skulk.store.installed_cards import (
 )
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation_closure import RecoveryMember, map_recovery_members
+from skulk.utils.directory_publication import publish_directory
 
 
 @final
@@ -595,21 +596,11 @@ def _recover_home(
         # Flushing a large closure can outlive the previously checked proof.
         # Fresh publication must still be valid at the final commit boundary.
         inspect_verified_manifest(manifest, manifest_id, mode)
-        # Exclusive reservation prevents replacing an existing operator home.
+        # No intermediate reservation can strand an empty operator home after
+        # process exit; existing destinations still cannot be replaced.
         if not parent_unchanged():
             raise PreservationError("recovery parent changed before publication")
-        os.mkdir(destination.name, mode=0o700, dir_fd=parent_descriptor)
-        try:
-            os.rename(
-                pending.name,
-                destination.name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-            )
-        except BaseException:
-            os.rmdir(destination.name, dir_fd=parent_descriptor)
-            raise
-        os.fsync(parent_descriptor)
+        publish_directory(pending, destination.name, parent_descriptor)
         return inspection
     finally:
         if parent_unchanged() and pending.exists():

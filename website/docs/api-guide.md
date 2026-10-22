@@ -5943,6 +5943,15 @@ keys, without loading the now-unneeded private signing key. Known operational fi
 scanner for intentionally selected model files or public cards. Late cancellation
 can lose to a completed verified publication.
 
+Public copies and recovered homes use atomic exclusive directory publication:
+an interrupted final move leaves either the complete verified stage or the
+complete destination, without an empty reservation. Explicit retry verifies an
+already completed exact copy. Existing entries (even empty directories or
+symlinks) are never overwritten or automatically removed. Filesystems without
+exclusive rename support refuse publication and retain the source; select a
+supported destination. Empty remnants created by older Core builds still need
+operator inspection because they have no authenticated ownership receipt.
+
 A recipient plan uses `kind: receive`, `location_id: invitation`, a completed
 invitation `upload_id` and explicitly authenticated `accepted_key_ids`. The intended
 candidate threshold also requires authentication. This creates an exact-copy

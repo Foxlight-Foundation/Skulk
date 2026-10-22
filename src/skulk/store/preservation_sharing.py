@@ -21,6 +21,7 @@ from foxlight_model_preservation.torrent import (
 )
 
 from skulk.store.preservation_contracts import SharingPolicy, SharingStatus
+from skulk.utils.directory_publication import publish_directory
 
 
 def require_public_bundle(manifest: Manifest) -> None:
@@ -104,13 +105,7 @@ def import_public_bundle(
         current = destination.parent.lstat()
         if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
             raise PreservationError("public_destination_changed")
-        os.mkdir(destination.name, mode=0o700, dir_fd=parent)
-        try:
-            os.rename(verified, destination.name, dst_dir_fd=parent)
-        except BaseException:
-            os.rmdir(destination.name, dir_fd=parent)
-            raise
-        os.fsync(parent)
+        publish_directory(verified, destination.name, parent)
         control.mark_committed()
     finally:
         os.close(parent)
