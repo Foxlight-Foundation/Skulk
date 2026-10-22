@@ -629,6 +629,39 @@ async def test_active_qualification_card_uses_matching_local_record(
     )
 
 
+async def test_builtin_steward_descriptor_has_legacy_compatible_bundled_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A built-in virtual service must not masquerade as an installed card."""
+
+    catalog_card = _card("a")
+    _configure_model_list_test(
+        monkeypatch,
+        catalog_card=catalog_card,
+        current_registry_card_value=catalog_card,
+        local_record=None,
+    )
+    def _enabled(_api: API) -> bool:
+        """Expose the bundled virtual descriptor for this generated catalog."""
+
+        return True
+
+    monkeypatch.setattr(API, "_intelligent_fabric_enabled", _enabled)
+    api = _api_with_store(_RegistryStoreClient([]))
+
+    response = await api.get_models(status=None)
+
+    assert len(response.data) == 2
+    assert response.data[0].catalog_source == "registry"
+    steward = response.data[1]
+    assert steward.system_role == "steward"
+    assert steward.catalog_source == "bundled"
+    assert steward.installed is False
+    assert steward.active_installed_identity is None
+    assert steward.installed_verification is None
+    assert steward.registry_card_id is None
+
+
 async def test_model_list_store_timeout_reuses_last_known_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
