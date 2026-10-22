@@ -82,10 +82,10 @@ import skulk.store.preservation_delivery as delivery
 
 root, boundary = Path(sys.argv[1]), sys.argv[2]
 original = delivery.publish_directory
-def interrupted(source, name, parent):
+def interrupted(source, source_parent, name, parent):
     if boundary == "before":
         os._exit(97)
-    original(source, name, parent)
+    original(source, source_parent, name, parent)
     os._exit(97)
 delivery.publish_directory = interrupted
 invitation = read_invitation((root / "invitation.json").read_bytes())

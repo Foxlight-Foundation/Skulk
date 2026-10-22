@@ -600,7 +600,9 @@ def _recover_home(
         # process exit; existing destinations still cannot be replaced.
         if not parent_unchanged():
             raise PreservationError("recovery parent changed before publication")
-        publish_directory(pending, destination.name, parent_descriptor)
+        publish_directory(
+            pending.name, parent_descriptor, destination.name, parent_descriptor
+        )
         return inspection
     finally:
         if parent_unchanged() and pending.exists():

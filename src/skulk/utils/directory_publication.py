@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import cast
 
 
-def publish_directory(source: Path, name: str, parent: int) -> None:
+def publish_directory(source: str, source_parent: int, name: str, parent: int) -> None:
     """Move a complete directory into a pinned parent without a reservation.
 
     Args:
-        source: Verified staging directory on the destination filesystem.
+        source: Verified staging basename on the destination filesystem.
+        source_parent: Already pinned directory containing the verified stage.
         name: Single destination basename in the already opened parent.
         parent: Caller-owned destination directory descriptor.
 
@@ -22,8 +23,13 @@ def publish_directory(source: Path, name: str, parent: int) -> None:
     destination, without an empty placeholder. Unsupported platforms/filesystems
     fail closed; ordinary rename is not a safe fallback. The caller owns durable
     intent, verification, cancellation and completion acknowledgement.
+    Both parent descriptors must stay pinned across verification and publication;
+    this function performs no pathname-based directory lookup.
     """
-    if name in {"", ".", ".."} or Path(name).name != name:
+    if any(
+        value in {"", ".", ".."} or Path(value).name != value
+        for value in (source, name)
+    ):
         raise ValueError("directory publication requires a single basename")
     if sys.platform == "darwin":
         symbol, flags = "renameatx_np", 0x00000004  # RENAME_EXCL
@@ -49,14 +55,8 @@ def publish_directory(source: Path, name: str, parent: int) -> None:
         raise OSError(
             errno.ENOTSUP, "exclusive directory publication unavailable"
         ) from error
-    source_parent = os.open(
-        source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    )
-    try:
-        if rename(source_parent, os.fsencode(source.name), parent, os.fsencode(name), flags):
-            code = ctypes.get_errno()
-            raise OSError(code, os.strerror(code), name)
-        os.fsync(source_parent)
-        os.fsync(parent)
-    finally:
-        os.close(source_parent)
+    if rename(source_parent, os.fsencode(source), parent, os.fsencode(name), flags):
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), name)
+    os.fsync(source_parent)
+    os.fsync(parent)
