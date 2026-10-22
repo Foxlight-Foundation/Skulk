@@ -272,6 +272,19 @@ class PreservationHost:
                 lambda: read_capture(descriptor, identity, location.trust)
             )
 
+    async def _format(
+        self, location: _Location, identity: str
+    ) -> Literal["preservation-v1", "pmf-v0.1"]:
+        async with self._archive(location) as descriptor:
+            manifest = await self._storage.run(
+                lambda: verify_archive_manifest(
+                    read_metadata(descriptor, manifest_path(identity)),
+                    location.trust,
+                    identity,
+                )
+            )
+        return "pmf-v0.1" if isinstance(manifest, PMFManifest) else "preservation-v1"
+
     async def setup_device(self) -> PreservationLocation:
         """Explicitly enroll the built-in private archive with protected capture custody."""
         async with self._setup_lock:
@@ -753,6 +766,9 @@ class PreservationHost:
             "location": cast(dict[str, JsonValue], location.model_dump(mode="json"))
         }
         manifest: str | None = None
+        archive_format: Literal["preservation-v1", "pmf-v0.1"] = (
+            "pmf-v0.1" if request.kind == "preserve" else "preservation-v1"
+        )
         copy_id = request.copy_id
         if request.kind == "preserve":
             if request.model_id is None or request.generation_id is None:
@@ -795,6 +811,7 @@ class PreservationHost:
                     copy.size_bytes,
                 )
                 metadata = await self._manifest(location, manifest)
+                archive_format = await self._format(location, manifest)
                 members = tuple(
                     model_id
                     if member.member_id == metadata.root_member
@@ -823,28 +840,14 @@ class PreservationHost:
                     prior_plan.size_bytes,
                 )
                 members = prior_plan.members
+                # A durable intent can precede the envelope. Outcome probing
+                # needs the recorded format even when no completion exists.
+                archive_format = prior_plan.archive_format
             payload["manifest_id"] = manifest
-        archive_format: Literal["preservation-v1", "pmf-v0.1"] = (
-            "pmf-v0.1" if request.kind == "preserve" else "preservation-v1"
-        )
         if kit is not None:
             archive_format = (
                 "pmf-v0.1"
                 if isinstance(kit.manifest, PMFManifest)
-                else "preservation-v1"
-            )
-        elif manifest is not None:
-            async with self._archive(location) as archive_root:
-                selected_archive = await self._storage.run(
-                    lambda: verify_archive_manifest(
-                        read_metadata(archive_root, manifest_path(manifest)),
-                        location.trust,
-                        manifest,
-                    )
-                )
-            archive_format = (
-                "pmf-v0.1"
-                if isinstance(selected_archive, PMFManifest)
                 else "preservation-v1"
             )
         payload["archive_format"] = archive_format
@@ -1100,6 +1103,19 @@ class PreservationHost:
             < public.total_bytes + 32 * 1024 * 1024
         ):
             raise PreservationHostError("insufficient_space")
+        if not destination.exists():
+            # The PMF bridge and public output coexist in private job work.
+            # Logical totals conservatively cover deduplicated object stores.
+            conversion_bytes = (
+                source.total_bytes
+                if await self._format(location, copy.manifest_id) == "pmf-v0.1"
+                else 0
+            )
+            if (
+                shutil.disk_usage(self.root).free
+                < conversion_bytes + public.total_bytes + 32 * 1024 * 1024
+            ):
+                raise PreservationHostError("insufficient_space")
         payload: dict[str, JsonValue] = {
             "location": location.model_dump(mode="json"),
             "publisher": publisher.model_dump(mode="json"),

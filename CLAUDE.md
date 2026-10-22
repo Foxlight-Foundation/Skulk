@@ -20,7 +20,8 @@ installed-card schema 3; legacy sidecar serialization stays unchanged. See
 `plan` is inventory only; `preserve` is a local private snapshot, not a lease on
 a live store. Processor/vLLM direct-Hub loaders require separate offline adapters.
 The `pyinstaller40` entry point in `_pyinstaller/` includes the public core's
-JSON schemas and distribution metadata in frozen builds. Keep the resource
+JSON schemas, distribution metadata and the exact PMF adapter source used by
+converter receipts in frozen builds. Keep the resource
 closure test separate from actual desktop signing and release qualification.
 
 Core-owned preservation jobs live in `store/preservation_host.py`, with private

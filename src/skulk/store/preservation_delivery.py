@@ -23,7 +23,11 @@ from foxlight_model_preservation.pmf_preservation import (
     export_preservation,
     inspect_preservation_pmf,
 )
-from foxlight_model_preservation.publication import PublicationRequest, publish_public
+from foxlight_model_preservation.publication import (
+    PublicationRequest,
+    publish_public,
+    review_publication,
+)
 from foxlight_model_preservation.signing import encode_record, verify_manifest
 from foxlight_model_preservation.storage import (
     atomic_bytes,
@@ -217,11 +221,19 @@ def publish_copy(
                     raise PreservationError(
                         "PMF has no supported original preservation profile"
                     )
-                original_id, _ = inspect_preservation_pmf(
+                original_id, original = inspect_preservation_pmf(
                     selected,
                     read_metadata(source_root, object_path(document.sha256)),
                     source_trust=source_trust,
                 )
+                public = review_publication(original, request)
+                if (
+                    shutil.disk_usage(source_parent).free
+                    < original.total_bytes + public.total_bytes + 32 * 1024 * 1024
+                    or shutil.disk_usage(parent).free
+                    < public.total_bytes + 32 * 1024 * 1024
+                ):
+                    raise PreservationHostError("insufficient_space")
                 source_store = work / "publication-source"
                 export_preservation(
                     Path("."),

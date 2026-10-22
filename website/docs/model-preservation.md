@@ -387,3 +387,12 @@ private copy uses a verified temporary original-format selection for this step;
 allow additional private staging space approximately equal to the source closure.
 Public invitations, mirror and BitTorrent contracts retain their existing format.
 Direct public PMF mirror-kit import requires a future explicit transport adapter.
+
+Public publication reviews combined conversion/output space on the Core work
+filesystem and rechecks both stages before copying, while retaining the separate
+destination-space check. Frozen resource collection includes the exact adapter
+source used by conversion receipts. Checking an uncertain interrupted capture
+uses its recorded format even if no completion envelope was published; a failed
+probe does not silently recapture or declare success. Unused-recovery cleanup
+authenticates PMF and original source evidence before deleting an unindexed
+known generation, with the same custody and index-reference safeguards as v1.

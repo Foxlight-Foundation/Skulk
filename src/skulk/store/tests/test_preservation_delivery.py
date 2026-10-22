@@ -229,6 +229,33 @@ async def test_publish_receive_and_complete_restore_after_both_original_cores_ar
             public_metadata = Manifest.model_validate_json(
                 await publisher.public_manifest(plan.plan_id)
             )
+        # One output fits the destination check, but not the simultaneously
+        # retained private conversion plus public staging. Refuse during review.
+        from typing import NamedTuple
+
+        class Capacity(NamedTuple):
+            total: int
+            used: int
+            free: int
+
+        usage = shutil.disk_usage(publisher.root)
+
+        def one_copy_only(_: object) -> Capacity:
+            return Capacity(
+                usage.total, usage.used, public_metadata.total_bytes + 32 * 1024 * 1024
+            )
+
+        with monkeypatch.context() as capacity:
+            capacity.setattr(shutil, "disk_usage", one_copy_only)
+            with pytest.raises(PreservationHostError, match="insufficient_space"):
+                await publisher.plan(
+                    PreservationPlanRequest(
+                        kind="publish",
+                        location_id="device",
+                        copy_id=copy.copy_id,
+                        upload_id=upload,
+                    )
+                )
         assert plan.manifest_id != private_id
         assert all(m.member_id != "source-evidence" for m in public_metadata.members)
         with pytest.raises(
@@ -825,3 +852,82 @@ async def test_receive_deadline_stops_a_stalled_mirror_and_cleared_work_never_re
         server.server_close()
         thread.join(5)
         assert not thread.is_alive()
+
+
+def test_publication_rechecks_both_stages_before_pmf_conversion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import NamedTuple
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from foxlight_model_preservation.operations import OperationControl
+    from foxlight_model_preservation.publication import review_publication
+    from foxlight_model_preservation.signing import digest, load_key
+
+    import skulk.store.preservation_delivery as delivery
+    from skulk.store.preservation_export import preserve_installed
+    from skulk.store.preservation_pmf import verify_capture
+
+    installed = make_preservation_installation(tmp_path)
+    identity = preserve_installed(
+        installed.primary,
+        installed.archive,
+        (load_key(installed.key, None),),
+        portable=True,
+    )
+    original = verify_capture(installed.archive, identity, installed.trust)
+    request = PublicationRequest(
+        name=original.name,
+        workloads=original.workloads,
+        runtime_requirements=original.runtime_requirements,
+        members=tuple(
+            PublicMemberTerms(
+                member_id=member.member_id,
+                license_id="test-only",
+                terms_reference="LICENSE",
+                decision="Synthetic publication",
+                notice_paths=member.intake.notice_paths,
+            )
+            for member in original.members
+            if member.member_id != "source-evidence"
+        ),
+    )
+    public = review_publication(original, request)
+    work = tmp_path / "work"
+    parent = tmp_path / "public"
+    work.mkdir(mode=0o700)
+    parent.mkdir(mode=0o700)
+    info = parent.stat()
+    usage = shutil.disk_usage(work)
+
+    class Capacity(NamedTuple):
+        total: int
+        used: int
+        free: int
+
+    def one_copy_only(_: object) -> Capacity:
+        return Capacity(usage.total, usage.used, public.total_bytes + 32 * 1024 * 1024)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("insufficient combined capacity must refuse before copying bytes")
+
+    monkeypatch.chdir(installed.archive)
+    monkeypatch.setattr(shutil, "disk_usage", one_copy_only)
+    monkeypatch.setattr(delivery, "export_preservation", forbidden)
+    with pytest.raises(PreservationHostError, match="insufficient_space"):
+        delivery.publish_copy(
+            identity,
+            installed.trust,
+            request,
+            parent / "copy",
+            digest(encode_record(public)),
+            Ed25519PrivateKey.generate,
+            installed.trust,
+            work,
+            OperationControl(),
+            OperationControl(),
+            forbidden,
+            parent_identity=(info.st_dev, info.st_ino),
+            conversion_control=OperationControl(),
+        )
+    assert not (work / "publication-source").exists() and not (parent / "copy").exists()
