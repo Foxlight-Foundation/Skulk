@@ -2027,7 +2027,7 @@ Comfy timed scene prompts require an exact issued extension declaring `prompt_re
 
 ### Model preservation host jobs
 
-- `store/preservation_io.py`: two active off-loop filesystem calls, reused bounded availability probes, retained setup cancellation and descriptor leases; shutdown drains actual calls before journal release.
+- `store/preservation_io.py`: two effect slots and an isolated availability pool (up to sixteen private roots plus publisher), reused bounded probes, retained setup cancellation and descriptor leases; shutdown drains actual calls before journal release.
 
 - `store/preservation_host.py`: lazy `ModelStoreServer`-owned controller around the
   existing `ModelStore`; private built-in archive enrollment, exact plans, private

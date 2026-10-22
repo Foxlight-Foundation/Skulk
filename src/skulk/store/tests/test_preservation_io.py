@@ -63,7 +63,10 @@ async def test_stalled_probe_is_bounded_and_close_retains_journal_owner(
             item for item in page.locations if item.location_id == "device"
         ).reachable
         for _ in range(3):
-            await asyncio.wait_for(host.page(), 2)
+            later = await asyncio.wait_for(host.page(), 2)
+            assert next(
+                item for item in later.locations if item.location_id == "device"
+            ).reachable
         assert calls == 1  # Repeated reads reuse the one outstanding NAS probe.
         closing = asyncio.create_task(host.close())
         await asyncio.sleep(0.03)
@@ -175,6 +178,95 @@ async def test_shutdown_keeps_pool_until_a_borrowed_directory_is_closed(
         with pytest.raises(OSError):
             os.fstat(descriptor)
     finally:
+        if closing is not None:
+            await closing
+        await storage.close()
+
+
+async def test_multiple_stale_probes_leave_effect_and_healthy_probe_capacity() -> None:
+    storage = PreservationIO()
+    started, release = threading.Event(), threading.Event()
+    calls = 0
+
+    def stale() -> str:
+        nonlocal calls
+        calls += 1
+        started.set()
+        release.wait(10)
+        return "late"
+
+    try:
+        assert (
+            await storage.probe("local", lambda: "verified-local", "unknown")
+            == "verified-local"
+        )
+        assert await storage.probe("nas-one", stale, "unknown") == "unknown"
+        await begun(started)
+        assert await storage.probe("nas-two", stale, "unknown") == "unknown"
+        assert calls == 2
+        assert (
+            await storage.probe("local", lambda: "fresh-local", "unknown")
+            == "fresh-local"
+        )
+        assert (
+            await asyncio.wait_for(storage.run(lambda: "real-operation-finished"), 1)
+            == "real-operation-finished"
+        )
+    finally:
+        release.set()
+        await storage.close()
+
+
+async def test_cancelled_directory_cleanup_keeps_lease_while_waiting_for_slots(
+    tmp_path: Path,
+) -> None:
+    storage = PreservationIO()
+    entered, leave = asyncio.Event(), asyncio.Event()
+    started_one, started_two, release = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    descriptors: list[int] = []
+
+    async def borrowed() -> None:
+        async with storage.directory(
+            lambda: os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        ) as descriptor:
+            descriptors.append(descriptor)
+            entered.set()
+            await leave.wait()
+
+    def occupied(started: threading.Event) -> None:
+        started.set()
+        release.wait(10)
+
+    task = asyncio.create_task(borrowed())
+    await asyncio.wait_for(entered.wait(), 2)
+    first = asyncio.create_task(storage.run(lambda: occupied(started_one)))
+    second = asyncio.create_task(storage.run(lambda: occupied(started_two)))
+    closing: asyncio.Task[None] | None = None
+    try:
+        await begun(started_one)
+        await begun(started_two)
+        leave.set()
+        await asyncio.sleep(0.03)
+        task.cancel()
+        closing = asyncio.create_task(storage.close())
+        await asyncio.sleep(0.03)
+        assert not task.done() and not closing.done()
+        assert os.fstat(descriptors[0]).st_ino == tmp_path.stat().st_ino
+        release.set()
+        await asyncio.gather(first, second)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(closing, 2)
+        with pytest.raises(OSError):
+            os.fstat(descriptors[0])
+    finally:
+        leave.set()
+        release.set()
+        await asyncio.gather(task, first, second, return_exceptions=True)
         if closing is not None:
             await closing
         await storage.close()

@@ -14,7 +14,7 @@ from skulk.store.preservation_journal import PreservationHostError
 
 @final
 class PreservationIO:
-    """Two active filesystem calls, retained through cancellation and shutdown.
+    """Two effect slots and isolated bounded probes, retained through shutdown.
 
     Availability reads reuse one outstanding probe per location and return an
     unavailable observation after a short wait. Effects drain before returning
@@ -26,19 +26,29 @@ class PreservationIO:
             max_workers=2, thread_name_prefix="preservation-storage"
         )
         self._slots = asyncio.Semaphore(2)
+        # All sixteen private roots plus publisher custody can be observed even
+        # when another mount stalls. Probes never consume effect/cleanup slots.
+        self._probe_executor = ThreadPoolExecutor(
+            max_workers=17, thread_name_prefix="preservation-probe"
+        )
+        self._probe_slots = asyncio.Semaphore(17)
         self._pending: set[asyncio.Future[object]] = set()
         self._probes: dict[str, asyncio.Future[object]] = {}
         self._leases: set[asyncio.Event] = set()
         self._closed = False
 
-    def _submit[T](self, operation: Callable[[], T]) -> asyncio.Future[T]:
-        future = asyncio.get_running_loop().run_in_executor(self._executor, operation)
+    def _submit[T](
+        self, operation: Callable[[], T], *, probe: bool = False
+    ) -> asyncio.Future[T]:
+        future = asyncio.get_running_loop().run_in_executor(
+            self._probe_executor if probe else self._executor, operation
+        )
         owned = cast(asyncio.Future[object], future)
         self._pending.add(owned)
 
         def finished(result: asyncio.Future[T]) -> None:
             self._pending.discard(owned)
-            self._slots.release()
+            (self._probe_slots if probe else self._slots).release()
             if not result.cancelled():
                 result.exception()  # Observe failures even after a probe timed out.
 
@@ -60,12 +70,20 @@ class PreservationIO:
         """
         if self._closed and not _cleanup:
             raise PreservationHostError("preservation_host_closed")
-        await self._slots.acquire()
+        cancelled = False
+        while True:
+            try:
+                await self._slots.acquire()
+                break
+            except asyncio.CancelledError:
+                if not _cleanup:
+                    raise
+                # A borrowed handle remains owned while cleanup waits for room.
+                cancelled = True
         if self._closed and not _cleanup:
             self._slots.release()
             raise PreservationHostError("preservation_host_closed")
         future = self._submit(operation)
-        cancelled = False
         try:
             while True:
                 try:
@@ -109,11 +127,11 @@ class PreservationIO:
             return fallback
         previous = self._probes.get(key)
         if previous is None:
-            if self._slots.locked():
+            if self._probe_slots.locked():
                 return fallback
-            # With a free slot this acquire does not suspend on the event loop.
-            await self._slots.acquire()
-            future = self._submit(operation)
+            # With a free probe slot this does not suspend on the event loop.
+            await self._probe_slots.acquire()
+            future = self._submit(operation, probe=True)
             self._probes[key] = cast(asyncio.Future[object], future)
             future.add_done_callback(lambda _: self._probes.pop(key, None))
         else:
@@ -142,3 +160,4 @@ class PreservationIO:
             except asyncio.CancelledError:
                 continue
         self._executor.shutdown(wait=False)
+        self._probe_executor.shutdown(wait=False)

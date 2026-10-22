@@ -3287,8 +3287,8 @@ or capability restart has no byte-worker ownership. The standalone public mirror
 and recovery tools retain their independent trust/transport boundaries.
 
 
-Mounted preservation I/O uses `preservation_io.py`: two active off-loop calls,
-250-ms reused availability probes, cancellation draining and retained directory
+Mounted preservation I/O uses `preservation_io.py`: two effect slots and a separate capped
+availability pool, 250-ms reused probes, cancellation draining and retained directory
 leases. Journal ownership is released only after actual filesystem work finishes.
 
 Explicit trusted-operator folder setup (`preservation_folders.py`) reviews one

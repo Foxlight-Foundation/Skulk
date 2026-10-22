@@ -5855,10 +5855,12 @@ private destinations are retained; unavailable roots are never recreated. These
 setup controls copy no model bytes and start no listener, swarm or model load.
 
 Mounted-destination opens, trust/manifest reads, folder setup, free-space checks
-and descriptor closes run in a two-slot owned filesystem lane. Library probes
-reuse a pending observation and wait at most 250 ms per location; a busy or
+and descriptor closes run in a two-slot owned effect lane. Availability has a
+separate pool capped at sixteen private roots plus publisher custody; stalled
+probes cannot consume effect or cleanup capacity. Library probes reuse a pending observation and wait at most 250 ms per location; a busy or
 unfinished check reports unavailable rather than blocking the node event loop
-or queueing another probe. Effects retain setup ownership through cancellation.
+or queueing another probe. Effects retain setup ownership through cancellation. Directory cleanup defers
+cancellation while awaiting admission as well as while its actual close runs.
 Core drains outstanding filesystem calls and directory leases before releasing
 its journal; an operating-system mount that never responds can delay shutdown.
 No timed-out operation is abandoned, restarted or allowed to finish ownerless.
