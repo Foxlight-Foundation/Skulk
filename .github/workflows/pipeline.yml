@@ -109,6 +109,21 @@ jobs:
       - name: Ruff check
         run: uv run ruff check
 
+  directory-publication-linux:
+    name: Atomic directory publication (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Verify native exclusive rename without runtime dependencies
+        env:
+          PYTHONPATH: src
+          SKULK_TESTS: "1"
+        run: uv run --isolated --no-project --python 3.13 --with pytest==9.1.1 pytest -c /dev/null -p no:cacheprovider --noconftest --import-mode=importlib src/skulk/utils/tests/test_directory_publication.py
+
   dashboard-test:
     name: Dashboard browser tests
     runs-on: ubuntu-latest

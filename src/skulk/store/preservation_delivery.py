@@ -36,6 +36,7 @@ from skulk.store.preservation_contracts import (
     ReceivingPolicy,
 )
 from skulk.store.preservation_journal import PreservationHostError, secure_directory
+from skulk.utils.directory_publication import publish_directory
 
 
 def publication_members(manifest: Manifest) -> tuple[PublicationMember, ...]:
@@ -137,19 +138,16 @@ def _commit_copy(
     control: OperationControl,
     before_publish: Callable[[str], None],
     parent: int,
+    source_parent: int,
 ) -> None:
     control.checkpoint()
     _parent_current(destination, parent)
+    _parent_current(verified, source_parent)
     before_publish(manifest_id)
     control.checkpoint()
     _parent_current(destination, parent)
-    os.mkdir(destination.name, mode=0o700, dir_fd=parent)
-    try:
-        os.rename(verified, destination.name, dst_dir_fd=parent)
-    except BaseException:
-        os.rmdir(destination.name, dir_fd=parent)
-        raise
-    os.fsync(parent)
+    _parent_current(verified, source_parent)
+    publish_directory(verified.name, source_parent, destination.name, parent)
     control.mark_committed()
 
 
@@ -176,7 +174,10 @@ def publish_copy(
     is independently reverified, never replaced. No listener or model admission
     occurs; the durable parent acknowledgement precedes global publication.
     """
-    with _output_parent(destination, parent_identity) as parent:
+    with (
+        _output_parent(destination, parent_identity) as parent,
+        directory(work) as source_parent,
+    ):
         if destination.exists() or destination.is_symlink():
             manifest = verify_store(
                 destination, expected_id, publisher_trust, control=publication_control
@@ -205,7 +206,9 @@ def publish_copy(
                 read_metadata(root, manifest_path(identity)), publisher_trust, identity
             )
             atomic_bytes(root, "bundle-trust.json", encode_record(publisher_trust))
-        _commit_copy(staged, destination, identity, control, before_publish, parent)
+        _commit_copy(
+            staged, destination, identity, control, before_publish, parent, source_parent
+        )
         return manifest
 
 
@@ -283,7 +286,10 @@ def receive_copy(
     intent acknowledged before atomic publication. Partial files remain private.
     No card interpretation, model admission, repository code or seeding occurs.
     """
-    with _output_parent(destination, parent_identity) as parent:
+    with (
+        _output_parent(destination, parent_identity) as parent,
+        directory(work) as source_parent,
+    ):
         manifest = authenticate_invitation(invitation, trust)
         transfer_policy(policy).validate()
         if sum(file.size for file in unique_objects(manifest)) > policy.max_bytes:
@@ -321,6 +327,12 @@ def receive_copy(
         with directory(staged) as root:
             atomic_bytes(root, "bundle-trust.json", encode_record(trust))
         _commit_copy(
-            staged, destination, invitation.manifest_id, control, before_publish, parent
+            staged,
+            destination,
+            invitation.manifest_id,
+            control,
+            before_publish,
+            parent,
+            source_parent,
         )
         return manifest

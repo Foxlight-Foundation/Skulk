@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import shutil
 import socket
+import subprocess
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -31,6 +33,101 @@ from skulk.store.preservation_host import PreservationHost
 from skulk.store.preservation_journal import PreservationHostError
 from skulk.store.tests.test_preservation_export import make_preservation_installation
 from skulk.store.tests.test_preservation_sharing import ready, settled
+
+
+@pytest.mark.parametrize("boundary", ["before", "after"])
+def test_process_exit_at_atomic_receive_commit_can_be_confirmed_offline(
+    tmp_path: Path, boundary: str
+) -> None:
+    """A real process exit cannot strand an empty unregistered final copy."""
+    from foxlight_model_preservation.invitations import create_invitation
+    from foxlight_model_preservation.operations import OperationControl
+
+    from skulk.store.preservation_contracts import ReceivingPolicy
+    from skulk.store.preservation_delivery import receive_copy
+    from skulk.store.tests.test_preservation_sharing import public_kit
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _, identity, trust = public_kit(source)
+    invitation = create_invitation(
+        source / "archive", identity, trust, ("https://unavailable.invalid",)
+    )
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    stage = work / "public-copy"
+    shutil.copytree(source / "archive", stage)
+    inode = stage.stat().st_ino
+    shutil.rmtree(source)
+    parent = tmp_path / "public"
+    parent.mkdir(mode=0o700)
+    destination = parent / "copy"
+    (tmp_path / "invitation.json").write_bytes(encode_record(invitation))
+    (tmp_path / "trust.json").write_bytes(encode_record(trust))
+    # This child uses real verification and native exclusive rename. It exits
+    # without exception unwinding immediately on either side of that boundary.
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import os
+import sys
+from pathlib import Path
+from foxlight_model_preservation.invitations import read_invitation
+from foxlight_model_preservation.models import TrustProfile
+from foxlight_model_preservation.operations import OperationControl
+from skulk.store.preservation_contracts import ReceivingPolicy
+import skulk.store.preservation_delivery as delivery
+
+root, boundary = Path(sys.argv[1]), sys.argv[2]
+original = delivery.publish_directory
+def interrupted(source, source_parent, name, parent):
+    if boundary == "before":
+        os._exit(97)
+    original(source, source_parent, name, parent)
+    os._exit(97)
+delivery.publish_directory = interrupted
+invitation = read_invitation((root / "invitation.json").read_bytes())
+trust = TrustProfile.model_validate_json((root / "trust.json").read_bytes())
+parent = root / "public"
+info = parent.stat()
+delivery.receive_copy(
+    invitation, trust,
+    ReceivingPolicy(mirrors=invitation.mirrors, max_bytes=1024**2, deadline_seconds=60),
+    parent / "copy", root / "work", OperationControl(), OperationControl,
+    lambda identity: None, parent_identity=(info.st_dev, info.st_ino),
+)
+raise AssertionError("crash boundary was not exercised")
+""",
+            str(tmp_path),
+            boundary,
+        ],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert child.returncode == 97, child.stderr.decode()
+    survivor = stage if boundary == "before" else destination
+    assert survivor.stat().st_ino == inode
+    assert verify_store(survivor, identity, trust)
+    assert not (destination if boundary == "before" else stage).exists()
+    info = parent.stat()
+    result = receive_copy(
+        invitation,
+        trust,
+        ReceivingPolicy(
+            mirrors=invitation.mirrors, max_bytes=1024**2, deadline_seconds=60
+        ),
+        destination,
+        work,
+        OperationControl(),
+        OperationControl,
+        lambda identity: None,
+        parent_identity=(info.st_dev, info.st_ino),
+    )
+    assert result == verify_store(destination, identity, trust)
+    assert destination.stat().st_ino == inode and not stage.exists()
 
 
 def metadata_upload(

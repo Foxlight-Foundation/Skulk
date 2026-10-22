@@ -13,7 +13,7 @@ from foxlight_model_preservation.kits import import_kit
 from foxlight_model_preservation.models import Manifest, PreservationError, TrustProfile
 from foxlight_model_preservation.operations import OperationControl
 from foxlight_model_preservation.seed import SeedServer
-from foxlight_model_preservation.storage import verify_store
+from foxlight_model_preservation.storage import directory, verify_store
 from foxlight_model_preservation.torrent import (
     TorrentSeeder,
     TorrentSeedPolicy,
@@ -21,6 +21,7 @@ from foxlight_model_preservation.torrent import (
 )
 
 from skulk.store.preservation_contracts import SharingPolicy, SharingStatus
+from skulk.utils.directory_publication import publish_directory
 
 
 def require_public_bundle(manifest: Manifest) -> None:
@@ -78,42 +79,43 @@ def import_public_bundle(
         control.checkpoint()
         before_publish(manifest_id)
         return manifest
-    verified = work / "public-copy"
-    imported = import_kit(
-        kit,
-        verified,
-        expected_manifest_id=manifest_id,
-        trust=trust,
-        control=import_control,
-    )
-    manifest = imported.manifest
-    require_public_bundle(manifest)
-    control.checkpoint()
-    parent = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        info = os.fstat(parent)
-        if (
-            parent_identity is not None
-            and (info.st_dev, info.st_ino) != parent_identity
-        ):
-            raise PreservationError("public_destination_changed")
-        # Intent can now represent a real publication uncertainty. No ordinary
-        # bad-object/length/signature failure consumes the uncertainty allowance.
-        before_publish(manifest_id)
+    with directory(work) as source_parent:
+        verified = work / "public-copy"
+        imported = import_kit(
+            kit,
+            verified,
+            expected_manifest_id=manifest_id,
+            trust=trust,
+            control=import_control,
+        )
+        manifest = imported.manifest
+        require_public_bundle(manifest)
         control.checkpoint()
-        current = destination.parent.lstat()
-        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
-            raise PreservationError("public_destination_changed")
-        os.mkdir(destination.name, mode=0o700, dir_fd=parent)
+        parent = os.open(
+            destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
         try:
-            os.rename(verified, destination.name, dst_dir_fd=parent)
-        except BaseException:
-            os.rmdir(destination.name, dir_fd=parent)
-            raise
-        os.fsync(parent)
-        control.mark_committed()
-    finally:
-        os.close(parent)
+            info = os.fstat(parent)
+            if (
+                parent_identity is not None
+                and (info.st_dev, info.st_ino) != parent_identity
+            ):
+                raise PreservationError("public_destination_changed")
+            # Intent can now represent a real publication uncertainty. No ordinary
+            # bad-object/length/signature failure consumes the uncertainty allowance.
+            before_publish(manifest_id)
+            control.checkpoint()
+            current = destination.parent.lstat()
+            staging = work.lstat()
+            pinned = os.fstat(source_parent)
+            if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or (
+                staging.st_dev, staging.st_ino
+            ) != (pinned.st_dev, pinned.st_ino):
+                raise PreservationError("public_destination_changed")
+            publish_directory(verified.name, source_parent, destination.name, parent)
+            control.mark_committed()
+        finally:
+            os.close(parent)
     return manifest
 
 
