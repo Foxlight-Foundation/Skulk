@@ -9,6 +9,7 @@ import pytest
 from foxlight_model_preservation.kits import export_kit
 from foxlight_model_preservation.signing import load_trust
 from foxlight_model_preservation.storage import verify_store
+from pydantic import ValidationError
 
 import skulk.store.preservation_host as host_module
 from skulk.store.installed_cards import read_installed_card
@@ -278,5 +279,49 @@ async def test_existing_root_replacement_and_unconfirmed_setup_refuse(
             )
         assert not tuple(archive.iterdir())
         assert (await host.page()).default_location_id == "device"
+    finally:
+        await host.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "kind"),
+    [
+        ("parent_device", "string"),
+        ("parent_inode", "string"),
+        ("device", "string"),
+        ("inode", "string"),
+        ("parent_inode", "float"),
+        ("device", "boolean"),
+    ],
+)
+async def test_malformed_persisted_identity_is_refused_before_setup(
+    tmp_path: Path, field: str, kind: str
+) -> None:
+    host = owner(tmp_path / "source")
+    archive = tmp_path / "selected"
+    archive.mkdir(mode=0o700)
+    try:
+        review = await host.review_folder(
+            FolderReviewRequest(path=str(archive), label="Backup")
+        )
+        saved = host.journal.setting("folder-review")
+        assert isinstance(saved, dict)
+        original = saved[field]
+        assert isinstance(original, int)
+        saved[field] = (
+            str(original)
+            if kind == "string"
+            else float(original)
+            if kind == "float"
+            else True
+        )
+        host.journal.set_setting("folder-review", saved)
+        with pytest.raises(ValidationError):
+            await host.setup_folder(
+                FolderConfirmation(review_id=review.review_id, confirmed=True)
+            )
+        assert not tuple(archive.iterdir())
+        assert not (host.root / "custody").exists()
+        assert not (await host.page()).locations
     finally:
         await host.close()

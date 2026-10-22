@@ -20,7 +20,7 @@ from skulk.store.preservation_journal import PreservationHostError
 class FolderObservation(BaseModel):
     """Private observation binds consent to a parent and absent/existing leaf."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     view: FolderReview
     path: Path
     parent_device: int
