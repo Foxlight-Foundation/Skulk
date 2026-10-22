@@ -7,11 +7,14 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
-from foxlight_model_preservation.models import TrustProfile
+from foxlight_model_preservation.invitations import Invitation
+from foxlight_model_preservation.models import Manifest, TrustProfile
 
 from skulk.store.preservation import RecoveryCompatibilityError
 from skulk.store.preservation_contracts import (
     Handle,
+    InvitationPreview,
+    InvitationRequest,
     KitUploadRequest,
     KitUploadStatus,
     PreservationJob,
@@ -20,6 +23,7 @@ from skulk.store.preservation_contracts import (
     PreservationPlan,
     PreservationPlanRequest,
     PreservationStart,
+    PublicationSource,
     RecoveryCleanup,
     TemporaryWork,
 )
@@ -83,6 +87,117 @@ def create_preservation_router(
         owner = await host(request)
         try:
             return await owner.setup_device()
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/setup/publisher",
+        response_model=PreservationLocation,
+        summary="Set up a separate public publishing identity",
+        description="Explicitly create protected local publishing custody, separate from the private capture key and archive. Repeat setup observes the enrolled identity without replacing keys or disconnected storage. No listener, swarm, registry enrollment or model admission starts.",
+    )
+    async def setup_publisher(request: Request) -> PreservationLocation:
+        owner = await host(request)
+        try:
+            return await owner.setup_publisher()
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/copies/{copy_id}/publication",
+        response_model=PublicationSource,
+        summary="Inspect public publication terms for a private kept copy",
+        description="Authenticate source metadata and return every supported retained member, origin, size and existing terms/notice hints without reading weights or contacting a registry. Private capture bookkeeping is omitted. No redistribution rights, byte-completion or serving claim is made.",
+    )
+    async def publication_source(
+        request: Request, copy_id: Handle
+    ) -> PublicationSource:
+        owner = await host(request)
+        try:
+            return await owner.publication_source(copy_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/plans/{plan_id}/public-manifest",
+        response_model=Manifest,
+        summary="Download the exact proposed public manifest",
+        description="Return authenticated-source-derived unsigned publication review JSON through the bounded metadata byte plane. Recheck its exact reviewed identity without reading weights. It includes only the public selection; no private paths, capture bookkeeping or signing key is returned. This is review metadata, not a complete or signed publication.",
+    )
+    async def public_manifest(request: Request, plan_id: Handle) -> Response:
+        owner = await host(request)
+        try:
+            return Response(
+                content=await owner.public_manifest(plan_id),
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{plan_id}.public-manifest.json"'
+                },
+            )
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/public-copies/{copy_id}/invitation",
+        response_model=Invitation,
+        summary="Export a portable public-copy invitation",
+        description="Create bounded metadata containing the original signed public manifest, candidate public keys and explicitly supplied HTTP(S) mirror hints. Reject credentials, queries, fragments and local sources. No mirror is contacted or asserted reachable, no serving starts, and candidate keys grant no registry authority. The metadata file uses a separate response byte plane, not SDK controls.",
+    )
+    async def public_invitation(
+        request: Request, copy_id: Handle, selection: InvitationRequest
+    ) -> Response:
+        owner = await host(request)
+        try:
+            return Response(
+                content=await owner.public_invitation(copy_id, selection),
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{copy_id}.invitation.json"'
+                },
+            )
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/kit-uploads/{upload_id}/invitation",
+        response_model=InvitationPreview,
+        summary="Inspect an uploaded invitation offline",
+        description="Read a completed invitation-purpose metadata upload of at most 8 MiB. Verify candidate signatures and the complete declared public closure before any DNS or mirror request. Display candidate fingerprints and threshold without independently authenticating a publisher or granting registry/model/code authority.",
+    )
+    async def inspect_invitation(
+        request: Request, upload_id: Handle
+    ) -> InvitationPreview:
+        owner = await host(request)
+        try:
+            return owner.inspect_invitation(upload_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/jobs/{job_id}/invitation",
+        response_model=InvitationPreview,
+        summary="Inspect a receive job's original invitation",
+        description="Read retained bounded signed metadata without the original upload, registry or mirror. No download, key enrollment, restore or sharing starts. This permits explicit fresh review of an interrupted receive under its unchanged original policy and cumulative allowance.",
+    )
+    async def receive_invitation(request: Request, job_id: Handle) -> InvitationPreview:
+        owner = await host(request)
+        try:
+            return owner.receive_invitation(job_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/jobs/{job_id}/resume",
+        response_model=PreservationJob,
+        summary="Explicitly resume a stopped receive under its retained allowance",
+        description="Require a fresh resume plan, new idempotency identity, original workflow owner and exact-copy acceptance. Authenticate retained work custody and requeue only the same receive job, stage, trust, sources and finite policy. The original plan/operation identity remains on the returned job. Repeating this resume action only observes it; changed input refuses. Removed work needs a new explicit download. This never restarts serving, recovery or publication.",
+    )
+    async def resume_receive(
+        request: Request, job_id: Handle, submission: PreservationStart
+    ) -> PreservationJob:
+        owner = await host(request)
+        try:
+            return await owner.resume_receive(job_id, submission)
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
@@ -215,7 +330,7 @@ def create_preservation_router(
         try:
             async with owner.upload_lock:
                 value = await asyncio.to_thread(
-                    owner.uploads.create, selection.size_bytes
+                    owner.uploads.create, selection.size_bytes, selection.purpose
                 )
             return KitUploadStatus.model_validate(value)
         except (ValueError, OSError) as error:
@@ -360,6 +475,13 @@ def create_preservation_router(
     _ = (
         library,
         setup_device,
+        setup_publisher,
+        publication_source,
+        public_manifest,
+        public_invitation,
+        inspect_invitation,
+        receive_invitation,
+        resume_receive,
         plan,
         read_plan,
         start,

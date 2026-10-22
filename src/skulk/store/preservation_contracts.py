@@ -11,6 +11,7 @@ OperationId = Annotated[
     str, Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._:@-]+$")
 ]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+Fingerprint = Annotated[str, Field(pattern=r"^ed25519:[0-9a-f]{64}$")]
 JobKind = Literal[
     "preserve",
     "check",
@@ -21,6 +22,7 @@ JobKind = Literal[
     "http_share",
     "torrent_share",
     "mirror_import",
+    "receive",
 ]
 JobState = Literal[
     "queued", "running", "cancelling", "succeeded", "failed", "cancelled", "interrupted"
@@ -106,10 +108,144 @@ class PreservationCopy(PreservationContract):
 
 
 @final
+class PublicationMember(PreservationContract):
+    """One retained member's public-facing terms hints; never a rights grant."""
+
+    member_id: str = Field(max_length=64, description="Exact signed member selection.")
+    role: str = Field(max_length=64, description="Declared closure role.")
+    repository: str = Field(max_length=512, description="Original repository identity.")
+    revision: str = Field(max_length=40, description="Exact original revision.")
+    format: str = Field(max_length=128, description="Declared file format.")
+    size_bytes: int = Field(ge=0, description="Declared selected member bytes.")
+    file_count: int = Field(ge=0, description="Declared selected file count.")
+    license_id: str = Field(max_length=200, description="Existing terms hint only.")
+    terms_reference: str = Field(
+        max_length=2048, description="Existing terms reference."
+    )
+    notice_paths: tuple[str, ...] = Field(
+        max_length=100, description="Original required public notices."
+    )
+
+
+@final
+class PublicationSource(PreservationContract):
+    """Metadata-only source for an exact private copy's publication review."""
+
+    copy_id: Handle = Field(description="Selected kept private copy.")
+    manifest_id: Digest = Field(description="Authenticated source identity.")
+    name: str = Field(max_length=200, description="Existing public-name suggestion.")
+    workloads: tuple[str, ...] = Field(
+        max_length=100, description="Declared workloads."
+    )
+    runtime_requirements: tuple[str, ...] = Field(
+        max_length=100, description="Declared runtime requirements."
+    )
+    members: tuple[PublicationMember, ...] = Field(
+        max_length=16,
+        description="Every supported retained member; large selections refuse.",
+    )
+
+
+@final
+class InvitationRequest(PreservationContract):
+    """Explicit mirror hints for a portable public-copy handoff; no network effect."""
+
+    mirrors: tuple[Annotated[str, Field(max_length=2048)], ...] = Field(
+        strict=False,  # FastAPI supplies decoded JSON lists; string items stay strict.
+        min_length=1,
+        max_length=16,
+        description="Credential-free HTTP(S) bases, independently validated by the invitation writer.",
+    )
+
+
+@final
+class InvitationPreview(PreservationContract):
+    """Candidate-signed offline metadata; no independent owner or registry trust."""
+
+    manifest_id: Digest = Field(description="Exact included signed identity.")
+    name: str = Field(max_length=200, description="Signed display name.")
+    size_bytes: int = Field(ge=0, description="Complete declared closure bytes.")
+    member_count: int = Field(
+        ge=1, le=256, description="Complete selected member count."
+    )
+    members: tuple[str, ...] = Field(
+        max_length=256,
+        description="All selected member IDs and roles, without runtime parsing.",
+    )
+    publisher_key_ids: tuple[str, ...] = Field(
+        max_length=32,
+        description="Candidate fingerprints; not independently authenticated.",
+    )
+    threshold: int = Field(
+        ge=1,
+        le=32,
+        description="Sender-supplied threshold, also requiring independent authentication.",
+    )
+    mirrors: tuple[str, ...] = Field(
+        max_length=16, description="Unsigned transport hints; reading contacts none."
+    )
+
+
+@final
+class ReceivingPolicy(PreservationContract):
+    """Finite direct-receiving policy retained unchanged across explicit resumes."""
+
+    mirrors: tuple[str, ...] = Field(
+        min_length=1, max_length=16, description="Exact reviewed HTTP(S) bases."
+    )
+    max_bytes: int = Field(
+        ge=1,
+        le=2**53 - 1,
+        description="Cumulative object-byte allowance, including failed attempts.",
+    )
+    deadline_seconds: int = Field(
+        ge=1,
+        le=86400,
+        description="Finite maximum time for one explicitly authorized attempt.",
+    )
+    allow_http: bool = Field(
+        default=False, description="Separate deliberate permission for plaintext HTTP."
+    )
+    allow_private: bool = Field(
+        default=False,
+        description="Separate deliberate permission for non-global addresses.",
+    )
+
+
+@final
 class PreservationPlanRequest(PreservationContract):
     """Select exact opaque resources; callers never provide host/key paths."""
 
     kind: JobKind = Field(description="Requested bounded effect.")
+    resume_job_id: Digest | None = Field(
+        default=None,
+        description="Stopped receive job whose original exact inputs and remaining budget are reviewed again.",
+    )
+    accepted_key_ids: tuple[Fingerprint, ...] = Field(
+        strict=False,  # Accept the JSON array container without coercing fingerprints.
+        default=(),
+        max_length=32,
+        description="Independently authenticated invitation fingerprints selected for this copy only.",
+    )
+    download_limit_bytes: int = Field(
+        default=20 * 1024**3,
+        ge=1,
+        le=2**53 - 1,
+        description="Finite receiving object-byte allowance.",
+    )
+    download_deadline_seconds: int = Field(
+        default=3600,
+        ge=1,
+        le=86400,
+        description="Finite deadline for one deliberate download attempt.",
+    )
+    allow_http: bool = Field(
+        default=False,
+        description="Explicit direct plaintext HTTP receiving permission.",
+    )
+    allow_private: bool = Field(
+        default=False, description="Explicit private-address receiving permission."
+    )
     public_network: bool = Field(
         default=False,
         description="Explicit network binding and public BitTorrent discovery; false is a loopback preview.",
@@ -242,6 +378,14 @@ class PreservationPlan(PreservationContract):
         max_length=16,
         description="Reviewed matching owned companions; old files remain intact while the complete generation is prepared.",
     )
+    receiving: ReceivingPolicy | None = Field(
+        default=None,
+        description="Exact receiving exposure/allowance; never a serving grant.",
+    )
+    resume_job_id: Digest | None = Field(
+        default=None,
+        description="Original receive job selected for an explicit resume action.",
+    )
     sharing: SharingPolicy | None = Field(
         default=None,
         description="Exact reviewed sharing controls, never inherited from a kit.",
@@ -336,7 +480,7 @@ class PreservationStart(PreservationContract):
     )
     public_participation: bool = Field(
         default=False,
-        description="Explicit public hosting or swarm participation for a sharing plan.",
+        description="Explicit public-audience publication, hosting or swarm participation; publication starts no listener.",
     )
 
 
@@ -382,6 +526,11 @@ class TemporaryWork(PreservationContract):
 class PreservationJob(PreservationContract):
     """Canonical durable host status; cancellation intent is not proof of stop."""
 
+    bytes_received: int = Field(
+        default=0,
+        ge=0,
+        description="Largest observed attempt's received bytes; not a remaining-quota or unique-coverage claim.",
+    )
     sharing_policy: SharingPolicy | None = Field(
         default=None,
         description="Immutable reviewed session exposure and allowances, retained after plan expiry.",
@@ -471,6 +620,10 @@ class KitUploadRequest(PreservationContract):
     size_bytes: int = Field(
         ge=1, le=8 * 1024**4, description="Exact whole kit file length."
     )
+    purpose: Literal["kit", "invitation", "publication"] = Field(
+        default="kit",
+        description="Declared ingress use; metadata purposes are limited to 8 MiB.",
+    )
 
 
 @final
@@ -478,6 +631,10 @@ class KitUploadStatus(PreservationContract):
     """Durable ingress observation, not a signature or admission result."""
 
     upload_id: Handle = Field(description="Opaque host-created ingress handle.")
+    purpose: Literal["kit", "invitation", "publication"] = Field(
+        default="kit",
+        description="Declared ingress purpose; legacy uploads remain recovery kits.",
+    )
     size_bytes: int = Field(ge=1, description="Declared exact kit length.")
     offset: int = Field(ge=0, description="Flushed bytes; resume at this offset.")
     complete: bool = Field(
@@ -489,6 +646,10 @@ class KitUploadStatus(PreservationContract):
 class PreservationPage(PreservationContract):
     """A bounded page of private host observations."""
 
+    publishing: PreservationLocation | None = Field(
+        default=None,
+        description="Separately configured public publishing identity; never a private Preserve destination.",
+    )
     uploads: tuple[KitUploadStatus, ...] = Field(
         default=(),
         max_length=8,

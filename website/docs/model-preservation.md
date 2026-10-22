@@ -306,6 +306,44 @@ files even when their original metadata has already been deleted. Reads do not
 start cleanup. A disconnected caller cannot release the store lease while
 cleanup is still running. A new restore still needs current review and consent.
 
+## Publish and receive public copies
+
+Core can separately publish a kept private copy and receive a signed public
+invitation. Configure a distinct publishing identity, inspect every member's
+terms/notices and the exact proposed public metadata, then deliberately create a
+public copy. A notice can be explicitly supplied when the saved capture lacks a
+public one; it remains publisher evidence and cannot replace an original notice
+or grant redistribution rights. Publication rechecks source/output bytes and
+starts no hosting. The private backup stays separate. New public copies retain their candidate public
+verification snapshot in `bundle-trust.json`, so the folder remains independently
+verifiable after Core's journal disappears. Imported kits already retain
+`kit-trust.json`. Authenticate the fingerprints independently; these files grant
+no registry authority. Serving or confirming an already complete publication
+does not require its private signing key.
+
+A portable invitation contains the original signed public manifest, candidate
+keys and HTTP(S) mirror hints. Inspecting it is offline. Independently authenticate
+the sender fingerprints and intended threshold before accepting this exact copy;
+a self-signature does not identify its owner or confer registry authority. Choose
+a finite allowance/deadline and explicitly permit HTTP/private addresses if needed.
+Downloading is receive-only and does not admit a model or execute repository code.
+
+Closing Library leaves Core's worker running. Core restart stops it without
+replay. A fresh resume review can reuse the same original receive job, stage and
+cumulative byte allowance; failed reads retain their conservative charges. If
+all objects are already present, completion can verify them offline using the
+included envelope. Explicit temporary-work cleanup removes retry state; a new
+download then requires a new deliberate allowance. Transfer accounting and
+partials stay outside the resulting public archive.
+
+Save a completed public copy as a portable recovery kit and retain it independently.
+The existing Restore review covers the full companion closure and retained
+provenance, with separate owner/historical/code consent. Unknown card data can
+be retained without being executable by this runtime. Public mirrors disclose
+Core's connecting address; invitations do not provide anonymity, external hosting,
+public reachability or automatic BitTorrent participation. See the
+[operator API contract](api-guide.md#public-publication-and-recipient-invitations).
+
 ## Privacy boundaries
 
 Signatures detect substitution and corruption; they do not encrypt weights or

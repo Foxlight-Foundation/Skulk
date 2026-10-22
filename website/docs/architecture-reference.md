@@ -2080,7 +2080,26 @@ staging never becomes a loader candidate.
 
 
 
-Stopped public-import and sharing jobs expose an explicit temporary-work inspection
+`preservation_delivery.py` adds exact public publication and receive-only invitation
+workers. Publisher custody is separate from private Preserve storage. Metadata-only
+plans authenticate the original source and bind all terms/notices, public identity
+and distinct key. Full byte checks and durable parent intent precede atomic public
+copy publication; no listener or runtime admission starts. Output parents are
+pinned and checked against recorded device/inode custody.
+
+Invitations retain the original signed public manifest, candidate keys and bounded
+HTTP(S) hints. Offline inspection never enrolls keys or contacts a supplier.
+Explicitly selected fingerprints/threshold and finite policy precede receiving.
+Restart stops work. A specialized fresh-review resume action retains the original
+job/plan, staging inode and cumulative transfer allowance with permanent replay
+reservations; generic Start cannot consume a resume plan. Completed local objects
+can finish offline after rehashing. Accounting stays in private work rather than
+the immutable public copy. Whole-closure restore/code consent remains separate.
+Binary ingress purposes separate kit transfers from 8-MiB publication/invitation
+metadata; no weights enter SDK controls. Public reachability, independent custody,
+anonymity and frozen distribution remain separately qualified.
+
+Stopped public-import, publication, receiving and sharing jobs expose an explicit temporary-work inspection
 and cleanup path (`preservation_work.py`). The host excludes queued tasks and
 owned processes, pins private directory descriptors and checks durable device/inode
 custody before bounded logical-size inspection. Removal quarantines the exact

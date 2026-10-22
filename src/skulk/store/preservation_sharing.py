@@ -48,6 +48,8 @@ def import_public_bundle(
     control: OperationControl,
     import_control: OperationControl,
     before_publish: Callable[[str], None],
+    *,
+    parent_identity: tuple[int, int] | None = None,
 ) -> Manifest:
     """Verify a public kit before recording intent or exposing its complete copy.
 
@@ -60,6 +62,7 @@ def import_public_bundle(
         control: Live parent cancellation, separate from the one-use importer.
         import_control: One-use byte verification/copy progress and cancellation.
         before_publish: Durable parent intent/acknowledgement after verification.
+        parent_identity: Optional host-reviewed destination-parent device/inode.
 
     Returns:
         The complete byte-verified public manifest.
@@ -88,10 +91,19 @@ def import_public_bundle(
     control.checkpoint()
     parent = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
+        info = os.fstat(parent)
+        if (
+            parent_identity is not None
+            and (info.st_dev, info.st_ino) != parent_identity
+        ):
+            raise PreservationError("public_destination_changed")
         # Intent can now represent a real publication uncertainty. No ordinary
         # bad-object/length/signature failure consumes the uncertainty allowance.
         before_publish(manifest_id)
         control.checkpoint()
+        current = destination.parent.lstat()
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise PreservationError("public_destination_changed")
         os.mkdir(destination.name, mode=0o700, dir_fd=parent)
         try:
             os.rename(verified, destination.name, dst_dir_fd=parent)

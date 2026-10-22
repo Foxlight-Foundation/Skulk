@@ -7,7 +7,7 @@ import shutil
 import stat
 import uuid
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from pydantic import JsonValue
 
@@ -61,12 +61,21 @@ class KitUploads:
             "size_bytes": declared,
             "offset": offset,
             "complete": offset == declared,
+            "purpose": self.journal.setting("upload-purpose:" + upload_id) or "kit",
         }
 
-    def create(self, size_bytes: int) -> dict[str, JsonValue]:
+    def create(
+        self,
+        size_bytes: int,
+        purpose: Literal["kit", "invitation", "publication"] = "kit",
+    ) -> dict[str, JsonValue]:
         """Reserve a bounded kit transfer after observing actual free capacity."""
         if not 1 <= size_bytes <= MAX_KIT_BYTES:
             raise PreservationHostError("kit_size_out_of_range")
+        if purpose not in {"kit", "invitation", "publication"}:
+            raise PreservationHostError("invalid_upload_purpose")
+        if purpose != "kit" and size_bytes > 8 * 1024 * 1024:
+            raise PreservationHostError("metadata_size_out_of_range")
         entries = tuple(self.root.iterdir())
         if len(entries) >= 8:
             raise PreservationHostError("remove_unused_kit_uploads")
@@ -85,6 +94,7 @@ class KitUploads:
             raise PreservationHostError("insufficient_space")
         identity = uuid.uuid4().hex
         self.journal.set_setting("upload:" + identity, size_bytes)
+        self.journal.set_setting("upload-purpose:" + identity, purpose)
         descriptor = os.open(
             self.root / identity,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,

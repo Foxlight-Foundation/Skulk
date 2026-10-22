@@ -26,6 +26,7 @@ from skulk.utils.channels import channel
 # lose its public request schema without making the omission visible in review.
 _BODYLESS_MUTATIONS = {
     ("POST", "/preservation/setup/device"),
+    ("POST", "/preservation/setup/publisher"),
     ("POST", "/preservation/jobs/{job_id}/cancel"),
     ("POST", "/preservation/jobs/{job_id}/reclaim"),
     ("POST", "/preservation/jobs/{job_id}/reclaim-work"),

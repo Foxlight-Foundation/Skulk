@@ -45,8 +45,17 @@ could not publish and retains uncertainty only with an expected manifest. An
 explicit successful Check binds the verified copy to the original expected model,
 location and manifest, then marks it reconciled without replaying the capture.
 Verification remains available when the uncertainty limit blocks new captures.
-The first host effects are private Preserve/Check; fresh-home native recovery and
-standalone public mirror/BitTorrent tools are separate surfaces. See the API guide
+`store/preservation_delivery.py` owns separately reviewed public publication and
+receive-only HTTP(S) invitations. Publisher custody is separate, metadata review
+never hashes weights, and full verified staging waits for durable parent intent
+before atomic public-copy publication. Candidate invitation keys require explicit
+exact-copy acceptance and never grant registry authority. A fresh specialized
+receive-resume action retains the original job/plan, stage inode and cumulative
+allowance; no restart/replay resets its budget. Accounting stays outside public
+copies. Output-parent and work custody are checked before effects. Metadata
+uploads are purpose bounded; the governed private-copy SDK contract stays intact.
+The host supports private Preserve/Check, public publication/receiving/sharing and
+complete kit recovery. Standalone tools remain independently usable. See the API guide
 and both architecture references for current contracts and remaining boundaries.
 
 Skulk is a distributed AI inference system that connects multiple devices into one cluster. It runs large language models across machines using MLX as the inference backend and libp2p for peer-to-peer networking. Skulk began as a fork of exo and has substantially diverged.

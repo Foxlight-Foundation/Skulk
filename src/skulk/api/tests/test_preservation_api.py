@@ -13,6 +13,7 @@ from skulk.api.main import API
 from skulk.api.preservation import create_preservation_router
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation_contracts import (
+    KitUploadStatus,
     PreservationJob,
     PreservationPage,
     PreservationPlan,
@@ -125,4 +126,117 @@ async def test_private_inventory_and_setup_reject_untrusted_requests(
     ) as client:
         assert (await client.get("/preservation/library")).status_code == 403
         assert (await client.post("/preservation/setup/device")).status_code == 403
+        assert (await client.post("/preservation/setup/publisher")).status_code == 403
+        for path in (
+            "copies/example/publication",
+            "plans/example/public-manifest",
+            "kit-uploads/example/invitation",
+            "jobs/example/invitation",
+        ):
+            assert (await client.get("/preservation/" + path)).status_code == 403
+        assert (
+            await client.post(
+                "/preservation/public-copies/example/invitation",
+                json={"mirrors": ["https://example.invalid"]},
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                "/preservation/jobs/example/resume",
+                json={"plan_id": "a" * 64, "operation_id": "resume"},
+            )
+        ).status_code == 403
     assert not requested
+
+
+@pytest.mark.asyncio
+async def test_public_invitation_metadata_is_offline_bounded_and_operator_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import socket
+
+    from foxlight_model_preservation.invitations import read_invitation
+
+    from skulk.store.tests.test_preservation_sharing import (
+        empty_host,
+        import_copy,
+        public_kit,
+    )
+
+    source = tmp_path / "publisher"
+    source.mkdir()
+    content, identity, _ = public_kit(source)
+    owner = empty_host(tmp_path)
+    try:
+        copy = await import_copy(owner, content)
+
+        async def provider() -> PreservationHost:
+            return owner
+
+        app = FastAPI()
+        app.include_router(
+            create_preservation_router(provider, API.require_preservation_operator)
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 1000)),
+            base_url="http://localhost",
+        ) as client:
+
+            def forbidden(*args: object, **kwargs: object) -> None:
+                pytest.fail("metadata handoff made a network request")
+
+            monkeypatch.setattr(socket, "getaddrinfo", forbidden)
+            response = await client.post(
+                f"/preservation/public-copies/{copy.copy_id}/invitation",
+                json={"mirrors": ["https://unavailable.invalid/models"]},
+            )
+            assert response.status_code == 200
+            invitation = read_invitation(response.content)
+            assert invitation.manifest_id == identity
+            assert str(tmp_path).encode() not in response.content
+            bad = await client.post(
+                f"/preservation/public-copies/{copy.copy_id}/invitation",
+                json={"mirrors": ["https://user:secret@unavailable.invalid/models"]},
+            )
+            assert bad.status_code == 409 and "secret" not in bad.text
+            oversized = await client.post(
+                "/preservation/kit-uploads",
+                json={"purpose": "invitation", "size_bytes": 8 * 1024**2 + 1},
+            )
+            assert oversized.status_code == 409
+            declared = await client.post(
+                "/preservation/kit-uploads",
+                json={"purpose": "invitation", "size_bytes": len(response.content)},
+            )
+            uid = KitUploadStatus.model_validate_json(declared.content).upload_id
+            assert (
+                declared.status_code == 200
+                and declared.json()["purpose"] == "invitation"
+            )
+            assert (
+                await client.put(
+                    f"/preservation/kit-uploads/{uid}?offset=0",
+                    content=response.content,
+                    headers={"Content-Type": "application/octet-stream"},
+                )
+            ).status_code == 200
+            preview = await client.get(f"/preservation/kit-uploads/{uid}/invitation")
+            assert (
+                preview.status_code == 200 and preview.json()["manifest_id"] == identity
+            )
+            wrong = await client.post(
+                "/preservation/plans",
+                json={
+                    "kind": "receive",
+                    "location_id": "invitation",
+                    "upload_id": uid,
+                    "accepted_key_ids": ["ed25519:" + "0" * 64],
+                },
+            )
+            assert wrong.status_code == 409
+            assert (
+                len((await owner.page()).jobs) == 1
+            )  # Only the original public kit import.
+            assert not owner.store.list_models()
+    finally:
+        await owner.close()

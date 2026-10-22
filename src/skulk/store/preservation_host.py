@@ -16,10 +16,32 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal, cast, final
 
+from foxlight_model_preservation.invitations import (
+    accept_invitation_keys,
+    invitation_from_envelope,
+    read_invitation,
+)
 from foxlight_model_preservation.kits import inspect_kit
-from foxlight_model_preservation.models import TrustProfile
-from foxlight_model_preservation.signing import create_key, verify_manifest
-from foxlight_model_preservation.storage import manifest_path, read_metadata
+from foxlight_model_preservation.models import Manifest, TrustProfile
+from foxlight_model_preservation.publication import (
+    PublicationRequest,
+    review_publication,
+)
+from foxlight_model_preservation.signing import (
+    canonical_bytes,
+    create_key,
+    digest,
+    encode_record,
+    strict_json,
+    verify_manifest,
+)
+from foxlight_model_preservation.storage import (
+    atomic_bytes,
+    directory,
+    manifest_path,
+    read_metadata,
+    unique_objects,
+)
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
 from skulk.shared.constants import SKULK_CUSTOM_MODEL_CARDS_DIR
@@ -27,6 +49,8 @@ from skulk.store.installed_cards import read_installed_card
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation import inspect_verified_manifest
 from skulk.store.preservation_contracts import (
+    InvitationPreview,
+    InvitationRequest,
     KitUploadStatus,
     PreservationCopy,
     PreservationJob,
@@ -36,11 +60,14 @@ from skulk.store.preservation_contracts import (
     PreservationPlan,
     PreservationPlanRequest,
     PreservationStart,
+    PublicationSource,
+    ReceivingPolicy,
     RecoveryCleanup,
     SharingPolicy,
     SharingStatus,
     TemporaryWork,
 )
+from skulk.store.preservation_delivery import invitation_preview, publication_members
 from skulk.store.preservation_export import plan_preservation, preservation_generation
 from skulk.store.preservation_journal import (
     PreservationHostError,
@@ -51,6 +78,7 @@ from skulk.store.preservation_journal import (
 from skulk.store.preservation_live import publish_recovered_home
 from skulk.store.preservation_uploads import KitUploads
 from skulk.store.preservation_work import (
+    WORK_KINDS,
     manage_temporary_work,
     register_temporary_work,
     temporary_work_pending,
@@ -81,6 +109,7 @@ class _Observation(BaseModel):
     stage: str | None = None
     bytes_hashed: int = 0
     bytes_copied: int = 0
+    bytes_received: int = 0
     manifest_id: str | None = None
     size_bytes: int | None = None
     member_count: int | None = None
@@ -239,6 +268,183 @@ class PreservationHost:
                 )
             return await self.location_view("device")
 
+    def _public_copy_parent(self) -> os.stat_result:
+        parent = self.root / "public-copies"
+        recorded = self.journal.setting("public-copy-parent")
+        if recorded is None:
+            secure_directory(parent)
+        info = parent.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+        ):
+            raise PreservationHostError("public_destination_changed")
+        identity: dict[str, JsonValue] = {"device": info.st_dev, "inode": info.st_ino}
+        if recorded is not None and safe_json(recorded) != safe_json(identity):
+            raise PreservationHostError("public_destination_changed")
+        if self.journal.setting("location:publisher") is not None:
+            publisher = self._location("publisher")
+            if (info.st_dev, info.st_ino) != (publisher.device, publisher.inode):
+                raise PreservationHostError("public_destination_changed")
+        if recorded is None:
+            self.journal.set_setting("public-copy-parent", identity)
+        return info
+
+    async def setup_publisher(self) -> PreservationLocation:
+        """Explicitly create distinct protected publishing custody, without serving.
+
+        Repeats observe the enrolled directory/key without replacing either.
+        This identity is separate from private Preserve destinations and never
+        grants redistribution rights, registry authority or public reachability.
+        """
+        async with self._setup_lock:
+            if self._closed:
+                raise PreservationHostError("preservation_host_closed")
+            if self.journal.setting("location:publisher") is None:
+                archive = self.root / "public-copies"
+                custody = self.root / "custody"
+                self._public_copy_parent()
+                secure_directory(custody)
+                key = custody / "publisher.pem"
+                if key.exists() or key.is_symlink():
+                    raise PreservationHostError(
+                        "publisher_identity_needs_reconciliation"
+                    )
+                trust = create_key(key, None)
+                info = self._public_copy_parent()
+                location = _Location(
+                    location_id="publisher",
+                    purpose="public",
+                    label="Public publishing",
+                    path=archive.absolute(),
+                    device=info.st_dev,
+                    inode=info.st_ino,
+                    trust=trust,
+                    key_path=key.absolute(),
+                )
+                self.journal.set_setting(
+                    "location:publisher", location.model_dump(mode="json")
+                )
+            return await self.location_view("publisher")
+
+    async def _copy_metadata(
+        self, copy_id: str
+    ) -> tuple[PreservationCopy, _Location, Manifest]:
+        copy = self.journal.copy(copy_id)
+        location = self._location(copy.location_id)
+        async with self._archive(location) as descriptor:
+            manifest = verify_manifest(
+                read_metadata(descriptor, manifest_path(copy.manifest_id)),
+                location.trust,
+                copy.manifest_id,
+            )
+        return copy, location, manifest
+
+    async def publication_source(self, copy_id: str) -> PublicationSource:
+        """Read signed member/terms hints for a kept private copy, without hashing.
+
+        No installed model or online registry is needed. Known private capture
+        bookkeeping is omitted; no notice text is invented and no rights granted.
+        """
+        copy, location, manifest = await self._copy_metadata(copy_id)
+        if copy.audience != "private" or location.purpose != "private":
+            raise PreservationHostError("private_copy_required")
+        source = PublicationSource(
+            copy_id=copy_id,
+            manifest_id=copy.manifest_id,
+            name=manifest.name,
+            workloads=manifest.workloads,
+            runtime_requirements=manifest.runtime_requirements,
+            members=publication_members(manifest),
+        )
+        self._bounded_view(source)
+        return source
+
+    def _metadata_upload(
+        self, upload_id: str, purpose: Literal["invitation", "publication"]
+    ) -> bytes:
+        status = self.uploads.status(upload_id)
+        if not status["complete"] or status["purpose"] != purpose:
+            raise PreservationHostError("complete_metadata_upload_required")
+        if cast(int, status["size_bytes"]) > 8 * 1024 * 1024:
+            raise PreservationHostError("metadata_size_out_of_range")
+        with directory(self.uploads.root) as root:
+            encoded = read_metadata(root, upload_id)
+        if len(encoded) != status["size_bytes"]:
+            raise PreservationHostError("metadata_upload_changed")
+        return encoded
+
+    @staticmethod
+    def _bounded_view(value: BaseModel) -> None:
+        if (
+            len(json.dumps(value.model_dump(mode="json"), ensure_ascii=True).encode())
+            > 48000
+        ):
+            raise PreservationHostError("metadata_preview_too_large")
+
+    def inspect_invitation(self, upload_id: str) -> InvitationPreview:
+        """Inspect a completed invitation offline, without trusting its publisher.
+
+        Reads at most 8 MiB from host-created binary ingress. The original signed
+        closure and candidate fingerprints are shown without DNS, model parsing,
+        private path reads, key enrollment, admission or sharing.
+        """
+        preview = invitation_preview(
+            read_invitation(self._metadata_upload(upload_id, "invitation"))
+        )
+        self._bounded_view(preview)
+        return preview
+
+    def receive_invitation(self, job_id: str) -> InvitationPreview:
+        """Inspect a receive job's retained original metadata after upload loss."""
+        job = self.journal.job(job_id)
+        if job.kind != "receive":
+            raise PreservationHostError("receive_job_required")
+        _, payload = self.journal.plan(job.plan_id)
+        invitation = read_invitation(safe_json(payload["invitation"]).encode())
+        preview = invitation_preview(invitation)
+        self._bounded_view(preview)
+        return preview
+
+    async def public_invitation(
+        self, copy_id: str, request: InvitationRequest
+    ) -> bytes:
+        """Export original signed public metadata with explicitly selected hints.
+
+        The returned portable bytes include public candidate keys only. This
+        performs no network/reachability test and starts no listener or swarm.
+        """
+        copy, location, _ = await self._copy_metadata(copy_id)
+        if copy.audience != "public" or location.purpose != "public":
+            raise PreservationHostError("public_copy_required")
+        async with self._archive(location) as descriptor:
+            envelope = read_metadata(descriptor, manifest_path(copy.manifest_id))
+        return encode_record(
+            invitation_from_envelope(
+                envelope, copy.manifest_id, location.trust, request.mirrors
+            )
+        )
+
+    async def public_manifest(self, plan_id: str) -> bytes:
+        """Download exact unsigned publication review metadata, without weight IO.
+
+        Source metadata is authenticated again; no weights, private operational
+        evidence, signing key or host location is included in this public preview.
+        """
+        plan, payload = self.journal.plan(plan_id)
+        if plan.kind != "publish" or plan.copy_id is None:
+            raise PreservationHostError("publication_plan_required")
+        _, _, source = await self._copy_metadata(plan.copy_id)
+        request = PublicationRequest.model_validate_json(
+            safe_json(payload["publication_request"])
+        )
+        manifest = review_publication(source, request)
+        encoded = encode_record(manifest)
+        if digest(encoded) != plan.manifest_id:
+            raise PreservationHostError("public_review_changed")
+        return encoded
+
     async def location_view(self, location_id: str) -> PreservationLocation:
         """Observe actual enrolled storage without creating any archive pathname."""
         location = self._location(location_id)
@@ -315,6 +521,9 @@ class PreservationHost:
             except (ValueError, OSError):
                 continue
         return PreservationPage(
+            publishing=await self.location_view("publisher")
+            if self.journal.setting("location:publisher") is not None
+            else None,
             bittorrent_available=importlib.util.find_spec("libtorrent") is not None,
             uploads=tuple(uploads),
             temporary_work_jobs=tuple(
@@ -332,6 +541,12 @@ class PreservationHost:
         """Bind a no-byte-write plan to the exact source generation and enrolled root."""
         if self._closed:
             raise PreservationHostError("preservation_host_closed")
+        if request.resume_job_id is not None and request.kind != "receive":
+            raise PreservationHostError("receive_resume_required")
+        if request.kind == "publish":
+            return await self._publication_plan(request)
+        if request.kind == "receive":
+            return await self._receiving_plan(request)
         if request.kind in {"mirror_import", "http_share", "torrent_share"}:
             return await self._sharing_plan(request)
         if request.kind not in {"preserve", "check", "kit_export", "recover"}:
@@ -586,11 +801,217 @@ class PreservationHost:
         self.journal.add_plan(plan, payload)
         return plan
 
+    def _delivery_review(
+        self,
+        request: PreservationPlanRequest,
+        payload: dict[str, JsonValue],
+        manifest: Manifest,
+        trust: TrustProfile,
+        model_id: str,
+    ) -> PreservationPlan:
+        expires = int(time.time()) + 600
+        identity = hashlib.sha256(
+            safe_json(
+                {
+                    "request": request.model_dump(mode="json"),
+                    "payload": payload,
+                    "expires": expires,
+                }
+            ).encode()
+        ).hexdigest()
+        plan = PreservationPlan(
+            plan_id=identity,
+            kind=request.kind,
+            model_id=model_id,
+            location_id=request.location_id,
+            copy_id=request.copy_id,
+            destination_id=cast(str, payload["destination_id"]),
+            manifest_id=cast(str, payload["manifest_id"]),
+            size_bytes=manifest.total_bytes,
+            members=tuple(
+                f"{m.role}: {m.origin_repository}" for m in manifest.members[:16]
+            ),
+            member_count=len(manifest.members),
+            expires_at=expires,
+            publisher_key_ids=tuple(key.key_id for key in trust.keys),
+            requires_owner_acceptance=request.kind == "receive",
+            publication="public-publisher-declaration",
+            upload_id=request.upload_id,
+            receiving=ReceivingPolicy.model_validate_json(
+                safe_json(payload["receiving"])
+            )
+            if request.kind == "receive"
+            else None,
+            resume_job_id=request.resume_job_id,
+        )
+        self._bounded_view(plan)
+        self.journal.add_plan(plan, payload)
+        return plan
+
+    @staticmethod
+    def _destination_token(manifest_id: str, trust: TrustProfile) -> str:
+        return hashlib.sha256(
+            (manifest_id + safe_json(trust.model_dump(mode="json"))).encode()
+        ).hexdigest()
+
+    async def _publication_plan(
+        self, request: PreservationPlanRequest
+    ) -> PreservationPlan:
+        if request.copy_id is None or request.destination_id not in {None, "publisher"}:
+            raise PreservationHostError("private_publication_selection_required")
+        copy, location, source = await self._copy_metadata(request.copy_id)
+        if (
+            copy.location_id != request.location_id
+            or copy.audience != "private"
+            or location.purpose != "private"
+        ):
+            raise PreservationHostError("private_copy_required")
+        publisher = self._location("publisher")
+        async with self._archive(publisher):
+            pass
+        if request.upload_id is not None:
+            if request.public_request is not None:
+                raise PreservationHostError("one_publication_request_required")
+            encoded = self._metadata_upload(request.upload_id, "publication")
+        elif request.public_request is not None:
+            encoded = safe_json(request.public_request).encode()
+        else:
+            raise PreservationHostError("public_terms_required")
+        selected = PublicationRequest.model_validate_json(
+            canonical_bytes(strict_json(encoded))
+        )
+        public = review_publication(source, selected)
+        publication_members(public)
+        identity = digest(encode_record(public))
+        token = self._destination_token(identity, publisher.trust)
+        destination = publisher.path / token
+        if not destination.exists():
+            try:
+                key_info = publisher.key_path.lstat()
+            except FileNotFoundError as error:
+                raise PreservationHostError(
+                    "publisher_signing_key_unavailable"
+                ) from error
+            if (
+                not stat.S_ISREG(key_info.st_mode)
+                or key_info.st_uid != os.getuid()
+                or key_info.st_mode & 0o077
+            ):
+                raise PreservationHostError("publisher_signing_key_unavailable")
+        if (
+            not destination.exists()
+            and shutil.disk_usage(publisher.path).free
+            < public.total_bytes + 32 * 1024 * 1024
+        ):
+            raise PreservationHostError("insufficient_space")
+        payload: dict[str, JsonValue] = {
+            "location": location.model_dump(mode="json"),
+            "publisher": publisher.model_dump(mode="json"),
+            "source_manifest_id": copy.manifest_id,
+            "manifest_id": identity,
+            "publication_request": selected.model_dump(mode="json"),
+            "destination": str(destination.absolute()),
+            "destination_id": "public-" + token,
+            "output_trust": publisher.trust.model_dump(mode="json"),
+        }
+        return self._delivery_review(
+            request, payload, public, publisher.trust, copy.model_id
+        )
+
+    async def _receiving_plan(
+        self, request: PreservationPlanRequest
+    ) -> PreservationPlan:
+        if request.location_id != "invitation":
+            raise PreservationHostError("invitation_selection_required")
+        if request.resume_job_id is not None:
+            previous = self.journal.job(request.resume_job_id)
+            if previous.kind != "receive" or previous.state not in {
+                "failed",
+                "cancelled",
+                "interrupted",
+            }:
+                raise PreservationHostError("stopped_receive_job_required")
+            original, payload = self.journal.plan(previous.plan_id)
+            payload = {**payload, "resume_job_id": previous.job_id}
+            invitation = read_invitation(safe_json(payload["invitation"]).encode())
+            location = _Location.model_validate_json(safe_json(payload["location"]))
+            # A resume is another review of unchanged execution inputs. Changed
+            # sources/limits/trust require a new deliberate download, never a
+            # quiet refill of the original operation's remaining allowance.
+            if (
+                request.upload_id is not None
+                or request.accepted_key_ids
+                or request.public_request is not None
+            ):
+                raise PreservationHostError("receive_resume_inputs_fixed")
+            if original.receiving is None:
+                raise PreservationHostError("receive_policy_missing")
+            policy = original.receiving
+            for field, expected in (
+                ("download_limit_bytes", policy.max_bytes),
+                ("download_deadline_seconds", policy.deadline_seconds),
+                ("allow_http", policy.allow_http),
+                ("allow_private", policy.allow_private),
+            ):
+                if (
+                    field in request.model_fields_set
+                    and getattr(request, field) != expected
+                ):
+                    raise PreservationHostError("receive_resume_inputs_fixed")
+            return self._delivery_review(
+                request, payload, invitation.manifest, location.trust, original.model_id
+            )
+        if request.upload_id is None:
+            raise PreservationHostError("complete_invitation_required")
+        invitation = read_invitation(
+            self._metadata_upload(request.upload_id, "invitation")
+        )
+        trust = accept_invitation_keys(invitation, request.accepted_key_ids)
+        manifest = invitation.manifest
+        policy = ReceivingPolicy(
+            mirrors=invitation.mirrors,
+            max_bytes=request.download_limit_bytes,
+            deadline_seconds=request.download_deadline_seconds,
+            allow_http=request.allow_http,
+            allow_private=request.allow_private,
+        )
+        if sum(file.size for file in unique_objects(manifest)) > policy.max_bytes:
+            raise PreservationHostError("receiving_allowance_too_small")
+        token = self._destination_token(invitation.manifest_id, trust)
+        destination = self.root / "public-copies" / token
+        if (
+            not destination.exists()
+            and shutil.disk_usage(self.root).free
+            < manifest.total_bytes + 32 * 1024 * 1024
+        ):
+            raise PreservationHostError("insufficient_space")
+        info = self.root.stat()
+        location = _Location(
+            location_id="invitation",
+            purpose="public",
+            label="Selected public invitation",
+            path=self.root.absolute(),
+            device=info.st_dev,
+            inode=info.st_ino,
+            trust=trust,
+            key_path=self.root / "unused-public-key",
+        )
+        receive_payload: dict[str, JsonValue] = {
+            "location": location.model_dump(mode="json"),
+            "invitation": invitation.model_dump(mode="json"),
+            "manifest_id": invitation.manifest_id,
+            "receiving": policy.model_dump(mode="json"),
+            "destination": str(destination.absolute()),
+            "destination_id": "public-" + token,
+            "output_trust": trust.model_dump(mode="json"),
+        }
+        return self._delivery_review(
+            request, receive_payload, manifest, trust, manifest.name
+        )
+
     async def _sharing_plan(self, request: PreservationPlanRequest) -> PreservationPlan:
         """Bind public-copy import or serving without parsing a runtime card."""
         from urllib.parse import urlsplit
-
-        from foxlight_model_preservation.models import Manifest
 
         payload: dict[str, JsonValue] = {}
         policy = None
@@ -723,6 +1144,46 @@ class PreservationHost:
         if created:
             self._tasks[job.job_id] = asyncio.create_task(self._execute(job.job_id))
         return job
+
+    async def resume_receive(
+        self, job_id: str, request: PreservationStart
+    ) -> PreservationJob:
+        """Explicitly resume one stopped receive after fresh unchanged-input review.
+
+        This fences cleanup and validates retained work custody before requeueing.
+        It preserves the original stage, plan and cumulative accounting. Replay
+        of this action only observes state; restart never invokes it implicitly.
+        """
+        if self._closed:
+            raise PreservationHostError("preservation_host_closed")
+        reservation = self.journal.receive_resume_reserved(job_id, request)
+        if reservation is not None:
+            return reservation
+        if self._queue.locked():
+            raise PreservationHostError("store_busy_try_again")
+        async with self._queue:
+            if self._closed:
+                raise PreservationHostError("preservation_host_closed")
+            # Duplicate explicit actions are observational even if this job has
+            # since completed or its temporary files have already been cleared.
+            reservation = self.journal.receive_resume_reserved(job_id, request)
+            if reservation is not None:
+                return reservation
+            if job_id in self._tasks or job_id in self._processes:
+                raise PreservationHostError("temporary_job_not_stopped")
+            previous = self.journal.job(job_id)
+            if (
+                not (self.root / "work" / job_id).exists()
+                or (self.root / "work-trash" / job_id).exists()
+            ):
+                raise PreservationHostError("receive_work_unavailable")
+            await asyncio.to_thread(
+                manage_temporary_work, self.root, self.journal, previous, remove=False
+            )
+            job, created = self.journal.resume_receive(job_id, request)
+            if created:
+                self._tasks[job_id] = asyncio.create_task(self._execute(job_id))
+            return job
 
     async def cancel(self, job_id: str) -> PreservationJob:
         """Persist stop intent; only an observed stopped process confirms cancellation."""
@@ -862,6 +1323,12 @@ class PreservationHost:
                         }
                     )
                 )
+                attempt_seconds = 86400
+                if job.kind == "receive":
+                    receiving = self.journal.plan(job.plan_id)[0].receiving
+                    if receiving is None:
+                        raise PreservationHostError("receive_policy_missing")
+                    attempt_seconds = receiving.deadline_seconds
                 if job.kind in {"preserve", "recover"}:
                     async with self.store.preservation_lease(
                         cancelled=lambda: self.journal.job(job_id).state == "cancelling"
@@ -869,7 +1336,7 @@ class PreservationHost:
                         async with asyncio.timeout(86400):
                             await self._run(job_id)
                 else:
-                    async with asyncio.timeout(86400):
+                    async with asyncio.timeout(attempt_seconds):
                         await self._run(job_id)
         except Exception as error:
             job = self.journal.job(job_id)
@@ -932,9 +1399,31 @@ class PreservationHost:
             if plan.kind == "recover"
             else self.root / "work"
         ) / job_id
+        resuming_receive = plan.kind == "receive" and job.attempts > 1
+        work_exists = work.exists() or work.is_symlink()
+        if plan.kind in WORK_KINDS and work_exists and not resuming_receive:
+            raise PreservationHostError("unknown_temporary_work")
+        if resuming_receive and (
+            not work_exists or self.journal.setting("temporary-work:" + job_id) is None
+        ):
+            raise PreservationHostError("receive_work_unavailable")
         secure_directory(work)
+        register_temporary_work(self.root, self.journal, self.journal.job(job_id))
         if plan.kind == "mirror_import":
-            secure_directory(self.root / "public-copies")
+            self._public_copy_parent()
+        publisher = (
+            _Location.model_validate_json(safe_json(payload["publisher"]))
+            if plan.kind == "publish"
+            else None
+        )
+        if publisher is not None:
+            async with self._archive(publisher):
+                pass
+        output_info = (
+            self._public_copy_parent()
+            if plan.kind in {"publish", "receive", "mirror_import"}
+            else None
+        )
         if plan.kind == "kit_export":
             secure_directory(self.root / "kits")
         if plan.kind == "torrent_share":
@@ -961,6 +1450,8 @@ class PreservationHost:
                         "mirror_import",
                         "http_share",
                         "torrent_share",
+                        "publish",
+                        "receive",
                     ],
                     plan.kind,
                 ),
@@ -979,7 +1470,7 @@ class PreservationHost:
                 else (work / "recovered").absolute()
                 if plan.kind == "recover"
                 else Path(cast(str, payload["destination"]))
-                if plan.kind == "mirror_import"
+                if plan.kind in {"mirror_import", "publish", "receive"}
                 else None,
                 kit_path=Path(cast(str, payload["kit_path"]))
                 if "kit_path" in payload
@@ -995,18 +1486,43 @@ class PreservationHost:
                 ).absolute()
                 if plan.kind == "torrent_share"
                 else None,
+                source_manifest_id=cast(str | None, payload.get("source_manifest_id")),
+                publication_request=PublicationRequest.model_validate_json(
+                    safe_json(payload["publication_request"])
+                )
+                if plan.kind == "publish"
+                else None,
+                publisher_key_path=publisher.key_path
+                if publisher is not None
+                else None,
+                publisher_trust=publisher.trust if publisher is not None else None,
+                invitation=read_invitation(safe_json(payload["invitation"]).encode())
+                if plan.kind == "receive"
+                else None,
+                receiving=plan.receiving,
+                output_parent_device=output_info.st_dev
+                if output_info is not None
+                else None,
+                output_parent_inode=output_info.st_ino
+                if output_info is not None
+                else None,
             )
             request_path = work / "request.json"
-            fd = os.open(
-                request_path,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-                0o600,
-            )
-            with os.fdopen(fd, "w") as stream:
-                _ = stream.write(request.model_dump_json())
-                stream.flush()
-                os.fsync(stream.fileno())
-            register_temporary_work(self.root, self.journal, self.journal.job(job_id))
+            if resuming_receive:
+                with directory(work) as target:
+                    atomic_bytes(
+                        target, "request.json", request.model_dump_json().encode()
+                    )
+            else:
+                fd = os.open(
+                    request_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                    0o600,
+                )
+                with os.fdopen(fd, "w") as stream:
+                    _ = stream.write(request.model_dump_json())
+                    stream.flush()
+                    os.fsync(stream.fileno())
             process = await asyncio.create_subprocess_exec(
                 *preservation_worker_command(request_path),
                 pass_fds=(descriptor,),
@@ -1057,7 +1573,10 @@ class PreservationHost:
                             )
                         )
                     elif observation.event == "expected":
-                        if observation.manifest_id is None:
+                        if observation.manifest_id is None or (
+                            plan.manifest_id is not None
+                            and observation.manifest_id != plan.manifest_id
+                        ):
                             raise PreservationHostError("invalid_expected_outcome")
                         self.journal.update_job(
                             current.model_copy(
@@ -1082,6 +1601,10 @@ class PreservationHost:
                                     ),
                                     "bytes_copied": max(
                                         current.bytes_copied, observation.bytes_copied
+                                    ),
+                                    "bytes_received": max(
+                                        current.bytes_received,
+                                        observation.bytes_received,
                                     ),
                                 }
                             )
@@ -1111,18 +1634,40 @@ class PreservationHost:
                             != (
                                 "public"
                                 if location.purpose == "public"
-                                or plan.kind == "mirror_import"
+                                or plan.kind in {"mirror_import", "publish", "receive"}
                                 else "private"
                             )
                             and plan.kind != "recover"
                         )
                     ):
                         raise PreservationHostError("worker_outcome_mismatch")
-                    if plan.kind in {"mirror_import", "http_share", "torrent_share"}:
+                    if plan.kind in {
+                        "mirror_import",
+                        "publish",
+                        "receive",
+                        "http_share",
+                        "torrent_share",
+                    }:
                         now = int(time.time())
                         copy_id = plan.copy_id
-                        if plan.kind == "mirror_import":
+                        if plan.kind in {"mirror_import", "publish", "receive"}:
                             destination = Path(cast(str, payload["destination"]))
+                            if output_info is not None:
+                                current_parent = destination.parent.stat()
+                                if (current_parent.st_dev, current_parent.st_ino) != (
+                                    output_info.st_dev,
+                                    output_info.st_ino,
+                                ):
+                                    raise PreservationHostError(
+                                        "public_destination_changed"
+                                    )
+                            output_trust = (
+                                TrustProfile.model_validate_json(
+                                    safe_json(payload["output_trust"])
+                                )
+                                if "output_trust" in payload
+                                else location.trust
+                            )
                             info = destination.stat()
                             enrolled = _Location(
                                 location_id=cast(str, payload["destination_id"]),
@@ -1131,7 +1676,7 @@ class PreservationHost:
                                 path=destination,
                                 device=info.st_dev,
                                 inode=info.st_ino,
-                                trust=location.trust,
+                                trust=output_trust,
                                 key_path=self.root / "unused-public-key",
                             )
                             self.journal.set_setting(
@@ -1156,7 +1701,7 @@ class PreservationHost:
                                     checked_at=now,
                                     member_count=result.member_count,
                                     publisher_key_ids=tuple(
-                                        key.key_id for key in location.trust.keys
+                                        key.key_id for key in output_trust.keys
                                     ),
                                 )
                             )
@@ -1165,9 +1710,10 @@ class PreservationHost:
                                 update={
                                     "state": "cancelled"
                                     if current.state == "cancelling"
+                                    and plan.kind in {"http_share", "torrent_share"}
                                     else "succeeded",
                                     "stage": "stopped"
-                                    if plan.kind != "mirror_import"
+                                    if plan.kind in {"http_share", "torrent_share"}
                                     else "complete",
                                     "copy_id": copy_id,
                                     "updated_at": now,
@@ -1289,5 +1835,9 @@ class PreservationHost:
                         process.kill()
                         await process.wait()
                 self._processes.pop(job_id, None)
-                request_path.unlink(missing_ok=True)
-                shutil.rmtree(work)
+                if (
+                    plan.kind != "receive"
+                    or self.journal.job(job_id).state == "succeeded"
+                ):
+                    request_path.unlink(missing_ok=True)
+                    shutil.rmtree(work)
