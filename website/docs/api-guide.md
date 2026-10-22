@@ -5916,6 +5916,11 @@ before symlink-safe deletion; an interrupted removal is explicitly retryable
 across restart. Caller disconnect waits for cleanup to drain before releasing
 Core's ownership queue. No sharing, byte job or consent is replayed.
 
+Terminal job history retains handles while their original or quarantined work
+remains, including legacy work. After cleanup, ordinary history retirement may
+remove the row and its receipt; permanent operation reservations still prevent
+replay.
+
 Verified public copies, private archives, installed models, signing keys, recovery
 kits and retained torrent metadata remain intact. Reported logical sizes are
 neither allocated storage nor a promise of reclaimed disk space. Clean stop

@@ -275,3 +275,60 @@ async def test_disconnected_cleanup_keeps_host_ownership(
         await cleanup
     assert not (await pending_read).found
     assert not leftover.work.exists()
+
+
+@pytest.mark.parametrize("quarantined", [False, True])
+async def test_history_retirement_keeps_work_until_explicit_cleanup(
+    leftover: Leftover, quarantined: bool
+) -> None:
+    host = leftover.host
+    original = host.journal.job(leftover.job_id)
+    receipt_key = "temporary-work:" + original.job_id
+    if quarantined:
+        trash = host.root / "work-trash"
+        trash.mkdir(mode=0o700)
+        leftover.work.rename(trash / original.job_id)
+    else:
+        # Legacy work also needs its row retained before custody enrollment.
+        host.journal.set_setting(receipt_key, None)
+        (leftover.work / "request.json").write_bytes(leftover.request)
+
+    def complete(index: int) -> None:
+        job, created = host.journal.reserve(
+            PreservationStart(
+                plan_id=original.plan_id,
+                operation_id=f"history-{index}",
+                public_participation=True,
+            )
+        )
+        assert created
+        host.journal.update_job(
+            job.model_copy(
+                update={
+                    "state": "failed",
+                    "stage": "failed",
+                    "updated_at": original.updated_at + index + 1,
+                }
+            )
+        )
+
+    for index in range(260):
+        complete(index)
+    assert host.journal.job(original.job_id) == original
+    assert original in host.journal.jobs(256)
+    assert (await host.temporary_work(original.job_id)).found
+    assert (await host.temporary_work(original.job_id, remove=True)).removed
+    complete(260)
+    with pytest.raises(PreservationHostError, match="job_not_found"):
+        host.journal.job(original.job_id)
+    assert host.journal.setting(receipt_key) is None
+    with pytest.raises(PreservationHostError, match="operation_retired"):
+        host.journal.reserve(
+            PreservationStart(
+                plan_id=original.plan_id,
+                operation_id=original.operation_id,
+                owner_id=original.owner_id,
+                public_participation=True,
+            )
+        )
+    assert host.journal.copy(leftover.copy_id)

@@ -2130,7 +2130,8 @@ owned processes, pins private directory descriptors and checks durable device/in
 custody before bounded logical-size inspection. Removal quarantines the exact
 directory before symlink-safe deletion and remains retryable after a crash.
 Legacy work needs its matching host-authored request. Cleanup drains despite
-caller cancellation and retains all archives, installed models, signing keys,
+caller cancellation; history retirement retains jobs until their work is gone.
+It retains all archives, installed models, signing keys,
 kits and torrent artifacts; it never replays participation.
 
 ### Comfy LTX detailing
