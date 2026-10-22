@@ -21,6 +21,7 @@ from skulk.store.preservation_contracts import (
     PreservationPlanRequest,
     PreservationStart,
     RecoveryCleanup,
+    TemporaryWork,
 )
 from skulk.store.preservation_host import PreservationHost
 from skulk.store.preservation_journal import PreservationHostError
@@ -168,6 +169,36 @@ def create_preservation_router(
         owner = await host(request)
         try:
             return await owner.reclaim_recovery(job_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/jobs/{job_id}/temporary-files",
+        response_model=TemporaryWork,
+        summary="Inspect stopped sharing temporary files",
+        description="Read bounded logical regular-file counts for one drained public import/HTTP/BitTorrent job. No cleanup or whole-archive scan occurs. Counts exclude retained public copies, model-store files, keys and torrent artifacts; incomplete counts are lower bounds, not guaranteed free space.",
+    )
+    async def inspect_temporary_files(
+        request: Request, job_id: Handle
+    ) -> TemporaryWork:
+        owner = await host(request)
+        try:
+            return await owner.temporary_work(job_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/jobs/{job_id}/reclaim-work",
+        response_model=TemporaryWork,
+        summary="Clear stopped sharing temporary files",
+        description="Explicitly remove only the exact stopped job's private temporary directory after inode/custody validation. Quarantine and a durable receipt permit retry after interrupted deletion. Refuses active work or changed identities; no model-store mutation, copy deletion, permission replay or network participation occurs.",
+    )
+    async def reclaim_temporary_files(
+        request: Request, job_id: Handle
+    ) -> TemporaryWork:
+        owner = await host(request)
+        try:
+            return await owner.temporary_work(job_id, remove=True)
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
@@ -335,6 +366,8 @@ def create_preservation_router(
         observe,
         cancel,
         reclaim,
+        inspect_temporary_files,
+        reclaim_temporary_files,
         create_upload,
         upload_status,
         upload_chunk,

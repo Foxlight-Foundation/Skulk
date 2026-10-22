@@ -39,6 +39,7 @@ from skulk.store.preservation_contracts import (
     RecoveryCleanup,
     SharingPolicy,
     SharingStatus,
+    TemporaryWork,
 )
 from skulk.store.preservation_export import plan_preservation, preservation_generation
 from skulk.store.preservation_journal import (
@@ -49,6 +50,11 @@ from skulk.store.preservation_journal import (
 )
 from skulk.store.preservation_live import publish_recovered_home
 from skulk.store.preservation_uploads import KitUploads
+from skulk.store.preservation_work import (
+    manage_temporary_work,
+    register_temporary_work,
+    temporary_work_pending,
+)
 from skulk.store.preservation_worker import WorkerRequest
 
 
@@ -311,6 +317,9 @@ class PreservationHost:
         return PreservationPage(
             bittorrent_available=importlib.util.find_spec("libtorrent") is not None,
             uploads=tuple(uploads),
+            temporary_work_jobs=tuple(
+                job.job_id for job in jobs if temporary_work_pending(self.root, job)
+            ),
             locations=locations,
             models=tuple(models),
             copies=tuple(copy for copy in copies if copy.audience == "private"),
@@ -788,6 +797,43 @@ class PreservationHost:
                     maintenance.result()
                     raise
 
+    async def temporary_work(
+        self, job_id: str, *, remove: bool = False
+    ) -> TemporaryWork:
+        """Inspect or explicitly clear stopped sharing/import staging.
+
+        Selects one retained job without accepting paths. The exclusive queue
+        and task/process checks prevent cleanup of active work. Disconnecting
+        the caller cannot release ownership while deletion is in progress.
+        Public copies, model-store files, keys and retained artifacts stay intact.
+        """
+        if self._closed:
+            raise PreservationHostError("preservation_host_closed")
+        job = self.journal.job(job_id)
+        if job.state in {"queued", "running", "cancelling"}:
+            raise PreservationHostError("temporary_job_not_stopped")
+        async with self._queue:
+            if self._closed:
+                raise PreservationHostError("preservation_host_closed")
+            job = self.journal.job(job_id)
+            if job_id in self._tasks or job_id in self._processes:
+                raise PreservationHostError("temporary_job_not_stopped")
+            maintenance = asyncio.create_task(
+                asyncio.to_thread(
+                    manage_temporary_work, self.root, self.journal, job, remove=remove
+                )
+            )
+            try:
+                return await asyncio.shield(maintenance)
+            except asyncio.CancelledError:
+                while not maintenance.done():
+                    try:
+                        await asyncio.shield(maintenance)
+                    except asyncio.CancelledError:
+                        continue
+                maintenance.result()
+                raise
+
     async def close(self) -> None:
         """Drain owned workers before releasing the exclusive host journal owner."""
         self._closed = True
@@ -960,6 +1006,7 @@ class PreservationHost:
                 _ = stream.write(request.model_dump_json())
                 stream.flush()
                 os.fsync(stream.fileno())
+            register_temporary_work(self.root, self.journal, self.journal.job(job_id))
             process = await asyncio.create_subprocess_exec(
                 *preservation_worker_command(request_path),
                 pass_fds=(descriptor,),

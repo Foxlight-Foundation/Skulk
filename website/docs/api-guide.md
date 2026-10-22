@@ -5899,7 +5899,24 @@ identity nor redistribution rights. Network routing, TLS and independent hosting
 remain the operator's responsibility.
 
 An unclean Core exit can leave a model-sized temporary BitTorrent export in
-Core-owned work storage. Clean stop removes this staging; this preview has no
-startup/operator reclamation action for abandoned sharing work. Original verified
-public copies and standard metainfo are retained. Plan storage maintenance
-explicitly; do not delete unknown files while Core is active.
+Core-owned work storage. Library's bounded `temporary_work_jobs` list hints at
+known stopped jobs with remaining work; it does not scan their contents.
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| GET | `/preservation/jobs/{job_id}/temporary-files` | Inspect one stopped `mirror_import`, `http_share` or `torrent_share` job's authenticated work. Returns `job_id`, `found`, logical regular-file `logical_bytes`, `files`, `complete` and `removed: false`. Measurement stops after two seconds, 100,000 entries or depth 64; `complete: false` means a lower bound. It follows no symlinks and writes no custody receipt. |
+| POST | `/preservation/jobs/{job_id}/reclaim-work` | Explicitly clear that drained job's authenticated temporary work; no body or caller path. Returns the counts observed before deletion and `removed: true` when removal completes. Absence is idempotent (`found: false`). |
+
+Both routes require the operator gate. Core pins private parent directories and
+authenticates the exact work directory against its durable device/inode receipt.
+Older work without a receipt requires its matching host-authored worker request;
+missing evidence refuses cleanup. Changed identities, unsafe links, active jobs
+and ambiguous collisions refuse deletion. Cleanup atomically quarantines work
+before symlink-safe deletion; an interrupted removal is explicitly retryable
+across restart. Caller disconnect waits for cleanup to drain before releasing
+Core's ownership queue. No sharing, byte job or consent is replayed.
+
+Verified public copies, private archives, installed models, signing keys, recovery
+kits and retained torrent metadata remain intact. Reported logical sizes are
+neither allocated storage nor a promise of reclaimed disk space. Clean stop
+continues to remove normal temporary work automatically.

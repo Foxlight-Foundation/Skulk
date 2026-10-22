@@ -2079,6 +2079,16 @@ staging never becomes a loader candidate.
   payload and may overshoot. No network-overhead or anonymity guarantee.
 
 
+
+Stopped public-import and sharing jobs expose an explicit temporary-work inspection
+and cleanup path (`preservation_work.py`). The host excludes queued tasks and
+owned processes, pins private directory descriptors and checks durable device/inode
+custody before bounded logical-size inspection. Removal quarantines the exact
+directory before symlink-safe deletion and remains retryable after a crash.
+Legacy work needs its matching host-authored request. Cleanup drains despite
+caller cancellation and retains all archives, installed models, signing keys,
+kits and torrent artifacts; it never replays participation.
+
 ### Comfy LTX detailing
 
 External companion loading: `graph.companion_file()` binds the graph name to

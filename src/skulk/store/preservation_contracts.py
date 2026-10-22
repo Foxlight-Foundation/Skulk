@@ -355,6 +355,30 @@ class RecoveryCleanup(PreservationContract):
 
 
 @final
+class TemporaryWork(PreservationContract):
+    """Bounded observations before optional cleanup of one stopped job's work."""
+
+    job_id: Digest = Field(description="Exact stopped public-sharing job inspected.")
+    found: bool = Field(
+        default=False, description="Temporary work was found before this action."
+    )
+    logical_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="Observed regular-file lengths, not allocated or guaranteed freed storage.",
+    )
+    files: int = Field(default=0, ge=0, description="Observed regular-file count.")
+    complete: bool = Field(
+        default=True,
+        description="False means the bounded measurement is a lower bound.",
+    )
+    removed: bool = Field(
+        default=False,
+        description="Explicit cleanup finished; no kept copy or torrent artifact was removed.",
+    )
+
+
+@final
 class PreservationJob(PreservationContract):
     """Canonical durable host status; cancellation intent is not proof of stop."""
 
@@ -469,6 +493,11 @@ class PreservationPage(PreservationContract):
         default=(),
         max_length=8,
         description="Retained resumable kit transfers; reads do not start work.",
+    )
+    temporary_work_jobs: tuple[Digest, ...] = Field(
+        default=(),
+        max_length=16,
+        description="Stopped jobs on this page with possible temporary work; no content scan or cleanup occurs during listing.",
     )
     bittorrent_available: bool = Field(
         default=False,
