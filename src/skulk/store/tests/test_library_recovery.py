@@ -78,6 +78,7 @@ async def test_kit_restores_complete_closure_after_original_loss(
             generation_id=model.generation_id,
         )
     )
+    assert plan.archive_format == "pmf-v0.1"
     saved = source.start(PreservationStart(plan_id=plan.plan_id, operation_id="save"))
     await wait_job(source, saved.job_id)
     saved = source.journal.job(saved.job_id)
@@ -92,6 +93,9 @@ async def test_kit_restores_complete_closure_after_original_loss(
     kit_job = source.journal.job(kit_job.job_id)
     assert kit_job.state == "succeeded", kit_job
     kit_bytes = source.kit_path(kit_job.job_id).read_bytes()
+    from foxlight_model_preservation.kits import PMF_MAGIC
+
+    assert kit_bytes.startswith(PMF_MAGIC)
     await source.close()
     shutil.rmtree(original)
 
@@ -136,6 +140,7 @@ async def test_kit_restores_complete_closure_after_original_loss(
             )
             assert reply.status_code == 200, reply.text
             review = PreservationPlan.model_validate_json(reply.content)
+            assert review.archive_format == "pmf-v0.1"
             assert review.requires_owner_acceptance is True
             assert review.requires_code_permission is (
                 role in {"vision_weights", "projector"}

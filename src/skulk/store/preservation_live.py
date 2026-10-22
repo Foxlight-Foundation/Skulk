@@ -9,7 +9,6 @@ from pathlib import Path
 import anyio
 from foxlight_model_preservation.models import PreservationError, TrustProfile
 from foxlight_model_preservation.registry_proof import ProofMode
-from foxlight_model_preservation.signing import verify_manifest
 from pydantic import TypeAdapter
 
 from skulk.shared.models.model_cards import (
@@ -24,6 +23,7 @@ from skulk.store.model_store import (
     StoreRegistryIndex,
 )
 from skulk.store.preservation import inspect_verified_manifest, read_recovery_metadata
+from skulk.store.preservation_pmf import read_recovered_capture
 
 
 def recovered_index(home: Path) -> StoreRegistryIndex:
@@ -65,11 +65,7 @@ async def publish_recovered_home(
     )
     if base is None or any(record is None for record in cards):
         raise PreservationError("prepared recovery lacks complete installed records")
-    original = verify_manifest(
-        read_recovery_metadata(home / "preservation" / "envelope.json"),
-        trust,
-        manifest_id,
-    )
+    original = read_recovered_capture(home / "preservation", manifest_id, trust)
     # The worker's isolated-home publication is preparation. Freshness and
     # projection must still hold at the actual canonical store commit boundary.
     review, projected = inspect_verified_manifest(original, manifest_id, mode)

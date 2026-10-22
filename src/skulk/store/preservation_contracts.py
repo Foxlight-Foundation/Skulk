@@ -424,6 +424,11 @@ class SharingStatus(PreservationContract):
 class PreservationPlan(PreservationContract):
     """Exact reviewed plan summary; large manifests and private paths stay on host."""
 
+    archive_format: Literal["preservation-v1", "pmf-v0.1"] = Field(
+        default="preservation-v1",
+        description="Authenticated archive format, or the native format planned for Preserve.",
+    )
+
     existing_companions: tuple[str, ...] = Field(
         default=(),
         max_length=16,

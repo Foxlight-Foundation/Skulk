@@ -21,13 +21,13 @@ from foxlight_model_preservation.signing import (
     encode_record,
     load_trust,
     strict_json,
-    verify_manifest,
 )
 
 from skulk.shared.constants import SKULK_MODEL_REGISTRY_CACHE_DIR
 from skulk.shared.models.registry import EMBEDDED_REGISTRY_ROOT
 from skulk.store.installed_cards import InstalledCardRecord
 from skulk.store.preservation import read_recovery_metadata
+from skulk.store.preservation_pmf import read_recovered_capture
 
 
 def retained_recovery_card(
@@ -46,12 +46,9 @@ def retained_recovery_card(
     if not envelope_path.is_file() or not trust_path.is_file():
         return None
     # Recovery retains materialized members, not a portable object archive.
-    from foxlight_model_preservation.signing import verify_manifest
 
     trust = load_trust(read_recovery_metadata(trust_path))
-    manifest = verify_manifest(
-        read_recovery_metadata(envelope_path), trust, record.preservation.manifest_id
-    )
+    manifest = read_recovered_capture(evidence, record.preservation.manifest_id, trust)
     member = next(
         item for item in manifest.members if item.member_id == manifest.root_member
     )
@@ -131,11 +128,7 @@ def retained_registry_source(
     ):
         return None
     trust = load_trust(read_recovery_metadata(evidence / "owner-trust.json"))
-    manifest = verify_manifest(
-        read_recovery_metadata(evidence / "envelope.json"),
-        trust,
-        record.preservation.manifest_id,
-    )
+    manifest = read_recovered_capture(evidence, record.preservation.manifest_id, trust)
     for member in manifest.members:
         file = next(
             (item for item in member.files if item.path == "registry-source-card.json"),

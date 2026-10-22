@@ -6,9 +6,9 @@ import shutil
 from pathlib import Path
 
 import pytest
+from foxlight_model_preservation.archives import verify_archive
 from foxlight_model_preservation.kits import export_kit
 from foxlight_model_preservation.signing import load_trust
-from foxlight_model_preservation.storage import verify_store
 from pydantic import ValidationError
 
 import skulk.store.preservation_host as host_module
@@ -106,7 +106,7 @@ async def test_folder_survives_original_core_and_restores_complete_closure(
     trust = load_trust((archive / "archive-trust.json").read_bytes())
     assert trust.keys[0].key_id == fingerprint
     assert not list(archive.rglob("*.pem"))
-    assert len(verify_store(archive, copy.manifest_id, trust).members) == 3
+    assert len(verify_archive(archive, copy.manifest_id, trust).members) == 3
     kit = tmp_path / "retained.foxkit"
     export_kit(archive, copy.manifest_id, trust, kit)
     fresh_store = tmp_path / "fresh-models"

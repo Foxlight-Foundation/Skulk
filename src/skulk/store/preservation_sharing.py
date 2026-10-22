@@ -89,6 +89,8 @@ def import_public_bundle(
             control=import_control,
         )
         manifest = imported.manifest
+        if not isinstance(manifest, Manifest):
+            raise PreservationError("public PMF sharing requires a supported adapter")
         require_public_bundle(manifest)
         control.checkpoint()
         parent = os.open(
@@ -109,7 +111,8 @@ def import_public_bundle(
             staging = work.lstat()
             pinned = os.fstat(source_parent)
             if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or (
-                staging.st_dev, staging.st_ino
+                staging.st_dev,
+                staging.st_ino,
             ) != (pinned.st_dev, pinned.st_ino):
                 raise PreservationError("public_destination_changed")
             publish_directory(verified.name, source_parent, destination.name, parent)

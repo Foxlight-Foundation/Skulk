@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal, cast, final
 
+from foxlight_model_preservation.archives import verify_archive_manifest
 from foxlight_model_preservation.invitations import (
     accept_invitation_keys,
     invitation_from_envelope,
@@ -23,6 +24,7 @@ from foxlight_model_preservation.invitations import (
 )
 from foxlight_model_preservation.kits import inspect_kit
 from foxlight_model_preservation.models import Manifest, TrustProfile
+from foxlight_model_preservation.pmf_models import PMFManifest
 from foxlight_model_preservation.publication import (
     PublicationRequest,
     review_publication,
@@ -33,7 +35,6 @@ from foxlight_model_preservation.signing import (
     digest,
     encode_record,
     strict_json,
-    verify_manifest,
 )
 from foxlight_model_preservation.storage import (
     atomic_bytes,
@@ -86,6 +87,7 @@ from skulk.store.preservation_journal import (
     secure_directory,
 )
 from skulk.store.preservation_live import publish_recovered_home
+from skulk.store.preservation_pmf import read_capture, read_kit_capture
 from skulk.store.preservation_uploads import KitUploads
 from skulk.store.preservation_work import (
     WORK_KINDS,
@@ -267,11 +269,7 @@ class PreservationHost:
     async def _manifest(self, location: _Location, identity: str) -> Manifest:
         async with self._archive(location) as descriptor:
             return await self._storage.run(
-                lambda: verify_manifest(
-                    read_metadata(descriptor, manifest_path(identity)),
-                    location.trust,
-                    identity,
-                )
+                lambda: read_capture(descriptor, identity, location.trust)
             )
 
     async def setup_device(self) -> PreservationLocation:
@@ -826,12 +824,42 @@ class PreservationHost:
                 )
                 members = prior_plan.members
             payload["manifest_id"] = manifest
+        archive_format: Literal["preservation-v1", "pmf-v0.1"] = (
+            "pmf-v0.1" if request.kind == "preserve" else "preservation-v1"
+        )
+        if kit is not None:
+            archive_format = (
+                "pmf-v0.1"
+                if isinstance(kit.manifest, PMFManifest)
+                else "preservation-v1"
+            )
+        elif manifest is not None:
+            async with self._archive(location) as archive_root:
+                selected_archive = await self._storage.run(
+                    lambda: verify_archive_manifest(
+                        read_metadata(archive_root, manifest_path(manifest)),
+                        location.trust,
+                        manifest,
+                    )
+                )
+            archive_format = (
+                "pmf-v0.1"
+                if isinstance(selected_archive, PMFManifest)
+                else "preservation-v1"
+            )
+        payload["archive_format"] = archive_format
         inspection = None
         if request.kind == "recover":
             if manifest is None:
                 raise PreservationHostError("selected_copy_required")
             if kit is not None:
-                signed = kit.manifest
+                signed = await self._storage.run(
+                    lambda: read_kit_capture(
+                        self.uploads.path(cast(str, request.upload_id)),
+                        kit,
+                        location.trust,
+                    )
+                )
             else:
                 signed = await self._manifest(location, manifest)
             inspection, projected_card = inspect_verified_manifest(
@@ -839,7 +867,7 @@ class PreservationHost:
             )
             model_id, size, members = (
                 inspection.model_id,
-                inspection.total_bytes,
+                max(size, inspection.total_bytes),
                 inspection.members,
             )
             conflicts = set(members) & {
@@ -931,6 +959,7 @@ class PreservationHost:
         ).hexdigest()
         plan = PreservationPlan(
             plan_id=identity,
+            archive_format=archive_format,
             kind=request.kind,
             model_id=model_id,
             location_id=request.location_id,
@@ -1188,6 +1217,8 @@ class PreservationHost:
             if not self.uploads.status(request.upload_id)["complete"]:
                 raise PreservationHostError("kit_upload_incomplete")
             kit = inspect_kit(self.uploads.path(request.upload_id))
+            if not isinstance(kit.manifest, Manifest):
+                raise PreservationHostError("public_pmf_adapter_required")
             manifest: Manifest = kit.manifest
             identity = kit.manifest_id
             info = self.uploads.root.stat()
@@ -1618,6 +1649,7 @@ class PreservationHost:
                     ],
                     plan.kind,
                 ),
+                archive_format=plan.archive_format,
                 archive_descriptor=descriptor,
                 archive_device=location.device,
                 archive_inode=location.inode,
