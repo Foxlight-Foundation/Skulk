@@ -49,6 +49,9 @@ from skulk.store.installed_cards import read_installed_card
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation import inspect_verified_manifest
 from skulk.store.preservation_contracts import (
+    FolderConfirmation,
+    FolderReview,
+    FolderReviewRequest,
     InvitationPreview,
     InvitationRequest,
     KitUploadStatus,
@@ -69,6 +72,12 @@ from skulk.store.preservation_contracts import (
 )
 from skulk.store.preservation_delivery import invitation_preview, publication_members
 from skulk.store.preservation_export import plan_preservation, preservation_generation
+from skulk.store.preservation_folders import (
+    FolderObservation,
+    confirmed_folder,
+    observe_folder,
+    private_folder,
+)
 from skulk.store.preservation_journal import (
     PreservationHostError,
     PreservationJournal,
@@ -98,6 +107,7 @@ class _Location(BaseModel):
     inode: int
     trust: TrustProfile
     key_path: Path
+    requires_trust_snapshot: bool = False
 
 
 class _Observation(BaseModel):
@@ -233,6 +243,14 @@ class PreservationHost:
             info = os.fstat(descriptor)
             if (info.st_dev, info.st_ino) != (location.device, location.inode):
                 raise PreservationHostError("archive_identity_changed")
+            if location.requires_trust_snapshot:
+                private_folder(descriptor)
+                try:
+                    snapshot = read_metadata(descriptor, "archive-trust.json")
+                except (OSError, ValueError) as error:
+                    raise PreservationHostError("storage_setup_incomplete") from error
+                if snapshot != encode_record(location.trust):
+                    raise PreservationHostError("storage_setup_incomplete")
             yield descriptor
         finally:
             os.close(descriptor)
@@ -267,6 +285,119 @@ class PreservationHost:
                     cast(dict[str, JsonValue], location.model_dump(mode="json")),
                 )
             return await self.location_view("device")
+
+    async def review_folder(self, request: FolderReviewRequest) -> FolderReview:
+        """Review a dedicated host folder without creating storage or custody.
+
+        The path is accepted only by trusted operator setup, never by a card,
+        invitation or governed copy operation. Registered roots can be reviewed
+        again to finish a previously interrupted public-trust snapshot write.
+        """
+        async with self._setup_lock:
+            if self._closed:
+                raise PreservationHostError("preservation_host_closed")
+            selected = Path(request.path)
+            path = selected.parent.resolve(strict=True) / selected.name
+            enrolled = tuple(
+                self._location(identity)
+                for identity in self.journal.private_location_ids()
+            )
+            known = next(
+                (location for location in enrolled if location.path == path), None
+            )
+            observation = observe_folder(
+                request,
+                forbidden=(self.root, self.store.store_path, self.custom_cards),
+                enrolled_id=None if known is None else known.location_id,
+            )
+            if known is not None and (observation.device, observation.inode) != (
+                known.device,
+                known.inode,
+            ):
+                raise PreservationHostError("archive_identity_changed")
+            self.journal.set_setting(
+                "folder-review", observation.model_dump(mode="json")
+            )
+            return observation.view
+
+    async def setup_folder(self, request: FolderConfirmation) -> PreservationLocation:
+        """Confirm exact private storage; keys stay in protected Core custody.
+
+        Enrollment precedes the public-trust write, so an interrupted metadata
+        write can be explicitly repaired only on the recorded root. Such roots
+        remain unavailable to byte work until that snapshot is complete. Default
+        selection occurs last; incomplete setup never changes the old default.
+        """
+        if not request.confirmed:
+            raise PreservationHostError("storage_confirmation_required")
+        if self.journal.setting("folder-review") is None:
+            raise PreservationHostError("storage_review_expired")
+        observation = FolderObservation.model_validate_json(
+            safe_json(self.journal.setting("folder-review"))
+        )
+        if (
+            observation.view.review_id != request.review_id
+            or observation.view.expires_at <= int(time.time())
+        ):
+            raise PreservationHostError("storage_review_expired")
+        await self.setup_device()
+        async with self._setup_lock:
+            if self._closed:
+                raise PreservationHostError("preservation_host_closed")
+            current = FolderObservation.model_validate_json(
+                safe_json(self.journal.setting("folder-review"))
+            )
+            if current != observation or observation.view.expires_at <= int(
+                time.time()
+            ):
+                raise PreservationHostError("storage_review_expired")
+            identity = observation.enrolled_id or "folder_" + request.review_id[:32]
+            recorded = self.journal.setting("location:" + identity)
+            if recorded is not None:
+                enrolled = self._location(identity)
+                observation = observation.model_copy(
+                    update={
+                        "device": enrolled.device,
+                        "inode": enrolled.inode,
+                        "enrolled_id": identity,
+                    }
+                )
+            elif len(self.journal.private_location_ids()) >= 16:
+                raise PreservationHostError("storage_location_limit")
+            with confirmed_folder(observation) as descriptor:
+                info = os.fstat(descriptor)
+                capture = self._location("device")
+                location = _Location(
+                    location_id=identity,
+                    label=observation.view.label,
+                    path=observation.path,
+                    device=info.st_dev,
+                    inode=info.st_ino,
+                    trust=capture.trust,
+                    key_path=capture.key_path,
+                    requires_trust_snapshot=True,
+                )
+                self.journal.set_setting(
+                    "location:" + identity, location.model_dump(mode="json")
+                )
+                atomic_bytes(
+                    descriptor, "archive-trust.json", encode_record(location.trust)
+                )
+            async with self._archive(location):
+                self.journal.set_setting("default-private-location", identity)
+            return await self.location_view(identity)
+
+    async def default_location(self, location_id: str) -> PreservationLocation:
+        """Persist one available private destination; never move existing copies."""
+        async with self._setup_lock:
+            if self._closed:
+                raise PreservationHostError("preservation_host_closed")
+            location = self._location(location_id)
+            if location.purpose != "private":
+                raise PreservationHostError("private_archive_required")
+            async with self._archive(location):
+                self.journal.set_setting("default-private-location", location_id)
+            return await self.location_view(location_id)
 
     def _public_copy_parent(self) -> os.stat_result:
         parent = self.root / "public-copies"
@@ -475,10 +606,19 @@ class PreservationHost:
         """Read one bounded installed/library/activity page; never submit byte work."""
         if not 0 <= offset <= 2**31:
             raise PreservationHostError("invalid_offset")
-        locations = (
-            ()
-            if self.journal.setting("location:device") is None
-            else (await self.location_view("device"),)
+        locations = tuple(
+            [
+                await self.location_view(identity)
+                for identity in self.journal.private_location_ids()
+            ]
+        )
+        selected = self.journal.setting("default-private-location")
+        default_id = (
+            selected
+            if isinstance(selected, str)
+            else "device"
+            if any(location.location_id == "device" for location in locations)
+            else None
         )
         models: list[PreservationModel] = []
         entries = self.store.list_models()[offset : offset + 5]
@@ -521,6 +661,7 @@ class PreservationHost:
             except (ValueError, OSError):
                 continue
         return PreservationPage(
+            default_location_id=default_id,
             publishing=await self.location_view("publisher")
             if self.journal.setting("location:publisher") is not None
             else None,

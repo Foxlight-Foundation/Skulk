@@ -127,6 +127,12 @@ async def test_private_inventory_and_setup_reject_untrusted_requests(
         assert (await client.get("/preservation/library")).status_code == 403
         assert (await client.post("/preservation/setup/device")).status_code == 403
         assert (await client.post("/preservation/setup/publisher")).status_code == 403
+        for path, body in (
+            ("setup/folder/review", {"path": "/not-authorized", "label": "Backup"}),
+            ("setup/folder", {"review_id": "a" * 64, "confirmed": True}),
+            ("setup/default", {"location_id": "device"}),
+        ):
+            assert (await client.post("/preservation/" + path, json=body)).status_code == 403
         for path in (
             "copies/example/publication",
             "plans/example/public-manifest",
@@ -238,5 +244,49 @@ async def test_public_invitation_metadata_is_offline_bounded_and_operator_only(
                 len((await owner.page()).jobs) == 1
             )  # Only the original public kit import.
             assert not owner.store.list_models()
+    finally:
+        await owner.close()
+
+
+async def test_folder_setup_api_keeps_paths_private_and_persists_default(
+    tmp_path: Path,
+) -> None:
+    installed = make_preservation_installation(tmp_path / "installed-source")
+    owner = PreservationHost(ModelStore(installed.primary.parent), tmp_path / "private")
+
+    async def provider() -> PreservationHost:
+        return owner
+
+    app = FastAPI()
+    app.include_router(
+        create_preservation_router(provider, API.require_preservation_operator)
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 1000)),
+            base_url="http://localhost",
+        ) as client:
+            archive = tmp_path / "external"
+            preview = await client.post(
+                "/preservation/setup/folder/review",
+                json={"path": str(archive), "label": "My backup"},
+            )
+            assert preview.status_code == 200 and not archive.exists()
+            assert str(tmp_path) not in preview.text
+            accepted = await client.post(
+                "/preservation/setup/folder",
+                json={"review_id": preview.json()["review_id"], "confirmed": True},
+            )
+            assert accepted.status_code == 200 and accepted.json()["reachable"]
+            page = await client.get("/preservation/library")
+            assert page.json()["default_location_id"] == accepted.json()["location_id"]
+            assert str(tmp_path) not in page.text and "capture.pem" not in page.text
+            chosen = await client.post(
+                "/preservation/setup/default", json={"location_id": "device"}
+            )
+            assert chosen.status_code == 200
+            assert (await client.get("/preservation/library")).json()[
+                "default_location_id"
+            ] == "device"
     finally:
         await owner.close()

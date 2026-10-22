@@ -5815,8 +5815,11 @@ paths or signing keys.
 
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
-| GET | `/preservation/library` | Optional `offset` (default 0); up to 4 installed selections, copies and jobs (bounded for SDK wire encoding), enrolled storage availability and `next_offset`. Reads never start/replay jobs or sharing. |
+| GET | `/preservation/library` | Optional `offset` (default 0); up to 4 installed selections, copies and jobs (bounded for SDK wire encoding), up to 16 enrolled private destinations with availability/free space, durable `default_location_id` and `next_offset`. Reads never start/replay jobs or sharing. |
 | POST | `/preservation/setup/device` | Explicitly enroll **Use this device** private storage and its protected capture identity. No arbitrary path/key input. Repeating setup retains the identity; unavailable enrolled storage is not recreated. |
+| POST | `/preservation/setup/folder/review` | Trusted-operator-only `path` (absolute Core-host folder, up to 4096 characters) and `label` (1–80 characters). Review an empty owner-only folder or one missing leaf below an existing mounted parent. Returns a ten-minute `review_id`, label, `creates_folder`, observed `free_bytes` and expiry; no archive/key writes. |
+| POST | `/preservation/setup/folder` | Exact `review_id`, `confirmed: true`. Recheck parent and root device/inode; create only the reviewed private leaf, enroll it, keep capture keys on Core and write only public `archive-trust.json` to the archive. Choose it for new copies after successful setup. Repeat confirmation identifies the same enrollment. Missing/replaced parents, foreign nonempty folders and expired reviews refuse. |
+| POST | `/preservation/setup/default` | Enrolled private `location_id`. Select available storage for future new-copy reviews; existing copies/plans/jobs remain bound to their original destination. Never silently fall back when the selected storage disappears. |
 | POST | `/preservation/plans` | `kind` (`preserve`, `check`, `kit_export`, `recover`, `publish`, `receive`, `mirror_import`, `http_share` or `torrent_share`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Kit export selects `copy_id`; recovery selects that copy or a completed `upload_id` with `location_id=kit`. `historical=true` explicitly permits historical proof inspection. Recovery reviews exact members, candidate key fingerprints, original publication/file assurance and separate receiver consent requirements. Existing aliases and deletion tombstones are protected. |
 | GET | `/preservation/plans/{plan_id}` | Read an exact retained safe plan without refreshing expiry or executing it. |
 | POST | `/preservation/jobs` | `plan_id`, caller-retained `operation_id`, optional `owner_id` (default `operator`) and explicit consent flags. Returns 202 with a durable job immediately. Exact repeated requests return the original job; changed input refuses. |
@@ -5831,7 +5834,26 @@ paths or signing keys.
 
 Preserve runs under the existing store owner's mutation fence and independently
 checks the copied complete closure. Workers use an already opened archive
-directory; missing/replaced mount paths never become substitute folders. Private
+directory; missing/replaced mount paths never become substitute folders.
+Explicit folder setup is the sole host-path input exception; cards, invitations
+and ordinary copy controls still use opaque enrolled handles. Paths and custody
+remain private. Choose a dedicated owner-only folder on a local disk, removable
+volume or already mounted NAS/remote filesystem. Setup does not mount, configure
+credentials, recursively create parents or chmod shared NAS roots. Overlaps with
+Core state, Model Store and custom-card storage refuse. Public `archive-trust.json`
+plus the manifest identity allow standalone verification/kit export after Core
+loss; keep an independent fingerprint record. No private key is copied to the
+archive. Private audience does not imply encryption: protect storage access and
+encryption separately. Native object-store adapters and specific NAS/provider
+qualification are separate from mounted-folder support.
+
+If setup stops after enrollment but before its trust snapshot is complete, that
+root is unavailable to copy work and the old default remains. Review the same
+recorded folder and confirm again to finish. Unknown populated folders are not
+adopted. A crash-created empty leaf can be explicitly reviewed again. Up to 16
+private destinations are retained; unavailable roots are never recreated. These
+setup controls copy no model bytes and start no listener, swarm or model load.
+ Private
 local snapshot staging and capture custody stay outside capability generations.
 The pinned preservation reader retains new descriptive card properties in the
 original identity without requiring a library update for each capability field.

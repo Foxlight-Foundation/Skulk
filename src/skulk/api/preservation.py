@@ -12,6 +12,10 @@ from foxlight_model_preservation.models import Manifest, TrustProfile
 
 from skulk.store.preservation import RecoveryCompatibilityError
 from skulk.store.preservation_contracts import (
+    DefaultLocationRequest,
+    FolderConfirmation,
+    FolderReview,
+    FolderReviewRequest,
     Handle,
     InvitationPreview,
     InvitationRequest,
@@ -39,7 +43,8 @@ def create_preservation_router(
 ) -> APIRouter:
     """Mount bounded controls; private reads use the same operator gate as writes.
 
-    No archive/key paths or arbitrary commands are accepted. The provider binds
+    Only explicit folder setup accepts a host path; copy controls accept opaque
+    enrolled handles, never key paths or arbitrary commands. The provider binds
     the actual configured store owner; absence is actionable 503, never a fake
     empty library. No admin route is added to the unauthenticated store listener.
     """
@@ -87,6 +92,51 @@ def create_preservation_router(
         owner = await host(request)
         try:
             return await owner.setup_device()
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/setup/folder/review",
+        response_model=FolderReview,
+        summary="Review a dedicated local or mounted private archive",
+        description="Trusted operators select an absolute folder on the Core host and a label. Inspect an empty private folder or one missing leaf below an existing mounted parent. Retain an expiring identity-bound review without creating archive bytes or keys. Paths stay in private setup state; missing mounts are never created.",
+    )
+    async def review_folder(
+        request: Request, body: FolderReviewRequest
+    ) -> FolderReview:
+        owner = await host(request)
+        try:
+            return await owner.review_folder(body)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/setup/folder",
+        response_model=PreservationLocation,
+        summary="Confirm the exact private storage review",
+        description="Explicitly confirm a live setup review. Recheck parent/root identity, create only its reviewed private leaf if needed, retain capture keys on Core and a public verification-key snapshot on the archive, then choose it for new copies. Known interrupted enrollment can be reviewed again; no model transfer, hosting or runtime admission starts.",
+    )
+    async def setup_folder(
+        request: Request, body: FolderConfirmation
+    ) -> PreservationLocation:
+        owner = await host(request)
+        try:
+            return await owner.setup_folder(body)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/setup/default",
+        response_model=PreservationLocation,
+        summary="Choose private storage for new copies",
+        description="Persist an available enrolled private location as the default for future reviews. Existing copies, plans and jobs retain their original location. Disconnected storage never silently falls back to another disk.",
+    )
+    async def default_location(
+        request: Request, body: DefaultLocationRequest
+    ) -> PreservationLocation:
+        owner = await host(request)
+        try:
+            return await owner.default_location(body.location_id)
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
@@ -475,6 +525,9 @@ def create_preservation_router(
     _ = (
         library,
         setup_device,
+        review_folder,
+        setup_folder,
+        default_location,
         setup_publisher,
         publication_source,
         public_manifest,
