@@ -20,7 +20,9 @@ from skulk.store.preservation_journal import (
 )
 from skulk.store.preservation_worker import WorkerRequest
 
-WORK_KINDS = frozenset({"mirror_import", "http_share", "torrent_share"})
+WORK_KINDS = frozenset(
+    {"mirror_import", "http_share", "torrent_share", "publish", "receive"}
+)
 MAX_MEASURE_ENTRIES = 100_000
 MEASURE_SECONDS = 2.0
 

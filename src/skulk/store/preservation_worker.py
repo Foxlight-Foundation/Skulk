@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+from foxlight_model_preservation.invitations import Invitation
 from foxlight_model_preservation.kits import export_kit, import_kit, inspect_kit
 from foxlight_model_preservation.models import TrustProfile
 from foxlight_model_preservation.operations import (
@@ -17,12 +18,18 @@ from foxlight_model_preservation.operations import (
     Progress,
     failure_code,
 )
+from foxlight_model_preservation.publication import PublicationRequest
 from foxlight_model_preservation.signing import load_key
 from foxlight_model_preservation.storage import verify_store
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from skulk.store.preservation import RecoveryCompatibilityError, recover_home
-from skulk.store.preservation_contracts import SharingPolicy, SharingStatus
+from skulk.store.preservation_contracts import (
+    ReceivingPolicy,
+    SharingPolicy,
+    SharingStatus,
+)
+from skulk.store.preservation_delivery import publish_copy, receive_copy
 from skulk.store.preservation_export import (
     PreservationCapacityError,
     preservation_generation,
@@ -52,6 +59,8 @@ class WorkerRequest(BaseModel):
         "mirror_import",
         "http_share",
         "torrent_share",
+        "publish",
+        "receive",
     ]
     archive_descriptor: int
     archive_device: int
@@ -72,6 +81,14 @@ class WorkerRequest(BaseModel):
     sharing: SharingPolicy | None = None
     public_participation: bool = False
     metainfo_path: Path | None = None
+    source_manifest_id: str | None = None
+    publication_request: PublicationRequest | None = None
+    publisher_key_path: Path | None = None
+    publisher_trust: TrustProfile | None = None
+    invitation: Invitation | None = None
+    receiving: ReceivingPolicy | None = None
+    output_parent_device: int | None = None
+    output_parent_inode: int | None = None
 
 
 def _emit(value: dict[str, JsonValue]) -> None:
@@ -97,21 +114,30 @@ def run_worker(request: WorkerRequest) -> int:
         _emit(
             {
                 "event": "progress",
-                "stage": progress.stage,
+                "stage": "checking"
+                if request.kind in {"publish", "receive"}
+                and progress.stage == "complete"
+                else progress.stage,
                 "bytes_hashed": progress.bytes_hashed,
                 "bytes_copied": progress.bytes_copied,
+                "bytes_received": progress.bytes_received,
             }
         )
 
     control = OperationControl(observe, interval_seconds=0.25)
-    control.limit_deadline(time.monotonic() + 86400)
+    deadline = time.monotonic() + (
+        request.receiving.deadline_seconds
+        if request.kind == "receive" and request.receiving is not None
+        else 86400
+    )
+    control.limit_deadline(deadline)
     controls = [control]
     controls_lock = threading.Lock()
     cancelled = threading.Event()
 
     def byte_control() -> OperationControl:
         active = OperationControl(observe, interval_seconds=0.25)
-        active.limit_deadline(time.monotonic() + 86400)
+        active.limit_deadline(deadline)
         with controls_lock:
             controls.append(active)
             if cancelled.is_set():
@@ -166,6 +192,65 @@ def run_worker(request: WorkerRequest) -> int:
             )
             # A separate final check does not reuse the consumed capture control.
             manifest = verify_store(Path("."), manifest_id, request.trust)
+        elif request.kind == "publish":
+            if (
+                request.manifest_id is None
+                or request.source_manifest_id is None
+                or request.output_path is None
+                or request.publication_request is None
+                or request.publisher_key_path is None
+                or request.publisher_trust is None
+                or request.output_parent_device is None
+                or request.output_parent_inode is None
+                or not request.public_participation
+            ):
+                raise ValueError("reviewed separate public publication required")
+            manifest_id = request.manifest_id
+            publishing_key_path = request.publisher_key_path
+            manifest = publish_copy(
+                request.source_manifest_id,
+                request.trust,
+                request.publication_request,
+                request.output_path,
+                manifest_id,
+                lambda: load_key(publishing_key_path, None),
+                request.publisher_trust,
+                request.snapshot_parent,
+                control,
+                byte_control(),
+                commit_intent,
+                parent_identity=(
+                    request.output_parent_device,
+                    request.output_parent_inode,
+                ),
+            )
+        elif request.kind == "receive":
+            if (
+                request.manifest_id is None
+                or request.output_path is None
+                or request.invitation is None
+                or request.receiving is None
+                or request.output_parent_device is None
+                or request.output_parent_inode is None
+                or not request.accept_owner_capture
+                or request.invitation.manifest_id != request.manifest_id
+            ):
+                raise ValueError("accepted exact public invitation required")
+            manifest_id = request.manifest_id
+            manifest = receive_copy(
+                request.invitation,
+                request.trust,
+                request.receiving,
+                request.output_path,
+                request.snapshot_parent,
+                control,
+                byte_control,
+                commit_intent,
+                parent_identity=(
+                    request.output_parent_device,
+                    request.output_parent_inode,
+                ),
+            )
         elif request.kind == "mirror_import":
             if (
                 request.manifest_id is None
@@ -188,6 +273,13 @@ def run_worker(request: WorkerRequest) -> int:
                 control,
                 byte_control(),
                 commit_intent,
+                parent_identity=(
+                    request.output_parent_device,
+                    request.output_parent_inode,
+                )
+                if request.output_parent_device is not None
+                and request.output_parent_inode is not None
+                else None,
             )
         elif request.kind in {"http_share", "torrent_share"}:
             if (

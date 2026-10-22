@@ -310,9 +310,20 @@ async def test_torrent_real_peer_and_retained_metadata_after_stop(
         try:
             handle.connect_peer(("127.0.0.1", live.sharing.listen_port))
             async with asyncio.timeout(20):
-                while not handle.status().is_seeding:
+                while True:
+                    # Native status can briefly report seeding before its disk
+                    # jobs make even the root visible. Actual signed bytes are
+                    # the receiving completion gate, including on cached writes.
+                    if handle.status().is_seeding:
+                        try:
+                            restored = verify_store(
+                                destination / identity, identity, trust
+                            )
+                        except (FileNotFoundError, ValueError):
+                            pass
+                        else:
+                            break
                     await asyncio.sleep(0.05)
-            restored = verify_store(destination / identity, identity, trust)
             retained = restored.members[0].retained_card
             assert (
                 retained is not None

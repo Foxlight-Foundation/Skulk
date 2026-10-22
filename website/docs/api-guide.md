@@ -5817,13 +5817,13 @@ paths or signing keys.
 | --- | --- | --- |
 | GET | `/preservation/library` | Optional `offset` (default 0); up to 4 installed selections, copies and jobs (bounded for SDK wire encoding), enrolled storage availability and `next_offset`. Reads never start/replay jobs or sharing. |
 | POST | `/preservation/setup/device` | Explicitly enroll **Use this device** private storage and its protected capture identity. No arbitrary path/key input. Repeating setup retains the identity; unavailable enrolled storage is not recreated. |
-| POST | `/preservation/plans` | `kind` (`preserve`, `check`, `kit_export` or `recover`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Kit export selects `copy_id`; recovery selects that copy or a completed `upload_id` with `location_id=kit`. `historical=true` explicitly permits historical proof inspection. Recovery reviews exact members, candidate key fingerprints, original publication/file assurance and separate receiver consent requirements. Existing aliases and deletion tombstones are protected. |
+| POST | `/preservation/plans` | `kind` (`preserve`, `check`, `kit_export`, `recover`, `publish`, `receive`, `mirror_import`, `http_share` or `torrent_share`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Kit export selects `copy_id`; recovery selects that copy or a completed `upload_id` with `location_id=kit`. `historical=true` explicitly permits historical proof inspection. Recovery reviews exact members, candidate key fingerprints, original publication/file assurance and separate receiver consent requirements. Existing aliases and deletion tombstones are protected. |
 | GET | `/preservation/plans/{plan_id}` | Read an exact retained safe plan without refreshing expiry or executing it. |
 | POST | `/preservation/jobs` | `plan_id`, caller-retained `operation_id`, optional `owner_id` (default `operator`) and explicit consent flags. Returns 202 with a durable job immediately. Exact repeated requests return the original job; changed input refuses. |
 | GET | `/preservation/jobs/{job_id}` | Observe one exact retained job and bounded result. Does not queue, retry or reconcile byte work. |
 | POST | `/preservation/jobs/{job_id}/cancel` | Persist cancellation intent, request stop, then bound the wait for the exclusively owned process. A committed verified result may win. Copies are retained. |
 | POST | `/preservation/jobs/{job_id}/reclaim` | Explicitly reclaim one stopped recovery job's known temporary files. No body or arbitrary paths. Requires the actual store lease, a readable canonical index and exact signed-manifest/worker identity. Returns `job_id`, `generation_removed`, `temporary_removed` and `indexed_generation_retained`. Indexed models and saved kits remain intact; no job or permission is replayed. Missing/corrupt indexes, links, changed identities and active jobs refuse cleanup. Interrupted cleanup can be retried. |
-| POST | `/preservation/kit-uploads` | Exact `size_bytes` (up to 8 TiB). Observe actual free space and at most eight retained transfers; return an opaque `upload_id` and flushed offset. No publisher trust or runtime admission. |
+| POST | `/preservation/kit-uploads` | Exact `size_bytes` and optional `purpose` (default `kit`, up to 8 TiB; `invitation` / `publication`, up to 8 MiB). Observe actual free space and at most eight retained transfers; return an opaque `upload_id` and flushed offset. No publisher trust or runtime admission. |
 | GET | `/preservation/kit-uploads/{upload_id}` | Read the retained offset for explicit resume. Library inventory also lists bounded transfer handles so a new browser/capability can find them. |
 | PUT | `/preservation/kit-uploads/{upload_id}` | Required `offset` query, `application/octet-stream` body up to 4 MiB. Exact-offset append; identical completed-chunk replay works after response loss. All weights stay outside SDK/control JSON. |
 | DELETE | `/preservation/kit-uploads/{upload_id}` | Remove an unused transfer; queued/running/cancelling job references refuse removal. Frees ingress storage, preserving completed restored models. |
@@ -5857,7 +5857,8 @@ Interrupted kit exports/restores need a new explicit review and retry; a source
 archive Check cannot establish their destination outcome. The retry rechecks any
 already committed exact closure before finishing admission. A Core-owned 24-hour
 worker watchdog bounds active byte work; queue/store-fence wait is separate.
-Public publication/sharing and new-home CLI recovery remain separate tools.
+The public data workers below own publication, receiving and sharing; new-home CLI
+recovery remains independently usable.
 
 ### Public bundle mirroring and bounded sharing
 
@@ -5867,8 +5868,8 @@ have a public audience. Start requires `accept_owner_capture` for that exact
 manifest and its bundled keys. Core verifies all bytes into a separate immutable
 public archive; it does not parse a runtime card, install a model or grant
 registry authority. Unknown additive card metadata is retained unchanged.
-Private kits require a separate public publication review with the standalone
-tools; this route never relabels a private copy.
+Private copies require the separate publication review below; this route never
+relabels a private signed envelope.
 
 `http_share` and `torrent_share` select an exact public `copy_id` and its
 `location_id`. Review binds `public_network` (default false: loopback preview),
@@ -5898,13 +5899,103 @@ authenticated fingerprints; self-signatures alone establish neither publisher
 identity nor redistribution rights. Network routing, TLS and independent hosting
 remain the operator's responsibility.
 
+### Public publication and recipient invitations
+
+`POST /preservation/setup/publisher` explicitly creates a protected local
+publishing key, separate from private capture custody. Library's `publishing`
+observation is separate from private `locations`; public destinations never
+become default private Preserve locations. A disconnected or replaced enrolled
+parent is refused. No listener, key enrollment or runtime admission starts.
+
+| Method | Path | Parameters and behavior |
+| --- | --- | --- |
+| GET | `/preservation/copies/{copy_id}/publication` | Authenticate a kept private copy's metadata and return supported retained members, origins, sizes and terms/notice hints. No weight reads or registry connection. Known private capture bookkeeping is omitted; hints are not redistribution permission. |
+| GET | `/preservation/plans/{plan_id}/public-manifest` | Download the exact proposed unsigned public manifest through the metadata byte plane, outside SDK controls. It contains no capture bookkeeping, host/key paths or signing key. It is review metadata, not a completed publication. |
+| POST | `/preservation/public-copies/{copy_id}/invitation` | Body: `mirrors`, one to sixteen HTTP(S) bases. Export an at-most-8-MiB portable invitation with the original signed public manifest and candidate public keys. Credentials, queries, fragments and local sources refuse. No hosting/reachability test or network connection occurs. |
+| GET | `/preservation/kit-uploads/{upload_id}/invitation` | Inspect a completed `purpose: invitation` upload offline: exact identity, name, complete declared closure/size, candidate fingerprints/threshold and mirror hints. Reading self-signatures does not identify a publisher or grant registry/code authority. |
+| GET | `/preservation/jobs/{job_id}/invitation` | Inspect the original invitation retained with a receive job, even after the upload or mirrors disappear. Does not download, enroll keys or start sharing. |
+| POST | `/preservation/jobs/{job_id}/resume` | Body: fresh resume `plan_id`, new action `operation_id`, original `owner_id`, `accept_owner_capture: true`. Resume only this stopped receive under unchanged original inputs, private staging and cumulative allowance. Repeating the exact action observes the job. The returned job retains its original execution plan/operation identity; this is separate from starting a new job. |
+
+A publication plan uses `kind: publish`, the private source `location_id` and
+`copy_id`. The distinct publisher must already be configured. Supply one
+`public_request` or an uploaded `purpose: publication` metadata document selected
+by `upload_id`. The strict portable `PublicationRequest` supplies a public name,
+workloads/runtime requirements and resolved terms for every retained member.
+Optional publisher-supplied UTF-8 notices use `NOTICE.publisher.txt`: at most
+65,536 characters per member and 1 MiB in aggregate. They cannot replace/alias a
+source file or remove an original required notice and do not become original
+upstream evidence. Unknown transferable evidence profiles refuse new publication
+without damaging the saved copy. Retained additive descriptive card fields stay
+intact; runtime admission remains separate.
+
+The plan is a metadata-only transformation of an authenticated source; it proves
+neither current bytes nor redistribution rights. Start requires fresh
+`public_participation: true` for this exact public-audience publication. The worker
+checks source/output bytes, distinct keys, terms/notices and the reviewed public
+identity, then waits for durable intent acknowledgement before atomic public-copy
+publication. Publication starts no server or swarm and does not change the private
+copy. New publications and received copies include a public `bundle-trust.json`
+verification snapshot for independent filesystem recovery. Imported kits retain
+`kit-trust.json`. These files contain candidate public keys, never private keys or
+automatic enrollment authority; keep independent fingerprints/manifest references.
+Confirming or serving an already completed exact publication requires its public
+keys, without loading the now-unneeded private signing key. Known operational filenames are refused, but this is not a general secret
+scanner for intentionally selected model files or public cards. Late cancellation
+can lose to a completed verified publication.
+
+A recipient plan uses `kind: receive`, `location_id: invitation`, a completed
+invitation `upload_id` and explicitly authenticated `accepted_key_ids`. The intended
+candidate threshold also requires authentication. This creates an exact-copy
+choice, never global or registry key enrollment. Select finite
+`download_limit_bytes` (default 20 GiB), `download_deadline_seconds` (default 3,600,
+maximum 86,400) and separate `allow_http` / `allow_private` permissions. Plan
+`receiving` binds the exact mirror list and these controls. Start requires
+`accept_owner_capture: true`. It authenticates before contacting mirrors, uses
+pinned-DNS HTTPS and signed object hashes, and never seeds, admits a model or runs
+repository code. Direct mirrors see Core's connecting address and requests;
+receiving is not anonymous.
+
+The owned worker continues after Library disconnects. A stopped receive retains
+its private working directory and conservative accounting. For a new resume
+review, submit `kind: receive`, `location_id: invitation` and `resume_job_id`; do
+not supply replacement sources, trust, upload or limits. Explicitly changed policy
+fields refuse. The new review recaps the original policy; call the dedicated
+resume route with fresh exact-copy acceptance. Work device/inode custody and
+owner binding are rechecked. The same original stage inode, transfer operation,
+trust, sources and maximum byte allowance persist across attempts, including
+charged failed reads. Each deliberate attempt has its own bounded deadline, enforced by Core's owned-process watchdog as well as portable read checkpoints.
+Neither restart nor replaying the original Start restarts a download. An already
+used resume action is observational even after completion. Busy work returns
+`store_busy_try_again`; cleared/quarantined work requires a new explicit download
+rather than silently resetting its allowance.
+
+Every received object verifies before the complete copy appears. If a crash left
+all objects locally, the included signed envelope permits a full offline recheck
+and completion with mirrors gone. Transfer receipts remain outside the immutable
+public copy, and temporary partials are not published. A complete copy supports
+Check, portable kit export and the existing separately reviewed whole-closure
+recovery. Unknown future card bodies remain opaque during receiving/kit export;
+restoration into a runtime still requires supported semantics and ordinary
+owner/historical/code consent. No registry connection or original Core is needed
+for the portable fallback.
+
+Publication/invitation metadata uses the existing binary upload routes with
+`purpose: publication` or `purpose: invitation`, each capped at 8 MiB. Default
+`purpose: kit` preserves the existing up-to-8-TiB kit contract. At most eight
+uploads and 4-MiB chunks remain; weights never enter SDK JSON. Core control
+summaries stay bounded; very large metadata/selections may need the standalone
+tools or a recovery kit. Invitations provide no hosted resolver, DNS/firewall/TLS
+configuration, verified public reachability, independent custody or protected
+transport. Public BitTorrent seeding remains separately explicit; invitations
+currently receive over HTTP(S).
+
 An unclean Core exit can leave a model-sized temporary BitTorrent export in
 Core-owned work storage. Library's bounded `temporary_work_jobs` list hints at
 known stopped jobs with remaining work; it does not scan their contents.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
-| GET | `/preservation/jobs/{job_id}/temporary-files` | Inspect one stopped `mirror_import`, `http_share` or `torrent_share` job's authenticated work. Returns `job_id`, `found`, logical regular-file `logical_bytes`, `files`, `complete` and `removed: false`. Measurement stops after two seconds, 100,000 entries or depth 64; `complete: false` means a lower bound. It follows no symlinks and writes no custody receipt. |
+| GET | `/preservation/jobs/{job_id}/temporary-files` | Inspect one stopped `mirror_import`, `publish`, `receive`, `http_share` or `torrent_share` job's authenticated work. Returns `job_id`, `found`, logical regular-file `logical_bytes`, `files`, `complete` and `removed: false`. Measurement stops after two seconds, 100,000 entries or depth 64; `complete: false` means a lower bound. It follows no symlinks and writes no custody receipt. |
 | POST | `/preservation/jobs/{job_id}/reclaim-work` | Explicitly clear that drained job's authenticated temporary work; no body or caller path. Returns the counts observed before deletion and `removed: true` when removal completes. Absence is idempotent (`found: false`). |
 
 Both routes require the operator gate. Core pins private parent directories and

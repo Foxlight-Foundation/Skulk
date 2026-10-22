@@ -189,3 +189,48 @@ def test_full_uncertain_budget_still_allows_explicit_verification_and_resolution
     replay = request.model_copy(update={"operation_id": "original-0"})
     assert journal.reserve(replay) == (confirmed, False)
     journal.close()
+
+
+def test_pre_delivery_request_digest_and_old_job_rows_replay_after_upgrade(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+    import json
+
+    root = tmp_path / "private"
+    journal = PreservationJournal(root)
+    request = _plan(journal)
+    job, _ = journal.reserve(request)
+    legacy = json.dumps(
+        {
+            "plan_id": request.plan_id,
+            "operation_id": "original",
+            "owner_id": "operator",
+            "accept_owner_capture": False,
+            "allow_repository_code": False,
+            "restore_deleted": False,
+            "public_participation": False,
+        },
+        separators=(",", ":"),
+    )
+    assert request.model_dump_json() == legacy
+    journal.close()
+    with sqlite3.connect(root / "journal.sqlite3") as db:
+        db.execute(
+            "UPDATE requests SET digest=?",
+            (hashlib.sha256(legacy.encode()).hexdigest(),),
+        )
+        db.execute(
+            "UPDATE settings SET value=? WHERE key=?", (legacy, "request:" + job.job_id)
+        )
+        db.execute("UPDATE jobs SET value=json_remove(value,'$.bytes_received')")
+    reopened = PreservationJournal(root)
+    try:
+        retained, created = reopened.reserve(request)
+        assert (
+            not created
+            and retained.job_id == job.job_id
+            and retained.bytes_received == 0
+        )
+    finally:
+        reopened.close()

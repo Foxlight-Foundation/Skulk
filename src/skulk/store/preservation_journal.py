@@ -56,6 +56,12 @@ def safe_json(value: object) -> str:
     )
 
 
+def _receive_resume_digest(job_id: str, request: PreservationStart) -> str:
+    return hashlib.sha256(
+        ("receive-resume\x00" + job_id + "\x00" + request.model_dump_json()).encode()
+    ).hexdigest()
+
+
 @final
 class PreservationJournal:
     """One private owner, bounded job display and permanent replay reservations."""
@@ -232,6 +238,8 @@ class PreservationJournal:
                 now = int(time.time())
                 if plan.expires_at < now:
                     raise PreservationHostError("plan_missing_or_expired")
+                if plan.resume_job_id is not None:
+                    raise PreservationHostError("receive_resume_action_required")
                 if plan.requires_owner_acceptance and not request.accept_owner_capture:
                     raise PreservationHostError("owner_capture_acceptance_required")
                 if plan.requires_code_permission and not request.allow_repository_code:
@@ -239,7 +247,7 @@ class PreservationJournal:
                 if plan.deleted_aliases and not request.restore_deleted:
                     raise PreservationHostError("removed_models_need_confirmation")
                 if (
-                    plan.kind in {"http_share", "torrent_share"}
+                    plan.kind in {"publish", "http_share", "torrent_share"}
                     and not request.public_participation
                 ):
                     raise PreservationHostError("public_participation_required")
@@ -320,6 +328,147 @@ class PreservationJournal:
                 db.execute("ROLLBACK")
                 raise
 
+    def receive_resume_reserved(
+        self, job_id: str, request: PreservationStart
+    ) -> PreservationJob | None:
+        """Observe a previously reserved exact resume action, without queueing."""
+        with self._connection() as db:
+            reservation = cast(
+                tuple[str, str] | None,
+                db.execute(
+                    "SELECT digest,job FROM requests WHERE owner=? AND operation=?",
+                    (request.owner_id, request.operation_id),
+                ).fetchone(),
+            )
+            if reservation is None:
+                return None
+            if reservation != (_receive_resume_digest(job_id, request), job_id):
+                raise PreservationHostError("request_changed")
+            row = cast(
+                tuple[str] | None,
+                db.execute("SELECT value FROM jobs WHERE id=?", (job_id,)).fetchone(),
+            )
+            if row is None:
+                raise PreservationHostError("operation_retired")
+            return PreservationJob.model_validate_json(row[0])
+
+    def resume_receive(
+        self, job_id: str, request: PreservationStart
+    ) -> tuple[PreservationJob, bool]:
+        """Reserve a fresh explicit receive attempt without refilling its allowance.
+
+        The review must bind unchanged original inputs and this same stopped job.
+        The original execution plan, operation identity and custody remain intact;
+        the new action gets its own permanent replay reservation. Repeating it
+        observes the job and never queues another attempt. This cannot restart
+        sharing, publication, recovery or a successful receive.
+        """
+        request_digest = _receive_resume_digest(job_id, request)
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                reservation = cast(
+                    tuple[str, str] | None,
+                    db.execute(
+                        "SELECT digest,job FROM requests WHERE owner=? AND operation=?",
+                        (request.owner_id, request.operation_id),
+                    ).fetchone(),
+                )
+                row = cast(
+                    tuple[str] | None,
+                    db.execute(
+                        "SELECT value FROM jobs WHERE id=?", (job_id,)
+                    ).fetchone(),
+                )
+                if row is None:
+                    raise PreservationHostError("job_not_found")
+                previous = PreservationJob.model_validate_json(row[0])
+                if reservation is not None:
+                    if reservation != (request_digest, job_id):
+                        raise PreservationHostError("request_changed")
+                    db.execute("COMMIT")
+                    return previous, False
+                if (
+                    previous.kind != "receive"
+                    or previous.state not in {"failed", "cancelled", "interrupted"}
+                    or previous.owner_id != request.owner_id
+                ):
+                    raise PreservationHostError("stopped_owned_receive_required")
+                records: list[dict[str, JsonValue]] = []
+                for plan_id in (previous.plan_id, request.plan_id):
+                    plan_row = cast(
+                        tuple[str] | None,
+                        db.execute(
+                            "SELECT value FROM plans WHERE id=?", (plan_id,)
+                        ).fetchone(),
+                    )
+                    if plan_row is None:
+                        raise PreservationHostError("plan_missing_or_expired")
+                    records.append(cast(dict[str, JsonValue], json.loads(plan_row[0])))
+                original, reviewed = records
+                plan = PreservationPlan.model_validate_json(safe_json(reviewed["view"]))
+                original_plan = PreservationPlan.model_validate_json(
+                    safe_json(original["view"])
+                )
+                payload = cast(dict[str, JsonValue], reviewed["payload"])
+                now = int(time.time())
+                if plan.expires_at < now:
+                    raise PreservationHostError("plan_missing_or_expired")
+                if (
+                    plan.kind != "receive"
+                    or plan.resume_job_id != job_id
+                    or original_plan.kind != "receive"
+                    or plan.manifest_id != original_plan.manifest_id
+                    or payload.get("resume_job_id") != job_id
+                    or safe_json(
+                        {
+                            key: value
+                            for key, value in payload.items()
+                            if key != "resume_job_id"
+                        }
+                    )
+                    != safe_json(original["payload"])
+                ):
+                    raise PreservationHostError("receive_resume_inputs_changed")
+                if not request.accept_owner_capture:
+                    raise PreservationHostError("owner_capture_acceptance_required")
+                count = cast(
+                    tuple[int], db.execute("SELECT count(*) FROM requests").fetchone()
+                )[0]
+                pending = cast(
+                    tuple[int],
+                    db.execute(
+                        "SELECT count(*) FROM jobs WHERE state IN ('queued','running','cancelling')"
+                    ).fetchone(),
+                )[0]
+                if count >= 65536:
+                    raise PreservationHostError("reservation_capacity_reached")
+                if pending >= 32:
+                    raise PreservationHostError("job_queue_full")
+                job = previous.model_copy(
+                    update={
+                        "state": "queued",
+                        "stage": "queued",
+                        "updated_at": now,
+                        "finished_at": None,
+                        "error_code": None,
+                        "result": None,
+                    }
+                )
+                db.execute(
+                    "INSERT INTO requests VALUES (?,?,?,?)",
+                    (request.owner_id, request.operation_id, request_digest, job_id),
+                )
+                db.execute(
+                    "UPDATE jobs SET updated=?,state=?,value=? WHERE id=?",
+                    (now, job.state, job.model_dump_json(), job_id),
+                )
+                db.execute("COMMIT")
+                return job, True
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
     def job(self, job_id: str) -> PreservationJob:
         """Read actual durable status; a read never queues or replays work."""
         with self._connection() as db:
@@ -383,6 +532,7 @@ class PreservationJournal:
                 raise PreservationHostError("cancellation_already_requested")
             if (
                 job.attempts < previous.attempts
+                or job.bytes_received < previous.bytes_received
                 or job.bytes_copied < previous.bytes_copied
                 or job.bytes_hashed < previous.bytes_hashed
             ):
