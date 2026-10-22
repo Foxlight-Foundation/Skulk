@@ -2123,6 +2123,17 @@ explicit reviewed participation, stop on Core loss/restart, and never auto-repla
 See both architecture documents and the API guide for limits and artifact routes.
 
 
+
+Stopped public-import and sharing jobs expose an explicit temporary-work inspection
+and cleanup path (`preservation_work.py`). The host excludes queued tasks and
+owned processes, pins private directory descriptors and checks durable device/inode
+custody before bounded logical-size inspection. Removal quarantines the exact
+directory before symlink-safe deletion and remains retryable after a crash.
+Legacy work needs its matching host-authored request. Cleanup drains despite
+caller cancellation; history retirement retains jobs until their work is gone.
+It retains all archives, installed models, signing keys,
+kits and torrent artifacts; it never replays participation.
+
 ### Comfy LTX detailing
 
 LTX-2.5 Comfy DFR uses the selected pixel-spatial IC-LoRA with generated

@@ -244,14 +244,25 @@ class PreservationJournal:
                 ):
                     raise PreservationHostError("public_participation_required")
                 # Retire display history, never its permanent request reservation.
-                # Uncertain outcomes without a confirmed copy stay inspectable.
+                # Uncertain outcomes and stopped work stay inspectable. Presence
+                # pins even legacy or unsafe work: cleanup authenticates custody
+                # separately, and history retirement must never strand its handle.
                 retire = "SELECT id FROM jobs WHERE state IN ('succeeded','failed','cancelled') ORDER BY updated DESC,id LIMIT -1 OFFSET 256"
-                db.execute(
-                    "DELETE FROM settings WHERE key IN (SELECT 'request:' || id FROM ("
-                    + retire
-                    + "))"
-                )
-                db.execute("DELETE FROM jobs WHERE id IN (" + retire + ")")
+                candidates = cast(list[tuple[str]], db.execute(retire).fetchall())
+                for (retired_id,) in candidates:
+                    if any(
+                        path.exists() or path.is_symlink()
+                        for path in (
+                            self.root / "work" / retired_id,
+                            self.root / "work-trash" / retired_id,
+                        )
+                    ):
+                        continue
+                    db.execute(
+                        "DELETE FROM settings WHERE key IN (?,?)",
+                        ("request:" + retired_id, "temporary-work:" + retired_id),
+                    )
+                    db.execute("DELETE FROM jobs WHERE id=?", (retired_id,))
                 uncertain = cast(
                     tuple[int],
                     db.execute(

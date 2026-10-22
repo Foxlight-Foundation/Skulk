@@ -28,6 +28,7 @@ _BODYLESS_MUTATIONS = {
     ("POST", "/preservation/setup/device"),
     ("POST", "/preservation/jobs/{job_id}/cancel"),
     ("POST", "/preservation/jobs/{job_id}/reclaim"),
+    ("POST", "/preservation/jobs/{job_id}/reclaim-work"),
     ("POST", "/models/remote-code-approvals/{card_id}"),
     ("POST", "/v1/plugins/managed/service/setup"),
     ("POST", "/v1/videos/{video_id}/cancel"),
