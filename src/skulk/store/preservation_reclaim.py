@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import cast
 
 from foxlight_model_preservation.models import MAX_METADATA_BYTES, TrustProfile
-from foxlight_model_preservation.signing import verify_manifest
 from pydantic import JsonValue, TypeAdapter
 
 from skulk.store.model_store import ModelStore, StoreModelEntry, StoreRegistryIndex
@@ -21,6 +20,7 @@ from skulk.store.preservation_journal import (
     safe_json,
     secure_directory,
 )
+from skulk.store.preservation_pmf import read_recovered_capture
 from skulk.store.preservation_worker import WorkerRequest
 
 
@@ -145,11 +145,7 @@ def reclaim_recovery_files(
             if trash_exists:
                 raise PreservationHostError("unknown_recovery_temporary_files")
             if kind == "generation":
-                verify_manifest(
-                    _metadata(source / "preservation" / "envelope.json"),
-                    trust,
-                    manifest_id,
-                )
+                read_recovered_capture(source / "preservation", manifest_id, trust)
             else:
                 request = WorkerRequest.model_validate_json(
                     _metadata(source / "request.json")

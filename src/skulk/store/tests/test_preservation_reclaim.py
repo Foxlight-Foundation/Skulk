@@ -6,7 +6,7 @@ import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import httpx
 import pytest
@@ -35,9 +35,9 @@ class InterruptedRecovery:
     request_bytes: bytes
 
 
-@pytest.fixture
+@pytest.fixture(params=[False, True])
 async def interrupted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> AsyncIterator[InterruptedRecovery]:
     from skulk.shared.models import model_cards
 
@@ -53,7 +53,10 @@ async def interrupted(
     original.mkdir()
     installed = make_preservation_installation(original, "assistant")
     manifest = preserve_installed(
-        installed.primary, installed.archive, (load_key(installed.key, None),)
+        installed.primary,
+        installed.archive,
+        (load_key(installed.key, None),),
+        portable=cast(bool, request.param),
     )
     kit = tmp_path / "saved.foxkit"
     export_kit(installed.archive, manifest, installed.trust, kit)
