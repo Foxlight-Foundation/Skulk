@@ -17,8 +17,9 @@ from skulk.store.tests.test_preservation_export import make_preservation_install
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("parent_lost", [False, True])
+@pytest.mark.parametrize("portable", [False, True])
 async def test_pinned_archive_and_no_publication_without_durable_ack(
-    tmp_path: Path, parent_lost: bool
+    tmp_path: Path, parent_lost: bool, portable: bool
 ) -> None:
     installed = make_preservation_installation(tmp_path, "assistant")
     descriptor = os.open(
@@ -32,6 +33,7 @@ async def test_pinned_archive_and_no_publication_without_durable_ack(
     info = os.fstat(descriptor)
     request = WorkerRequest(
         kind="preserve",
+        archive_format="pmf-v0.1" if portable else "preservation-v1",
         archive_descriptor=descriptor,
         archive_device=info.st_dev,
         archive_inode=info.st_ino,
@@ -45,7 +47,9 @@ async def test_pinned_archive_and_no_publication_without_durable_ack(
         trust=installed.trust,
     )
     request_path = tmp_path / "request.json"
-    request_path.write_text(request.model_dump_json())
+    request_path.write_text(
+        request.model_dump_json(exclude=set() if portable else {"archive_format"})
+    )
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",

@@ -353,3 +353,46 @@ is not endpoint authentication or encryption. Receiving from a direct mirror
 reveals the connecting address and requested objects to that supplier. The
 standalone receiver is not an anonymity client. Receiving/recovery never enables
 public serving, discovery or automatic sharing.
+
+## Portable Model Format in Library
+
+New Library/Guided Preserve jobs create draft PMF 0.1 archives automatically.
+Check, Save recovery kit and Restore detect the signed format; there is no
+format picker or manual converter step. Existing v1 copies and kits still work.
+PMF kits use explicit v2 framing and require an updated reader. The ordinary
+local export API retains its legacy default; `preserve_installed(portable=True)`
+uses PMF. The standalone `model-preserve` tools can inspect/import/export these
+kits, verify PMF and restore model files and opaque documents without Skulk.
+
+Native PMF captures retain every original card property and signed source
+record, including unknown descriptive metadata. Restore checks all actual
+weights, required companions and document bytes. Skulk then independently
+validates its supported runtime mapping, packaged registry root/proof and
+repository-code permission. Capture/conversion signatures confer no registry
+authority. Unknown required format features or unsupported runtime profiles
+refuse admission without discarding the archive; use a compatible adapter or
+standalone file restoration.
+
+Core's automatic adapter currently requires the lossless preservation profile
+and verifies original capture signatures with the same explicitly enrolled owner
+trust as PMF. A converter signed by another key does not replace that source
+trust. Such conversions can be exported using the standalone tools with
+independently supplied original trust before using the legacy recovery path.
+Original provenance is rechecked at the final store commit boundary and retained
+for subsequent preservation. No old receiver's local permissions become grants.
+
+Public publication remains a separately reviewed v1 publication with distinct
+publisher custody, exact member terms and private-evidence sanitization. A PMF
+private copy uses a verified temporary original-format selection for this step;
+allow additional private staging space approximately equal to the source closure.
+Public invitations, mirror and BitTorrent contracts retain their existing format.
+Direct public PMF mirror-kit import requires a future explicit transport adapter.
+
+Public publication reviews combined conversion/output space on the Core work
+filesystem and rechecks both stages before copying, while retaining the separate
+destination-space check. Frozen resource collection includes the exact adapter
+source used by conversion receipts. Checking an uncertain interrupted capture
+uses its recorded format even if no completion envelope was published; a failed
+probe does not silently recapture or declare success. Unused-recovery cleanup
+authenticates PMF and original source evidence before deleting an unindexed
+known generation, with the same custody and index-reference safeguards as v1.

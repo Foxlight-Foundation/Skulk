@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+from foxlight_model_preservation.archives import verify_archive
 from foxlight_model_preservation.invitations import Invitation
 from foxlight_model_preservation.kits import export_kit, import_kit, inspect_kit
 from foxlight_model_preservation.models import TrustProfile
@@ -20,7 +21,6 @@ from foxlight_model_preservation.operations import (
 )
 from foxlight_model_preservation.publication import PublicationRequest
 from foxlight_model_preservation.signing import load_key
-from foxlight_model_preservation.storage import verify_store
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from skulk.store.preservation import RecoveryCompatibilityError, recover_home
@@ -39,6 +39,7 @@ from skulk.store.preservation_live import (
     validate_existing_recovery,
     validate_prepared_home,
 )
+from skulk.store.preservation_pmf import PMFProfileUnavailableError, verify_capture
 from skulk.store.preservation_sharing import (
     import_public_bundle,
     require_public_bundle,
@@ -62,6 +63,7 @@ class WorkerRequest(BaseModel):
         "publish",
         "receive",
     ]
+    archive_format: Literal["preservation-v1", "pmf-v0.1"] = "preservation-v1"
     archive_descriptor: int
     archive_device: int
     archive_inode: int
@@ -189,9 +191,12 @@ def run_worker(request: WorkerRequest) -> int:
                 control=control,
                 snapshot_parent=request.snapshot_parent,
                 before_publish=commit_intent,
+                portable=request.archive_format == "pmf-v0.1",
             )
             # A separate final check does not reuse the consumed capture control.
-            manifest = verify_store(Path("."), manifest_id, request.trust)
+            manifest = verify_archive(
+                Path("."), manifest_id, request.trust, control=byte_control()
+            )
         elif request.kind == "publish":
             if (
                 request.manifest_id is None
@@ -223,6 +228,7 @@ def run_worker(request: WorkerRequest) -> int:
                     request.output_parent_device,
                     request.output_parent_inode,
                 ),
+                conversion_control=byte_control(),
             )
         elif request.kind == "receive":
             if (
@@ -262,6 +268,10 @@ def run_worker(request: WorkerRequest) -> int:
             info = inspect_kit(request.kit_path)
             if info.manifest_id != request.manifest_id or info.trust != request.trust:
                 raise ValueError("public kit changed")
+            from foxlight_model_preservation.models import Manifest
+
+            if not isinstance(info.manifest, Manifest):
+                raise ValueError("public PMF sharing requires a supported adapter")
             require_public_bundle(info.manifest)
             manifest_id = request.manifest_id
             manifest = import_public_bundle(
@@ -326,7 +336,7 @@ def run_worker(request: WorkerRequest) -> int:
             if request.manifest_id is None:
                 raise ValueError("selected copy required")
             manifest_id = request.manifest_id
-            manifest = verify_store(
+            manifest = verify_archive(
                 Path("."), manifest_id, request.trust, control=control
             )
         else:
@@ -352,9 +362,9 @@ def run_worker(request: WorkerRequest) -> int:
                         archive,
                         expected_manifest_id=manifest_id,
                         trust=request.trust,
-                        control=control,
+                        control=byte_control(),
                     )
-                manifest = verify_store(archive, manifest_id, request.trust)
+                manifest = verify_capture(archive, manifest_id, request.trust)
                 control.checkpoint()
                 recover_home(
                     archive,
@@ -389,6 +399,8 @@ def run_worker(request: WorkerRequest) -> int:
                 "event": "error",
                 "error_code": "insufficient_space"
                 if isinstance(error, PreservationCapacityError)
+                else "unsupported_pmf_profile"
+                if isinstance(error, PMFProfileUnavailableError)
                 else "unsupported_model_card"
                 if isinstance(error, RecoveryCompatibilityError)
                 else failure_code(error),

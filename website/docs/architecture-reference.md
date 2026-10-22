@@ -2195,3 +2195,17 @@ audio but does not append another source guide. Both stage contexts use the
 native SDR green cue. A full-canvas opening uses JPEG18/strength0.7 at base and
 uncompressed strength1 at refinement. Normal output, progress and cancellation
 lifecycles apply; startup verifies all advertised node output contracts.
+
+
+Native preservation jobs write draft PMF 0.1 via `store/preservation_pmf.py`.
+Metadata, full-byte verification and restored evidence dispatch on explicit
+signing domains; existing v1 copies/kits remain readable. The optional source
+profile retains the exact original signed capture and cards. Both source and
+PMF signatures must satisfy enrolled archive trust; registry proof and code
+consent remain independent. Live publication rechecks the retained PMF/source
+projection. Public publication explicitly converts a private PMF to its original
+v1 selection in private staging, then applies the existing terms/sanitization and
+separate publisher signature. This starts no serving. PMF kit v2 remains usable
+through standalone tools without Core; generic profiles do not imply Skulk
+runtime support. Automatic Library restore currently supports the lossless
+preservation profile signed by the enrolled source keys.

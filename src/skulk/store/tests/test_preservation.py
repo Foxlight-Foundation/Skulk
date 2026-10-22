@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -944,8 +945,9 @@ def test_future_card_properties_remain_verifiable_without_unsafe_projection(
         preservation.inspect_recovery(capture.store, identity, capture.trust)
 
 
+@pytest.mark.parametrize("portable", [False, True])
 def test_derived_runtime_view_keeps_original_signed_source_across_recapture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, portable: bool
 ) -> None:
     from foxlight_model_preservation.assurance import load_retained_card
     from foxlight_model_preservation.storage import object_path, verify_store
@@ -953,6 +955,7 @@ def test_derived_runtime_view_keeps_original_signed_source_across_recapture(
     import skulk.store.preservation_export as exporter
     import skulk.store.preservation_provenance as provenance
     from skulk.store.installed_cards import write_installed_card
+    from skulk.store.preservation_pmf import verify_capture
 
     capture = _capture(tmp_path, monkeypatch, registry=True)
     first_home = tmp_path / "first-view"
@@ -988,9 +991,12 @@ def test_derived_runtime_view_keeps_original_signed_source_across_recapture(
         archive = tmp_path / f"derived-archive-{number}"
         archive.mkdir()
         identity = exporter.preserve_installed(
-            primary, archive, (load_key(tmp_path / "owner.pem", None),)
+            primary,
+            archive,
+            (load_key(tmp_path / "owner.pem", None),),
+            portable=portable,
         )
-        manifest = verify_store(archive, identity, capture.trust)
+        manifest = verify_capture(archive, identity, capture.trust)
         root = load_retained_card(identity_json(manifest.members[0].retained_card))
         assert root.registry_proof is None
         assert (
@@ -1028,3 +1034,92 @@ def test_derived_runtime_view_keeps_original_signed_source_across_recapture(
         exporter.preserve_installed(
             primary, rejected, (load_key(tmp_path / "owner.pem", None),)
         )
+
+
+@pytest.mark.parametrize(
+    "registry,expired,code,invalid",
+    [
+        (False, False, True, False),
+        (True, False, False, False),
+        (True, True, False, False),
+        (True, False, False, True),
+    ],
+)
+def test_pmf_cannot_change_registry_or_code_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registry: bool,
+    expired: bool,
+    code: bool,
+    invalid: bool,
+) -> None:
+    from foxlight_model_preservation.pmf_preservation import import_preservation
+
+    from skulk.store.preservation_pmf import read_recovered_capture
+
+    capture = _capture(
+        tmp_path,
+        monkeypatch,
+        registry=registry,
+        expired=expired,
+        code=code,
+        invalid_proof=invalid,
+    )
+    archive = tmp_path / "pmf"
+    result = import_preservation(
+        capture.store,
+        capture.manifest_id,
+        capture.trust,
+        archive,
+        (load_key(tmp_path / "owner.pem", None),),
+    )
+    identity = result.output_identity
+    shutil.rmtree(capture.store)
+    home = tmp_path / "home"
+    if invalid:
+        with pytest.raises(PreservationError):
+            preservation.recover_home(
+                archive,
+                identity,
+                capture.trust,
+                home,
+                mode="historical",
+                accept_owner_capture=True,
+                allow_repository_code=True,
+            )
+        assert not home.exists()
+        return
+    if expired:
+        with pytest.raises(PreservationError):
+            preservation.inspect_recovery(archive, identity, capture.trust)
+    report = preservation.inspect_recovery(
+        archive, identity, capture.trust, mode="historical" if expired else "fresh"
+    )
+    assert report.publication == (
+        "registry-historical"
+        if expired
+        else "registry-fresh"
+        if registry
+        else "owner-only"
+    )
+    assert report.requires_code_permission == code
+    if code:
+        with pytest.raises(PreservationError, match="code permission"):
+            preservation.recover_home(
+                archive, identity, capture.trust, home, accept_owner_capture=True
+            )
+        assert not home.exists()
+    preservation.recover_home(
+        archive,
+        identity,
+        capture.trust,
+        home,
+        mode="historical" if expired else "fresh",
+        accept_owner_capture=report.requires_owner_acceptance,
+        allow_repository_code=code,
+    )
+    # A changed original record is refused again at the live-store boundary.
+    document = home / "preservation/documents/preservation-envelope"
+    document.write_bytes(document.read_bytes() + b" ")
+    with pytest.raises(PreservationError):
+        read_recovered_capture(home / "preservation", identity, capture.trust)

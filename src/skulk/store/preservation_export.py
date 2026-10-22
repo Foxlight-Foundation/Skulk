@@ -248,6 +248,7 @@ def preserve_installed(
     control: OperationControl | None = None,
     snapshot_parent: Path | None = None,
     before_publish: Callable[[str], None] | None = None,
+    portable: bool = False,
 ) -> str:
     """Snapshot and sign a complete private installed closure into an existing archive.
 
@@ -259,6 +260,8 @@ def preserve_installed(
     durable background job and must not run on an HTTP event loop. A host may
     supply private local snapshot storage and a durable expected-outcome callback
     that must return successfully before archive publication begins.
+    ``portable=True`` writes draft PMF with the exact original signed capture
+    and full retained card/proof documents, using the same owner custody.
     """
     sources = _sources(model_directory, artifact_roots)
     registry_source: RetainedCard | None = None
@@ -543,6 +546,12 @@ def preserve_installed(
             if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
                 raise PreservationError(
                     "archive changed during capture; reconnect the selected storage"
+                )
+            if portable:
+                from skulk.store.preservation_pmf import pack_capture
+
+                return pack_capture(
+                    manifest, source_paths, destination, keys, active, before_publish
                 )
             expected = digest(encode_record(manifest))
             if before_publish is not None:

@@ -205,3 +205,58 @@ async def test_archive_check_ignores_store_lease_and_closes_recorded_uncertainty
         assert host.journal.reserve(request) == (confirmed, False)
     finally:
         await host.close()
+
+
+@pytest.mark.parametrize("archive_format", ["preservation-v1", "pmf-v0.1"])
+async def test_uncertain_missing_envelope_can_still_be_checked(
+    tmp_path: Path, archive_format: str
+) -> None:
+    from typing import Literal, cast
+
+    installed = make_preservation_installation(tmp_path)
+    host = PreservationHost(ModelStore(installed.primary.parent), tmp_path / "private")
+    try:
+        await host.setup_device()
+        model = (await host.page()).models[0]
+        plan = await host.plan(
+            PreservationPlanRequest(
+                kind="preserve",
+                location_id="device",
+                model_id=model.model_id,
+                generation_id=model.generation_id,
+            )
+        )
+        _, payload = host.journal.plan(plan.plan_id)
+        original_plan = plan.model_copy(
+            update={
+                "plan_id": "a" * 64,
+                "archive_format": cast(
+                    Literal["preservation-v1", "pmf-v0.1"], archive_format
+                ),
+            }
+        )
+        payload["archive_format"] = archive_format
+        host.journal.add_plan(original_plan, payload)
+        original, _ = host.journal.reserve(
+            PreservationStart(plan_id=original_plan.plan_id, operation_id="uncertain")
+        )
+        host.journal.update_job(
+            original.model_copy(
+                update={"state": "interrupted", "expected_manifest_id": "b" * 64}
+            )
+        )
+        # The durable intent exists, but no signed completion envelope does.
+        check = await host.plan(
+            PreservationPlanRequest(
+                kind="check", location_id="device", copy_id=original.job_id
+            )
+        )
+        assert check.archive_format == archive_format and check.manifest_id == "b" * 64
+        job = host.start(
+            PreservationStart(plan_id=check.plan_id, operation_id="check-missing")
+        )
+        await _settled(host, job.job_id)
+        assert host.journal.job(job.job_id).state != "succeeded"
+        assert host.journal.job(original.job_id).state == "interrupted"
+    finally:
+        await host.close()

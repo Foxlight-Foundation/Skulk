@@ -652,6 +652,11 @@ async def test_preserve_companion_downloaded_through_normal_store(
     import skulk.download.download_utils as downloads
     from skulk.shared.types.worker.downloads import FileListEntry
 
+    # This synthetic transfer tests companion identity/placement, not the
+    # separately tested production 10-GiB operating-system reserve.
+    monkeypatch.setattr(
+        "skulk.store.model_store.MINIMUM_STAGING_FREE_DISK_BYTES", 1024**2
+    )
     installed = make_preservation_installation(tmp_path, "assistant")
     assert installed.companion
     record = read_installed_card(installed.companion)

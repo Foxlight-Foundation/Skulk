@@ -20,7 +20,8 @@ installed-card schema 3; legacy sidecar serialization stays unchanged. See
 `plan` is inventory only; `preserve` is a local private snapshot, not a lease on
 a live store. Processor/vLLM direct-Hub loaders require separate offline adapters.
 The `pyinstaller40` entry point in `_pyinstaller/` includes the public core's
-JSON schemas and distribution metadata in frozen builds. Keep the resource
+JSON schemas, distribution metadata and the exact PMF adapter source used by
+converter receipts in frozen builds. Keep the resource
 closure test separate from actual desktop signing and release qualification.
 
 Core-owned preservation jobs live in `store/preservation_host.py`, with private
@@ -71,6 +72,20 @@ uploads are purpose bounded; the governed private-copy SDK contract stays intact
 The host supports private Preserve/Check, public publication/receiving/sharing and
 complete kit recovery. Standalone tools remain independently usable. See the API guide
 and both architecture references for current contracts and remaining boundaries.
+
+
+Native preservation jobs write draft PMF 0.1 via `store/preservation_pmf.py`.
+Metadata, full-byte verification and restored evidence dispatch on explicit
+signing domains; existing v1 copies/kits remain readable. The optional source
+profile retains the exact original signed capture and cards. Both source and
+PMF signatures must satisfy enrolled archive trust; registry proof and code
+consent remain independent. Live publication rechecks the retained PMF/source
+projection. Public publication explicitly converts a private PMF to its original
+v1 selection in private staging, then applies the existing terms/sanitization and
+separate publisher signature. This starts no serving. PMF kit v2 remains usable
+through standalone tools without Core; generic profiles do not imply Skulk
+runtime support. Automatic Library restore currently supports the lossless
+preservation profile signed by the enrolled source keys.
 
 Skulk is a distributed AI inference system that connects multiple devices into one cluster. It runs large language models across machines using MLX as the inference backend and libp2p for peer-to-peer networking. Skulk began as a fork of exo and has substantially diverged.
 

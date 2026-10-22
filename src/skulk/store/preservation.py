@@ -31,7 +31,7 @@ from foxlight_model_preservation.models import (
 from foxlight_model_preservation.operations import OperationControl
 from foxlight_model_preservation.registry_proof import ProofMode, ProofReport
 from foxlight_model_preservation.signing import load_trust
-from foxlight_model_preservation.storage import directory, restore, verify_store
+from foxlight_model_preservation.storage import directory
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from skulk.download.download_utils import (
@@ -58,6 +58,8 @@ from skulk.store.installed_cards import (
 )
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation_closure import RecoveryMember, map_recovery_members
+from skulk.store.preservation_pmf import restore_capture as restore
+from skulk.store.preservation_pmf import verify_capture
 from skulk.utils.directory_publication import publish_directory
 
 
@@ -243,7 +245,7 @@ def inspect_recovery(
     This performs no network access or writes. Invalid registry proofs always
     fail, including when the caller intends to accept a community capture.
     """
-    manifest = verify_store(store, manifest_id, trust, control=control)
+    manifest = verify_capture(store, manifest_id, trust, control=control)
     return inspect_verified_manifest(manifest, manifest_id, mode)[0]
 
 
@@ -478,7 +480,7 @@ def _recover_home(
 
     if destination.exists() or destination.is_symlink():
         raise PreservationError("recovery destination must be a new home")
-    manifest = verify_store(store, manifest_id, trust)
+    manifest = verify_capture(store, manifest_id, trust)
     inspection, card = inspect_verified_manifest(manifest, manifest_id, mode)
     if inspection.requires_owner_acceptance and not accept_owner_capture:
         raise PreservationError(

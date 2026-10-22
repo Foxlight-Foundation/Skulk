@@ -6058,3 +6058,18 @@ Verified public copies, private archives, installed models, signing keys, recove
 kits and retained torrent metadata remain intact. Reported logical sizes are
 neither allocated storage nor a promise of reclaimed disk space. Clean stop
 continues to remove normal temporary work automatically.
+
+### Preservation archive format detection
+
+`POST /preservation/plans` includes additive `archive_format` (`pmf-v0.1` or
+`preservation-v1`) in private Preserve/Check/kit-export/Restore reviews. New
+Preserve jobs use PMF; the exact plan binds this choice and the full installed
+selection. Existing legacy plans default to v1 when deserialized. The same
+`POST /preservation/jobs` controls, owner-capture acceptance, separate code
+permission, cancellation and durable expected-outcome acknowledgement apply.
+Kit uploads and download endpoints accept/produce explicit PMF kit v2 or legacy
+kit v1 automatically. PMF source-record review reads bounded authenticated
+metadata and seeks over weights; full import/restore hashes all bytes. Registry
+assurance remains an independent proof check. Generic PMF without the supported
+runtime profile can be recovered with standalone tools, and does not authorize
+Skulk runtime admission. Public sharing still uses reviewed v1 publication.

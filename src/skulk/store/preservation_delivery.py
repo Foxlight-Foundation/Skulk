@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from foxlight_model_preservation.archives import verify_archive_manifest
 from foxlight_model_preservation.invitations import (
     Invitation,
     authenticate_invitation,
@@ -17,12 +18,22 @@ from foxlight_model_preservation.invitations import (
 )
 from foxlight_model_preservation.models import Manifest, PreservationError, TrustProfile
 from foxlight_model_preservation.operations import OperationControl, OperationError
-from foxlight_model_preservation.publication import PublicationRequest, publish_public
+from foxlight_model_preservation.pmf_models import PMFManifest
+from foxlight_model_preservation.pmf_preservation import (
+    export_preservation,
+    inspect_preservation_pmf,
+)
+from foxlight_model_preservation.publication import (
+    PublicationRequest,
+    publish_public,
+    review_publication,
+)
 from foxlight_model_preservation.signing import encode_record, verify_manifest
 from foxlight_model_preservation.storage import (
     atomic_bytes,
     directory,
     manifest_path,
+    object_path,
     read_metadata,
     unique_objects,
     verify_object,
@@ -165,6 +176,7 @@ def publish_copy(
     before_publish: Callable[[str], None],
     *,
     parent_identity: tuple[int, int],
+    conversion_control: OperationControl,
 ) -> Manifest:
     """Verify and atomically retain a separately reviewed public publication.
 
@@ -189,8 +201,52 @@ def publish_copy(
             before_publish(expected_id)
             return manifest
         staged = work / "public-copy"
+        source_store = Path(".")
+        with directory(source_store) as source_root:
+            selected = verify_archive_manifest(
+                read_metadata(source_root, manifest_path(source_id)),
+                source_trust,
+                source_id,
+            )
+            if isinstance(selected, PMFManifest):
+                document = next(
+                    (
+                        item
+                        for item in selected.documents
+                        if item.document_id == "preservation-envelope"
+                    ),
+                    None,
+                )
+                if document is None:
+                    raise PreservationError(
+                        "PMF has no supported original preservation profile"
+                    )
+                original_id, original = inspect_preservation_pmf(
+                    selected,
+                    read_metadata(source_root, object_path(document.sha256)),
+                    source_trust=source_trust,
+                )
+                public = review_publication(original, request)
+                if (
+                    shutil.disk_usage(source_parent).free
+                    < original.total_bytes + public.total_bytes + 32 * 1024 * 1024
+                    or shutil.disk_usage(parent).free
+                    < public.total_bytes + 32 * 1024 * 1024
+                ):
+                    raise PreservationHostError("insufficient_space")
+                source_store = work / "publication-source"
+                export_preservation(
+                    Path("."),
+                    source_id,
+                    source_trust,
+                    source_store,
+                    source_trust=source_trust,
+                    expected_source_manifest_id=original_id,
+                    control=conversion_control,
+                )
+                source_id = original_id
         identity = publish_public(
-            Path("."),
+            source_store,
             source_id,
             source_trust,
             request,
@@ -207,7 +263,13 @@ def publish_copy(
             )
             atomic_bytes(root, "bundle-trust.json", encode_record(publisher_trust))
         _commit_copy(
-            staged, destination, identity, control, before_publish, parent, source_parent
+            staged,
+            destination,
+            identity,
+            control,
+            before_publish,
+            parent,
+            source_parent,
         )
         return manifest
 

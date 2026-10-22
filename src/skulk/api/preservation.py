@@ -33,6 +33,7 @@ from skulk.store.preservation_contracts import (
 )
 from skulk.store.preservation_host import PreservationHost
 from skulk.store.preservation_journal import PreservationHostError
+from skulk.store.preservation_pmf import PMFProfileUnavailableError
 from skulk.store.preservation_uploads import KIT_CHUNK_BYTES
 
 HostProvider = Callable[[], Awaitable[PreservationHost]]
@@ -61,6 +62,8 @@ def create_preservation_router(
         code = (
             error.code
             if isinstance(error, PreservationHostError)
+            else "unsupported_pmf_profile"
+            if isinstance(error, PMFProfileUnavailableError)
             else "unsupported_model_card"
             if isinstance(error, RecoveryCompatibilityError)
             else "storage_unavailable"
