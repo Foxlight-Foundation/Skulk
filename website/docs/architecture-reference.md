@@ -2027,10 +2027,13 @@ Comfy timed scene prompts require an exact issued extension declaring `prompt_re
 
 ### Model preservation host jobs
 
+- `store/preservation_io.py`: two effect slots and an isolated availability pool (up to sixteen private roots plus publisher), reused bounded probes, retained setup cancellation and descriptor leases; shutdown drains actual calls before journal release.
+
 - `store/preservation_host.py`: lazy `ModelStoreServer`-owned controller around the
   existing `ModelStore`; private built-in archive enrollment, exact plans, private
   Preserve/Check and worker ownership. `ModelStore.preservation_lease()` uses the
   actual download/import/eviction fence. No new store-file-listener admin routes.
+- `store/preservation_folders.py`: explicit operator-only folder review/enrollment, pinned parent/root identity, one private leaf, public trust snapshot and retained default. Incomplete setup is unavailable to byte work; missing mounts never fall back.
 - `store/preservation_journal.py`: owner-only SQLite WAL/FULL journal, exclusive
   process owner, immutable plans and request reservations, retained copy receipts,
   bounded control pages; restart interrupts uncertain work without replay.
@@ -2039,8 +2042,10 @@ Comfy timed scene prompts require an exact issued extension declaring `prompt_re
   observations (combined on a shared device), safe bounded progress and expected
   manifest acknowledgement before signed publication. Parent EOF exits the worker.
 - `api/preservation.py`: operator-gated `/preservation/library`, `/setup/device`,
-  `/plans`, `/jobs`, `/jobs/{job_id}` and `/jobs/{job_id}/cancel`. No browser-supplied
-  filesystem/key paths; stale configured owner refuses. See API guide for methods.
+  `/plans`, `/jobs`, `/jobs/{job_id}` and `/jobs/{job_id}/cancel`. Folder setup adds
+  `/setup/folder/review`, `/setup/folder` and `/setup/default`; only folder review
+  accepts a trusted operator host path. Ordinary copy controls accept opaque
+  handles, never key paths; stale configured owner refuses. See API guide for methods.
 - This host surface supports private Preserve/Check, portable kit export and whole-closure live-store recovery. Public mirror/BitTorrent tools and native fresh-home recovery remain separate; no public capability distribution is implied.
 
 ### Library recovery kits

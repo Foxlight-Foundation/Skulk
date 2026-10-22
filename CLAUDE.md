@@ -32,6 +32,20 @@ the canonical store fence. `api/preservation.py` adds operator-gated private
 inventory, built-in archive setup, exact plans, idempotent jobs and cancellation
 on the Core API, never the unauthenticated store-file listener.
 
+Mounted preservation I/O uses `preservation_io.py`: two effect slots and a separate capped
+availability pool, 250-ms reused probes, cancellation draining and retained directory
+leases. Journal ownership is released only after actual filesystem work finishes.
+
+Explicit trusted-operator folder setup (`preservation_folders.py`) reviews one
+existing private folder or one new leaf below an already mounted parent. Consent
+binds a ten-minute review to parent/root device and inode. No recursive mount
+creation or fallback is allowed. Private signing custody stays on Core; enrolled
+folders retain only `archive-trust.json` public verification keys. Incomplete
+snapshot setup blocks byte work until explicitly repaired on the recorded root.
+The journal lists bounded private locations directly and retains a default for
+new copies; existing copies/plans/jobs keep their original location. Only these
+setup controls accept an operator path, outside cards and governed copy inputs.
+
 An already opened archive descriptor crosses into the worker, whose process-local
 cwd pins that filesystem. Private snapshot staging stays outside mounted archives
 and capability generations; capture checks snapshot and archive free space on

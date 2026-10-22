@@ -47,7 +47,7 @@ class PreservationLocation(PreservationContract):
         description="Private captures or separately published public copies."
     )
     reachable: bool = Field(
-        description="Whether the actual enrolled directory is presently available."
+        description="Whether a bounded observation confirmed the enrolled directory; false also covers a pending or busy filesystem check."
     )
     free_bytes: int | None = Field(
         default=None,
@@ -57,6 +57,57 @@ class PreservationLocation(PreservationContract):
     publisher_key_id: str = Field(
         max_length=80,
         description="Public fingerprint of this location's capture or publishing identity.",
+    )
+
+
+@final
+class FolderReviewRequest(PreservationContract):
+    """Explicit trusted-operator setup input, never a model/copy authority."""
+
+    path: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Absolute folder path on the Core host, kept only in private setup state.",
+    )
+    label: str = Field(
+        min_length=1,
+        max_length=80,
+        description="Human storage name, without credentials.",
+    )
+
+
+@final
+class FolderReview(PreservationContract):
+    """Expiring observation of one destination; review writes no archive bytes."""
+
+    review_id: Digest = Field(description="Exact private setup observation to confirm.")
+    label: str = Field(max_length=80, description="Reviewed human destination name.")
+    creates_folder: bool = Field(
+        description="Confirmation will create one private leaf beneath an existing parent."
+    )
+    free_bytes: int = Field(
+        ge=0,
+        description="Observed filesystem space, not a reservation or quota guarantee.",
+    )
+    expires_at: int = Field(ge=0, description="Review expiry in Unix seconds.")
+
+
+@final
+class FolderConfirmation(PreservationContract):
+    """Confirm only the exact reviewed storage setup, without a new path."""
+
+    review_id: Digest = Field(description="Exact reviewed destination observation.")
+    confirmed: bool = Field(
+        description="Explicit consent to private folder and local capture identity setup."
+    )
+
+
+@final
+class DefaultLocationRequest(PreservationContract):
+    """Select enrolled private storage for subsequent new-copy reviews."""
+
+    location_id: Handle = Field(
+        description="Existing private location; no path or automatic fallback."
     )
 
 
@@ -645,6 +696,11 @@ class KitUploadStatus(PreservationContract):
 @final
 class PreservationPage(PreservationContract):
     """A bounded page of private host observations."""
+
+    default_location_id: Handle | None = Field(
+        default=None,
+        description="Durable private destination for new copies, retained even when disconnected.",
+    )
 
     publishing: PreservationLocation | None = Field(
         default=None,

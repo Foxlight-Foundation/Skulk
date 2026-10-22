@@ -152,6 +152,19 @@ class PreservationJournal:
                 (key, encoded),
             )
 
+    def private_location_ids(self) -> tuple[str, ...]:
+        """List bounded private enrollments directly, without a separate index."""
+        with self._connection() as db:
+            rows = cast(
+                list[tuple[str]],
+                db.execute(
+                    "SELECT key FROM settings WHERE key LIKE 'location:%' AND COALESCE(json_extract(value, '$.purpose'), 'private')='private' ORDER BY key LIMIT 17"
+                ).fetchall(),
+            )
+        if len(rows) > 16:
+            raise PreservationHostError("storage_location_limit")
+        return tuple(row[0][9:] for row in rows)
+
     def add_plan(self, plan: PreservationPlan, payload: dict[str, JsonValue]) -> None:
         """Retain the exact reviewed summary and host-only immutable inputs."""
         value = safe_json({"view": plan.model_dump(mode="json"), "payload": payload})
