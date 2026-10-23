@@ -45,7 +45,8 @@ def worker(tmp_path: Path, mode: str) -> tuple[str, ...]:
         + (
             "print(json.dumps({'event':'succeeded'}),flush=True)\n"
             if mode == "claim"
-            else "sys.stdin.readline()\ntime.sleep(0.1)\n"
+            else "sys.stdin.readline()\npathlib.Path(sys.argv[1]).with_suffix('.stopping').touch()\n"
+            + ("time.sleep(60)\n" if mode == "linger" else "time.sleep(0.1)\n")
         )
     )
     return sys.executable, str(script)
@@ -387,3 +388,98 @@ async def test_shutdown_wins_inflight_admission_and_drains_after_caller_cancel(
         await admission
     await asyncio.wait_for(closing, 10)
     assert not host.peers.installation.runtime_directory.exists()
+
+
+async def test_admission_holds_peer_gate_through_plan_and_queued_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    import skulk.store.peer_install_host as module
+
+    host = PreservationHost(ModelStore(tmp_path / "models"), tmp_path / "core")
+    setup = host.peers.installation
+    request = await selection(host)
+    entered, release = threading.Event(), threading.Event()
+    original = module.runtime_plan
+
+    def delayed_plan():
+        entered.set()
+        assert release.wait(10)
+        return original()
+
+    monkeypatch.setattr(module, "runtime_plan", delayed_plan)
+    admission = asyncio.create_task(setup.start(request))
+    peer: asyncio.Task[bool] | None = None
+    try:
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        assert setup.gate.locked()
+        peer = asyncio.create_task(setup.gate.acquire())
+        await asyncio.sleep(0.03)
+        assert not peer.done()
+        release.set()
+        job = await admission
+        await setup.cancel(job.job_id, "library")
+        assert (await settled(host, job.job_id)).state == "cancelled"
+        assert await asyncio.wait_for(peer, 1)
+        setup.gate.release()
+        assert not setup.runtime_directory.exists()
+    finally:
+        release.set()
+        if peer is not None and not peer.done():
+            peer.cancel()
+        await host.close()
+
+
+async def test_shutdown_during_timeout_finalizer_drains_actual_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skulk.store.peer_install_host as module
+
+    host = PreservationHost(ModelStore(tmp_path / "models"), tmp_path / "core")
+    setup = host.peers.installation
+    select_worker(setup, tmp_path, "linger")
+    children = observe_children(monkeypatch)
+    monkeypatch.setattr(module, "SETUP_WORKER_SECONDS", 0.3)
+    marker = host.root / "peer-runtime-request.stopping"
+    try:
+        job = await setup.start(await selection(host))
+        async with asyncio.timeout(10):
+            while not marker.exists():
+                await asyncio.sleep(0.01)
+        assert len(children) == 1 and children[0].returncode is None
+        assert setup.gate.locked()
+        closing = asyncio.create_task(host.close())
+        await asyncio.sleep(0.05)
+        assert not closing.done()
+        await asyncio.wait_for(closing, 10)
+        assert children[0].returncode is not None
+        assert not setup.gate.locked()
+        reopened = PreservationHost(ModelStore(tmp_path / "models"), host.root)
+        try:
+            assert reopened.peers.installation.job(job.job_id, "library").state in {
+                "failed",
+                "interrupted",
+            }
+        finally:
+            await reopened.close()
+    finally:
+        for child in children:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+
+
+def test_known_worker_request_requires_exact_python_types() -> None:
+    from skulk.store.peer_install_worker import RuntimeSetupWorkerRequest
+
+    with pytest.raises(ValidationError):
+        RuntimeSetupWorkerRequest.model_validate(
+            {"runtime_directory": "/not-a-Path-object", "plan_id": "a" * 64}
+        )
+    request = RuntimeSetupWorkerRequest(runtime_directory=Path("."), plan_id="a" * 64)
+    assert (
+        RuntimeSetupWorkerRequest.model_validate_json(request.model_dump_json())
+        == request
+    )

@@ -34,6 +34,7 @@ from skulk.store.preservation_journal import (
 )
 
 _ACTIVE = {"queued", "running", "cancelling"}
+SETUP_WORKER_SECONDS = 330
 
 
 @final
@@ -59,6 +60,10 @@ class RuntimeSetupHost:
         self._admission = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._process: asyncio.subprocess.Process | None = None
+        self._owns_gate = False
+        self._stopping: tuple[asyncio.subprocess.Process, asyncio.Task[None]] | None = (
+            None
+        )
         self._closed = False
         self._closing: asyncio.Task[None] | None = None
         for record in self._history().records:
@@ -140,36 +145,51 @@ class RuntimeSetupHost:
                 record.job.state in _ACTIVE for record in history.records
             ):
                 raise PreservationHostError("peer_busy_try_again")
-            plan = await self.storage.run(runtime_plan)
-            if self._closed:
-                raise PreservationHostError("preservation_host_closed")
-            if request.plan_id != digest(encode_record(plan)):
-                raise PreservationHostError("peer_runtime_plan_changed")
-            now = int(time.time())
-            job = RuntimeSetupJob(
-                job_id=digest(
-                    (
-                        "peer-runtime\x00"
-                        + request.owner_id
-                        + "\x00"
-                        + request.operation_id
-                    ).encode()
-                ),
-                owner_id=request.owner_id,
-                state="queued",
-                created_at=now,
-                updated_at=now,
-            )
-            self._save(
-                RuntimeSetupHistory(
-                    records=(
-                        *history.records,
-                        RuntimeSetupRecord(request=request, job=job),
+            try:
+                async with asyncio.timeout(0.05):
+                    await self.gate.acquire()
+            except TimeoutError as error:
+                raise PreservationHostError("peer_busy_try_again") from error
+            self._owns_gate = True
+            try:
+                plan = await self.storage.run(runtime_plan)
+                if self._closed:
+                    raise PreservationHostError("preservation_host_closed")
+                if request.plan_id != digest(encode_record(plan)):
+                    raise PreservationHostError("peer_runtime_plan_changed")
+                now = int(time.time())
+                job = RuntimeSetupJob(
+                    job_id=digest(
+                        (
+                            "peer-runtime\x00"
+                            + request.owner_id
+                            + "\x00"
+                            + request.operation_id
+                        ).encode()
+                    ),
+                    owner_id=request.owner_id,
+                    state="queued",
+                    created_at=now,
+                    updated_at=now,
+                )
+                self._save(
+                    RuntimeSetupHistory(
+                        records=(
+                            *history.records,
+                            RuntimeSetupRecord(request=request, job=job),
+                        )
                     )
                 )
-            )
-            self._task = asyncio.create_task(self._execute(request, job.job_id))
-            return job
+                self._task = asyncio.create_task(self._execute(request, job.job_id))
+                return job
+            except BaseException:
+                self._release_gate()
+                raise
+
+    def _release_gate(self) -> None:
+        if self._owns_gate:
+            self._owns_gate = False
+            self.gate.release()
 
     async def cancel(self, job_id: str, owner_id: str) -> RuntimeSetupJob:
         """Retain stop intent and await actual child termination before a terminal receipt."""
@@ -184,8 +204,21 @@ class RuntimeSetupHost:
                 await self._stop(self._process)
         return self.job(job_id, owner_id)
 
+    async def _stop(self, process: asyncio.subprocess.Process) -> None:
+        # Keep a single actual stop owner even if shutdown cancels a finalizer,
+        # an API caller disappears, or concurrent cancellation observes it.
+        if self._stopping is None or self._stopping[0] is not process:
+            self._stopping = (process, asyncio.create_task(self._terminate(process)))
+        stopping = self._stopping[1]
+        while not stopping.done():
+            try:
+                await asyncio.shield(stopping)
+            except asyncio.CancelledError:
+                continue
+        stopping.result()
+
     @staticmethod
-    async def _stop(process: asyncio.subprocess.Process) -> None:
+    async def _terminate(process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
             return
         if process.stdin is not None:
@@ -206,8 +239,7 @@ class RuntimeSetupHost:
 
     async def _execute(self, request: RuntimeSetupRequest, job_id: str) -> None:
         try:
-            async with self.gate:
-                await self._run(request, job_id)
+            await self._run(request, job_id)
         except asyncio.CancelledError:
             current = self.job(job_id, request.owner_id)
             self._update(
@@ -219,6 +251,8 @@ class RuntimeSetupHost:
                     }
                 )
             )
+        finally:
+            self._release_gate()
 
     async def _spawn(self, path: Path) -> asyncio.subprocess.Process:
         # Shield process creation so cancellation cannot abandon a newly
@@ -269,7 +303,7 @@ class RuntimeSetupHost:
                     )
 
             await self.storage.run(write)
-            async with asyncio.timeout(330):
+            async with asyncio.timeout(SETUP_WORKER_SECONDS):
                 process = await self._spawn(path)
                 self._process = process
                 if (
@@ -368,3 +402,4 @@ class RuntimeSetupHost:
                             }
                         )
                     )
+            self._release_gate()

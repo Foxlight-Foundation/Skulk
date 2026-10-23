@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 class RuntimeSetupWorkerRequest(BaseModel):
     """Protected parent-authored paths; the HTTP API accepts neither paths nor URLs."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     worker_family: Literal["preservation-peer-install"] = "preservation-peer-install"
     runtime_directory: Path = Field(
         description="Parent-selected private software storage."
