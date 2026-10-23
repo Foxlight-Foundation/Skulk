@@ -211,6 +211,8 @@ class DiscoveryHost:
                         self.cache, encode_record(peer), view.bootstrap_id
                     )
                 else:
+                    if self._transport(view.source_id) == "peer":
+                        raise PreservationHostError("source_transport_switch_unavailable")
                     status = follow_source(
                         self.cache,
                         encode_record(bootstrap),

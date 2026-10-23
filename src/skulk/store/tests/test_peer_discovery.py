@@ -49,6 +49,7 @@ from skulk.store.discovery_contracts import (
     DiscoveryQuery,
     DiscoveryRequest,
     DiscoveryResults,
+    SourceConfirmation,
     SourceReview,
 )
 from skulk.store.model_store import ModelStore
@@ -886,3 +887,64 @@ async def test_active_receive_cancel_then_resume_with_replacement_contacts(
             await receiver.close()
     finally:
         await producer.close()
+
+
+@pytest.mark.asyncio
+async def test_peer_unfollow_then_http_reenrollment_refuses_before_mutation(
+    tmp_path: Path,
+) -> None:
+    """No false HTTP enrollment or verifier-floor loss for a retained peer authority."""
+    from skulk.store.tests.test_preservation_sharing import public_kit
+
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    _, identity, trust = public_kit(source_path)
+    initial = source_tree(
+        tmp_path / "metadata", identity, trust, "https://mirror.invalid/"
+    )
+    bootstrap = SourceBootstrap(
+        name="Fixture source",
+        root=base64.b64encode(initial).decode(),
+        endpoints=("https://source.invalid/",),
+    )
+    peer = PeerSource(
+        source=bootstrap,
+        ipns="k51qzi5uqu5dl0ppxz7s1b5ou99zdf5ridzo2lvjti880d6t0tqyamyhwglmxf",
+    )
+    host = PreservationHost(ModelStore(tmp_path / "models"), tmp_path / "core")
+
+    def source_upload(content: bytes) -> str:
+        status = host.uploads.create(len(content), "source")
+        upload_id = str(status["upload_id"])
+        host.uploads.append(upload_id, 0, content)
+        return upload_id
+
+    try:
+        reviewed = await host.discovery.review(source_upload(encode_record(peer)))
+        followed = await host.discovery.follow(
+            SourceConfirmation(review_id=reviewed.review_id, confirmed=True)
+        )
+        await host.discovery.remove(followed.source_id)
+        cache = host.root / "discovery-cache"
+        before = {
+            str(path.relative_to(cache)): path.read_bytes()
+            for path in cache.rglob("*")
+            if path.is_file()
+        }
+        http = await host.discovery.review(source_upload(encode_record(bootstrap)))
+        with pytest.raises(
+            PreservationHostError, match="source_transport_switch_unavailable"
+        ):
+            await host.discovery.follow(
+                SourceConfirmation(review_id=http.review_id, confirmed=True)
+            )
+        after = {
+            str(path.relative_to(cache)): path.read_bytes()
+            for path in cache.rglob("*")
+            if path.is_file()
+        }
+        assert after == before
+        assert not (await host.discovery.page("library", 0)).sources[0].enabled
+        assert not (host.root / "peer-cache").exists()
+    finally:
+        await host.close()

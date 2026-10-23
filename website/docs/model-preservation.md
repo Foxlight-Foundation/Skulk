@@ -479,3 +479,8 @@ This adapter transfers public preservation v1 archives. PMF local archives/kits
 remain supported by existing Preserve/Restore; direct PMF peer transport is a
 separate adapter. Stock local mesh tests do not establish independent custody,
 Internet/NAT reachability or censorship resistance.
+
+A retained peer source cannot currently be re-enrolled as an HTTP source with
+that same initial TUF root, including after Unfollow. Core refuses before
+changing enrollment or verifier floors. Keep its reviewed peer source file;
+transport migration under the same authority needs a separate supported path.
