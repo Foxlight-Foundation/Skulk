@@ -21,6 +21,7 @@ JobKind = Literal[
     "torrent_export",
     "http_share",
     "torrent_share",
+    "peer_share",
     "mirror_import",
     "receive",
 ]
@@ -31,7 +32,9 @@ JobState = Literal[
 
 def omit_peer_default(value: object) -> bool:
     """Keep additive peer defaults out of HTTP v1 responses and replay digests."""
-    return value is None or value is False or value == "http" or value == 0
+    return (
+        value is None or value is False or value == "http" or value == 0 or value == ()
+    )
 
 
 class PreservationContract(BaseModel):
@@ -245,6 +248,28 @@ class InvitationPreview(PreservationContract):
     mirrors: tuple[str, ...] = Field(
         max_length=16, description="Unsigned transport hints; reading contacts none."
     )
+    contacts: tuple[str, ...] = Field(
+        default=(),
+        max_length=8,
+        exclude_if=omit_peer_default,
+        description="Untrusted numeric starting hints; review locally before saving or connecting.",
+    )
+
+
+@final
+class HandoffRequest(PreservationContract):
+    """Export one public copy with HTTP hints or one owned peer sharing receipt."""
+
+    mirrors: tuple[Annotated[str, Field(max_length=2048)], ...] = Field(
+        default=(),
+        strict=False,
+        max_length=16,
+        description="Explicit HTTP(S) mirror hints, exclusive with sharing_job_id.",
+    )
+    sharing_job_id: Digest | None = Field(
+        default=None,
+        description="Exact owned peer sharing job for this copy; no caller paths or contact inventory.",
+    )
 
 
 @final
@@ -388,7 +413,7 @@ class PreservationPlanRequest(PreservationContract):
         default=1073741824,
         ge=1,
         le=2**53 - 1,
-        description="HTTP response allowance or observed BitTorrent stop threshold, which can overshoot.",
+        description="HTTP response allowance or observed torrent payload/peer wire stop threshold, with native overshoot.",
     )
 
 
@@ -408,7 +433,7 @@ class SharingPolicy(PreservationContract):
     upload_limit_bytes: int = Field(
         ge=1,
         le=2**53 - 1,
-        description="HTTP response allowance or observed torrent payload stop threshold.",
+        description="HTTP response allowance or observed torrent payload/peer wire stop threshold.",
     )
     upload_rate_bytes: int = Field(
         ge=1024,
@@ -420,11 +445,22 @@ class SharingPolicy(PreservationContract):
         max_length=2048,
         description="User-supplied mirror hint, not verified reachability.",
     )
+    peer_private: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Exact reviewed Core peer address scope, separate from HTTP permissions.",
+    )
 
 
 @final
 class SharingStatus(PreservationContract):
-    """Safe owned session observations without peer addresses or request history."""
+    """Owned aggregate observations and an export receipt, without remote peer history."""
+
+    handoff_sha256: Digest | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Hash of this job's retained one-file peer handoff, not reachability evidence.",
+    )
 
     metainfo_sha256: Digest | None = Field(
         default=None,
@@ -443,10 +479,12 @@ class SharingStatus(PreservationContract):
     charged_bytes: int = Field(
         default=0,
         ge=0,
-        description="Conservative HTTP reservation or observed torrent payload bytes.",
+        description="HTTP reservations, torrent payload or native peer wire bytes, according to accounting.",
     )
-    accounting: Literal["reserved-response", "observed-torrent-payload"] = Field(
-        description="Exact meaning of charged_bytes; neither includes network overhead."
+    accounting: Literal[
+        "reserved-response", "observed-torrent-payload", "observed-peer-wire"
+    ] = Field(
+        description="Exact meaning of charged_bytes; peer wire observations include native routing overhead and may overshoot."
     )
     connected_peers: int = Field(
         default=0,

@@ -931,3 +931,79 @@ def test_publication_rechecks_both_stages_before_pmf_conversion(
             conversion_control=OperationControl(),
         )
     assert not (work / "publication-source").exists() and not (parent / "copy").exists()
+
+
+@pytest.mark.asyncio
+async def test_one_file_http_export_is_offline_and_keeps_opaque_card_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+    from foxlight_model_preservation.handoffs import read_handoff, read_reference
+    from foxlight_model_preservation.invitations import Invitation
+
+    from skulk.store.preservation_contracts import HandoffRequest
+    from skulk.store.tests.test_discovery import application
+    from skulk.store.tests.test_preservation_sharing import (
+        empty_host,
+        import_copy,
+        public_kit,
+    )
+
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    content, identity, trust = public_kit(fixture)
+    home = tmp_path / "core"
+    home.mkdir()
+    host = empty_host(home)
+    try:
+        copy = await import_copy(host, content)
+        before = host.journal.jobs()
+
+        def forbidden(*args: object, **kwargs: object) -> None:
+            raise AssertionError("metadata-only export contacted a network")
+
+        monkeypatch.setattr(socket, "getaddrinfo", forbidden)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application(host)),
+            base_url="http://localhost",
+        ) as client:
+            response = await client.post(
+                f"/preservation/public-copies/{copy.copy_id}/handoff",
+                json={"mirrors": ["https://not-contacted.invalid/models"]},
+            )
+            assert response.status_code == 200, response.text
+            handoff = read_handoff(response.content)
+            reference = read_reference(response.content)
+            assert isinstance(reference, Invitation)
+            assert not handoff.contacts and reference.manifest_id == identity
+            assert reference.manifest == verify_store(
+                fixture / "archive", identity, trust
+            )
+            card = reference.manifest.members[0].retained_card
+            assert card is not None
+            assert card["future_property"] == {
+                "nested": [1, 2, 3]
+            }
+            upload = metadata_upload(host, response.content, "invitation")
+            preview = host.inspect_invitation(upload)
+            assert preview.transport == "http" and preview.publisher_key_ids == tuple(
+                k.key_id for k in trust.keys
+            )
+            with pytest.raises(ValueError, match="independently authenticated"):
+                await host.plan(
+                    PreservationPlanRequest(
+                        kind="receive", location_id="invitation", upload_id=upload
+                    )
+                )
+            assert not (host.root / "peer-cache").exists()
+            assert host.journal.jobs() == before
+        for request in (
+            HandoffRequest(),
+            HandoffRequest(mirrors=("https://a.invalid",), sharing_job_id="a" * 64),
+        ):
+            with pytest.raises(
+                PreservationHostError, match="handoff_route_selection_required"
+            ):
+                await host.public_handoff(copy.copy_id, request)
+    finally:
+        await host.close()

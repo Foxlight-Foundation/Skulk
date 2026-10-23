@@ -5820,7 +5820,7 @@ paths or signing keys.
 | POST | `/preservation/setup/folder/review` | Trusted-operator-only `path` (absolute Core-host folder, up to 4096 characters) and `label` (1–80 characters). Review an empty owner-only folder or one missing leaf below an existing mounted parent. Returns a ten-minute `review_id`, label, `creates_folder`, observed `free_bytes` and expiry; no archive/key writes. |
 | POST | `/preservation/setup/folder` | Exact `review_id`, `confirmed: true`. Recheck parent and root device/inode; create only the reviewed private leaf, enroll it, keep capture keys on Core and write only public `archive-trust.json` to the archive. Choose it for new copies after successful setup. Repeat confirmation identifies the same enrollment. Missing/replaced parents, foreign nonempty folders and expired reviews refuse. |
 | POST | `/preservation/setup/default` | Enrolled private `location_id`. Select available storage for future new-copy reviews; existing copies/plans/jobs remain bound to their original destination. Never silently fall back when the selected storage disappears. |
-| POST | `/preservation/plans` | `kind` (`preserve`, `check`, `kit_export`, `recover`, `publish`, `receive`, `mirror_import`, `http_share` or `torrent_share`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Kit export selects `copy_id`; recovery selects that copy or a completed `upload_id` with `location_id=kit`. `historical=true` explicitly permits historical proof inspection. Recovery reviews exact members, candidate key fingerprints, original publication/file assurance and separate receiver consent requirements. Existing aliases and deletion tombstones are protected. |
+| POST | `/preservation/plans` | `kind` (`preserve`, `check`, `kit_export`, `recover`, `publish`, `receive`, `mirror_import`, `http_share`, `torrent_share` or `peer_share`), `location_id`; Preserve requires exact `model_id` + `generation_id`; Check requires `copy_id`. Plans expand required companions and expire after ten minutes. An interrupted Preserve job ID may be selected as Check's `copy_id` to verify its recorded expected outcome. Kit export selects `copy_id`; recovery selects that copy or a completed `upload_id` with `location_id=kit`. `historical=true` explicitly permits historical proof inspection. Recovery reviews exact members, candidate key fingerprints, original publication/file assurance and separate receiver consent requirements. Existing aliases and deletion tombstones are protected. |
 | GET | `/preservation/plans/{plan_id}` | Read an exact retained safe plan without refreshing expiry or executing it. |
 | POST | `/preservation/jobs` | `plan_id`, caller-retained `operation_id`, optional `owner_id` (default `operator`) and explicit consent flags. Returns 202 with a durable job immediately. Exact repeated requests return the original job; changed input refuses. |
 | GET | `/preservation/jobs/{job_id}` | Observe one exact retained job and bounded result. Does not queue, retry or reconcile byte work. |
@@ -5945,6 +5945,7 @@ parent is refused. No listener, key enrollment or runtime admission starts.
 | GET | `/preservation/copies/{copy_id}/publication` | Authenticate a kept private copy's metadata and return supported retained members, origins, sizes and terms/notice hints. No weight reads or registry connection. Known private capture bookkeeping is omitted; hints are not redistribution permission. |
 | GET | `/preservation/plans/{plan_id}/public-manifest` | Download the exact proposed unsigned public manifest through the metadata byte plane, outside SDK controls. It contains no capture bookkeeping, host/key paths or signing key. It is review metadata, not a completed publication. |
 | POST | `/preservation/public-copies/{copy_id}/invitation` | Body: `mirrors`, one to sixteen HTTP(S) bases. Export an at-most-8-MiB portable invitation with the original signed public manifest and candidate public keys. Credentials, queries, fragments and local sources refuse. No hosting/reachability test or network connection occurs. |
+| POST | `/preservation/public-copies/{copy_id}/handoff` | Body: exclusively `mirrors` (one to sixteen HTTP(S) bases) or `sharing_job_id` (this copy's exact owned `peer_share` job). Download one at-most-8-MiB `.foxhandoff` with the unchanged signed reference and bounded numeric peer contacts when applicable. Peer output is hash-checked against its worker receipt and remains downloadable after stop. No network, trust enrollment, serving, reachability assertion or deletion occurs. |
 | GET | `/preservation/kit-uploads/{upload_id}/invitation` | Inspect a completed `purpose: invitation` upload offline: exact identity, name, complete declared closure/size, candidate fingerprints/threshold and mirror hints. Reading self-signatures does not identify a publisher or grant registry/code authority. |
 | GET | `/preservation/jobs/{job_id}/invitation` | Inspect the original invitation retained with a receive job, even after the upload or mirrors disappear. Does not download, enroll keys or start sharing. |
 | POST | `/preservation/jobs/{job_id}/resume` | Body: fresh resume `plan_id`, new action `operation_id`, original `owner_id`, `accept_owner_capture: true`. Resume only this stopped receive under unchanged original inputs, private staging and cumulative allowance. Repeating the exact action observes the job. The returned job retains its original execution plan/operation identity; this is separate from starting a new job. |
@@ -6037,7 +6038,7 @@ known stopped jobs with remaining work; it does not scan their contents.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
-| GET | `/preservation/jobs/{job_id}/temporary-files` | Inspect one stopped `mirror_import`, `publish`, `receive`, `http_share` or `torrent_share` job's authenticated work. Returns `job_id`, `found`, logical regular-file `logical_bytes`, `files`, `complete` and `removed: false`. Measurement stops after two seconds, 100,000 entries or depth 64; `complete: false` means a lower bound. It follows no symlinks and writes no custody receipt. |
+| GET | `/preservation/jobs/{job_id}/temporary-files` | Inspect one stopped `mirror_import`, `publish`, `receive`, `http_share`, `torrent_share` or `peer_share` job's authenticated work. Returns `job_id`, `found`, logical regular-file `logical_bytes`, `files`, `complete` and `removed: false`. Measurement stops after two seconds, 100,000 entries or depth 64; `complete: false` means a lower bound. It follows no symlinks and writes no custody receipt. |
 | POST | `/preservation/jobs/{job_id}/reclaim-work` | Explicitly clear that drained job's authenticated temporary work; no body or caller path. Returns the counts observed before deletion and `removed: true` when removal completes. Absence is idempotent (`found: false`). |
 
 Both routes require the operator gate. Core pins private parent directories and
@@ -6191,3 +6192,48 @@ Closing a presentation client does not stop work. Cancellation/EOF/shutdown drai
 actual native effects; Core restart records interruption without network replay.
 Network addresses/content identifiers remain observable, and native routing/wire
 traffic and block-cache growth are separate from the object-byte allowance.
+
+### One-file model handoffs and finite peer sharing
+
+`kind: peer_share` selects an exact already-public `copy_id`/`location_id`.
+Review requires `public_network: true`, `allow_peer_network: true` and the exact
+`peer_setup_id` from locally confirmed numeric contacts/private-address scope.
+`listen_port` stays zero and `advertised_url` must be absent; the native worker
+chooses its listener. Duration and upload threshold use the existing finite
+sharing controls. A separate start still needs `public_participation: true`.
+No imported file, source signature or receiving consent starts a mirror.
+
+Core creates a fresh job-owned mirror repo and supervises its actual native
+process group under the shared runtime gate. Its independent peer worker
+monitors native upload usage during complete public-closure preparation. It
+cannot adopt the receiving cache or old pins. Acquisition/configuration and
+another peer session wait or refuse while that gate is held. Ordinary HTTP and
+BitTorrent jobs retain their existing independent serving slots.
+
+Job `sharing.accounting: observed-peer-wire` identifies observed native wire
+bytes, including routing overhead; this is a stop threshold with in-flight
+overshoot, not a hard quota or payload-only counter. `handoff_sha256` appears
+only after a complete handoff is written. It is an export receipt, not proof of
+reachability, independent custody or anonymity. Stop/expiry/Core loss drain
+native serving; restart never replays it. Core confirms stopped only after the
+native group drains. The source copy, exported file and native cache remain.
+Explicit stopped-job temporary-file cleanup may remove the native cache; it
+preserves the archive and exported handoff. Physical deletion remains an
+operator decision.
+
+Invitation-purpose uploads also accept `foxlight.model-preservation.handoff.v1`.
+Offline preview returns optional `contacts` as untrusted suggestions without
+saving Core settings or granting private/network/model/code access. Source-purpose
+uploads accept a wrapped peer source within their existing 256-KiB bound;
+source review returns the unchanged inner peer/source identity and optional
+contact suggestions. Following retains the original TUF authority/floors and
+starts no network. A model handoff is refused as a source and vice versa.
+Legacy HTTP/peer invitations and source files retain their prior behavior.
+
+Recipients still independently authenticate exact-copy fingerprints and approve
+network scope before receiving. All required bytes, original card fields and
+signed provenance are preserved; registry roots, repository-code permission,
+deletions/tombstones and complete companion recovery keep their existing checks.
+The portable file and standalone tools require no Skulk. Public network
+publication currently uses the supported preservation-v1 bridge; unsupported
+PMF-only profiles are refused without losing retained data.

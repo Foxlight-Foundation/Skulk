@@ -44,6 +44,7 @@ from skulk.store.preservation_sharing import (
     import_public_bundle,
     require_public_bundle,
     serve_public_http,
+    serve_public_peer,
     serve_public_torrent,
 )
 
@@ -51,7 +52,7 @@ from skulk.store.preservation_sharing import (
 class WorkerRequest(BaseModel):
     """Private host-authored input; never accepted as a browser filesystem grant."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     kind: Literal[
         "preserve",
         "check",
@@ -60,6 +61,7 @@ class WorkerRequest(BaseModel):
         "mirror_import",
         "http_share",
         "torrent_share",
+        "peer_share",
         "publish",
         "receive",
     ]
@@ -90,6 +92,8 @@ class WorkerRequest(BaseModel):
     invitation: Invitation | None = None
     peer_repository: Path | None = None
     peer_binary: str | None = None
+    peer_contacts: tuple[str, ...] = ()
+    handoff_path: Path | None = None
     receiving: ReceivingPolicy | None = None
     output_parent_device: int | None = None
     output_parent_inode: int | None = None
@@ -295,7 +299,7 @@ def run_worker(request: WorkerRequest) -> int:
                 and request.output_parent_inode is not None
                 else None,
             )
-        elif request.kind in {"http_share", "torrent_share"}:
+        elif request.kind in {"http_share", "torrent_share", "peer_share"}:
             if (
                 request.manifest_id is None
                 or request.sharing is None
@@ -320,6 +324,24 @@ def run_worker(request: WorkerRequest) -> int:
                     manifest_id,
                     request.trust,
                     request.sharing,
+                    control,
+                    sharing_observation,
+                )
+            elif request.kind == "peer_share":
+                if (
+                    request.peer_repository is None
+                    or request.peer_binary is None
+                    or request.handoff_path is None
+                ):
+                    raise ValueError("owned peer mirror and handoff output required")
+                serve_public_peer(
+                    manifest_id,
+                    request.trust,
+                    request.sharing,
+                    request.peer_repository,
+                    request.peer_binary,
+                    request.peer_contacts,
+                    request.handoff_path,
                     control,
                     sharing_observation,
                 )

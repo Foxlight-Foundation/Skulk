@@ -263,7 +263,8 @@ class PreservationJournal:
                 if plan.deleted_aliases and not request.restore_deleted:
                     raise PreservationHostError("removed_models_need_confirmation")
                 if (
-                    plan.kind in {"publish", "http_share", "torrent_share"}
+                    plan.kind
+                    in {"publish", "http_share", "torrent_share", "peer_share"}
                     and not request.public_participation
                 ):
                     raise PreservationHostError("public_participation_required")
@@ -621,7 +622,7 @@ class PreservationJournal:
             for row in rows:
                 previous = PreservationJob.model_validate_json(row[0])
                 sharing = previous.sharing
-                serving = previous.kind in {"http_share", "torrent_share"}
+                serving = previous.kind in {"http_share", "torrent_share", "peer_share"}
                 if sharing is not None:
                     sharing = sharing.model_copy(
                         update={"ready": False, "listen_port": 0, "connected_peers": 0}

@@ -29,12 +29,18 @@ class SourceReview(PreservationContract):
     review_id: Digest = Field(description="Exact private review to confirm.")
     source_id: Digest = Field(description="Stable initial-root identity.")
     bootstrap_id: Digest = Field(
-        description="Digest of the entire reviewed source file."
+        description="Original source/peer identity, unchanged inside an unsigned routing handoff."
     )
     name: str = Field(max_length=200, description="Source-supplied display name.")
     endpoints: tuple[str, ...] = Field(
         max_length=8,
         description="Reviewed HTTP(S) metadata endpoints; none have been contacted.",
+    )
+    contacts: tuple[str, ...] = Field(
+        default=(),
+        max_length=8,
+        exclude_if=omit_peer_default,
+        description="Untrusted handoff starting hints; no automatic Core configuration or network permission.",
     )
     transport: Literal["http", "peer"] = Field(
         default="http",

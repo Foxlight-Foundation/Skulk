@@ -3504,3 +3504,16 @@ bytes before readiness. Library closure retains the job; stop/EOF/shutdown drain
 acquisition, while restart records interruption without replay. Private managed
 generations require no administrator or PATH change. Software setup grants no
 peer access, public serving, source authority, model trust or code permission.
+
+`peer_share` reuses that native lifetime owner with a fresh mirror profile and a
+separate public participation grant. A separately supervised peer worker keeps
+wire monitoring active while the preservation byte worker verifies/pins the
+complete public closure and writes a portable handoff. The runtime gate stays
+held through actual native process-group drain. Parent EOF stops the native
+worker, and restart cannot replay sharing. Neither receiving caches nor old pins
+are adopted. The host records only an export hash and aggregate wire counters;
+contact hints and original signed metadata use the bounded file byte plane.
+Archives, exported files and native caches survive stop; cache cleanup is an
+explicit stopped-job maintenance action. Handoff import unwraps unchanged model
+or source references and returns contact drafts without enrolling settings,
+trust, registry authority or repository-code permission.

@@ -20,7 +20,7 @@ class PeerSetup(PreservationContract):
     )
     allow_private: bool = Field(
         default=False,
-        description="Permit LAN/private peer connections in a separate receiving profile.",
+        description="Permit LAN/private peer connections; receiving and explicitly public sharing use separate profiles.",
     )
     confirmed: bool = Field(
         description="Operator understands peers can observe Core network address and requested content identifiers."
