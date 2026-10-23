@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
+from foxlight_model_preservation.handoffs import Handoff
 from foxlight_model_preservation.invitations import Invitation
 from foxlight_model_preservation.models import Manifest, TrustProfile
 
@@ -18,6 +19,7 @@ from skulk.store.preservation_contracts import (
     FolderReview,
     FolderReviewRequest,
     Handle,
+    HandoffRequest,
     InvitationPreview,
     InvitationRequest,
     KitUploadRequest,
@@ -207,6 +209,29 @@ def create_preservation_router(
                 media_type="application/json",
                 headers={
                     "Content-Disposition": f'attachment; filename="{copy_id}.invitation.json"'
+                },
+            )
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/public-copies/{copy_id}/handoff",
+        response_model=Handoff,
+        summary="Export one portable model handoff file",
+        description="Return the original signed public-copy reference with explicit HTTP hints or the exact retained output of its owned peer sharing job. Candidate keys remain candidates; contact hints grant no trust, private-network permission, code execution or serving. Stopped peer sessions remain exportable without restarting them. No network, reachability probe or deletion occurs.",
+    )
+    async def public_handoff(
+        request: Request, copy_id: Handle, selection: HandoffRequest
+    ) -> Response:
+        owner = await host(request)
+        try:
+            return Response(
+                content=await owner.public_handoff(copy_id, selection),
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{copy_id}.foxhandoff"',
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
                 },
             )
         except (ValueError, OSError) as error:
@@ -536,6 +561,7 @@ def create_preservation_router(
         publication_source,
         public_manifest,
         public_invitation,
+        public_handoff,
         inspect_invitation,
         receive_invitation,
         resume_receive,

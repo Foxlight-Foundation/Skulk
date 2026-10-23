@@ -17,11 +17,16 @@ from pathlib import Path
 from typing import Literal, cast, final
 
 from foxlight_model_preservation.archives import verify_archive_manifest
+from foxlight_model_preservation.handoffs import (
+    Handoff,
+    read_handoff,
+    reference_contacts,
+)
 from foxlight_model_preservation.invitations import (
     invitation_from_envelope,
 )
 from foxlight_model_preservation.kits import inspect_kit
-from foxlight_model_preservation.models import Manifest, TrustProfile
+from foxlight_model_preservation.models import Manifest, PreservationError, TrustProfile
 from foxlight_model_preservation.peer_invitations import PeerInvitation
 from foxlight_model_preservation.pmf_models import PMFManifest
 from foxlight_model_preservation.publication import (
@@ -54,6 +59,7 @@ from skulk.store.preservation_contracts import (
     FolderConfirmation,
     FolderReview,
     FolderReviewRequest,
+    HandoffRequest,
     InvitationPreview,
     InvitationRequest,
     KitUploadStatus,
@@ -92,7 +98,11 @@ from skulk.store.preservation_pmf import read_capture, read_kit_capture
 from skulk.store.preservation_references import (
     accept_model_reference_keys as accept_invitation_keys,
 )
+from skulk.store.preservation_references import (
+    authenticate_model_reference,
+)
 from skulk.store.preservation_references import read_model_reference as read_invitation
+from skulk.store.preservation_sharing import check_peer_space
 from skulk.store.preservation_uploads import KitUploads
 from skulk.store.preservation_work import (
     WORK_KINDS,
@@ -571,8 +581,9 @@ class PreservationHost:
         closure and candidate fingerprints are shown without DNS, model parsing,
         private path reads, key enrollment, admission or sharing.
         """
-        preview = invitation_preview(
-            read_invitation(self._metadata_upload(upload_id, "invitation"))
+        data = self._metadata_upload(upload_id, "invitation")
+        preview = invitation_preview(read_invitation(data)).model_copy(
+            update={"contacts": reference_contacts(data)}
         )
         self._bounded_view(preview)
         return preview
@@ -608,6 +619,58 @@ class PreservationHost:
                 envelope, copy.manifest_id, location.trust, request.mirrors
             )
         )
+
+    async def public_handoff(self, copy_id: str, request: HandoffRequest) -> bytes:
+        """Export one unchanged signed copy with reviewed HTTP or owned peer hints.
+
+        Peer files are the exact bounded, hash-checked output of this copy's
+        known sharing job. Stopped shares remain exportable; reading starts no
+        network, asserts no reachability and never enrolls trust or deletes data.
+        """
+        if bool(request.mirrors) == (request.sharing_job_id is not None):
+            raise PreservationHostError("handoff_route_selection_required")
+        if request.sharing_job_id is None:
+            data = await self.public_invitation(
+                copy_id, InvitationRequest(mirrors=request.mirrors)
+            )
+            return encode_record(Handoff(reference=read_invitation(data)))
+        copy, location, _ = await self._copy_metadata(copy_id)
+        job = self.journal.job(request.sharing_job_id)
+        plan, _ = self.journal.plan(job.plan_id)
+        if (
+            copy.audience != "public"
+            or location.purpose != "public"
+            or job.kind != "peer_share"
+            or plan.copy_id != copy_id
+            or job.sharing is None
+            or job.sharing.handoff_sha256 is None
+        ):
+            raise PreservationHostError("handoff_not_ready")
+        expected = job.sharing.handoff_sha256
+        path = self.root / "handoffs" / (job.job_id + ".foxhandoff")
+
+        def read() -> bytes:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or not 0 < info.st_size <= 8 * 1024**2
+                ):
+                    raise PreservationHostError("handoff_metadata_changed")
+                data = stream.read(8 * 1024**2 + 1)
+            if digest(data) != expected:
+                raise PreservationHostError("handoff_metadata_changed")
+            reference = read_handoff(data).reference
+            if (
+                not isinstance(reference, PeerInvitation)
+                or reference.manifest_id != copy.manifest_id
+            ):
+                raise PreservationHostError("handoff_metadata_changed")
+            authenticate_model_reference(reference, location.trust)
+            return data
+
+        return await self._storage.run(read)
 
     async def public_manifest(self, plan_id: str) -> bytes:
         """Download exact unsigned publication review metadata, without weight IO.
@@ -753,7 +816,12 @@ class PreservationHost:
             return await self._publication_plan(request)
         if request.kind == "receive":
             return await self._receiving_plan(request)
-        if request.kind in {"mirror_import", "http_share", "torrent_share"}:
+        if request.kind in {
+            "mirror_import",
+            "http_share",
+            "torrent_share",
+            "peer_share",
+        }:
             return await self._sharing_plan(request)
         if request.kind not in {"preserve", "check", "kit_export", "recover"}:
             raise PreservationHostError("operation_not_available_in_this_host_version")
@@ -1350,6 +1418,28 @@ class PreservationHost:
                     or parsed.fragment
                 ):
                     raise PreservationHostError("invalid_mirror_hint")
+            peer_private = False
+            if request.kind == "peer_share":
+                try:
+                    await self._storage.run(
+                        lambda: check_peer_space(
+                            location.path, self.root, manifest.total_bytes
+                        )
+                    )
+                except PreservationError as exc:
+                    raise PreservationHostError("insufficient_space") from exc
+                if (
+                    not request.public_network
+                    or request.listen_port != 0
+                    or request.advertised_url is not None
+                ):
+                    raise PreservationHostError(
+                        "peer_sharing_network_confirmation_required"
+                    )
+                setup_id, peer_private = self._peer_receiving_setup(request)
+                payload["peer_setup_id"] = setup_id
+            elif request.allow_peer_network or request.peer_setup_id is not None:
+                raise PreservationHostError("http_torrent_cannot_grant_peer_access")
             policy = SharingPolicy(
                 public_network=request.public_network,
                 listen_port=request.listen_port,
@@ -1357,6 +1447,7 @@ class PreservationHost:
                 upload_limit_bytes=request.upload_limit_bytes,
                 upload_rate_bytes=request.upload_rate_bytes,
                 advertised_url=request.advertised_url,
+                peer_private=peer_private,
             )
         if any(member.intake.audience != "public" for member in manifest.members):
             raise PreservationHostError("public_bundle_required")
@@ -1569,7 +1660,11 @@ class PreservationHost:
 
     async def _execute(self, job_id: str) -> None:
         try:
-            serving = self.journal.job(job_id).kind in {"http_share", "torrent_share"}
+            serving = self.journal.job(job_id).kind in {
+                "http_share",
+                "torrent_share",
+                "peer_share",
+            }
             gate = self._serving if serving else self._queue
             async with gate:
                 job = self.journal.job(job_id)
@@ -1606,10 +1701,10 @@ class PreservationHost:
                 self._finish(
                     job_id,
                     "cancelled"
-                    if job.kind in {"http_share", "torrent_share"}
+                    if job.kind in {"http_share", "torrent_share", "peer_share"}
                     and job.state == "cancelling"
                     else "failed"
-                    if job.kind in {"http_share", "torrent_share"}
+                    if job.kind in {"http_share", "torrent_share", "peer_share"}
                     else "interrupted"
                     if job.expected_manifest_id
                     else "cancelled"
@@ -1690,6 +1785,8 @@ class PreservationHost:
             secure_directory(self.root / "kits")
         if plan.kind == "torrent_share":
             secure_directory(self.root / "torrents")
+        if plan.kind == "peer_share":
+            secure_directory(self.root / "handoffs")
         async with (
             self._archive(location) as descriptor,
             AsyncExitStack() as peer_lifetime,
@@ -1721,6 +1818,23 @@ class PreservationHost:
                     or self.journal.job(job_id).state == "cancelling",
                 )
                 peer_lifetime.push_async_callback(peer.close)
+            if plan.kind == "peer_share":
+                setup_id = payload.get("peer_setup_id")
+                if (
+                    not isinstance(setup_id, str)
+                    or plan.sharing is None
+                    or not submitted.public_participation
+                ):
+                    raise PreservationHostError("peer_network_confirmation_required")
+                peer = await self.peers.open_sharing(
+                    setup_id,
+                    plan.sharing.duration_seconds,
+                    plan.sharing.upload_limit_bytes,
+                    work / "peer",
+                    lambda: self._closed
+                    or self.journal.job(job_id).state == "cancelling",
+                )
+                peer_lifetime.push_async_callback(peer.close)
             request = WorkerRequest(
                 kind=cast(
                     Literal[
@@ -1731,6 +1845,7 @@ class PreservationHost:
                         "mirror_import",
                         "http_share",
                         "torrent_share",
+                        "peer_share",
                         "publish",
                         "receive",
                     ],
@@ -1784,6 +1899,14 @@ class PreservationHost:
                 receiving=plan.receiving,
                 peer_repository=peer.repository if peer else None,
                 peer_binary=peer.binary if peer else None,
+                peer_contacts=self.peers.selected()[0].bootstrap
+                if plan.kind == "peer_share"
+                else (),
+                handoff_path=(
+                    self.root / "handoffs" / (job_id + ".foxhandoff")
+                ).absolute()
+                if plan.kind == "peer_share"
+                else None,
                 output_parent_device=output_info.st_dev
                 if output_info is not None
                 else None,
@@ -1833,7 +1956,8 @@ class PreservationHost:
                     current = self.journal.job(job_id)
                     if observation.event == "sharing":
                         if (
-                            plan.kind not in {"http_share", "torrent_share"}
+                            plan.kind
+                            not in {"http_share", "torrent_share", "peer_share"}
                             or observation.sharing is None
                         ):
                             raise PreservationHostError(
@@ -1857,7 +1981,7 @@ class PreservationHost:
                             )
                         )
                     elif observation.event == "expected":
-                        if peer is not None:
+                        if peer is not None and plan.kind != "peer_share":
                             await peer.close()
                             current = self.journal.job(job_id)
                         if observation.manifest_id is None or (
@@ -1902,8 +2026,20 @@ class PreservationHost:
                         error_code = observation.error_code or "operation_failed"
                 exit_code = await process.wait()
                 if peer is not None:
+                    if plan.kind == "peer_share" and peer.failed() and exit_code == 0:
+                        exit_code = 1
+                        error_code = "peer_runtime_interrupted"
                     await peer.close()
                 current = self.journal.job(job_id)
+                if plan.kind == "peer_share" and current.sharing is not None:
+                    # Native PeerLease has drained above; only now report stopped.
+                    current = current.model_copy(
+                        update={
+                            "sharing": current.sharing.model_copy(
+                                update={"ready": False}
+                            )
+                        }
+                    )
                 if (
                     exit_code == 0
                     and result is not None
@@ -1936,6 +2072,7 @@ class PreservationHost:
                         "receive",
                         "http_share",
                         "torrent_share",
+                        "peer_share",
                     }:
                         now = int(time.time())
                         copy_id = plan.copy_id
@@ -1999,10 +2136,12 @@ class PreservationHost:
                                 update={
                                     "state": "cancelled"
                                     if current.state == "cancelling"
-                                    and plan.kind in {"http_share", "torrent_share"}
+                                    and plan.kind
+                                    in {"http_share", "torrent_share", "peer_share"}
                                     else "succeeded",
                                     "stage": "stopped"
-                                    if plan.kind in {"http_share", "torrent_share"}
+                                    if plan.kind
+                                    in {"http_share", "torrent_share", "peer_share"}
                                     else "complete",
                                     "copy_id": copy_id,
                                     "updated_at": now,
@@ -2102,10 +2241,10 @@ class PreservationHost:
                 else:
                     state = (
                         "cancelled"
-                        if plan.kind in {"http_share", "torrent_share"}
+                        if plan.kind in {"http_share", "torrent_share", "peer_share"}
                         and (current.state == "cancelling" or error_code == "cancelled")
                         else "failed"
-                        if plan.kind in {"http_share", "torrent_share"}
+                        if plan.kind in {"http_share", "torrent_share", "peer_share"}
                         else "interrupted"
                         if current.expected_manifest_id is not None
                         else "cancelled"
@@ -2131,4 +2270,5 @@ class PreservationHost:
                     or self.journal.job(job_id).state == "succeeded"
                 ):
                     request_path.unlink(missing_ok=True)
-                    shutil.rmtree(work)
+                    if plan.kind != "peer_share":
+                        shutil.rmtree(work)

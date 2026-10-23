@@ -23,6 +23,7 @@ from foxlight_model_preservation.discovery import (
     source_identity,
 )
 from foxlight_model_preservation.discovery_models import SourceBootstrap, SourceStatus
+from foxlight_model_preservation.handoffs import read_handoff
 from foxlight_model_preservation.models import MAX_METADATA_BYTES
 from foxlight_model_preservation.peer import (
     PeerSource,
@@ -141,12 +142,23 @@ class DiscoveryHost:
             if len(data) > 256 * 1024:
                 raise PreservationHostError("source_document_too_large")
             raw = strict_json(data)
+            handoff = (
+                read_handoff(data)
+                if isinstance(raw, dict)
+                and raw.get("schema_version")
+                == "foxlight.model-preservation.handoff.v1"
+                else None
+            )
             peer = (
-                inspect_peer_source(data)
+                handoff.reference
+                if handoff is not None and isinstance(handoff.reference, PeerSource)
+                else inspect_peer_source(data)
                 if isinstance(raw, dict)
                 and raw.get("schema_version") == "foxlight.peer-source.v1"
                 else None
             )
+            if handoff is not None and peer is None:
+                raise PreservationHostError("source_bootstrap_required")
             bootstrap = peer.source if peer is not None else read_source_document(data)
             if not isinstance(bootstrap, SourceBootstrap):
                 raise PreservationHostError("source_bootstrap_required")
@@ -164,6 +176,7 @@ class DiscoveryHost:
                 else bootstrap_identity(bootstrap),
                 name=bootstrap.name,
                 endpoints=() if peer else bootstrap.endpoints,
+                contacts=handoff.contacts if handoff else (),
                 transport="peer" if peer else "http",
                 ipns_name=peer.ipns if peer else None,
                 snapshot_count=len(peer.snapshots) if peer else 0,
@@ -212,7 +225,9 @@ class DiscoveryHost:
                     )
                 else:
                     if self._transport(view.source_id) == "peer":
-                        raise PreservationHostError("source_transport_switch_unavailable")
+                        raise PreservationHostError(
+                            "source_transport_switch_unavailable"
+                        )
                     status = follow_source(
                         self.cache,
                         encode_record(bootstrap),

@@ -14,17 +14,26 @@ from pydantic import BaseModel, ConfigDict, Field
 class PeerWorkerRequest(BaseModel):
     """Protected Core-authored request; no browser supplies these paths or code."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     worker_family: Literal["preservation-peer"] = "preservation-peer"
-    repository: Path = Field(description="Dedicated receive-only Core cache.")
+    repository: Path = Field(description="Dedicated receive cache or fresh job-owned mirror repo.")
     binary: str = Field(
         description="Host-selected qualified installed Kubo executable."
     )
     seconds: int = Field(ge=1, le=86400, description="Finite owned network lifetime.")
+    share_public: bool = Field(
+        default=False, description="Separate host-reviewed public mirror participation."
+    )
+    max_upload_bytes: int = Field(
+        default=1024**3,
+        ge=1,
+        le=2**53 - 1,
+        description="Observed native-wire upload stop threshold, with in-flight overshoot.",
+    )
 
 
 def run_peer_worker(request: PeerWorkerRequest) -> int:
-    """Serve only a receiving profile and stop its child on cancellation or EOF."""
+    """Own one reviewed receive/mirror profile; stop its child on cancel or EOF."""
     control = OperationControl()
 
     def commands() -> None:
@@ -40,6 +49,8 @@ def run_peer_worker(request: PeerWorkerRequest) -> int:
             request.binary,
             allow_network=True,
             seconds=request.seconds,
+            share_public=request.share_public,
+            max_upload_bytes=request.max_upload_bytes,
             control=control,
         )
         return 0

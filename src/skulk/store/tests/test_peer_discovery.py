@@ -677,8 +677,9 @@ async def test_waiting_peer_job_cancels_without_stopping_another_owner(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["receive", "mirror"])
 async def test_core_caller_loss_stops_real_peer_and_restart_never_replays(
-    tmp_path: Path, native_binary: str
+    tmp_path: Path, native_binary: str, mode: str
 ) -> None:
     """Kill the owning Core process and observe native EOF cleanup, not just asyncio."""
     with native_node(tmp_path / "router", native_binary) as (_, contact):
@@ -694,7 +695,10 @@ async def run():
     root,contact = Path(sys.argv[1]),sys.argv[2]
     host=PreservationHost(ModelStore(root/'models'),root/'state')
     state=await host.peers.configure(PeerSetup(bootstrap=(contact,),allow_private=True,confirmed=True))
-    lease=await host.peers.open(state.setup_id,60,lambda:False)
+    if sys.argv[3] == 'mirror':
+        lease=await host.peers.open_sharing(state.setup_id,60,1024**3,root/'state/shared-peer',lambda:False)
+    else:
+        lease=await host.peers.open(state.setup_id,60,lambda:False)
     print((lease.repository/'api').read_text().strip(),flush=True)
     await asyncio.sleep(120)
 asyncio.run(run())
@@ -705,6 +709,7 @@ asyncio.run(run())
             script,
             str(root),
             contact,
+            mode,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -714,7 +719,11 @@ asyncio.run(run())
             assert b"/ip4/127.0.0.1/tcp/" in address
             process.kill()
             await process.wait()
-            api = root / "state/peer-cache/private/api"
+            api = root / (
+                "state/shared-peer/api"
+                if mode == "mirror"
+                else "state/peer-cache/private/api"
+            )
             async with asyncio.timeout(12):
                 while api.exists():
                     await asyncio.sleep(0.1)
@@ -946,5 +955,345 @@ async def test_peer_unfollow_then_http_reenrollment_refuses_before_mutation(
         assert after == before
         assert not (await host.discovery.page("library", 0)).sources[0].enabled
         assert not (host.root / "peer-cache").exists()
+    finally:
+        await host.close()
+
+
+@pytest.mark.asyncio
+async def test_one_file_core_sharing_to_cold_receive_and_complete_restore(
+    tmp_path: Path, native_binary: str
+) -> None:
+    """An exported handoff outlives its original Core without granting trust/code."""
+    from foxlight_model_preservation.handoffs import read_handoff
+    from foxlight_model_preservation.peer_invitations import PeerInvitation
+
+    from skulk.store.preservation_contracts import HandoffRequest
+    from skulk.store.tests.test_preservation_sharing import ready
+
+    producer, archive, identity, trust = await public_assistant(tmp_path)
+    original = verify_store(archive, identity, trust)
+    copy = next(c for c in producer.journal.copies() if c.audience == "public")
+    (tmp_path / "recipient-models").mkdir()
+    receiver = PreservationHost(
+        ModelStore(tmp_path / "recipient-models"), tmp_path / "recipient"
+    )
+    try:
+        with (
+            native_node(tmp_path / "handoff-router", native_binary) as (_, contact),
+            native_node(tmp_path / "handoff-retainer", native_binary, (contact,)) as (
+                retainer,
+                _,
+            ),
+        ):
+            settings = await producer.peers.configure(
+                PeerSetup(bootstrap=(contact,), allow_private=True, confirmed=True)
+            )
+            with pytest.raises(
+                PreservationHostError, match="peer_network_confirmation_required"
+            ):
+                await producer.plan(
+                    PreservationPlanRequest(
+                        kind="peer_share",
+                        copy_id=copy.copy_id,
+                        location_id=copy.location_id,
+                        public_network=True,
+                        peer_setup_id=settings.setup_id,
+                    )
+                )
+            plan = await producer.plan(
+                PreservationPlanRequest(
+                    kind="peer_share",
+                    copy_id=copy.copy_id,
+                    location_id=copy.location_id,
+                    public_network=True,
+                    allow_peer_network=True,
+                    peer_setup_id=settings.setup_id,
+                    duration_seconds=120,
+                )
+            )
+            with pytest.raises(
+                PreservationHostError, match="public_participation_required"
+            ):
+                producer.start(
+                    PreservationStart(plan_id=plan.plan_id, operation_id="share")
+                )
+            sharing = producer.start(
+                PreservationStart(
+                    plan_id=plan.plan_id,
+                    operation_id="share",
+                    public_participation=True,
+                )
+            )
+            active = await ready(producer, sharing.job_id)
+            assert active.sharing and active.sharing.handoff_sha256
+            assert active.sharing.accounting == "observed-peer-wire"
+            assert (await producer.peers.status()).active
+            with pytest.raises(PreservationHostError, match="peer_busy_try_again"):
+                await producer.peers.configure(
+                    PeerSetup(bootstrap=(contact,), allow_private=True, confirmed=True)
+                )
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=application(producer)),
+                base_url="http://localhost",
+            ) as client:
+                denied = await client.post(
+                    f"/preservation/public-copies/{copy.copy_id}/handoff",
+                    json={"sharing_job_id": sharing.job_id},
+                    headers={"Origin": "https://stranger.invalid"},
+                )
+                assert denied.status_code == 403
+                response = await client.post(
+                    f"/preservation/public-copies/{copy.copy_id}/handoff",
+                    json={"sharing_job_id": sharing.job_id},
+                )
+                assert response.status_code == 200, response.text
+                assert response.headers["content-disposition"].endswith('.foxhandoff"')
+                data = response.content
+            handoff = read_handoff(data)
+            assert isinstance(handoff.reference, PeerInvitation)
+            assert handoff.reference.manifest_id == identity
+            assert handoff.reference.manifest == original
+            assert contact in handoff.contacts
+            retained = publish_peer_model(
+                archive, identity, trust, retainer, public_model=True
+            )
+            assert handoff.reference.mirrors == (retained["mirror"],)
+            await producer.cancel(sharing.job_id)
+            stopped = await settled(producer, sharing.job_id)
+            assert (
+                stopped.state == "cancelled"
+                and stopped.sharing
+                and not stopped.sharing.ready
+            )
+            assert not (await producer.peers.status()).active
+            native_cache = producer.root / "work" / sharing.job_id / "peer"
+            assert native_cache.is_dir() and not (native_cache / "api").exists()
+            assert verify_store(archive, identity, trust) == original
+            assert (
+                await producer.public_handoff(
+                    copy.copy_id, HandoffRequest(sharing_job_id=sharing.job_id)
+                )
+                == data
+            )
+            pending = await producer.temporary_work(sharing.job_id, remove=False)
+            assert pending.found and pending.logical_bytes > 0
+            cleaned = await producer.temporary_work(sharing.job_id, remove=True)
+            assert cleaned.removed and not native_cache.exists()
+            assert (
+                await producer.public_handoff(
+                    copy.copy_id, HandoffRequest(sharing_job_id=sharing.job_id)
+                )
+                == data
+            )
+            assert verify_store(archive, identity, trust) == original
+            await producer.close()
+            shutil.rmtree(tmp_path / "producer")
+            shutil.rmtree(tmp_path / "original")
+            # Only the same file and a separately chosen fingerprint enter the
+            # recipient. Contacts remain an unsaved draft until explicit setup.
+            upload = metadata_upload(receiver, data, "invitation")
+            preview = receiver.inspect_invitation(upload)
+            assert preview.contacts == handoff.contacts and preview.member_count == 2
+            assert (await receiver.peers.status()).setup_id is None
+            assert not (receiver.root / "peer-cache").exists()
+            accepted = tuple(k.key_id for k in trust.keys)
+            with pytest.raises(
+                PreservationHostError, match="peer_network_confirmation_required"
+            ):
+                await receiver.plan(
+                    PreservationPlanRequest(
+                        kind="receive",
+                        location_id="invitation",
+                        upload_id=upload,
+                        accepted_key_ids=accepted,
+                    )
+                )
+            settings = await receiver.peers.configure(
+                PeerSetup(
+                    bootstrap=preview.contacts,
+                    allow_private=True,
+                    confirmed=True,
+                )
+            )
+            receiving = await receiver.plan(
+                PreservationPlanRequest(
+                    kind="receive",
+                    location_id="invitation",
+                    upload_id=upload,
+                    accepted_key_ids=accepted,
+                    allow_peer_network=True,
+                    peer_setup_id=settings.setup_id,
+                )
+            )
+            received = await settled(
+                receiver,
+                receiver.start(
+                    PreservationStart(
+                        plan_id=receiving.plan_id,
+                        operation_id="receive-file",
+                        accept_owner_capture=True,
+                    )
+                ).job_id,
+            )
+            assert received.state == "succeeded" and received.copy_id, received
+            assert not (await receiver.peers.status()).active
+        retained_copy = receiver.journal.copy(received.copy_id)
+        location = receiver.journal.setting("location:" + retained_copy.location_id)
+        assert isinstance(location, dict) and isinstance(location["path"], str)
+        assert verify_store(Path(location["path"]), identity, trust) == original
+        recover = await receiver.plan(
+            PreservationPlanRequest(
+                kind="recover",
+                location_id=retained_copy.location_id,
+                copy_id=retained_copy.copy_id,
+                historical=True,
+            )
+        )
+        assert recover.member_count == 2 and recover.requires_code_permission
+        with pytest.raises(
+            PreservationHostError, match="repository_code_permission_required"
+        ):
+            receiver.start(
+                PreservationStart(
+                    plan_id=recover.plan_id,
+                    operation_id="recover-file",
+                    accept_owner_capture=True,
+                )
+            )
+        restored = await settled(
+            receiver,
+            receiver.start(
+                PreservationStart(
+                    plan_id=recover.plan_id,
+                    operation_id="recover-file",
+                    accept_owner_capture=True,
+                    allow_repository_code=True,
+                )
+            ).job_id,
+        )
+        assert restored.state == "succeeded", restored
+        from skulk.store.installed_cards import (
+            read_installed_card,
+            verify_installed_card,
+        )
+        from skulk.store.preservation_provenance import retained_recovery_card
+
+        for member in original.members:
+            if member.retained_card is None:
+                continue
+            path = receiver.store.get_store_path(member.origin_repository)
+            assert path is not None
+            record = read_installed_card(path)
+            assert record is not None and verify_installed_card(
+                path, record, verify_hashes=True
+            )
+            evidence = retained_recovery_card(path, record)
+            assert (
+                evidence is not None
+                and evidence.model_dump(mode="json") == member.retained_card
+            )
+    finally:
+        await producer.close()
+        await receiver.close()
+
+
+@pytest.mark.asyncio
+async def test_source_handoff_keeps_inner_pin_and_contacts_are_only_drafts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import socket
+
+    from foxlight_model_preservation.handoffs import Handoff
+    from multiformats import CID, multihash
+
+    from skulk.store.tests.test_preservation_sharing import public_kit
+
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    _, manifest, trust = public_kit(fixture)
+    initial = source_tree(
+        tmp_path / "metadata", manifest, trust, "https://offline.invalid/models"
+    )
+    source = PeerSource(
+        source=SourceBootstrap(
+            name="Community source",
+            root=base64.b64encode(initial).decode(),
+            endpoints=("https://offline.invalid/source",),
+        ),
+        ipns=str(
+            CID("base36", 1, "libp2p-key", multihash.digest(b"synthetic", "sha2-256"))
+        ),
+    )
+    contact = "/ip4/127.0.0.1/tcp/4001/p2p/" + "1" * 40
+    encoded = encode_record(Handoff(reference=source, contacts=(contact,)))
+    host = PreservationHost(ModelStore(tmp_path / "models"), tmp_path / "core")
+    try:
+
+        def forbidden(*args: object, **kwargs: object) -> None:
+            raise AssertionError("review/follow must remain offline")
+
+        monkeypatch.setattr(socket, "getaddrinfo", forbidden)
+        reservation = host.uploads.create(len(encoded), "source")
+        upload = str(reservation["upload_id"])
+        host.uploads.append(upload, 0, encoded)
+        review = await host.discovery.review(upload)
+        assert review.bootstrap_id == peer_source_identity(source)
+        assert review.contacts == (contact,) and review.transport == "peer"
+        assert host.journal.setting("peer-setup") is None
+        followed = await host.discovery.follow(
+            SourceConfirmation(review_id=review.review_id, confirmed=True)
+        )
+        assert followed.freshness == "empty"
+        assert host.journal.setting("peer-setup") is None
+        assert not (host.root / "peer-cache").exists()
+        saved = host.discovery.cache / "peer-sources" / (followed.source_id + ".json")
+        assert saved.read_bytes() == encode_record(source)
+    finally:
+        await host.close()
+
+
+@pytest.mark.asyncio
+async def test_mirror_supervisor_loss_drains_native_group_without_waiting_for_job(
+    tmp_path: Path, native_binary: str
+) -> None:
+    import signal
+    import socket
+
+    import psutil
+
+    host = PreservationHost(ModelStore(tmp_path / "models"), tmp_path / "core")
+    try:
+        with native_node(tmp_path / "router", native_binary) as (_, contact):
+            setup = await host.peers.configure(
+                PeerSetup(bootstrap=(contact,), allow_private=True, confirmed=True)
+            )
+            assert setup.setup_id is not None
+            lease = await host.peers.open_sharing(
+                setup.setup_id,
+                60,
+                1024**3,
+                host.root / "fresh-mirror",
+                lambda: False,
+            )
+            assert (lease.repository / "api").exists()
+            address = (lease.repository / "api").read_text().strip()
+            port = int(address.rsplit("/", 1)[-1])
+            children = psutil.Process(lease.process.pid).children(recursive=True)
+            assert children
+            os.kill(lease.process.pid, signal.SIGKILL)
+            async with asyncio.timeout(12):
+                while (await host.peers.status()).active:
+                    await asyncio.sleep(0.05)
+            with socket.socket() as connection:
+                connection.settimeout(0.5)
+                assert connection.connect_ex(("127.0.0.1", port)) != 0
+            for child in children:
+                assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+            assert lease.failed()
+            assert lease.repository.is_dir()
+            # A forced group kill may leave Kubo's stale API marker. The socket
+            # and actual descendants, not deletion of metadata, prove shutdown.
+            await lease.close()
+            await lease.close()
     finally:
         await host.close()

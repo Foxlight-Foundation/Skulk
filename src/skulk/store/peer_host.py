@@ -1,4 +1,4 @@
-"""One finite receive-only peer lifetime, owned by Core rather than a browser."""
+"""Finite receive or explicitly public mirror lifetimes owned by Core."""
 
 from __future__ import annotations
 
@@ -49,6 +49,32 @@ class PeerLease:
         self.owner, self.process, self.path = owner, process, path
         self.repository, self.binary = repository, binary
         self._closing: asyncio.Task[None] | None = None
+        self._failed = False
+        self._watcher = asyncio.create_task(self._watch())
+
+    def exited(self) -> bool:
+        """Observe worker exit without racing the owned group's drain/reap."""
+        if self._closing is not None:
+            return True
+        result = observe_process_exit(self.process)
+        if result is not None:
+            self._failed = result.si_status != 0
+            return True
+        return False
+
+    def failed(self) -> bool:
+        """Observe an unexpected worker exit without releasing its group identity."""
+        _ = self.exited()
+        return self._failed
+
+    async def _watch(self) -> None:
+        # A dead native supervisor cannot enforce its wire/lifetime policy.
+        # Drain its remaining group immediately, even during slow byte IO.
+        while self._closing is None:
+            if self.exited():
+                await self.close()
+                return
+            await asyncio.sleep(0.1)
 
     async def close(self) -> None:
         """Drain the actual worker/group even if the requesting job is cancelled."""
@@ -59,6 +85,10 @@ class PeerLease:
         except asyncio.CancelledError:
             await self._closing
             raise
+        finally:
+            if self._watcher is not asyncio.current_task():
+                self._watcher.cancel()
+                await asyncio.gather(self._watcher, return_exceptions=True)
 
     async def _stop(self) -> None:
         process = self.process
@@ -86,7 +116,7 @@ class PeerLease:
 
 @final
 class PeerHost:
-    """Explicit settings and receive-only native supervision under the host owner."""
+    """Explicit settings and separately consented native supervision under Core."""
 
     def __init__(
         self,
@@ -164,6 +194,40 @@ class PeerHost:
         self, expected_setup: str, seconds: int, cancelled: Callable[[], bool]
     ) -> PeerLease:
         """Start one known finite native session after exact local consent checks."""
+        return await self._open(expected_setup, seconds, cancelled)
+
+    async def open_sharing(
+        self,
+        expected_setup: str,
+        seconds: int,
+        maximum_upload: int,
+        repository: Path,
+        cancelled: Callable[[], bool],
+    ) -> PeerLease:
+        """Own a fresh public mirror under the native runtime gate until drained.
+
+        The caller supplies a host-selected fresh job directory after separate
+        public participation consent. An old cache is never adopted or replayed.
+        Its known worker monitors native upload usage even while model byte
+        preparation runs elsewhere. Closing retains the repo and source archive.
+        """
+        return await self._open(
+            expected_setup,
+            seconds,
+            cancelled,
+            mirror_repository=repository,
+            maximum_upload=maximum_upload,
+        )
+
+    async def _open(
+        self,
+        expected_setup: str,
+        seconds: int,
+        cancelled: Callable[[], bool],
+        *,
+        mirror_repository: Path | None = None,
+        maximum_upload: int = 1024**3,
+    ) -> PeerLease:
         while True:
             if self._closed or cancelled():
                 raise PreservationHostError("cancelled")
@@ -180,7 +244,7 @@ class PeerHost:
             state, binary = await self.storage.run(self._runtime)
             if state != "available" or binary is None:
                 raise PreservationHostError("peer_runtime_required")
-            repository = (
+            repository = mirror_repository or (
                 self.root
                 / "peer-cache"
                 / ("private" if setup.allow_private else "public")
@@ -189,10 +253,11 @@ class PeerHost:
 
             def prepare() -> None:
                 secure_directory(repository.parent)
-                if not repository.exists():
+                if mirror_repository is not None or not repository.exists():
                     initialize_peer(
                         repository,
                         binary,
+                        mode="mirror" if mirror_repository is not None else "receive",
                         allow_private_peers=setup.allow_private,
                         bootstrap=setup.bootstrap,
                     )
@@ -207,7 +272,11 @@ class PeerHost:
                 request = PeerWorkerRequest(
                     repository=repository.absolute(),
                     binary=binary,
-                    seconds=min(seconds + 20, 86400),
+                    seconds=seconds
+                    if mirror_repository is not None
+                    else min(seconds + 20, 86400),
+                    share_public=mirror_repository is not None,
+                    max_upload_bytes=maximum_upload,
                 )
                 with directory(self.root) as root:
                     atomic_bytes(
@@ -234,7 +303,7 @@ class PeerHost:
             while time.monotonic() < end:
                 if cancelled() or self._closed:
                     raise PreservationHostError("cancelled")
-                if observe_process_exit(process) is not None:
+                if lease.exited():
                     raise PreservationHostError("peer_runtime_unavailable")
 
                 def ready() -> bool:

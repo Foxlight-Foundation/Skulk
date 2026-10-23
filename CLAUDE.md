@@ -2283,3 +2283,12 @@ profiles never serve blocks. Source metadata still passes stock TUF; model
 references keep independent exact-copy keys, registry evidence and code consent.
 Known/frozen worker lifetimes drain actual native groups on stop/EOF/shutdown;
 restart does not replay network effects. See `website/docs/model-preservation.md`.
+
+Portable `.foxhandoff` model/source files keep original signed references and
+untrusted contact drafts. The Core `peer_share` kind uses a fresh job-owned mirror
+lease through `PeerHost`/`PeerWorkerRequest`; native upload monitoring runs
+independently of byte preparation, and the shared runtime gate stays held until
+actual group drain. Stop/restart never deletes copies or replays serving. Native
+cache cleanup is explicit. The bounded handoff response byte plane retains only
+an export hash in job controls; independent model, registry, code and network
+checks remain unchanged. See the API and architecture contracts.

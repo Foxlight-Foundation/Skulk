@@ -7,6 +7,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Model preservation
+
+- Export one portable model handoff with HTTP routes or a finite, explicitly
+  opted-in peer share. Core supervises a fresh mirror and its actual process
+  group, keeps upload monitoring active during preparation, and retains the
+  archive, handoff and native cache on stop. Cache cleanup remains explicit.
+  Peer preparation checks simultaneous staging/cache space on their actual
+  volumes and rechecks remaining native space immediately before import.
+- Review model/source handoffs offline with contact suggestions, preserving
+  original signed references, all card data, companion recovery and independent
+  model, registry, network and repository-code checks. Standalone recipients
+  need no Skulk; no public service is replayed after restart.
+
 ### Security
 
 - Updated primp, the HTTP client behind web search, from 1.2.2 to 1.3.1.

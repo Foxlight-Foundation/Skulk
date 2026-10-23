@@ -484,3 +484,43 @@ A retained peer source cannot currently be re-enrolled as an HTTP source with
 that same initial TUF root, including after Unfollow. Core refuses before
 changing enrollment or verifier floors. Keep its reviewed peer source file;
 transport migration under the same authority needs a separate supported path.
+
+## Share using one portable file
+
+For a kept **public** copy, Core can prepare a `.foxhandoff` containing its original
+signed model reference and numeric peer starting contacts. A public HTTP mirror
+can use the same wrapper with explicitly supplied mirror bases. The standalone
+[`model-preserve handoff-*` tools](https://github.com/Foxlight-Foundation/foxlight-model-preservation/blob/main/docs/handoffs.md)
+review and receive that file without Skulk or a Foxlight service. Existing
+invitations remain supported.
+
+Peer sharing is a separate, finite opt-in effect. Review the local peer setup,
+public exposure, duration and observed upload threshold, then explicitly start
+public participation for that copy. Core owns a fresh mirror repo and the actual
+native process group. Its upload monitor runs throughout model preparation.
+Receiving caches never become servers. Closing Library leaves the Core-owned
+job running; Stop and Core shutdown drain native serving, and restart does not
+replay it. Stop preserves the model, file and peer cache. Stopped-job temporary
+cleanup removes that cache only when the operator requests it, keeping the
+archive and exported file.
+
+Importing a handoff performs offline review. Its contacts are suggestions to
+review and save separately; they cannot enable private peers or networking.
+Authenticate the exact model fingerprints independently before receiving, then
+use the ordinary complete-companion Restore flow. Owner captures remain distinct
+from registry-signed provenance; code execution and removed-model recovery still
+require their separate receiver decisions. Arbitrary card data and original
+signed evidence remain intact.
+
+Peers can observe addresses and content identifiers. Contact hints do not prove
+Internet/NAT reachability or retention by another operator. Native wire/cache
+costs include overhead, and observed thresholds can overshoot; hard quotas remain
+operator controls. Peer sharing budgets both export staging on the archive volume
+and the fresh native cache on the Core work volume, combining their requirements
+when they share a device. It checks again before staging and before native import;
+free-space checks cannot reserve capacity against other writers.
+Planning checks run in Core's owned IO executor so a slow archive does not block
+unrelated API/control work.
+Controlled local conformance does not establish independent
+community custody, anonymity or censorship resistance. Generic PMF network
+profiles beyond the supported public-v1 bridge still require compatible adapters.

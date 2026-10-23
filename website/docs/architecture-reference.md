@@ -2259,3 +2259,22 @@ source following/cache interchange/search remain usable without Skulk.
 - No implicit serving, provider advertisement, HTTP fallback, network replay on
   restart, mandatory Foxlight service or anonymity guarantee. Native cache/wire
   overhead remains separate from exported object-byte accounting.
+
+### Portable handoff sharing
+
+- `peer_share`: fresh job-owned mirror profile under `PeerHost`'s existing native
+  gate; `PeerWorkerRequest` separately records public participation and finite
+  native-wire threshold. Its process group remains owned through drain.
+- `preservation_sharing.serve_public_peer`: verifies/pins a complete public closure
+  under that independently monitored lease, writes one bounded `.foxhandoff`,
+  and reports only its SHA-256 plus aggregate wire observations. The byte worker
+  does not own or certify native shutdown.
+- `/preservation/public-copies/{copy_id}/handoff`: HTTP wrapper or exact retained
+  peer-job output, hash/signature/selection checked offline. No arbitrary paths,
+  model/registry/code grants or reachability claim.
+- `preservation_references`/`DiscoveryHost`: unwrap unchanged signed references;
+  expose unsigned contacts as drafts, preserve inner source identities and TUF
+  floors, and leave local network/private scope independently selected.
+- Terminal stop follows actual native drain. Restart never replays serving.
+  Native job cache survives stop and uses explicit existing temporary cleanup;
+  source copies and handoff artifacts remain. No automatic eviction/deletion.
