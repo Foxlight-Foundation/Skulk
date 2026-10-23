@@ -46,6 +46,7 @@ from foxlight_model_preservation.storage import (
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
 from skulk.shared.constants import SKULK_CUSTOM_MODEL_CARDS_DIR
+from skulk.store.discovery_host import DiscoveryHost
 from skulk.store.installed_cards import read_installed_card
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation import inspect_verified_manifest
@@ -167,6 +168,15 @@ class PreservationHost:
         self._storage = PreservationIO()
         self.uploads = KitUploads(root / "uploads", self.journal)
         self.upload_lock = asyncio.Lock()
+        self.discovery = DiscoveryHost(
+            root,
+            self.journal,
+            self._storage,
+            self.uploads,
+            self.upload_lock,
+            self._metadata_upload,
+            preservation_worker_command,
+        )
         self.custom_cards = custom_cards or Path(str(SKULK_CUSTOM_MODEL_CARDS_DIR))
 
     def kit_path(self, job_id: str) -> Path:
@@ -525,7 +535,7 @@ class PreservationHost:
         return source
 
     def _metadata_upload(
-        self, upload_id: str, purpose: Literal["invitation", "publication"]
+        self, upload_id: str, purpose: Literal["invitation", "publication", "source"]
     ) -> bytes:
         status = self.uploads.status(upload_id)
         if not status["complete"] or status["purpose"] != purpose:
@@ -1507,6 +1517,7 @@ class PreservationHost:
     async def close(self) -> None:
         """Drain owned workers before releasing the exclusive host journal owner."""
         self._closed = True
+        await self.discovery.close()
         for job_id in tuple(self._tasks):
             await self.cancel(job_id)
         if self._tasks:

@@ -28,6 +28,8 @@ _BODYLESS_MUTATIONS = {
     ("POST", "/preservation/setup/device"),
     ("POST", "/preservation/setup/publisher"),
     ("POST", "/preservation/jobs/{job_id}/cancel"),
+    # Metadata cancellation is an operator action with no new policy/body.
+    ("POST", "/preservation/discovery/jobs/{job_id}/cancel"),
     ("POST", "/preservation/jobs/{job_id}/reclaim"),
     ("POST", "/preservation/jobs/{job_id}/reclaim-work"),
     ("POST", "/models/remote-code-approvals/{card_id}"),

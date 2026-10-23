@@ -5826,7 +5826,7 @@ paths or signing keys.
 | GET | `/preservation/jobs/{job_id}` | Observe one exact retained job and bounded result. Does not queue, retry or reconcile byte work. |
 | POST | `/preservation/jobs/{job_id}/cancel` | Persist cancellation intent, request stop, then bound the wait for the exclusively owned process. A committed verified result may win. Copies are retained. |
 | POST | `/preservation/jobs/{job_id}/reclaim` | Explicitly reclaim one stopped recovery job's known temporary files. No body or arbitrary paths. Requires the actual store lease, a readable canonical index and exact signed-manifest/worker identity. Returns `job_id`, `generation_removed`, `temporary_removed` and `indexed_generation_retained`. Indexed models and saved kits remain intact; no job or permission is replayed. Missing/corrupt indexes, links, changed identities and active jobs refuse cleanup. Interrupted cleanup can be retried. |
-| POST | `/preservation/kit-uploads` | Exact `size_bytes` and optional `purpose` (default `kit`, up to 8 TiB; `invitation` / `publication`, up to 8 MiB). Observe actual free space and at most eight retained transfers; return an opaque `upload_id` and flushed offset. No publisher trust or runtime admission. |
+| POST | `/preservation/kit-uploads` | Exact `size_bytes` and optional `purpose` (default `kit`, up to 8 TiB; `invitation` / `publication`, up to 8 MiB; `source`, up to 256 KiB). Observe actual free space and at most eight retained transfers; return an opaque `upload_id` and flushed offset. No publisher trust or runtime admission. |
 | GET | `/preservation/kit-uploads/{upload_id}` | Read the retained offset for explicit resume. Library inventory also lists bounded transfer handles so a new browser/capability can find them. |
 | PUT | `/preservation/kit-uploads/{upload_id}` | Required `offset` query, `application/octet-stream` body up to 4 MiB. Exact-offset append; identical completed-chunk replay works after response loss. All weights stay outside SDK/control JSON. |
 | DELETE | `/preservation/kit-uploads/{upload_id}` | Remove an unused transfer; queued/running/cancelling job references refuse removal. Frees ingress storage, preserving completed restored models. |
@@ -6073,3 +6073,46 @@ metadata and seeks over weights; full import/restore hashes all bytes. Registry
 assurance remains an independent proof check. Generic PMF without the supported
 runtime profile can be recovered with standalone tools, and does not authorize
 Skulk runtime admission. Public sharing still uses reviewed v1 publication.
+
+### Followed model sources and offline discovery
+
+These routes use the same trusted-operator gate as all preservation reads and
+writes. Source roots authorize discovery metadata, not registry provenance,
+model authorship, runtime support, repository code or public sharing. No source
+is pre-enrolled. Obtain a bootstrap file from a supplier you trust. Queries stay
+in POST bodies and the local cache; suppliers never receive search text or the
+installed-model inventory.
+
+| Method | Path | Parameters and behavior |
+| --- | --- | --- |
+| POST | `/preservation/discovery/reviews` | `upload_id` of a completed `purpose: source` transfer. Inspect public bootstrap/root metadata offline, return name, exact endpoints, source/bootstrap digests and a ten-minute `review_id`. Bootstrap files are capped at 256 KiB. Cache interchange and local-file sources use the standalone tools. |
+| POST | `/preservation/discovery/sources` | Exact `review_id`, `confirmed: true`, optional `allow_http` / `allow_private` (both false by default). Trust this reviewed file for discovery only and persist local metadata permissions. Following itself contacts nobody and retains any prior roots/version floors. |
+| DELETE | `/preservation/discovery/sources/{source_id}` | Disable this exact source without deleting verifier floors, evidence or model copies. Returns 204. Stop pending metadata work before enrollment changes; a busy queue refuses. |
+| GET | `/preservation/discovery` | Required `owner_id`, optional `offset` (0–1024). Up to sixteen retained source states and four metadata jobs for that client, with `next_offset`. Reads perform no refresh, probe or replay. |
+| POST | `/preservation/discovery/search` | `query` (up to 500 characters), `offset` (0–1000) and `supplier_offset` (0–16000). Four exact model identities, each with four attributed supplier statements and pagination. For more suppliers, search the exact `manifest_id` and advance `supplier_offset`. Bounded display projections retain full original signed metadata in the cache. |
+| POST | `/preservation/discovery/jobs` | `owner_id`, permanent `operation_id`, `source_id` and `kind: refresh` or `model_metadata`. Returns 202 before effects. Refresh uses enrolled source permissions. Model metadata additionally requires exact `entry_id`, `manifest_id`, `accept_source_keys: true` and separate optional model-metadata `allow_http` / `allow_private` grants. No local model-file paths are accepted. |
+| GET | `/preservation/discovery/jobs/{job_id}` | Observe the exact retained metadata job. Successful model metadata returns only an invitation `upload_id`; inspect it via the existing offline invitation route, then separately review/authorize receiving and Restore. No weights are fetched by this job. |
+| POST | `/preservation/discovery/jobs/{job_id}/cancel` | Retain stop intent and stop the owned child, with a bounded terminate/kill fallback. A completed atomic source-cache commit wins a late stop. Forced/uncertain exits retain an interrupted outcome for inspection rather than claiming no effects occurred. |
+
+Metadata jobs have their own typed records and client namespace in the existing
+private journal, separate from model-copy/SDK contracts. At most four jobs are
+pending and 1024 exact reservations are retained. Identical request replay only
+observes the original job, including after completion or restart; changing a
+reserved request refuses. Core restart marks unfinished work interrupted and
+never replays network effects. Closing Library does not cancel submitted work.
+
+The known metadata subprocess has a lifetime pipe and a 150-second parent
+deadline, followed by up to seven seconds of stop/terminate/kill escalation.
+Standalone source refresh retains its own 32 MiB body, 128-request and
+cooperative 120-second bounds. Model preparation retrieves only bounded signed
+public manifests with a separate 32 MiB metadata allowance and cooperative
+120-second deadline. Source permissions never become model-download permissions.
+Normal receiving keeps its existing reviewed object-byte/time limits.
+
+Source status distinguishes empty, fresh, retained after error, stale, imported,
+superseded-root and invalid cache evidence. Search remains available offline;
+none of these statuses grants registry assurance. Candidate keys require the
+operator's explicit selected-copy decision and never enter global trust.
+Untrusted/unsupported runtime cards still require the existing Restore checks.
+Direct public PMF network transport is not added by these controls; existing
+public v1 publication preserves complete original card and provenance data.

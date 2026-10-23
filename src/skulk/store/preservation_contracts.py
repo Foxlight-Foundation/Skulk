@@ -676,9 +676,9 @@ class KitUploadRequest(PreservationContract):
     size_bytes: int = Field(
         ge=1, le=8 * 1024**4, description="Exact whole kit file length."
     )
-    purpose: Literal["kit", "invitation", "publication"] = Field(
+    purpose: Literal["kit", "invitation", "publication", "source"] = Field(
         default="kit",
-        description="Declared ingress use; metadata purposes are limited to 8 MiB.",
+        description="Declared ingress use; invitations/publications up to 8 MiB, source bootstraps up to 256 KiB.",
     )
 
 
@@ -687,7 +687,7 @@ class KitUploadStatus(PreservationContract):
     """Durable ingress observation, not a signature or admission result."""
 
     upload_id: Handle = Field(description="Opaque host-created ingress handle.")
-    purpose: Literal["kit", "invitation", "publication"] = Field(
+    purpose: Literal["kit", "invitation", "publication", "source"] = Field(
         default="kit",
         description="Declared ingress purpose; legacy uploads remain recovery kits.",
     )
