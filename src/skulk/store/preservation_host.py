@@ -26,7 +26,7 @@ from foxlight_model_preservation.invitations import (
     invitation_from_envelope,
 )
 from foxlight_model_preservation.kits import inspect_kit
-from foxlight_model_preservation.models import Manifest, TrustProfile
+from foxlight_model_preservation.models import Manifest, PreservationError, TrustProfile
 from foxlight_model_preservation.peer_invitations import PeerInvitation
 from foxlight_model_preservation.pmf_models import PMFManifest
 from foxlight_model_preservation.publication import (
@@ -102,6 +102,7 @@ from skulk.store.preservation_references import (
     authenticate_model_reference,
 )
 from skulk.store.preservation_references import read_model_reference as read_invitation
+from skulk.store.preservation_sharing import check_peer_space
 from skulk.store.preservation_uploads import KitUploads
 from skulk.store.preservation_work import (
     WORK_KINDS,
@@ -1401,7 +1402,7 @@ class PreservationHost:
             manifest = await self._manifest(location, identity)
             destination_id = None
             if (
-                request.kind in {"torrent_share", "peer_share"}
+                request.kind == "torrent_share"
                 and shutil.disk_usage(self.root).free
                 < manifest.total_bytes + 32 * 1024 * 1024
             ):
@@ -1419,6 +1420,10 @@ class PreservationHost:
                     raise PreservationHostError("invalid_mirror_hint")
             peer_private = False
             if request.kind == "peer_share":
+                try:
+                    check_peer_space(location.path, self.root, manifest.total_bytes)
+                except PreservationError as exc:
+                    raise PreservationHostError("insufficient_space") from exc
                 if (
                     not request.public_network
                     or request.listen_port != 0

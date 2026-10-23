@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -26,6 +27,42 @@ from foxlight_model_preservation.torrent import (
 
 from skulk.store.preservation_contracts import SharingPolicy, SharingStatus
 from skulk.utils.directory_publication import publish_directory
+
+
+def check_peer_space(
+    archive: Path, repository: Path, required_bytes: int, *, staged: bool = False
+) -> None:
+    """Budget staging and native import on their actual volumes before writing.
+
+    Combine demands on a shared device. Once staging exists, recheck the remaining
+    native allocation immediately before import. Metadata/block overhead has a
+    conservative allowance; this is an admission check, not a storage quota.
+    """
+    demands: dict[int, tuple[int, int]] = {}
+    native = required_bytes + max(required_bytes // 10, 32 * 1024 * 1024)
+    for path, demand in (
+        (archive, (0 if staged else required_bytes) + 32 * 1024 * 1024),
+        (repository, native),
+    ):
+        with directory(path) as descriptor:
+            device = os.fstat(descriptor).st_dev
+            free = shutil.disk_usage(descriptor).free
+        previous, available = demands.get(device, (0, free))
+        demands[device] = previous + demand, min(available, free)
+    if any(required > free for required, free in demands.values()):
+        raise PreservationError("insufficient_space")
+
+
+class _SpaceCheckedPeerClient(PeerClient):
+    """Recheck native-cache headroom after the adapter has finished staging."""
+
+    required_bytes: int = 0
+
+    def command(self, *arguments: str, maximum: int = 65536) -> bytes:
+        """Guard the adapter's fixed import command before it reaches Kubo."""
+        if arguments and arguments[0] == "add":
+            check_peer_space(Path("."), self.repo, self.required_bytes, staged=True)
+        return super().command(*arguments, maximum=maximum)
 
 
 def require_public_bundle(manifest: Manifest) -> None:
@@ -328,13 +365,16 @@ def serve_public_peer(
     its caller supplies the already reviewed mirror lease and public copy.
     Stopping keeps the source archive, handoff and native cache for the operator.
     """
-    client = PeerClient(
+    manifest = verify_store(Path("."), manifest_id, trust)
+    check_peer_space(Path("."), repository, manifest.total_bytes)
+    client = _SpaceCheckedPeerClient(
         repository,
         binary,
         allow_network=True,
         control=control.fork(),
         seconds=policy.duration_seconds,
     )
+    client.required_bytes = manifest.total_bytes
     if (
         not policy.public_network
         or client.profile.mode != "mirror"

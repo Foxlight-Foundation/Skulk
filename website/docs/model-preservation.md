@@ -515,6 +515,10 @@ signed evidence remain intact.
 Peers can observe addresses and content identifiers. Contact hints do not prove
 Internet/NAT reachability or retention by another operator. Native wire/cache
 costs include overhead, and observed thresholds can overshoot; hard quotas remain
-operator controls. Controlled local conformance does not establish independent
+operator controls. Peer sharing budgets both export staging on the archive volume
+and the fresh native cache on the Core work volume, combining their requirements
+when they share a device. It checks again before staging and before native import;
+free-space checks cannot reserve capacity against other writers.
+Controlled local conformance does not establish independent
 community custody, anonymity or censorship resistance. Generic PMF network
 profiles beyond the supported public-v1 bridge still require compatible adapters.

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import socket
+from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import httpx
 import pytest
@@ -27,6 +29,24 @@ from skulk.store.preservation_contracts import (
 )
 from skulk.store.preservation_host import PreservationHost
 from skulk.store.preservation_journal import PreservationHostError
+from skulk.store.preservation_sharing import (
+    _SpaceCheckedPeerClient,  # pyright: ignore[reportPrivateUsage]
+    check_peer_space,
+)
+
+
+class Capacity(NamedTuple):
+    total: int
+    used: int
+    free: int
+
+
+def capacity(free: int) -> Callable[[object], Capacity]:
+    """Provide a typed disk-space probe for admission-boundary regressions."""
+    def available(_: object) -> Capacity:
+        return Capacity(free, 0, free)
+
+    return available
 
 
 def public_kit(
@@ -137,6 +157,88 @@ def empty_host(root: Path) -> PreservationHost:
     store = root / "models"
     store.mkdir()
     return PreservationHost(ModelStore(store), root / "private")
+
+
+@pytest.mark.asyncio
+async def test_peer_plan_budgets_staging_and_native_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One-copy headroom cannot admit simultaneous staging and native storage."""
+    content, _, _ = public_kit(tmp_path)
+    host = empty_host(tmp_path)
+    try:
+        copy = await import_copy(host, content)
+        monkeypatch.setattr(shutil, "disk_usage", capacity(33 * 1024 * 1024))
+        with pytest.raises(PreservationHostError, match="insufficient_space"):
+            await host.plan(
+                PreservationPlanRequest(
+                    kind="peer_share",
+                    copy_id=copy.copy_id,
+                    location_id=copy.location_id,
+                    public_network=True,
+                    allow_peer_network=True,
+                )
+            )
+        assert not (host.root / "peer-cache").exists()
+    finally:
+        await host.close()
+
+
+def test_peer_space_combines_shared_device_but_checks_separate_volumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Combine a shared device and refuse undersized independent volumes."""
+    from foxlight_model_preservation.models import PreservationError
+
+    archive, repository = tmp_path / "archive", tmp_path / "repo"
+    archive.mkdir()
+    repository.mkdir()
+    size = 100 * 1024 * 1024
+    monkeypatch.setattr(shutil, "disk_usage", capacity(size + 32 * 1024 * 1024))
+    with pytest.raises(PreservationError, match="insufficient_space"):
+        check_peer_space(archive, repository, size)
+    original = os.fstat
+    repo_inode = repository.stat().st_ino
+
+    def separate_volume(descriptor: int) -> os.stat_result:
+        info = original(descriptor)
+        fields = list(info)
+        if info.st_ino == repo_inode:
+            fields[2] += 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", separate_volume)
+    check_peer_space(archive, repository, size)
+    monkeypatch.setattr(shutil, "disk_usage", capacity(size))
+    with pytest.raises(PreservationError, match="insufficient_space"):
+        check_peer_space(archive, repository, size)
+
+
+def test_peer_import_rechecks_space_after_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Falling headroom after staging cannot reach the native add operation."""
+    from foxlight_model_preservation.models import PreservationError
+    from foxlight_model_preservation.peer_runtime import PeerClient
+
+    monkeypatch.chdir(tmp_path)
+    client = object.__new__(_SpaceCheckedPeerClient)
+    client.repo = tmp_path
+    client.required_bytes = 100 * 1024 * 1024
+    commands: list[tuple[str, ...]] = []
+
+    def command(self: PeerClient, *arguments: str, maximum: int = 65536) -> bytes:
+        commands.append(arguments)
+        return b"imported"
+
+    monkeypatch.setattr(PeerClient, "command", command)
+    monkeypatch.setattr(shutil, "disk_usage", capacity(120 * 1024 * 1024))
+    with pytest.raises(PreservationError, match="insufficient_space"):
+        client.command("add", "--recursive", "host-staged-directory")
+    assert not commands
+    monkeypatch.setattr(shutil, "disk_usage", capacity(200 * 1024 * 1024))
+    assert client.command("add", "--recursive", "host-staged-directory") == b"imported"
+    assert len(commands) == 1
 
 
 @pytest.mark.asyncio
