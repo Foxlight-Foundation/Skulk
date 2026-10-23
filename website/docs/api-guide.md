@@ -6116,3 +6116,46 @@ operator's explicit selected-copy decision and never enter global trust.
 Untrusted/unsupported runtime cards still require the existing Restore checks.
 Direct public PMF network transport is not added by these controls; existing
 public v1 publication preserves complete original card and provenance data.
+
+### Preservation peer controls
+
+These routes share the existing preservation operator/origin boundary. All
+paths are relative to the Core API base. Peer participation is optional and
+uses the separately installed qualified Kubo 0.43.1 executable on Core's PATH.
+No API request accepts a native executable or host repository path.
+
+| Method and path | Input and behavior |
+| --- | --- |
+| `GET /preservation/discovery/peer` | Local `PeerState`: runtime availability, current setup identity, operator-selected contacts/private scope and actual active-session status. No networking or replay. |
+| `POST /preservation/discovery/peer` | `PeerSetup`: `bootstrap` (1–8 unique numeric libp2p contacts), `allow_private` (default false), `confirmed` (explicit Core address/content-exposure acknowledgement). Offline settings only; refuses during an owned session. |
+
+Source-file reviews also accept `foxlight.peer-source.v1`, exposing transport,
+pinned IPNS name and snapshot count. Confirming follows only that exact reviewed
+file; HTTP/private metadata grants cannot authorize peer connections.
+`GET /preservation/discovery` and cached search attribute peer transport and
+pinned historical availability without connecting.
+
+`POST /preservation/discovery/jobs` accepts additive peer fields:
+`transport="peer"`, `allow_peer_network=true`, and the exact current
+`peer_setup_id`. Peer jobs reject HTTP/private-HTTP flags. For `kind="refresh"`,
+`historical=true` explicitly selects only trusted immutable snapshot pins; it
+cannot become fresh authority or lower observed verifier floors. For
+`kind="model_metadata"`, exact source/entry/manifest and candidate-key acceptance
+remain required; only signed metadata is returned as a validated invitation
+upload, before object requests.
+
+Offline invitation review accepts the distinct
+`foxlight.model-preservation.peer-invitation.v1` format. A peer receive plan
+requires `allow_peer_network=true` and `peer_setup_id` in addition to existing
+accepted exact-copy fingerprints, byte/deadline allowance and later start
+confirmation. Transfer scope, model identity, trust and allowance remain fixed
+across explicit resume; reviewed replacement contacts are permitted only within
+that original private-address scope. HTTP v1 defaults retain their serialized
+shape and replay identities. Unsupported/missing runtime, stale setup, absent
+network consent and attempted scope expansion refuse before peer requests.
+
+Peer work runs in known Core-owned workers and receive-only native process groups.
+Closing a presentation client does not stop work. Cancellation/EOF/shutdown drain
+actual native effects; Core restart records interruption without network replay.
+Network addresses/content identifiers remain observable, and native routing/wire
+traffic and block-cache growth are separate from the object-byte allowance.

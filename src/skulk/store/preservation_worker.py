@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Literal
 
 from foxlight_model_preservation.archives import verify_archive
-from foxlight_model_preservation.invitations import Invitation
 from foxlight_model_preservation.kits import export_kit, import_kit, inspect_kit
 from foxlight_model_preservation.models import TrustProfile
 from foxlight_model_preservation.operations import (
@@ -40,6 +39,7 @@ from skulk.store.preservation_live import (
     validate_prepared_home,
 )
 from skulk.store.preservation_pmf import PMFProfileUnavailableError, verify_capture
+from skulk.store.preservation_references import ModelInvitation as Invitation
 from skulk.store.preservation_sharing import (
     import_public_bundle,
     require_public_bundle,
@@ -88,6 +88,8 @@ class WorkerRequest(BaseModel):
     publisher_key_path: Path | None = None
     publisher_trust: TrustProfile | None = None
     invitation: Invitation | None = None
+    peer_repository: Path | None = None
+    peer_binary: str | None = None
     receiving: ReceivingPolicy | None = None
     output_parent_device: int | None = None
     output_parent_inode: int | None = None
@@ -252,6 +254,8 @@ def run_worker(request: WorkerRequest) -> int:
                 control,
                 byte_control,
                 commit_intent,
+                peer_repository=request.peer_repository,
+                peer_binary=request.peer_binary,
                 parent_identity=(
                     request.output_parent_device,
                     request.output_parent_inode,
@@ -422,11 +426,14 @@ def main() -> None:
         DiscoveryWorkerRequest,
         run_discovery_worker,
     )
+    from skulk.store.peer_worker import PeerWorkerRequest, run_peer_worker
 
-    adapter: TypeAdapter[WorkerRequest | DiscoveryWorkerRequest] = TypeAdapter(
-        WorkerRequest | DiscoveryWorkerRequest
+    adapter: TypeAdapter[WorkerRequest | DiscoveryWorkerRequest | PeerWorkerRequest] = (
+        TypeAdapter(WorkerRequest | DiscoveryWorkerRequest | PeerWorkerRequest)
     )
     request = adapter.validate_json(data)
+    if isinstance(request, PeerWorkerRequest):
+        raise SystemExit(run_peer_worker(request))
     raise SystemExit(
         run_discovery_worker(request)
         if isinstance(request, DiscoveryWorkerRequest)

@@ -428,3 +428,54 @@ grants are separate from both source-update and weight-download permissions.
 Public mirrors see Core's address and requested artifacts; this is not anonymous
 transport. See the [operator API contract](api-guide.md#followed-model-sources-and-offline-discovery)
 for bounds, pagination and cancellation behavior.
+
+## Optional peer sources and receiving
+
+Core can follow portable IPFS/IPNS sources and receive public v1 archives through
+stock Kubo **0.43.1**, separately installed on the Core host and available on its
+PATH. Obtain the qualified software from the
+[official release](https://github.com/ipfs/kubo/releases/tag/v0.43.1), verifying
+its release checksum through your software distribution process. An incompatible
+or missing runtime is reported before peer work; source review and cached search
+remain offline. Kubo's own existing repository is never adopted or modified.
+
+Import a trusted peer source file through normal source review. It binds an
+IPNS locator and the original TUF authority, optionally retaining immutable
+historical snapshot CIDs. Peer setup accepts one to eight numeric routing
+contacts with separate private/LAN permission. It accepts no executable or
+filesystem paths. Setup and source following do not join a network. Each peer
+update or receive needs explicit public-network consent and a review bound to
+the current local setup. Changed setup requires a new review.
+
+Core owns a finite receive-only native session while the durable job runs.
+Closing Library does not own/cancel it. Cancellation and shutdown drain the actual
+native worker/process group before terminal state or journal release; restart
+marks interrupted work and does not replay networking. Public and private peer
+scopes use separate dedicated Core caches. Neither profile serves model blocks
+nor advertises providers. Changing contacts while a session runs refuses.
+
+Fresh source updates still pass the stock TUF updater, expiry, root rotation and
+retained rollback checks. An explicit historical update tries only snapshots
+pinned in the trusted source file; its result remains imported/stale rather than
+fresh. Searches read local authenticated metadata without supplier requests.
+Source authority cannot enroll model keys, confer registry status or permit code.
+
+Peer model metadata is a separately versioned portable reference. Review its
+exact manifest, complete companion set and candidate fingerprints before a
+separate receive review. The existing copy-scoped trust and repository-code
+consent remain distinct. Receiving verifies all bytes and original cards/evidence,
+retains fsynced conservative transfer charges across retries and reuses verified
+objects. A fresh reviewed retry may use updated contacts within its original
+private-address scope; it cannot refill its budget or change model/trust.
+
+Peers observe the Core's network address and requested content identifiers.
+Encrypted transport provides no anonymity. Native DAG/wire overhead and block
+cache storage are outside the object allowance; retain room for the native cache
+and archive and use operating-system quotas when hard limits are required. No
+public gateway, delegated router, default bootstrap service, automatic direct
+HTTP fallback, daemon registration or software download is enabled.
+
+This adapter transfers public preservation v1 archives. PMF local archives/kits
+remain supported by existing Preserve/Restore; direct PMF peer transport is a
+separate adapter. Stock local mesh tests do not establish independent custody,
+Internet/NAT reachability or censorship resistance.

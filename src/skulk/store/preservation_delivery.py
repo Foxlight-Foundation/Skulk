@@ -11,13 +11,14 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from foxlight_model_preservation.archives import verify_archive_manifest
-from foxlight_model_preservation.invitations import (
-    Invitation,
-    authenticate_invitation,
-    fetch_invitation,
-)
+from foxlight_model_preservation.invitations import fetch_invitation
 from foxlight_model_preservation.models import Manifest, PreservationError, TrustProfile
 from foxlight_model_preservation.operations import OperationControl, OperationError
+from foxlight_model_preservation.peer_invitations import (
+    PeerInvitation,
+    fetch_peer_invitation,
+)
+from foxlight_model_preservation.peer_runtime import PeerClient
 from foxlight_model_preservation.pmf_models import PMFManifest
 from foxlight_model_preservation.pmf_preservation import (
     export_preservation,
@@ -47,6 +48,10 @@ from skulk.store.preservation_contracts import (
     ReceivingPolicy,
 )
 from skulk.store.preservation_journal import PreservationHostError, secure_directory
+from skulk.store.preservation_references import ModelInvitation as Invitation
+from skulk.store.preservation_references import (
+    authenticate_model_reference as authenticate_invitation,
+)
 from skulk.utils.directory_publication import publish_directory
 
 
@@ -106,6 +111,7 @@ def invitation_preview(invitation: Invitation) -> InvitationPreview:
         publisher_key_ids=tuple(key.key_id for key in invitation.candidate_trust.keys),
         threshold=invitation.candidate_trust.threshold,
         mirrors=invitation.mirrors,
+        transport="peer" if isinstance(invitation, PeerInvitation) else "http",
     )
 
 
@@ -338,6 +344,8 @@ def receive_copy(
     before_publish: Callable[[str], None],
     *,
     parent_identity: tuple[int, int],
+    peer_repository: Path | None = None,
+    peer_binary: str | None = None,
 ) -> Manifest:
     """Receive and verify a public closure, keeping retry accounting private.
 
@@ -370,14 +378,40 @@ def receive_copy(
         secure_directory(staged)
         _move_accounting(work, staged, restore=True)
         if not _complete_received_stage(staged, invitation, manifest, byte_control()):
-            manifest = fetch_invitation(
-                invitation,
-                trust,
-                staged,
-                transfer_policy(policy),
-                control=byte_control(),
-                operation_id="receive",
-            )
+            if isinstance(invitation, PeerInvitation):
+                if (
+                    policy.transport != "peer"
+                    or not policy.allow_peer_network
+                    or peer_repository is None
+                    or peer_binary is None
+                ):
+                    raise PreservationHostError("peer_session_required")
+                client = PeerClient(
+                    peer_repository,
+                    peer_binary,
+                    allow_network=True,
+                    control=byte_control(),
+                    seconds=policy.deadline_seconds,
+                )
+                if client.profile.allow_private_peers != policy.peer_private:
+                    raise PreservationHostError("peer_scope_changed")
+                manifest = fetch_peer_invitation(
+                    invitation,
+                    trust,
+                    staged,
+                    client,
+                    maximum_bytes=policy.max_bytes,
+                    operation_id="receive",
+                )
+            else:
+                manifest = fetch_invitation(
+                    invitation,
+                    trust,
+                    staged,
+                    transfer_policy(policy),
+                    control=byte_control(),
+                    operation_id="receive",
+                )
         control.checkpoint()
         # The accounting receipt survives outside the immutable public copy until
         # the host records completion. A crash/retry restores it before any fetch.

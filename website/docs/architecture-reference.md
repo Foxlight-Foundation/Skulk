@@ -2231,3 +2231,18 @@ cards/proofs, registry assurance and code consent. Metadata permissions do not
 become model-supplier/download grants. Source listings and private queries are
 not replicated on cluster topics or treated as runtime model cards. Standalone
 source following/cache interchange/search remain usable without Skulk.
+
+### Optional preservation peer owner
+
+- `store/peer_host.py`: explicit local setup, qualified installed Kubo detection,
+  serialized finite receiving leases and actual process-group drain.
+- `store/peer_worker.py`: known/frozen native-worker request; parent EOF cancels
+  and drains Kubo. No API-selected executable, fabric listener or daemon adoption.
+- `store/preservation_references.py`: strict HTTP/peer portable reference dispatch,
+  independent exact-copy key acceptance and unchanged registry/code authority.
+- `api/discovery.py`: operator-gated offline peer settings/status and explicit
+  peer source/model-metadata jobs. Receive/Restore retain the existing owner,
+  journal, filesystem publication fence, budget and companion/provenance checks.
+- No implicit serving, provider advertisement, HTTP fallback, network replay on
+  restart, mandatory Foxlight service or anonymity guarantee. Native cache/wire
+  overhead remains separate from exported object-byte accounting.

@@ -168,3 +168,36 @@ jobs:
           SKULK_DASHBOARD_DIR: ${{ github.workspace }}/dashboard-react/dist/
           SKULK_RESOURCES_DIR: ${{ github.workspace }}/resources
         run: uv run pytest src -m "not slow" --import-mode=importlib
+
+      - name: Verify stock Kubo for local preservation peer conformance
+        run: |
+          uv run python - <<'PYCODE'
+          import hashlib
+          import hmac
+          import platform
+          import re
+          import tarfile
+          import tempfile
+          import urllib.request
+          from pathlib import Path
+          arch = {"arm64": "arm64", "x86_64": "amd64"}[platform.machine()]
+          name = f"kubo_v0.43.1_darwin-{arch}.tar.gz"
+          base = "https://github.com/ipfs/kubo/releases/download/v0.43.1/" + name
+          root = Path(tempfile.gettempdir()) / "preservation-kubo"
+          root.mkdir(exist_ok=True)
+          with urllib.request.urlopen(base + ".sha512", timeout=30) as stream:
+              expected = stream.read(1024).decode().split()[0]
+          assert re.fullmatch(r"[0-9a-fA-F]{128}", expected)
+          with urllib.request.urlopen(base, timeout=60) as stream:
+              data = stream.read(64 * 1024**2 + 1)
+          assert len(data) <= 64 * 1024**2
+          assert hmac.compare_digest(hashlib.sha512(data).hexdigest(), expected.lower())
+          archive = root / name
+          archive.write_bytes(data)
+          with tarfile.open(archive) as package:
+              package.extractall(root, filter="data")
+          PYCODE
+      - name: Qualify Core peer ownership and complete recovery on a private mesh
+        run: |
+          export KUBO_BINARY="$(uv run python -c 'import tempfile; print(tempfile.gettempdir())')/preservation-kubo/kubo/ipfs"
+          uv run pytest src/skulk/store/tests/test_peer_discovery.py -q

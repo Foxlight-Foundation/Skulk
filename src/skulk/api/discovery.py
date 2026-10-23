@@ -16,6 +16,7 @@ from skulk.store.discovery_contracts import (
     SourceReview,
     SourceReviewRequest,
 )
+from skulk.store.peer_contracts import PeerSetup, PeerState
 from skulk.store.preservation_contracts import Digest, Handle
 from skulk.store.preservation_host import PreservationHost
 
@@ -27,11 +28,37 @@ def install_discovery_routes(
 ) -> None:
     """Use exactly the canonical host and operator gate for every private route."""
 
+    @router.get(
+        "/discovery/peer",
+        response_model=PeerState,
+        summary="Read local peer setup and runtime availability",
+        description="Observe the separately installed qualified Kubo runtime, operator-selected routing contacts and actual owned session state. This performs no peer networking or source update and returns no executable or filesystem path.",
+    )
+    async def peer_state(request: Request) -> PeerState:
+        owner = await host(request)
+        try:
+            return await owner.peers.status()
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/discovery/peer",
+        response_model=PeerState,
+        summary="Configure receive-only peer contacts offline",
+        description="Review public peer address/content exposure and set one to eight numeric bootstrap contacts, with separate private-address permission. This starts no daemon, grants no model/source trust and refuses changes during an active owned session. Every peer job needs separate network permission and the exact current setup identity.",
+    )
+    async def peer_setup(request: Request, body: PeerSetup) -> PeerState:
+        owner = await host(request)
+        try:
+            return await owner.peers.configure(body)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
     @router.post(
         "/discovery/reviews",
         response_model=SourceReview,
         summary="Review a discovery source file offline",
-        description="Inspect a completed source-purpose bootstrap upload of at most 256 KiB. Verify public root metadata and retain a ten-minute review without DNS or supplier requests. Source/cache paths and root bytes remain private; historical cache imports and local-file endpoints use standalone tools.",
+        description="Inspect a completed source-purpose bootstrap upload of at most 256 KiB. Verify public root metadata and retain a ten-minute review without DNS or supplier requests. Peer source files expose their pinned IPNS name and immutable snapshot count; HTTP files expose metadata endpoints. Source/cache paths and root bytes remain private; general historical cache imports and local-file endpoints use standalone tools.",
     )
     async def review(request: Request, body: SourceReviewRequest) -> SourceReview:
         owner = await host(request)
@@ -44,7 +71,7 @@ def install_discovery_routes(
         "/discovery/sources",
         response_model=SourceStatus,
         summary="Follow a reviewed model source",
-        description="Explicitly trust the reviewed file for discovery metadata only. Keep separate local plaintext/private-address metadata grants and all existing verifier floors. Following performs no network request, enrolls no bundle signer and grants no registry or code authority.",
+        description="Explicitly trust the reviewed file for discovery metadata only. Keep separate local plaintext/private-address metadata grants and all existing verifier floors. Peer files use separately reviewed local peer settings and reject HTTP grants. Following performs no network request, enrolls no bundle signer and grants no registry or code authority.",
     )
     async def follow(request: Request, body: SourceConfirmation) -> SourceStatus:
         owner = await host(request)
@@ -100,7 +127,7 @@ def install_discovery_routes(
         response_model=DiscoveryJob,
         status_code=202,
         summary="Start a finite owned metadata job",
-        description="Reserve exact owner/operation idempotency before starting a bounded source refresh or selected signed model-metadata handoff. Refresh uses enrolled metadata grants; model metadata requires separate exact-source/entry/manifest key acceptance and separate network grants. No weights, signing, model admission or serving occurs. At most four pending jobs and 1024 retained reservations. Closing Library does not stop Core work; restart records interruption without replay.",
+        description="Reserve exact owner/operation idempotency before starting a bounded source refresh or selected signed model-metadata handoff. HTTP refresh uses enrolled metadata grants. Peer jobs require explicit network consent bound to current local peer settings; historical refresh uses only exact imported snapshot pins and retains rollback floors. Model metadata requires separate exact-source/entry/manifest key acceptance and separate network grants. No weights, signing, model admission or serving occurs. At most four pending jobs and 1024 retained reservations. Closing Library does not stop Core work; restart records interruption without replay.",
     )
     async def start(request: Request, body: DiscoveryRequest) -> DiscoveryJob:
         owner = await host(request)
@@ -135,4 +162,15 @@ def install_discovery_routes(
         except (ValueError, OSError, RepositoryError) as error:
             raise refusal(error) from error
 
-    _ = review, follow, remove, page, search, start, observe, cancel
+    _ = (
+        peer_state,
+        peer_setup,
+        review,
+        follow,
+        remove,
+        page,
+        search,
+        start,
+        observe,
+        cancel,
+    )

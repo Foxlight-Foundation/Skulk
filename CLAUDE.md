@@ -2272,3 +2272,11 @@ cards/proofs, registry assurance and code consent. Metadata permissions do not
 become model-supplier/download grants. Source listings and private queries are
 not replicated on cluster topics or treated as runtime model cards. Standalone
 source following/cache interchange/search remain usable without Skulk.
+
+Preservation peer discovery uses the optional standalone IPFS/IPNS adapter with
+Core-owned `PeerHost`/`PeerWorkerRequest` supervision, separate from fabric P2P.
+The operator installs qualified Kubo 0.43.1 on Core's PATH; private/public receive
+profiles never serve blocks. Source metadata still passes stock TUF; model
+references keep independent exact-copy keys, registry evidence and code consent.
+Known/frozen worker lifetimes drain actual native groups on stop/EOF/shutdown;
+restart does not replay network effects. See `website/docs/model-preservation.md`.

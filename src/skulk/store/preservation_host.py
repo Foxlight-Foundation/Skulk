@@ -12,18 +12,17 @@ import stat
 import sys
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal, cast, final
 
 from foxlight_model_preservation.archives import verify_archive_manifest
 from foxlight_model_preservation.invitations import (
-    accept_invitation_keys,
     invitation_from_envelope,
-    read_invitation,
 )
 from foxlight_model_preservation.kits import inspect_kit
 from foxlight_model_preservation.models import Manifest, TrustProfile
+from foxlight_model_preservation.peer_invitations import PeerInvitation
 from foxlight_model_preservation.pmf_models import PMFManifest
 from foxlight_model_preservation.publication import (
     PublicationRequest,
@@ -49,6 +48,7 @@ from skulk.shared.constants import SKULK_CUSTOM_MODEL_CARDS_DIR
 from skulk.store.discovery_host import DiscoveryHost
 from skulk.store.installed_cards import read_installed_card
 from skulk.store.model_store import ModelStore
+from skulk.store.peer_host import PeerHost, PeerLease
 from skulk.store.preservation import inspect_verified_manifest
 from skulk.store.preservation_contracts import (
     FolderConfirmation,
@@ -89,6 +89,10 @@ from skulk.store.preservation_journal import (
 )
 from skulk.store.preservation_live import publish_recovered_home
 from skulk.store.preservation_pmf import read_capture, read_kit_capture
+from skulk.store.preservation_references import (
+    accept_model_reference_keys as accept_invitation_keys,
+)
+from skulk.store.preservation_references import read_model_reference as read_invitation
 from skulk.store.preservation_uploads import KitUploads
 from skulk.store.preservation_work import (
     WORK_KINDS,
@@ -168,6 +172,9 @@ class PreservationHost:
         self._storage = PreservationIO()
         self.uploads = KitUploads(root / "uploads", self.journal)
         self.upload_lock = asyncio.Lock()
+        self.peers = PeerHost(
+            root, self.journal, self._storage, preservation_worker_command
+        )
         self.discovery = DiscoveryHost(
             root,
             self.journal,
@@ -176,6 +183,7 @@ class PreservationHost:
             self.upload_lock,
             self._metadata_upload,
             preservation_worker_command,
+            self.peers,
         )
         self.custom_cards = custom_cards or Path(str(SKULK_CUSTOM_MODEL_CARDS_DIR))
 
@@ -1140,6 +1148,23 @@ class PreservationHost:
             request, payload, public, publisher.trust, copy.model_id
         )
 
+    def _peer_receiving_setup(
+        self, request: PreservationPlanRequest, scope: bool | None = None
+    ) -> tuple[str, bool]:
+        if (
+            not request.allow_peer_network
+            or request.peer_setup_id is None
+            or request.allow_http
+            or request.allow_private
+        ):
+            raise PreservationHostError("peer_network_confirmation_required")
+        setup, identity = self.peers.selected()
+        if identity != request.peer_setup_id:
+            raise PreservationHostError("peer_setup_changed")
+        if scope is not None and setup.allow_private != scope:
+            raise PreservationHostError("peer_scope_changed_new_receive_required")
+        return identity, setup.allow_private
+
     async def _receiving_plan(
         self, request: PreservationPlanRequest
     ) -> PreservationPlan:
@@ -1169,6 +1194,11 @@ class PreservationHost:
             if original.receiving is None:
                 raise PreservationHostError("receive_policy_missing")
             policy = original.receiving
+            if isinstance(invitation, PeerInvitation):
+                peer_setup, _ = self._peer_receiving_setup(request, policy.peer_private)
+                payload = {**payload, "peer_setup_id": peer_setup}
+            elif request.allow_peer_network or request.peer_setup_id is not None:
+                raise PreservationHostError("http_receive_cannot_grant_peering")
             for field, expected in (
                 ("download_limit_bytes", policy.max_bytes),
                 ("download_deadline_seconds", policy.deadline_seconds),
@@ -1190,7 +1220,16 @@ class PreservationHost:
         )
         trust = accept_invitation_keys(invitation, request.accepted_key_ids)
         manifest = invitation.manifest
+        peer_setup: str | None = None
+        peer_private = False
+        if isinstance(invitation, PeerInvitation):
+            peer_setup, peer_private = self._peer_receiving_setup(request)
+        elif request.allow_peer_network or request.peer_setup_id is not None:
+            raise PreservationHostError("http_receive_cannot_grant_peering")
         policy = ReceivingPolicy(
+            transport="peer" if isinstance(invitation, PeerInvitation) else "http",
+            allow_peer_network=isinstance(invitation, PeerInvitation),
+            peer_private=peer_private,
             mirrors=invitation.mirrors,
             max_bytes=request.download_limit_bytes,
             deadline_seconds=request.download_deadline_seconds,
@@ -1219,6 +1258,7 @@ class PreservationHost:
             key_path=self.root / "unused-public-key",
         )
         receive_payload: dict[str, JsonValue] = {
+            "peer_setup_id": peer_setup,
             "location": location.model_dump(mode="json"),
             "invitation": invitation.model_dump(mode="json"),
             "manifest_id": invitation.manifest_id,
@@ -1517,11 +1557,12 @@ class PreservationHost:
     async def close(self) -> None:
         """Drain owned workers before releasing the exclusive host journal owner."""
         self._closed = True
-        await self.discovery.close()
         for job_id in tuple(self._tasks):
             await self.cancel(job_id)
+        await self.discovery.close()
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks.values()), return_exceptions=True)
+        await self.peers.close()
         async with self._queue, self._setup_lock:
             await self._storage.close()
             self.journal.close()
@@ -1649,7 +1690,11 @@ class PreservationHost:
             secure_directory(self.root / "kits")
         if plan.kind == "torrent_share":
             secure_directory(self.root / "torrents")
-        async with self._archive(location) as descriptor:
+        async with (
+            self._archive(location) as descriptor,
+            AsyncExitStack() as peer_lifetime,
+        ):
+            peer: PeerLease | None = None
             model_path = (
                 self._selected(plan.model_id) if plan.kind == "preserve" else None
             )
@@ -1661,6 +1706,19 @@ class PreservationHost:
             submitted = PreservationStart.model_validate_json(
                 safe_json(submitted_value)
             )
+            if plan.receiving is not None and plan.receiving.transport == "peer":
+                setup_id = payload.get("peer_setup_id")
+                if not plan.receiving.allow_peer_network or not isinstance(
+                    setup_id, str
+                ):
+                    raise PreservationHostError("peer_network_confirmation_required")
+                peer = await self.peers.open(
+                    setup_id,
+                    plan.receiving.deadline_seconds,
+                    lambda: self._closed
+                    or self.journal.job(job_id).state == "cancelling",
+                )
+                peer_lifetime.push_async_callback(peer.close)
             request = WorkerRequest(
                 kind=cast(
                     Literal[
@@ -1722,6 +1780,8 @@ class PreservationHost:
                 if plan.kind == "receive"
                 else None,
                 receiving=plan.receiving,
+                peer_repository=peer.repository if peer else None,
+                peer_binary=peer.binary if peer else None,
                 output_parent_device=output_info.st_dev
                 if output_info is not None
                 else None,
@@ -1795,6 +1855,9 @@ class PreservationHost:
                             )
                         )
                     elif observation.event == "expected":
+                        if peer is not None:
+                            await peer.close()
+                            current = self.journal.job(job_id)
                         if observation.manifest_id is None or (
                             plan.manifest_id is not None
                             and observation.manifest_id != plan.manifest_id
@@ -2056,6 +2119,8 @@ class PreservationHost:
                     except TimeoutError:
                         process.kill()
                         await process.wait()
+                if peer is not None:
+                    await peer.close()
                 self._processes.pop(job_id, None)
                 if (
                     plan.kind != "receive"
