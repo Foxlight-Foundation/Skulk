@@ -10,11 +10,20 @@ from pathlib import Path
 import pytest
 
 import skulk.store.preservation_host as host_module
-from skulk.store.preservation_contracts import FolderConfirmation, FolderReviewRequest
+from skulk.store.preservation_contracts import (
+    FolderConfirmation,
+    FolderReviewRequest,
+    PreservationPlanRequest,
+)
 from skulk.store.preservation_host import PreservationHost
 from skulk.store.preservation_io import PreservationIO
 from skulk.store.preservation_journal import PreservationHostError
 from skulk.store.tests.test_preservation_folders import owner
+from skulk.store.tests.test_preservation_sharing import (
+    empty_host,
+    import_copy,
+    public_kit,
+)
 
 
 async def begun(event: threading.Event) -> None:
@@ -22,6 +31,60 @@ async def begun(event: threading.Event) -> None:
     async with asyncio.timeout(2):
         while not event.is_set():
             await asyncio.sleep(0.01)
+
+
+async def test_stalled_peer_space_check_keeps_controls_and_owner_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slow archive capacity checks leave Core schedulable and drain on cancel."""
+    content, _, _ = public_kit(tmp_path)
+    host = empty_host(tmp_path)
+    copy = await import_copy(host, content)
+    started, release = threading.Event(), threading.Event()
+    original = host_module.check_peer_space
+
+    def delayed(archive: Path, repository: Path, required_bytes: int) -> None:
+        started.set()
+        release.wait(10)
+        original(archive, repository, required_bytes)
+
+    monkeypatch.setattr(host_module, "check_peer_space", delayed)
+    task = asyncio.create_task(
+        host.plan(
+            PreservationPlanRequest(
+                kind="peer_share",
+                copy_id=copy.copy_id,
+                location_id=copy.location_id,
+                public_network=True,
+                allow_peer_network=True,
+            )
+        )
+    )
+    closing: asyncio.Task[None] | None = None
+    try:
+        await begun(started)
+        await asyncio.wait_for(asyncio.sleep(0.01), 0.5)
+        assert not task.done()
+        task.cancel()
+        await asyncio.sleep(0.03)
+        assert not task.done()  # The actual filesystem operation remains owned.
+        closing = asyncio.create_task(host.close())
+        await asyncio.sleep(0.03)
+        assert not closing.done()
+        with pytest.raises(
+            PreservationHostError, match="preservation_host_already_running"
+        ):
+            PreservationHost(host.store, host.root)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(closing, 2)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        if closing is not None:
+            await closing
+        await host.close()
 
 
 async def test_stalled_probe_is_bounded_and_close_retains_journal_owner(

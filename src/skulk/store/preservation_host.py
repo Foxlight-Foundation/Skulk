@@ -1421,7 +1421,11 @@ class PreservationHost:
             peer_private = False
             if request.kind == "peer_share":
                 try:
-                    check_peer_space(location.path, self.root, manifest.total_bytes)
+                    await self._storage.run(
+                        lambda: check_peer_space(
+                            location.path, self.root, manifest.total_bytes
+                        )
+                    )
                 except PreservationError as exc:
                     raise PreservationHostError("insufficient_space") from exc
                 if (

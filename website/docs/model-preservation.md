@@ -519,6 +519,8 @@ operator controls. Peer sharing budgets both export staging on the archive volum
 and the fresh native cache on the Core work volume, combining their requirements
 when they share a device. It checks again before staging and before native import;
 free-space checks cannot reserve capacity against other writers.
+Planning checks run in Core's owned IO executor so a slow archive does not block
+unrelated API/control work.
 Controlled local conformance does not establish independent
 community custody, anonymity or censorship resistance. Generic PMF network
 profiles beyond the supported public-v1 bridge still require compatible adapters.

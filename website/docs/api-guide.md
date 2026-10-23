@@ -6203,6 +6203,12 @@ chooses its listener. Duration and upload threshold use the existing finite
 sharing controls. A separate start still needs `public_participation: true`.
 No imported file, source signature or receiving consent starts a mirror.
 
+Review budgets simultaneous export staging and fresh native-cache space on their
+actual volumes, combining demands on a shared device. Planning uses Core's owned
+IO executor so slow archive checks leave other control work schedulable. The
+worker rechecks before staging and immediately before native import; capacity
+checks do not reserve disk space against other writers.
+
 Core creates a fresh job-owned mirror repo and supervises its actual native
 process group under the shared runtime gate. Its independent peer worker
 monitors native upload usage during complete public-closure preparation. It
