@@ -93,19 +93,27 @@ async def test_disconnected_or_replaced_root_is_never_recreated(tmp_path: Path) 
         await host.setup_device()
         archive = host.root / "device-archive"
         archive.rename(host.root / "unmounted-archive")
-        assert not (await host.location_view("device")).reachable
+        # Enrollment can time out its availability read while that probe still
+        # owns an open descriptor. Its one late observation predates the rename;
+        # wait for a fresh bounded observation rather than assuming no probe is
+        # in flight. Missing-path and replacement-write guards remain mandatory.
+        async with asyncio.timeout(2):
+            while (await host.location_view("device")).reachable:
+                await asyncio.sleep(0.01)
+        assert not archive.exists()
+        model = (await host.page()).models[0]
+        request = PreservationPlanRequest(
+            kind="preserve",
+            location_id="device",
+            model_id=model.model_id,
+            generation_id=model.generation_id,
+        )
+        with pytest.raises(PreservationHostError, match="archive_unavailable"):
+            await host.plan(request)
         assert not archive.exists()
         archive.mkdir(mode=0o700)
-        model = (await host.page()).models[0]
         with pytest.raises(PreservationHostError, match="archive_identity_changed"):
-            await host.plan(
-                PreservationPlanRequest(
-                    kind="preserve",
-                    location_id="device",
-                    model_id=model.model_id,
-                    generation_id=model.generation_id,
-                )
-            )
+            await host.plan(request)
         assert not tuple(archive.iterdir())
     finally:
         await host.close()
