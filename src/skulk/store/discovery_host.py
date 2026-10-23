@@ -492,6 +492,11 @@ class DiscoveryHost:
                     update={"state": "running", "updated_at": int(time.time())}
                 )
             )
+            enrolled_transport = await self.storage.run(
+                lambda: self._transport(selection.source_id)
+            )
+            if selection.transport != enrolled_transport:
+                raise PreservationHostError("source_transport_changed")
             if selection.transport == "peer":
                 if self.peers is None or selection.peer_setup_id is None:
                     raise PreservationHostError("peer_setup_required")

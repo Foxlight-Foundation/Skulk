@@ -2235,7 +2235,9 @@ source following/cache interchange/search remain usable without Skulk.
 ### Optional preservation peer owner
 
 - `store/peer_host.py`: explicit local setup, qualified installed Kubo detection,
-  serialized finite receiving leases and actual process-group drain.
+  serialized finite receiving leases and actual process-group drain. Retain an
+  unreaped `Popen` session leader through descendant signals using the shared
+  process-group helper; then reap it.
 - `store/peer_worker.py`: known/frozen native-worker request; parent EOF cancels
   and drains Kubo. No API-selected executable, fabric listener or daemon adoption.
 - `store/preservation_references.py`: strict HTTP/peer portable reference dispatch,
@@ -2243,6 +2245,9 @@ source following/cache interchange/search remain usable without Skulk.
 - `api/discovery.py`: operator-gated offline peer settings/status and explicit
   peer source/model-metadata jobs. Receive/Restore retain the existing owner,
   journal, filesystem publication fence, budget and companion/provenance checks.
+- `store/preservation_journal.py`: atomically reserve each explicit peer resume
+  with a separate reviewed connection binding. Original execution plan, signed
+  inputs, private-address scope, stage and cumulative allowance stay fixed.
 - No implicit serving, provider advertisement, HTTP fallback, network replay on
   restart, mandatory Foxlight service or anonymity guarantee. Native cache/wire
   overhead remains separate from exported object-byte accounting.

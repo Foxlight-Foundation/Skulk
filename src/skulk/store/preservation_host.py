@@ -1707,7 +1707,9 @@ class PreservationHost:
                 safe_json(submitted_value)
             )
             if plan.receiving is not None and plan.receiving.transport == "peer":
-                setup_id = payload.get("peer_setup_id")
+                setup_id = self.journal.setting("peer-attempt:" + job_id)
+                if setup_id is None:
+                    setup_id = payload.get("peer_setup_id")
                 if not plan.receiving.allow_peer_network or not isinstance(
                     setup_id, str
                 ):
@@ -1899,6 +1901,8 @@ class PreservationHost:
                     else:
                         error_code = observation.error_code or "operation_failed"
                 exit_code = await process.wait()
+                if peer is not None:
+                    await peer.close()
                 current = self.journal.job(job_id)
                 if (
                     exit_code == 0

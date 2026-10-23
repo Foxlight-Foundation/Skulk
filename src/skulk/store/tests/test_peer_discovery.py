@@ -405,6 +405,21 @@ async def test_cold_peer_source_to_complete_core_restore(
                     json={"review_id": review.review_id, "confirmed": True},
                 )
                 assert followed.status_code == 200, followed.text
+                wrong_transport = await submit(
+                    client,
+                    DiscoveryRequest(
+                        owner_id="library-peer",
+                        operation_id="wrong-transport",
+                        kind="refresh",
+                        source_id=review.source_id,
+                    ),
+                )
+                rejected = await metadata_settled(client, wrong_transport.job_id)
+                assert (
+                    rejected.state == "failed"
+                    and rejected.error_code == "source_transport_changed"
+                )
+                assert not (receiver.root / "peer-cache").exists()
                 refresh = await submit(
                     client,
                     DiscoveryRequest(
@@ -614,9 +629,20 @@ async def test_cold_peer_source_to_complete_core_restore(
 
 @pytest.mark.asyncio
 async def test_waiting_peer_job_cancels_without_stopping_another_owner(
-    tmp_path: Path, native_binary: str
+    tmp_path: Path, native_binary: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A stop drains its own lease; queued cancellation never waits for another job."""
+    from skulk.utils.process_groups import terminate_process_group
+
+    stopped: list[int] = []
+
+    def owned_stop(process: subprocess.Popen[str]) -> None:
+        assert process.returncode is None
+        terminate_process_group(process)
+        assert process.poll() is not None
+        stopped.append(process.pid)
+
+    monkeypatch.setattr("skulk.store.peer_host.terminate_process_group", owned_stop)
     with native_node(tmp_path / "router", native_binary) as (_, contact):
         host = PreservationHost(ModelStore(tmp_path / "models"), tmp_path / "core")
         try:
@@ -641,6 +667,7 @@ async def test_waiting_peer_job_cancels_without_stopping_another_owner(
             await first.close()
             assert not (await host.peers.status()).active
             assert not (first.repository / "api").exists()
+            assert stopped == [first.process.pid]
             with pytest.raises(PreservationHostError, match="peer_setup_changed"):
                 await host.peers.open("a" * 64, 60, lambda: False)
             assert not (await host.peers.status()).active
@@ -702,3 +729,160 @@ asyncio.run(run())
             if process.returncode is None:
                 process.kill()
                 await process.wait()
+
+
+@pytest.mark.asyncio
+async def test_active_receive_cancel_then_resume_with_replacement_contacts(
+    tmp_path: Path, native_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Actual stalled object transfer drains before terminal; resume binds new peers."""
+    from foxlight_model_preservation.ledger import TransferReceipt
+    from foxlight_model_preservation.peer_invitations import (
+        peer_invitation_from_envelope,
+    )
+
+    from skulk.store.preservation_contracts import PreservationJob
+
+    producer, archive, manifest_id, trust = await public_assistant(tmp_path)
+    try:
+        with native_node(tmp_path / "gone-supplier", native_binary) as (supplier, _):
+            published = publish_peer_model(
+                archive, manifest_id, trust, supplier, public_model=True
+            )
+        reference = peer_invitation_from_envelope(
+            (archive / "manifests" / (manifest_id + ".json")).read_bytes(),
+            manifest_id,
+            trust,
+            ("ipfs://" + str(published["cid"]),),
+        )
+        (tmp_path / "model-store").mkdir(mode=0o700)
+        receiver = PreservationHost(
+            ModelStore(tmp_path / "model-store"), tmp_path / "receiver"
+        )
+        try:
+            with native_node(tmp_path / "router", native_binary) as (_, contact):
+                setup = await receiver.peers.configure(
+                    PeerSetup(bootstrap=(contact,), allow_private=True, confirmed=True)
+                )
+                upload = metadata_upload(
+                    receiver, encode_record(reference), "invitation"
+                )
+                plan = await receiver.plan(
+                    PreservationPlanRequest(
+                        kind="receive",
+                        location_id="invitation",
+                        upload_id=upload,
+                        accepted_key_ids=tuple(
+                            key.key_id for key in reference.candidate_trust.keys
+                        ),
+                        allow_peer_network=True,
+                        peer_setup_id=setup.setup_id,
+                    )
+                )
+                original_update = receiver.journal.update_job
+                terminal: list[str] = []
+                receipts: list[TransferReceipt] = []
+
+                def assert_native_stopped(job: PreservationJob) -> None:
+                    if (
+                        job.kind == "receive"
+                        and job.expected_manifest_id is not None
+                        and not receipts
+                    ):
+                        receipts.append(
+                            TransferReceipt.model_validate_json(
+                                (
+                                    work / "receive-accounting" / "receive.json"
+                                ).read_bytes()
+                            )
+                        )
+                        assert staged.stat().st_ino == inode
+                    if job.kind == "receive" and job.state in {
+                        "failed",
+                        "interrupted",
+                        "cancelled",
+                        "succeeded",
+                    }:
+                        assert not (
+                            receiver.root / "peer-cache" / "private" / "api"
+                        ).exists()
+                        terminal.append(job.state)
+                    original_update(job)
+
+                monkeypatch.setattr(
+                    receiver.journal, "update_job", assert_native_stopped
+                )
+                job = receiver.start(
+                    PreservationStart(
+                        plan_id=plan.plan_id,
+                        operation_id="original",
+                        accept_owner_capture=True,
+                    )
+                )
+                work = receiver.root / "work" / job.job_id
+                staged = work / "public-copy"
+                ledger = staged / ".operations" / "receive.json"
+                end = time.monotonic() + 30
+                while not ledger.exists() and time.monotonic() < end:
+                    await asyncio.sleep(0.05)
+                assert ledger.exists(), receiver.journal.job(job.job_id)
+                before = TransferReceipt.model_validate_json(ledger.read_bytes())
+                inode = staged.stat().st_ino
+                await receiver.cancel(job.job_id)
+                stopped = await settled(receiver, job.job_id)
+                assert stopped.state == "cancelled" and terminal == ["cancelled"]
+                with native_node(
+                    tmp_path / "replacement", native_binary, (contact,)
+                ) as (replacement, new_contact):
+                    assert (
+                        publish_peer_model(
+                            archive, manifest_id, trust, replacement, public_model=True
+                        )["cid"]
+                        == published["cid"]
+                    )
+                    new_setup = await receiver.peers.configure(
+                        PeerSetup(
+                            bootstrap=(new_contact,), allow_private=True, confirmed=True
+                        )
+                    )
+                    assert new_setup.setup_id != setup.setup_id
+                    review = await receiver.plan(
+                        PreservationPlanRequest(
+                            kind="receive",
+                            location_id="invitation",
+                            resume_job_id=job.job_id,
+                            allow_peer_network=True,
+                            peer_setup_id=new_setup.setup_id,
+                        )
+                    )
+                    assert review.receiving == plan.receiving
+                    resumed = await receiver.resume_receive(
+                        job.job_id,
+                        PreservationStart(
+                            plan_id=review.plan_id,
+                            operation_id="resume",
+                            accept_owner_capture=True,
+                        ),
+                    )
+                    assert (
+                        resumed.job_id == job.job_id and resumed.plan_id == plan.plan_id
+                    )
+                    assert (
+                        receiver.journal.setting("peer-attempt:" + job.job_id)
+                        == new_setup.setup_id
+                    )
+                    finished = await settled(receiver, job.job_id)
+                    assert finished.state == "succeeded" and finished.attempts == 2, (
+                        finished
+                    )
+                    after = receipts[0]
+                    assert (
+                        after.max_bytes == before.max_bytes
+                        and after.charged_bytes >= before.charged_bytes
+                    )
+                    assert terminal == ["cancelled", "succeeded"]
+                    assert not staged.exists() or staged.stat().st_ino == inode
+        finally:
+            await receiver.close()
+    finally:
+        await producer.close()

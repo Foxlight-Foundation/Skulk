@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import signal
+import subprocess
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -30,6 +29,7 @@ from skulk.store.preservation_journal import (
     safe_json,
     secure_directory,
 )
+from skulk.utils.process_groups import observe_process_exit, terminate_process_group
 
 
 @final
@@ -39,7 +39,7 @@ class PeerLease:
     def __init__(
         self,
         owner: PeerHost,
-        process: asyncio.subprocess.Process,
+        process: subprocess.Popen[str],
         path: Path,
         repository: Path,
         binary: str,
@@ -60,31 +60,26 @@ class PeerLease:
 
     async def _stop(self) -> None:
         process = self.process
-        try:
+
+        def stop() -> None:
+            # Popen has no asyncio child watcher: retain the unreaped leader PID
+            # through descendant signalling, including normal worker exit.
             if process.stdin is not None:
                 with suppress(BrokenPipeError, ConnectionResetError):
-                    process.stdin.write(b"cancel\n")
-                    await process.stdin.drain()
-                process.stdin.close()
-            try:
-                await asyncio.wait_for(asyncio.shield(process.wait()), 8)
-            except TimeoutError:
-                with suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    await asyncio.wait_for(asyncio.shield(process.wait()), 3)
-                except TimeoutError:
-                    with suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
-                    await process.wait()
+                    process.stdin.write("cancel\n")
+                    process.stdin.flush()
+                with suppress(BrokenPipeError, ConnectionResetError):
+                    process.stdin.close()
+            deadline = time.monotonic() + 8
+            while observe_process_exit(process) is None and time.monotonic() < deadline:
+                time.sleep(0.025)
+            terminate_process_group(process)
+
+        await self.owner.storage.run(stop)
+        try:
+            await self.owner.storage.run(lambda: self.path.unlink(missing_ok=True))
         finally:
-            # A killed worker must not leave its same-group Go child running.
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            try:
-                await self.owner.storage.run(lambda: self.path.unlink(missing_ok=True))
-            finally:
-                self.owner.release(self)
+            self.owner.release(self)
 
 
 @final
@@ -216,12 +211,16 @@ class PeerHost:
             await self.storage.run(prepare)
             if cancelled() or self._closed:
                 raise PreservationHostError("cancelled")
-            process = await asyncio.create_subprocess_exec(
-                *self.command(request_path),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True,
+            process = await self.storage.run(
+                lambda: subprocess.Popen(
+                    self.command(request_path),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    start_new_session=True,
+                ),
+                discard=terminate_process_group,
             )
             lease = PeerLease(self, process, request_path, repository, binary)
             self._active = lease
@@ -229,7 +228,7 @@ class PeerHost:
             while time.monotonic() < end:
                 if cancelled() or self._closed:
                     raise PreservationHostError("cancelled")
-                if process.returncode is not None:
+                if observe_process_exit(process) is not None:
                     raise PreservationHostError("peer_runtime_unavailable")
 
                 def ready() -> bool:
