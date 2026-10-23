@@ -2234,6 +2234,14 @@ source following/cache interchange/search remain usable without Skulk.
 
 ### Optional preservation peer owner
 
+- `store/peer_install_host.py` / `peer_install_contracts.py`: separately consented,
+  exact-plan native acquisition, bounded permanent replay receipts and the shared
+  native lifetime gate. Restart interrupts without replay; client closure retains
+  the job. No API-selected paths, download origins, hashes or executables.
+- `store/peer_install_worker.py`: known/frozen acquisition family, fixed public
+  installer pins, private atomic generations and immediate exit on parent EOF.
+  Parent verifies actual managed bytes; downloaded software/scripts never run
+  during acquisition. Setup changes neither peer grants nor model trust.
 - `store/peer_host.py`: explicit local setup, qualified installed Kubo detection,
   serialized finite receiving leases and actual process-group drain. Retain an
   unreaped `Popen` session leader through descendant signals using the shared

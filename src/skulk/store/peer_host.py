@@ -10,6 +10,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Literal, final
 
+from foxlight_model_preservation.peer_install import managed_executable
 from foxlight_model_preservation.peer_runtime import (
     PeerClient,
     executable,
@@ -21,6 +22,7 @@ from foxlight_model_preservation.signing import canonical_bytes, digest
 from foxlight_model_preservation.storage import atomic_bytes, directory
 
 from skulk.store.peer_contracts import PeerSetup, PeerState
+from skulk.store.peer_install_host import RuntimeSetupHost
 from skulk.store.peer_worker import PeerWorkerRequest
 from skulk.store.preservation_io import PreservationIO
 from skulk.store.preservation_journal import (
@@ -102,6 +104,9 @@ class PeerHost:
         self._gate = asyncio.Lock()
         self._active: PeerLease | None = None
         self._closed = False
+        self.installation = RuntimeSetupHost(
+            root, journal, storage, self._gate, command
+        )
         # A crashed caller's worker already owns its loaded request and EOF
         # fence. This known control file is never a model or a replay trigger.
         (self.root / "peer-request.json").unlink(missing_ok=True)
@@ -120,16 +125,17 @@ class PeerHost:
         setup = PeerSetup.model_validate_json(safe_json(value))
         return setup, digest(canonical_bytes(setup.model_dump(mode="json")))
 
-    @staticmethod
-    def _runtime() -> tuple[
-        Literal["available", "missing", "incompatible"], str | None
-    ]:
+    def _runtime(
+        self,
+    ) -> tuple[Literal["available", "missing", "incompatible"], str | None]:
         try:
-            return "available", executable()
+            managed = managed_executable(self.installation.runtime_directory)
+            return "available", executable(managed) if managed else executable()
         except (OSError, ValueError):
             import shutil
 
-            return ("incompatible" if shutil.which("ipfs") else "missing"), None
+            found = self.installation.runtime_directory.exists() or shutil.which("ipfs")
+            return ("incompatible" if found else "missing"), None
 
     async def status(self) -> PeerState:
         """Observe installed software/setup locally; start no daemon or probes."""
@@ -254,5 +260,6 @@ class PeerHost:
     async def close(self) -> None:
         """Refuse new work and drain any actual remaining native process group."""
         self._closed = True
+        await self.installation.close()
         if self._active is not None:
             await self._active.close()

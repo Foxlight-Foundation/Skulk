@@ -26,7 +26,11 @@ def preservation_data_files() -> list[tuple[str, str]]:
     for entry in package.files or ():
         source = str(package.locate_file(entry))
         target = str(entry.parent)
-        if entry.parts[0] == "foxlight_model_preservation" and entry.suffix == ".json":
+        if entry.parts[0] == "foxlight_model_preservation" and (
+            entry.suffix == ".json"
+            or entry.as_posix()
+            == "foxlight_model_preservation/resources/kubo-NOTICE.txt"
+        ):
             resources.append((source, target))
         if entry.as_posix() == "foxlight_model_preservation/pmf_preservation.py":
             # Converter receipts hash this exact source as an opaque resource.
@@ -44,6 +48,12 @@ def preservation_data_files() -> list[tuple[str, str]]:
     if not resources or len(metadata) != 1 or len(adapter_sources) != 1:
         raise FileNotFoundError(
             "installed preservation core lacks schemas, converter source or metadata"
+        )
+    if not {"kubo_v0_43_1.json", "kubo-NOTICE.txt"}.issubset(
+        {Path(source).name for source, _ in resources}
+    ):
+        raise FileNotFoundError(
+            "installed preservation core lacks native acquisition pins or notices"
         )
     declared_licenses = set(package.metadata.get_all("License-File") or ())
     if not declared_licenses.issubset(included_licenses):

@@ -2275,7 +2275,10 @@ source following/cache interchange/search remain usable without Skulk.
 
 Preservation peer discovery uses the optional standalone IPFS/IPNS adapter with
 Core-owned `PeerHost`/`PeerWorkerRequest` supervision, separate from fabric P2P.
-The operator installs qualified Kubo 0.43.1 on Core's PATH; private/public receive
+The operator explicitly acquires pinned Kubo 0.43.1 through Core-owned durable
+setup (`peer_install_host.py` / `peer_install_worker.py`) or supplies a qualified
+existing runtime. Setup is separately consented, grants no peer access, verifies
+actual managed bytes and interrupts without replay after restart. Private/public receive
 profiles never serve blocks. Source metadata still passes stock TUF; model
 references keep independent exact-copy keys, registry evidence and code consent.
 Known/frozen worker lifetimes drain actual native groups on stop/EOF/shutdown;

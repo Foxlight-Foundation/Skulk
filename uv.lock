@@ -636,8 +636,8 @@ wheels = [
 
 [[package]]
 name = "foxlight-model-preservation"
-version = "0.9.1"
-source = { git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=f51553159cfcc7fd4c057f202d032404730f088e#f51553159cfcc7fd4c057f202d032404730f088e" }
+version = "0.10.0"
+source = { git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=8a82fae5700849e1f10d393c713a7e402762de12#8a82fae5700849e1f10d393c713a7e402762de12" }
 dependencies = [
     { name = "cryptography" },
     { name = "jsonschema" },
@@ -2928,7 +2928,7 @@ requires-dist = [
     { name = "ddgs", specifier = ">=9.6.1" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "filelock", specifier = ">=3.18.0" },
-    { name = "foxlight-model-preservation", extras = ["peer"], git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=f51553159cfcc7fd4c057f202d032404730f088e" },
+    { name = "foxlight-model-preservation", extras = ["peer"], git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=8a82fae5700849e1f10d393c713a7e402762de12" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=1.8.0" },
     { name = "hypercorn", specifier = ">=0.18.0" },

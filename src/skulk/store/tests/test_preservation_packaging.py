@@ -6,6 +6,7 @@ import hashlib
 import shutil
 from pathlib import Path
 
+import foxlight_model_preservation.peer_install as native
 import foxlight_model_preservation.pmf_preservation as adapter
 import pytest
 from foxlight_model_preservation.signing import load_key
@@ -37,6 +38,9 @@ def test_collected_frozen_resources_support_full_pmf_round_trip(
         return frozen / "foxlight_model_preservation"
 
     monkeypatch.setattr(adapter, "files", frozen_files)
+    monkeypatch.setattr(native, "files", frozen_files)
+    assert native.runtime_plan().artifact.executable_bytes > 0
+    assert (frozen / "foxlight_model_preservation/resources/kubo-NOTICE.txt").is_file()
     installed = make_preservation_installation(tmp_path)
     key = load_key(installed.key, None)
     identity = preserve_installed(installed.primary, installed.archive, (key,))
