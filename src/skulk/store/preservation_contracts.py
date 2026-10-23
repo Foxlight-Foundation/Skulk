@@ -29,6 +29,11 @@ JobState = Literal[
 ]
 
 
+def omit_peer_default(value: object) -> bool:
+    """Keep additive peer defaults out of HTTP v1 responses and replay digests."""
+    return value is None or value is False or value == "http" or value == 0
+
+
 class PreservationContract(BaseModel):
     """Immutable strict local-control contract; never a filesystem authority grant."""
 
@@ -232,6 +237,11 @@ class InvitationPreview(PreservationContract):
         le=32,
         description="Sender-supplied threshold, also requiring independent authentication.",
     )
+    transport: Literal["http", "peer"] = Field(
+        default="http",
+        exclude_if=omit_peer_default,
+        description="Unsigned supplier transport, never model trust.",
+    )
     mirrors: tuple[str, ...] = Field(
         max_length=16, description="Unsigned transport hints; reading contacts none."
     )
@@ -241,6 +251,21 @@ class InvitationPreview(PreservationContract):
 class ReceivingPolicy(PreservationContract):
     """Finite direct-receiving policy retained unchanged across explicit resumes."""
 
+    transport: Literal["http", "peer"] = Field(
+        default="http",
+        exclude_if=omit_peer_default,
+        description="Explicit selected receiving transport.",
+    )
+    allow_peer_network: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Explicit public peer participation for this copy.",
+    )
+    peer_private: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Fixed private-address peer scope; independent of HTTP flags.",
+    )
     mirrors: tuple[str, ...] = Field(
         min_length=1, max_length=16, description="Exact reviewed HTTP(S) bases."
     )
@@ -267,6 +292,16 @@ class ReceivingPolicy(PreservationContract):
 class PreservationPlanRequest(PreservationContract):
     """Select exact opaque resources; callers never provide host/key paths."""
 
+    allow_peer_network: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Permit finite peer receiving after reviewing Core network exposure.",
+    )
+    peer_setup_id: Digest | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Exact currently reviewed Core peer settings for this attempt.",
+    )
     kind: JobKind = Field(description="Requested bounded effect.")
     resume_job_id: Digest | None = Field(
         default=None,

@@ -23,9 +23,15 @@ from foxlight_model_preservation.discovery import (
     source_identity,
 )
 from foxlight_model_preservation.discovery_models import SourceBootstrap, SourceStatus
-from foxlight_model_preservation.invitations import Invitation, read_invitation
 from foxlight_model_preservation.models import MAX_METADATA_BYTES
-from foxlight_model_preservation.signing import encode_record
+from foxlight_model_preservation.peer import (
+    PeerSource,
+    follow_peer_source,
+    inspect_peer_source,
+    peer_source_identity,
+    read_peer_source,
+)
+from foxlight_model_preservation.signing import encode_record, strict_json
 from foxlight_model_preservation.storage import atomic_bytes, directory
 from pydantic import BaseModel
 
@@ -46,6 +52,7 @@ from skulk.store.discovery_worker import (
     DiscoveryWorkerResult,
     public_model_mirrors,
 )
+from skulk.store.peer_host import PeerHost, PeerLease
 from skulk.store.preservation_io import PreservationIO
 from skulk.store.preservation_journal import (
     PreservationHostError,
@@ -53,6 +60,8 @@ from skulk.store.preservation_journal import (
     safe_json,
     secure_directory,
 )
+from skulk.store.preservation_references import ModelInvitation as Invitation
+from skulk.store.preservation_references import read_model_reference as read_invitation
 from skulk.store.preservation_uploads import KitUploads
 
 METADATA_WORKER_SECONDS = 150
@@ -100,6 +109,7 @@ class DiscoveryHost:
         upload_lock: asyncio.Lock,
         metadata: MetadataReader,
         command: Callable[[Path], tuple[str, ...]],
+        peers: PeerHost | None = None,
     ) -> None:
         self.root = root
         self.cache = root / "discovery-cache"
@@ -109,6 +119,8 @@ class DiscoveryHost:
         self.upload_lock = upload_lock
         self.metadata = metadata
         self.command = command
+        self.peers = peers
+        self._peer_connections: dict[str, PeerLease] = {}
         self._queue = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
@@ -128,10 +140,17 @@ class DiscoveryHost:
             data = self.metadata(upload_id, "source")
             if len(data) > 256 * 1024:
                 raise PreservationHostError("source_document_too_large")
-            bootstrap = read_source_document(data)
+            raw = strict_json(data)
+            peer = (
+                inspect_peer_source(data)
+                if isinstance(raw, dict)
+                and raw.get("schema_version") == "foxlight.peer-source.v1"
+                else None
+            )
+            bootstrap = peer.source if peer is not None else read_source_document(data)
             if not isinstance(bootstrap, SourceBootstrap):
                 raise PreservationHostError("source_bootstrap_required")
-            if any(
+            if peer is None and any(
                 urlsplit(endpoint).scheme not in {"https", "http"}
                 for endpoint in bootstrap.endpoints
             ):
@@ -140,9 +159,14 @@ class DiscoveryHost:
             view = SourceReview(
                 review_id=secrets.token_hex(32),
                 source_id=source_identity(bootstrap),
-                bootstrap_id=bootstrap_identity(bootstrap),
+                bootstrap_id=peer_source_identity(peer)
+                if peer
+                else bootstrap_identity(bootstrap),
                 name=bootstrap.name,
-                endpoints=bootstrap.endpoints,
+                endpoints=() if peer else bootstrap.endpoints,
+                transport="peer" if peer else "http",
+                ipns_name=peer.ipns if peer else None,
+                snapshot_count=len(peer.snapshots) if peer else 0,
                 expires_at=expires,
             )
             self.journal.add_discovery_review(
@@ -150,6 +174,7 @@ class DiscoveryHost:
                 {
                     "view": view.model_dump(mode="json"),
                     "bootstrap": bootstrap.model_dump(mode="json"),
+                    "peer": peer.model_dump(mode="json") if peer else None,
                     "expires_at": expires,
                 },
             )
@@ -178,13 +203,23 @@ class DiscoveryHost:
                 bootstrap = SourceBootstrap.model_validate_json(
                     safe_json(value["bootstrap"])
                 )
-                status = follow_source(
-                    self.cache,
-                    encode_record(bootstrap),
-                    view.bootstrap_id,
-                    allow_http=request.allow_http,
-                    allow_private=request.allow_private,
-                )
+                if value.get("peer") is not None:
+                    if request.allow_http or request.allow_private:
+                        raise PreservationHostError("peer_sources_use_peer_settings")
+                    peer = PeerSource.model_validate_json(safe_json(value["peer"]))
+                    status = follow_peer_source(
+                        self.cache, encode_record(peer), view.bootstrap_id
+                    )
+                else:
+                    if self._transport(view.source_id) == "peer":
+                        raise PreservationHostError("source_transport_switch_unavailable")
+                    status = follow_source(
+                        self.cache,
+                        encode_record(bootstrap),
+                        view.bootstrap_id,
+                        allow_http=request.allow_http,
+                        allow_private=request.allow_private,
+                    )
                 if status.source_id != view.source_id:
                     raise PreservationHostError("source_identity_changed")
                 return status
@@ -200,22 +235,55 @@ class DiscoveryHost:
             self._open()
             await self.storage.run(lambda: remove_source(self.cache, source_id))
 
+    def _transport(self, source_id: str) -> Literal["http", "peer"]:
+        return (
+            "peer"
+            if (self.cache / "peer-sources" / (source_id + ".json")).exists()
+            else "http"
+        )
+
+    def _snapshot_count(self, source_id: str) -> int:
+        try:
+            return len(read_peer_source(self.cache, source_id).snapshots)
+        except (ValueError, OSError):
+            return 0
+
     async def page(self, owner_id: str, offset: int) -> DiscoveryPage:
         """Read source and metadata-job states locally without probes or replay."""
-        sources = await self.storage.run(lambda: list_sources(self.cache))
+        sources = await self.storage.run(
+            lambda: tuple(
+                source.model_copy(update={"name": _projection(source.name, 512)})
+                for source in list_sources(self.cache)
+            )
+        )
+        transports = await self.storage.run(
+            lambda: {
+                source.source_id: self._transport(source.source_id)
+                for source in sources
+            }
+        )
+        snapshots = await self.storage.run(
+            lambda: {
+                source.source_id: self._snapshot_count(source.source_id)
+                for source in sources
+            }
+        )
         jobs = self.journal.discovery_jobs(owner_id, offset)
         return _bounded(
             DiscoveryPage(
                 sources=tuple(
                     DiscoverySource.model_validate_json(
-                        source.model_copy(
-                            update={
+                        safe_json(
+                            {
+                                **source.model_dump(mode="json"),
                                 "name": _projection(source.name, 512),
                                 "last_error": _projection(source.last_error, 512)
                                 if source.last_error
                                 else None,
+                                "transport": transports[source.source_id],
+                                "snapshot_count": snapshots[source.source_id],
                             }
-                        ).model_dump_json()
+                        )
                     )
                     for source in sources
                 ),
@@ -234,6 +302,7 @@ class DiscoveryHost:
                 suppliers = tuple(
                     DiscoverySupplier(
                         source_id=item.source_id,
+                        transport=self._transport(item.source_id),
                         source_name=_projection(item.source_name, 256),
                         entry_id=item.entry_id,
                         name=_projection(
@@ -343,8 +412,12 @@ class DiscoveryHost:
     def _request(self, job_id: str, selection: DiscoveryRequest) -> Path:
         path = self.root / "discovery-requests"
         secure_directory(path)
+        peer = self._peer_connections.get(job_id)
         request = DiscoveryWorkerRequest(
-            cache=self.cache.absolute(), selection=selection
+            cache=self.cache.absolute(),
+            selection=selection,
+            peer_repository=peer.repository if peer else None,
+            peer_binary=peer.binary if peer else None,
         )
         with directory(path) as root:
             atomic_bytes(root, job_id + ".json", request.model_dump_json().encode())
@@ -375,7 +448,8 @@ class DiscoveryHost:
             description is None
             or description.candidate_bundle_trust != checked.candidate_trust
             or checked.manifest_id != entry.manifest
-            or checked.mirrors != public_model_mirrors(entry.mirrors)
+            or checked.mirrors
+            != public_model_mirrors(entry.mirrors, selection.transport)
         ):
             raise PreservationHostError("source_model_reference_changed")
         encoded = encode_record(checked)
@@ -409,6 +483,7 @@ class DiscoveryHost:
     async def _run(self, job_id: str) -> None:
         process: asyncio.subprocess.Process | None = None
         request_path: Path | None = None
+        peer: PeerLease | None = None
         try:
             job, selection = self.journal.discovery_job(job_id)
             if job.state == "cancelling" or self._closed:
@@ -419,6 +494,56 @@ class DiscoveryHost:
                     update={"state": "running", "updated_at": int(time.time())}
                 )
             )
+            enrolled_transport = await self.storage.run(
+                lambda: self._transport(selection.source_id)
+            )
+            if selection.transport != enrolled_transport:
+                raise PreservationHostError("source_transport_changed")
+            if selection.transport == "peer":
+                if self.peers is None or selection.peer_setup_id is None:
+                    raise PreservationHostError("peer_setup_required")
+
+                def preflight() -> None:
+                    if not any(
+                        s.source_id == selection.source_id and s.enabled
+                        for s in list_sources(self.cache)
+                    ):
+                        raise PreservationHostError("source_no_longer_followed")
+                    if selection.kind == "refresh":
+                        record = read_peer_source(self.cache, selection.source_id)
+                        if selection.historical and not record.snapshots:
+                            raise PreservationHostError("peer_pinned_snapshot_required")
+                    else:
+                        entry = select_entry(
+                            self.cache,
+                            selection.source_id,
+                            selection.entry_id or "",
+                            selection.manifest_id or "",
+                        )
+                        if not public_model_mirrors(entry.mirrors, "peer"):
+                            raise PreservationHostError("public_model_mirror_required")
+
+                        matches = search_sources(self.cache, entry.manifest, limit=1000)
+                        if not any(
+                            location.source_id == selection.source_id
+                            and location.entry_id == selection.entry_id
+                            and location.description is not None
+                            and location.description.candidate_bundle_trust is not None
+                            for match in matches
+                            for location in match.locations
+                        ):
+                            raise PreservationHostError(
+                                "candidate_bundle_keys_required"
+                            )
+
+                await self.storage.run(preflight)
+                peer = await self.peers.open(
+                    selection.peer_setup_id,
+                    METADATA_WORKER_SECONDS,
+                    lambda: self._closed
+                    or self.journal.discovery_job(job_id)[0].state == "cancelling",
+                )
+                self._peer_connections[job_id] = peer
             request_path = await self.storage.run(
                 lambda: self._request(job_id, selection)
             )
@@ -440,6 +565,8 @@ class DiscoveryHost:
                     if len(encoded) > MAX_METADATA_BYTES + 65536:
                         raise PreservationHostError("discovery_response_too_large")
                 await process.wait()
+                if peer is not None:
+                    await peer.close()
                 result_bytes = bytes(encoded)
                 result = await self.storage.run(
                     lambda: DiscoveryWorkerResult.model_validate_json(result_bytes)
@@ -476,6 +603,8 @@ class DiscoveryHost:
         except (ValueError, OSError, TimeoutError) as error:
             if process is not None and process.returncode is None:
                 await self._stop(process)
+            if peer is not None:
+                await peer.close()
             current = self.journal.discovery_job(job_id)[0]
             self._finish(
                 job_id,
@@ -498,6 +627,9 @@ class DiscoveryHost:
                     await self._stop(process)
                 if process.stdin is not None:
                     process.stdin.close()
+            if peer is not None:
+                await peer.close()
+            self._peer_connections.pop(job_id, None)
             self._processes.pop(job_id, None)
             if request_path is not None:
                 retained_path = request_path

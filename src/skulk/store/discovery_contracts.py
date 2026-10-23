@@ -11,6 +11,7 @@ from skulk.store.preservation_contracts import (
     JobState,
     OperationId,
     PreservationContract,
+    omit_peer_default,
 )
 
 
@@ -34,6 +35,24 @@ class SourceReview(PreservationContract):
     endpoints: tuple[str, ...] = Field(
         max_length=8,
         description="Reviewed HTTP(S) metadata endpoints; none have been contacted.",
+    )
+    transport: Literal["http", "peer"] = Field(
+        default="http",
+        exclude_if=omit_peer_default,
+        description="Reviewed source transport, without connection permission.",
+    )
+    ipns_name: str | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        max_length=200,
+        description="Pinned public source name for a peer file.",
+    )
+    snapshot_count: int = Field(
+        default=0,
+        exclude_if=omit_peer_default,
+        ge=0,
+        le=8,
+        description="Trusted immutable historical fallback count.",
     )
     expires_at: int = Field(description="Review expiry in Unix seconds.")
 
@@ -91,9 +110,46 @@ class DiscoveryRequest(PreservationContract):
         description="Separate private-address permission for model-metadata suppliers.",
     )
 
+    transport: Literal["http", "peer"] = Field(
+        default="http",
+        exclude_if=omit_peer_default,
+        description="Explicit transport; no automatic direct-network fallback.",
+    )
+    allow_peer_network: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Permit public peer participation for this exact finite operation.",
+    )
+    peer_setup_id: Digest | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Exact separately reviewed Core peer settings.",
+    )
+    historical: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Explicitly recover only a trusted pinned peer snapshot; never fresh-update authority.",
+    )
+
     @model_validator(mode="after")
     def check_selection(self) -> "DiscoveryRequest":
         """Keep refresh grants separate from exact model-reference acceptance."""
+        if self.transport == "peer":
+            if (
+                not self.allow_peer_network
+                or self.peer_setup_id is None
+                or self.allow_http
+                or self.allow_private
+            ):
+                raise ValueError(
+                    "peer operation needs its own exact consent and settings"
+                )
+        elif (
+            self.allow_peer_network or self.peer_setup_id is not None or self.historical
+        ):
+            raise ValueError("HTTP requests cannot carry peer grants")
+        if self.historical and self.kind != "refresh":
+            raise ValueError("historical peer policy is a source recovery choice")
         if self.kind == "model_metadata":
             if (
                 not self.entry_id
@@ -152,6 +208,19 @@ class DiscoveryJob(PreservationContract):
 class DiscoverySource(SourceStatus):
     """Bounded status projection; original bootstrap and diagnostics remain cached."""
 
+    transport: Literal["http", "peer"] = Field(
+        default="http",
+        exclude_if=omit_peer_default,
+        description="Locally followed transport, never an implicit network action.",
+    )
+
+    snapshot_count: int = Field(
+        default=0,
+        exclude_if=omit_peer_default,
+        ge=0,
+        le=8,
+        description="Independently pinned historical peer snapshots available for an explicit recovery choice.",
+    )
     name: str = Field(
         max_length=200,
         description="Source display projection; long escaped text may end in an ellipsis.",
@@ -210,6 +279,11 @@ class DiscoverySupplier(PreservationContract):
     freshness: str = Field(
         max_length=32,
         description="Source age/authority state, not model or registry trust.",
+    )
+    transport: Literal["http", "peer"] = Field(
+        default="http",
+        exclude_if=omit_peer_default,
+        description="Selected reference transport; source statements stay separate.",
     )
     model_keys_available: bool = Field(
         description="Source includes candidate bundle keys for explicit selected-copy review."

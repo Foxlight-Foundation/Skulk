@@ -15,10 +15,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import cast, final
 
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from skulk.store.discovery_contracts import DiscoveryJob, DiscoveryRequest
 from skulk.store.preservation_contracts import (
+    Digest,
     PreservationCopy,
     PreservationJob,
     PreservationPlan,
@@ -426,6 +427,16 @@ class PreservationJournal:
                     safe_json(original["view"])
                 )
                 payload = cast(dict[str, JsonValue], reviewed["payload"])
+                peer_resume = (
+                    original_plan.receiving is not None
+                    and original_plan.receiving.transport == "peer"
+                )
+                ignored = (
+                    {"resume_job_id", "peer_setup_id"}
+                    if peer_resume
+                    else {"resume_job_id"}
+                )
+                original_payload = cast(dict[str, JsonValue], original["payload"])
                 now = int(time.time())
                 if plan.expires_at < now:
                     raise PreservationHostError("plan_missing_or_expired")
@@ -439,10 +450,17 @@ class PreservationJournal:
                         {
                             key: value
                             for key, value in payload.items()
-                            if key != "resume_job_id"
+                            if key not in ignored
                         }
                     )
-                    != safe_json(original["payload"])
+                    != safe_json(
+                        {
+                            key: value
+                            for key, value in original_payload.items()
+                            if key not in ignored
+                        }
+                    )
+                    or plan.receiving != original_plan.receiving
                 ):
                     raise PreservationHostError("receive_resume_inputs_changed")
                 if not request.accept_owner_capture:
@@ -470,6 +488,14 @@ class PreservationJournal:
                         "result": None,
                     }
                 )
+                if peer_resume:
+                    setup_id = TypeAdapter[str](Digest).validate_python(
+                        payload.get("peer_setup_id")
+                    )
+                    db.execute(
+                        "INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        ("peer-attempt:" + job_id, safe_json(setup_id)),
+                    )
                 db.execute(
                     "INSERT INTO requests VALUES (?,?,?,?)",
                     (request.owner_id, request.operation_id, request_digest, job_id),

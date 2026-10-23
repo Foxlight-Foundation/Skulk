@@ -3486,3 +3486,13 @@ cards/proofs, registry assurance and code consent. Metadata permissions do not
 become model-supplier/download grants. Source listings and private queries are
 not replicated on cluster topics or treated as runtime model cards. Standalone
 source following/cache interchange/search remain usable without Skulk.
+
+Preservation's optional `PeerHost` supervises a finite stock-Kubo receive-only
+session for an explicitly reviewed discovery or receive job. It shares the
+existing protected journal and drained storage owner, uses known/frozen worker
+commands, and stops the actual native process group before completion or owner
+release. Dedicated public/private receiving scopes retain separate block caches;
+neither serves blocks or advertises providers. This public IPFS/IPNS adapter is
+separate from Skulk's fabric listener and uses the same standalone TUF/model trust
+and original card/provenance contracts. Library remains an HTTP presentation
+client; cached search and source enrollment do not start networking.
