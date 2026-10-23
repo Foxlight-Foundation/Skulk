@@ -17,6 +17,7 @@ from typing import cast, final
 
 from pydantic import JsonValue
 
+from skulk.store.discovery_contracts import DiscoveryJob, DiscoveryRequest
 from skulk.store.preservation_contracts import (
     PreservationCopy,
     PreservationJob,
@@ -108,6 +109,7 @@ class PreservationJournal:
                     CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, updated INTEGER NOT NULL, state TEXT NOT NULL, value TEXT NOT NULL);
                     CREATE TABLE IF NOT EXISTS requests (owner TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL, job TEXT NOT NULL, PRIMARY KEY(owner,operation));
                     CREATE TABLE IF NOT EXISTS copies (id TEXT PRIMARY KEY, created INTEGER NOT NULL, value TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS discovery_jobs (id TEXT PRIMARY KEY, owner TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL, updated INTEGER NOT NULL, state TEXT NOT NULL, value TEXT NOT NULL, request TEXT NOT NULL, UNIQUE(owner,operation));
                     PRAGMA user_version=1;
                 """)
         except BaseException:
@@ -746,3 +748,131 @@ class PreservationJournal:
                 ).fetchall(),
             )
         return tuple(PreservationCopy.model_validate_json(row[0]) for row in rows)
+
+    def reserve_discovery(self, request: DiscoveryRequest) -> tuple[DiscoveryJob, bool]:
+        """Atomically retain a bounded metadata request; replay never queues work."""
+        encoded = request.model_dump_json()
+        request_digest = hashlib.sha256(encoded.encode()).hexdigest()
+        identity = hashlib.sha256(
+            (
+                "discovery\x00" + request.owner_id + "\x00" + request.operation_id
+            ).encode()
+        ).hexdigest()
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                previous = cast(
+                    tuple[str, str] | None,
+                    db.execute(
+                        "SELECT digest,value FROM discovery_jobs WHERE owner=? AND operation=?",
+                        (request.owner_id, request.operation_id),
+                    ).fetchone(),
+                )
+                if previous is not None:
+                    if previous[0] != request_digest:
+                        raise PreservationHostError("request_changed")
+                    job = DiscoveryJob.model_validate_json(previous[1])
+                    db.execute("COMMIT")
+                    return job, False
+                count = cast(
+                    tuple[int],
+                    db.execute("SELECT count(*) FROM discovery_jobs").fetchone(),
+                )[0]
+                pending = cast(
+                    tuple[int],
+                    db.execute(
+                        "SELECT count(*) FROM discovery_jobs WHERE state IN ('queued','running','cancelling')"
+                    ).fetchone(),
+                )[0]
+                if count >= 1024 or pending >= 4:
+                    raise PreservationHostError("discovery_job_capacity_reached")
+                now = int(time.time())
+                job = DiscoveryJob(
+                    job_id=identity,
+                    owner_id=request.owner_id,
+                    operation_id=request.operation_id,
+                    kind=request.kind,
+                    source_id=request.source_id,
+                    manifest_id=request.manifest_id,
+                    state="queued",
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.execute(
+                    "INSERT INTO discovery_jobs VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        identity,
+                        request.owner_id,
+                        request.operation_id,
+                        request_digest,
+                        now,
+                        job.state,
+                        job.model_dump_json(),
+                        encoded,
+                    ),
+                )
+                db.execute("COMMIT")
+                return job, True
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+    def discovery_job(self, job_id: str) -> tuple[DiscoveryJob, DiscoveryRequest]:
+        """Read one retained typed metadata record without replay or network IO."""
+        with self._connection() as db:
+            row = cast(
+                tuple[str, str] | None,
+                db.execute(
+                    "SELECT value,request FROM discovery_jobs WHERE id=?", (job_id,)
+                ).fetchone(),
+            )
+        if row is None:
+            raise PreservationHostError("discovery_job_not_found")
+        return DiscoveryJob.model_validate_json(
+            row[0]
+        ), DiscoveryRequest.model_validate_json(row[1])
+
+    def update_discovery_job(self, job: DiscoveryJob) -> None:
+        """Persist a host-observed metadata state without modifying its request."""
+        with self._connection() as db:
+            db.execute(
+                "UPDATE discovery_jobs SET updated=?,state=?,value=? WHERE id=?",
+                (job.updated_at, job.state, job.model_dump_json(), job.job_id),
+            )
+
+    def discovery_jobs(
+        self, owner_id: str | None = None, offset: int = 0
+    ) -> tuple[DiscoveryJob, ...]:
+        """Read a bounded job page, or all at most four active metadata jobs."""
+        if not 0 <= offset <= 1024:
+            raise PreservationHostError("invalid_offset")
+        with self._connection() as db:
+            rows = cast(
+                list[tuple[str]],
+                db.execute(
+                    "SELECT value FROM discovery_jobs WHERE (owner=? OR ? IS NULL AND state IN ('queued','running','cancelling')) ORDER BY updated DESC,id LIMIT 5 OFFSET ?",
+                    (owner_id, owner_id, offset),
+                ).fetchall(),
+            )
+        return tuple(DiscoveryJob.model_validate_json(row[0]) for row in rows)
+
+    def add_discovery_review(self, identity: str, value: dict[str, JsonValue]) -> None:
+        """Retain at most 64 live source-file reviews, outside model-copy plans."""
+        now = int(time.time())
+        with self._connection() as db:
+            db.execute(
+                "DELETE FROM settings WHERE key LIKE 'discovery-review:%' AND json_extract(value,'$.expires_at')<?",
+                (now,),
+            )
+            count = cast(
+                tuple[int],
+                db.execute(
+                    "SELECT count(*) FROM settings WHERE key LIKE 'discovery-review:%'"
+                ).fetchone(),
+            )[0]
+            if count >= 64:
+                raise PreservationHostError("discovery_review_capacity_reached")
+            db.execute(
+                "INSERT INTO settings VALUES (?,?)",
+                ("discovery-review:" + identity, safe_json(value)),
+            )

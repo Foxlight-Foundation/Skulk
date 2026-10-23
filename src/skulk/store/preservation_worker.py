@@ -416,8 +416,22 @@ def main() -> None:
     data = Path(sys.argv[1]).read_bytes()
     if len(data) > 8 * 1024 * 1024:
         raise SystemExit(2)
-    request = WorkerRequest.model_validate_json(data)
-    raise SystemExit(run_worker(request))
+    from pydantic import TypeAdapter
+
+    from skulk.store.discovery_worker import (
+        DiscoveryWorkerRequest,
+        run_discovery_worker,
+    )
+
+    adapter: TypeAdapter[WorkerRequest | DiscoveryWorkerRequest] = TypeAdapter(
+        WorkerRequest | DiscoveryWorkerRequest
+    )
+    request = adapter.validate_json(data)
+    raise SystemExit(
+        run_discovery_worker(request)
+        if isinstance(request, DiscoveryWorkerRequest)
+        else run_worker(request)
+    )
 
 
 if __name__ == "__main__":

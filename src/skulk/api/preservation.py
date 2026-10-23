@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from foxlight_model_preservation.invitations import Invitation
 from foxlight_model_preservation.models import Manifest, TrustProfile
 
+from skulk.api.discovery import install_discovery_routes
 from skulk.store.preservation import RecoveryCompatibilityError
 from skulk.store.preservation_contracts import (
     DefaultLocationRequest,
@@ -373,8 +374,8 @@ def create_preservation_router(
     @router.post(
         "/kit-uploads",
         response_model=KitUploadStatus,
-        summary="Reserve a recovery kit upload",
-        description="Trusted operators declare the exact kit length. Core checks bounded ingress slots and free space and returns an opaque resumable handle. This grants neither publisher trust nor model admission.",
+        summary="Reserve a purpose-bounded preservation upload",
+        description="Trusted operators declare exact length and purpose: kit up to 8 TiB, invitation/publication up to 8 MiB, source bootstrap up to 256 KiB. Core checks bounded ingress slots and free space and returns an opaque resumable handle. This grants neither publisher trust nor model admission.",
     )
     async def create_upload(
         request: Request, selection: KitUploadRequest
@@ -554,4 +555,5 @@ def create_preservation_router(
         download_torrent,
         download_trust,
     )
+    install_discovery_routes(router, host, refusal)
     return router

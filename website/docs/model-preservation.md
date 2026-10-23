@@ -396,3 +396,35 @@ uses its recorded format even if no completion envelope was published; a failed
 probe does not silently recapture or declare success. Unused-recovery cleanup
 authenticates PMF and original source evidence before deleting an unindexed
 known generation, with the same custody and index-reference safeguards as v1.
+
+## Followed sources and offline search
+
+The operator API can follow multiple source bootstrap files, explicitly refresh
+TUF-authenticated catalogs and search the retained cache offline. The public
+[`model-preserve source-*` tools](https://github.com/Foxlight-Foundation/foxlight-model-preservation/blob/main/docs/discovery.md)
+provide the same independent protocol without Skulk, a GPU, a hosted account or
+private SDK. Core stores only explicitly followed sources; no community source
+or global discovery service is implied.
+
+Upload a trusted bootstrap with `purpose: source`, review its identity/endpoints,
+and confirm it for discovery metadata. Following itself makes no connection.
+Submit a `refresh` metadata job to get listings. Read/search stays offline, even
+after a failed update or Core restart. Source status shows whether evidence is
+fresh, retained after error, expired, imported or associated with an older root.
+Unfollowing retains trust/version floors rather than resetting them.
+
+Select an exact source, catalog entry and manifest. A source that supplies
+candidate bundle keys can support an explicit per-copy `model_metadata` review.
+That job retrieves only the signed complete public manifest, then creates an
+ordinary invitation upload. It fetches no weights and grants no global key
+trust, registry provenance or model execution. Use existing receiving review to
+choose the finite download policy, obtain the verified public copy, then review
+Restore. Complete companions, original model-card data and signed provenance
+remain inside the original archive, with their existing trust/code checks.
+
+Metadata updates are finite Core-owned jobs. Closing a client does not stop them;
+Core restart interrupts unfinished work without replay. Model-metadata network
+grants are separate from both source-update and weight-download permissions.
+Public mirrors see Core's address and requested artifacts; this is not anonymous
+transport. See the [operator API contract](api-guide.md#followed-model-sources-and-offline-discovery)
+for bounds, pagination and cancellation behavior.

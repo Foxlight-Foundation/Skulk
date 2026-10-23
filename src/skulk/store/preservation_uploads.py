@@ -67,15 +67,17 @@ class KitUploads:
     def create(
         self,
         size_bytes: int,
-        purpose: Literal["kit", "invitation", "publication"] = "kit",
+        purpose: Literal["kit", "invitation", "publication", "source"] = "kit",
     ) -> dict[str, JsonValue]:
         """Reserve a bounded kit transfer after observing actual free capacity."""
         if not 1 <= size_bytes <= MAX_KIT_BYTES:
             raise PreservationHostError("kit_size_out_of_range")
-        if purpose not in {"kit", "invitation", "publication"}:
+        if purpose not in {"kit", "invitation", "publication", "source"}:
             raise PreservationHostError("invalid_upload_purpose")
         if purpose != "kit" and size_bytes > 8 * 1024 * 1024:
             raise PreservationHostError("metadata_size_out_of_range")
+        if purpose == "source" and size_bytes > 256 * 1024:
+            raise PreservationHostError("source_document_too_large")
         entries = tuple(self.root.iterdir())
         if len(entries) >= 8:
             raise PreservationHostError("remove_unused_kit_uploads")

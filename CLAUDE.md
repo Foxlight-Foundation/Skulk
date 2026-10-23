@@ -2250,3 +2250,25 @@ audio but does not append another source guide. Both stage contexts use the
 native SDR green cue. A full-canvas opening uses JPEG18/strength0.7 at base and
 uncompressed strength1 at refinement. Normal output, progress and cancellation
 lifecycles apply; startup verifies all advertised node output contracts.
+
+
+Core also owns followed source discovery through `store/discovery_host.py` and
+`api/discovery.py`. Stock TUF-authenticated listings, source-root history and
+last-good evidence stay in the preservation owner's protected local cache.
+Search is local, off the event loop, and does not expose queries or inventory to
+suppliers. The typed metadata-job table shares the existing exclusive journal
+owner, while retaining a separate client namespace and four-slot metadata queue.
+`store/discovery_worker.py` runs through the known source/frozen preservation
+entry, with no archive/signing-key placeholders, model-store mutation or serving.
+The parent retains serialization through actual worker stop, limits output and
+deadline, and drains local IO before releasing journal ownership. Parent EOF
+ends the child; restart records interruption without network replay.
+
+First-contact source-file trust authorizes discovery only. Selecting exact
+source/entry/manifest and explicitly accepting that source's model-reference keys
+can create a validated metadata-only invitation upload. The ordinary receiving
+and Restore paths still own weight verification, complete companions, original
+cards/proofs, registry assurance and code consent. Metadata permissions do not
+become model-supplier/download grants. Source listings and private queries are
+not replicated on cluster topics or treated as runtime model cards. Standalone
+source following/cache interchange/search remain usable without Skulk.
