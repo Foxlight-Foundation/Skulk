@@ -3496,3 +3496,11 @@ neither serves blocks or advertises providers. This public IPFS/IPNS adapter is
 separate from Skulk's fabric listener and uses the same standalone TUF/model trust
 and original card/provenance contracts. Library remains an HTTP presentation
 client; cached search and source enrollment do not start networking.
+
+`RuntimeSetupHost` adds separately authorized native-software acquisition under
+that same owner/gate. It journals exact plan/operation consent, supervises a
+known `RuntimeSetupWorkerRequest`, and independently verifies pinned managed
+bytes before readiness. Library closure retains the job; stop/EOF/shutdown drain
+acquisition, while restart records interruption without replay. Private managed
+generations require no administrator or PATH change. Software setup grants no
+peer access, public serving, source authority, model trust or code permission.

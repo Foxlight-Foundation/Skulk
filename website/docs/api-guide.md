@@ -6121,13 +6121,45 @@ public v1 publication preserves complete original card and provenance data.
 
 These routes share the existing preservation operator/origin boundary. All
 paths are relative to the Core API base. Peer participation is optional and
-uses the separately installed qualified Kubo 0.43.1 executable on Core's PATH.
+uses qualified Kubo 0.43.1, acquired explicitly in Core's private storage or
+supplied through the standalone managed installer/an existing PATH installation.
 No API request accepts a native executable or host repository path.
 
 | Method and path | Input and behavior |
 | --- | --- |
 | `GET /preservation/discovery/peer` | Local `PeerState`: runtime availability, current setup identity, operator-selected contacts/private scope and actual active-session status. No networking or replay. |
 | `POST /preservation/discovery/peer` | `PeerSetup`: `bootstrap` (1–8 unique numeric libp2p contacts), `allow_private` (default false), `confirmed` (explicit Core address/content-exposure acknowledgement). Offline settings only; refuses during an owned session. |
+| `GET /preservation/discovery/peer/runtime?owner_id=CLIENT` | Offline `RuntimeSetupView`: supported managed platform, exact plan and its `plan_id`, and the client's latest setup receipt. The plan lists fixed official HTTPS origins, version, archive/executable hashes and sizes. No acquisition or peer effects. |
+| `POST /preservation/discovery/peer/runtime/jobs` | `RuntimeSetupRequest`: `owner_id`, permanent `operation_id`, exact reviewed `plan_id`, and `confirmed=true`. Returns a Core-owned software setup job. No API accepts a URL, filesystem path, checksum override or executable argument. |
+| `DELETE /preservation/discovery/peer/runtime/jobs/{job_id}?owner_id=CLIENT` | Stop this client's setup job. Returns its retained receipt; poll the offline view until terminal. Cancellation never starts peer networking and never recalls already verified publication. |
+
+Native setup supports managed macOS/Linux ARM64 and AMD64 builds, requires no
+administrator access, and changes no PATH, system packages, source enrollment,
+model trust or code permission. The known acquisition child uses the standalone
+installer's packaged SHA-512 archive and SHA-256 executable pins, free-space
+check, fixed official origins and atomic private generation publication. It runs
+no extraction hooks, installation script or downloaded executable. Core rehashes
+the managed executable before selecting it, then checks its exact version locally.
+Existing runtimes on other supported POSIX platforms can still use PATH.
+
+`RuntimeSetupJob` reports `job_id`, `owner_id`, observed `state`, conservative
+archive `bytes_copied`, creation/update times and a safe `error_code`. Setup is
+separate from model byte jobs and their allowances. It has a five-minute
+cooperative acquisition bound and a 330-second parent worker deadline, with a
+bounded stop/terminate/kill ladder. Parent EOF exits the acquisition child even
+if a resolver or storage call is blocked. Core checks actual pinned managed
+bytes after child exit rather than trusting a success message. Verified atomic
+publication can win a late cancellation race. A crash may leave private staging;
+it is never selected as a complete installation.
+
+Closing Library does not stop installation. The same owner/operation request
+returns its original receipt without replay; changing the request refuses.
+Restart marks pending setup interrupted, preserving identities without another
+download. A new deliberate attempt needs a new operation identity. Retain at
+most 64 setup receipts; exhaustion refuses instead of forgetting authorization.
+Setup shares the native lifetime gate and refuses admission while peers are
+active. Acquisition never configures contacts, starts a peer daemon or grants
+peer exposure. Subsequent source/receive jobs still need their separate grants.
 
 Source-file reviews also accept `foxlight.peer-source.v1`, exposing transport,
 pinned IPNS name and snapshot count. Confirming follows only that exact reviewed

@@ -426,12 +426,26 @@ def main() -> None:
         DiscoveryWorkerRequest,
         run_discovery_worker,
     )
+    from skulk.store.peer_install_worker import (
+        RuntimeSetupWorkerRequest,
+        run_runtime_setup_worker,
+    )
     from skulk.store.peer_worker import PeerWorkerRequest, run_peer_worker
 
-    adapter: TypeAdapter[WorkerRequest | DiscoveryWorkerRequest | PeerWorkerRequest] = (
-        TypeAdapter(WorkerRequest | DiscoveryWorkerRequest | PeerWorkerRequest)
+    adapter: TypeAdapter[
+        WorkerRequest
+        | DiscoveryWorkerRequest
+        | PeerWorkerRequest
+        | RuntimeSetupWorkerRequest
+    ] = TypeAdapter(
+        WorkerRequest
+        | DiscoveryWorkerRequest
+        | PeerWorkerRequest
+        | RuntimeSetupWorkerRequest
     )
     request = adapter.validate_json(data)
+    if isinstance(request, RuntimeSetupWorkerRequest):
+        raise SystemExit(run_runtime_setup_worker(request))
     if isinstance(request, PeerWorkerRequest):
         raise SystemExit(run_peer_worker(request))
     raise SystemExit(

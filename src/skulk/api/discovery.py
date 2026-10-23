@@ -17,6 +17,11 @@ from skulk.store.discovery_contracts import (
     SourceReviewRequest,
 )
 from skulk.store.peer_contracts import PeerSetup, PeerState
+from skulk.store.peer_install_contracts import (
+    RuntimeSetupJob,
+    RuntimeSetupRequest,
+    RuntimeSetupView,
+)
 from skulk.store.preservation_contracts import Digest, Handle
 from skulk.store.preservation_host import PreservationHost
 
@@ -51,6 +56,49 @@ def install_discovery_routes(
         owner = await host(request)
         try:
             return await owner.peers.configure(body)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/discovery/peer/runtime",
+        response_model=RuntimeSetupView,
+        summary="Review pinned peer software setup offline",
+        description="Read the exact packaged Kubo distribution identities, fixed official HTTPS origins, byte sizes and this client's latest durable setup receipt. No acquisition, peer networking, sharing or trust enrollment occurs on read. Paths and executable selection remain private to Core.",
+    )
+    async def runtime_view(request: Request, owner_id: Handle) -> RuntimeSetupView:
+        owner = await host(request)
+        try:
+            return await owner.peers.installation.view(owner_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/discovery/peer/runtime/jobs",
+        response_model=RuntimeSetupJob,
+        summary="Start separately authorized peer software acquisition",
+        description="Authorize the exact reviewed native plan for a permanent owner/operation identity. Core supervises one finite known child, verifies packaged archive/executable pins and atomically installs in private storage without administrator access, PATH changes, installers, scripts or peer effects. Closing the client does not cancel; restart interrupts without replay. Repeated exact requests observe prior work. Refuse changed consent, active peer work or exhausted receipt capacity. No API accepts paths, URLs, checksums or native executable arguments.",
+    )
+    async def runtime_start(
+        request: Request, body: RuntimeSetupRequest
+    ) -> RuntimeSetupJob:
+        owner = await host(request)
+        try:
+            return await owner.peers.installation.start(body)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.delete(
+        "/discovery/peer/runtime/jobs/{job_id}",
+        response_model=RuntimeSetupJob,
+        summary="Stop an owned peer software setup job",
+        description="Retain cancellation and drain the actual acquisition child. Verified publication that won a late stop race remains usable. Retain the receipt and original operation identity; restarting or replaying a request never retries the download. This grants no peer network access.",
+    )
+    async def runtime_stop(
+        request: Request, job_id: Digest, owner_id: Handle
+    ) -> RuntimeSetupJob:
+        owner = await host(request)
+        try:
+            return await owner.peers.installation.cancel(job_id, owner_id)
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
@@ -165,6 +213,9 @@ def install_discovery_routes(
     _ = (
         peer_state,
         peer_setup,
+        runtime_view,
+        runtime_start,
+        runtime_stop,
         review,
         follow,
         remove,
