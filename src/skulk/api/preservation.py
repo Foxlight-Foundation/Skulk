@@ -256,7 +256,7 @@ def create_preservation_router(
         "/jobs/{job_id}/invitation",
         response_model=InvitationPreview,
         summary="Inspect a receive job's original invitation",
-        description="Read retained bounded signed metadata without the original upload, registry or mirror. No download, key enrollment, restore or sharing starts. This permits explicit fresh review of an interrupted receive under its unchanged original policy and cumulative allowance.",
+        description="Read retained bounded signed metadata without the original upload, registry or mirror. No download, key enrollment, restore or sharing starts. This permits explicit fresh review of an interrupted receive under its unchanged original policy and cumulative allowance. The read-only receiving field projects that original local transport/proxy and limits; it is not imported metadata or a renewed network grant.",
     )
     async def receive_invitation(request: Request, job_id: Handle) -> InvitationPreview:
         owner = await host(request)

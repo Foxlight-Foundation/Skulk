@@ -3530,3 +3530,8 @@ Archives, exported files and native caches survive stop; cache cleanup is an
 explicit stopped-job maintenance action. Handoff import unwraps unchanged model
 or source references and returns contact drafts without enrolling settings,
 trust, registry authority or repository-code permission.
+
+The retained receiving invitation preview projects its original local
+`receiving` policy, including the exact numeric I2P proxy and limits. This is
+read-only control metadata, omitted from fresh invitation inspection; it does
+not enter signed portable evidence or renew the explicit Resume grant.

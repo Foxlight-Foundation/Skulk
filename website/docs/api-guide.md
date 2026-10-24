@@ -6309,3 +6309,10 @@ This direct transport currently receives legacy signed archives; PMF kits retain
 their independent offline/peer paths. See the standalone
 [I2P HTTP contract](https://github.com/Foxlight-Foundation/foxlight-model-preservation/blob/v0.15.1/docs/i2p-http.md)
 for route restrictions, router trust and qualification limits.
+
+The retained receive preview at `GET /preservation/jobs/{job_id}/invitation`
+also includes a read-only `receiving` policy. It exposes the original local
+transport, numeric I2P proxy and finite limits so a UI can show an interrupted
+job after reload. It neither renews network consent nor changes the original
+signed reference. Fresh uploaded invitation previews omit this local field;
+a recipient must still explicitly confirm the exact I2P policy to Resume.

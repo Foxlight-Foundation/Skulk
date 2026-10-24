@@ -362,6 +362,19 @@ async def test_real_i2p_core_source_receive_restart_and_offline_recovery(
                     ).job_id,
                 )
                 assert completed.state == "succeeded" and completed.copy_id, completed
+                before_preview = len(requests)
+                retained = await client.get(
+                    "/preservation/jobs/" + completed.job_id + "/invitation"
+                )
+                assert retained.status_code == 200, retained.text
+                assert retained.json()["receiving"] == plan.receiving.model_dump(
+                    mode="json"
+                )
+                fresh = await client.get(
+                    "/preservation/kit-uploads/" + metadata.upload_id + "/invitation"
+                )
+                assert fresh.status_code == 200 and "receiving" not in fresh.json()
+                assert len(requests) == before_preview
                 copy_id = completed.copy_id
                 assert not trap.requests
                 assert all(urlsplit(value).hostname == hostname for value in requests)
@@ -513,6 +526,13 @@ async def test_i2p_receive_stop_restart_and_exact_policy_resume(tmp_path: Path) 
                 len(requests) == attempts
                 and host.journal.job(job.job_id).state == "cancelled"
             )
+            retained = host.receive_invitation(job.job_id)
+            assert retained.receiving == plan.receiving
+            assert retained.receiving is not None
+            assert retained.receiving.i2p_proxy == connection
+            assert len(requests) == attempts
+            # A projection cannot renew consent: an unconfirmed resume still
+            # refuses under the exact original policy below.
             with pytest.raises(
                 PreservationHostError, match="receive_resume_i2p_policy_required"
             ):
