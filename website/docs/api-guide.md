@@ -6069,6 +6069,11 @@ private Library reads; none is installed on the unauthenticated store listener.
 No route accepts a filesystem path, executable, new signer or arbitrary command.
 The current Library release does not invoke these dedicated routes.
 
+Stop drains the actual worker group independently of the two filesystem effect
+slots. Stalled archive operations cannot defer the network signal; private
+request cleanup and the disk pause write may remain pending until storage
+responds, with Core's Stop fence already committed and their ownership retained.
+
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
 | GET | `/preservation/mirror` | Optional `offset` (0–1,000). Returns `MirrorPage`: configured/available observations, exact `policy_id`, actual resource/transport configuration, pause and standing-permission observations, live controller job/activity and up to twenty sorted model selections. `next_offset` pages models; pending, retained and removed tombstones are distinct. No network, verification of weight bytes or replay starts on read. |

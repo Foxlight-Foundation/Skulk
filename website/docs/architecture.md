@@ -3558,7 +3558,10 @@ using independent per-model mirror custody rather than Core's receive-only
 repository. `mirror_process.py` reads bounded observations without reaping the
 leader, signals/drains the owned group and only then releases descriptors,
 request files or terminal job state. Parent EOF stops the real controller and
-native descendants. Live activity includes preparation/drain and is never a
+native descendants. A bounded process-control executor per owned worker drains
+independently of the two storage effect slots, so stalled archive mounts cannot
+defer withdrawal of public participation. Disk cleanup remains owned until it
+actually finishes. Live activity includes preparation/drain and is never a
 public replica count.
 
 Only explicit `ModelStoreServer.start()` consults a configured mirror's previous

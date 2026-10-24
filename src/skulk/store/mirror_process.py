@@ -6,6 +6,7 @@ import asyncio
 import subprocess
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
 
@@ -18,9 +19,15 @@ from skulk.utils.process_groups import observe_process_exit, terminate_process_g
 class MirrorProcess:
     """Own the exact worker until its process group and observation pipe drain."""
 
-    def __init__(self, process: subprocess.Popen[str], storage: PreservationIO) -> None:
+    def __init__(self, process: subprocess.Popen[str]) -> None:
         self.process = process
-        self.storage = storage
+        # Two unrelated mounted-archive operations may occupy every storage
+        # effect slot. Withdrawal of public participation cannot wait for them.
+        # Each owned worker has one deduplicated drain, with at most two workers
+        # admitted by the mirror journal; no filesystem work uses this executor.
+        self._control = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="preservation-mirror-stop"
+        )
         self._transport: asyncio.ReadTransport | None = None
         self._reader: asyncio.StreamReader | None = None
         self._stopping: asyncio.Task[None] | None = None
@@ -45,7 +52,7 @@ class MirrorProcess:
             ),
             discard=terminate_process_group,
         )
-        owned = cls(process, storage)
+        owned = cls(process)
         try:
             if process.stdout is None:
                 raise PreservationHostError("mirror_worker_protocol")
@@ -94,7 +101,7 @@ class MirrorProcess:
             and self._stopping.exception() is not None
             and self.process.returncode is None
         ):
-            self._stopping = asyncio.create_task(self.storage.run(self._drain))
+            self._stopping = asyncio.create_task(self._drain_owned())
         interrupted = False
         while not self._stopping.done():
             try:
@@ -110,6 +117,12 @@ class MirrorProcess:
                 stream.close()
         if interrupted:
             raise asyncio.CancelledError
+
+    async def _drain_owned(self) -> None:
+        await asyncio.get_running_loop().run_in_executor(self._control, self._drain)
+        # Failed drains retain their executor and owner so explicit Stop may
+        # retry. Release it only after the actual process group has drained.
+        self._control.shutdown(wait=False)
 
     def _drain(self) -> None:
         stream = self.process.stdin

@@ -2319,7 +2319,8 @@ not enter signed portable evidence or renew the explicit Resume grant.
   Parent EOF cooperatively drains; source directory replacement cannot change
   its inherited accepted descriptor. No runtime card parser participates.
 - `store/mirror_process.py`: bounded JSON pipe, unreaped leader ownership,
-  cooperative stop then process-group drain. Requests/descriptors and terminal
+  cooperative stop then process-group drain on a bounded per-worker control
+  executor, independent of saturated filesystem effect slots. Requests/descriptors and terminal
   receipts remain owned until actual effects finish; no arbitrary process adoption.
 - `store/peer_host.py`: selected qualified runtime and exact reviewed contacts for
   independent mirror custody; receive-only Core peer sessions are not converted

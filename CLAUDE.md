@@ -2326,7 +2326,9 @@ registry/runtime authority or serving.
 the released standalone controller/retention/grant/prune primitives and validates
 policy under the actual service lock. `mirror_process.py` bounds the observation
 pipe and retains an unreaped process-group leader until actual worker/native
-shutdown. Native policy uses the qualified Core executable and reviewed peer
+shutdown. A bounded per-worker control executor drains independently of saturated
+storage effect slots; private disk cleanup stays owned until it finishes.
+Native policy uses the qualified Core executable and reviewed peer
 settings in independent mirror custody, never the receive-only cache. HTTP opt-out
 binds no HTTP listener. Activity counts include preparation/drain, not reachability.
 

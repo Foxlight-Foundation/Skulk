@@ -246,6 +246,81 @@ async def test_stop_drains_network_before_stalled_pause_and_client_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_stop_drains_workers_while_both_filesystem_effect_slots_stall(
+    tmp_path: Path,
+) -> None:
+    host = empty_host(tmp_path)
+    entered = (threading.Event(), threading.Event())
+    release = threading.Event()
+    effects: list[asyncio.Task[None]] = []
+    stopping: asyncio.Task[MirrorJob] | None = None
+
+    def stalled(index: int) -> None:
+        entered[index].set()
+        if not release.wait(20):
+            raise AssertionError("test filesystem effects did not release")
+
+    try:
+        await complete(
+            host,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="config",
+                kind="configure",
+                configuration=configuration(),
+            ),
+        )
+        page = await host.mirrors.page()
+        running = await host.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="run",
+                kind="run",
+                policy_id=page.policy_id,
+                public_participation=True,
+            )
+        )
+        await listening(host, running.job_id)
+        ledger = MirrorLedger(host.root / "managed-mirror")
+        active = await listening(host, running.job_id)
+        assert active.activity is not None and active.activity.http_port is not None
+        port = active.activity.http_port
+        effects = [
+            asyncio.create_task(host.mirrors.storage.run(lambda i=i: stalled(i)))
+            for i in range(2)
+        ]
+        for event in entered:
+            assert await asyncio.to_thread(event.wait, 5)
+        stopping = asyncio.create_task(host.mirrors.cancel(running.job_id))
+        # A mounted archive may consume both filesystem slots indefinitely.
+        # Signal and group drain must still end actual public participation;
+        # private command-file cleanup and pause may correctly remain pending.
+        async with asyncio.timeout(5):
+            while ledger.running():
+                await asyncio.sleep(0.025)
+            while True:
+                try:
+                    _, connection = await asyncio.open_connection("127.0.0.1", port)
+                except ConnectionRefusedError:
+                    break
+                connection.close()
+                await connection.wait_closed()
+                await asyncio.sleep(0.025)
+        assert host.journal.setting("mirror-running-intent") is None
+        assert host.journal.setting("mirror-stopped") is True
+        assert not ledger.running()
+        assert not stopping.done()
+        release.set()
+        assert (await stopping).state == "cancelled"
+    finally:
+        release.set()
+        await asyncio.gather(*effects, return_exceptions=True)
+        if stopping is not None:
+            await asyncio.gather(stopping, return_exceptions=True)
+        await host.close()
+
+
+@pytest.mark.asyncio
 async def test_pending_metadata_probe_projects_each_requested_cursor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
