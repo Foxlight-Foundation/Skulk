@@ -14,9 +14,11 @@ from urllib.parse import urlsplit
 from foxlight_model_preservation.discovery import (
     list_sources,
     refresh_source,
+    refresh_source_i2p,
     search_sources,
     select_entry,
 )
+from foxlight_model_preservation.i2p_http import I2PHTTPProxy
 from foxlight_model_preservation.invitations import invitation_from_envelope
 from foxlight_model_preservation.models import MAX_METADATA_BYTES, PreservationError
 from foxlight_model_preservation.operations import OperationControl, failure_code
@@ -24,14 +26,19 @@ from foxlight_model_preservation.peer import refresh_peer_source
 from foxlight_model_preservation.peer_invitations import inspect_peer_model
 from foxlight_model_preservation.peer_runtime import PeerClient, content_id
 from foxlight_model_preservation.storage import manifest_path
-from foxlight_model_preservation.transfer import DEFAULT_POLICY, response
-from pydantic import BaseModel, ConfigDict, Field
+from foxlight_model_preservation.transfer import (
+    DEFAULT_POLICY,
+    I2PTransferPolicy,
+    response,
+)
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from tuf.api.exceptions import RepositoryError
 
-from skulk.store.discovery_contracts import DiscoveryRequest
+from skulk.store.discovery_contracts import DiscoveryRequest, I2PSourcePolicy
 from skulk.store.preservation_contracts import Digest
 from skulk.store.preservation_journal import PreservationHostError
 from skulk.store.preservation_references import ModelInvitation as Invitation
+from skulk.store.preservation_references import i2p_model_mirrors
 
 
 @final
@@ -47,12 +54,31 @@ class DiscoveryWorkerRequest(BaseModel):
         description="Parent-selected protected cache; never supplied through the API."
     )
     selection: DiscoveryRequest = Field(description="Exact durable metadata request.")
+    i2p_policy: I2PSourcePolicy | None = Field(
+        default=None,
+        description="Parent-resolved exact local proxy and I2P-only metadata locators.",
+    )
     peer_repository: Path | None = Field(
         default=None, description="Host-owned active receive profile, never API input."
     )
     peer_binary: str | None = Field(
         default=None, description="Parent-qualified native executable, never API input."
     )
+
+    @model_validator(mode="after")
+    def check_i2p(self) -> "DiscoveryWorkerRequest":
+        """Bind protected worker routing before any metadata IO can begin."""
+        policy = self.i2p_policy
+        if self.selection.transport == "i2p":
+            if (
+                policy is None
+                or policy.source_id != self.selection.source_id
+                or policy.policy_id != self.selection.i2p_policy_id
+            ):
+                raise ValueError("I2P worker policy differs from the exact selection")
+        elif policy is not None:
+            raise ValueError("Other metadata transports cannot carry an I2P policy")
+        return self
 
 
 @final
@@ -78,10 +104,12 @@ class DiscoveryWorkerResult(BaseModel):
 
 
 def public_model_mirrors(
-    values: tuple[str, ...], transport: Literal["http", "peer"] = "http"
+    values: tuple[str, ...], transport: Literal["http", "peer", "i2p"] = "http"
 ) -> tuple[str, ...]:
     """Keep bounded credential-free HTTP(S) hints; never grant local file access."""
     accepted: list[str] = []
+    if transport == "i2p":
+        return i2p_model_mirrors(values)
     for value in values:
         if transport == "peer":
             if value.startswith("ipfs://"):
@@ -146,7 +174,11 @@ def _invitation(
     # model paths remain standalone-only and cannot become Core filesystem grants.
     mirrors = public_model_mirrors(entry.mirrors, selected.transport)
     if not mirrors:
-        raise PreservationHostError("public_model_mirror_required")
+        raise PreservationHostError(
+            "i2p_model_mirror_required"
+            if selected.transport == "i2p"
+            else "public_model_mirror_required"
+        )
     if selected.transport == "peer":
         return inspect_peer_model(
             entry.manifest,
@@ -154,11 +186,15 @@ def _invitation(
             mirrors,
             _peer_client(request, control),
         )
-    policy = replace(
-        DEFAULT_POLICY,
-        timeout=10,
-        allow_http=selected.allow_http,
-        allow_private=selected.allow_private,
+    policy = (
+        I2PTransferPolicy(proxy=_i2p_proxy(request), timeout=10)
+        if selected.transport == "i2p"
+        else replace(
+            DEFAULT_POLICY,
+            timeout=10,
+            allow_http=selected.allow_http,
+            allow_private=selected.allow_private,
+        )
     )
     deadline = time.monotonic() + 120
     control.limit_deadline(deadline)
@@ -200,6 +236,18 @@ def _invitation(
             # Cancellation/deadline must not be swallowed as supplier failover.
             control.checkpoint()
     raise PreservationHostError("model_metadata_unavailable")
+
+
+def _i2p_proxy(request: DiscoveryWorkerRequest) -> I2PHTTPProxy:
+    policy = request.i2p_policy
+    if (
+        policy is None
+        or not request.selection.allow_i2p
+        or policy.policy_id != request.selection.i2p_policy_id
+        or policy.source_id != request.selection.source_id
+    ):
+        raise PreservationHostError("source_i2p_policy_changed")
+    return I2PHTTPProxy(host=policy.proxy.host, port=policy.proxy.port)
 
 
 def _peer_client(
@@ -246,6 +294,17 @@ def run_discovery_worker(request: DiscoveryWorkerRequest) -> int:
                     historical=request.selection.historical,
                 )
                 if request.selection.transport == "peer"
+                else refresh_source_i2p(
+                    request.cache,
+                    request.selection.source_id,
+                    proxy=_i2p_proxy(request),
+                    allow_i2p=request.selection.allow_i2p,
+                    endpoints=request.i2p_policy.endpoints
+                    if request.i2p_policy
+                    else None,
+                    control=control,
+                )
+                if request.selection.transport == "i2p"
                 else refresh_source(
                     request.cache, request.selection.source_id, control=control
                 )

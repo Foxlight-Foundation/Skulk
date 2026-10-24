@@ -2252,6 +2252,19 @@ uncompressed strength1 at refinement. Normal output, progress and cancellation
 lifecycles apply; startup verifies all advertised node output contracts.
 
 
+
+
+Preservation's I2P HTTP pilot uses the same known metadata/byte worker and durable
+journal. `I2PSourcePolicy` binds an operator-selected numeric loopback proxy and
+I2P-only metadata locators to the original source identity; it stays private and
+is persisted before membership. Every protected job rechecks that exact policy
+and grants no direct/peer fallback. Exact receiving plans retain the proxy and
+finite byte/deadline controls across explicit resume. Network locations are
+unsigned hints; original cards, envelopes, TUF/model/registry/code authorities and
+complete companions stay unchanged. Installing/opening Core starts no I2P router
+or sharing. External proxy software remains operator-trusted; schema availability
+and source integration are not anonymity, full UI delivery or broad qualification.
+
 Core also owns followed source discovery through `store/discovery_host.py` and
 `api/discovery.py`. Stock TUF-authenticated listings, source-root history and
 last-good evidence stay in the preservation owner's protected local cache.

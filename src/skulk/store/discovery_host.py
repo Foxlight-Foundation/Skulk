@@ -24,6 +24,7 @@ from foxlight_model_preservation.discovery import (
 )
 from foxlight_model_preservation.discovery_models import SourceBootstrap, SourceStatus
 from foxlight_model_preservation.handoffs import read_handoff
+from foxlight_model_preservation.i2p_http import i2p_http_endpoint
 from foxlight_model_preservation.models import MAX_METADATA_BYTES
 from foxlight_model_preservation.peer import (
     PeerSource,
@@ -45,6 +46,7 @@ from skulk.store.discovery_contracts import (
     DiscoveryResults,
     DiscoverySource,
     DiscoverySupplier,
+    I2PSourcePolicy,
     SourceConfirmation,
     SourceReview,
 )
@@ -217,7 +219,7 @@ class DiscoveryHost:
                     safe_json(value["bootstrap"])
                 )
                 if value.get("peer") is not None:
-                    if request.allow_http or request.allow_private:
+                    if request.allow_http or request.allow_private or request.allow_i2p:
                         raise PreservationHostError("peer_sources_use_peer_settings")
                     peer = PeerSource.model_validate_json(safe_json(value["peer"]))
                     status = follow_peer_source(
@@ -225,6 +227,36 @@ class DiscoveryHost:
                     )
                 else:
                     if self._transport(view.source_id) == "peer":
+                        raise PreservationHostError(
+                            "source_transport_switch_unavailable"
+                        )
+                    if request.allow_i2p:
+                        if request.i2p_proxy is None:
+                            raise PreservationHostError("i2p_proxy_required")
+                        endpoints = request.i2p_endpoints
+                        if not endpoints:
+                            supported: list[str] = []
+                            for endpoint in bootstrap.endpoints:
+                                try:
+                                    supported.append(i2p_http_endpoint(endpoint))
+                                except ValueError:
+                                    continue
+                            endpoints = tuple(supported)
+                        if not endpoints:
+                            raise PreservationHostError("i2p_metadata_mirror_required")
+                        policy = I2PSourcePolicy(
+                            source_id=view.source_id,
+                            proxy=request.i2p_proxy,
+                            endpoints=endpoints,
+                        )
+                        # Persist protected routing first. A crash may leave a
+                        # harmless unenrolled policy, never direct-only membership
+                        # that loses the operator's explicit I2P selection.
+                        self.journal.set_setting(
+                            "discovery-i2p:" + view.source_id,
+                            policy.model_dump(mode="json"),
+                        )
+                    elif self._transport(view.source_id) == "i2p":
                         raise PreservationHostError(
                             "source_transport_switch_unavailable"
                         )
@@ -250,7 +282,23 @@ class DiscoveryHost:
             self._open()
             await self.storage.run(lambda: remove_source(self.cache, source_id))
 
-    def _transport(self, source_id: str) -> Literal["http", "peer"]:
+    def _i2p_policy(self, source_id: str) -> I2PSourcePolicy | None:
+        value = self.journal.setting("discovery-i2p:" + source_id)
+        if value is None:
+            return None
+        try:
+            policy = I2PSourcePolicy.model_validate_json(safe_json(value))
+            if policy.source_id != source_id:
+                raise ValueError("source binding changed")
+            return policy
+        except ValueError as error:
+            raise PreservationHostError("source_i2p_policy_invalid") from error
+
+    def _transport(self, source_id: str) -> Literal["http", "peer", "i2p"]:
+        # Even a malformed protected record refuses; it must never downgrade.
+        if self.journal.setting("discovery-i2p:" + source_id) is not None:
+            self._i2p_policy(source_id)
+            return "i2p"
         return (
             "peer"
             if (self.cache / "peer-sources" / (source_id + ".json")).exists()
@@ -283,6 +331,12 @@ class DiscoveryHost:
                 for source in sources
             }
         )
+        i2p_policies = await self.storage.run(
+            lambda: {
+                source.source_id: self._i2p_policy(source.source_id)
+                for source in sources
+            }
+        )
         jobs = self.journal.discovery_jobs(owner_id, offset)
         return _bounded(
             DiscoveryPage(
@@ -297,6 +351,17 @@ class DiscoveryHost:
                                 else None,
                                 "transport": transports[source.source_id],
                                 "snapshot_count": snapshots[source.source_id],
+                                **(
+                                    {
+                                        "i2p_policy_id": policy.policy_id,
+                                        "i2p_proxy": policy.proxy.model_dump(
+                                            mode="json"
+                                        ),
+                                    }
+                                    if (policy := i2p_policies[source.source_id])
+                                    is not None
+                                    else {}
+                                ),
                             }
                         )
                     )
@@ -431,6 +496,9 @@ class DiscoveryHost:
         request = DiscoveryWorkerRequest(
             cache=self.cache.absolute(),
             selection=selection,
+            i2p_policy=self._i2p_policy(selection.source_id)
+            if selection.transport == "i2p"
+            else None,
             peer_repository=peer.repository if peer else None,
             peer_binary=peer.binary if peer else None,
         )
@@ -514,6 +582,16 @@ class DiscoveryHost:
             )
             if selection.transport != enrolled_transport:
                 raise PreservationHostError("source_transport_changed")
+            if selection.transport == "i2p":
+                policy = await self.storage.run(
+                    lambda: self._i2p_policy(selection.source_id)
+                )
+                if (
+                    policy is None
+                    or policy.policy_id != selection.i2p_policy_id
+                    or not selection.allow_i2p
+                ):
+                    raise PreservationHostError("source_i2p_policy_changed")
             if selection.transport == "peer":
                 if self.peers is None or selection.peer_setup_id is None:
                     raise PreservationHostError("peer_setup_required")

@@ -1,6 +1,7 @@
 """Offline HTTP/peer model references with identical independent trust decisions."""
 
 from foxlight_model_preservation.handoffs import read_reference
+from foxlight_model_preservation.i2p_http import i2p_http_endpoint
 from foxlight_model_preservation.invitations import (
     Invitation as HTTPInvitation,
 )
@@ -49,3 +50,18 @@ def accept_model_reference_keys(
         if isinstance(invitation, PeerInvitation)
         else accept_http_keys(invitation, keys)
     )
+
+
+def i2p_model_mirrors(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Select only canonical I2P hints offline; locations never establish model trust."""
+    accepted: list[str] = []
+    for value in values:
+        if len(value) > 2048:
+            continue
+        try:
+            checked = i2p_http_endpoint(value)
+        except ValueError:
+            continue
+        if checked not in accepted:
+            accepted.append(checked)
+    return tuple(accepted)

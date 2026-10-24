@@ -1,18 +1,52 @@
 """Typed metadata controls, separate from model-copy and runtime authority."""
 
+import hashlib
 from typing import Literal, final
 
 from foxlight_model_preservation.discovery_models import SourceStatus
+from foxlight_model_preservation.i2p_http import i2p_http_endpoint
 from pydantic import Field, model_validator
 
 from skulk.store.preservation_contracts import (
     Digest,
     Handle,
+    I2PProxySettings,
     JobState,
     OperationId,
     PreservationContract,
     omit_peer_default,
 )
+
+
+@final
+class I2PSourcePolicy(PreservationContract):
+    """Private receiver connection policy; original signed source bytes stay intact."""
+
+    schema_version: Literal["skulk.i2p-source-policy.v1"] = Field(
+        default="skulk.i2p-source-policy.v1",
+        description="Local policy version, not a source signing domain.",
+    )
+    source_id: Digest = Field(description="Exact initial-root source identity.")
+    proxy: I2PProxySettings = Field(description="Explicit numeric loopback proxy.")
+    endpoints: tuple[str, ...] = Field(
+        min_length=1,
+        max_length=8,
+        description="I2P-only locators; no direct fallback or source authority is granted.",
+    )
+
+    @model_validator(mode="after")
+    def check_endpoints(self) -> "I2PSourcePolicy":
+        """Reject unsupported or mixed routes offline, before any connection."""
+        for endpoint in self.endpoints:
+            if len(endpoint) > 2048:
+                raise ValueError("I2P metadata endpoint exceeds its bound")
+            i2p_http_endpoint(endpoint)
+        return self
+
+    @property
+    def policy_id(self) -> str:
+        """Bind the exact local proxy/source/locator policy without network effects."""
+        return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
 
 
 @final
@@ -42,7 +76,7 @@ class SourceReview(PreservationContract):
         exclude_if=omit_peer_default,
         description="Untrusted handoff starting hints; no automatic Core configuration or network permission.",
     )
-    transport: Literal["http", "peer"] = Field(
+    transport: Literal["http", "peer", "i2p"] = Field(
         default="http",
         exclude_if=omit_peer_default,
         description="Reviewed source transport, without connection permission.",
@@ -78,6 +112,36 @@ class SourceConfirmation(PreservationContract):
         default=False,
         description="Permit metadata connections to non-global addresses only.",
     )
+
+    allow_i2p: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Follow using only I2P metadata connections; no model or sharing grant.",
+    )
+    i2p_proxy: I2PProxySettings | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Explicit numeric proxy on the Core host, not the browser device.",
+    )
+    i2p_endpoints: tuple[str, ...] = Field(
+        default=(),
+        max_length=8,
+        strict=False,
+        exclude_if=omit_peer_default,
+        description="Optional I2P-only locators; absent uses only supported original source hints.",
+    )
+
+    @model_validator(mode="after")
+    def check_i2p(self) -> "SourceConfirmation":
+        """Keep explicit I2P authority separate from every direct/peer grant."""
+        if self.allow_i2p:
+            if self.i2p_proxy is None or self.allow_http or self.allow_private:
+                raise ValueError(
+                    "I2P following requires its proxy and separate consent"
+                )
+        elif self.i2p_proxy is not None or self.i2p_endpoints:
+            raise ValueError("I2P proxy choices require explicit I2P permission")
+        return self
 
 
 @final
@@ -116,7 +180,7 @@ class DiscoveryRequest(PreservationContract):
         description="Separate private-address permission for model-metadata suppliers.",
     )
 
-    transport: Literal["http", "peer"] = Field(
+    transport: Literal["http", "peer", "i2p"] = Field(
         default="http",
         exclude_if=omit_peer_default,
         description="Explicit transport; no automatic direct-network fallback.",
@@ -137,9 +201,35 @@ class DiscoveryRequest(PreservationContract):
         description="Explicitly recover only a trusted pinned peer snapshot; never fresh-update authority.",
     )
 
+    allow_i2p: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Permit only I2P for this exact finite metadata operation.",
+    )
+    i2p_policy_id: Digest | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Exact separately confirmed source proxy/locator policy; drift refuses.",
+    )
+
     @model_validator(mode="after")
     def check_selection(self) -> "DiscoveryRequest":
         """Keep refresh grants separate from exact model-reference acceptance."""
+        if self.transport == "i2p":
+            if (
+                not self.allow_i2p
+                or self.i2p_policy_id is None
+                or self.allow_http
+                or self.allow_private
+                or self.allow_peer_network
+                or self.peer_setup_id is not None
+                or self.historical
+            ):
+                raise ValueError(
+                    "I2P operation requires its exact policy and separate consent"
+                )
+        elif self.allow_i2p or self.i2p_policy_id is not None:
+            raise ValueError("Other transports cannot carry I2P grants")
         if self.transport == "peer":
             if (
                 not self.allow_peer_network
@@ -214,7 +304,7 @@ class DiscoveryJob(PreservationContract):
 class DiscoverySource(SourceStatus):
     """Bounded status projection; original bootstrap and diagnostics remain cached."""
 
-    transport: Literal["http", "peer"] = Field(
+    transport: Literal["http", "peer", "i2p"] = Field(
         default="http",
         exclude_if=omit_peer_default,
         description="Locally followed transport, never an implicit network action.",
@@ -235,11 +325,26 @@ class DiscoverySource(SourceStatus):
         description="Bounded safe display diagnostic; original status remains retained locally."
     )
 
+    i2p_policy_id: Digest | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Current exact local I2P policy, if selected.",
+    )
+    i2p_proxy: I2PProxySettings | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Configured Core-local proxy; no liveness or anonymity assertion.",
+    )
+
 
 @final
 class DiscoveryPage(PreservationContract):
     """Local cached source states and one bounded page of metadata jobs."""
 
+    i2p_available: Literal[True] = Field(
+        default=True,
+        description="This owner implements explicit I2P HTTP jobs; not runtime proxy health or privacy qualification.",
+    )
     sources: tuple[DiscoverySource, ...] = Field(
         max_length=16,
         description="Retained sources, including disabled and invalid caches; no online probes.",
@@ -286,7 +391,7 @@ class DiscoverySupplier(PreservationContract):
         max_length=32,
         description="Source age/authority state, not model or registry trust.",
     )
-    transport: Literal["http", "peer"] = Field(
+    transport: Literal["http", "peer", "i2p"] = Field(
         default="http",
         exclude_if=omit_peer_default,
         description="Selected reference transport; source statements stay separate.",

@@ -6243,3 +6243,69 @@ deletions/tombstones and complete companion recovery keep their existing checks.
 The portable file and standalone tools require no Skulk. Public network
 publication currently uses the supported preservation-v1 bridge; unsupported
 PMF-only profiles are refused without losing retained data.
+
+
+### I2P HTTP preservation jobs
+
+Compatible development Core exposes the standalone 0.15.1 receive-only I2P HTTP
+pilot through its existing operator-gated preservation routes. Library UI adoption
+is a separate component release; API availability is not a native installer or
+full end-user qualification. A separately operated trusted I2P HTTP proxy must
+already be listening on the Core host. No router is installed, adopted, started,
+stopped or reconfigured, and a listening port does not authenticate its software.
+The pilot is not qualified anonymity or broad hostile-network reliability.
+
+`POST /preservation/discovery/sources` additionally accepts `allow_i2p: true`,
+`i2p_proxy: {"host":"127.0.0.1","port":4444}` and optional `i2p_endpoints` (at
+most eight canonical `http://HASH.b32.i2p` bases). The host must be numeric
+`127.0.0.1` or `::1`; port is 1–65535. These choices cannot accompany
+`allow_http`/`allow_private` or a peer source. If endpoint overrides are omitted,
+only supported I2P hints from the original bootstrap are selected. Absence of an
+I2P locator refuses without a connection. Following remains offline and leaves
+the original bootstrap/root/version floors intact. The protected connection
+policy is persisted before source membership, so an interrupted follow cannot
+silently leave direct-only membership. Unfollow retains this local preference;
+re-following it without explicit I2P settings refuses rather than downgrading.
+Use a new offline source review to deliberately change its proxy or locators.
+
+`GET /preservation/discovery` adds `i2p_available: true` for schema support,
+not proxy health. Each protected source projects `transport: "i2p"`, its
+`i2p_policy_id` and numeric `i2p_proxy`. Cached search attributes that transport
+without contacting the source. Private endpoint policy remains outside replicated
+State; source/cache export does not grant another receiver local network consent.
+
+`POST /preservation/discovery/jobs` uses `transport: "i2p"`, `allow_i2p: true`
+and the source's exact `i2p_policy_id` for both `refresh` and `model_metadata`.
+Other transport grants and historical-peer choices are refused. The parent and
+known worker independently bind the selected policy before network IO; policy
+change, removal or unsupported routes refuse without direct fallback. Source
+updates retain stock TUF authentication, expiration/rollback floors and last-good
+cache. Model metadata still needs exact entry/manifest selection and separate
+`accept_source_keys`; source trust never becomes registry or global model trust.
+Only canonical I2P model mirrors are used. Existing status/cancel endpoints,
+finite worker ownership, EOF/cancel drain and restart-without-replay apply.
+
+`POST /preservation/plans` with `kind: "receive"` additionally accepts
+`allow_i2p: true` and an exact `i2p_proxy`. This is separate from metadata consent,
+copy-scoped key acceptance and the final governed start. It cannot carry direct
+HTTP/private-address or peer grants. Only canonical I2P hints are retained from
+the unsigned invitation routing list; the original upload, signed envelope,
+model/card data and provenance remain intact. A plan without an I2P mirror
+refuses. Its `receiving` policy reports `transport: "i2p"`, the exact proxy,
+byte/deadline allowance and effective mirrors. It starts no router, payload swarm,
+mirror or runtime model admission. The selected proxy can observe request paths
+and timing; I2P endpoints may link a client destination. Search remains local.
+
+A stopped I2P receive must be re-planned with the same `resume_job_id`,
+`allow_i2p: true` and unchanged proxy. Missing or changed proxy confirmation
+refuses, as do changes to the original allowance, deadline or other immutable
+inputs. The existing `POST /preservation/jobs/{job_id}/resume` then reuses the
+same private stage and cumulative charges. Stop/Core loss retains files; restart,
+source withdrawal and transport failure do not replay work or delete a copy.
+Existing registry/code-authority decisions apply separately to later Restore.
+Default I2P fields are omitted from existing HTTP/peer request/receipt projections.
+
+This direct transport currently receives legacy signed archives; PMF kits retain
+their independent offline/peer paths. See the standalone
+[I2P HTTP contract](https://github.com/Foxlight-Foundation/foxlight-model-preservation/blob/v0.15.1/docs/i2p-http.md)
+for route restrictions, router trust and qualification limits.

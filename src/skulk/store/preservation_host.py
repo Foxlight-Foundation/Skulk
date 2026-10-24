@@ -100,6 +100,7 @@ from skulk.store.preservation_references import (
 )
 from skulk.store.preservation_references import (
     authenticate_model_reference,
+    i2p_model_mirrors,
 )
 from skulk.store.preservation_references import read_model_reference as read_invitation
 from skulk.store.preservation_sharing import check_peer_space
@@ -1262,6 +1263,11 @@ class PreservationHost:
             if original.receiving is None:
                 raise PreservationHostError("receive_policy_missing")
             policy = original.receiving
+            if policy.transport == "i2p":
+                if not request.allow_i2p or request.i2p_proxy != policy.i2p_proxy:
+                    raise PreservationHostError("receive_resume_i2p_policy_required")
+            elif request.allow_i2p or request.i2p_proxy is not None:
+                raise PreservationHostError("receive_resume_inputs_fixed")
             if isinstance(invitation, PeerInvitation):
                 peer_setup, _ = self._peer_receiving_setup(request, policy.peer_private)
                 payload = {**payload, "peer_setup_id": peer_setup}
@@ -1272,6 +1278,8 @@ class PreservationHost:
                 ("download_deadline_seconds", policy.deadline_seconds),
                 ("allow_http", policy.allow_http),
                 ("allow_private", policy.allow_private),
+                ("allow_i2p", policy.allow_i2p),
+                ("i2p_proxy", policy.i2p_proxy),
             ):
                 if (
                     field in request.model_fields_set
@@ -1290,12 +1298,29 @@ class PreservationHost:
         manifest = invitation.manifest
         peer_setup: str | None = None
         peer_private = False
+        if request.allow_i2p:
+            if isinstance(invitation, PeerInvitation):
+                raise PreservationHostError("peer_receive_cannot_grant_i2p")
+            mirrors = i2p_model_mirrors(invitation.mirrors)
+            if not mirrors:
+                raise PreservationHostError("i2p_model_mirror_required")
+            # Only unsigned routing hints change. The original upload, exact
+            # signed envelope, selected model keys and registry proof are kept.
+            invitation = read_invitation(
+                encode_record(invitation.model_copy(update={"mirrors": mirrors}))
+            )
         if isinstance(invitation, PeerInvitation):
             peer_setup, peer_private = self._peer_receiving_setup(request)
         elif request.allow_peer_network or request.peer_setup_id is not None:
             raise PreservationHostError("http_receive_cannot_grant_peering")
         policy = ReceivingPolicy(
-            transport="peer" if isinstance(invitation, PeerInvitation) else "http",
+            transport="peer"
+            if isinstance(invitation, PeerInvitation)
+            else "i2p"
+            if request.allow_i2p
+            else "http",
+            allow_i2p=request.allow_i2p,
+            i2p_proxy=request.i2p_proxy,
             allow_peer_network=isinstance(invitation, PeerInvitation),
             peer_private=peer_private,
             mirrors=invitation.mirrors,
