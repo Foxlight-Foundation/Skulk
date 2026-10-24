@@ -2291,3 +2291,8 @@ source following/cache interchange/search remain usable without Skulk.
 - Terminal stop follows actual native drain. Restart never replays serving.
   Native job cache survives stop and uses explicit existing temporary cleanup;
   source copies and handoff artifacts remain. No automatic eviction/deletion.
+
+The retained receiving invitation preview projects its original local
+`receiving` policy, including the exact numeric I2P proxy and limits. This is
+read-only control metadata, omitted from fresh invitation inspection; it does
+not enter signed portable evidence or renew the explicit Resume grant.

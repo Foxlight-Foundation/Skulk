@@ -2305,3 +2305,8 @@ actual group drain. Stop/restart never deletes copies or replays serving. Native
 cache cleanup is explicit. The bounded handoff response byte plane retains only
 an export hash in job controls; independent model, registry, code and network
 checks remain unchanged. See the API and architecture contracts.
+
+The retained receiving invitation preview projects its original local
+`receiving` policy, including the exact numeric I2P proxy and limits. This is
+read-only control metadata, omitted from fresh invitation inspection; it does
+not enter signed portable evidence or renew the explicit Resume grant.

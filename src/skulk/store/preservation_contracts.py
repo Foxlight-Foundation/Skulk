@@ -221,6 +221,11 @@ class InvitationRequest(PreservationContract):
 class InvitationPreview(PreservationContract):
     """Candidate-signed offline metadata; no independent owner or registry trust."""
 
+    receiving: ReceivingPolicy | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Read-only original local policy on a retained receive preview; never imported authority or renewed consent.",
+    )
     manifest_id: Digest = Field(description="Exact included signed identity.")
     name: str = Field(max_length=200, description="Signed display name.")
     size_bytes: int = Field(ge=0, description="Complete declared closure bytes.")

@@ -594,9 +594,11 @@ class PreservationHost:
         job = self.journal.job(job_id)
         if job.kind != "receive":
             raise PreservationHostError("receive_job_required")
-        _, payload = self.journal.plan(job.plan_id)
+        plan, payload = self.journal.plan(job.plan_id)
         invitation = read_invitation(safe_json(payload["invitation"]).encode())
-        preview = invitation_preview(invitation)
+        preview = invitation_preview(invitation).model_copy(
+            update={"receiving": plan.receiving}
+        )
         self._bounded_view(preview)
         return preview
 
