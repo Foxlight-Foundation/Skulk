@@ -3269,8 +3269,8 @@ Native video engine v0.2.1 marks decoding at the actual decode-and-save call. Th
 
 ### Durable model preservation owner
 
-The actual `ModelStoreServer` lazily owns a `PreservationHost` around its existing
-`ModelStore`; it does not instantiate a competing store writer. Private operator
+The actual `ModelStoreServer` owns a `PreservationHost` around its existing
+`ModelStore`, normally on demand and at explicit startup for a configured persistent mirror; it does not instantiate a competing store writer. Private operator
 controls on the Core API expose enrolled storage, exact expiring plans and a
 bounded Library/Activity view. Core's protected SQLite journal holds permanent
 request reservations, jobs and verified-copy receipts outside capability
@@ -3535,3 +3535,48 @@ The retained receiving invitation preview projects its original local
 `receiving` policy, including the exact numeric I2P proxy and limits. This is
 read-only control metadata, omitted from fresh invitation inspection; it does
 not enter signed portable evidence or renew the explicit Resume grant.
+
+
+### Persistent public mirror owner
+
+`store/mirror_host.py` adds one managed mirror beneath the existing preservation
+owner. `mirror_contracts.py` and operator-gated `api/mirrors.py` give it dedicated
+strict controls and bounded history; existing finite sharing/copy wire contracts
+stay unchanged. The journal retains permanent request identities before effects,
+with two active slots and a fixed receipt limit. Configuration and public-copy
+admission are offline and grant no serving; caller paths, executables and signers
+are never accepted. Public-copy input retains its already accepted trust and
+same pinned archive descriptor through actual child drain. Opaque/future card
+properties and full original evidence/companion closure stay on the standalone
+verification path, with no runtime card parsing or new registry authority.
+
+`mirror_worker.py` runs through the known source/frozen worker dispatcher and
+reuses the public core's exact-policy ledger, local retention, HTTP/native
+controller, expiring grants, pin/block and journaled prune. Native configuration
+selects the existing qualified Core runtime and reviewed peer settings, while
+using independent per-model mirror custody rather than Core's receive-only
+repository. `mirror_process.py` reads bounded observations without reaping the
+leader, signals/drains the owned group and only then releases descriptors,
+request files or terminal job state. Parent EOF stops the real controller and
+native descendants. A bounded process-control executor per owned worker drains
+independently of the two storage effect slots, so stalled archive mounts cannot
+defer withdrawal of public participation. Disk cleanup remains owned until it
+actually finishes. Live activity includes preparation/drain and is never a
+public replica count.
+
+Only explicit `ModelStoreServer.start()` consults a configured mirror's previous
+running intent and separately approved exact unexpired standing grant. Host
+construction and reads never resume. Finite runs never gain standing intent;
+a saved grant alone starts nothing. Core close drains while retaining the prior
+standing intent; user Stop clears it before signalling and records the disk's
+pause after drain, so a stalled pause write cannot defer the network signal.
+An unavailable disk still has Core's durable Stop fence. New actions refuse
+while cancellation still owns work. Policy changes/new local selections clear
+authority as appropriate; reboot or retry cannot reset resource reservations.
+Deletion remains an exact stopped-owner, blocked/unpinned operator action.
+
+The current Library release uses the existing finite routes. These dedicated
+Core controls and standalone tools do not establish a native desktop package,
+public-network anonymity, reachable replicas or independently operated custody.
+Direct public PMF transport is refused; PMF's existing kit/Restore paths retain
+their supported scope. See the API guide for exact request and lifecycle fields.

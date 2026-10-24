@@ -12,6 +12,7 @@ from foxlight_model_preservation.invitations import Invitation
 from foxlight_model_preservation.models import Manifest, TrustProfile
 
 from skulk.api.discovery import install_discovery_routes
+from skulk.api.mirrors import install_mirror_routes
 from skulk.store.preservation import RecoveryCompatibilityError
 from skulk.store.preservation_contracts import (
     DefaultLocationRequest,
@@ -582,4 +583,5 @@ def create_preservation_router(
         download_trust,
     )
     install_discovery_routes(router, host, refusal)
+    install_mirror_routes(router, host, refusal)
     return router
