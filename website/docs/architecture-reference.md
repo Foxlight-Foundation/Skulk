@@ -2318,10 +2318,13 @@ not enter signed portable evidence or renew the explicit Resume grant.
   evidence. Expected policy is rechecked inside the controller's service lock.
   Parent EOF cooperatively drains; source directory replacement cannot change
   its inherited accepted descriptor. No runtime card parser participates.
+  The fixed direct native adapter keeps daemons/commands in the outer owner's
+  group; source/frozen execution needs no nested Python module launch.
 - `store/mirror_process.py`: bounded JSON pipe, unreaped leader ownership,
   cooperative stop then process-group drain on a bounded per-worker control
   executor, independent of saturated filesystem effect slots. Requests/descriptors and terminal
   receipts remain owned until actual effects finish; no arbitrary process adoption.
+  Group-member confirmation precedes leader reap; a real drain timeout retains ownership.
 - `store/peer_host.py`: selected qualified runtime and exact reviewed contacts for
   independent mirror custody; receive-only Core peer sessions are not converted
   into publishers. Runtime bytes are pinned/rechecked in mirror policy.
@@ -2333,6 +2336,7 @@ not enter signed portable evidence or renew the explicit Resume grant.
   grant alone or finite run. Core close retains only prior approved intent. User
   Stop clears it before signalling and persists pause after drain; unavailable
   disks do not erase Core's Stop fence. No automatic retained-model deletion.
+  Controller drain precedes waits for unrelated cancelled model cleanup.
 
 Direct public PMF transport, public replica health and native desktop distribution
 are not implied by these controls. Standalone core use remains independent of

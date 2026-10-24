@@ -30,6 +30,7 @@ from foxlight_model_preservation.operations import (
     Progress,
     failure_code,
 )
+from foxlight_model_preservation.peer_runtime import serve_peer
 from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.store.mirror_contracts import MirrorActivity, MirrorRequest
@@ -288,6 +289,10 @@ def run_mirror_worker(request: MirrorWorkerRequest) -> int:
                 control=control,
                 prepared=prepared,
                 observe=observe,
+                # The fixed outer source/frozen worker already owns a group
+                # and an EOF fence. Keep native daemons in that same group;
+                # a second Python supervisor would detach and require -m.
+                native_peer_runner=serve_peer,
             )
         elif decision.kind == "grant_resume":
             if decision.resume_expires is None:

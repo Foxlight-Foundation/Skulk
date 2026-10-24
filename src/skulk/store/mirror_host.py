@@ -572,8 +572,6 @@ class MirrorHost:
         await self._await_control(self._closing)
 
     async def _close(self) -> None:
-        if self._cancellations:
-            await asyncio.gather(*tuple(self._cancellations.values()))
         tasks = tuple(self._tasks.values())
         for job_id, task in tuple(self._tasks.items()):
             job, _ = self.journal.mirror_job(job_id)
@@ -588,6 +586,10 @@ class MirrorHost:
                 await process.stop()
             else:
                 task.cancel()
+        # Unrelated cancelled model work can still own stalled filesystem
+        # cleanup. Stop actual public controllers before waiting for that work.
+        if self._cancellations:
+            await asyncio.gather(*tuple(self._cancellations.values()))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for job_id, task in tuple(self._tasks.items()):

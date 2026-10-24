@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from foxlight_model_preservation.kits import export_kit
 from foxlight_model_preservation.mirror_models import (
     HeldModel,
     MirrorState,
@@ -18,13 +19,15 @@ from foxlight_model_preservation.mirror_models import (
 )
 from foxlight_model_preservation.mirror_state import MirrorLedger
 
+import skulk.store.mirror_host as mirror_host
 import skulk.store.model_store_server as store_server
 from skulk.store.mirror_contracts import MirrorJob, MirrorRequest
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_server import ModelStoreServer
 from skulk.store.preservation_host import PreservationHost
+from skulk.store.preservation_io import PreservationIO
 from skulk.store.tests.test_mirror_worker import archive, configuration
-from skulk.store.tests.test_preservation_sharing import empty_host
+from skulk.store.tests.test_preservation_sharing import empty_host, import_copy
 
 
 async def complete(host: PreservationHost, request: MirrorRequest) -> MirrorJob:
@@ -317,6 +320,109 @@ async def test_stop_drains_workers_while_both_filesystem_effect_slots_stall(
         await asyncio.gather(*effects, return_exceptions=True)
         if stopping is not None:
             await asyncio.gather(stopping, return_exceptions=True)
+        await host.close()
+
+
+@pytest.mark.asyncio
+async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = empty_host(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    selected: str | None = None
+    cancelled: asyncio.Task[MirrorJob] | None = None
+    closing: asyncio.Task[None] | None = None
+    original_cleanup = mirror_host.remove_mirror_request
+
+    def stalled() -> None:
+        entered.set()
+        if not release.wait(15):
+            raise AssertionError("test model cleanup did not release")
+
+    async def cleanup(path: Path, storage: PreservationIO) -> None:
+        if path.stem == selected:
+            await storage.run(stalled)
+        await original_cleanup(path, storage)
+
+    try:
+        await complete(
+            host,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="config",
+                kind="configure",
+                configuration=configuration(),
+            ),
+        )
+        source, identity, trust = archive(tmp_path)
+        kit = tmp_path / "complete.foxkit"
+        export_kit(source, identity, trust, kit)
+        copy = await import_copy(host, kit.read_bytes())
+        page = await host.mirrors.page()
+        await complete(
+            host,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="retain",
+                kind="retain",
+                policy_id=page.policy_id,
+                copy_id=copy.copy_id,
+                manifest_id=identity,
+                confirm_redistribution=True,
+            ),
+        )
+        page = await host.mirrors.page()
+        controller = await host.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="run",
+                kind="run",
+                policy_id=page.policy_id,
+                public_participation=True,
+            ),
+        )
+        active = await listening(host, controller.job_id)
+        assert active.activity is not None and active.activity.http_port is not None
+        port = active.activity.http_port
+        monkeypatch.setattr(mirror_host, "remove_mirror_request", cleanup)
+        model = await host.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="pin",
+                kind="model",
+                policy_id=page.policy_id,
+                manifest_id=identity,
+                action="pin",
+            ),
+        )
+        selected = model.job_id
+        assert await asyncio.to_thread(entered.wait, 5)
+        cancelled = asyncio.create_task(host.mirrors.cancel(model.job_id))
+        async with asyncio.timeout(5):
+            while host.mirrors.job(model.job_id).state != "cancelling":
+                await asyncio.sleep(0.025)
+        closing = asyncio.create_task(host.close())
+        async with asyncio.timeout(5):
+            while MirrorLedger(host.root / "managed-mirror").running():
+                await asyncio.sleep(0.025)
+            while True:
+                try:
+                    _, connection = await asyncio.open_connection("127.0.0.1", port)
+                except ConnectionRefusedError:
+                    break
+                connection.close()
+                await connection.wait_closed()
+                await asyncio.sleep(0.025)
+        assert not closing.done() and not cancelled.done()
+        release.set()
+        await closing
+        assert (await cancelled).state == "interrupted"
+    finally:
+        release.set()
+        if cancelled is not None:
+            await asyncio.gather(cancelled, return_exceptions=True)
+        if closing is not None:
+            await asyncio.gather(closing, return_exceptions=True)
         await host.close()
 
 

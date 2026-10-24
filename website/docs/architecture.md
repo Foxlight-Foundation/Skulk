@@ -3555,9 +3555,14 @@ reuses the public core's exact-policy ledger, local retention, HTTP/native
 controller, expiring grants, pin/block and journaled prune. Native configuration
 selects the existing qualified Core runtime and reviewed peer settings, while
 using independent per-model mirror custody rather than Core's receive-only
-repository. `mirror_process.py` reads bounded observations without reaping the
+repository. The known outer worker supplies the public core's direct `serve_peer`
+adapter, keeping daemons and command helpers in its owned group. No nested
+Python module launcher or detached native supervisor is needed in a source or
+frozen worker. `mirror_process.py` reads bounded observations without reaping the
 leader, signals/drains the owned group and only then releases descriptors,
-request files or terminal job state. Parent EOF stops the real controller and
+request files or terminal job state. Group drain confirms every member is absent
+or stopped as a zombie before reaping the leader; timeout retains ownership.
+Parent EOF stops the real controller and
 native descendants. A bounded process-control executor per owned worker drains
 independently of the two storage effect slots, so stalled archive mounts cannot
 defer withdrawal of public participation. Disk cleanup remains owned until it
@@ -3570,6 +3575,8 @@ construction and reads never resume. Finite runs never gain standing intent;
 a saved grant alone starts nothing. Core close drains while retaining the prior
 standing intent; user Stop clears it before signalling and records the disk's
 pause after drain, so a stalled pause write cannot defer the network signal.
+Core close also drains controllers before awaiting unrelated cancelled model
+cleanup; that filesystem work remains owned until it actually finishes.
 An unavailable disk still has Core's durable Stop fence. New actions refuse
 while cancellation still owns work. Policy changes/new local selections clear
 authority as appropriate; reboot or retry cannot reset resource reservations.

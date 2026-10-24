@@ -2331,14 +2331,19 @@ storage effect slots; private disk cleanup stays owned until it finishes.
 Native policy uses the qualified Core executable and reviewed peer
 settings in independent mirror custody, never the receive-only cache. HTTP opt-out
 binds no HTTP listener. Activity counts include preparation/drain, not reachability.
+The fixed outer worker selects the public core's direct native adapter; daemons
+and command helpers stay in that group without a nested Python launcher. Group
+confirmation precedes leader reap; a real drain timeout retains ownership.
 
 Only explicit `ModelStoreServer.start()` can resume prior running intent with the
 same Core-approved exact unexpired standing grant. Reads/constructors, finite
 runs and grants alone do not start sharing. Core close drains while preserving
 only prior standing intent; user Stop clears it before signalling, drains network
 work before the disk pause write, and retains filesystem ownership through client
-cancellation. Unavailable storage still has Core's durable Stop fence. Budgets,
-original evidence and operator-only deletion survive restart. Current public PMF
+cancellation. Unavailable storage still has Core's durable Stop fence.
+Core close drains actual controllers before waiting for unrelated cancelled
+model cleanup; that cleanup retains filesystem and journal ownership.
+Budgets, original evidence and operator-only deletion survive restart. Current public PMF
 transport still refuses; PMF kit/recovery and standalone Skulk-free use retain
 existing scope. The current Library release does not yet invoke these routes.
 

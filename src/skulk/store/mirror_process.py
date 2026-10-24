@@ -137,7 +137,7 @@ class MirrorProcess:
             observe_process_exit(self.process) is None and time.monotonic() < deadline
         ):
             time.sleep(0.025)
-        terminate_process_group(self.process)
+        terminate_process_group(self.process, confirm_members=True)
 
 
 async def remove_mirror_request(path: Path, storage: PreservationIO) -> None:

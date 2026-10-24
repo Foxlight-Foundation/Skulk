@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -29,6 +30,37 @@ from skulk.store.mirror_worker import (
     MirrorWorkerEvent,
     MirrorWorkerRequest,
 )
+from skulk.utils.process_groups import observe_process_exit, terminate_process_group
+
+
+def test_group_confirmation_timeout_retains_unreaped_identity_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = subprocess.Popen(  # noqa: S603 - fixed synthetic owned child
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        text=True,
+    )
+
+    def unconfirmed(_identity: int) -> bool:
+        # Model an OS observation that cannot yet confirm the owned member
+        # stopped. Returning from killpg is insufficient evidence by itself.
+        return True
+
+    try:
+        with monkeypatch.context() as observation:
+            observation.setattr(
+                "skulk.utils.process_groups._group_is_running", unconfirmed
+            )
+            with pytest.raises(subprocess.TimeoutExpired):
+                terminate_process_group(process, grace_seconds=0, confirm_members=True)
+            assert process.returncode is None
+            assert observe_process_exit(process) is not None
+        terminate_process_group(process, grace_seconds=0, confirm_members=True)
+        assert process.poll() is not None
+    finally:
+        if process.returncode is None:
+            terminate_process_group(process, grace_seconds=0, confirm_members=True)
 
 
 def configuration() -> MirrorConfiguration:

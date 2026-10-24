@@ -7,6 +7,8 @@ import os
 import shutil
 import signal
 import socket
+import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Literal
 
@@ -16,6 +18,7 @@ from foxlight_model_preservation.handoffs import read_handoff
 from foxlight_model_preservation.kits import export_kit
 from foxlight_model_preservation.mirror_native import export_reference
 from foxlight_model_preservation.mirror_state import MirrorLedger
+from foxlight_model_preservation.models import PreservationError
 from foxlight_model_preservation.peer_invitations import (
     PeerInvitation,
     fetch_peer_invitation,
@@ -34,13 +37,22 @@ from skulk.store.tests.test_preservation_sharing import empty_host, import_copy
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "transport,crash", [("torrent", False), ("ipfs", False), ("ipfs", True)]
+    "transport,crash,stalled,frozen",
+    [
+        ("torrent", False, False, False),
+        ("ipfs", False, False, False),
+        ("ipfs", True, False, False),
+        ("ipfs", True, True, False),
+        ("ipfs", False, False, True),
+    ],
 )
 async def test_native_only_core_recipient_and_owned_descendant_drain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     transport: Literal["torrent", "ipfs"],
     crash: bool,
+    stalled: bool,
+    frozen: bool,
 ) -> None:
     binary = None
     if transport == "ipfs":
@@ -54,10 +66,30 @@ async def test_native_only_core_recipient_and_owned_descendant_drain(
     else:
         pytest.importorskip("libtorrent")
     host = empty_host(tmp_path)
+    if frozen:
+        # Exercise fixed-worker dispatch when the self executable cannot run
+        # Python modules. Actual frozen resource closure/notarization is separate.
+        refusal = tmp_path / "frozen-self"
+        refusal.write_text("#!/bin/sh\nexit 97\n")
+        refusal.chmod(0o700)
+        entry = tmp_path / "fixed-worker.py"
+        entry.write_text(
+            "import sys\n"
+            "from skulk.store.preservation_worker import main\n"
+            "sys.frozen = True\n"
+            f"sys.executable = {str(refusal)!r}\n"
+            "main()\n"
+        )
+
+        def fixed_worker(request: Path) -> tuple[str, ...]:
+            return (sys.executable, str(entry), str(request.absolute()))
+
+        host.mirrors.command = fixed_worker
     occupied = socket.socket()
     occupied.bind(("127.0.0.1", 0))
     occupied.listen(1)
     receiver = handle = None
+    descendants: tuple[tuple[int, float], ...] = ()
     try:
         original, identity, trust = archive(tmp_path)
         wrapper = (original / manifest_path(identity)).read_bytes()
@@ -187,7 +219,20 @@ async def test_native_only_core_recipient_and_owned_descendant_drain(
             )
             handle.connect_peer(("127.0.0.1", record.last_torrent_port))
             async with asyncio.timeout(30):
-                while not handle.status().is_seeding:
+                while True:
+                    if handle.status().is_seeding:
+                        try:
+                            await asyncio.to_thread(
+                                verify_store,
+                                destination / identity,
+                                identity,
+                                trust,
+                            )
+                        except (FileNotFoundError, PreservationError):
+                            # Native piece completion precedes async disk writes.
+                            pass
+                        else:
+                            break
                     await asyncio.sleep(0.05)
             destination = destination / identity
         manifest = await asyncio.to_thread(verify_store, destination, identity, trust)
@@ -195,14 +240,25 @@ async def test_native_only_core_recipient_and_owned_descendant_drain(
             len(manifest.members) == 2
             and (destination / manifest_path(identity)).read_bytes() == wrapper
         )
-        descendants: tuple[tuple[int, float], ...] = ()
-        if crash:
-            owned = host.mirrors._processes[run.job_id]  # pyright: ignore[reportPrivateUsage] - precise owned-process fault injection
-            descendants = tuple(
-                (child.pid, child.create_time())
-                for child in psutil.Process(owned.process.pid).children(recursive=True)
-            )
+        owned = host.mirrors._processes[run.job_id]  # pyright: ignore[reportPrivateUsage] - exact owned-group qualification and fault injection
+        children: list[tuple[int, float]] = []
+        for child in psutil.Process(owned.process.pid).children(recursive=True):
+            try:
+                started = child.create_time()
+                assert os.getpgid(child.pid) == owned.process.pid
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                continue
+            children.append((child.pid, started))
+        descendants = tuple(children)
+        if binary:
             assert descendants
+        if crash:
+            if stalled:
+                # An unresponsive nested owner cannot satisfy an EOF fence.
+                # Terminal ownership must still cover every actual child.
+                for identifier, _ in descendants:
+                    with suppress(ProcessLookupError):
+                        os.kill(identifier, signal.SIGSTOP)
             os.kill(owned.process.pid, signal.SIGKILL)
             async with asyncio.timeout(20):
                 while host.mirrors.job(run.job_id).state in {
@@ -214,26 +270,33 @@ async def test_native_only_core_recipient_and_owned_descendant_drain(
             assert host.mirrors.job(run.job_id).state == "failed"
         else:
             assert (await host.mirrors.cancel(run.job_id)).state == "cancelled"
-        async with asyncio.timeout(20):
-            while True:
-                live = False
-                for identifier, started in descendants:
-                    try:
-                        process = psutil.Process(identifier)
-                        live |= (
-                            process.create_time() == started
-                            and process.is_running()
-                            and process.status() != psutil.STATUS_ZOMBIE
-                        )
-                    except psutil.NoSuchProcess:
-                        continue
-                if not live:
-                    break
-                await asyncio.sleep(0.05)
+        # The first terminal observation must already mean all native activity
+        # stopped, including an unresponsive child and frozen fixed-entry case.
+        for identifier, started in descendants:
+            try:
+                child = psutil.Process(identifier)
+                assert (
+                    child.create_time() != started
+                    or child.status() == psutil.STATUS_ZOMBIE
+                )
+            except psutil.NoSuchProcess:
+                pass
         assert (await host.mirrors.page()).activity is None and not ledger.running()
         assert verify_store(ledger.path / "store", identity, trust) == manifest
         assert ledger.read().egress_month_used >= 16 * 1024**2
     finally:
+        # Explicit fault-harness cleanup is independent of the assertion above:
+        # a failing pre-fix run must never leave its deliberately stopped peers.
+        for identifier, started in descendants:
+            try:
+                child = psutil.Process(identifier)
+                if (
+                    child.create_time() == started
+                    and child.status() != psutil.STATUS_ZOMBIE
+                ):
+                    child.kill()
+            except psutil.NoSuchProcess:
+                pass
         await host.close()
         if receiver is not None:
             if handle is not None:

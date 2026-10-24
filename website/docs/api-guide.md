@@ -6073,6 +6073,11 @@ Stop drains the actual worker group independently of the two filesystem effect
 slots. Stalled archive operations cannot defer the network signal; private
 request cleanup and the disk pause write may remain pending until storage
 responds, with Core's Stop fence already committed and their ownership retained.
+Core shutdown drains controllers before waiting for unrelated cancelled model
+cleanup. Native daemons/helpers remain in the fixed worker's owned process
+group; terminal completion requires every member to be absent or a zombie before
+the leader is reaped. A real drain timeout retains ownership and reports
+incomplete Stop rather than a completed receipt.
 
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
