@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, final
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 Handle = Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")]
 OperationId = Annotated[
@@ -273,10 +273,26 @@ class HandoffRequest(PreservationContract):
 
 
 @final
+class I2PProxySettings(PreservationContract):
+    """Explicit local I2P HTTP proxy, without a router or anonymity assertion."""
+
+    host: Literal["127.0.0.1", "::1"] = Field(
+        default="127.0.0.1",
+        description="Numeric loopback proxy on the Core host; never DNS or a remote proxy.",
+    )
+    port: int = Field(
+        default=4444,
+        ge=1,
+        le=65535,
+        description="Explicit local HTTP proxy port; a listener alone does not authenticate its software.",
+    )
+
+
+@final
 class ReceivingPolicy(PreservationContract):
     """Finite direct-receiving policy retained unchanged across explicit resumes."""
 
-    transport: Literal["http", "peer"] = Field(
+    transport: Literal["http", "peer", "i2p"] = Field(
         default="http",
         exclude_if=omit_peer_default,
         description="Explicit selected receiving transport.",
@@ -290,6 +306,16 @@ class ReceivingPolicy(PreservationContract):
         default=False,
         exclude_if=omit_peer_default,
         description="Fixed private-address peer scope; independent of HTTP flags.",
+    )
+    allow_i2p: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Explicit receive-only I2P application participation; grants no payload seeding.",
+    )
+    i2p_proxy: I2PProxySettings | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Exact immutable proxy selection for this receiving operation.",
     )
     mirrors: tuple[str, ...] = Field(
         min_length=1, max_length=16, description="Exact reviewed HTTP(S) bases."
@@ -312,6 +338,29 @@ class ReceivingPolicy(PreservationContract):
         description="Separate deliberate permission for non-global addresses.",
     )
 
+    @model_validator(mode="after")
+    def check_i2p(self) -> "ReceivingPolicy":
+        """Keep protected proxy routing separate from direct and peer permissions."""
+        if self.transport == "i2p":
+            if (
+                not self.allow_i2p
+                or self.i2p_proxy is None
+                or self.allow_http
+                or self.allow_private
+                or self.allow_peer_network
+                or self.peer_private
+            ):
+                raise ValueError(
+                    "I2P receiving requires only its exact proxy and consent"
+                )
+            from foxlight_model_preservation.i2p_http import i2p_http_endpoint
+
+            for mirror in self.mirrors:
+                i2p_http_endpoint(mirror)
+        elif self.allow_i2p or self.i2p_proxy is not None:
+            raise ValueError("Other receiving transports cannot carry I2P grants")
+        return self
+
 
 @final
 class PreservationPlanRequest(PreservationContract):
@@ -326,6 +375,16 @@ class PreservationPlanRequest(PreservationContract):
         default=None,
         exclude_if=omit_peer_default,
         description="Exact currently reviewed Core peer settings for this attempt.",
+    )
+    allow_i2p: bool = Field(
+        default=False,
+        exclude_if=omit_peer_default,
+        description="Permit this exact finite I2P receive after review; starts no router or sharing.",
+    )
+    i2p_proxy: I2PProxySettings | None = Field(
+        default=None,
+        exclude_if=omit_peer_default,
+        description="Selected Core-local proxy; independent from model, registry and code authority.",
     )
     kind: JobKind = Field(description="Requested bounded effect.")
     resume_job_id: Digest | None = Field(
@@ -415,6 +474,25 @@ class PreservationPlanRequest(PreservationContract):
         le=2**53 - 1,
         description="HTTP response allowance or observed torrent payload/peer wire stop threshold, with native overshoot.",
     )
+
+    @model_validator(mode="after")
+    def check_i2p(self) -> "PreservationPlanRequest":
+        """Allow I2P only for explicit receiving, with no direct/peer permission."""
+        if self.allow_i2p:
+            if (
+                self.kind != "receive"
+                or self.i2p_proxy is None
+                or self.allow_http
+                or self.allow_private
+                or self.allow_peer_network
+                or self.peer_setup_id is not None
+            ):
+                raise ValueError(
+                    "I2P grant requires an exact receive proxy without other transport grants"
+                )
+        elif self.i2p_proxy is not None:
+            raise ValueError("I2P proxy requires explicit I2P participation")
+        return self
 
 
 @final

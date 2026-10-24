@@ -11,6 +11,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from foxlight_model_preservation.archives import verify_archive_manifest
+from foxlight_model_preservation.i2p_http import I2PHTTPProxy
 from foxlight_model_preservation.invitations import fetch_invitation
 from foxlight_model_preservation.models import Manifest, PreservationError, TrustProfile
 from foxlight_model_preservation.operations import OperationControl, OperationError
@@ -40,7 +41,7 @@ from foxlight_model_preservation.storage import (
     verify_object,
     verify_store,
 )
-from foxlight_model_preservation.transfer import TransferPolicy
+from foxlight_model_preservation.transfer import I2PTransferPolicy, TransferPolicy
 
 from skulk.store.preservation_contracts import (
     InvitationPreview,
@@ -117,6 +118,14 @@ def invitation_preview(invitation: Invitation) -> InvitationPreview:
 
 def transfer_policy(policy: ReceivingPolicy) -> TransferPolicy:
     """Map an exact host review to the portable finite direct-fetch controls."""
+    if policy.transport == "i2p":
+        if not policy.allow_i2p or policy.i2p_proxy is None:
+            raise PreservationHostError("i2p_proxy_and_permission_required")
+        return I2PTransferPolicy(
+            proxy=I2PHTTPProxy(host=policy.i2p_proxy.host, port=policy.i2p_proxy.port),
+            max_bytes=policy.max_bytes,
+            deadline_seconds=policy.deadline_seconds,
+        )
     return TransferPolicy(
         max_bytes=policy.max_bytes,
         deadline_seconds=policy.deadline_seconds,

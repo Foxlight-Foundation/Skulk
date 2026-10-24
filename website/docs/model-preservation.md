@@ -524,3 +524,28 @@ unrelated API/control work.
 Controlled local conformance does not establish independent
 community custody, anonymity or censorship resistance. Generic PMF network
 profiles beyond the supported public-v1 bridge still require compatible adapters.
+
+
+## I2P HTTP pilot through Core
+
+The operator API can run authenticated source updates and legacy archive receiving
+through a separately operated local I2P HTTP proxy. Choose the exact numeric
+loopback proxy and I2P-only locators explicitly; each protected job binds that
+choice and refuses direct fallback. Sources keep their signed authority and
+last-good offline search. Receiving still requires separate copy-key acceptance,
+network/resource review and complete model/companion verification. Later Restore
+retains its own registry and repository-code decisions.
+
+Core owns the durable worker, Stop, retained partials and explicit same-policy
+Resume. A restart does not replay it; the router remains under its operator's
+control. Proxy failure, source withdrawal and uninstall do not authorize deletion
+of retained models. This is the receive-only application HTTP path, not implicit
+payload seeding or a claim that the router relays no other traffic.
+
+This component is development Core API integration. Library/Guided controls and
+native application distribution need their own compatible artifacts and
+acceptance; an available API does not establish them. Public-network privacy,
+router-wide leak behavior and sustained hostile-network reliability remain
+unqualified. See the [API contract](api-guide.md#i2p-http-preservation-jobs) for the
+exact opt-ins and immutable resume fields. Standalone Sovereign tools retain the
+same verifier/downloader without requiring Skulk.
