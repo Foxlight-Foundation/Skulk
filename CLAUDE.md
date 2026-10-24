@@ -2336,6 +2336,8 @@ and command helpers stay in that group without a nested Python launcher. Group
 confirmation precedes leader reap; a real drain timeout retains ownership.
 Successful Stop retry finishes retained task/request cleanup and clears the
 resolved Stop error without replaying a byte or network operation.
+Failed close attempts may retry owner cleanup after recovery; successful closes
+remain idempotent and a closed owner never admits new sharing.
 The Node lifetime closes its current store after the node task group exits,
 shielding actual owner drain from signal or parent-scope cancellation. Approved
 mirror intent is retained before event-loop teardown.

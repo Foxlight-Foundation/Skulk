@@ -642,6 +642,73 @@ async def test_successful_stop_retry_reconciles_retained_failed_task_and_request
 
 
 @pytest.mark.asyncio
+async def test_failed_shutdown_can_close_after_successful_stop_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = empty_host(tmp_path)
+    controller: MirrorJob | None = None
+    reopened: PreservationHost | None = None
+    closed = False
+    try:
+        await complete(
+            host,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="config",
+                kind="configure",
+                configuration=configuration(),
+            ),
+        )
+        page = await host.mirrors.page()
+        controller = await host.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="run",
+                kind="run",
+                policy_id=page.policy_id,
+                public_participation=True,
+            ),
+        )
+        await listening(host, controller.job_id)
+
+        def unconfirmed(_identity: int) -> bool:
+            return True
+
+        with monkeypatch.context() as observation:
+            observation.setattr(
+                "skulk.utils.process_groups._group_is_running", unconfirmed
+            )
+            with pytest.raises(subprocess.TimeoutExpired):
+                await host.close()
+        stopped = await host.mirrors.cancel(controller.job_id)
+        assert stopped.state in {"cancelled", "interrupted"}
+        assert stopped.activity is None
+        assert not MirrorLedger(host.root / "managed-mirror").running()
+        await host.close()
+        closed = True
+        await host.close()  # Successful close remains idempotent.
+        reopened = PreservationHost(host.store, host.root)
+        assert reopened.mirrors.job(controller.job_id).state in {
+            "cancelled",
+            "interrupted",
+        }
+        assert (await reopened.mirrors.page()).paused
+        assert not (
+            host.root / "mirror-requests" / (controller.job_id + ".json")
+        ).exists()
+    finally:
+        if reopened is not None:
+            await reopened.close()
+        if not closed and controller is not None:
+            with suppress(PreservationHostError, subprocess.TimeoutExpired):
+                await host.mirrors.cancel(controller.job_id)
+        with suppress(PreservationHostError, subprocess.TimeoutExpired):
+            await host.close()
+        await host.mirrors.storage.close()
+        host.journal.close()
+
+
+@pytest.mark.asyncio
 async def test_pending_metadata_probe_projects_each_requested_cursor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

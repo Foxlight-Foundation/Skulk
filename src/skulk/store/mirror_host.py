@@ -589,7 +589,10 @@ class MirrorHost:
     async def close(self) -> None:
         """Drain owned work while preserving only previously approved restart intent."""
         self._closed = True
-        if self._closing is None:
+        if self._closing is None or (
+            self._closing.done()
+            and (self._closing.cancelled() or self._closing.exception() is not None)
+        ):
             self._closing = asyncio.create_task(self._close())
         await self._await_control(self._closing)
 

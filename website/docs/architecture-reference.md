@@ -2326,6 +2326,7 @@ not enter signed portable evidence or renew the explicit Resume grant.
   receipts remain owned until actual effects finish; no arbitrary process adoption.
   Group-member confirmation precedes leader reap; a real drain timeout retains ownership.
   Successful Stop retry reconciles retained task/request ownership before freeing the role.
+  Failed close tasks can be retried after recovery; successful close is idempotent.
 - `store/peer_host.py`: selected qualified runtime and exact reviewed contacts for
   independent mirror custody; receive-only Core peer sessions are not converted
   into publishers. Runtime bytes are pinned/rechecked in mirror policy.

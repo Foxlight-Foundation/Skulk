@@ -3567,6 +3567,8 @@ actual drain, rather than replaying its historical timeout or byte operation.
 The Node lifetime shields current-store cleanup after its task group exits.
 Normal signal shutdown and parent-scope cancellation therefore drain sharing
 before loop teardown while retaining only the previously approved resume intent.
+If close fails, a later attempt can complete cleanup after owner recovery;
+successful closes remain idempotent and admission stays closed throughout.
 Parent EOF stops the real controller and
 native descendants. A bounded process-control executor per owned worker drains
 independently of the two storage effect slots, so stalled archive mounts cannot
