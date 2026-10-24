@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import subprocess
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -501,7 +502,25 @@ class MirrorHost:
                 task.cancel()
             if task is not None:
                 with suppress(asyncio.CancelledError):
-                    await asyncio.shield(task)
+                    try:
+                        await asyncio.shield(task)
+                    except subprocess.TimeoutExpired:
+                        # A retained task can have failed an earlier drain.
+                        # Its historical timeout is resolved only after this
+                        # exact owned process has now successfully drained.
+                        if process is None or process.process.returncode is None:
+                            raise
+                if (
+                    task.done()
+                    and process is not None
+                    and self._processes.get(job_id) is process
+                ):
+                    # The failed worker task cannot perform its own cleanup on
+                    # retry. Keep its owner until private request cleanup ends.
+                    await remove_mirror_request(
+                        self.requests / (job_id + ".json"), self.storage
+                    )
+                    self._processes.pop(job_id, None)
                 if task.done() and job_id not in self._processes:
                     current, _ = self.journal.mirror_job(job_id)
                     if current.state == "cancelling":
@@ -510,6 +529,9 @@ class MirrorHost:
                                 update={
                                     "state": "cancelled",
                                     "activity": None,
+                                    "error_code": None
+                                    if current.error_code == "mirror_stop_incomplete"
+                                    else current.error_code,
                                     "updated_at": int(time.time()),
                                 }
                             )

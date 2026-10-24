@@ -6078,6 +6078,9 @@ cleanup. Native daemons/helpers remain in the fixed worker's owned process
 group; terminal completion requires every member to be absent or a zombie before
 the leader is reaped. A real drain timeout retains ownership and reports
 incomplete Stop rather than a completed receipt.
+A successful retry finishes retained request cleanup, retires the failed task
+and clears the resolved Stop error before freeing the role for new operations;
+historical work is never replayed.
 
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |

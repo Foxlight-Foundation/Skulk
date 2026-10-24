@@ -2334,6 +2334,8 @@ binds no HTTP listener. Activity counts include preparation/drain, not reachabil
 The fixed outer worker selects the public core's direct native adapter; daemons
 and command helpers stay in that group without a nested Python launcher. Group
 confirmation precedes leader reap; a real drain timeout retains ownership.
+Successful Stop retry finishes retained task/request cleanup and clears the
+resolved Stop error without replaying a byte or network operation.
 
 Only explicit `ModelStoreServer.start()` can resume prior running intent with the
 same Core-approved exact unexpired standing grant. Reads/constructors, finite

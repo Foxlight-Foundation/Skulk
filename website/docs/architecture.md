@@ -3562,6 +3562,8 @@ frozen worker. `mirror_process.py` reads bounded observations without reaping th
 leader, signals/drains the owned group and only then releases descriptors,
 request files or terminal job state. Group drain confirms every member is absent
 or stopped as a zombie before reaping the leader; timeout retains ownership.
+A successful Stop retry reconciles the failed task and private request after
+actual drain, rather than replaying its historical timeout or byte operation.
 Parent EOF stops the real controller and
 native descendants. A bounded process-control executor per owned worker drains
 independently of the two storage effect slots, so stalled archive mounts cannot

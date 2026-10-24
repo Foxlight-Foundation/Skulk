@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Literal
 
@@ -26,6 +28,7 @@ from skulk.store.model_store import ModelStore
 from skulk.store.model_store_server import ModelStoreServer
 from skulk.store.preservation_host import PreservationHost
 from skulk.store.preservation_io import PreservationIO
+from skulk.store.preservation_journal import PreservationHostError
 from skulk.store.tests.test_mirror_worker import archive, configuration
 from skulk.store.tests.test_preservation_sharing import empty_host, import_copy
 
@@ -424,6 +427,74 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
         if closing is not None:
             await asyncio.gather(closing, return_exceptions=True)
         await host.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_stop_retry_reconciles_retained_failed_task_and_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = empty_host(tmp_path)
+    try:
+        await complete(
+            host,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="configure",
+                kind="configure",
+                configuration=configuration(),
+            ),
+        )
+        page = await host.mirrors.page()
+        job = await host.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="first",
+                kind="run",
+                policy_id=page.policy_id,
+                public_participation=True,
+                seconds=1,
+            ),
+        )
+        await listening(host, job.job_id)
+
+        def unconfirmed(_identity: int) -> bool:
+            return True
+
+        with monkeypatch.context() as observation:
+            observation.setattr(
+                "skulk.utils.process_groups._group_is_running", unconfirmed
+            )
+            async with asyncio.timeout(10):
+                while (
+                    host.mirrors.job(job.job_id).error_code != "mirror_stop_incomplete"
+                ):
+                    await asyncio.sleep(0.025)
+        assert host.mirrors.job(job.job_id).state == "cancelling"
+        assert not MirrorLedger(host.root / "managed-mirror").running()
+        stopped = await host.mirrors.cancel(job.job_id)
+        assert stopped.state == "cancelled" and stopped.activity is None
+        assert stopped.error_code is None
+        assert not (host.root / "mirror-requests" / (job.job_id + ".json")).exists()
+        current = await host.mirrors.page()
+        assert current.controller_job_id is None and current.paused
+        following = await host.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="following",
+                kind="run",
+                policy_id=current.policy_id,
+                public_participation=True,
+            ),
+        )
+        await listening(host, following.job_id)
+        assert (await host.mirrors.cancel(following.job_id)).state == "cancelled"
+    finally:
+        # This controlled fault has only an expired HTTP worker; the retry has
+        # drained its real group even when the pre-fix metadata owner is stuck.
+        with suppress(PreservationHostError, subprocess.TimeoutExpired):
+            await host.close()
+        await host.mirrors.storage.close()
+        host.journal.close()
 
 
 @pytest.mark.asyncio
