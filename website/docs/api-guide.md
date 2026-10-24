@@ -6060,6 +6060,85 @@ kits and retained torrent metadata remain intact. Reported logical sizes are
 neither allocated storage nor a promise of reclaimed disk space. Clean stop
 continues to remove normal temporary work automatically.
 
+### Persistent public mirror controls
+
+Core owns one managed public mirror with up to 1,000 exact model selections.
+Its dedicated controls and durable history are separate from the existing finite
+sharing/copy jobs. All routes below use the same trusted-operator boundary as
+private Library reads; none is installed on the unauthenticated store listener.
+No route accepts a filesystem path, executable, new signer or arbitrary command.
+The current Library release does not invoke these dedicated routes.
+
+| Method | Path | Parameters and behavior |
+| --- | --- | --- |
+| GET | `/preservation/mirror` | Optional `offset` (0–1,000). Returns `MirrorPage`: configured/available observations, exact `policy_id`, actual resource/transport configuration, pause and standing-permission observations, live controller job/activity and up to twenty sorted model selections. `next_offset` pages models; pending, retained and removed tombstones are distinct. No network, verification of weight bytes or replay starts on read. |
+| POST | `/preservation/mirror/jobs` | `MirrorRequest` with permanent `owner_id`, `operation_id`, `kind` and the exact reviewed `policy_id` (absent only for initial configuration). Returns a durable `MirrorJob` with HTTP 202. A repeated identical decision observes its original job, including failure/cancellation; changed input refuses. At most two active jobs and 4,096 permanent receipts are admitted. |
+| GET | `/preservation/mirror/jobs` | Optional `owner_id` and `offset` (0–4,096). Returns `MirrorJobsPage` with at most twenty receipts and a next offset; no effects replay. |
+| GET | `/preservation/mirror/jobs/{job_id}` | Exact digest job handle. Returns lifecycle, safe refusal, byte progress and activity only while that exact worker is owned. Historical listening ports never become live after a restart. |
+| DELETE | `/preservation/mirror/jobs/{job_id}` | Cancel the exact active operation and drain its process group before returning a terminal receipt. For an active controller, commit Core's Stop fence and clear running intent before signalling, then record the mirror's pause after drain. Client cancellation retains actual filesystem ownership. Cancelling an old terminal receipt does not pause a newer controller. |
+
+`kind` selects one operation:
+
+- `configure`: supply `configuration` with name and explicit disk, daily ingress,
+  daily egress and monthly egress byte limits. Disk allowance is at least 256 MiB.
+  HTTP, IPFS and BitTorrent all default off. HTTP `exposure` is `loopback` or
+  `network`; `port` is 0–65,535. **The exposure setting applies only to HTTP**;
+  selected IPFS/BitTorrent are separate public transports. IPFS also binds the
+  exact previously reviewed `peer_setup_id` and qualified installed runtime from
+  the [peer controls](#preservation-peer-controls). Native `max_active`, session
+  duration/reservation and upload rate are explicit bounded settings. Saving is
+  offline, requires the controller to stop, retains bytes/caches/accounting and
+  clears standing authority. A partial setup failure stays paused and unserved.
+- `retain`: supply `copy_id`, its exact `manifest_id`, and
+  `confirm_redistribution: true` after reviewing every member's existing public
+  terms. Core rechecks the already accepted public copy and its original keys,
+  pins its directory descriptor and delegates complete copy/verification to the
+  standalone core. Original cards/extensions, signed wrapper and required
+  companions stay unchanged. This creates no catalog, source trust, registry
+  authority, listener or automatic serving. Removed selections require the
+  separate `confirm_reintake: true`; existing block/accounting stay intact.
+- `run`: `public_participation: true` is required for this exact new decision.
+  `mode: finite` runs for `seconds` (1–86,400); it creates no restart intent.
+  `mode: resume` additionally requires Core's separately approved exact unexpired
+  standing grant. Only a successful explicit resume selection retains running
+  intent for later store startup. No serving transport selected refuses.
+- `grant_resume`: separately supply `resume_expires` (absolute Unix time within
+  the next 366 days) and `confirm_resume: true`. It binds policy, model authority,
+  directories, native runtime/routing and budgets. A saved grant alone starts
+  nothing, including after restart. `revoke_resume` clears standing permission;
+  stop an active controller before using this offline control.
+- `model`: select exact `manifest_id` and `action` (`pin`, `unpin`, `block`,
+  `unblock`, `retry`). These live local controls do not alter accepted model keys
+  or reset allowances. Other policy/intake/deletion work requires the controller
+  to stop first.
+- `prune`: select exact `manifest_id` and matching `confirm_delete_manifest`.
+  Standalone stopped-owner, blocked/unpinned and shared-object protections apply.
+  Delete only the selected mirror custody; other Library/source/recipient copies
+  remain intact. Source loss, budget pressure, Stop, restart and uninstall are
+  never deletion permission.
+
+Each actual `ModelStoreServer.start()` may resume only a previously running role
+whose saved Core intent, approved standing grant, exact policy, directory
+identities and expiry still agree. Lazy host construction and all GET routes
+start no sharing. Core shutdown drains children while preserving only that prior
+intent. Explicit Stop clears intent and durably fences future restart, including
+when the selected disk is unavailable. Finite jobs and intake do not replay.
+Previous-controller handover is bounded and refuses beside an unowned controller.
+
+`activity` reports an actual owned HTTP port, if selected, and native worker
+count, including preparation and drain. It is neither completed-publication nor
+reachable-replica evidence. Stop clears live observations only after actual
+owned work/group drain. An operating-system filesystem stall may delay metadata
+completion; it cannot release the journal/worker owner early. Budgets and upload
+reservations survive stop/crash/restart and are not refunded by retry.
+
+This adapter currently admits the public preservation-v1 transport profile.
+Direct public PMF transport refuses before selection/copy; the existing PMF
+Preserve/kit/Restore paths remain supported. Standalone Sovereign tools retain
+these same format, trust and operator-deletion checks without Skulk. Public
+transports expose addresses/content identifiers according to their protocol;
+this interface does not establish anonymity or general public reachability.
+
 ### Preservation archive format detection
 
 `POST /preservation/plans` includes additive `archive_format` (`pmf-v0.1` or

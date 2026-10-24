@@ -18,6 +18,7 @@ from typing import cast, final
 from pydantic import JsonValue, TypeAdapter
 
 from skulk.store.discovery_contracts import DiscoveryJob, DiscoveryRequest
+from skulk.store.mirror_contracts import MirrorJob, MirrorRequest
 from skulk.store.preservation_contracts import (
     Digest,
     PreservationCopy,
@@ -111,6 +112,7 @@ class PreservationJournal:
                     CREATE TABLE IF NOT EXISTS requests (owner TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL, job TEXT NOT NULL, PRIMARY KEY(owner,operation));
                     CREATE TABLE IF NOT EXISTS copies (id TEXT PRIMARY KEY, created INTEGER NOT NULL, value TEXT NOT NULL);
                     CREATE TABLE IF NOT EXISTS discovery_jobs (id TEXT PRIMARY KEY, owner TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL, updated INTEGER NOT NULL, state TEXT NOT NULL, value TEXT NOT NULL, request TEXT NOT NULL, UNIQUE(owner,operation));
+                    CREATE TABLE IF NOT EXISTS mirror_jobs (id TEXT PRIMARY KEY, owner TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL, updated INTEGER NOT NULL, state TEXT NOT NULL, value TEXT NOT NULL, request TEXT NOT NULL, UNIQUE(owner,operation));
                     PRAGMA user_version=1;
                 """)
         except BaseException:
@@ -882,6 +884,182 @@ class PreservationJournal:
                 ).fetchall(),
             )
         return tuple(DiscoveryJob.model_validate_json(row[0]) for row in rows)
+
+    def reserve_mirror(self, request: MirrorRequest) -> tuple[MirrorJob, bool]:
+        """Retain one permanent mirror decision before any filesystem/network work.
+
+        Repeated semantic requests observe the original receipt, even when its
+        policy later changes. Two active slots allow a controller plus one live
+        model control. Exhaustion never prevents observing or stopping work.
+        """
+        request = MirrorRequest.model_validate_json(request.model_dump_json())
+        encoded = request.model_dump_json(exclude_defaults=True)
+        request_digest = hashlib.sha256(encoded.encode()).hexdigest()
+        identity = hashlib.sha256(
+            ("mirror\x00" + request.owner_id + "\x00" + request.operation_id).encode()
+        ).hexdigest()
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                previous = cast(
+                    tuple[str, str] | None,
+                    db.execute(
+                        "SELECT digest,value FROM mirror_jobs WHERE owner=? AND operation=?",
+                        (request.owner_id, request.operation_id),
+                    ).fetchone(),
+                )
+                if previous is not None:
+                    if previous[0] != request_digest:
+                        raise PreservationHostError("request_changed")
+                    job = MirrorJob.model_validate_json(previous[1])
+                    db.execute("COMMIT")
+                    return job, False
+                count = cast(
+                    tuple[int],
+                    db.execute("SELECT count(*) FROM mirror_jobs").fetchone(),
+                )[0]
+                pending = cast(
+                    tuple[int],
+                    db.execute(
+                        "SELECT count(*) FROM mirror_jobs WHERE state IN ('queued','running','cancelling')"
+                    ).fetchone(),
+                )[0]
+                if count >= 4096 or pending >= 2:
+                    raise PreservationHostError("mirror_job_capacity_reached")
+                now = int(time.time())
+                job = MirrorJob(
+                    job_id=identity,
+                    owner_id=request.owner_id,
+                    operation_id=request.operation_id,
+                    kind=request.kind,
+                    state="queued",
+                    created_at=now,
+                    updated_at=now,
+                    manifest_id=request.manifest_id,
+                )
+                db.execute(
+                    "INSERT INTO mirror_jobs VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        identity,
+                        request.owner_id,
+                        request.operation_id,
+                        request_digest,
+                        now,
+                        job.state,
+                        job.model_dump_json(),
+                        encoded,
+                    ),
+                )
+                db.execute("COMMIT")
+                return job, True
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+    def mirror_job(self, job_id: str) -> tuple[MirrorJob, MirrorRequest]:
+        """Read the original typed mirror decision and its last durable receipt."""
+        with self._connection() as db:
+            row = cast(
+                tuple[str, str] | None,
+                db.execute(
+                    "SELECT value,request FROM mirror_jobs WHERE id=?", (job_id,)
+                ).fetchone(),
+            )
+        if row is None:
+            raise PreservationHostError("mirror_job_not_found")
+        return MirrorJob.model_validate_json(row[0]), MirrorRequest.model_validate_json(
+            row[1]
+        )
+
+    def update_mirror_job(self, job: MirrorJob) -> None:
+        """Persist a bounded mirror observation without rewriting its authority."""
+        job = MirrorJob.model_validate_json(job.model_dump_json())
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = cast(
+                    tuple[str] | None,
+                    db.execute(
+                        "SELECT value FROM mirror_jobs WHERE id=?", (job.job_id,)
+                    ).fetchone(),
+                )
+                if row is None:
+                    raise PreservationHostError("mirror_job_not_found")
+                old = MirrorJob.model_validate_json(row[0])
+                if (old.owner_id, old.operation_id, old.kind, old.manifest_id) != (
+                    job.owner_id,
+                    job.operation_id,
+                    job.kind,
+                    job.manifest_id,
+                ):
+                    raise PreservationHostError("request_changed")
+                if old.state == "cancelling" and job.state in {"queued", "running"}:
+                    raise PreservationHostError("cancellation_already_requested")
+                if (
+                    old.state not in {"queued", "running", "cancelling"}
+                    and job.state != old.state
+                ):
+                    raise PreservationHostError("mirror_job_terminal")
+                if (
+                    job.state not in {"queued", "running", "cancelling"}
+                    and job.activity is not None
+                    and job.activity.running
+                ):
+                    raise PreservationHostError("terminal_mirror_cannot_be_running")
+                db.execute(
+                    "UPDATE mirror_jobs SET updated=?,state=?,value=? WHERE id=?",
+                    (job.updated_at, job.state, job.model_dump_json(), job.job_id),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+
+    def mirror_jobs(
+        self, owner_id: str | None = None, offset: int = 0
+    ) -> tuple[MirrorJob, ...]:
+        """Read at most 21 mirror receipts; a caller pages after the first 20."""
+        if not 0 <= offset <= 4096:
+            raise PreservationHostError("invalid_offset")
+        with self._connection() as db:
+            rows = cast(
+                list[tuple[str]],
+                db.execute(
+                    "SELECT value FROM mirror_jobs WHERE owner=? OR ? IS NULL ORDER BY updated DESC,id LIMIT 21 OFFSET ?",
+                    (owner_id, owner_id, offset),
+                ).fetchall(),
+            )
+        return tuple(MirrorJob.model_validate_json(row[0]) for row in rows)
+
+    def interrupt_mirror_jobs(self) -> None:
+        """Mark prior processes interrupted; never replay their inputs or ports."""
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = cast(
+                    list[tuple[str]],
+                    db.execute(
+                        "SELECT value FROM mirror_jobs WHERE state IN ('queued','running','cancelling')"
+                    ).fetchall(),
+                )
+                for row in rows:
+                    old = MirrorJob.model_validate_json(row[0])
+                    job = old.model_copy(
+                        update={
+                            "state": "interrupted",
+                            "activity": None,
+                            "updated_at": int(time.time()),
+                            "error_code": "core_restarted",
+                        }
+                    )
+                    db.execute(
+                        "UPDATE mirror_jobs SET updated=?,state=?,value=? WHERE id=?",
+                        (job.updated_at, job.state, job.model_dump_json(), job.job_id),
+                    )
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
 
     def add_discovery_review(self, identity: str, value: dict[str, JsonValue]) -> None:
         """Retain at most 64 live source-file reviews, outside model-copy plans."""

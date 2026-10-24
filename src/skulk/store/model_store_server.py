@@ -113,9 +113,7 @@ def _require_loopback_peer_import(
     """Reject peer-import mutations not originating directly on loopback."""
 
     if any(header in headers for header in _PROXY_FORWARDING_HEADERS):
-        raise web.HTTPForbidden(
-            reason="peer imports reject proxy forwarding headers"
-        )
+        raise web.HTTPForbidden(reason="peer imports reject proxy forwarding headers")
     try:
         remote_address = ipaddress.ip_address(remote or "")
     except ValueError as error:
@@ -394,6 +392,23 @@ class ModelStoreServer:
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
+        # Reads and lazy provider construction never resume sharing. Only this
+        # explicit owner startup consults a previously configured mirror, whose
+        # private intent and exact unexpired standalone grant are checked again.
+        marker = SKULK_DATA_HOME / "preservation" / "managed-mirror" / "mirror.json"
+        if await asyncio.to_thread(marker.is_file):
+            try:
+                owner = await self.preservation_host()
+                await owner.mirrors.resume_at_startup()
+            except (ValueError, OSError) as error:
+                code = (
+                    error.code
+                    if isinstance(error, PreservationHostError)
+                    else "mirror_resume_unavailable"
+                )
+                logger.warning(
+                    "Persistent preservation mirror did not resume: {}", code
+                )
         logger.info(
             f"ModelStoreServer listening on {self._host}:{self._port} "
             f"(store: {self._store.store_path})"
@@ -772,10 +787,7 @@ class ModelStoreServer:
                     (
                         candidate
                         for candidate in cards
-                        if (
-                            candidate.is_custom
-                            or candidate.registry_card_id is None
-                        )
+                        if (candidate.is_custom or candidate.registry_card_id is None)
                         and str(candidate.model_id) == owner_model_id
                     ),
                     None,
@@ -799,7 +811,9 @@ class ModelStoreServer:
                 expected_revision = card.vision.weights_revision
             elif artifact_role == "image_component" and card.image is not None:
                 if not card.image.files_for_source(repository, source_revision):
-                    raise web.HTTPConflict(reason="image component revision is not declared by its owner")
+                    raise web.HTTPConflict(
+                        reason="image component revision is not declared by its owner"
+                    )
                 expected_revision = source_revision
             elif artifact_role == "video_companion":
                 expected_revision = next(
@@ -873,10 +887,7 @@ class ModelStoreServer:
             or card.gguf_file != pinned_gguf
             or (
                 artifact_bundle_id is not None
-                and (
-                    card_bundle is None
-                    or card_bundle.bundle_id != artifact_bundle_id
-                )
+                and (card_bundle is None or card_bundle.bundle_id != artifact_bundle_id)
             )
         ):
             raise web.HTTPConflict(

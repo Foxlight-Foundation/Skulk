@@ -26,8 +26,7 @@ closure test separate from actual desktop signing and release qualification.
 
 Core-owned preservation jobs live in `store/preservation_host.py`, with private
 SQLite state in `store/preservation_journal.py` and known owned byte subprocesses
-in `store/preservation_worker.py`. The actual `ModelStoreServer` lazily binds its
-existing ModelStore; do not instantiate another live writer. Preserve uses that
+in `store/preservation_worker.py`. The actual `ModelStoreServer` binds its existing ModelStore on demand or at explicit configured-mirror startup; do not instantiate another live writer. Preserve uses that
 store's mutation fence until its worker stops; archive-only Check does not hold
 the canonical store fence. `api/preservation.py` adds operator-gated private
 inventory, built-in archive setup, exact plans, idempotent jobs and cancellation
@@ -2310,3 +2309,38 @@ The retained receiving invitation preview projects its original local
 `receiving` policy, including the exact numeric I2P proxy and limits. This is
 read-only control metadata, omitted from fresh invitation inspection; it does
 not enter signed portable evidence or renew the explicit Resume grant.
+
+
+### Persistent preservation mirrors
+
+`store/mirror_host.py` owns one managed public mirror alongside finite preservation
+jobs. Its strict `mirror_contracts.py` and operator-gated `api/mirrors.py` keep
+separate permanent job history in the existing exclusive journal. Every new
+operation binds current policy; caller paths/commands/signers are never accepted.
+Local public-copy intake pins the accepted archive descriptor and original keys,
+rechecks every member's terms, and preserves cards/extensions, original signatures
+and required companions through the public standalone verifier. It grants no
+registry/runtime authority or serving.
+
+`mirror_worker.py` is another known source/frozen preservation family. It reuses
+the released standalone controller/retention/grant/prune primitives and validates
+policy under the actual service lock. `mirror_process.py` bounds the observation
+pipe and retains an unreaped process-group leader until actual worker/native
+shutdown. Native policy uses the qualified Core executable and reviewed peer
+settings in independent mirror custody, never the receive-only cache. HTTP opt-out
+binds no HTTP listener. Activity counts include preparation/drain, not reachability.
+
+Only explicit `ModelStoreServer.start()` can resume prior running intent with the
+same Core-approved exact unexpired standing grant. Reads/constructors, finite
+runs and grants alone do not start sharing. Core close drains while preserving
+only prior standing intent; user Stop clears it before signalling, drains network
+work before the disk pause write, and retains filesystem ownership through client
+cancellation. Unavailable storage still has Core's durable Stop fence. Budgets,
+original evidence and operator-only deletion survive restart. Current public PMF
+transport still refuses; PMF kit/recovery and standalone Skulk-free use retain
+existing scope. The current Library release does not yet invoke these routes.
+
+The existing stock-Kubo CI conformance step also exercises `test_mirror_native.py`
+with synthetic complete recovery, native-only startup and precise descendant
+checks after abrupt worker loss. No physical fleet or public privacy qualification
+is implied by those local configured-runtime cases.

@@ -197,7 +197,7 @@ jobs:
           with tarfile.open(archive) as package:
               package.extractall(root, filter="data")
           PYCODE
-      - name: Qualify Core peer ownership and complete recovery on a private mesh
+      - name: Qualify Core peer and mirror ownership with synthetic recovery
         run: |
           export KUBO_BINARY="$(uv run python -c 'import tempfile; print(tempfile.gettempdir())')/preservation-kubo/kubo/ipfs"
-          uv run pytest src/skulk/store/tests/test_peer_discovery.py -q
+          uv run pytest src/skulk/store/tests/test_peer_discovery.py src/skulk/store/tests/test_mirror_native.py -q
