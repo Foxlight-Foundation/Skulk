@@ -2338,6 +2338,9 @@ not enter signed portable evidence or renew the explicit Resume grant.
   Stop clears it before signalling and persists pause after drain; unavailable
   disks do not erase Core's Stop fence. No automatic retained-model deletion.
   Controller drain precedes waits for unrelated cancelled model cleanup.
+- `Node.run()`: the outer store lifetime closes the current server after node
+  tasks exit, with shielded drain under signal and parent-scope cancellation.
+  Event-loop teardown cannot substitute for this owner shutdown.
 
 Direct public PMF transport, public replica health and native desktop distribution
 are not implied by these controls. Standalone core use remains independent of

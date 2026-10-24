@@ -6136,6 +6136,8 @@ identities and expiry still agree. Lazy host construction and all GET routes
 start no sharing. Core shutdown drains children while preserving only that prior
 intent. Explicit Stop clears intent and durably fences future restart, including
 when the selected disk is unavailable. Finite jobs and intake do not replay.
+The Node lifetime awaits shielded store cleanup on normal signal shutdown and
+parent-scope cancellation, before event-loop teardown can cancel its owner.
 Previous-controller handover is bounded and refuses beside an unowned controller.
 
 `activity` reports an actual owned HTTP port, if selected, and native worker

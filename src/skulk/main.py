@@ -8,7 +8,8 @@ import signal
 import socket
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -1221,6 +1222,7 @@ class Node:
         )
 
     async def run(self):
+        """Run node tasks and drain the current store owner before loop teardown."""
         # Command ownership and persistence collision checks are synchronous.
         # Load durable card truth before any API or master task can accept a
         # mutation, including on nodes that do not host the model store.
@@ -1229,7 +1231,7 @@ class Node:
             await self.store_server.refresh_recovered_generations(
                 get_current_registry_cards(),
             )
-        async with self._tg as tg:
+        async with self._store_lifetime(), self._tg as tg:
             signal.signal(signal.SIGINT, lambda _, __: self.shutdown())
             signal.signal(signal.SIGTERM, lambda _, __: self.shutdown())
             tg.start_soon(self.router.run)
@@ -1277,6 +1279,18 @@ class Node:
             if self.api:
                 tg.start_soon(self.api.run)
             tg.start_soon(self._elect_loop)
+
+    @asynccontextmanager
+    async def _store_lifetime(self) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            # The task-group scope exits first. Its cancellation must not skip
+            # store cleanup, or loop teardown will turn approved mirror intent
+            # into a user Stop and leave independently owned workers running.
+            with anyio.CancelScope(shield=True):
+                if self.store_server is not None:
+                    await self.store_server.stop()
 
     async def _send_restart_recovery_advert(
         self, advert: RestartRecoveryAdvert
@@ -1480,7 +1494,9 @@ class Node:
         artifacts: list[NodeArtifactAvailability] = []
         truncated = False
         canonical_resolved = (
-            canonical_root.expanduser().resolve() if canonical_root is not None else None
+            canonical_root.expanduser().resolve()
+            if canonical_root is not None
+            else None
         )
         every_root = installed_artifact_roots(self._configured_artifact_cache_root())
         # Telemetry leaves the canonical store out: the store host advertises

@@ -3564,6 +3564,9 @@ request files or terminal job state. Group drain confirms every member is absent
 or stopped as a zombie before reaping the leader; timeout retains ownership.
 A successful Stop retry reconciles the failed task and private request after
 actual drain, rather than replaying its historical timeout or byte operation.
+The Node lifetime shields current-store cleanup after its task group exits.
+Normal signal shutdown and parent-scope cancellation therefore drain sharing
+before loop teardown while retaining only the previously approved resume intent.
 Parent EOF stops the real controller and
 native descendants. A bounded process-control executor per owned worker drains
 independently of the two storage effect slots, so stalled archive mounts cannot

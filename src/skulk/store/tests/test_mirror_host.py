@@ -11,6 +11,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Literal
 
+import anyio
 import pytest
 from foxlight_model_preservation.kits import export_kit
 from foxlight_model_preservation.mirror_models import (
@@ -21,8 +22,11 @@ from foxlight_model_preservation.mirror_models import (
 )
 from foxlight_model_preservation.mirror_state import MirrorLedger
 
+import skulk.main as skulk_main
 import skulk.store.mirror_host as mirror_host
 import skulk.store.model_store_server as store_server
+from skulk.main import Node
+from skulk.shared.types.common import NodeId
 from skulk.store.mirror_contracts import MirrorJob, MirrorRequest
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_server import ModelStoreServer
@@ -31,6 +35,7 @@ from skulk.store.preservation_io import PreservationIO
 from skulk.store.preservation_journal import PreservationHostError
 from skulk.store.tests.test_mirror_worker import archive, configuration
 from skulk.store.tests.test_preservation_sharing import empty_host, import_copy
+from skulk.utils.task_group import TaskGroup
 
 
 async def complete(host: PreservationHost, request: MirrorRequest) -> MirrorJob:
@@ -159,6 +164,145 @@ async def test_store_startup_requires_approved_grant_and_prior_running_intent(
     finally:
         for instance in reversed(servers):
             await instance.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown", ["signal", "parent-cancel"])
+async def test_node_lifetime_drains_mirror_and_preserves_approved_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shutdown: str
+) -> None:
+    data = tmp_path / "data"
+    models = tmp_path / "models"
+    data.mkdir()
+    models.mkdir()
+    monkeypatch.setattr(store_server, "SKULK_DATA_HOME", data)
+    store = ModelStore(models)
+    servers: list[ModelStoreServer] = []
+
+    def server() -> ModelStoreServer:
+        value = ModelStoreServer(store, host="127.0.0.1", port=0)
+        servers.append(value)
+        return value
+
+    async def idle(*_args: object) -> None:
+        await anyio.sleep_forever()
+
+    async def cards() -> list[object]:
+        return []
+
+    def ignore_signal(*_args: object) -> None:
+        pass
+
+    class Background:
+        async def run(self) -> None:
+            await idle()
+
+        def telemetry_sender(self) -> None:
+            return None
+
+    try:
+        first = server()
+        await first.start()
+        owner = await first.preservation_host()
+        await complete(
+            owner,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="configure",
+                kind="configure",
+                configuration=configuration(),
+            ),
+        )
+        current = await owner.mirrors.page()
+        await complete(
+            owner,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="grant",
+                kind="grant_resume",
+                policy_id=current.policy_id,
+                resume_expires=int(time.time()) + 300,
+                confirm_resume=True,
+            ),
+        )
+        original = await owner.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="start",
+                kind="run",
+                policy_id=current.policy_id,
+                mode="resume",
+                public_participation=True,
+            )
+        )
+        await listening(owner, original.job_id)
+        await first.stop()
+
+        second = server()
+        node = object.__new__(Node)
+        monkeypatch.setattr(node, "_tg", TaskGroup(), raising=False)
+        for name in ("router", "event_router", "election"):
+            monkeypatch.setattr(node, name, Background(), raising=False)
+        for name in (
+            "worker",
+            "master",
+            "api",
+            "download_coordinator",
+            "artifact_inventory_event_receiver",
+        ):
+            monkeypatch.setattr(node, name, None, raising=False)
+        node.node_id = NodeId()
+        node.store_server = second
+        monkeypatch.setattr(skulk_main, "get_all_model_cards", cards)
+        monkeypatch.setattr(skulk_main, "get_current_registry_cards", list)
+        monkeypatch.setattr(skulk_main, "RESTART_RECOVERY_ENABLED", False)
+        monkeypatch.setattr(skulk_main, "_publish_management_node_resources", idle)
+        monkeypatch.setattr(skulk_main.signal, "signal", ignore_signal)
+        for name in (
+            "_run_telemetry",
+            "_artifact_inventory_loop",
+            "_monitor_zenoh_isolation",
+        ):
+            monkeypatch.setattr(Node, name, idle)
+        resumed: list[str] = []
+        with anyio.CancelScope() as outer:
+
+            async def exit_node(_node: Node) -> None:
+                current_owner = await second.preservation_host()
+                async with asyncio.timeout(30):
+                    while (
+                        status := await current_owner.mirrors.page()
+                    ).controller_job_id is None:
+                        await asyncio.sleep(0.025)
+                await listening(current_owner, status.controller_job_id)
+                resumed.append(status.controller_job_id)
+                if shutdown == "signal":
+                    node.shutdown()
+                else:
+                    outer.cancel()
+                await idle()
+
+            monkeypatch.setattr(Node, "_elect_loop", exit_node)
+            await node.run()
+        assert len(resumed) == 1 and resumed[0] != original.job_id
+        assert not MirrorLedger(data / "preservation/managed-mirror").running()
+        third = server()
+        current_owner = await third.preservation_host()
+        assert current_owner.mirrors.job(resumed[0]).state == "interrupted"
+        await third.start()
+        async with asyncio.timeout(30):
+            while (
+                status := await current_owner.mirrors.page()
+            ).controller_job_id is None:
+                await asyncio.sleep(0.025)
+        await listening(current_owner, status.controller_job_id)
+        assert status.controller_job_id not in {original.job_id, resumed[0]}
+        assert (
+            await current_owner.mirrors.cancel(status.controller_job_id)
+        ).state == "cancelled"
+    finally:
+        for value in reversed(servers):
+            await value.stop()
 
 
 @pytest.mark.asyncio
