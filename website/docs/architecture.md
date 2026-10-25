@@ -3569,6 +3569,15 @@ Normal signal shutdown and parent-scope cancellation therefore drain sharing
 before loop teardown while retaining only the previously approved resume intent.
 If close fails, a later attempt can complete cleanup after owner recovery;
 successful closes remain idempotent and admission stays closed throughout.
+The outer preservation host begins finite-job cancellation and mirror,
+discovery and native-peer close together before waiting for their cleanup.
+It collects every drain outcome before propagating a failure, retaining the
+storage/journal owner while any cleanup is pending.
+That entire close is an owned shielded task, including storage/journal release;
+caller cancellation cannot abandon it and failure permits a later cleanup retry.
+Normal exit, Stop and close use one drained-owner reconciliation path. A failed
+worker cannot rerun its own cleanup; shutdown retry removes its private request
+only after confirmed drain and retains the prior approved resume intent.
 Parent EOF stops the real controller and
 native descendants. A bounded process-control executor per owned worker drains
 independently of the two storage effect slots, so stalled archive mounts cannot

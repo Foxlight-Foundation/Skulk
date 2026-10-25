@@ -182,6 +182,7 @@ class PreservationHost:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._closed = False
+        self._closing: asyncio.Task[None] | None = None
         self._setup_lock = asyncio.Lock()
         self._storage = PreservationIO()
         self.uploads = KitUploads(root / "uploads", self.journal)
@@ -1730,15 +1731,39 @@ class PreservationHost:
                 raise
 
     async def close(self) -> None:
-        """Drain owned workers before releasing the exclusive host journal owner."""
+        """Own complete shutdown despite caller cancellation; allow failed cleanup retry."""
         self._closed = True
-        await self.mirrors.close()
-        for job_id in tuple(self._tasks):
+        if self._closing is None or (
+            self._closing.done()
+            and (self._closing.cancelled() or self._closing.exception() is not None)
+        ):
+            self._closing = asyncio.create_task(self._close())
+        while not self._closing.done():
+            try:
+                await asyncio.shield(self._closing)
+            except asyncio.CancelledError:
+                continue
+        self._closing.result()
+
+    async def _close(self) -> None:
+        async def withdraw(job_id: str) -> None:
             await self.cancel(job_id)
-        await self.discovery.close()
+
+        # Start every withdrawal before awaiting any owner's filesystem cleanup.
+        # A stalled mirror intake cannot leave an existing finite share serving,
+        # nor may another failed close cancel its siblings' actual drain.
+        results = await asyncio.gather(
+            *(withdraw(job_id) for job_id in tuple(self._tasks)),
+            self.mirrors.close(),
+            self.discovery.close(),
+            self.peers.close(),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks.values()), return_exceptions=True)
-        await self.peers.close()
         async with self._queue, self._setup_lock:
             await self._storage.close()
             self.journal.close()

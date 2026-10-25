@@ -30,11 +30,16 @@ from skulk.shared.types.common import NodeId
 from skulk.store.mirror_contracts import MirrorJob, MirrorRequest
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_server import ModelStoreServer
+from skulk.store.preservation_contracts import (
+    PreservationPlanRequest,
+    PreservationStart,
+)
 from skulk.store.preservation_host import PreservationHost
 from skulk.store.preservation_io import PreservationIO
 from skulk.store.preservation_journal import PreservationHostError
 from skulk.store.tests.test_mirror_worker import archive, configuration
 from skulk.store.tests.test_preservation_sharing import empty_host, import_copy
+from skulk.store.tests.test_preservation_sharing import ready as finite_ready
 from skulk.utils.task_group import TaskGroup
 
 
@@ -471,9 +476,14 @@ async def test_stop_drains_workers_while_both_filesystem_effect_slots_stall(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("finite_kind", ["http_share", "torrent_share"])
 async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    finite_kind: Literal["http_share", "torrent_share"],
 ) -> None:
+    if finite_kind == "torrent_share":
+        pytest.importorskip("libtorrent")
     host = empty_host(tmp_path)
     entered, release = threading.Event(), threading.Event()
     selected: str | None = None
@@ -483,7 +493,7 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
 
     def stalled() -> None:
         entered.set()
-        if not release.wait(15):
+        if not release.wait(30):
             raise AssertionError("test model cleanup did not release")
 
     async def cleanup(path: Path, storage: PreservationIO) -> None:
@@ -531,6 +541,25 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
         active = await listening(host, controller.job_id)
         assert active.activity is not None and active.activity.http_port is not None
         port = active.activity.http_port
+        finite_plan = await host.plan(
+            PreservationPlanRequest(
+                kind=finite_kind,
+                location_id=copy.location_id,
+                copy_id=copy.copy_id,
+                duration_seconds=60,
+                upload_limit_bytes=1024**2,
+            )
+        )
+        finite = host.start(
+            PreservationStart(
+                plan_id=finite_plan.plan_id,
+                operation_id="finite-share",
+                public_participation=True,
+            )
+        )
+        finite_live = await finite_ready(host, finite.job_id)
+        assert finite_live.sharing is not None and finite_live.sharing.ready
+        finite_port = finite_live.sharing.listen_port
         monkeypatch.setattr(mirror_host, "remove_mirror_request", cleanup)
         model = await host.mirrors.start(
             MirrorRequest(
@@ -560,6 +589,22 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
                 connection.close()
                 await connection.wait_closed()
                 await asyncio.sleep(0.025)
+        assert not closing.done() and not cancelled.done()
+        async with asyncio.timeout(10):
+            while host.journal.job(finite.job_id).state in {
+                "queued",
+                "running",
+                "cancelling",
+            }:
+                await asyncio.sleep(0.025)
+        finite_stopped = host.journal.job(finite.job_id)
+        assert finite_stopped.state == "cancelled"
+        assert finite_stopped.sharing is not None and not finite_stopped.sharing.ready
+        with pytest.raises(ConnectionRefusedError):
+            await asyncio.open_connection("127.0.0.1", finite_port)
+        assert not closing.done() and not cancelled.done()
+        closing.cancel()
+        await asyncio.sleep(0.05)
         assert not closing.done() and not cancelled.done()
         release.set()
         await closing
@@ -642,8 +687,11 @@ async def test_successful_stop_retry_reconciles_retained_failed_task_and_request
 
 
 @pytest.mark.asyncio
-async def test_failed_shutdown_can_close_after_successful_stop_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("recovery", ["manual-stop", "close-only"])
+async def test_failed_shutdown_can_reconcile_workers_and_release_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery: Literal["manual-stop", "close-only"],
 ) -> None:
     host = empty_host(tmp_path)
     controller: MirrorJob | None = None
@@ -660,16 +708,32 @@ async def test_failed_shutdown_can_close_after_successful_stop_retry(
             ),
         )
         page = await host.mirrors.page()
+        expires = int(time.time()) + 300
+        await complete(
+            host,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="grant",
+                kind="grant_resume",
+                policy_id=page.policy_id,
+                resume_expires=expires,
+                confirm_resume=True,
+            ),
+        )
         controller = await host.mirrors.start(
             MirrorRequest(
                 owner_id="library",
                 operation_id="run",
                 kind="run",
                 policy_id=page.policy_id,
+                mode="resume",
                 public_participation=True,
             ),
         )
         await listening(host, controller.job_id)
+        approved_intent = host.journal.setting("mirror-running-intent")
+        approved_grant = host.journal.setting("mirror-approved-resume")
+        assert isinstance(approved_intent, dict)
 
         def unconfirmed(_identity: int) -> bool:
             return True
@@ -680,9 +744,16 @@ async def test_failed_shutdown_can_close_after_successful_stop_retry(
             )
             with pytest.raises(subprocess.TimeoutExpired):
                 await host.close()
-        stopped = await host.mirrors.cancel(controller.job_id)
-        assert stopped.state in {"cancelled", "interrupted"}
-        assert stopped.activity is None
+        async with asyncio.timeout(10):
+            while (
+                host.mirrors.job(controller.job_id).error_code
+                != "mirror_stop_incomplete"
+            ):
+                await asyncio.sleep(0.025)
+        if recovery == "manual-stop":
+            stopped = await host.mirrors.cancel(controller.job_id)
+            assert stopped.state in {"cancelled", "interrupted"}
+            assert stopped.activity is None
         assert not MirrorLedger(host.root / "managed-mirror").running()
         await host.close()
         closed = True
@@ -692,7 +763,22 @@ async def test_failed_shutdown_can_close_after_successful_stop_retry(
             "cancelled",
             "interrupted",
         }
-        assert (await reopened.mirrors.page()).paused
+        current = await reopened.mirrors.page()
+        assert current.controller_job_id is None
+        assert current.restart_expires == expires
+        if recovery == "manual-stop":
+            assert (
+                current.paused
+                and reopened.journal.setting("mirror-running-intent") is None
+            )
+            assert await reopened.mirrors.resume_at_startup() is None
+        else:
+            assert reopened.journal.setting("mirror-running-intent") == approved_intent
+            assert reopened.journal.setting("mirror-approved-resume") == approved_grant
+            resumed = await reopened.mirrors.resume_at_startup()
+            assert resumed is not None and resumed.job_id != controller.job_id
+            await listening(reopened, resumed.job_id)
+            assert (await reopened.mirrors.cancel(resumed.job_id)).state == "cancelled"
         assert not (
             host.root / "mirror-requests" / (controller.job_id + ".json")
         ).exists()

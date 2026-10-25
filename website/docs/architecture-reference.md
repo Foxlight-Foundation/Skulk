@@ -2327,6 +2327,11 @@ not enter signed portable evidence or renew the explicit Resume grant.
   Group-member confirmation precedes leader reap; a real drain timeout retains ownership.
   Successful Stop retry reconciles retained task/request ownership before freeing the role.
   Failed close tasks can be retried after recovery; successful close is idempotent.
+  The outer preservation host begins finite-job, mirror, discovery and native-peer
+  withdrawal concurrently; all drain outcomes precede storage/journal release.
+  Complete host close is shielded through release and retryable after failure.
+  Normal exit/Stop/close share drained-owner cleanup, including completed failed
+  workers; shutdown-only retry preserves approved standing intent.
 - `store/peer_host.py`: selected qualified runtime and exact reviewed contacts for
   independent mirror custody; receive-only Core peer sessions are not converted
   into publishers. Runtime bytes are pinned/rechecked in mirror policy.

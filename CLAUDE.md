@@ -2338,6 +2338,13 @@ Successful Stop retry finishes retained task/request cleanup and clears the
 resolved Stop error without replaying a byte or network operation.
 Failed close attempts may retry owner cleanup after recovery; successful closes
 remain idempotent and a closed owner never admits new sharing.
+The preservation host starts cancellation of existing finite jobs, mirrors,
+discovery and native peers concurrently before waiting for storage cleanup.
+One stalled/failed owner cannot defer another owner's initial withdrawal.
+The complete host close is owned and shielded through storage/journal release;
+caller cancellation cannot abandon it, and failed close may retry after recovery.
+Normal worker exit, Stop and shutdown retries share drained-owner/request
+reconciliation. Shutdown recovery retains approved resume intent without a Stop.
 The Node lifetime closes its current store after the node task group exits,
 shielding actual owner drain from signal or parent-scope cancellation. Approved
 mirror intent is retained before event-loop teardown.

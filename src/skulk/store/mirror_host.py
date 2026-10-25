@@ -446,12 +446,21 @@ class MirrorHost:
             try:
                 await process.stop()
             finally:
-                if process.process.returncode is not None:
-                    self._processes.pop(job_id, None)
-                    await remove_mirror_request(path, self.storage)
+                await self._release_process(job_id, process)
         if process.process.returncode != 0:
             error = error or "mirror_worker_failed"
         return result, error
+
+    async def _release_process(self, job_id: str, process: MirrorProcess) -> None:
+        """Release only this drained owner, after private request cleanup ends."""
+        if (
+            process.process.returncode is None
+            or self._processes.get(job_id) is not process
+        ):
+            return
+        await remove_mirror_request(self.requests / (job_id + ".json"), self.storage)
+        if self._processes.get(job_id) is process:
+            self._processes.pop(job_id, None)
 
     async def cancel(self, job_id: str) -> MirrorJob:
         """Record Stop before signalling; return only after actual worker drain."""
@@ -510,17 +519,8 @@ class MirrorHost:
                         # exact owned process has now successfully drained.
                         if process is None or process.process.returncode is None:
                             raise
-                if (
-                    task.done()
-                    and process is not None
-                    and self._processes.get(job_id) is process
-                ):
-                    # The failed worker task cannot perform its own cleanup on
-                    # retry. Keep its owner until private request cleanup ends.
-                    await remove_mirror_request(
-                        self.requests / (job_id + ".json"), self.storage
-                    )
-                    self._processes.pop(job_id, None)
+                if task.done() and process is not None:
+                    await self._release_process(job_id, process)
                 if task.done() and job_id not in self._processes:
                     current, _ = self.journal.mirror_job(job_id)
                     if current.state == "cancelling":
@@ -618,6 +618,8 @@ class MirrorHost:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for job_id, task in tuple(self._tasks.items()):
+            if task.done() and (process := self._processes.get(job_id)) is not None:
+                await self._release_process(job_id, process)
             if task.done() and job_id not in self._processes:
                 current, _ = self.journal.mirror_job(job_id)
                 if current.state in {"queued", "running", "cancelling"}:

@@ -6140,6 +6140,12 @@ The Node lifetime awaits shielded store cleanup on normal signal shutdown and
 parent-scope cancellation, before event-loop teardown can cancel its owner.
 A failed shutdown can retry cleanup after an incomplete drain is resolved;
 successful closes stay idempotent and cleanup never restarts sharing.
+Shutdown begins withdrawal of finite shares, the persistent mirror, discovery
+and native peers together. Stalled cleanup in one owner does not defer the
+others' initial cancellation; storage/journal ownership remains until drain ends.
+Caller cancellation cannot abandon the owned close before storage/journal release.
+Shutdown-only retry also reconciles a completed failed worker after confirmed
+drain, retaining prior approved resume intent without requiring a user Stop.
 Previous-controller handover is bounded and refuses beside an unowned controller.
 
 `activity` reports an actual owned HTTP port, if selected, and native worker
