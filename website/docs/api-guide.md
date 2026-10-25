@@ -5943,6 +5943,7 @@ parent is refused. No listener, key enrollment or runtime admission starts.
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
 | GET | `/preservation/copies/{copy_id}/publication` | Authenticate a kept private copy's metadata and return supported retained members, origins, sizes and terms/notice hints. No weight reads or registry connection. Known private capture bookkeeping is omitted; hints are not redistribution permission. |
+| GET | `/preservation/public-copies/{copy_id}/review` | Operator-only offline review of an already accepted public-copy handle. Authenticate its exact signed identity using enrolled archive trust, including both signing domains for a supported PMF source profile. Return `skulk.preservation-public-review.v1`: `copy_id`, `manifest_id`, original `archive_format`, signed name, declared `size_bytes`, workloads/runtime requirements and every member's original terms, notices, file count and size. No private-capture filtering applies. The complete response is capped at 48,000 JSON bytes; oversized or unsupported metadata refuses rather than omit members. No weights, signing key, registry, mirror hints, network, conversion, trust enrollment, sharing or deletion. This is neither a fresh byte-completion check nor redistribution permission. `Cache-Control: no-store`. |
 | GET | `/preservation/plans/{plan_id}/public-manifest` | Download the exact proposed unsigned public manifest through the metadata byte plane, outside SDK controls. It contains no capture bookkeeping, host/key paths or signing key. It is review metadata, not a completed publication. |
 | POST | `/preservation/public-copies/{copy_id}/invitation` | Body: `mirrors`, one to sixteen HTTP(S) bases. Export an at-most-8-MiB portable invitation with the original signed public manifest and candidate public keys. Credentials, queries, fragments and local sources refuse. No hosting/reachability test or network connection occurs. |
 | POST | `/preservation/public-copies/{copy_id}/handoff` | Body: exclusively `mirrors` (one to sixteen HTTP(S) bases) or `sharing_job_id` (this copy's exact owned `peer_share` job). Download one at-most-8-MiB `.foxhandoff` with the unchanged signed reference and bounded numeric peer contacts when applicable. Peer output is hash-checked against its worker receipt and remains downloadable after stop. No network, trust enrollment, serving, reachability assertion or deletion occurs. |
@@ -6294,6 +6295,11 @@ Closing a presentation client does not stop work. Cancellation/EOF/shutdown drai
 actual native effects; Core restart records interruption without network replay.
 Network addresses/content identifiers remain observable, and native routing/wire
 traffic and block-cache growth are separate from the object-byte allowance.
+
+Discovery jobs remain nonterminal while owned request cleanup holds their source
+serialization lock. Core publishes the final receipt only after that cleanup
+scope exits and the lock is released, so a client can immediately Unfollow after
+observing completion. Cleanup failures cannot publish a successful receipt.
 
 ### One-file model handoffs and finite peer sharing
 

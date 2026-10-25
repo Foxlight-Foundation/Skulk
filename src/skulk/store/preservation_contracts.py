@@ -206,6 +206,34 @@ class PublicationSource(PreservationContract):
 
 
 @final
+class PublicCopyReview(PreservationContract):
+    """Authenticated public-copy terms; no byte check or redistribution grant."""
+
+    schema_version: Literal["skulk.preservation-public-review.v1"] = Field(
+        default="skulk.preservation-public-review.v1",
+        description="Versioned all-member offline review contract.",
+    )
+    copy_id: Handle = Field(description="Exact accepted public-copy handle.")
+    manifest_id: Digest = Field(description="Exact enrolled signed archive identity.")
+    archive_format: Literal["preservation-v1", "pmf-v0.1"] = Field(
+        description="Original archive format; review does not convert the archive.",
+    )
+    name: str = Field(max_length=200, description="Existing signed display name.")
+    size_bytes: int = Field(ge=0, description="Declared complete member file bytes.")
+    workloads: tuple[str, ...] = Field(
+        max_length=100, description="Declared workloads, without runtime parsing."
+    )
+    runtime_requirements: tuple[str, ...] = Field(
+        max_length=100, description="Declared runtime requirements."
+    )
+    members: tuple[PublicationMember, ...] = Field(
+        min_length=1,
+        max_length=256,
+        description="Every signed member and all its notice paths; oversized reviews refuse rather than omit members.",
+    )
+
+
+@final
 class InvitationRequest(PreservationContract):
     """Explicit mirror hints for a portable public-copy handoff; no network effect."""
 

@@ -75,6 +75,7 @@ from skulk.store.preservation_contracts import (
     PreservationPlanRequest,
     PreservationStart,
     PublicationSource,
+    PublicCopyReview,
     ReceivingPolicy,
     RecoveryCleanup,
     SharingPolicy,
@@ -610,6 +611,33 @@ class PreservationHost:
         )
         self._bounded_view(source)
         return source
+
+    async def public_copy_review(self, copy_id: str) -> PublicCopyReview:
+        """Authenticate every accepted public member's terms without weight IO.
+
+        Uses only enrolled archive trust and exact original identities, including
+        the signed source profile of a supported PMF. No mirror hints, candidate
+        keys, model parsing, registry, network or signing custody is required.
+        The bounded response is a review, not a fresh completion or rights claim.
+        """
+        copy = self.journal.copy(copy_id)
+        location = self._location(copy.location_id)
+        if copy.audience != "public" or location.purpose != "public":
+            raise PreservationHostError("public_copy_required")
+        manifest = await self._manifest(location, copy.manifest_id)
+        require_public_bundle(manifest)
+        review = PublicCopyReview(
+            copy_id=copy_id,
+            manifest_id=copy.manifest_id,
+            archive_format=await self._format(location, copy.manifest_id),
+            name=manifest.name,
+            size_bytes=manifest.total_bytes,
+            workloads=manifest.workloads,
+            runtime_requirements=manifest.runtime_requirements,
+            members=publication_members(manifest, private_capture=False),
+        )
+        self._bounded_view(review)
+        return review
 
     def _metadata_upload(
         self, upload_id: str, purpose: Literal["invitation", "publication", "source"]
@@ -1924,8 +1952,9 @@ class PreservationHost:
                 peer = await self.peers.open(
                     setup_id,
                     plan.receiving.deadline_seconds,
-                    lambda: self._closed
-                    or self.journal.job(job_id).state == "cancelling",
+                    lambda: (
+                        self._closed or self.journal.job(job_id).state == "cancelling"
+                    ),
                 )
                 peer_lifetime.push_async_callback(peer.close)
             if plan.kind == "peer_share":
@@ -1941,8 +1970,9 @@ class PreservationHost:
                     plan.sharing.duration_seconds,
                     plan.sharing.upload_limit_bytes,
                     work / "peer",
-                    lambda: self._closed
-                    or self.journal.job(job_id).state == "cancelling",
+                    lambda: (
+                        self._closed or self.journal.job(job_id).state == "cancelling"
+                    ),
                 )
                 peer_lifetime.push_async_callback(peer.close)
             request = WorkerRequest(

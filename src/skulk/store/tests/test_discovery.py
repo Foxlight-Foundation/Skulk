@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import httpx
 import psutil
@@ -467,6 +467,80 @@ async def test_source_and_model_metadata_permissions_remain_separate(
                     assert tuple(metadata.requests) == attempts
                     assert not (await host.page()).locations
     finally:
+        await host.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["refresh", "model_metadata"])
+async def test_terminal_discovery_receipt_follows_cleanup_and_source_unlock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: Literal["refresh", "model_metadata"],
+) -> None:
+    """A terminal receipt permits immediate source withdrawal after real cleanup."""
+    fixture = tmp_path / "model"
+    fixture.mkdir()
+    _, manifest, trust = public_kit(fixture)
+    host = PreservationHost(ModelStore(tmp_path / "models"), tmp_path / "core")
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    original_unlink = Path.unlink
+
+    def held_cleanup(path: Path, missing_ok: bool = False) -> None:
+        if path.parent == host.root / "discovery-requests":
+            cleanup_started.set()
+            assert release_cleanup.wait(30), "test must release owned request cleanup"
+        original_unlink(path, missing_ok=missing_ok)
+
+    try:
+        with serve(fixture / "archive") as models:
+            root = source_tree(tmp_path / "source", manifest, trust, models.url)
+            with serve(tmp_path / "source") as metadata:
+                bootstrap = SourceBootstrap(
+                    name="Withdrawal after cleanup",
+                    root=base64.b64encode(root).decode(),
+                    endpoints=(metadata.url,),
+                )
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=application(host)),
+                    base_url="http://localhost",
+                ) as client:
+                    review = await enroll(client, encode_record(bootstrap))
+                    monkeypatch.setattr(Path, "unlink", held_cleanup)
+                    selection = DiscoveryRequest(
+                        owner_id="library",
+                        operation_id="cleanup-order",
+                        kind=kind,
+                        source_id=review.source_id,
+                        entry_id="community-model"
+                        if kind == "model_metadata"
+                        else None,
+                        manifest_id=manifest if kind == "model_metadata" else None,
+                        accept_source_keys=kind == "model_metadata",
+                    )
+                    submitted = await submit(client, selection)
+                    assert await asyncio.to_thread(cleanup_started.wait, 30)
+                    observed = await client.get(
+                        "/preservation/discovery/jobs/" + submitted.job_id
+                    )
+                    assert observed.json()["state"] == "running", observed.text
+                    busy = await client.delete(
+                        "/preservation/discovery/sources/" + review.source_id
+                    )
+                    assert busy.status_code == 409
+                    assert busy.json()["detail"] == "discovery_busy_try_again"
+                    release_cleanup.set()
+                    completed = await metadata_settled(client, submitted.job_id)
+                    assert completed.state == (
+                        "succeeded" if kind == "refresh" else "failed"
+                    )
+                    removed = await client.delete(
+                        "/preservation/discovery/sources/" + review.source_id
+                    )
+                    assert removed.status_code == 204, removed.text
+                    assert not models.requests
+    finally:
+        release_cleanup.set()
         await host.close()
 
 

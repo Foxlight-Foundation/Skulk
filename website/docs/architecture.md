@@ -3341,6 +3341,14 @@ and distinct key. Full byte checks and durable parent intent precede atomic publ
 copy publication; no listener or runtime admission starts. Output parents are
 pinned and checked against recorded device/inode custody.
 
+The operator-only public-copy review authenticates the enrolled exact archive
+offline and returns every signed member's existing terms and notices, including
+notice-only companions. Supported PMF reviews authenticate both the outer archive
+and original source profile without conversion. The all-or-nothing response is
+bounded to 48,000 JSON bytes; no weights or network are read, no serving starts,
+and the prior byte-check timestamp is unchanged. This metadata adapter does not
+add public PMF transport or imply redistribution permission or current file health.
+
 Invitations retain the original signed public manifest, candidate keys and bounded
 HTTP(S) hints. Offline inspection never enrolls keys or contacts a supplier.
 Explicitly selected fingerprints/threshold and finite policy precede receiving.
@@ -3490,6 +3498,11 @@ entry, with no archive/signing-key placeholders, model-store mutation or serving
 The parent retains serialization through actual worker stop, limits output and
 deadline, and drains local IO before releasing journal ownership. Parent EOF
 ends the child; restart records interruption without network replay.
+
+Discovery outcomes stay pending through request cleanup and release of the source
+serialization lock. The parent publishes the terminal receipt synchronously after
+unlock, allowing immediate source withdrawal after observed completion. A cleanup
+failure reports interruption rather than a premature success.
 
 First-contact source-file trust authorizes discovery only. Selecting exact
 source/entry/manifest and explicitly accepting that source's model-reference keys

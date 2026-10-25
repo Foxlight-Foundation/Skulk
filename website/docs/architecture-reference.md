@@ -2092,6 +2092,15 @@ and distinct key. Full byte checks and durable parent intent precede atomic publ
 copy publication; no listener or runtime admission starts. Output parents are
 pinned and checked against recorded device/inode custody.
 
+`GET /preservation/public-copies/{copy_id}/review` is an operator-only,
+48,000-JSON-byte all-or-nothing metadata view. `PublicCopyReview` binds the exact
+accepted public handle, enrolled signed identity and original archive format to
+every member's terms/notices, file count and declared size. Public copies bypass
+private-capture bookkeeping filters. Supported PMF also authenticates the original
+source profile. No weight hashing, network, conversion, trust enrollment, sharing,
+deletion or byte-check timestamp update occurs. The adapter does not add public
+PMF transport, infer current byte health or grant redistribution rights.
+
 Invitations retain the original signed public manifest, candidate keys and bounded
 HTTP(S) hints. Offline inspection never enrolls keys or contacts a supplier.
 Explicitly selected fingerprints/threshold and finite policy precede receiving.
@@ -2235,6 +2244,11 @@ entry, with no archive/signing-key placeholders, model-store mutation or serving
 The parent retains serialization through actual worker stop, limits output and
 deadline, and drains local IO before releasing journal ownership. Parent EOF
 ends the child; restart records interruption without network replay.
+
+`DiscoveryHost._run` returns an immutable pending outcome after its owned cleanup
+scope. `_execute` releases the source queue, then synchronously records the final
+receipt without an intervening await. Thus terminal observation permits immediate
+source withdrawal; failed cleanup cannot leave a successful terminal receipt.
 
 First-contact source-file trust authorizes discovery only. Selecting exact
 source/entry/manifest and explicitly accepting that source's model-reference keys

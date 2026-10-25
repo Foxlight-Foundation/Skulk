@@ -132,9 +132,12 @@ async def test_private_inventory_and_setup_reject_untrusted_requests(
             ("setup/folder", {"review_id": "a" * 64, "confirmed": True}),
             ("setup/default", {"location_id": "device"}),
         ):
-            assert (await client.post("/preservation/" + path, json=body)).status_code == 403
+            assert (
+                await client.post("/preservation/" + path, json=body)
+            ).status_code == 403
         for path in (
             "copies/example/publication",
+            "public-copies/example/review",
             "plans/example/public-manifest",
             "kit-uploads/example/invitation",
             "jobs/example/invitation",
@@ -192,6 +195,15 @@ async def test_public_invitation_metadata_is_offline_bounded_and_operator_only(
                 pytest.fail("metadata handoff made a network request")
 
             monkeypatch.setattr(socket, "getaddrinfo", forbidden)
+            review = await client.get(
+                f"/preservation/public-copies/{copy.copy_id}/review"
+            )
+            assert review.status_code == 200, review.text
+            assert review.headers["cache-control"] == "no-store"
+            assert review.json()["manifest_id"] == identity
+            assert review.json()["archive_format"] == "preservation-v1"
+            assert review.json()["members"][0]["license_id"] == "test-only"
+            assert str(tmp_path) not in review.text
             response = await client.post(
                 f"/preservation/public-copies/{copy.copy_id}/invitation",
                 json={"mirrors": ["https://unavailable.invalid/models"]},
