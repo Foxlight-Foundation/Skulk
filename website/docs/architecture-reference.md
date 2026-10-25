@@ -2330,6 +2330,12 @@ not enter signed portable evidence or renew the explicit Resume grant.
   Exact selection lookup and complete, all-member review survive original import
   loss and do not read weights. `prepare_kit` may coexist with the controller
   within two active jobs; permanent replay never regenerates an artifact.
+  `recover` is exclusive stopped-controller offline completion verification over
+  standalone 0.19. Exact model/policy and every actual object verify before
+  promotion; original local intents retain wrapper bytes. Host restart intent
+  clears before work, while block/pin/accounting and recipient/registry trust
+  stay separate. Lost clients observe the original durable job; restart never
+  retries a recovery or deletes partial data.
 - `store/mirror_kits.py`: enrolled private preparation directories, durable
   intent/seal/removal receipts and fixed-name artifacts. Completed digest and
   descriptor fingerprint gate download; unexpected entries or changed identities

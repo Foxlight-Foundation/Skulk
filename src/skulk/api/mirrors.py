@@ -70,7 +70,7 @@ def install_mirror_routes(
         response_model=MirrorJob,
         status_code=202,
         summary="Start one explicit permanent mirror decision",
-        description="Configure offline, retain an exact already accepted public copy with reviewed every-member terms, select a finite public run or separately approved standing resume, control pin/block/retry, or confirm exact stopped-owner deletion. The immutable client operation observes its original job on replay. Every new effect binds current policy; installation, metadata reads, receiving, or a source file grant no sharing. Configuration and local admission clear restart authority as appropriate; no policy evicts retained copies. Direct public PMF transport remains unavailable.",
+        description="Configure offline, retain an exact already accepted public copy with reviewed every-member terms, recover a complete pending selection offline, prepare its recovery kit, select a finite public run or separately approved standing resume, control pin/block/retry, or confirm exact stopped-owner deletion. Recovery requires a stopped controller and original model authority, verifies every actual object and clears Core restart intent; it never fetches or deletes partial bytes. The immutable client operation observes its original job on replay. Every new effect binds current policy; installation, metadata reads, receiving, or a source file grant no sharing. Configuration and local admission clear restart authority as appropriate; no policy evicts retained copies. Direct public PMF transport remains unavailable.",
     )
     async def start(request: Request, body: MirrorRequest) -> MirrorJob:
         owner = await host(request)

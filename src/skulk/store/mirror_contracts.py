@@ -25,6 +25,7 @@ MirrorKind = Literal[
     "model",
     "prune",
     "prepare_kit",
+    "recover",
 ]
 MirrorAction = Literal["pin", "unpin", "block", "unblock", "retry"]
 
@@ -206,10 +207,13 @@ class MirrorRequest(PreservationContract):
             or self.confirm_reintake
         ):
             raise ValueError("copy intake grants belong only to retain")
-        if self.kind in {"model", "prune", "prepare_kit"} and self.manifest_id is None:
+        if (
+            self.kind in {"model", "prune", "prepare_kit", "recover"}
+            and self.manifest_id is None
+        ):
             raise ValueError("select an exact retained model")
         if (
-            self.kind not in {"model", "prune", "retain", "prepare_kit"}
+            self.kind not in {"model", "prune", "retain", "prepare_kit", "recover"}
             and self.manifest_id is not None
         ):
             raise ValueError("model identity belongs only to model operations")

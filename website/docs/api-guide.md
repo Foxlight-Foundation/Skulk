@@ -6130,9 +6130,26 @@ historical work is never replayed.
   `unblock`, `retry`). These live local controls do not alter accepted model keys
   or reset allowances. Policy/intake/model-deletion work requires the controller
   to stop first.
+- `recover`: select exact already accepted `manifest_id` and reviewed `policy_id`.
+  This is an explicit stopped-controller offline completion check, distinct from
+  `retry`, `run`, reintake or deletion. The standalone 0.19 verifier authenticates
+  original model keys/terms and every actual object. A retained local intent may
+  restore the unchanged original signed wrapper after a crash before publication;
+  missing/corrupt bytes refuse without fetching. Complete pending copies become
+  retained; pin/block, accepted authority and accounting remain unchanged. Removed
+  selections still require separate reintake. Core clears its standing/running
+  sharing intent before byte work, and successful pending promotion clears the
+  standalone restart grant. No service, network, signing or runtime admission
+  starts. Run verification in the owned cancellable worker: client loss keeps its
+  durable receipt, identical retries observe the original outcome, and Core loss
+  interrupts without replay. After interruption, inspect state and explicitly
+  choose another operation if needed; a completed retained copy can use the kit
+  journey below. An already retained copy is reverified without rewriting its
+  standalone receipt. The `recover` kind in `MirrorRequest`/`MirrorJob` is the
+  feature-negotiation signal for clients connecting to older hosts.
 - `prepare_kit`: select exact retained `manifest_id` and reviewed `policy_id`.
   No copy handle, caller path, signer or network permission is accepted. It
-  reuses the standalone 0.18 verifier, preserving exact original wrapper bytes,
+  reuses the standalone verifier, preserving exact original wrapper bytes,
   all card extensions, companions/notices and candidate public trust. Full copy
   and digest work stays in the owned background worker. Preparation can coexist
   with an existing controller, and client closure does not cancel it. A
