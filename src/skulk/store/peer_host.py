@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import subprocess
 import time
 from collections.abc import Callable
@@ -21,6 +22,7 @@ from foxlight_model_preservation.peer_runtime import (
 from foxlight_model_preservation.signing import canonical_bytes, digest
 from foxlight_model_preservation.storage import atomic_bytes, directory
 
+from skulk.store.mirror_worker import MirrorNativeRuntime
 from skulk.store.peer_contracts import PeerSetup, PeerState
 from skulk.store.peer_install_host import RuntimeSetupHost
 from skulk.store.peer_worker import PeerWorkerRequest
@@ -189,6 +191,35 @@ class PeerHost:
         async with self._gate:
             self.journal.set_setting("peer-setup", setup.model_dump(mode="json"))
         return await self.status()
+
+    async def mirror_runtime(self, expected_setup: str) -> MirrorNativeRuntime:
+        """Select current qualified native bytes for a separately approved mirror.
+
+        This verifies local software and reviewed contacts only. It starts no
+        router or serving session and does not reuse the receive-only repository.
+        The persistent controller rechecks the returned executable hash on use.
+        """
+        if self._closed or self._gate.locked():
+            raise PreservationHostError("peer_busy_try_again")
+        async with self._gate:
+            setup, identity = self.selected()
+            if identity != expected_setup:
+                raise PreservationHostError("peer_setup_changed")
+            runtime, binary = await self.storage.run(self._runtime)
+            if runtime != "available" or binary is None:
+                raise PreservationHostError("peer_runtime_required")
+
+            def fingerprint() -> str:
+                with Path(binary).open("rb") as stream:
+                    return hashlib.file_digest(stream, "sha256").hexdigest()
+
+            expected_hash = await self.storage.run(fingerprint)
+            return MirrorNativeRuntime(
+                binary=binary,
+                sha256=expected_hash,
+                bootstrap=setup.bootstrap,
+                allow_private=setup.allow_private,
+            )
 
     async def open(
         self, expected_setup: str, seconds: int, cancelled: Callable[[], bool]

@@ -26,6 +26,7 @@ from foxlight_model_preservation.invitations import (
     invitation_from_envelope,
 )
 from foxlight_model_preservation.kits import inspect_kit
+from foxlight_model_preservation.mirror_models import Terms
 from foxlight_model_preservation.models import Manifest, PreservationError, TrustProfile
 from foxlight_model_preservation.peer_invitations import PeerInvitation
 from foxlight_model_preservation.pmf_models import PMFManifest
@@ -52,6 +53,8 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 from skulk.shared.constants import SKULK_CUSTOM_MODEL_CARDS_DIR
 from skulk.store.discovery_host import DiscoveryHost
 from skulk.store.installed_cards import read_installed_card
+from skulk.store.mirror_host import MirrorHost
+from skulk.store.mirror_worker import MirrorRetainSource
 from skulk.store.model_store import ModelStore
 from skulk.store.peer_host import PeerHost, PeerLease
 from skulk.store.preservation import inspect_verified_manifest
@@ -103,7 +106,7 @@ from skulk.store.preservation_references import (
     i2p_model_mirrors,
 )
 from skulk.store.preservation_references import read_model_reference as read_invitation
-from skulk.store.preservation_sharing import check_peer_space
+from skulk.store.preservation_sharing import check_peer_space, require_public_bundle
 from skulk.store.preservation_uploads import KitUploads
 from skulk.store.preservation_work import (
     WORK_KINDS,
@@ -179,12 +182,21 @@ class PreservationHost:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._closed = False
+        self._closing: asyncio.Task[None] | None = None
         self._setup_lock = asyncio.Lock()
         self._storage = PreservationIO()
         self.uploads = KitUploads(root / "uploads", self.journal)
         self.upload_lock = asyncio.Lock()
         self.peers = PeerHost(
             root, self.journal, self._storage, preservation_worker_command
+        )
+        self.mirrors = MirrorHost(
+            root,
+            self.journal,
+            self._storage,
+            preservation_worker_command,
+            self._mirror_source,
+            self.peers.mirror_runtime,
         )
         self.discovery = DiscoveryHost(
             root,
@@ -257,6 +269,52 @@ class PreservationHost:
         if copy.audience != "public" or location.purpose != "public":
             raise PreservationHostError("public_copy_required")
         return location.trust
+
+    @asynccontextmanager
+    async def _mirror_source(
+        self, copy_id: str, identity: str
+    ) -> AsyncIterator[MirrorRetainSource]:
+        copy = self.journal.copy(copy_id)
+        location = self._location(copy.location_id)
+        if (
+            copy.audience != "public"
+            or location.purpose != "public"
+            or copy.manifest_id != identity
+        ):
+            raise PreservationHostError("public_copy_required")
+        async with self._archive(location) as descriptor:
+
+            def inspect() -> MirrorRetainSource:
+                manifest = verify_archive_manifest(
+                    read_metadata(descriptor, manifest_path(identity)),
+                    location.trust,
+                    identity,
+                )
+                if not isinstance(manifest, Manifest):
+                    raise PreservationHostError(
+                        "public_mirror_pmf_transport_unavailable"
+                    )
+                require_public_bundle(manifest)
+                pairs = sorted(
+                    {
+                        (member.intake.license_id, member.intake.terms_reference)
+                        for member in manifest.members
+                    }
+                )
+                terms = tuple(
+                    Terms(license_id=license_id, terms_reference=reference)
+                    for license_id, reference in pairs
+                )
+                info = os.fstat(descriptor)
+                return MirrorRetainSource(
+                    descriptor=descriptor,
+                    device=info.st_dev,
+                    inode=info.st_ino,
+                    trust=location.trust,
+                    terms=terms,
+                )
+
+            yield await self._storage.run(inspect)
 
     def _location(self, location_id: str) -> _Location:
         value = self.journal.setting("location:" + location_id)
@@ -1673,14 +1731,39 @@ class PreservationHost:
                 raise
 
     async def close(self) -> None:
-        """Drain owned workers before releasing the exclusive host journal owner."""
+        """Own complete shutdown despite caller cancellation; allow failed cleanup retry."""
         self._closed = True
-        for job_id in tuple(self._tasks):
+        if self._closing is None or (
+            self._closing.done()
+            and (self._closing.cancelled() or self._closing.exception() is not None)
+        ):
+            self._closing = asyncio.create_task(self._close())
+        while not self._closing.done():
+            try:
+                await asyncio.shield(self._closing)
+            except asyncio.CancelledError:
+                continue
+        self._closing.result()
+
+    async def _close(self) -> None:
+        async def withdraw(job_id: str) -> None:
             await self.cancel(job_id)
-        await self.discovery.close()
+
+        # Start every withdrawal before awaiting any owner's filesystem cleanup.
+        # A stalled mirror intake cannot leave an existing finite share serving,
+        # nor may another failed close cancel its siblings' actual drain.
+        results = await asyncio.gather(
+            *(withdraw(job_id) for job_id in tuple(self._tasks)),
+            self.mirrors.close(),
+            self.discovery.close(),
+            self.peers.close(),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks.values()), return_exceptions=True)
-        await self.peers.close()
         async with self._queue, self._setup_lock:
             await self._storage.close()
             self.journal.close()

@@ -2029,7 +2029,7 @@ Comfy timed scene prompts require an exact issued extension declaring `prompt_re
 
 - `store/preservation_io.py`: two effect slots and an isolated availability pool (up to sixteen private roots plus publisher), reused bounded probes, retained setup cancellation and descriptor leases; shutdown drains actual calls before journal release.
 
-- `store/preservation_host.py`: lazy `ModelStoreServer`-owned controller around the
+- `store/preservation_host.py`: `ModelStoreServer`-owned controller (normally on demand; configured mirror startup also binds it) around the
   existing `ModelStore`; private built-in archive enrollment, exact plans, private
   Preserve/Check and worker ownership. `ModelStore.preservation_lease()` uses the
   actual download/import/eviction fence. No new store-file-listener admin routes.
@@ -2296,3 +2296,58 @@ The retained receiving invitation preview projects its original local
 `receiving` policy, including the exact numeric I2P proxy and limits. This is
 read-only control metadata, omitted from fresh invitation inspection; it does
 not enter signed portable evidence or renew the explicit Resume grant.
+
+
+### Persistent public mirror owner
+
+- `store/mirror_contracts.py`: strict separate `MirrorRequest`, `MirrorJob`,
+  `MirrorPage` and bounded job/model pages. Opaque public-copy/manifest handles;
+  no operator paths, executable selection or signer enrollment. Existing finite
+  job enums/pages and SDK contracts stay unchanged.
+- `store/preservation_journal.py`: separate `mirror_jobs` table under the same
+  exclusive WAL/FULL owner. Immutable owner/operation reservation, 4,096 retained
+  receipts, two active slots, cancellation/terminal fences and restart interruption.
+  Original decisions never replay or regain historical live ports.
+- `store/mirror_host.py`: one managed mirror, qualified native runtime selection,
+  pinned accepted public-copy lease, explicit resource/transports and per-member
+  terms, durable jobs, live activity, Stop and exact pin/block/prune controls.
+  Bounded metadata probes share a state snapshot then project each requested
+  cursor, rather than reusing a different page's response.
+- `store/mirror_worker.py`: known `preservation-mirror` source/frozen family;
+  standalone retention/controller/grant/deletion primitives and original signed
+  evidence. Expected policy is rechecked inside the controller's service lock.
+  Parent EOF cooperatively drains; source directory replacement cannot change
+  its inherited accepted descriptor. No runtime card parser participates.
+  The fixed direct native adapter keeps daemons/commands in the outer owner's
+  group; source/frozen execution needs no nested Python module launch.
+- `store/mirror_process.py`: bounded JSON pipe, unreaped leader ownership,
+  cooperative stop then process-group drain on a bounded per-worker control
+  executor, independent of saturated filesystem effect slots. Requests/descriptors and terminal
+  receipts remain owned until actual effects finish; no arbitrary process adoption.
+  Group-member confirmation precedes leader reap; a real drain timeout retains ownership.
+  Successful Stop retry reconciles retained task/request ownership before freeing the role.
+  Failed close tasks can be retried after recovery; successful close is idempotent.
+  The outer preservation host begins finite-job, mirror, discovery and native-peer
+  withdrawal concurrently; all drain outcomes precede storage/journal release.
+  Complete host close is shielded through release and retryable after failure.
+  Normal exit/Stop/close share drained-owner cleanup, including completed failed
+  workers; shutdown-only retry preserves approved standing intent.
+- `store/peer_host.py`: selected qualified runtime and exact reviewed contacts for
+  independent mirror custody; receive-only Core peer sessions are not converted
+  into publishers. Runtime bytes are pinned/rechecked in mirror policy.
+- `api/mirrors.py`: same operator boundary as private Library; dedicated
+  `/preservation/mirror` and `/mirror/jobs` controls. No store-file-listener admin
+  endpoints, private paths/key material, automatic source/model trust or serving.
+- `ModelStoreServer.start()`: sole startup hook. Requires original running intent
+  plus Core-approved exact unexpired standing grant; no resume on GET/constructor,
+  grant alone or finite run. Core close retains only prior approved intent. User
+  Stop clears it before signalling and persists pause after drain; unavailable
+  disks do not erase Core's Stop fence. No automatic retained-model deletion.
+  Controller drain precedes waits for unrelated cancelled model cleanup.
+- `Node.run()`: the outer store lifetime closes the current server after node
+  tasks exit, with shielded drain under signal and parent-scope cancellation.
+  Event-loop teardown cannot substitute for this owner shutdown.
+
+Direct public PMF transport, public replica health and native desktop distribution
+are not implied by these controls. Standalone core use remains independent of
+Skulk; existing PMF kit/recovery and model/registry/code authority stay separate.

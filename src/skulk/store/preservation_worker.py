@@ -448,6 +448,7 @@ def main() -> None:
         DiscoveryWorkerRequest,
         run_discovery_worker,
     )
+    from skulk.store.mirror_worker import MirrorWorkerRequest, run_mirror_worker
     from skulk.store.peer_install_worker import (
         RuntimeSetupWorkerRequest,
         run_runtime_setup_worker,
@@ -459,13 +460,17 @@ def main() -> None:
         | DiscoveryWorkerRequest
         | PeerWorkerRequest
         | RuntimeSetupWorkerRequest
+        | MirrorWorkerRequest
     ] = TypeAdapter(
         WorkerRequest
         | DiscoveryWorkerRequest
         | PeerWorkerRequest
         | RuntimeSetupWorkerRequest
+        | MirrorWorkerRequest
     )
     request = adapter.validate_json(data)
+    if isinstance(request, MirrorWorkerRequest):
+        raise SystemExit(run_mirror_worker(request))
     if isinstance(request, RuntimeSetupWorkerRequest):
         raise SystemExit(run_runtime_setup_worker(request))
     if isinstance(request, PeerWorkerRequest):
