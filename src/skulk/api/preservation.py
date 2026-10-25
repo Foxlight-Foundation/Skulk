@@ -32,6 +32,7 @@ from skulk.store.preservation_contracts import (
     PreservationPlanRequest,
     PreservationStart,
     PublicationSource,
+    PublicCopyReview,
     RecoveryCleanup,
     TemporaryWork,
 )
@@ -172,6 +173,22 @@ def create_preservation_router(
         owner = await host(request)
         try:
             return await owner.publication_source(copy_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/public-copies/{copy_id}/review",
+        response_model=PublicCopyReview,
+        summary="Review every accepted public-copy member offline",
+        description="Authenticate the exact enrolled public archive and, for supported PMF, its original signed source profile. Return every member's original terms, notice paths, declared file count and size in a bounded all-or-nothing response. No weights, model parsing, registry connection, network, trust enrollment, conversion, sharing or deletion occurs. Metadata review is not a fresh byte-completion check or redistribution permission.",
+    )
+    async def public_copy_review(
+        request: Request, copy_id: Handle, response: Response
+    ) -> PublicCopyReview:
+        owner = await host(request)
+        try:
+            response.headers["Cache-Control"] = "no-store"
+            return await owner.public_copy_review(copy_id)
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
@@ -560,6 +577,7 @@ def create_preservation_router(
         default_location,
         setup_publisher,
         publication_source,
+        public_copy_review,
         public_manifest,
         public_invitation,
         public_handoff,

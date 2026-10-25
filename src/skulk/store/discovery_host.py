@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Literal, cast, final
+from typing import Literal, NamedTuple, cast, final
 from urllib.parse import urlsplit
 
 from foxlight_model_preservation.discovery import (
@@ -70,6 +70,15 @@ from skulk.store.preservation_uploads import KitUploads
 METADATA_WORKER_SECONDS = 150
 
 MetadataReader = Callable[[str, Literal["invitation", "publication", "source"]], bytes]
+
+
+@final
+class _DiscoveryOutcome(NamedTuple):
+    """Pending terminal result, published only after owned cleanup and unlock."""
+
+    state: Literal["failed", "interrupted", "cancelled", "succeeded"]
+    error: str | None = None
+    upload_id: str | None = None
 
 
 def _bounded[T: BaseModel](value: T) -> T:
@@ -549,7 +558,10 @@ class DiscoveryHost:
         try:
             # Retain serialization through actual process stop and IO cleanup.
             async with self._queue:
-                await self._run(job_id)
+                outcome = await self._run(job_id)
+            # No await separates lock release from the terminal receipt. Readers
+            # may act on completion immediately, including source withdrawal.
+            self._finish(job_id, outcome.state, outcome.error, outcome.upload_id)
         except asyncio.CancelledError:
             self._finish(job_id, "interrupted", "core_restarted")
             raise
@@ -563,15 +575,14 @@ class DiscoveryHost:
         finally:
             self._tasks.pop(job_id, None)
 
-    async def _run(self, job_id: str) -> None:
+    async def _run(self, job_id: str) -> _DiscoveryOutcome:
         process: asyncio.subprocess.Process | None = None
         request_path: Path | None = None
         peer: PeerLease | None = None
         try:
             job, selection = self.journal.discovery_job(job_id)
             if job.state == "cancelling" or self._closed:
-                self._finish(job_id, "cancelled", "cancelled")
-                return
+                return _DiscoveryOutcome("cancelled", "cancelled")
             self.journal.update_discovery_job(
                 job.model_copy(
                     update={"state": "running", "updated_at": int(time.time())}
@@ -666,12 +677,10 @@ class DiscoveryHost:
                 )
                 if process.returncode != 0 or result.outcome != "succeeded":
                     code = result.error_code or "discovery_update_failed"
-                    self._finish(
-                        job_id,
+                    return _DiscoveryOutcome(
                         "cancelled" if code == "cancelled" else "failed",
                         code,
                     )
-                    return
                 if selection.kind == "refresh":
                     sources = await self.storage.run(lambda: list_sources(self.cache))
                     if result.catalog_id is None or not any(
@@ -680,17 +689,16 @@ class DiscoveryHost:
                         for source in sources
                     ):
                         raise PreservationHostError("discovery_receipt_changed")
-                    self._finish(job_id, "succeeded")
+                    return _DiscoveryOutcome("succeeded")
                 elif result.invitation is not None:
                     if self.journal.discovery_job(job_id)[0].state == "cancelling":
-                        self._finish(job_id, "cancelled", "cancelled")
-                        return
+                        return _DiscoveryOutcome("cancelled", "cancelled")
                     invitation = result.invitation
                     async with self.upload_lock:
                         upload_id = await self.storage.run(
                             lambda: self._accept_metadata(selection, invitation)
                         )
-                    self._finish(job_id, "succeeded", upload_id=upload_id)
+                    return _DiscoveryOutcome("succeeded", upload_id=upload_id)
                 else:
                     raise PreservationHostError("discovery_receipt_changed")
         except (ValueError, OSError, TimeoutError) as error:
@@ -699,8 +707,7 @@ class DiscoveryHost:
             if peer is not None:
                 await peer.close()
             current = self.journal.discovery_job(job_id)[0]
-            self._finish(
-                job_id,
+            return _DiscoveryOutcome(
                 "interrupted"
                 if process is not None
                 else "cancelled"

@@ -68,6 +68,11 @@ receive-resume action retains the original job/plan, stage inode and cumulative
 allowance; no restart/replay resets its budget. Accounting stays outside public
 copies. Output-parent and work custody are checked before effects. Metadata
 uploads are purpose bounded; the governed private-copy SDK contract stays intact.
+`GET /preservation/public-copies/{copy_id}/review` authenticates every public
+member's original terms/notices offline under enrolled trust, including supported
+PMF source signatures. Its all-or-nothing view is bounded to 48,000 JSON bytes;
+no weights, network, conversion or effects occur, and current byte health or
+redistribution rights are not inferred. Public PMF transport remains separate.
 The host supports private Preserve/Check, public publication/receiving/sharing and
 complete kit recovery. Standalone tools remain independently usable. See the API guide
 and both architecture references for current contracts and remaining boundaries.
@@ -2275,6 +2280,11 @@ entry, with no archive/signing-key placeholders, model-store mutation or serving
 The parent retains serialization through actual worker stop, limits output and
 deadline, and drains local IO before releasing journal ownership. Parent EOF
 ends the child; restart records interruption without network replay.
+
+Discovery outcomes remain pending until request cleanup finishes and the source
+queue is released. The terminal receipt follows unlock without an await, so
+source withdrawal after observed completion is immediate. Failed cleanup records
+interruption rather than a premature success.
 
 First-contact source-file trust authorizes discovery only. Selecting exact
 source/entry/manifest and explicitly accepting that source's model-reference keys

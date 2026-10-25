@@ -56,11 +56,15 @@ from skulk.store.preservation_references import (
 from skulk.utils.directory_publication import publish_directory
 
 
-def publication_members(manifest: Manifest) -> tuple[PublicationMember, ...]:
+def publication_members(
+    manifest: Manifest, *, private_capture: bool = True
+) -> tuple[PublicationMember, ...]:
     """Describe all supported retained members without bytes or private bookkeeping.
 
     Args:
-        manifest: Signature-authenticated private source metadata.
+        manifest: Signature-authenticated source metadata.
+        private_capture: Omit known private bookkeeping for new publication.
+            False preserves every signed member, file and notice of a public copy.
 
     Returns:
         Existing terms and notice hints for explicit publisher review. These do
@@ -68,10 +72,16 @@ def publication_members(manifest: Manifest) -> tuple[PublicationMember, ...]:
     """
     members: list[PublicationMember] = []
     for member in manifest.members:
-        if member.role == "notices" and member.member_id == "source-evidence":
+        if (
+            private_capture
+            and member.role == "notices"
+            and member.member_id == "source-evidence"
+        ):
             continue
         files = tuple(
-            f for f in member.files if f.path != ".foxlight-capture-notice.txt"
+            f
+            for f in member.files
+            if not private_capture or f.path != ".foxlight-capture-notice.txt"
         )
         members.append(
             PublicationMember(
@@ -87,11 +97,11 @@ def publication_members(manifest: Manifest) -> tuple[PublicationMember, ...]:
                 notice_paths=tuple(
                     p
                     for p in member.intake.notice_paths
-                    if p != ".foxlight-capture-notice.txt"
+                    if not private_capture or p != ".foxlight-capture-notice.txt"
                 ),
             )
         )
-    if not 1 <= len(members) <= 16:
+    if not 1 <= len(members) <= (16 if private_capture else 256):
         raise PreservationHostError("selection_needs_paged_review")
     return tuple(members)
 
