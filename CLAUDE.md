@@ -2372,15 +2372,16 @@ after kit preparation. A failed preparation drain cannot leave that controller
 unsignalled; failed owners remain retained for a later close/Stop retry.
 Budgets, original evidence and operator-only deletion survive restart. Current public PMF
 transport still refuses; PMF kit/recovery and standalone Skulk-free use retain
-existing scope. Public Library 0.13 invokes the existing persistent controls;
-the following retained-copy actions need updated Library negotiation.
+existing scope. Public Library 0.14 invokes persistent controls and the retained
+kit actions below; the new pending-copy recovery action needs updated Library
+negotiation.
 
 Exact selection/review routes use the mirror's signed records and accepted keys,
 independently of original import receipts or pagination. Page labels are small
 previously authenticated immutable facts filled by one bounded/coalesced probe;
 they never hide current custody or substitute for payload verification. Complete
 member-term review refuses above 48,000 encoded bytes and opens no weight objects.
-The `prepare_kit` mirror kind reuses standalone 0.18 in the known worker and can
+The `prepare_kit` mirror kind reuses the standalone core in the known worker and can
 coexist with the controller. An enrolled output descriptor precedes any byte
 work. Root kit copying uses a child control so subsequent full-content sealing
 remains cancellable. Only the final worker seal and actual process drain can
@@ -2391,6 +2392,14 @@ on Core close. Explicit exact-job removal quarantines only that known output,
 refuses unexpected/replaced entries and retains restartable removal intent;
 constructor/restart never deletes it. Retained models and source/registry/code
 authority are unchanged. Raw kit transfer remains outside SDK JSON envelopes.
+
+The separate `recover` kind reuses standalone 0.19 offline pending-completion
+verification in that same owned worker. It requires a stopped controller and
+exact reviewed model/policy, clears host sharing intent before checking bytes,
+preserves block/pin/accounting and original signatures/card/companion closure,
+and never fetches, re-admits removed data or deletes partial files. Accepted jobs
+survive client loss; Core restart records interruption without replay. Clients
+negotiate this action independently through the request/job kind enum.
 
 The existing stock-Kubo CI conformance step also exercises `test_mirror_native.py`
 with synthetic complete recovery, native-only startup and precise descendant

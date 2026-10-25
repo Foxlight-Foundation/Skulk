@@ -19,7 +19,10 @@ from foxlight_model_preservation.mirror_models import (
 )
 from foxlight_model_preservation.mirror_native import configure
 from foxlight_model_preservation.mirror_prune import prune
-from foxlight_model_preservation.mirror_recovery import export_selection_kit
+from foxlight_model_preservation.mirror_recovery import (
+    export_selection_kit,
+    recover_selection,
+)
 from foxlight_model_preservation.mirror_state import (
     MirrorLedger,
     grant_restart,
@@ -303,6 +306,10 @@ def run_mirror_worker(request: MirrorWorkerRequest) -> int:
             kit_seal = seal_kit(target.descriptor, decision.manifest_id, control)
             control.checkpoint()
             control.mark_committed()
+        elif decision.kind == "recover":
+            if decision.manifest_id is None:
+                raise ValueError("exact selected manifest required for recovery")
+            recover_selection(ledger, decision.manifest_id, control=control)
         elif decision.kind == "run":
             with ledger.service_lock():
                 ledger.update(lambda state: state.model_copy(update={"paused": False}))

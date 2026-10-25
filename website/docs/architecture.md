@@ -3580,6 +3580,14 @@ preparation's stalled or failed drain cannot leave a later controller serving.
 Drain failures retain their owned process and journal for explicit retry; they
 do not cancel other workers' shutdown.
 
+The separate `recover` job uses standalone 0.19 to complete one already selected
+pending closure offline after an intake/receipt crash. It requires the controller
+to stop, verifies original authority and every object, and can republish only the
+unchanged retained local intent. Core clears sharing restart intent before work;
+pin/block/accounting and separate registry/runtime trust remain. It never fetches,
+re-admits a removed selection, starts sharing or deletes partial bytes. Client
+loss retains its durable receipt; Core loss interrupts without replay.
+
 `mirror_worker.py` runs through the known source/frozen worker dispatcher and
 reuses the public core's exact-policy ledger, local retention, HTTP/native
 controller, expiring grants, pin/block and journaled prune. Native configuration

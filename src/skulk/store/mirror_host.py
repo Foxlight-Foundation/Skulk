@@ -487,6 +487,13 @@ class MirrorHost:
             self._checkpoint(job_id)
             if decision.kind == "run":
                 await self._run_intent(job_id, decision)
+            elif decision.kind == "recover":
+                # An explicit offline check is never a standing sharing grant.
+                # Clear host restart intent before byte work, including when an
+                # interrupted worker's final commit observation is lost.
+                self.journal.set_setting("mirror-approved-resume", None)
+                self.journal.set_setting("mirror-running-intent", None)
+                self.journal.set_setting("mirror-stopped", True)
             self.journal.update_mirror_job(
                 job.model_copy(
                     update={"state": "running", "updated_at": int(time.time())}
@@ -533,6 +540,9 @@ class MirrorHost:
                 result, error = await self._worker(job_id, worker)
             if result is None:
                 error = error or "mirror_worker_failed"
+            elif decision.kind == "recover" and error is None:
+                if result.manifest_id != decision.manifest_id:
+                    raise PreservationHostError("mirror_worker_protocol")
             elif decision.kind == "configure":
                 if result.mirror_identity is None:
                     raise PreservationHostError("mirror_worker_protocol")
