@@ -3575,6 +3575,10 @@ Each read checks the prepared fingerprint without repeating the full hash;
 recipients still verify original signatures and every object. Close cancels and
 drains downloads before storage release. Stop, restart and download never delete
 an artifact; only an exactly confirmed, stopped preparation can be removed.
+All mirror-worker withdrawals start together during Core close, so an earlier
+preparation's stalled or failed drain cannot leave a later controller serving.
+Drain failures retain their owned process and journal for explicit retry; they
+do not cancel other workers' shutdown.
 
 `mirror_worker.py` runs through the known source/frozen worker dispatcher and
 reuses the public core's exact-policy ledger, local retention, HTTP/native

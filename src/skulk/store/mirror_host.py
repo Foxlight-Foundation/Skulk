@@ -867,7 +867,8 @@ class MirrorHost:
         for task in downloads:
             task.cancel()
         tasks = tuple(self._tasks.values())
-        for job_id, task in tuple(self._tasks.items()):
+
+        async def withdraw(job_id: str, task: asyncio.Task[None]) -> None:
             job, _ = self.journal.mirror_job(job_id)
             if job.state in {"queued", "running"}:
                 self.journal.update_mirror_job(
@@ -880,6 +881,16 @@ class MirrorHost:
                 await process.stop()
             else:
                 task.cancel()
+
+        # A preparation may precede its controller. Start every withdrawal
+        # before awaiting any drain, and do not cancel siblings on failure.
+        results = await asyncio.gather(
+            *(withdraw(job_id, task) for job_id, task in tuple(self._tasks.items())),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         # Unrelated cancelled model work can still own stalled filesystem
         # cleanup. Stop actual public controllers before waiting for that work.
         if self._cancellations:

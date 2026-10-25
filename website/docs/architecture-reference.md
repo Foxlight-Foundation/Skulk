@@ -2355,6 +2355,9 @@ not enter signed portable evidence or renew the explicit Resume grant.
   The outer preservation host begins finite-job, mirror, discovery and native-peer
   withdrawal concurrently; all drain outcomes precede storage/journal release.
   Complete host close is shielded through release and retryable after failure.
+  Every mirror-worker withdrawal starts before awaiting any drain; a preparation
+  admitted before its controller cannot prevent that controller from stopping.
+  Failures propagate after other withdrawals finish and retain their owner for retry.
   Normal exit/Stop/close share drained-owner cleanup, including completed failed
   workers; shutdown-only retry preserves approved standing intent.
 - `store/peer_host.py`: selected qualified runtime and exact reviewed contacts for

@@ -7,8 +7,9 @@ import hashlib
 import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,8 +39,9 @@ from skulk.api.tests.test_mirrors_api import ready, settled
 from skulk.store import mirror_kits
 from skulk.store.mirror_contracts import MirrorJob, MirrorRequest, MirrorReview
 from skulk.store.mirror_kits import KitSeal
+from skulk.store.mirror_process import MirrorProcess
 from skulk.store.preservation_host import PreservationHost
-from skulk.store.preservation_journal import PreservationHostError
+from skulk.store.preservation_journal import PreservationHostError, PreservationJournal
 from skulk.store.tests.test_mirror_worker import archive, configuration
 from skulk.store.tests.test_preservation_sharing import empty_host, import_copy
 
@@ -302,6 +304,31 @@ async def test_exact_lookup_off_page_removed_unknown_and_storage_loss(
         await owner.close()
 
 
+def stalled_seal_command(marker: Path) -> Callable[[Path], tuple[str, ...]]:
+    """Run the real fixed worker, stalling only its seal after the kit copy commits."""
+    script = "\n".join(
+        [
+            "import os, time, sys",
+            "sys.stderr = open(" + repr(str(marker) + ".stderr") + ", 'w')",
+            "from pathlib import Path",
+            "import skulk.store.mirror_worker as worker",
+            "def stalled(target, manifest_id, control):",
+            "    Path(" + repr(str(marker)) + ").write_text(str(os.getpid()))",
+            "    while True:",
+            "        control.checkpoint()",
+            "        time.sleep(0.02)",
+            "worker.seal_kit = stalled",
+            "from skulk.store.preservation_worker import main",
+            "main()",
+        ]
+    )
+
+    def command(request: Path) -> tuple[str, ...]:
+        return sys.executable, "-c", script, str(request)
+
+    return command
+
+
 @pytest.mark.asyncio
 async def test_stop_during_sealing_keeps_controller_and_model_and_allows_explicit_cleanup(
     tmp_path: Path,
@@ -321,29 +348,7 @@ async def test_stop_during_sealing_keeps_controller_and_model_and_allows_explici
             )
         )
         running = await ready(owner, run.job_id)
-        script = "\n".join(
-            [
-                "import time, sys",
-                "sys.stderr = open(" + repr(str(marker) + ".stderr") + ", 'w')",
-                "from pathlib import Path",
-                "import skulk.store.mirror_worker as worker",
-                "def stalled(target, manifest_id, control):",
-                "    Path("
-                + repr(str(marker))
-                + ").write_text('kit committed; seal pending')",
-                "    while True:",
-                "        control.checkpoint()",
-                "        time.sleep(0.02)",
-                "worker.seal_kit = stalled",
-                "from skulk.store.preservation_worker import main",
-                "main()",
-            ]
-        )
-
-        def slow_command(request: Path) -> tuple[str, ...]:
-            return sys.executable, "-c", script, str(request)
-
-        owner.mirrors.command = slow_command
+        owner.mirrors.command = stalled_seal_command(marker)
         prepared = await owner.mirrors.start(
             MirrorRequest(
                 owner_id="library",
@@ -386,6 +391,102 @@ async def test_stop_during_sealing_keeps_controller_and_model_and_allows_explici
         assert not (owner.root / "mirror-kits" / prepared.job_id).exists()
         assert verify_store(owner.root / "managed-mirror/store", identity, trust)
     finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_close_stops_later_controller_before_earlier_preparation_drain_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner, identity, trust, _wrapper = await retained(tmp_path)
+    marker = tmp_path / "earlier-sealing"
+    entered, release = asyncio.Event(), asyncio.Event()
+    closing: asyncio.Task[None] | None = None
+    reopened: PreservationHost | None = None
+    original_stop = MirrorProcess.stop
+    try:
+        page = await owner.mirrors.page()
+        owner.mirrors.command = stalled_seal_command(marker)
+        preparation = await owner.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="prepare-first",
+                kind="prepare_kit",
+                policy_id=page.policy_id,
+                manifest_id=identity,
+            )
+        )
+        async with asyncio.timeout(15):
+            while not marker.exists() or not marker.read_text().isdigit():
+                assert owner.mirrors.job(preparation.job_id).state in {
+                    "queued",
+                    "running",
+                }
+                await asyncio.sleep(0.025)
+        preparation_pid = int(marker.read_text())
+        controller = await owner.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="serve-second",
+                kind="run",
+                policy_id=page.policy_id,
+                public_participation=True,
+                seconds=120,
+            )
+        )
+        active = await ready(owner, controller.job_id)
+        assert active.activity is not None and active.activity.http_port is not None
+        port = active.activity.http_port
+
+        async def stalled_stop(process: MirrorProcess) -> None:
+            if process.process.pid == preparation_pid:
+                entered.set()
+                await release.wait()
+                raise subprocess.TimeoutExpired("synthetic preparation drain", 0)
+            await original_stop(process)
+
+        with monkeypatch.context() as failure:
+            failure.setattr(MirrorProcess, "stop", stalled_stop)
+            closing = asyncio.create_task(owner.close())
+            await asyncio.wait_for(entered.wait(), 5)
+            async with asyncio.timeout(5):
+                while MirrorLedger(owner.root / "managed-mirror").running():
+                    await asyncio.sleep(0.025)
+                while True:
+                    try:
+                        _, connection = await asyncio.open_connection("127.0.0.1", port)
+                    except ConnectionRefusedError:
+                        break
+                    connection.close()
+                    await connection.wait_closed()
+                    await asyncio.sleep(0.025)
+            assert not closing.done()
+            release.set()
+            with pytest.raises(subprocess.TimeoutExpired):
+                await closing
+        with pytest.raises(
+            PreservationHostError, match="preservation_host_already_running"
+        ):
+            unexpected = PreservationJournal(owner.root)
+            unexpected.close()
+        assert owner.mirrors.job(preparation.job_id).state == "cancelling"
+        assert (
+            owner.root / "mirror-kits" / preparation.job_id / "bundle.foxkit"
+        ).is_file()
+        await asyncio.wait_for(owner.close(), 15)
+        assert verify_store(owner.root / "managed-mirror/store", identity, trust)
+        reopened = PreservationHost(owner.store, owner.root)
+        assert reopened.mirrors.job(preparation.job_id).state == "interrupted"
+        assert (await reopened.mirrors.page()).controller_job_id is None
+        assert (
+            owner.root / "mirror-kits" / preparation.job_id / "bundle.foxkit"
+        ).is_file()
+    finally:
+        release.set()
+        if closing is not None:
+            await asyncio.gather(closing, return_exceptions=True)
+        if reopened is not None:
+            await reopened.close()
         await owner.close()
 
 

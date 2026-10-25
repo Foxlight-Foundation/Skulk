@@ -2367,6 +2367,9 @@ work before the disk pause write, and retains filesystem ownership through clien
 cancellation. Unavailable storage still has Core's durable Stop fence.
 Core close drains actual controllers before waiting for unrelated cancelled
 model cleanup; that cleanup retains filesystem and journal ownership.
+All mirror-worker withdrawals begin concurrently, including a controller started
+after kit preparation. A failed preparation drain cannot leave that controller
+unsignalled; failed owners remain retained for a later close/Stop retry.
 Budgets, original evidence and operator-only deletion survive restart. Current public PMF
 transport still refuses; PMF kit/recovery and standalone Skulk-free use retain
 existing scope. Public Library 0.13 invokes the existing persistent controls;
