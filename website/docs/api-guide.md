@@ -6086,10 +6086,15 @@ historical work is never replayed.
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
 | GET | `/preservation/mirror` | Optional `offset` (0–1,000). Returns `MirrorPage`: configured/available observations, exact `policy_id`, actual resource/transport configuration, pause and standing-permission observations, live controller job/activity and up to twenty sorted model selections. `next_offset` pages models; pending, retained and removed tombstones are distinct. No network, verification of weight bytes or replay starts on read. |
+| GET | `/preservation/mirror/models/{manifest_id}` | Exact signed digest. Returns `MirrorSelection`, independently of list pages and original Library copy records. `available: true, model: null` means unknown; unavailable/corrupt storage has `available: false`. Previously authenticated name/count/size hints do not replace current custody or byte verification. |
+| GET | `/preservation/mirror/models/{manifest_id}/review` | Authenticates the original retained manifest, accepted capture keys/threshold and every member's terms/notices without weight IO. Returns a complete `MirrorReview` within 48,000 encoded bytes or refuses entirely. This grants no recipient, registry, runtime or network authority; original opaque card data stays in the archive. |
 | POST | `/preservation/mirror/jobs` | `MirrorRequest` with permanent `owner_id`, `operation_id`, `kind` and the exact reviewed `policy_id` (absent only for initial configuration). Returns a durable `MirrorJob` with HTTP 202. A repeated identical decision observes its original job, including failure/cancellation; changed input refuses. At most two active jobs and 4,096 permanent receipts are admitted. |
 | GET | `/preservation/mirror/jobs` | Optional `owner_id` and `offset` (0–4,096). Returns `MirrorJobsPage` with at most twenty receipts and a next offset; no effects replay. |
 | GET | `/preservation/mirror/jobs/{job_id}` | Exact digest job handle. Returns lifecycle, safe refusal, byte progress and activity only while that exact worker is owned. Historical listening ports never become live after a restart. |
 | DELETE | `/preservation/mirror/jobs/{job_id}` | Cancel the exact active operation and drain its process group before returning a terminal receipt. For an active controller, commit Core's Stop fence and clear running intent before signalling, then record the mirror's pause after drain. Client cancellation retains actual filesystem ownership. Cancelling an old terminal receipt does not pause a newer controller. |
+| GET | `/preservation/mirror/kits/{job_id}` | Download only a successful `prepare_kit` artifact through an enrolled descriptor. Validates the prepared file fingerprint without a full-byte rescan. Returns prepared length, strong digest ETag and attachment headers; supports one byte range and `If-Range` (206), with 416 for unsupported/unsatisfiable ranges. Replacement/modification refuses or interrupts the stream. Recipients still verify original signatures, independent trust and every object. |
+| HEAD | `/preservation/mirror/kits/{job_id}` | Same operator/fingerprint gate and prepared length/digest headers, without reading payload bytes. Does not start a job or extend permissions. |
+| DELETE | `/preservation/mirror/kits/{job_id}` | Body `confirm_job_id` must exactly equal the selected preparation job. Removes only its stopped, enrolled complete/incomplete kit generation; retained models, other kits and sharing policy are untouched. `kit_removed` records the explicit outcome. Interrupted removal stays private/ineligible until explicit retry; restart never resumes deletion. Unexpected entries, symlinks and replaced directory identities refuse. |
 
 `kind` selects one operation:
 
@@ -6123,8 +6128,19 @@ historical work is never replayed.
   stop an active controller before using this offline control.
 - `model`: select exact `manifest_id` and `action` (`pin`, `unpin`, `block`,
   `unblock`, `retry`). These live local controls do not alter accepted model keys
-  or reset allowances. Other policy/intake/deletion work requires the controller
+  or reset allowances. Policy/intake/model-deletion work requires the controller
   to stop first.
+- `prepare_kit`: select exact retained `manifest_id` and reviewed `policy_id`.
+  No copy handle, caller path, signer or network permission is accepted. It
+  reuses the standalone 0.18 verifier, preserving exact original wrapper bytes,
+  all card extensions, companions/notices and candidate public trust. Full copy
+  and digest work stays in the owned background worker. Preparation can coexist
+  with an existing controller, and client closure does not cancel it. A
+  successful `MirrorJob.kit` records prepared identity/length/digest; metadata
+  reads do not claim a fresh payload scan. Sealing remains cancellable after
+  the inner kit copy finishes. Core loss interrupts unfinished work without
+  replay or automatic deletion. The kit is plaintext; receiving still needs
+  independent model trust or explicit first-contact key acceptance.
 - `prune`: select exact `manifest_id` and matching `confirm_delete_manifest`.
   Standalone stopped-owner, blocked/unpinned and shared-object protections apply.
   Delete only the selected mirror custody; other Library/source/recipient copies

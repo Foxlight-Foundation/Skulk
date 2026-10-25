@@ -19,6 +19,7 @@ from foxlight_model_preservation.mirror_models import (
 )
 from foxlight_model_preservation.mirror_native import configure
 from foxlight_model_preservation.mirror_prune import prune
+from foxlight_model_preservation.mirror_recovery import export_selection_kit
 from foxlight_model_preservation.mirror_state import (
     MirrorLedger,
     grant_restart,
@@ -34,6 +35,8 @@ from foxlight_model_preservation.peer_runtime import serve_peer
 from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.store.mirror_contracts import MirrorActivity, MirrorRequest
+from skulk.store.mirror_kits import KIT_FILENAME, KitSeal, seal_kit
+from skulk.store.preservation_journal import PreservationHostError
 
 
 @final
@@ -73,6 +76,18 @@ class MirrorNativeRuntime(BaseModel):
 
 
 @final
+class MirrorKitTarget(BaseModel):
+    """Known private output descriptor inherited only for kit preparation."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    descriptor: int = Field(
+        ge=0, description="Inherited enrolled private job directory."
+    )
+    device: int = Field(ge=0, description="Expected output filesystem device.")
+    inode: int = Field(ge=0, description="Expected output directory inode.")
+
+
+@final
 class MirrorWorkerRequest(BaseModel):
     """Protected known-worker request; paths/descriptors never enter browser controls."""
 
@@ -91,6 +106,10 @@ class MirrorWorkerRequest(BaseModel):
         default=None,
         description="Explicitly selected native runtime for configuration only.",
     )
+    kit_target: MirrorKitTarget | None = Field(
+        default=None,
+        description="Core-enrolled kit output; no caller path or filename.",
+    )
 
 
 @final
@@ -107,6 +126,10 @@ class MirrorWorkerEvent(BaseModel):
     bytes_hashed: int = Field(default=0, ge=0)
     bytes_copied: int = Field(default=0, ge=0)
     bytes_received: int = Field(default=0, ge=0)
+    kit_seal: KitSeal | None = Field(
+        default=None,
+        description="Internal complete-byte artifact seal, never a model trust grant.",
+    )
 
 
 def _emit(event: MirrorWorkerEvent) -> None:
@@ -237,6 +260,7 @@ def run_mirror_worker(request: MirrorWorkerRequest) -> int:
         control.checkpoint()
         ledger = _ledger(request)
         decision = request.decision
+        kit_seal = None
         if decision.kind == "configure":
             _configure(request, ledger)
         elif decision.kind == "retain":
@@ -257,6 +281,28 @@ def run_mirror_worker(request: MirrorWorkerRequest) -> int:
                 control=control,
                 confirm_reintake=decision.confirm_reintake,
             )
+        elif decision.kind == "prepare_kit":
+            target = request.kit_target
+            if target is None or decision.manifest_id is None:
+                raise ValueError("enrolled kit target and exact manifest required")
+            info = os.fstat(target.descriptor)
+            if (info.st_dev, info.st_ino) != (target.device, target.inode):
+                raise ValueError("kit directory identity changed")
+            os.fchdir(target.descriptor)
+            copying = control.fork()
+            export_selection_kit(
+                ledger, decision.manifest_id, Path(KIT_FILENAME), control=copying
+            )
+            # Root export has committed only its own child control. The outer
+            # preparation remains cancellable until the complete-byte seal is
+            # finished; a valid but unsealed kit stays private and unready.
+            control.advance(
+                hashed=copying.progress.bytes_hashed,
+                copied=copying.progress.bytes_copied,
+            )
+            kit_seal = seal_kit(target.descriptor, decision.manifest_id, control)
+            control.checkpoint()
+            control.mark_committed()
         elif decision.kind == "run":
             with ledger.service_lock():
                 ledger.update(lambda state: state.model_copy(update={"paused": False}))
@@ -317,10 +363,18 @@ def run_mirror_worker(request: MirrorWorkerRequest) -> int:
                 policy_id=policy_id(state),
                 mirror_identity=state.identity["."],
                 manifest_id=decision.manifest_id,
+                kit_seal=kit_seal,
             )
         )
         return 0
     except (OSError, ValueError) as error:
         with suppress(BrokenPipeError, ConnectionResetError):
-            _emit(MirrorWorkerEvent(event="error", error_code=failure_code(error)))
+            _emit(
+                MirrorWorkerEvent(
+                    event="error",
+                    error_code=error.code
+                    if isinstance(error, PreservationHostError)
+                    else failure_code(error),
+                )
+            )
         return 1

@@ -3563,6 +3563,19 @@ same pinned archive descriptor through actual child drain. Opaque/future card
 properties and full original evidence/companion closure stay on the standalone
 verification path, with no runtime card parsing or new registry authority.
 
+Exact retained-selection lookup and complete authenticated member review do not
+depend on Library import records or list pagination. Metadata reads never scan
+weight bytes. An explicit `prepare_kit` job can run beside the serving controller
+within the same two-job bound, using standalone recovery export without its
+service lock. The child writes through an enrolled directory descriptor; Core
+records the completed digest and file fingerprint before exposing a download.
+`mirror_kits.py` owns durable preparation and explicit removal receipts, while
+`api/mirror_kits.py` streams bounded, resumable ranges through a pinned lease.
+Each read checks the prepared fingerprint without repeating the full hash;
+recipients still verify original signatures and every object. Close cancels and
+drains downloads before storage release. Stop, restart and download never delete
+an artifact; only an exactly confirmed, stopped preparation can be removed.
+
 `mirror_worker.py` runs through the known source/frozen worker dispatcher and
 reuses the public core's exact-policy ledger, local retention, HTTP/native
 controller, expiring grants, pin/block and journaled prune. Native configuration

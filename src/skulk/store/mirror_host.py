@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 import subprocess
+import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, suppress
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from pathlib import Path
 from typing import final
 
-from foxlight_model_preservation.mirror_models import MirrorState
+from foxlight_model_preservation.mirror_models import HeldModel, MirrorState
+from foxlight_model_preservation.mirror_recovery import (
+    inspect_selection,
+    selection_status,
+)
 from foxlight_model_preservation.mirror_state import (
     MirrorLedger,
     policy_id,
@@ -28,14 +35,19 @@ from skulk.store.mirror_contracts import (
     MirrorModel,
     MirrorPage,
     MirrorRequest,
+    MirrorReview,
+    MirrorSelection,
 )
+from skulk.store.mirror_kits import KitSeal, MirrorKitStore, kit_fingerprint
 from skulk.store.mirror_process import MirrorProcess, remove_mirror_request
 from skulk.store.mirror_worker import (
+    MirrorKitTarget,
     MirrorNativeRuntime,
     MirrorRetainSource,
     MirrorWorkerEvent,
     MirrorWorkerRequest,
 )
+from skulk.store.preservation_delivery import publication_members
 from skulk.store.preservation_io import PreservationIO
 from skulk.store.preservation_journal import (
     PreservationHostError,
@@ -79,6 +91,11 @@ class MirrorHost:
         self._closing: asyncio.Task[None] | None = None
         self._closed = False
         self._restored = False
+        self.kits = MirrorKitStore(root, journal)
+        self._downloads: set[asyncio.Task[object]] = set()
+        self._kit_removals: dict[str, asyncio.Task[MirrorJob]] = {}
+        self._labels: dict[str, tuple[str, int, int]] = {}
+        self._label_lock = threading.RLock()
         journal.interrupt_mirror_jobs()
 
     def _enrollment(self) -> _Enrollment | None:
@@ -130,15 +147,7 @@ class MirrorHost:
     def _view(self, state: MirrorState, offset: int) -> MirrorPage:
         selections = sorted(state.models.items())
         models = tuple(
-            MirrorModel(
-                manifest_id=identity,
-                state=held.state,
-                pinned=held.pinned,
-                blocked=held.blocked,
-                error_code=held.error
-                if held.error is None or re.fullmatch(r"[a-z_]{1,80}", held.error)
-                else "invalid_or_unsafe",
-            )
+            self._model(identity, held)
             for identity, held in selections[offset : offset + 20]
         )
         return MirrorPage(
@@ -153,6 +162,115 @@ class MirrorHost:
             model_count=len(selections),
             next_offset=offset + 20 if offset + 20 < len(selections) else None,
         )
+
+    def _model(self, identity: str, held: HeldModel) -> MirrorModel:
+        with self._label_lock:
+            if held.state == "removed":
+                self._labels.pop(identity, None)
+            metadata = self._labels.get(identity)
+        return MirrorModel(
+            manifest_id=identity,
+            state=held.state,
+            pinned=held.pinned,
+            blocked=held.blocked,
+            error_code=held.error
+            if held.error is None or re.fullmatch(r"[a-z_]{1,80}", held.error)
+            else "invalid_or_unsafe",
+            name=metadata[0] if metadata is not None else None,
+            member_count=metadata[1] if metadata is not None else None,
+            size_bytes=metadata[2] if metadata is not None else None,
+        )
+
+    def _load_labels(self, state: MirrorState, offset: int) -> None:
+        ledger = self._ledger()
+        for identity, held in sorted(state.models.items())[offset : offset + 20]:
+            with self._label_lock:
+                if held.state == "removed":
+                    self._labels.pop(identity, None)
+                if held.state == "removed" or identity in self._labels:
+                    continue
+            try:
+                metadata = inspect_selection(ledger, identity)
+            except (OSError, ValueError):
+                continue
+            with self._label_lock:
+                if len(self._labels) < 1000:
+                    self._labels[identity] = (
+                        metadata.name,
+                        len(metadata.members),
+                        metadata.total_bytes,
+                    )
+
+    async def selection(self, manifest_id: str) -> MirrorSelection:
+        """Observe an exact selection without pagination, IO replay or authority changes."""
+        configured = self._enrollment() is not None
+        fallback = MirrorSelection(
+            manifest_id=manifest_id, configured=configured, available=not configured
+        )
+        if not configured:
+            return fallback
+
+        def observe() -> MirrorSelection:
+            ledger = self._ledger()
+            held = selection_status(ledger, manifest_id)
+            return MirrorSelection(
+                manifest_id=manifest_id,
+                configured=True,
+                available=True,
+                policy_id=policy_id(ledger.read()),
+                model=self._model(manifest_id, held) if held is not None else None,
+            )
+
+        try:
+            return await self.storage.probe(
+                "mirror-selection:" + manifest_id, observe, fallback
+            )
+        except (OSError, ValueError):
+            return fallback
+
+    async def review(self, manifest_id: str) -> MirrorReview:
+        """Authenticate complete bounded terms locally without tensor reads or signing."""
+
+        def inspect() -> MirrorReview:
+            ledger = self._ledger()
+            manifest = inspect_selection(ledger, manifest_id)
+            held = selection_status(ledger, manifest_id)
+            if held is None or held.state == "removed":
+                raise PreservationHostError("mirror_selection_changed")
+            trust = held.grant.trust
+            result = MirrorReview(
+                manifest_id=manifest_id,
+                name=manifest.name,
+                size_bytes=manifest.total_bytes,
+                workloads=manifest.workloads,
+                runtime_requirements=manifest.runtime_requirements,
+                members=publication_members(manifest, private_capture=False),
+                capture_key_ids=tuple(
+                    key.key_id
+                    for key in trust.keys
+                    if key.key_id not in trust.revoked_keys
+                ),
+                capture_threshold=trust.threshold,
+            )
+            if (
+                len(
+                    json.dumps(
+                        result.model_dump(mode="json"), ensure_ascii=True
+                    ).encode()
+                )
+                > 48000
+            ):
+                raise PreservationHostError("metadata_preview_too_large")
+            with self._label_lock:
+                if len(self._labels) < 1000:
+                    self._labels[manifest_id] = (
+                        manifest.name,
+                        len(manifest.members),
+                        manifest.total_bytes,
+                    )
+            return result
+
+        return await self.storage.run(inspect)
 
     async def page(self, offset: int = 0) -> MirrorPage:
         """Read bounded local metadata and owned activity without starting work."""
@@ -170,6 +288,14 @@ class MirrorHost:
                 if selected
                 else None
             )
+            if state is not None:
+                # Labels contain only previously authenticated immutable payload
+                # facts. A bounded/coalesced probe fills the small cache even if
+                # this request times out; a slow large card cannot hide custody
+                # state forever or enqueue repeated unbounded metadata reads.
+                await self.storage.probe(
+                    "mirror-labels", lambda: self._load_labels(state, offset), None
+                )
             page = self._view(state, offset) if state is not None else fallback
         except (ValueError, OSError):
             page = fallback
@@ -196,6 +322,100 @@ class MirrorHost:
             return job.model_copy(update={"activity": None})
         return job
 
+    @asynccontextmanager
+    async def kit_file(self, job_id: str) -> AsyncIterator[tuple[int, KitSeal]]:
+        """Lease an unchanged prepared file until response/disconnect cleanup finishes."""
+        if self._closed:
+            raise PreservationHostError("preservation_host_closed")
+        job = self.job(job_id)
+        if (
+            job.kind != "prepare_kit"
+            or job.state != "succeeded"
+            or job.kit is None
+            or job.kit_removed
+        ):
+            raise PreservationHostError("mirror_kit_not_ready")
+
+        sealed: list[KitSeal] = []
+
+        def open_prepared() -> int:
+            descriptor, seal = self.kits.open(job_id)
+            if seal.public() != job.kit:
+                os.close(descriptor)
+                raise PreservationHostError("mirror_kit_generation_changed")
+            sealed.append(seal)
+            return descriptor
+
+        owner = asyncio.current_task()
+        if owner is None:
+            raise PreservationHostError("mirror_kit_owner_unavailable")
+        self._downloads.add(owner)
+        try:
+            async with self.storage.directory(open_prepared) as descriptor:
+                yield descriptor, sealed[0]
+        finally:
+            self._downloads.discard(owner)
+
+    async def kit_chunk(
+        self, descriptor: int, seal: KitSeal, offset: int, size: int
+    ) -> bytes:
+        """Read one bounded unchanged range from an already leased descriptor."""
+        if (
+            offset < 0
+            or not 1 <= size <= 1024**2
+            or offset + size > seal.fingerprint.size_bytes
+        ):
+            raise PreservationHostError("invalid_kit_range")
+
+        def read() -> bytes:
+            if kit_fingerprint(descriptor) != seal.fingerprint:
+                raise PreservationHostError("mirror_kit_file_changed")
+            result = os.pread(descriptor, size, offset)
+            if len(result) != size or kit_fingerprint(descriptor) != seal.fingerprint:
+                raise PreservationHostError("mirror_kit_file_changed")
+            return result
+
+        return await self.storage.run(read)
+
+    async def remove_kit(self, job_id: str, confirmation: str) -> MirrorJob:
+        """Own explicit generation removal through actual IO completion, never model deletion."""
+        if confirmation != job_id:
+            raise PreservationHostError("mirror_kit_confirmation_required")
+        if self._closed:
+            raise PreservationHostError("preservation_host_closed")
+        job = self.job(job_id)
+        if (
+            job.kind != "prepare_kit"
+            or job_id in self._tasks
+            or job_id in self._processes
+            or job_id in self._cancellations
+        ):
+            raise PreservationHostError("mirror_kit_busy_or_unknown")
+        existing = self._kit_removals.get(job_id)
+        if existing is None:
+            existing = asyncio.create_task(self._remove_kit(job_id, confirmation))
+            self._kit_removals[job_id] = existing
+            existing.add_done_callback(self._observe_task)
+        return await self._await_control(existing)
+
+    async def _remove_kit(self, job_id: str, confirmation: str) -> MirrorJob:
+        try:
+            artifact = await self.storage.run(
+                lambda: self.kits.remove(job_id, confirmation)
+            )
+            job, _ = self.journal.mirror_job(job_id)
+            result = job.model_copy(
+                update={
+                    "kit": artifact,
+                    "kit_removed": True,
+                    "updated_at": int(time.time()),
+                }
+            )
+            self.journal.update_mirror_job(result)
+            return result
+        finally:
+            self._kit_removals.pop(job_id, None)
+
     async def start(self, decision: MirrorRequest) -> MirrorJob:
         """Reserve once and own the known operation independently of its client."""
         if self._closed:
@@ -204,12 +424,16 @@ class MirrorHost:
         if not created:
             return self.job(job.job_id)
         active = [self.journal.mirror_job(identity)[0] for identity in self._tasks]
-        if self._cancellations or (
-            active
-            and (
-                decision.kind != "model" or any(other.kind != "run" for other in active)
-            )
-        ):
+        compatible: set[str] = (
+            {"run", "prepare_kit"}
+            if decision.kind == "model"
+            else {"run"}
+            if decision.kind == "prepare_kit"
+            else {"prepare_kit"}
+            if decision.kind == "run"
+            else set()
+        )
+        if self._cancellations or any(other.kind not in compatible for other in active):
             failed = job.model_copy(
                 update={
                     "state": "failed",
@@ -224,7 +448,7 @@ class MirrorHost:
         return job
 
     @staticmethod
-    def _observe_task(task: asyncio.Task[None]) -> None:
+    def _observe_task[T](task: asyncio.Task[T]) -> None:
         if not task.cancelled():
             task.exception()
 
@@ -284,6 +508,27 @@ class MirrorHost:
                     result, error = await self._worker(
                         job_id, worker.model_copy(update={"source": source})
                     )
+            elif decision.kind == "prepare_kit":
+                if decision.manifest_id is None:
+                    raise PreservationHostError("mirror_selection_required")
+                manifest_id = decision.manifest_id
+                await self.storage.run(lambda: self.kits.prepare(job_id, manifest_id))
+                async with self.storage.directory(
+                    lambda: self.kits.target(job_id)
+                ) as target:
+                    info = os.fstat(target)
+                    result, error = await self._worker(
+                        job_id,
+                        worker.model_copy(
+                            update={
+                                "kit_target": MirrorKitTarget(
+                                    descriptor=target,
+                                    device=info.st_dev,
+                                    inode=info.st_ino,
+                                )
+                            }
+                        ),
+                    )
             else:
                 result, error = await self._worker(job_id, worker)
             if result is None:
@@ -313,6 +558,20 @@ class MirrorHost:
             elif decision.kind == "revoke_resume":
                 self.journal.set_setting("mirror-approved-resume", None)
                 self.journal.set_setting("mirror-running-intent", None)
+            elif decision.kind == "prepare_kit" and error is None:
+                if (
+                    result.kit_seal is None
+                    or result.manifest_id != decision.manifest_id
+                ):
+                    raise PreservationHostError("mirror_worker_protocol")
+                sealed = result.kit_seal
+                artifact = await self.storage.run(
+                    lambda: self.kits.record(job_id, sealed)
+                )
+                current, _ = self.journal.mirror_job(job_id)
+                self.journal.update_mirror_job(
+                    current.model_copy(update={"kit": artifact})
+                )
             completed = result is not None and error is None
         except asyncio.CancelledError:
             error = "core_stopped" if self._closed else "cancelled"
@@ -343,6 +602,7 @@ class MirrorHost:
                             "activity": None,
                             "error_code": error,
                             "updated_at": int(time.time()),
+                            "kit": current.kit if state == "succeeded" else None,
                         }
                     )
                 )
@@ -401,7 +661,11 @@ class MirrorHost:
         await self.storage.run(save)
         process = await MirrorProcess.start(
             self.command(path),
-            request.source.descriptor if request.source else None,
+            request.source.descriptor
+            if request.source
+            else request.kit_target.descriptor
+            if request.kit_target
+            else None,
             self.storage,
         )
         self._processes[job_id] = process
@@ -432,9 +696,11 @@ class MirrorHost:
                 self.journal.update_mirror_job(
                     job.model_copy(
                         update={
-                            "bytes_hashed": event.bytes_hashed,
-                            "bytes_copied": event.bytes_copied,
-                            "bytes_received": event.bytes_received,
+                            "bytes_hashed": max(job.bytes_hashed, event.bytes_hashed),
+                            "bytes_copied": max(job.bytes_copied, event.bytes_copied),
+                            "bytes_received": max(
+                                job.bytes_received, event.bytes_received
+                            ),
                             "updated_at": int(time.time()),
                         }
                     )
@@ -597,6 +863,9 @@ class MirrorHost:
         await self._await_control(self._closing)
 
     async def _close(self) -> None:
+        downloads = tuple(self._downloads)
+        for task in downloads:
+            task.cancel()
         tasks = tuple(self._tasks.values())
         for job_id, task in tuple(self._tasks.items()):
             job, _ = self.journal.mirror_job(job_id)
@@ -617,6 +886,12 @@ class MirrorHost:
             await asyncio.gather(*tuple(self._cancellations.values()))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if downloads:
+            await asyncio.gather(*downloads, return_exceptions=True)
+        if self._kit_removals:
+            await asyncio.gather(
+                *tuple(self._kit_removals.values()), return_exceptions=True
+            )
         for job_id, task in tuple(self._tasks.items()):
             if task.done() and (process := self._processes.get(job_id)) is not None:
                 await self._release_process(job_id, process)

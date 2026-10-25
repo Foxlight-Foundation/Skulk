@@ -8,16 +8,30 @@ from pydantic import Field, model_validator
 
 from skulk.store.preservation_contracts import (
     Digest,
+    Fingerprint,
     Handle,
     JobState,
     OperationId,
     PreservationContract,
+    PublicationMember,
 )
 
 MirrorKind = Literal[
-    "configure", "retain", "run", "grant_resume", "revoke_resume", "model", "prune"
+    "configure",
+    "retain",
+    "run",
+    "grant_resume",
+    "revoke_resume",
+    "model",
+    "prune",
+    "prepare_kit",
 ]
 MirrorAction = Literal["pin", "unpin", "block", "unblock", "retry"]
+
+
+def _omit_absent(value: object) -> bool:
+    """Preserve existing job wire records when no prepared artifact exists."""
+    return value is None
 
 
 @final
@@ -192,10 +206,10 @@ class MirrorRequest(PreservationContract):
             or self.confirm_reintake
         ):
             raise ValueError("copy intake grants belong only to retain")
-        if self.kind in {"model", "prune"} and self.manifest_id is None:
+        if self.kind in {"model", "prune", "prepare_kit"} and self.manifest_id is None:
             raise ValueError("select an exact retained model")
         if (
-            self.kind not in {"model", "prune", "retain"}
+            self.kind not in {"model", "prune", "retain", "prepare_kit"}
             and self.manifest_id is not None
         ):
             raise ValueError("model identity belongs only to model operations")
@@ -236,6 +250,33 @@ class MirrorActivity(PreservationContract):
 
 
 @final
+class MirrorKit(PreservationContract):
+    """Prepared content identity; recipient model trust remains independent."""
+
+    state: Literal["prepared", "removed"] = Field(
+        description="Historical preparation or explicit removal, not a fresh payload scan."
+    )
+    manifest_id: Digest = Field(
+        description="Original signed model identity inside this kit."
+    )
+    size_bytes: int = Field(
+        ge=1, le=2**53 - 1, description="Prepared complete kit length."
+    )
+    sha256: Digest = Field(
+        description="Prepared kit bytes digest, separate from its signed model identity."
+    )
+
+
+@final
+class MirrorKitRemoval(PreservationContract):
+    """Separate exact-artifact deletion, including stopped incomplete preparation."""
+
+    confirm_job_id: Digest = Field(
+        description="Explicitly confirm this preparation job's private kit and temporary output only."
+    )
+
+
+@final
 class MirrorJob(PreservationContract):
     """Durable control/worker receipt separate from existing finite copy jobs."""
 
@@ -271,6 +312,15 @@ class MirrorJob(PreservationContract):
     bytes_received: int = Field(
         default=0, ge=0, description="Observed receive bytes, not a new budget grant."
     )
+    kit: MirrorKit | None = Field(
+        default=None,
+        exclude_if=_omit_absent,
+        description="Prepared content or explicit removal receipt; absent before complete sealing.",
+    )
+    kit_removed: bool = Field(
+        default=False,
+        description="Operator removed this job's prepared or incomplete kit generation; retained models are unaffected.",
+    )
 
 
 @final
@@ -289,6 +339,84 @@ class MirrorModel(PreservationContract):
         default=None,
         max_length=80,
         description="Safe intake/verification refusal, if any.",
+    )
+    name: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Authenticated original name, when local metadata is available.",
+    )
+    member_count: int | None = Field(
+        default=None,
+        ge=1,
+        le=256,
+        description="Declared full member count; no fresh payload completeness claim.",
+    )
+    size_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Declared logical closure bytes, without scanning weights.",
+    )
+
+
+@final
+class MirrorSelection(PreservationContract):
+    """Exact identity lookup independent of application receipts and list pages."""
+
+    schema_version: Literal["skulk.preservation-mirror-selection.v1"] = Field(
+        default="skulk.preservation-mirror-selection.v1",
+        description="Exact local selection observation contract.",
+    )
+    manifest_id: Digest = Field(
+        description="Exact requested original manifest identity."
+    )
+    configured: bool = Field(description="Core has an enrolled mirror directory.")
+    available: bool = Field(
+        description="Local state was available; false never means an unknown selection."
+    )
+    policy_id: Digest | None = Field(
+        default=None, description="Observed policy to review before a new effect."
+    )
+    model: MirrorModel | None = Field(
+        default=None, description="None means unknown only when available is true."
+    )
+
+
+@final
+class MirrorReview(PreservationContract):
+    """Complete authenticated member terms, independent of original import records."""
+
+    schema_version: Literal["skulk.preservation-mirror-review.v1"] = Field(
+        default="skulk.preservation-mirror-review.v1",
+        description="Bounded retained-copy metadata review contract.",
+    )
+    manifest_id: Digest = Field(description="Exact retained signed identity.")
+    archive_format: Literal["preservation-v1"] = Field(
+        default="preservation-v1",
+        description="Current public mirror transport profile, without conversion.",
+    )
+    name: str = Field(max_length=200, description="Original signed display name.")
+    size_bytes: int = Field(
+        ge=0, description="Declared logical closure size, not a fresh weight check."
+    )
+    workloads: tuple[str, ...] = Field(
+        max_length=100, description="Original declared workloads."
+    )
+    runtime_requirements: tuple[str, ...] = Field(
+        max_length=100,
+        description="Original runtime declarations; no code or model admission.",
+    )
+    members: tuple[PublicationMember, ...] = Field(
+        min_length=1,
+        max_length=256,
+        description="Every signed member and required notice; oversized reviews refuse entirely.",
+    )
+    capture_key_ids: tuple[Fingerprint, ...] = Field(
+        min_length=1,
+        max_length=32,
+        description="Locally accepted non-revoked capture keys, not registry authority or a recipient trust grant.",
+    )
+    capture_threshold: int = Field(
+        ge=1, le=32, description="Previously accepted capture verification threshold."
     )
 
 
