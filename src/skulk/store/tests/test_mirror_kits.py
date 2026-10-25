@@ -74,6 +74,45 @@ def test_changed_prepared_identity_refuses_without_new_hash(
         journal.close()
 
 
+@pytest.mark.parametrize("damage", ["replacement", "modification"])
+def test_changed_sealed_bundle_and_temporary_file_survive_removal_and_retry(
+    tmp_path: Path, damage: str
+) -> None:
+    profile = tmp_path / "owner"
+    journal = PreservationJournal(profile)
+    store = MirrorKitStore(profile, journal)
+    quarantine = store.path / (".removed-" + JOB)
+    content = b"x" * len(CONTENT)
+    temporary = ".kit-" + "f" * 32
+    try:
+        seal = prepare(store)
+        path = store.path / JOB / KIT_FILENAME
+        if damage == "replacement":
+            path.rename(profile / "prior-artifact.foxkit")
+        else:
+            path.chmod(0o600)
+        path.write_bytes(content)
+        path.chmod(0o400)
+        os.utime(path, ns=(seal.fingerprint.modified_ns, seal.fingerprint.modified_ns))
+        (path.parent / temporary).write_bytes(b"retain until all checks pass")
+        with pytest.raises(PreservationHostError, match="mirror_kit_file_changed"):
+            store.remove(JOB, JOB)
+        assert (quarantine / KIT_FILENAME).read_bytes() == content
+        assert (quarantine / temporary).read_bytes() == b"retain until all checks pass"
+    finally:
+        journal.close()
+    journal = PreservationJournal(profile)
+    try:
+        reopened = MirrorKitStore(profile, journal)
+        assert (quarantine / KIT_FILENAME).read_bytes() == content
+        with pytest.raises(PreservationHostError, match="mirror_kit_file_changed"):
+            reopened.remove(JOB, JOB)
+        assert (quarantine / KIT_FILENAME).read_bytes() == content
+        assert (quarantine / temporary).read_bytes() == b"retain until all checks pass"
+    finally:
+        journal.close()
+
+
 def test_unknown_entries_survive_failed_removal_and_only_explicit_retry_finishes(
     tmp_path: Path,
 ) -> None:

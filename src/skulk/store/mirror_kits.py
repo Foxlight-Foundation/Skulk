@@ -371,6 +371,15 @@ class MirrorKitStore:
                         or info.st_uid != os.getuid()
                     ):
                         raise PreservationHostError("mirror_kit_directory_changed")
+                    if name == KIT_FILENAME and intent.seal is not None:
+                        # A sealed job selects its exact prepared artifact;
+                        # owner and file type cannot authorize a replacement.
+                        with open_file(target, name) as source:
+                            if (
+                                kit_fingerprint(source.fileno())
+                                != intent.seal.fingerprint
+                            ):
+                                raise PreservationHostError("mirror_kit_file_changed")
                 for name in names:
                     os.unlink(name, dir_fd=target)
                 os.fsync(target)
