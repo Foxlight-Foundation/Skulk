@@ -890,7 +890,8 @@ class PreservationJournal:
 
         Repeated semantic requests observe the original receipt, even when its
         policy later changes. Two active slots allow a controller plus one live
-        model control. Exhaustion never prevents observing or stopping work.
+        model control or kit preparation. Exhaustion never prevents observing
+        or stopping work.
         """
         request = MirrorRequest.model_validate_json(request.model_dump_json())
         encoded = request.model_dump_json(exclude_defaults=True)

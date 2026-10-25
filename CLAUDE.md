@@ -2367,9 +2367,30 @@ work before the disk pause write, and retains filesystem ownership through clien
 cancellation. Unavailable storage still has Core's durable Stop fence.
 Core close drains actual controllers before waiting for unrelated cancelled
 model cleanup; that cleanup retains filesystem and journal ownership.
+All mirror-worker withdrawals begin concurrently, including a controller started
+after kit preparation. A failed preparation drain cannot leave that controller
+unsignalled; failed owners remain retained for a later close/Stop retry.
 Budgets, original evidence and operator-only deletion survive restart. Current public PMF
 transport still refuses; PMF kit/recovery and standalone Skulk-free use retain
-existing scope. The current Library release does not yet invoke these routes.
+existing scope. Public Library 0.13 invokes the existing persistent controls;
+the following retained-copy actions need updated Library negotiation.
+
+Exact selection/review routes use the mirror's signed records and accepted keys,
+independently of original import receipts or pagination. Page labels are small
+previously authenticated immutable facts filled by one bounded/coalesced probe;
+they never hide current custody or substitute for payload verification. Complete
+member-term review refuses above 48,000 encoded bytes and opens no weight objects.
+The `prepare_kit` mirror kind reuses standalone 0.18 in the known worker and can
+coexist with the controller. An enrolled output descriptor precedes any byte
+work. Root kit copying uses a child control so subsequent full-content sealing
+remains cancellable. Only the final worker seal and actual process drain can
+publish `MirrorJob.kit`; interruption retains private/ineligible preparation.
+`mirror_kits.py` stores local file/directory fingerprints and content digests,
+while descriptor-owned range downloads do no full-byte hash in GET and cancel
+on Core close. Explicit exact-job removal quarantines only that known output,
+refuses unexpected/replaced entries and retains restartable removal intent;
+constructor/restart never deletes it. Retained models and source/registry/code
+authority are unchanged. Raw kit transfer remains outside SDK JSON envelopes.
 
 The existing stock-Kubo CI conformance step also exercises `test_mirror_native.py`
 with synthetic complete recovery, native-only startup and precise descendant

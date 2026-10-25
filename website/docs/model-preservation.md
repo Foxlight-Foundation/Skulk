@@ -344,6 +344,33 @@ Core's connecting address; invitations do not provide anonymity, external hostin
 public reachability or automatic BitTorrent participation. See the
 [operator API contract](api-guide.md#public-publication-and-recipient-invitations).
 
+## Recover a retained mirror copy
+
+An operator's retained mirror keeps its signed model metadata independently of
+the original Library import record, publisher and registry. The operator API
+can inspect its original name, complete member terms and accepted capture
+fingerprints by exact manifest ID, including selections outside the current
+list page. An unknown selection is distinct from unavailable storage. Metadata
+inspection does not scan weights or infer registry/runtime trust.
+
+Submit a permanent mirror decision with `kind: "prepare_kit"`, the exact
+`manifest_id`, and reviewed `policy_id`. The owned worker verifies every object
+and preserves the original signed wrapper, opaque card data and all companions
+in a self-contained recovery kit. It can prepare while the mirror serves;
+closing the client does not cancel the job. Observe its ordinary mirror job
+receipt, then download `/preservation/mirror/kits/{job_id}`. The prepared content
+has a digest ETag and resumable byte ranges. Downloads validate the enrolled
+artifact fingerprint; the recipient must still check the original signatures,
+accepted keys and all actual model bytes on import.
+
+Stopping preparation leaves retained models intact. Prepared or interrupted
+kit files have a separate explicit removal action confirmed by their exact
+job ID. Restart, source withdrawal, expiry and storage pressure do not delete
+them. Unexpected/replaced files refuse removal. Existing Library controls
+retain their current scope; these new retained-copy actions require updated
+Library negotiation and do not imply a standalone native GUI or installer.
+See the [operator API contract](api-guide.md#public-publication-and-recipient-invitations).
+
 ## Privacy boundaries
 
 Signatures detect substitution and corruption; they do not encrypt weights or

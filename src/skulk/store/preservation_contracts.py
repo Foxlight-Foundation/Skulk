@@ -171,7 +171,7 @@ class PublicationMember(PreservationContract):
     """One retained member's public-facing terms hints; never a rights grant."""
 
     member_id: str = Field(max_length=64, description="Exact signed member selection.")
-    role: str = Field(max_length=64, description="Declared closure role.")
+    role: str = Field(max_length=100, description="Declared closure role.")
     repository: str = Field(max_length=512, description="Original repository identity.")
     revision: str = Field(max_length=40, description="Exact original revision.")
     format: str = Field(max_length=128, description="Declared file format.")

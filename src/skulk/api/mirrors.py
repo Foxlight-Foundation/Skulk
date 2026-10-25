@@ -3,12 +3,17 @@
 from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request
+from starlette.responses import Response
 
+from skulk.api.mirror_kits import MirrorKitDownload
 from skulk.store.mirror_contracts import (
     MirrorJob,
     MirrorJobsPage,
+    MirrorKitRemoval,
     MirrorPage,
     MirrorRequest,
+    MirrorReview,
+    MirrorSelection,
 )
 from skulk.store.preservation_contracts import Digest, Handle
 from skulk.store.preservation_host import PreservationHost
@@ -31,6 +36,32 @@ def install_mirror_routes(
         owner = await host(request)
         try:
             return await owner.mirrors.page(offset)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/mirror/models/{manifest_id}",
+        response_model=MirrorSelection,
+        summary="Look up one exact retained mirror selection",
+        description="Read exact state independently of list pagination and original application import records. Unknown selections are distinct from unavailable or corrupt storage. Authenticated labels use bounded metadata only; this starts no network, hashes no model payload and grants no trust or deletion.",
+    )
+    async def selection(request: Request, manifest_id: Digest) -> MirrorSelection:
+        owner = await host(request)
+        try:
+            return await owner.mirrors.selection(manifest_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.get(
+        "/mirror/models/{manifest_id}/review",
+        response_model=MirrorReview,
+        summary="Review complete retained-copy metadata without the original import",
+        description="Authenticate the original signed identity and all required member terms/notices using locally accepted mirror trust. Return a complete bounded review or refuse, without scanning weights, signing new provenance, following sources or admitting models. Capture keys remain independent of recipient, registry and runtime authority.",
+    )
+    async def review(request: Request, manifest_id: Digest) -> MirrorReview:
+        owner = await host(request)
+        try:
+            return await owner.mirrors.review(manifest_id)
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
@@ -93,4 +124,59 @@ def install_mirror_routes(
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
-    _ = mirror, start, jobs, job, stop
+    @router.get(
+        "/mirror/kits/{job_id}",
+        response_class=Response,
+        summary="Download one prepared retained-copy recovery kit",
+        description="Download only a successfully sealed, unchanged private preparation artifact through an owned descriptor. Supports bounded single byte ranges and strong If-Range; no full-byte hash runs in a GET. A kit retains original signed evidence and candidate keys; recipients still independently verify trust and all bytes. Reading starts no sharing and never deletes the retained model.",
+        responses={
+            200: {
+                "content": {
+                    "application/octet-stream": {
+                        "schema": {"type": "string", "format": "binary"}
+                    }
+                }
+            },
+            206: {
+                "description": "Selected byte range",
+                "content": {
+                    "application/octet-stream": {
+                        "schema": {"type": "string", "format": "binary"}
+                    }
+                },
+            },
+            416: {"description": "Unsatisfiable or unsupported range"},
+        },
+    )
+    @router.head(
+        "/mirror/kits/{job_id}",
+        response_class=Response,
+        summary="Read prepared recovery-kit download headers",
+        description="Check the enrolled artifact fingerprint and return prepared length/digest headers without reading payload bytes or replaying preparation. Model trust remains separate.",
+    )
+    async def kit(request: Request, job_id: Digest) -> Response:
+        owner = await host(request)
+        return MirrorKitDownload(
+            owner.mirrors,
+            job_id,
+            request.headers.get("range"),
+            request.headers.get("if-range"),
+            refusal,
+        )
+
+    @router.delete(
+        "/mirror/kits/{job_id}",
+        response_model=MirrorJob,
+        summary="Remove only explicitly confirmed kit preparation files",
+        description="Delete one stopped job's enrolled complete/incomplete kit generation after exact job confirmation. Retained model weights, cards, provenance, sharing policy and other kits are untouched. Removal intent survives interruption; only explicit retry completes it. Unexpected/replaced files refuse deletion, and restart performs no automatic cleanup.",
+    )
+    async def remove_kit(
+        request: Request, job_id: Digest, body: MirrorKitRemoval
+    ) -> MirrorJob:
+        owner = await host(request)
+        try:
+            return await owner.mirrors.remove_kit(job_id, body.confirm_job_id)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    _ = mirror, selection, review, start, jobs, job, stop, kit, remove_kit

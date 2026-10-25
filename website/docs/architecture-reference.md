@@ -2327,6 +2327,17 @@ not enter signed portable evidence or renew the explicit Resume grant.
   terms, durable jobs, live activity, Stop and exact pin/block/prune controls.
   Bounded metadata probes share a state snapshot then project each requested
   cursor, rather than reusing a different page's response.
+  Exact selection lookup and complete, all-member review survive original import
+  loss and do not read weights. `prepare_kit` may coexist with the controller
+  within two active jobs; permanent replay never regenerates an artifact.
+- `store/mirror_kits.py`: enrolled private preparation directories, durable
+  intent/seal/removal receipts and fixed-name artifacts. Completed digest and
+  descriptor fingerprint gate download; unexpected entries or changed identities
+  refuse deletion. No startup cleanup or automatic artifact replacement.
+- `api/mirror_kits.py`: operator-gated prepared GET/HEAD and single-range streaming
+  with strong digest ETag, unchanged-file checks and bounded reads. Active leases
+  drain before storage closes; no full-byte hash on GET and no recipient trust
+  grant. Explicit confirmed removal affects only the stopped preparation.
 - `store/mirror_worker.py`: known `preservation-mirror` source/frozen family;
   standalone retention/controller/grant/deletion primitives and original signed
   evidence. Expected policy is rechecked inside the controller's service lock.
@@ -2344,6 +2355,9 @@ not enter signed portable evidence or renew the explicit Resume grant.
   The outer preservation host begins finite-job, mirror, discovery and native-peer
   withdrawal concurrently; all drain outcomes precede storage/journal release.
   Complete host close is shielded through release and retryable after failure.
+  Every mirror-worker withdrawal starts before awaiting any drain; a preparation
+  admitted before its controller cannot prevent that controller from stopping.
+  Failures propagate after other withdrawals finish and retain their owner for retry.
   Normal exit/Stop/close share drained-owner cleanup, including completed failed
   workers; shutdown-only retry preserves approved standing intent.
 - `store/peer_host.py`: selected qualified runtime and exact reviewed contacts for
