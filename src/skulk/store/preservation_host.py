@@ -194,6 +194,9 @@ class PreservationHost:
         self._closing: asyncio.Task[None] | None = None
         self._setup_lock = asyncio.Lock()
         self._storage = PreservationIO()
+        # Optional metadata on a stalled mount must not exhaust the capacity
+        # that decides whether healthy storage and byte operations are usable.
+        self._descriptions = PreservationIO(probe_workers=4)
         self.uploads = KitUploads(root / "uploads", self.journal)
         self.upload_lock = asyncio.Lock()
         self.peers = PeerHost(
@@ -896,7 +899,7 @@ class PreservationHost:
                 (copy.copy_id for copy in copies),
                 await asyncio.gather(
                     *(
-                        self._storage.probe(
+                        self._descriptions.probe(
                             "model-description:" + copy.copy_id,
                             lambda copy=copy: self._copy_details(copy),
                             unavailable_details,
@@ -1838,6 +1841,7 @@ class PreservationHost:
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks.values()), return_exceptions=True)
         async with self._queue, self._setup_lock:
+            await self._descriptions.close()
             await self._storage.close()
             self.journal.close()
 
