@@ -36,6 +36,8 @@ async def test_actual_companion_copy_check_idempotency_and_child_independence(
         page = await host.page()
         assert location.reachable and location.purpose == "private"
         model = next(model for model in page.models if model.model_id == "example/base")
+        assert model.details and model.details["purposes"] == ["chat"]
+        assert model.details["repository"] == "example/base"
         plan = await host.plan(
             PreservationPlanRequest(
                 kind="preserve",
@@ -61,7 +63,11 @@ async def test_actual_companion_copy_check_idempotency_and_child_independence(
         )
         copy = host.journal.copy(finished.copy_id)
         assert copy.member_count == 3  # base + assistant + private evidence
-        assert len((await host.page()).copies) == 1
+        described = await host.page()
+        assert len(described.copies) == 1
+        assert described.copy_details[copy.copy_id]["purposes"] == ["chat"]
+        assert "details" not in host.journal.copy(copy.copy_id).model_dump()
+        assert len(described.model_dump_json().encode()) < 64 * 1024
         check = await host.plan(
             PreservationPlanRequest(
                 kind="check", location_id="device", copy_id=copy.copy_id
@@ -79,6 +85,9 @@ async def test_actual_companion_copy_check_idempotency_and_child_independence(
         assert restarted.journal.job(job.job_id).state == "succeeded"
         assert restarted.start(request).job_id == job.job_id
         assert len((await restarted.page()).copies) == 1
+        assert (await restarted.page()).copy_details[copy.copy_id]["purposes"] == [
+            "chat"
+        ]
     finally:
         await restarted.close()
 

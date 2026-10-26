@@ -21,17 +21,21 @@ class PreservationIO:
     cancellation, so their caller retains its setup lock and journal ownership.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, probe_workers: int = 17) -> None:
+        """Own at most seventeen simultaneous probes in this independent pool."""
+        if not 1 <= probe_workers <= 17:
+            raise ValueError("probe capacity must be between one and seventeen")
         self._executor = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="preservation-storage"
         )
         self._slots = asyncio.Semaphore(2)
-        # All sixteen private roots plus publisher custody can be observed even
-        # when another mount stalls. Probes never consume effect/cleanup slots.
+        # The default reserves all sixteen private roots plus publisher custody.
+        # Separate owners can use a smaller pool for optional observations.
+        # Probes never consume effect/cleanup slots.
         self._probe_executor = ThreadPoolExecutor(
-            max_workers=17, thread_name_prefix="preservation-probe"
+            max_workers=probe_workers, thread_name_prefix="preservation-probe"
         )
-        self._probe_slots = asyncio.Semaphore(17)
+        self._probe_slots = asyncio.Semaphore(probe_workers)
         self._pending: set[asyncio.Future[object]] = set()
         self._probes: dict[str, asyncio.Future[object]] = {}
         self._leases: set[asyncio.Event] = set()

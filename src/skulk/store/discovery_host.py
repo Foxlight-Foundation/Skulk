@@ -408,6 +408,14 @@ class DiscoveryHost:
                             ],
                             768,
                         ),
+                        workloads=tuple(
+                            _projection(task, 80)
+                            for task in (
+                                item.description.workloads[:8]
+                                if item.description
+                                else ()
+                            )
+                        ),
                         freshness=item.freshness,
                         model_keys_available=item.description is not None
                         and item.description.candidate_bundle_trust is not None,

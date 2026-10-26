@@ -8,11 +8,13 @@ import threading
 from pathlib import Path
 
 import pytest
+from pydantic import JsonValue
 
 import skulk.store.preservation_host as host_module
 from skulk.store.preservation_contracts import (
     FolderConfirmation,
     FolderReviewRequest,
+    PreservationCopy,
     PreservationPlanRequest,
 )
 from skulk.store.preservation_host import PreservationHost
@@ -31,6 +33,77 @@ async def begun(event: threading.Event) -> None:
     async with asyncio.timeout(2):
         while not event.is_set():
             await asyncio.sleep(0.01)
+
+
+async def test_stalled_description_pages_keep_healthy_storage_and_shutdown_owned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Optional copy reads never consume availability capacity or escape shutdown."""
+    host = owner(tmp_path)
+    await host.setup_device()
+    copies = tuple(
+        PreservationCopy(
+            copy_id=f"{index:064x}",
+            model_id="example/base",
+            location_id="device",
+            manifest_id="a" * 64,
+            audience="private",
+            size_bytes=1,
+            created_at=1,
+            checked_at=1,
+            member_count=1,
+        )
+        for index in range(20)
+    )
+    release = threading.Event()
+    started = threading.Event()
+    calls: list[str] = []
+    closing: asyncio.Task[None] | None = None
+
+    def read_copies(offset: int = 0) -> tuple[PreservationCopy, ...]:
+        return copies[offset : offset + 16]
+
+    def stalled(copy: PreservationCopy) -> dict[str, JsonValue]:
+        calls.append(copy.copy_id)
+        started.set()
+        assert release.wait(15), "test did not release its simulated mount"
+        return {"metadata_status": "unavailable"}
+
+    monkeypatch.setattr(host.journal, "copies", read_copies)
+    monkeypatch.setattr(host, "_copy_details", stalled)
+    try:
+        for offset in range(0, 24, 4):
+            page = await asyncio.wait_for(host.page(offset), 2)
+            assert next(
+                item for item in page.locations if item.location_id == "device"
+            ).reachable
+        await begun(started)
+        assert len(calls) <= 4
+        model = (await host.page()).models[0]
+        plan = await asyncio.wait_for(
+            host.plan(
+                PreservationPlanRequest(
+                    kind="preserve",
+                    location_id="device",
+                    model_id=model.model_id,
+                    generation_id=model.generation_id,
+                )
+            ),
+            2,
+        )
+        assert plan.kind == "preserve"
+        closing = asyncio.create_task(host.close())
+        await asyncio.sleep(0.03)
+        assert not closing.done()
+        with pytest.raises(
+            PreservationHostError, match="preservation_host_already_running"
+        ):
+            PreservationHost(host.store, host.root)
+    finally:
+        release.set()
+        if closing is not None:
+            await closing
+        await host.close()
 
 
 async def test_stalled_peer_space_check_keeps_controls_and_owner_alive(

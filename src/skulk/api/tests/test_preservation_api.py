@@ -49,6 +49,7 @@ async def test_operator_api_guided_setup_plan_and_reopened_job(tmp_path: Path) -
                 (await client.get("/preservation/library")).text
             )
             model = page.models[0]
+            assert model.details and model.details["purposes"] == ["chat"]
             planned = await client.post(
                 "/preservation/plans",
                 json={

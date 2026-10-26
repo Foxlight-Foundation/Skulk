@@ -387,6 +387,11 @@ class DiscoverySupplier(PreservationContract):
     summary: str = Field(
         max_length=800, description="Bounded source description projection."
     )
+    workloads: tuple[str, ...] = Field(
+        default=(),
+        max_length=8,
+        description="Bounded source-declared task excerpt for browsing; not a signed-card amendment or execution qualification.",
+    )
     freshness: str = Field(
         max_length=32,
         description="Source age/authority state, not model or registry trust.",

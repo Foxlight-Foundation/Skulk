@@ -26,6 +26,10 @@ from foxlight_model_preservation.invitations import (
     invitation_from_envelope,
 )
 from foxlight_model_preservation.kits import inspect_kit
+from foxlight_model_preservation.local_host.presentation import (
+    copy_summary,
+    model_summary,
+)
 from foxlight_model_preservation.mirror_models import Terms
 from foxlight_model_preservation.models import Manifest, PreservationError, TrustProfile
 from foxlight_model_preservation.peer_invitations import PeerInvitation
@@ -83,7 +87,11 @@ from skulk.store.preservation_contracts import (
     TemporaryWork,
 )
 from skulk.store.preservation_delivery import invitation_preview, publication_members
-from skulk.store.preservation_export import plan_preservation, preservation_generation
+from skulk.store.preservation_export import (
+    plan_preservation,
+    preservation_generation,
+    public_card_body,
+)
 from skulk.store.preservation_folders import (
     FolderObservation,
     confirmed_folder,
@@ -186,6 +194,9 @@ class PreservationHost:
         self._closing: asyncio.Task[None] | None = None
         self._setup_lock = asyncio.Lock()
         self._storage = PreservationIO()
+        # Optional metadata on a stalled mount must not exhaust the capacity
+        # that decides whether healthy storage and byte operations are usable.
+        self._descriptions = PreservationIO(probe_workers=4)
         self.uploads = KitUploads(root / "uploads", self.journal)
         self.upload_lock = asyncio.Lock()
         self.peers = PeerHost(
@@ -819,6 +830,19 @@ class PreservationHost:
             raise PreservationHostError("installed_model_unavailable")
         return path.absolute()
 
+    def _copy_details(self, copy: PreservationCopy) -> dict[str, JsonValue]:
+        try:
+            location = self._location(copy.location_id)
+            descriptor = self._open_archive(location)
+            try:
+                return copy_summary(location.path, copy.manifest_id, location.trust)
+            finally:
+                os.close(descriptor)
+        except (ValueError, OSError):
+            # Display-only metadata is optional. Trust checks still run again
+            # in the exact selected recovery/export operation, including v1.
+            return {"metadata_status": "unavailable"}
+
     async def page(self, offset: int = 0) -> PreservationPage:
         """Read one bounded installed/library/activity page; never submit byte work."""
         if not 0 <= offset <= 2**31:
@@ -860,9 +884,32 @@ class PreservationHost:
                     generation_id=generation,
                     size_bytes=entry.total_bytes,
                     verification=record.verification,
+                    details=model_summary(
+                        public_card_body(record.model_card),
+                        repository=record.artifact_repository,
+                        artifact_format=record.artifact_format,
+                        quantization=record.quantization,
+                    ),
                 )
             )
         copies = self.journal.copies(offset)[:4]
+        unavailable_details: dict[str, JsonValue] = {"metadata_status": "unavailable"}
+        copy_details = dict(
+            zip(
+                (copy.copy_id for copy in copies),
+                await asyncio.gather(
+                    *(
+                        self._descriptions.probe(
+                            "model-description:" + copy.copy_id,
+                            lambda copy=copy: self._copy_details(copy),
+                            unavailable_details,
+                        )
+                        for copy in copies
+                    )
+                ),
+                strict=True,
+            )
+        )
         jobs = self.journal.jobs(offset)[:4]
         more = (
             len(entries) > 4
@@ -878,6 +925,7 @@ class PreservationHost:
             except (ValueError, OSError):
                 continue
         return PreservationPage(
+            copy_details=copy_details,
             default_location_id=default_id,
             publishing=await self.location_view("publisher")
             if self.journal.setting("location:publisher") is not None
@@ -1793,6 +1841,7 @@ class PreservationHost:
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks.values()), return_exceptions=True)
         async with self._queue, self._setup_lock:
+            await self._descriptions.close()
             await self._storage.close()
             self.journal.close()
 
