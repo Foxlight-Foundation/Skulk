@@ -9,6 +9,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Model preservation
 
+- Include bounded installed-card and authenticated saved-archive descriptions in
+  Library, plus source-declared tasks in Find results. These read-only excerpts
+  preserve original cards, durable copy receipts and independent trust checks;
+  disconnected or unavailable metadata never blocks recovery controls.
+
 - Export one portable model handoff with HTTP routes or a finite, explicitly
   opted-in peer share. Core supervises a fresh mirror and its actual process
   group, keeps upload monitoring active during preparation, and retains the

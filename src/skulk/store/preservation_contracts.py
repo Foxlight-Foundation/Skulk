@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Literal, final
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    model_validator,
+)
+
+
+def bounded_model_details(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Keep optional read-only descriptive excerpts within the control budget."""
+    if len(json.dumps(value, separators=(",", ":"))) > 1536:
+        raise ValueError("model description exceeds the metadata budget")
+    return value
+
+
+ModelDetails = Annotated[dict[str, JsonValue], AfterValidator(bounded_model_details)]
 
 Handle = Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")]
 OperationId = Annotated[
@@ -135,6 +153,10 @@ class PreservationModel(PreservationContract):
     verification: str = Field(
         max_length=64,
         description="Existing installed verification class, not a portable proof.",
+    )
+    details: ModelDetails | None = Field(
+        default=None,
+        description="Optional bounded installed-card claims for browsing, never byte, registry or runtime authority.",
     )
 
 
@@ -889,6 +911,11 @@ class PreservationPage(PreservationContract):
     default_location_id: Handle | None = Field(
         default=None,
         description="Durable private destination for new copies, retained even when disconnected.",
+    )
+    copy_details: dict[Handle, ModelDetails] = Field(
+        default_factory=dict,
+        max_length=4,
+        description="Optional authenticated archive metadata for copies on this page. Missing or unavailable excerpts never prevent recovery; original cards and receipts remain unchanged.",
     )
 
     publishing: PreservationLocation | None = Field(

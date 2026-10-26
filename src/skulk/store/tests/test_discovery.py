@@ -146,6 +146,7 @@ def source_tree(
                 manifest=entry.manifest,
                 name=name,
                 summary=description,
+                workloads=("CodeGeneration",),
                 candidate_bundle_trust=trust if keys else None,
             )
             for entry in catalog.entries
@@ -277,6 +278,9 @@ async def test_native_source_to_verified_copy_then_offline_search_after_restart(
                     )
                     results = DiscoveryResults.model_validate_json(found.text)
                     assert results.results[0].manifest_id == manifest
+                    assert results.results[0].suppliers[0].workloads == (
+                        "CodeGeneration",
+                    )
                     assert tuple(metadata.requests) == attempts and not models.requests
                     prep = DiscoveryRequest(
                         owner_id="library-discovery",

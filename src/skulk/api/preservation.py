@@ -81,7 +81,7 @@ def create_preservation_router(
         "/library",
         response_model=PreservationPage,
         summary="Read the local preservation library",
-        description="Trusted operators receive a bounded page of installed selections, enrolled storage, retained copies and durable jobs. Reading never queues, replays or starts sharing. Use next_offset for another page; paths and key material are withheld.",
+        description="Trusted operators receive a bounded page of installed selections, enrolled storage, retained copies and durable jobs. Optional installed-card details and exact-copy keyed copy_details expose bounded descriptive claims only; unavailable excerpts do not block recovery or change signed cards, receipts, registry trust or runtime permission. Reading never queues, replays or starts sharing. Use next_offset for another page; paths and key material are withheld.",
     )
     async def library(request: Request, offset: int = 0) -> PreservationPage:
         owner = await host(request)
