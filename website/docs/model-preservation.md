@@ -33,6 +33,14 @@ be complete and cannot escape the member.
 
 ## Recovery kits and Library restore
 
+Library describes the model's declared inputs and outputs, including image
+understanding and reasoning, using installed card data and attributed registry
+claims. Companion warnings use the installed selected paths: one exact selected
+projector can satisfy an inventory of alternative projector precisions, while
+other missing files remain visible. Descriptions do not change the original card,
+registry authority, file verification or runtime admission. Preserving and
+restoring retain their separate complete-closure and trust checks.
+
 On a configured Model Store host with the separately installed Model Preservation
 capability, **Save recovery kit** reviews an existing preserved copy, then creates
 one complete `.foxkit` file. Activity offers **Download recovery kit** after the

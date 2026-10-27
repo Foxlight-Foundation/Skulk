@@ -7,11 +7,18 @@ from pathlib import Path
 
 import pytest
 
+from skulk.shared.models.registry import RegistryCapabilityClaim
+from skulk.store.installed_cards import (
+    build_installed_card_record,
+    read_installed_card,
+    write_installed_card,
+)
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation_contracts import (
     PreservationPlanRequest,
     PreservationStart,
 )
+from skulk.store.preservation_export import public_card_body
 from skulk.store.preservation_host import PreservationHost
 from skulk.store.preservation_journal import PreservationHostError
 from skulk.store.tests.test_preservation_export import make_preservation_installation
@@ -21,6 +28,61 @@ async def _settled(host: PreservationHost, job_id: str) -> None:
     async with asyncio.timeout(20):
         while host.journal.job(job_id).state in {"queued", "running", "cancelling"}:
             await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
+async def test_installed_claims_and_selected_projector_describe_without_granting_trust(
+    tmp_path: Path,
+) -> None:
+    installed = make_preservation_installation(tmp_path, "projector")
+    claims = (
+        RegistryCapabilityClaim(
+            capability_id="vision.understand",
+            scope="artifact",
+            status="complete",
+            source="artifact_manifest",
+            confidence=1.0,
+            input_modalities=("text", "image"),
+            output_modalities=("text",),
+            details={"companion_files": ["mmproj.gguf", "mmproj-Q8.gguf"]},
+        ),
+        RegistryCapabilityClaim(
+            capability_id="reasoning",
+            scope="model",
+            status="claimed",
+            source="upstream_structured",
+            confidence=1.0,
+        ),
+    )
+    card = installed.card.model_copy(update={"registry_capability_claims": claims})
+    write_installed_card(
+        installed.primary, build_installed_card_record(installed.primary, card)
+    )
+    original = read_installed_card(installed.primary)
+    assert original is not None
+    public = public_card_body(card)
+    assert "registry_capability_claims" not in public
+    assert not any(key.startswith("registry_") for key in public)
+    host = PreservationHost(
+        ModelStore(installed.primary.parent), tmp_path / "private-host"
+    )
+    try:
+        await host.setup_device()
+        model = (await host.page()).models[0]
+        assert model.details is not None
+        assert model.details["purposes"] == ["chat", "vision", "reasoning"]
+        assert model.details["feature_ids"] == ["vision", "reasoning", "text"]
+        assert model.details["input_modalities"] == ["text", "image"]
+        assert model.details["claim_sources"] == [
+            "upstream_structured",
+            "artifact_manifest",
+        ]
+        assert model.details["artifact_notes"] == []
+        assert model.verification == original.verification
+        assert read_installed_card(installed.primary) == original
+        assert public_card_body(card) == public
+    finally:
+        await host.close()
 
 
 @pytest.mark.asyncio

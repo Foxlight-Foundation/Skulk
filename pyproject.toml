@@ -33,7 +33,7 @@ dependencies = [
   "tomlkit>=0.14.0",
   "tuf>=6,<7",
   # Public preservation core; serving remains an explicit operator action.
-  "foxlight-model-preservation[peer] @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@91bfd6f4fdd8864f4ce328f71b4db3ec62fd7090",
+  "foxlight-model-preservation[peer] @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@5e0cb2af075f1a0adeffb93e792f0b7cb83d378b",
   # Native peer wheels are qualified on Python 3.13; other supported Python
   # versions retain HTTP mirrors and receive-only preservation.
   "libtorrent==2.0.14; python_version < '3.14'",
