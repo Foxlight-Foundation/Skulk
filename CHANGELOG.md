@@ -9,6 +9,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Model preservation
 
+- Describe installed model inputs, outputs and reasoning from attributed registry
+  claims in Library, using the installed file list for companion warnings. Exact
+  selected projectors satisfy alternative-precision inventories; unrelated missing
+  files remain visible. These display projections retain receiver trust and
+  original-card boundaries. The standalone dependency also preserves complete
+  signed multimodal selections, refusing incomplete companion maps.
+
 - Include bounded installed-card and authenticated saved-archive descriptions in
   Library, plus source-declared tasks in Find results. These read-only excerpts
   preserve original cards, durable copy receipts and independent trust checks;

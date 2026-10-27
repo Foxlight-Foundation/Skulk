@@ -889,6 +889,16 @@ class PreservationHost:
                         repository=record.artifact_repository,
                         artifact_format=record.artifact_format,
                         quantization=record.quantization,
+                        # Receiver-verified claims describe the model; they
+                        # never become owner-asserted public-card authority.
+                        claims=cast(
+                            JsonValue,
+                            [
+                                claim.model_dump(mode="json")
+                                for claim in record.model_card.registry_capability_claims
+                            ],
+                        ),
+                        selected_files=(file.path for file in record.files),
                     ),
                 )
             )
