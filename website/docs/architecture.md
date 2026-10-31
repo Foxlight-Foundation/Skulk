@@ -3641,3 +3641,16 @@ Core controls and standalone tools do not establish a native desktop package,
 public-network anonymity, reachable replicas or independently operated custody.
 Direct public PMF transport is refused; PMF's existing kit/Restore paths retain
 their supported scope. See the API guide for exact request and lifecycle fields.
+
+## Delegated capability inference
+
+- **Delegated inference gateway (experimental):** `api/inference_gateway.py`
+  adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream
+  contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
+  precedes signing; capability-owned policy independently admits the request.
+  Gateway keys stay host-local. No account credentials or provider HTTP clients
+  enter Core. Capability models are separate from mounted instances; chat reuses
+  Markdown, function-call handling and mounted TTS. Discovery is local-host only.
+  Up to eight cached catalogs are read concurrently under individual and aggregate
+  deadlines, retaining completed results. Stream cleanup owns cancellation and
+  local receiver retirement before the first assistant-role event is yielded.

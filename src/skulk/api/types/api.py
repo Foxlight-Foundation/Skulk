@@ -4,7 +4,7 @@ from collections.abc import Generator
 from typing import Annotated, Any, Literal, cast, final
 from uuid import uuid4
 
-from pydantic import UUID4, BaseModel, ConfigDict, Field, field_validator
+from pydantic import UUID4, BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from skulk.provisioning.mlx_video import NativeVideoFeature, published_video_features
 from skulk.shared.backends import engine_of
@@ -224,6 +224,10 @@ class ModelListModel(BaseModel):
     """Public model-catalog entry returned by the models endpoints."""
 
     id: str
+    inference_capability: dict[str, JsonValue] | None = Field(
+        default=None,
+        description="Experimental delegated capability routing and usage facts; null for mounted model cards.",
+    )
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "skulk"
@@ -1734,6 +1738,12 @@ class ChatCompletionRequest(BaseModel):
     )
 
     model: ModelId
+    inference_policy: (
+        Literal["allow_external", "local_only", "included_only"] | None
+    ) = Field(
+        default=None,
+        description="Optional hard policy for capability inference; local-only and included-only currently refuse external or unknown-usage capability routing.",
+    )
     frequency_penalty: float | None = None
     messages: list[ChatCompletionMessage]
     logit_bias: dict[str, int] | None = None

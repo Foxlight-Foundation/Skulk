@@ -1,6 +1,8 @@
+import { capabilityChatChoices, useChatModelCatalog } from '../../hooks/useChatModelCatalog';
+import { ReadyModelSelect } from '../chat/ReadyModelSelect';
 // Copyright 2026 Foxlight Foundation
 
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { ThemeProvider } from 'styled-components';
@@ -461,4 +463,127 @@ describe('ChatView native images', () => {
     expect(captured).toMatchObject({ prompt: 'A fox beside a blue cup', n: 1, size: 'auto', advanced_params: {}, stream: true });
     expect(container?.querySelector<HTMLImageElement>('img[alt="Generated {index}"]')?.src).toBe('data:image/png;base64,aW1hZ2U=');
   });
+});
+
+describe('ChatView delegated inference capabilities', () => {
+  it('renders capability code and speaks its text through mounted TTS', async () => {
+    const modelId = 'capability/fixture.chat/code';
+    const spoken: Array<{ model: string; input: string }> = [];
+    let requestedModel: string | null = null;
+    vi.stubGlobal('AudioContext', class FakeAudioContext {});
+    vi.spyOn(StreamingSpeechPlayback.prototype, 'append').mockResolvedValue();
+    vi.spyOn(StreamingSpeechPlayback.prototype, 'finish').mockResolvedValue();
+    vi.spyOn(StreamingSpeechPlayback.prototype, 'stop').mockImplementation(() => undefined);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/models') return new Response(JSON.stringify({ data: [
+        { id: modelId, name: 'Fixture Code', tasks: ['TextGeneration'], inference_capability: {
+          contract: 'chat.completions@0.1.0', processing_domain: 'external', usage: 'unknown',
+          usage_label: 'Using ChatGPT plan', usage_url: 'https://chatgpt.com/settings/usage', expires_at: Date.now() / 1000 + 60,
+        } },
+        { id: 'org/local-speech', tasks: ['TextToSpeech'], audio: { default_response_format: 'pcm', response_formats: ['pcm'], supports_streaming: true }, resolved_capabilities: { supports_speech_synthesis: true, default_audio_response_format: 'pcm', audio_response_formats: ['pcm'] } },
+      ] }));
+      if (url === '/v1/chat/completions') {
+        requestedModel = (JSON.parse(String(init?.body)) as { model: string }).model;
+        const content = "Hello from the fabric.\n\n```python\nprint('hello')\n```";
+        return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+      }
+      if (url === '/v1/audio/speech') {
+        spoken.push(JSON.parse(String(init?.body)) as { model: string; input: string });
+        return new Response(new Uint8Array([0, 0]));
+      }
+      return new Response(JSON.stringify({ enabled: false }));
+    }));
+    store.dispatch(chatActions.selectModel(modelId));
+    store.dispatch(chatActions.selectSpeechModel('org/local-speech'));
+    store.dispatch(chatActions.setAutoSpeakAssistant(true));
+    store.dispatch(chatActions.setNarrateCodeBlocks(false));
+    container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+    await act(async () => { root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ChatView readyInstances={[{
+      instanceId: 'speech-instance', modelId: 'org/local-speech', sharding: 'Pipeline', instanceType: 'MlxRing', engine: 'mlx', nodeStatuses: [], status: 'ready',
+    }]} /></ThemeProvider></Provider>); });
+    await waitForReact(() => container?.textContent?.includes('Using ChatGPT plan') ?? false, 'capability model did not enter the catalog');
+    const composer = container.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]');
+    const send = container.querySelector<HTMLButtonElement>('[aria-label="Send message"]');
+    if (!composer || !send) throw new Error('capability composer did not render');
+    await act(async () => { await userEvent.fill(composer, 'Write a little code'); await userEvent.click(send); });
+    await waitForReact(() => [...(container?.querySelectorAll('code') ?? [])].some(code => code.textContent?.includes("print('hello')")), 'code was not rendered');
+    await waitForReact(() => spoken.some(request => request.input.includes('Hello from the fabric.')), 'text did not reach mounted TTS');
+    expect(requestedModel).toBe(modelId);
+    expect(spoken.every(request => request.model === 'org/local-speech')).toBe(true);
+    expect(spoken.some(request => request.input.includes("print('hello')"))).toBe(false);
+    store.dispatch(chatActions.setAutoSpeakAssistant(false));
+  });
+});
+
+it('preserves a saved capability conversation while native models are already ready', async () => {
+  const modelId = 'capability/fixture.chat/saved';
+  let resolveCatalog: (response: Response) => void = () => { throw new Error('catalog not requested'); };
+  const catalog = new Promise<Response>(resolve => { resolveCatalog = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input) === '/models') return catalog;
+    return new Response(JSON.stringify({ enabled: false }));
+  }));
+  store.dispatch(chatActions.selectModel('org/native-model'));
+  store.dispatch(chatActions.selectModel(modelId));
+  const savedConversation = store.getState().chat.activeConversationId;
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+  await act(async () => { root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ChatView readyInstances={[{
+    instanceId: 'native-instance', modelId: 'org/native-model', sharding: 'Pipeline', instanceType: 'MlxRing', engine: 'mlx', nodeStatuses: [], status: 'ready',
+  }]} /></ThemeProvider></Provider>); });
+  expect(store.getState().chat.selectedModelId).toBe(modelId);
+  expect(store.getState().chat.activeConversationId).toBe(savedConversation);
+  await act(async () => { resolveCatalog(new Response(JSON.stringify({ data: [
+    { id: 'org/native-model', tasks: ['TextGeneration'] },
+    { id: modelId, name: 'Saved provider model', tasks: ['TextGeneration'], inference_capability: {
+      contract: 'chat.completions@0.1.0', processing_domain: 'external', usage: 'unknown',
+      usage_label: 'Using ChatGPT plan', expires_at: Date.now() / 1000 + 60,
+    } },
+  ] }))); });
+  await waitForReact(() => container?.textContent?.includes('Using ChatGPT plan') ?? false, 'saved capability did not load');
+  expect(store.getState().chat.selectedModelId).toBe(modelId);
+  expect(store.getState().chat.activeConversationId).toBe(savedConversation);
+});
+
+
+it('keeps provider choices when switching to Skulk with no native chat models', async () => {
+  const modelId = 'capability/fixture.chat/shared';
+  let catalogRequests = 0;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input) === '/models') {
+      catalogRequests += 1;
+      return new Response(JSON.stringify({ data: [{
+        id: modelId, name: 'Shared provider', tasks: ['TextGeneration'], inference_capability: {
+          contract: 'chat.completions@0.1.0', processing_domain: 'external', usage: 'unknown',
+          usage_label: 'Using ChatGPT plan', expires_at: Date.now() / 1000 + 60,
+        },
+      }] }));
+    }
+    return new Response(JSON.stringify({ enabled: false }));
+  }));
+  function SharedChat() {
+    const catalog = useChatModelCatalog();
+    const [selected, setSelected] = useState('skulk/steward');
+    const select = (value: string) => { setSelected(value); store.dispatch(chatActions.selectModel(value)); };
+    return selected === 'skulk/steward'
+      ? <ReadyModelSelect value={selected} onChange={select} fabricEnabled models={capabilityChatChoices(catalog.models)} />
+      : <><ChatView readyInstances={[]} catalog={catalog} /><button onClick={() => select('skulk/steward')}>Back to Skulk</button></>;
+  }
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+  await act(async () => { root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}><SharedChat /></ThemeProvider></Provider>); });
+  await waitForReact(() => catalogRequests === 1, 'shared catalog was not requested');
+  const openChooser = async () => {
+    const trigger = container?.querySelector<HTMLButtonElement>('[aria-label="Select chat model"]');
+    if (!trigger) throw new Error('chat selector missing');
+    await act(async () => { await userEvent.click(trigger); });
+    await waitForReact(() => [...document.querySelectorAll('[role="option"]')].some(option => option.textContent?.includes('Shared provider')), 'provider choice missing');
+  };
+  await openChooser();
+  const option = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(item => item.textContent?.includes('Shared provider'))!;
+  await act(async () => { await userEvent.click(option); });
+  await waitForReact(() => container?.textContent?.includes('Using ChatGPT plan') ?? false, 'capability chat did not open');
+  const back = [...container.querySelectorAll('button')].find(button => button.textContent === 'Back to Skulk')!;
+  await act(async () => { await userEvent.click(back); });
+  await openChooser();
+  expect(catalogRequests).toBe(1);
 });
