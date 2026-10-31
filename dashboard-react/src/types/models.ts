@@ -119,6 +119,17 @@ export interface ImageCapabilityInfo {
 /** Complete dashboard-facing model metadata entry returned by the model catalog. */
 export interface ModelInfo {
   id: string;
+  /** Cached owner-delegated inference, separate from mounted capacity. */
+  inference_capability?: {
+    contract: string;
+    processing_domain: 'local' | 'private_site' | 'external';
+    usage: 'none' | 'included_only' | 'credits_possible' | 'unknown';
+    usage_label: string;
+    usage_url: string | null;
+    expires_at: number;
+    /** Provider-declared features narrowed by this integration's owner policy. */
+    features?: Array<'image_input' | 'function_tools' | 'reasoning_toggle'>;
+  } | null;
   name?: string;
   context_length?: number;
   tags?: string[];

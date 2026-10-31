@@ -1,3 +1,4 @@
+import { mergeToolCallDeltas, type StreamToolCall } from './chatToolCalls';
 import { ImageParamsPanel, DEFAULT_IMAGE_PARAMS, type ImageGenerationParams } from '../display/ImageParamsPanel';
 import { requestDashboardImages } from './chatImageRequest';
 import { ReadyModelSelect } from '../chat/ReadyModelSelect';
@@ -199,14 +200,6 @@ async function responseErrorMessage(response: Response): Promise<string> {
   return body;
 }
 
-interface StreamToolCall {
-  id: string;
-  type?: string;
-  function?: {
-    name?: string;
-    arguments?: string;
-  };
-}
 
 interface WebSearchToolResponse {
   query: string;
@@ -628,7 +621,8 @@ export function ChatView({
 
   // Fetch model capabilities and context lengths
   useEffect(() => {
-    (async () => {
+    let disposed = false;
+    const refreshCatalog = async () => {
       try {
         const res = await fetch('/models');
         if (!res.ok) return;
@@ -641,21 +635,25 @@ export function ChatView({
         for (const m of data.data ?? []) {
           if (m.id) {
             catalogById[m.id] = m;
-            toggleSupport[m.id] = m.resolved_capabilities?.supports_thinking_toggle ?? false;
-            imageSupport[m.id] = m.resolved_capabilities?.supports_image_input ?? false;
-            builtinTools[m.id] = m.tooling?.builtin_tools
+            toggleSupport[m.id] = m.inference_capability?.features?.includes('reasoning_toggle') ?? m.resolved_capabilities?.supports_thinking_toggle ?? false;
+            imageSupport[m.id] = m.inference_capability?.features?.includes('image_input') ?? m.resolved_capabilities?.supports_image_input ?? false;
+            builtinTools[m.id] = m.inference_capability?.features?.includes('function_tools') ? ['web_search'] : m.tooling?.builtin_tools
               ?? m.resolved_capabilities?.builtin_tools
               ?? [];
           }
           if (m.id && m.context_length) ctxLens[m.id] = m.context_length;
         }
+        if (disposed) return;
         setModelThinkingToggleSupport(toggleSupport);
         setModelImageInputSupport(imageSupport);
         setModelBuiltinTools(builtinTools);
         setModelContextLengths(ctxLens);
         setModelCatalogById(catalogById);
       } catch { /* ignore */ }
-    })();
+    };
+    void refreshCatalog();
+    const refresh = window.setInterval(() => { void refreshCatalog(); }, 15000);
+    return () => { disposed = true; window.clearInterval(refresh); };
   }, []);
 
   const contextLength = selectedModelId ? modelContextLengths[selectedModelId] ?? 0 : 0;
@@ -683,7 +681,12 @@ export function ChatView({
 
   // Ready models
   const readyModels = useMemo(
-    () => readyRunnableInstances.filter((i) => !i.isEmbedding && modelSupportsTextChat(modelCatalogById[i.modelId])),
+    () => [
+      ...readyRunnableInstances.filter((i) => !i.isEmbedding && modelSupportsTextChat(modelCatalogById[i.modelId])),
+      ...Object.values(modelCatalogById)
+        .filter(model => model.inference_capability && model.inference_capability.expires_at * 1000 > Date.now())
+        .map(model => ({ modelId: model.id, name: model.name, capability: true })),
+    ],
     [modelCatalogById, readyRunnableInstances],
   );
 
@@ -1333,6 +1336,7 @@ export function ChatView({
             try {
               const parsed = JSON.parse(data) as {
                 id?: string;
+                error?: { message?: string; code?: string };
                 choices?: Array<{
                   delta?: {
                     content?: string;
@@ -1341,6 +1345,7 @@ export function ChatView({
                   };
                 }>;
               };
+              if (parsed.error) throw new Error(parsed.error.message ?? 'Capability inference failed.');
               if (parsed.id) {
                 activeCommandIdRef.current = parsed.id;
               }
@@ -1397,7 +1402,7 @@ export function ChatView({
               }
 
               if (delta?.tool_calls?.length) {
-                iterationToolCalls.push(...delta.tool_calls);
+                mergeToolCallDeltas(iterationToolCalls, delta.tool_calls);
               }
 
               if (hasToken) {
@@ -1410,8 +1415,8 @@ export function ChatView({
                   }
                 }
               }
-            } catch {
-              // skip malformed JSON
+            } catch (error) {
+              if (!(error instanceof SyntaxError)) throw error;
             }
           }
         }
@@ -1648,7 +1653,7 @@ export function ChatView({
     );
   }
 
-  const modelSelector = (readyModels.length > 1 || stewardStatus?.enabled) ? (
+  const modelSelector = (readyModels.length > 1 || stewardStatus?.enabled || modelCatalogById[selectedModelId ?? '']?.inference_capability) ? (
     <ReadyModelSelect value={selectedModelId} onChange={selectModel} fabricEnabled={stewardStatus?.enabled === true} models={readyModels} />
   ) : undefined;
 
@@ -1672,6 +1677,11 @@ export function ChatView({
         />
       </MessagesScroll>
       <InputArea>
+        {modelCatalogById[selectedModelId ?? '']?.inference_capability && <p role="status">
+          {modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_label}
+          {' · '}{modelCatalogById[selectedModelId ?? ''].inference_capability?.processing_domain} processing
+          {modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_url && <>{' · '}<a href={modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_url ?? undefined} target="_blank" rel="noopener noreferrer">Manage usage</a></>}
+        </p>}
         {selectedImageProfile && <ImageParamsPanel params={imageParams} onChange={setImageParams} imageProfile={selectedImageProfile} streamingAvailable={false} />}
         <ChatForm
           onSend={handleSend}

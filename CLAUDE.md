@@ -4,6 +4,13 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
+Experimental delegated capability chat lives in `api/inference_gateway.py`.
+Core owns generic catalog-to-model discovery, direct owner request admission,
+short-lived gateway signatures and chat wire adaptation. Capabilities own their
+accounts, upstream HTTP and independent delegation/budget/policy enforcement.
+Capability model IDs do not fabricate mounted model instances. Never add a
+provider credential or provider-specific client to this generic path.
+
 Native installed preservation lives in `store/preservation_export.py`; complete
 card-selected mappings live in `store/preservation_closure.py`. Offline recovery
 lives in `store/preservation.py` and
