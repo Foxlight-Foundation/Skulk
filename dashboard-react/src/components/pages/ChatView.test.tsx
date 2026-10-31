@@ -1,6 +1,8 @@
+import { capabilityChatChoices, useChatModelCatalog } from '../../hooks/useChatModelCatalog';
+import { ReadyModelSelect } from '../chat/ReadyModelSelect';
 // Copyright 2026 Foxlight Foundation
 
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { ThemeProvider } from 'styled-components';
@@ -541,4 +543,47 @@ it('preserves a saved capability conversation while native models are already re
   await waitForReact(() => container?.textContent?.includes('Using ChatGPT plan') ?? false, 'saved capability did not load');
   expect(store.getState().chat.selectedModelId).toBe(modelId);
   expect(store.getState().chat.activeConversationId).toBe(savedConversation);
+});
+
+
+it('keeps provider choices when switching to Skulk with no native chat models', async () => {
+  const modelId = 'capability/fixture.chat/shared';
+  let catalogRequests = 0;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input) === '/models') {
+      catalogRequests += 1;
+      return new Response(JSON.stringify({ data: [{
+        id: modelId, name: 'Shared provider', tasks: ['TextGeneration'], inference_capability: {
+          contract: 'chat.completions@0.1.0', processing_domain: 'external', usage: 'unknown',
+          usage_label: 'Using ChatGPT plan', expires_at: Date.now() / 1000 + 60,
+        },
+      }] }));
+    }
+    return new Response(JSON.stringify({ enabled: false }));
+  }));
+  function SharedChat() {
+    const catalog = useChatModelCatalog();
+    const [selected, setSelected] = useState('skulk/steward');
+    const select = (value: string) => { setSelected(value); store.dispatch(chatActions.selectModel(value)); };
+    return selected === 'skulk/steward'
+      ? <ReadyModelSelect value={selected} onChange={select} fabricEnabled models={capabilityChatChoices(catalog.models)} />
+      : <><ChatView readyInstances={[]} catalog={catalog} /><button onClick={() => select('skulk/steward')}>Back to Skulk</button></>;
+  }
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+  await act(async () => { root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}><SharedChat /></ThemeProvider></Provider>); });
+  await waitForReact(() => catalogRequests === 1, 'shared catalog was not requested');
+  const openChooser = async () => {
+    const trigger = container?.querySelector<HTMLButtonElement>('[aria-label="Select chat model"]');
+    if (!trigger) throw new Error('chat selector missing');
+    await act(async () => { await userEvent.click(trigger); });
+    await waitForReact(() => [...document.querySelectorAll('[role="option"]')].some(option => option.textContent?.includes('Shared provider')), 'provider choice missing');
+  };
+  await openChooser();
+  const option = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(item => item.textContent?.includes('Shared provider'))!;
+  await act(async () => { await userEvent.click(option); });
+  await waitForReact(() => container?.textContent?.includes('Using ChatGPT plan') ?? false, 'capability chat did not open');
+  const back = [...container.querySelectorAll('button')].find(button => button.textContent === 'Back to Skulk')!;
+  await act(async () => { await userEvent.click(back); });
+  await openChooser();
+  expect(catalogRequests).toBe(1);
 });
