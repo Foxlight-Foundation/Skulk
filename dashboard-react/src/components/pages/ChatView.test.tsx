@@ -513,3 +513,32 @@ describe('ChatView delegated inference capabilities', () => {
     store.dispatch(chatActions.setAutoSpeakAssistant(false));
   });
 });
+
+it('preserves a saved capability conversation while native models are already ready', async () => {
+  const modelId = 'capability/fixture.chat/saved';
+  let resolveCatalog: (response: Response) => void = () => { throw new Error('catalog not requested'); };
+  const catalog = new Promise<Response>(resolve => { resolveCatalog = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input) === '/models') return catalog;
+    return new Response(JSON.stringify({ enabled: false }));
+  }));
+  store.dispatch(chatActions.selectModel('org/native-model'));
+  store.dispatch(chatActions.selectModel(modelId));
+  const savedConversation = store.getState().chat.activeConversationId;
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+  await act(async () => { root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ChatView readyInstances={[{
+    instanceId: 'native-instance', modelId: 'org/native-model', sharding: 'Pipeline', instanceType: 'MlxRing', engine: 'mlx', nodeStatuses: [], status: 'ready',
+  }]} /></ThemeProvider></Provider>); });
+  expect(store.getState().chat.selectedModelId).toBe(modelId);
+  expect(store.getState().chat.activeConversationId).toBe(savedConversation);
+  await act(async () => { resolveCatalog(new Response(JSON.stringify({ data: [
+    { id: 'org/native-model', tasks: ['TextGeneration'] },
+    { id: modelId, name: 'Saved provider model', tasks: ['TextGeneration'], inference_capability: {
+      contract: 'chat.completions@0.1.0', processing_domain: 'external', usage: 'unknown',
+      usage_label: 'Using ChatGPT plan', expires_at: Date.now() / 1000 + 60,
+    } },
+  ] }))); });
+  await waitForReact(() => container?.textContent?.includes('Using ChatGPT plan') ?? false, 'saved capability did not load');
+  expect(store.getState().chat.selectedModelId).toBe(modelId);
+  expect(store.getState().chat.activeConversationId).toBe(savedConversation);
+});

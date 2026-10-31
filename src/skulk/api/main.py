@@ -10807,45 +10807,47 @@ class API:
             return []
         descriptors = self._extensions.capability_descriptors
         catalogs: list[ChatCatalog] = []
-        async with asyncio.timeout(3):
-            for descriptor in [
-                item
-                for item in descriptors
-                if item.io_mode == "unary"
-                and (item.annotations or {}).get("inference.catalog")
-                == "chat.completions@0.1.0"
-            ][:8]:
-                result = await self._call_capability(
-                    self.node_id,
-                    descriptor.id,
-                    descriptor.version,
-                    descriptor_revision(descriptor),
-                    {},
-                    timeout_seconds=1,
-                )
-                if not result.ok or not result.result:
-                    continue
-                try:
-                    catalog = ChatCatalog.model_validate_json(json.dumps(result.result))
-                except ValueError:
-                    continue
-                if catalog.expires_at <= time.time():
-                    continue
-                if not any(
-                    item.id == catalog.callable_id
-                    and item.version == catalog.callable_version
-                    and descriptor_revision(item) == catalog.descriptor_revision
-                    and item.io_mode == "server_streaming"
-                    and (item.annotations or {}).get("inference.contract")
-                    == catalog.contract
-                    and (item.annotations or {}).get("inference.authorization")
-                    == "gateway.ed25519@0.1.0"
+        # A slow provider must not withdraw healthy catalogs already observed.
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(3):
+                for descriptor in [
+                    item
                     for item in descriptors
-                ):
-                    continue
-                if any(c.callable_id == catalog.callable_id for c in catalogs):
-                    continue
-                catalogs.append(catalog)
+                    if item.io_mode == "unary"
+                    and (item.annotations or {}).get("inference.catalog")
+                    == "chat.completions@0.1.0"
+                ][:8]:
+                    result = await self._call_capability(
+                        self.node_id,
+                        descriptor.id,
+                        descriptor.version,
+                        descriptor_revision(descriptor),
+                        {},
+                        timeout_seconds=1,
+                    )
+                    if not result.ok or not result.result:
+                        continue
+                    try:
+                        catalog = ChatCatalog.model_validate_json(json.dumps(result.result))
+                    except ValueError:
+                        continue
+                    if catalog.expires_at <= time.time():
+                        continue
+                    if not any(
+                        item.id == catalog.callable_id
+                        and item.version == catalog.callable_version
+                        and descriptor_revision(item) == catalog.descriptor_revision
+                        and item.io_mode == "server_streaming"
+                        and (item.annotations or {}).get("inference.contract")
+                        == catalog.contract
+                        and (item.annotations or {}).get("inference.authorization")
+                        == "gateway.ed25519@0.1.0"
+                        for item in descriptors
+                    ):
+                        continue
+                    if any(c.callable_id == catalog.callable_id for c in catalogs):
+                        continue
+                    catalogs.append(catalog)
         return catalogs
 
     async def _capability_chat_completions(

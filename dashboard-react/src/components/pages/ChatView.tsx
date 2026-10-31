@@ -560,6 +560,7 @@ export function ChatView({
   const [modelBuiltinTools, setModelBuiltinTools] = useState<Record<string, string[]>>({});
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
   const [modelCatalogById, setModelCatalogById] = useState<Record<string, ModelInfo>>({});
+  const [modelCatalogLoaded, setModelCatalogLoaded] = useState(false);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [voiceCatalogError, setVoiceCatalogError] = useState<string | null>(null);
   const [voiceOptions, setVoiceOptions] = useState<ChatVoiceOption[]>([]);
@@ -649,6 +650,7 @@ export function ChatView({
         setModelBuiltinTools(builtinTools);
         setModelContextLengths(ctxLens);
         setModelCatalogById(catalogById);
+        setModelCatalogLoaded(true);
       } catch { /* ignore */ }
     };
     void refreshCatalog();
@@ -723,15 +725,16 @@ export function ChatView({
     return options;
   }, [modelCatalogById, readyRunnableInstances]);
 
-  // Auto-select first ready model if none selected
+  // Keep a saved capability conversation while its first catalog is loading.
   useEffect(() => {
+    if (selectedModelId?.startsWith('capability/') && !modelCatalogLoaded) return;
     if (
       readyModels.length > 0
       && (!selectedModelId || !readyModels.some((model) => model.modelId === selectedModelId))
     ) {
       selectModel(readyModels[0].modelId);
     }
-  }, [selectedModelId, readyModels, selectModel]);
+  }, [selectedModelId, readyModels, selectModel, modelCatalogLoaded]);
 
   useEffect(() => {
     if (readyTranscriptionModels.length === 0) {

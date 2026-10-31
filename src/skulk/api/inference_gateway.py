@@ -211,6 +211,7 @@ async def chat_response(
     identifier, created = "chatcmpl-" + uuid4().hex, int(time.time())
     content = ""
     reasoning = ""
+    output_characters = 0
     tools: dict[int, dict[str, JsonValue]] = {}
     terminal: dict[str, JsonValue] | None = None
     finished = False
@@ -293,6 +294,16 @@ async def chat_response(
                     else json.dumps(_failure("invalid_stream"))
                 )
                 return
+            # Bound forwarded streams as well as collected responses. Counting
+            # serialized deltas also covers tool fragments and unknown fields.
+            output_characters += len(json.dumps(delta, ensure_ascii=False))
+            if output_characters > 262144:
+                yield (
+                    _sse(_failure("output_limit"))
+                    if stream
+                    else json.dumps(_failure("output_limit"))
+                )
+                return
             if stream:
                 yield _sse(chunk(delta))
             else:
@@ -330,9 +341,6 @@ async def chat_response(
                                     before, str
                                 ):
                                     existing[field] = before + addition
-            if len(content) + len(reasoning) + len(json.dumps(tools)) > 262144:
-                yield json.dumps(_failure("output_limit"))
-                return
         if not finished or terminal is None:
             yield (
                 _sse(_failure("interrupted"))

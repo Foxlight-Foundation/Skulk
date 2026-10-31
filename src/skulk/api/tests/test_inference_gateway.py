@@ -1,5 +1,6 @@
 """The unified chat API routes provider-neutral models under explicit authority."""
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator
@@ -11,7 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import JsonValue, TypeAdapter
 
-from skulk.api.inference_gateway import GatewaySigner
+from skulk.api.inference_gateway import GatewaySigner, chat_response
 from skulk.api.main import API
 from skulk.api.types import ModelList
 from skulk.extensions import (
@@ -22,6 +23,8 @@ from skulk.extensions import (
     LoadedExtensions,
     descriptor_revision,
 )
+from skulk.extensions.calls import CapabilityResult
+from skulk.extensions.streams import CapabilityStreamSession
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
@@ -37,9 +40,11 @@ class ChatFixture:
     name = "independent-chat-fixture"
     skulk_requires = ">=0"
 
-    def __init__(self, namespace: str, key: str) -> None:
+    def __init__(self, namespace: str, key: str, *, delay: float = 0) -> None:
         """Require a separately owner-delegated gateway key."""
         self.namespace, self.key = namespace, key
+        self.name = namespace
+        self.delay = delay
         self.local = namespace == "different.inference"
         self.calls = 0
         self.closed = False
@@ -80,6 +85,7 @@ class ChatFixture:
         self, context: ExtensionContext, call: CapabilityCall
     ) -> dict[str, object]:
         """Publish fresh fixture facts without making a provider request."""
+        await asyncio.sleep(self.delay)
         return {
             "contract": "chat.completions@0.1.0",
             "target_node": "fixture-transport",
@@ -176,7 +182,7 @@ class InferenceTestAPI(API):
                 tasks.cancel_scope.cancel()
 
 
-def build_api(provider: ChatFixture) -> InferenceTestAPI:
+def build_api(provider: ChatFixture, *others: ChatFixture) -> InferenceTestAPI:
     """Build an actual API with its ordinary provider data path and no shared state."""
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
@@ -195,7 +201,7 @@ def build_api(provider: ChatFixture) -> InferenceTestAPI:
         telemetry_view=TelemetryView(),
         provider_stream_sender=sender,
         provider_stream_receiver=receiver,
-        extensions=LoadedExtensions([provider]),
+        extensions=LoadedExtensions([provider, *others]),
     )
 
 
@@ -285,3 +291,83 @@ def test_signer_key_stays_private_and_stable(tmp_path: Path) -> None:
     path.chmod(0o644)
     with pytest.raises(ValueError):
         signer.public_key()
+
+
+async def test_slow_catalogs_do_not_withdraw_a_healthy_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Overall discovery expiry retains healthy models for listing and chat."""
+    monkeypatch.setattr("skulk.api.main.SKULK_DATA_HOME", tmp_path)
+    signer = GatewaySigner(tmp_path / "inference" / "gateway.key")
+    healthy = ChatFixture("healthy.inference", signer.public_key())
+    slow = [ChatFixture(f"slow{i}.inference", healthy.key, delay=2) for i in range(4)]
+    api = build_api(healthy, *slow)
+    async with (
+        api.providers(),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=api.app, client=("127.0.0.1", 5000)),
+            base_url="http://localhost:52415",
+            headers={
+                "Origin": "http://localhost:52415",
+                "X-Skulk-Dashboard": "pairing-v1",
+            },
+            timeout=10,
+        ) as client,
+    ):
+        listing = ModelList.model_validate_json(
+            (await client.get("/v1/models")).content
+        )
+        model = "capability/healthy.inference.chat/code"
+        assert model in [item.id for item in listing.data]
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "Write code"}],
+            },
+        )
+        assert response.status_code == 200 and "print('hello')" in response.text
+        assert healthy.calls == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_output_bound_precedes_forwarding_and_closes_the_provider(
+    stream: bool,
+) -> None:
+    """Oversized deltas fail in both wire modes without forwarding their content."""
+    closed = False
+    cancelled = False
+
+    async def frames() -> AsyncGenerator[CapabilityStreamFrame]:
+        nonlocal closed
+        try:
+            yield CapabilityStreamFrame(
+                call_id="bounded",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="chunk",
+                payload={"kind": "delta", "delta": {"content": "x" * 300000}},
+            )
+            raise AssertionError("oversized output must close the provider iterator")
+        finally:
+            closed = True
+
+    async def cancel() -> None:
+        nonlocal cancelled
+        cancelled = True
+
+    session = CapabilityStreamSession(
+        open_result=CapabilityResult(call_id="bounded", ok=True, result={}),
+        frames=frames(),
+        cancel_output=cancel,
+    )
+    output = "".join(
+        [
+            part
+            async for part in chat_response(
+                session, model="fixture", stream=stream, include_usage=True
+            )
+        ]
+    )
+    assert "output_limit" in output and "[DONE]" not in output and len(output) < 1024
+    assert closed and cancelled

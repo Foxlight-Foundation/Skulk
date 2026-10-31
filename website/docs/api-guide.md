@@ -6482,6 +6482,9 @@ The optional `inference_policy` accepts `allow_external`, `local_only`, or
 `included_only`; local-only rejects nonlocal catalogs, and included-only rejects
 usage outside `none`/`included_only`, with 403. Unknown request fields return 400
 and signed inputs larger than 48 KiB return 413 before provider submission.
+Both wire modes cap accumulated serialized delta characters at 262,144; overflow
+closes the provider stream and returns an `output_limit` error before forwarding
+the exceeding delta.
 
 Capability inference requires the direct owner dashboard authority used by plugin
 owner administration: same-origin `Origin` (or Referer),
