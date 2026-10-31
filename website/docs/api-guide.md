@@ -6471,7 +6471,9 @@ capability models with namespaced IDs `capability/<callable-id>/<model-slug>`
 and an `inference_capability` object containing processing domain, usage class,
 usage label/link and expiry. They are separate from mounted instances and are
 omitted from the `status=downloaded` filter. Discovery reads bounded cached
-catalogs from up to eight local installed providers; it does not fetch an
+catalogs concurrently from up to eight local installed providers with one-second
+individual and three-second aggregate deadlines; completed reads survive expiry.
+It does not fetch an
 upstream account catalog or token. Missing/stale catalogs withdraw availability.
 
 **POST** `/v1/chat/completions` accepts these exact IDs with ordinary `messages`,
@@ -6501,7 +6503,8 @@ function-call deltas, optional usage, and requires both provider and transport
 completion before a success finish and `[DONE]`. Errors after headers emit a
 bounded error object without a success terminator; non-streaming collection uses
 the same cancellable transport and returns an error JSON body on such failure.
-Client disconnect closes the provider session. No provider-specific account
+Client disconnect closes the provider session and retires its local receiver,
+including closure immediately after the first assistant-role event. No provider-specific account
 integration, TTS engine or tool executor is added to Core. The dashboard's normal
 code rendering, client tool handling and mounted speech playback compose with
 these text streams. This adapter does not expose capability models through the

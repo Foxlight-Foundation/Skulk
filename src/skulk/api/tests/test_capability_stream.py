@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 import anyio
 import pytest
 
+from skulk.api.inference_gateway import chat_response
 from skulk.api.main import (
     API,
     _ActiveProviderStream,  # pyright: ignore[reportPrivateUsage]
@@ -216,6 +217,7 @@ class _BlockingAdmissionTtsProvider(_TtsProvider):
 
 class _CancellableProvider(_TtsProvider):
     def __init__(self) -> None:
+        self.started = anyio.Event()
         self.cancelled = anyio.Event()
 
     async def handle_stream(
@@ -224,6 +226,7 @@ class _CancellableProvider(_TtsProvider):
         call: CapabilityCall,
     ) -> AsyncIterator[CapabilityStreamFrame]:
         try:
+            self.started.set()
             yield CapabilityStreamFrame(
                 call_id=call.call_id,
                 direction="provider_to_caller",
@@ -1124,6 +1127,37 @@ async def test_early_caller_close_cancels_only_its_provider_stream() -> None:
         assert (await iterator.__anext__()).kind == "chunk"
         await session.frames.aclose()  # type: ignore[attr-defined]
         with anyio.fail_after(1.0):
+            await provider.cancelled.wait()
+        task_group.cancel_scope.cancel()
+
+
+async def test_chat_role_only_close_retires_the_unread_caller_receiver() -> None:
+    """The first SSE event owns cancellation even before transport consumption."""
+    provider = _CancellableProvider()
+    api = _build_api(provider)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await context.stream_capability(
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            _TTS_REVISION,
+            {"text": "close before consuming transport"},
+            timeout_seconds=5.0,
+        )
+        assert session.open_result.ok
+        with anyio.fail_after(1):
+            await provider.started.wait()
+        response = chat_response(
+            session, model="fixture", stream=True, include_usage=False
+        )
+        assert '"role": "assistant"' in await anext(response)
+        await response.aclose()
+        assert not api._provider_stream_receivers  # pyright: ignore[reportPrivateUsage]
+        with anyio.fail_after(1):
             await provider.cancelled.wait()
         task_group.cancel_scope.cancel()
 

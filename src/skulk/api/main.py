@@ -8925,6 +8925,13 @@ class API:
                 )
 
         async def cancel_output() -> None:
+            # Explicit cancellation also owns unread receiver retirement:
+            # closing an unstarted async generator never enters its finally.
+            if receive_state.input_stream is not None:
+                self._schedule_provider_input_close(receive_state.input_stream)
+            self._provider_stream_receivers.pop(call_id, None)
+            output_sender.close()
+            output_receiver.close()
             if receive_state.cancellation_scheduled:
                 return
             receive_state.cancel_provider = True
@@ -10806,48 +10813,58 @@ class API:
         if self._extensions is None:
             return []
         descriptors = self._extensions.capability_descriptors
-        catalogs: list[ChatCatalog] = []
-        # A slow provider must not withdraw healthy catalogs already observed.
+        observed: dict[int, ChatCatalog] = {}
+
+        async def read_catalog(index: int, descriptor: CapabilityDescriptor) -> None:
+            result = await self._call_capability(
+                self.node_id,
+                descriptor.id,
+                descriptor.version,
+                descriptor_revision(descriptor),
+                {},
+                timeout_seconds=1,
+            )
+            if not result.ok or not result.result:
+                return
+            try:
+                catalog = ChatCatalog.model_validate_json(json.dumps(result.result))
+            except ValueError:
+                return
+            if catalog.expires_at <= time.time():
+                return
+            if not any(
+                item.id == catalog.callable_id
+                and item.version == catalog.callable_version
+                and descriptor_revision(item) == catalog.descriptor_revision
+                and item.io_mode == "server_streaming"
+                and (item.annotations or {}).get("inference.contract")
+                == catalog.contract
+                and (item.annotations or {}).get("inference.authorization")
+                == "gateway.ed25519@0.1.0"
+                for item in descriptors
+            ):
+                return
+            observed[index] = catalog
+
+        # At most eight concurrent cached reads prevent ordering behind slow
+        # providers from starving a healthy destination. Retain completed reads
+        # even if the aggregate budget cancels the remaining handlers.
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(3):
-                for descriptor in [
-                    item
-                    for item in descriptors
-                    if item.io_mode == "unary"
-                    and (item.annotations or {}).get("inference.catalog")
-                    == "chat.completions@0.1.0"
-                ][:8]:
-                    result = await self._call_capability(
-                        self.node_id,
-                        descriptor.id,
-                        descriptor.version,
-                        descriptor_revision(descriptor),
-                        {},
-                        timeout_seconds=1,
-                    )
-                    if not result.ok or not result.result:
-                        continue
-                    try:
-                        catalog = ChatCatalog.model_validate_json(json.dumps(result.result))
-                    except ValueError:
-                        continue
-                    if catalog.expires_at <= time.time():
-                        continue
-                    if not any(
-                        item.id == catalog.callable_id
-                        and item.version == catalog.callable_version
-                        and descriptor_revision(item) == catalog.descriptor_revision
-                        and item.io_mode == "server_streaming"
-                        and (item.annotations or {}).get("inference.contract")
-                        == catalog.contract
-                        and (item.annotations or {}).get("inference.authorization")
-                        == "gateway.ed25519@0.1.0"
+                async with asyncio.TaskGroup() as tasks:
+                    for index, descriptor in enumerate([
+                        item
                         for item in descriptors
-                    ):
-                        continue
-                    if any(c.callable_id == catalog.callable_id for c in catalogs):
-                        continue
-                    catalogs.append(catalog)
+                        if item.io_mode == "unary"
+                        and (item.annotations or {}).get("inference.catalog")
+                        == "chat.completions@0.1.0"
+                    ][:8]):
+                        tasks.create_task(read_catalog(index, descriptor))
+        catalogs: list[ChatCatalog] = []
+        for index in sorted(observed):
+            catalog = observed[index]
+            if not any(c.callable_id == catalog.callable_id for c in catalogs):
+                catalogs.append(catalog)
         return catalogs
 
     async def _capability_chat_completions(

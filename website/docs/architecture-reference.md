@@ -19,6 +19,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Gateway keys stay host-local. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
+  Up to eight cached catalogs are read concurrently under individual and aggregate
+  deadlines, retaining completed results. Stream cleanup owns cancellation and
+  local receiver retirement before the first assistant-role event is yielded.
 
 - **Native model preservation:** `store/preservation_export.py` resolves exact
   installed records and snapshots/verifies a private closure; `preservation_closure.py`

@@ -14,7 +14,7 @@ import secrets
 import stat
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from contextlib import aclosing
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, cast, final
 from uuid import uuid4
@@ -175,12 +175,14 @@ def _sse(value: dict[str, JsonValue]) -> str:
     return "data: " + json.dumps(value, allow_nan=False) + "\n\n"
 
 
+@asynccontextmanager
 async def _owned_frames(
     session: CapabilityStreamSession,
-) -> AsyncGenerator[CapabilityStreamFrame]:
+) -> AsyncIterator[AsyncIterator[CapabilityStreamFrame]]:
     try:
-        async for frame in session.frames:
-            yield frame
+        # Enter cleanup ownership before the role event can suspend delivery,
+        # including when the caller closes without consuming a provider frame.
+        yield session.frames
     finally:
         # ASGI disconnect runs under a cancelled scope. Shield bounded cleanup
         # so provider cancellation and local receiver retirement still happen.
@@ -201,7 +203,7 @@ async def chat_response(
     model: str,
     stream: bool,
     include_usage: bool,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str]:
     """Adapt a cancellable capability stream to the existing chat wire format.
 
     Success requires both a common completion event and transport completion.
@@ -227,7 +229,7 @@ async def chat_response(
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
 
-    async with aclosing(_owned_frames(session)) as frames:
+    async with _owned_frames(session) as frames:
         if stream:
             yield _sse(chunk({"role": "assistant"}))
         async for frame in frames:

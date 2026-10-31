@@ -293,15 +293,16 @@ def test_signer_key_stays_private_and_stable(tmp_path: Path) -> None:
         signer.public_key()
 
 
+@pytest.mark.parametrize("healthy_first", [True, False])
 async def test_slow_catalogs_do_not_withdraw_a_healthy_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, healthy_first: bool
 ) -> None:
     """Overall discovery expiry retains healthy models for listing and chat."""
     monkeypatch.setattr("skulk.api.main.SKULK_DATA_HOME", tmp_path)
     signer = GatewaySigner(tmp_path / "inference" / "gateway.key")
     healthy = ChatFixture("healthy.inference", signer.public_key())
     slow = [ChatFixture(f"slow{i}.inference", healthy.key, delay=2) for i in range(4)]
-    api = build_api(healthy, *slow)
+    api = build_api(healthy, *slow) if healthy_first else build_api(*slow, healthy)
     async with (
         api.providers(),
         httpx.AsyncClient(
@@ -370,4 +371,40 @@ async def test_output_bound_precedes_forwarding_and_closes_the_provider(
         ]
     )
     assert "output_limit" in output and "[DONE]" not in output and len(output) < 1024
+    assert closed and cancelled
+
+
+async def test_close_after_role_cancels_without_reading_a_provider_frame() -> None:
+    """Closing the first SSE event retires an already admitted provider call."""
+    closed = False
+    cancelled = False
+
+    class UnreadFrames:
+        """Record receiver closure without allowing the test to consume output."""
+
+        def __aiter__(self) -> "UnreadFrames":
+            return self
+
+        async def __anext__(self) -> CapabilityStreamFrame:
+            raise AssertionError("the role event must not consume a provider frame")
+
+        async def aclose(self) -> None:
+            """Retire the unopened local receiver."""
+            nonlocal closed
+            closed = True
+
+    async def cancel() -> None:
+        nonlocal cancelled
+        cancelled = True
+
+    session = CapabilityStreamSession(
+        open_result=CapabilityResult(call_id="unread", ok=True, result={}),
+        frames=UnreadFrames(),
+        cancel_output=cancel,
+    )
+    response = chat_response(
+        session, model="fixture", stream=True, include_usage=False
+    )
+    assert '"role": "assistant"' in await anext(response)
+    await response.aclose()
     assert closed and cancelled
