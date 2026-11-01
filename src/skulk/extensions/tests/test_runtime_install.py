@@ -600,3 +600,92 @@ def test_a_protocol_refusal_is_named_only_after_the_signature_verifies(
     document["signature"] = "0" * len(str(document["signature"]))
     with pytest.raises(ValueError, match="runtime signature refused"):
         verify_runtime(json.dumps(document).encode(), trust, host, now=int(time.time()))
+
+
+def test_v3_admits_independent_multilevel_application_and_launcher_graphs(
+    tmp_path: Path,
+) -> None:
+    """Normal transitive packages must be admitted, while a signed orphan is not."""
+    key = Ed25519PrivateKey.generate()
+    metadata, trust, host = artifacts(
+        tmp_path,
+        dependency="app-middle>=1",
+        owner_entrypoint=False,
+        signing_key=key,
+        runtime_protocol=3,
+        application_roots=("example-dep",),
+    )
+    objects = TypeAdapter(dict[str, JsonValue])
+    document = objects.validate_json(metadata)
+    runtime = objects.validate_python(document["runtime"], strict=True)
+    release = objects.validate_python(runtime["release"], strict=True)
+    wheels = TypeAdapter(list[JsonValue]).validate_python(
+        runtime["wheels"], strict=True
+    )
+    inventory: dict[str, JsonValue] = {"example-dep": "1.0"}
+
+    def add_wheel(
+        name: str, dependency: str | None = None, *, owner: bool = False
+    ) -> None:
+        module = name.replace("-", "_")
+        prefix = f"{module}-1.0.dist-info/"
+        files = {
+            f"{module}/__init__.py": "def main():\n    pass\n",
+            prefix + "METADATA": (
+                f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n"
+                + (f"Requires-Dist: {dependency}\n" if dependency else "")
+            ),
+            prefix + "WHEEL": (
+                "Wheel-Version: 1.0\nGenerator: test\n"
+                "Root-Is-Purelib: true\nTag: py3-none-any\n"
+            ),
+        }
+        if owner:
+            files[prefix + "entry_points.txt"] = (
+                f"[skulk.capability_runtime]\nowner = {module}:main\n"
+                f"manage = {module}:main\n"
+            )
+        files[prefix + "RECORD"] = (
+            "".join(f"{path},,\n" for path in files) + prefix + "RECORD,,\n"
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for path, content in files.items():
+                archive.writestr(path, content)
+        raw = buffer.getvalue()
+        filename = f"{module}-1.0-py3-none-any.whl"
+        write_private(tmp_path / filename, raw)
+        wheels.append(
+            {
+                "filename": filename,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "size": len(raw),
+            }
+        )
+        inventory[name] = "1.0"
+
+    def signed_graph() -> bytes:
+        release["dependency_lock_sha256"] = hashlib.sha256(
+            canonical_json(dict(sorted(inventory.items())))
+        ).hexdigest()
+        runtime["release"] = release
+        runtime["wheels"] = wheels
+        return json.dumps(
+            {
+                "runtime": runtime,
+                "signature": key.sign(canonical_json(runtime)).hex(),
+            }
+        ).encode()
+
+    add_wheel("app-middle", "app-leaf>=1")
+    add_wheel("app-leaf")
+    add_wheel("runtime-owner", "owner-leaf>=1", owner=True)
+    add_wheel("owner-leaf")
+    verified = verify_runtime(signed_graph(), trust, host, now=int(time.time()))
+    assert len(verified_artifacts(verified, tmp_path)) == 6
+    # Signing the orphan and updating the lock digest is insufficient: it must
+    # still be reachable from the application or owner dependency graph.
+    add_wheel("unreachable-extra")
+    orphaned = verify_runtime(signed_graph(), trust, host, now=int(time.time()))
+    with pytest.raises(ValueError, match="undeclared dependency"):
+        verified_artifacts(orphaned, tmp_path)
