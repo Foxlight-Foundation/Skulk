@@ -24,6 +24,7 @@ export interface SetupTarget {
    * Whether any of the release's actions can spend money, from its signed
    * listing; absent when the listing is not at hand, so nothing is claimed.
    */
+  /** Whether the signed listing declares billable Steward actions; false is not a free-usage guarantee. */
   spendsMoney?: boolean;
   /** Nodes the install turned on by itself, which may not have reported leaving `disabled` yet. */
   turnedOn?: string[];

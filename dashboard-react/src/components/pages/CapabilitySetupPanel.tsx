@@ -216,7 +216,7 @@ export function CapabilitySetupPanel({ target, onManage, onDone }: CapabilitySet
         : <Button variant="outline" onClick={() => onManage(target.pluginId)}>{t('plugins.setup.settings', 'Settings')}</Button>) : null}
       <Button variant="outline" onClick={onDone}>{t('plugins.setup.done', 'Done')}</Button>
     </Actions>
-    {next === 'turn-on' ? <Hint>{t('plugins.setup.turnOnHelp', 'Turning it on runs its setup checks again.')}{target.spendsMoney === false ? ` ${t('plugins.setup.cannotSpend', 'It cannot spend money.')}` : ''}</Hint> : null}
+    {next === 'turn-on' ? <Hint>{t('plugins.setup.turnOnHelp', 'Turning it on runs its setup checks again.')}{target.spendsMoney === false ? ` ${t('plugins.setup.billingNotDeclared', 'This release does not declare billable actions. Review its settings and any connected provider account before enabling it.')}` : ''}</Hint> : null}
     {next === 'open' ? <Hint>{t('plugins.setup.opensInNewTab', 'Opens in a new tab. You can also open it from its node in the Cluster view.')}</Hint> : null}
     {!ready && summaries.length > 0 && surfaces.length === 0 ? <Hint>{t('plugins.setup.openLater', 'Once it is running, Open {title} appears here and opens it in a new tab.', { title: target.title })}</Hint> : null}
     {unreachable.length > 0 ? <Hint>{t('plugins.setup.onHostOnly', '{surface} opens only from a browser running on the host that runs it.', { surface: unreachable.map((item) => item.surface.title).join(', ') })}</Hint> : null}

@@ -67,7 +67,7 @@ export function CatalogOfferCard({ offer, onReview, onSetUp, installedAction = {
   return <Card>
     <Mark aria-hidden="true">{monogram(title)}</Mark>
     <div>
-      <Row><h2>{title}</h2>{fit}{canSpendMoney(entry) ? <StatusPill tone="neutral">{t('plugins.catalog.canSpend', 'Can spend money, with approval')}</StatusPill> : <StatusPill tone="neutral">{t('plugins.catalog.noSpending', 'Cannot spend money')}</StatusPill>}</Row>
+      <Row><h2>{title}</h2>{fit}{canSpendMoney(entry) ? <StatusPill tone="neutral">{t('plugins.catalog.billableDeclared', 'Billable actions declared')}</StatusPill> : <StatusPill tone="neutral">{t('plugins.catalog.billingNotSpecified', 'Billing not declared')}</StatusPill>}</Row>
       {opens ? <Description>{opens}</Description> : null}
       {state === 'update' && installedSequence !== null ? <Description>{t('plugins.catalog.updateFrom', 'Release {installed} is installed; release {offered} is built for this host.', { installed: installedSequence, offered: entry.sequence })}</Description> : null}
       {state === 'retry' && offer.retry ? <Description>{offer.retry.stopped
