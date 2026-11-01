@@ -6473,8 +6473,10 @@ capability models with namespaced IDs `capability/<callable-id>/<model-slug>`
 and an `inference_capability` object containing processing domain, usage class,
 usage label/link and expiry. They are separate from mounted instances and are
 omitted from the `status=downloaded` filter. Discovery reads bounded cached
-catalogs concurrently from up to eight local installed providers with one-second
-individual and three-second aggregate deadlines; completed reads survive expiry.
+catalogs concurrently from up to eight local installed providers with five-second
+individual and six-second aggregate deadlines; completed reads survive expiry.
+The individual budget includes managed-owner IPC and schema validation, so a
+normal cached read can finish without restarting a healthy capability.
 It does not fetch an
 upstream account catalog or token. Missing/stale catalogs withdraw availability.
 The dashboard withdraws cached capability choices at their advertised expiry

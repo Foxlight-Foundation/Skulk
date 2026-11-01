@@ -345,6 +345,30 @@ def test_interrupted_signer_creation_does_not_publish_a_key(
     assert GatewaySigner(path).public_key() == GatewaySigner(path).public_key()
 
 
+async def test_managed_catalog_read_can_outlive_one_second(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner IPC and validation overhead must not withdraw a healthy provider."""
+    monkeypatch.setattr("skulk.api.main.SKULK_DATA_HOME", tmp_path)
+    signer = GatewaySigner(tmp_path / "inference" / "gateway.key")
+    provider = ChatFixture("managed.inference", signer.public_key(), delay=1.1)
+    api = build_api(provider)
+    async with (
+        api.providers(),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=api.app, client=("127.0.0.1", 5000)),
+            base_url="http://localhost:52415",
+        ) as client,
+    ):
+        response = await client.get("/v1/models")
+        assert response.status_code == 200
+        listing = ModelList.model_validate_json(response.content)
+        assert "capability/managed.inference.chat/code" in [
+            item.id for item in listing.data
+        ]
+        assert provider.calls == 0
+
+
 @pytest.mark.parametrize("healthy_first", [True, False])
 async def test_slow_catalogs_do_not_withdraw_a_healthy_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, healthy_first: bool
@@ -353,7 +377,7 @@ async def test_slow_catalogs_do_not_withdraw_a_healthy_provider(
     monkeypatch.setattr("skulk.api.main.SKULK_DATA_HOME", tmp_path)
     signer = GatewaySigner(tmp_path / "inference" / "gateway.key")
     healthy = ChatFixture("healthy.inference", signer.public_key())
-    slow = [ChatFixture(f"slow{i}.inference", healthy.key, delay=2) for i in range(4)]
+    slow = [ChatFixture(f"slow{i}.inference", healthy.key, delay=10) for i in range(4)]
     api = build_api(healthy, *slow) if healthy_first else build_api(*slow, healthy)
     async with (
         api.providers(),

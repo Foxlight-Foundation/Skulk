@@ -2775,7 +2775,8 @@ class API:
                 "the current signed registry snapshot, and final operator-owned "
                 "custom overrides. Entries expose active "
                 "installed identity, current registry identity, update availability, "
-                "verification state, and warn-only advisories."
+                "verification state, and warn-only advisories. Capability catalog "
+                "reads have a six-second overall limit."
             ),
         )(self.get_models)
         self.app.get(
@@ -2798,7 +2799,8 @@ class API:
                 "than only running instances. Entries distinguish the active "
                 "installed generation from current signed registry truth and "
                 "report updates, verification, advisories, and repository-code "
-                "authorization provenance."
+                "authorization provenance. Capability catalog reads have a "
+                "six-second overall limit."
             ),
         )(self.get_models)
         self.app.get(
@@ -10822,7 +10824,10 @@ class API:
                 descriptor.version,
                 descriptor_revision(descriptor),
                 {},
-                timeout_seconds=1,
+                # Managed calls include owner IPC and isolated schema workers.
+                # One second can cancel a healthy cached read and restart its
+                # child; allow the normal five-second managed call budget.
+                timeout_seconds=5,
             )
             if not result.ok or not result.result:
                 return
@@ -10850,7 +10855,7 @@ class API:
         # providers from starving a healthy destination. Retain completed reads
         # even if the aggregate budget cancels the remaining handlers.
         with contextlib.suppress(TimeoutError):
-            async with asyncio.timeout(3):
+            async with asyncio.timeout(6):
                 async with asyncio.TaskGroup() as tasks:
                     for index, descriptor in enumerate([
                         item
