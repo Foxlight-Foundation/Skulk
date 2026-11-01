@@ -162,7 +162,7 @@ it('turns a plugin that is only off on with one action, whatever its settings fo
   summaries = [summary({ status: 'disabled', surfaces: [] })];
   await render(() => undefined, () => undefined, false);
   await contains('It is turned off. Turn it on to start it.');
-  await contains('Turning it on runs its setup checks again. It cannot spend money.');
+  await contains('Turning it on runs its setup checks again. This release does not declare billable actions. Review its settings and any connected provider account before enabling it.');
   // No checks until something more than turning on is needed.
   expect(button('Check setup')).toBeNull();
   await act(async () => { await vi.waitFor(() => expect(button('Turn on')).not.toBeNull(), { timeout: 5000 }); });
@@ -173,7 +173,7 @@ it('turns a plugin that is only off on with one action, whatever its settings fo
   expect(button('Turn on')).toBeNull();
 });
 
-it('says nothing about money when the release is not known to be unable to spend it', async () => {
+it('does not infer free usage when the release declares billable actions', async () => {
   summaries = [summary({ status: 'disabled', surfaces: [] })];
   await render(() => undefined, () => undefined, true);
   await contains('Turning it on runs its setup checks again.');
