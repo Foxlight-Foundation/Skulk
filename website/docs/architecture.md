@@ -2340,6 +2340,14 @@ journal retains operation IDs, monotonic trust and interrupted generations.
 Cancellation of a waiting interface does not abandon owned installation work;
 only the fsynced completion marker publishes a staged generation. Staging never
 switches the active owner or changes cleanup state.
+Runtime envelopes 2 and 3 are accepted. Version two retains its original signed
+wire shape. Version three signs one to eight canonical `application_roots`
+distribution names so a capability can carry its own libraries in the isolated
+wheelhouse. The generic verifier checks that every root exists and that the
+dependency graph starting from those roots and launcher-provider wheels covers
+the exact signed inventory. Missing, incompatible, external-URL, extra-dependent
+or unreachable packages are refused before installation. No plugin or SDK is
+imported to inspect the graph, and no package resolver runs on the host.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can
 execute startup code; runtime commands disable bytecode writes. The interpreter

@@ -628,6 +628,15 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
 
 ### Extensions (plugins)
 
+- **Signed dependency roots:** `runtime_artifacts.py` accepts isolated runtime
+  protocols 2 and 3. V2 signed bytes/claims remain unchanged; v3 requires 1–8
+  unique canonical `application_roots` present in its exact signed wheel
+  inventory. Before pip, v3's graph from declared roots plus launcher-provider
+  wheels must cover every package. Metadata, native tags, hashes, dependency
+  versions, URL/extra refusal and archive bounds remain enforced. Verification
+  imports no provider SDK and resolves nothing online. Deploy this reader before
+  offering v3 capability releases.
+
 - **Proposal review:** `proposal_review.py` exports `ProposalReference`, summary,
   field, page and review models plus `NodeProposalReviewProvider`. `api/plugins.py`
   exposes read-scoped per-node proposal listing and exact-ID/digest review. Maximum
