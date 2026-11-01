@@ -1,3 +1,4 @@
+import { capabilityChatChoices, useChatModelCatalog } from './hooks/useChatModelCatalog';
 import { FiMaximize2 } from 'react-icons/fi';
 import { MdAutoAwesome } from 'react-icons/md';
 import { ReadyModelSelect } from './components/chat/ReadyModelSelect';
@@ -147,6 +148,7 @@ interface StoreDownload {
 
 
 export function App() {
+  const chatCatalog = useChatModelCatalog();
   const { t } = useSkulkTranslation();
   const {
     topology,
@@ -586,6 +588,10 @@ export function App() {
     return cards;
   }, [visibleInstances, runners, topology, t, engineInstallBytesByInstance]);
 
+  const chatModels = useMemo(() => [
+    ...instanceCards.filter(instance => (instance.status === 'ready' || instance.status === 'running') && instance.supportsTextChat && !instance.isEmbedding),
+    ...capabilityChatChoices(chatCatalog.models),
+  ], [instanceCards, chatCatalog.models]);
   const hasInstances = instanceCards.length > 0;
 
   const handleDeleteInstance = useCallback(async (instanceId: string) => {
@@ -691,9 +697,10 @@ export function App() {
                 onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
             ) : activeRoute === 'chat' && selectedModelId === STEWARD_MODEL_ID ? (
-              stewardOpen ? <ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={instanceCards.filter(instance => (instance.status === 'ready' || instance.status === 'running') && instance.supportsTextChat && !instance.isEmbedding)} /> : <StewardChatView modelSelector={<ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={instanceCards.filter(instance => (instance.status === 'ready' || instance.status === 'running') && instance.supportsTextChat && !instance.isEmbedding)} />} />
+              stewardOpen ? <ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={chatModels} /> : <StewardChatView modelSelector={<ReadyModelSelect value={STEWARD_MODEL_ID} onChange={value => dispatch(chatActions.selectModel(value))} fabricEnabled models={chatModels} />} />
             ) : activeRoute === 'chat' ? (
               <ChatView
+                catalog={chatCatalog}
                 readyInstances={instanceCards}
                 realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
               />

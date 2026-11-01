@@ -6457,3 +6457,63 @@ transport, numeric I2P proxy and finite limits so a UI can show an interrupted
 job after reload. It neither renews network consent nor changes the original
 signed reference. Fresh uploaded invitation previews omit this local field;
 a recipient must still explicitly confirm the exact I2P policy to Resume.
+
+
+### Experimental capability chat gateway
+
+**GET** `/v1/inference/gateway` returns `contract: chat.completions@0.1.0`
+and this API host's Ed25519 `public_key`. It accepts no parameters and exposes
+no private signing key or provider credential. The key grants no permission;
+a separately installed capability must hold an explicit owner delegation.
+First use atomically publishes a complete, owner-protected key; concurrent
+requests retain the same identity, and interrupted creation can be retried.
+
+**GET** `/models` and **GET** `/v1/models` additionally list fresh, owner-enabled
+capability models with namespaced IDs `capability/<callable-id>/<model-slug>`
+and an `inference_capability` object containing processing domain, usage class,
+usage label/link and expiry. They are separate from mounted instances and are
+omitted from the `status=downloaded` filter. Discovery reads bounded cached
+catalogs concurrently from up to eight local installed providers with one-second
+individual and three-second aggregate deadlines; completed reads survive expiry.
+It does not fetch an
+upstream account catalog or token. Missing/stale catalogs withdraw availability.
+The dashboard withdraws cached capability choices at their advertised expiry
+even when catalog polling fails. Its native artifact download picker excludes
+these delegated choices; they remain available in the chat selector.
+
+**POST** `/v1/chat/completions` accepts these exact IDs with ordinary `messages`,
+`stream` and `stream_options.include_usage`. Provider-supported request controls
+and full conversation history pass to the capability for independent validation.
+Unsupported controls are refused by that provider rather than silently ignored.
+The optional `inference_policy` accepts `allow_external`, `local_only`, or
+`included_only`; local-only rejects nonlocal catalogs, and included-only rejects
+usage outside `none`/`included_only`, with 403. Unknown request fields return 400
+and signed inputs larger than 48 KiB return 413 before provider submission.
+Both wire modes cap accumulated serialized delta characters at 262,144; overflow
+closes the provider stream and returns an `output_limit` error before forwarding
+the exceeding delta.
+
+Capability inference requires the direct owner dashboard authority used by plugin
+owner administration: same-origin `Origin` (or Referer),
+`X-Skulk-Dashboard: pairing-v1`, and a direct localhost or verified Tailscale peer.
+Ordinary LAN, forwarded, relay and paired-bearer requests cannot inherit it.
+Native mounted-model inference retains its existing behavior. A missing or no
+longer delegated capability model returns 404; discovery/start failure returns
+503. Public-key creation/read failure also returns 503.
+
+The gateway signs exact request/target/catalog facts with a one-use nonce and
+short expiry. The capability independently enforces its owner policy and account
+scope before upstream submission. Streaming emits standard text, reasoning and
+function-call deltas, optional usage, and requires both provider and transport
+completion before a success finish and `[DONE]`. Errors after headers emit a
+bounded error object without a success terminator; non-streaming collection uses
+the same cancellable transport and returns an error JSON body on such failure.
+Client disconnect closes the provider session and retires its local receiver,
+including closure immediately after the first assistant-role event. No provider-specific account
+integration, TTS engine or tool executor is added to Core. The dashboard's normal
+code rendering, client tool handling and mounted speech playback compose with
+these text streams. This adapter does not expose capability models through the
+instance-constrained, Responses or Claude adapters.
+Rejected provider events or invalid function-call deltas abort the dashboard's
+active HTTP request so the provider cancellation path runs without waiting for
+further output.

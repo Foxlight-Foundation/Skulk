@@ -266,8 +266,8 @@ it('turns a node on from its setup page with one action and ends ready to open',
   await act(async () => { await vi.waitFor(() => expect(button('Turn on')).not.toBeNull(), { timeout: 5000 }); });
   expect(host.textContent).not.toContain('Its screens appear here');
   await contains('Once it is running, Open Example Studio appears here and opens it in a new tab.');
-  // The release lists no action that can spend money.
-  await contains('Turning it on runs its setup checks again. It cannot spend money.');
+  // An absent billable declaration must not be presented as free usage.
+  await contains('Turning it on runs its setup checks again. This release does not declare billable actions. Review its settings and any connected provider account before enabling it.');
   await click('Turn on');
   await setupTitleIs('Example Studio is ready');
   expect(enables().map((post) => post.body)).toEqual([{ operation: 'enable', expectedRevision: 0, expectedSchemaDigest: schemaDigest }]);

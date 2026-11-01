@@ -337,7 +337,8 @@ class CapabilityStreamSession:
     """Opening result, one-shot output, optional input, and explicit cancellation.
 
     ``cancel_output`` lets consumers stop provider work even when their own task
-    is already cancelled and cannot rely on async-generator finalization.
+    is already cancelled and cannot rely on async-generator finalization. It
+    also retires the local receiver when no output frame has been consumed.
     """
 
     open_result: CapabilityResult

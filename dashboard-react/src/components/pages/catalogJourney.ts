@@ -148,6 +148,8 @@ export function platformLabel(entry: Pick<CatalogEntry, 'runtime_platform' | 'pl
 }
 
 /** Whether any of the release's actions can spend money. */
+// Steward risk declarations are positive metadata, not proof of free usage or
+// local execution when absent. Consumers must not turn false into either claim.
 export function canSpendMoney(entry: Pick<CatalogEntry, 'steward_risks'>): boolean {
   return entry.steward_risks.includes('billable');
 }

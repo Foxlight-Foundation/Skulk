@@ -175,6 +175,8 @@ export function ModelSearchModal({
   const modalRef = useRef<HTMLDivElement>(null);
   useModalFocus(open, modalRef, onClose);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  // Delegated inference is selectable in chat but has no native artifact to download.
+  const downloadableModels = useMemo(() => models.filter(model => !model.inference_capability), [models]);
   const [favorites, setFavorites] = useState<Set<string>>(() => loadFavorites());
   const [recentIds, setRecentIds] = useState<string[]>(() => loadRecentIds());
   const [hfResults, setHfResults] = useState<HuggingFaceModel[]>([]);
@@ -446,7 +448,7 @@ export function ModelSearchModal({
             heading={t('modelSearch.title', 'Find Models')}
             defaultFitsOnly={fleet !== null}
             onClose={onClose}
-            models={models}
+            models={downloadableModels}
             selectedModelId={null}
             favorites={favorites}
             recentModelIds={recentIds}

@@ -184,6 +184,7 @@ def _api_with_store(store_client: _RegistryStoreClient) -> API:
     """Create the minimal API state needed by the model-list projection."""
 
     api = object.__new__(API)
+    api._extensions = None
     api._store_client = cast(ModelStoreClient, cast(object, store_client))
     api._model_list_store_records_cache = {}
     api._model_list_store_records_cached_at = 0.0

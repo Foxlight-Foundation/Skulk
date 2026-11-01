@@ -220,8 +220,12 @@ a system service and asks for your administrator password once (see
    or platform; its publisher has to build one.
 3. The review shows what the release's signed listing says: publisher, version,
    download size, platforms, permissions, the screens it opens, the capabilities
-   it adds, and whether any of its actions can spend money. Accept the
-   permissions, then select **Install** or **Update**.
+   it adds, and whether it declares billable actions. An absent billable
+   declaration does not guarantee free usage or local execution. Review the
+   permissions, capability settings and any connected provider account before
+   enabling it. Local model downloads show their licences in the Model Store;
+   hosted model availability and usage come from the capability and provider
+   account. Accept the permissions, then select **Install** or **Update**.
 4. The page follows the download, staging, and activation. You can leave it:
    when you return in the same browser, **Browse** picks the install up where it
    was and reads its progress back instead of starting it again. Once it runs,

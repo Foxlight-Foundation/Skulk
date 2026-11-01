@@ -54,14 +54,14 @@ export function CatalogReviewPanel({ offer, onInstall, onCancel }: CatalogReview
       {entry.operations ? <Small>{t('plugins.catalog.durable', 'Its long jobs are recorded on this host and survive a restart.')}</Small> : null}
     </Section> : null}
     <Section>
-      <SectionLabel>{t('plugins.catalog.money', 'Money')}</SectionLabel>
+      <SectionLabel>{t('plugins.catalog.usageAndBilling', 'Usage and billing')}</SectionLabel>
       <p>{canSpendMoney(entry)
-        ? t('plugins.catalog.moneyBillable', 'Some of its actions can spend money. Each one asks for your approval first.')
-        : t('plugins.catalog.moneyNone', 'It cannot spend money. Its actions run on your own hardware.')}</p>
+        ? t('plugins.catalog.billingDeclared', 'This release declares actions that can spend money. Review its settings and usage policy before enabling it.')
+        : t('plugins.catalog.billingNotDeclared', 'This release does not declare billable actions. That does not guarantee free usage. Review its permissions, settings and any connected provider account.')}</p>
     </Section>
     <Section>
       <SectionLabel>{t('plugins.catalog.models', 'Models')}</SectionLabel>
-      <p>{t('plugins.catalog.modelsNote', 'Any models it uses are downloaded separately, from the Model Store, which shows each model’s licence before download.')}</p>
+      <p>{t('plugins.catalog.modelSources', 'Local model downloads show their licences in the Model Store. Hosted model availability and usage are managed through the capability and its connected provider account.')}</p>
     </Section>
     <Consent>
       <input id="catalog-consent" type="checkbox" checked={accepted} onChange={(event) => setAccepted(event.target.checked)} />

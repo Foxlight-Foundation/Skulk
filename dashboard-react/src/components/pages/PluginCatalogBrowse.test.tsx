@@ -181,10 +181,15 @@ it('updates an installed capability from its catalog listing after one consent',
   await render();
   await contains('Browse capabilities');
   await contains('Update available');
+  await contains('Billing not declared');
+  expect(host.textContent).not.toContain('Cannot spend money');
   await contains('Release 50 is installed; release 51 is built for this host.');
   await click('Review update');
   await contains('Review the update to Example Studio');
-  await contains('It cannot spend money.');
+  await contains('This release does not declare billable actions. That does not guarantee free usage.');
+  expect(host.textContent).not.toContain('It cannot spend money');
+  expect(host.textContent).not.toContain('Its actions run on your own hardware');
+  await contains('Hosted model availability and usage are managed through the capability');
   expect(button('Update')?.disabled).toBe(true);
   await act(async () => { (host.querySelector('#catalog-consent') as HTMLInputElement).click(); });
   expect(button('Update')?.disabled).toBe(false);
@@ -200,6 +205,15 @@ it('updates an installed capability from its catalog listing after one consent',
   expect(posts[1].body).toMatchObject({ runtime_digest: newDigest, expected_source_revision: 7 });
   expect(posts[2].body).toMatchObject({ action: 'activate', expected_revision: 3, runtime_digest: newDigest, accept_permissions: true });
   expect(readJourneys()).toEqual([]);
+});
+
+it('reports declared billing without promising per-request approval', async () => {
+  listed = listed.map((entry) => ({ ...entry, steward_risks: ['billable'] }));
+  await render();
+  await contains('Billable actions declared');
+  await click('Review update');
+  await contains('This release declares actions that can spend money.');
+  expect(host.textContent).not.toContain('Each one asks for your approval first');
 });
 
 it('lets a host that assigns trust revisions pick the next one itself', async () => {

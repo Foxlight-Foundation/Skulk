@@ -1,3 +1,5 @@
+import { capabilityChatChoices, useChatModelCatalog, type ChatModelCatalog } from '../../hooks/useChatModelCatalog';
+import { mergeToolCallDeltas, type StreamToolCall } from './chatToolCalls';
 import { ImageParamsPanel, DEFAULT_IMAGE_PARAMS, type ImageGenerationParams } from '../display/ImageParamsPanel';
 import { requestDashboardImages } from './chatImageRequest';
 import { ReadyModelSelect } from '../chat/ReadyModelSelect';
@@ -15,7 +17,7 @@ import type {
   ChatUploadedFile,
   ChatVoiceOption,
 } from '../../types/chat';
-import { modelSupportsTextChat, type ModelInfo } from '../../types/models';
+import { modelSupportsTextChat } from '../../types/models';
 import type { InstanceCardData } from '../layout/InstancePanel';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
@@ -50,6 +52,8 @@ import { buildApiMessages, type ApiMessagePayload } from './chatApiPayload';
 /* ── Types ────────────────────────────────────────────── */
 
 export interface ChatViewProps {
+  /** App-owned catalog survives switching to the Skulk conversation. */
+  catalog?: ChatModelCatalog;
   /** Ready instances the user can chat with. */
   readyInstances: InstanceCardData[];
   /** Whether this API node currently advertises the realtime STT provider. */
@@ -199,14 +203,6 @@ async function responseErrorMessage(response: Response): Promise<string> {
   return body;
 }
 
-interface StreamToolCall {
-  id: string;
-  type?: string;
-  function?: {
-    name?: string;
-    arguments?: string;
-  };
-}
 
 interface WebSearchToolResponse {
   query: string;
@@ -506,6 +502,7 @@ async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<strin
 
 export function ChatView({
   readyInstances,
+  catalog,
   realtimeTranscriptionAvailable = false,
   className,
 }: ChatViewProps) {
@@ -566,7 +563,7 @@ export function ChatView({
   const [modelImageInputSupport, setModelImageInputSupport] = useState<Record<string, boolean>>({});
   const [modelBuiltinTools, setModelBuiltinTools] = useState<Record<string, string[]>>({});
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
-  const [modelCatalogById, setModelCatalogById] = useState<Record<string, ModelInfo>>({});
+  const { models: modelCatalogById, loaded: modelCatalogLoaded } = useChatModelCatalog(catalog);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [voiceCatalogError, setVoiceCatalogError] = useState<string | null>(null);
   const [voiceOptions, setVoiceOptions] = useState<ChatVoiceOption[]>([]);
@@ -626,37 +623,23 @@ export function ChatView({
     });
   }, [setChatScrollTop]);
 
-  // Fetch model capabilities and context lengths
+  // Derive model controls from the same catalog used by every chat selector.
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch('/models');
-        if (!res.ok) return;
-        const data = await res.json() as { data?: ModelInfo[] };
-        const toggleSupport: Record<string, boolean> = {};
-        const imageSupport: Record<string, boolean> = {};
-        const builtinTools: Record<string, string[]> = {};
-        const ctxLens: Record<string, number> = {};
-        const catalogById: Record<string, ModelInfo> = {};
-        for (const m of data.data ?? []) {
-          if (m.id) {
-            catalogById[m.id] = m;
-            toggleSupport[m.id] = m.resolved_capabilities?.supports_thinking_toggle ?? false;
-            imageSupport[m.id] = m.resolved_capabilities?.supports_image_input ?? false;
-            builtinTools[m.id] = m.tooling?.builtin_tools
-              ?? m.resolved_capabilities?.builtin_tools
-              ?? [];
-          }
-          if (m.id && m.context_length) ctxLens[m.id] = m.context_length;
-        }
-        setModelThinkingToggleSupport(toggleSupport);
-        setModelImageInputSupport(imageSupport);
-        setModelBuiltinTools(builtinTools);
-        setModelContextLengths(ctxLens);
-        setModelCatalogById(catalogById);
-      } catch { /* ignore */ }
-    })();
-  }, []);
+    const toggleSupport: Record<string, boolean> = {};
+    const imageSupport: Record<string, boolean> = {};
+    const builtinTools: Record<string, string[]> = {};
+    const contextLengths: Record<string, number> = {};
+    for (const model of Object.values(modelCatalogById)) {
+      toggleSupport[model.id] = model.inference_capability?.features?.includes('reasoning_toggle') ?? model.resolved_capabilities?.supports_thinking_toggle ?? false;
+      imageSupport[model.id] = model.inference_capability?.features?.includes('image_input') ?? model.resolved_capabilities?.supports_image_input ?? false;
+      builtinTools[model.id] = model.inference_capability?.features?.includes('function_tools') ? ['web_search'] : model.tooling?.builtin_tools ?? model.resolved_capabilities?.builtin_tools ?? [];
+      if (model.context_length) contextLengths[model.id] = model.context_length;
+    }
+    setModelThinkingToggleSupport(toggleSupport);
+    setModelImageInputSupport(imageSupport);
+    setModelBuiltinTools(builtinTools);
+    setModelContextLengths(contextLengths);
+  }, [modelCatalogById]);
 
   const contextLength = selectedModelId ? modelContextLengths[selectedModelId] ?? 0 : 0;
 
@@ -683,7 +666,10 @@ export function ChatView({
 
   // Ready models
   const readyModels = useMemo(
-    () => readyRunnableInstances.filter((i) => !i.isEmbedding && modelSupportsTextChat(modelCatalogById[i.modelId])),
+    () => [
+      ...readyRunnableInstances.filter((i) => !i.isEmbedding && modelSupportsTextChat(modelCatalogById[i.modelId])),
+      ...capabilityChatChoices(modelCatalogById),
+    ],
     [modelCatalogById, readyRunnableInstances],
   );
 
@@ -720,15 +706,16 @@ export function ChatView({
     return options;
   }, [modelCatalogById, readyRunnableInstances]);
 
-  // Auto-select first ready model if none selected
+  // Keep a saved capability conversation while its first catalog is loading.
   useEffect(() => {
+    if (selectedModelId?.startsWith('capability/') && !modelCatalogLoaded) return;
     if (
       readyModels.length > 0
       && (!selectedModelId || !readyModels.some((model) => model.modelId === selectedModelId))
     ) {
       selectModel(readyModels[0].modelId);
     }
-  }, [selectedModelId, readyModels, selectModel]);
+  }, [selectedModelId, readyModels, selectModel, modelCatalogLoaded]);
 
   useEffect(() => {
     if (readyTranscriptionModels.length === 0) {
@@ -1333,6 +1320,7 @@ export function ChatView({
             try {
               const parsed = JSON.parse(data) as {
                 id?: string;
+                error?: { message?: string; code?: string };
                 choices?: Array<{
                   delta?: {
                     content?: string;
@@ -1341,6 +1329,7 @@ export function ChatView({
                   };
                 }>;
               };
+              if (parsed.error) throw new Error(parsed.error.message ?? 'Capability inference failed.');
               if (parsed.id) {
                 activeCommandIdRef.current = parsed.id;
               }
@@ -1397,7 +1386,7 @@ export function ChatView({
               }
 
               if (delta?.tool_calls?.length) {
-                iterationToolCalls.push(...delta.tool_calls);
+                mergeToolCallDeltas(iterationToolCalls, delta.tool_calls);
               }
 
               if (hasToken) {
@@ -1410,8 +1399,8 @@ export function ChatView({
                   }
                 }
               }
-            } catch {
-              // skip malformed JSON
+            } catch (error) {
+              if (!(error instanceof SyntaxError)) throw error;
             }
           }
         }
@@ -1478,6 +1467,9 @@ export function ChatView({
         );
       }
     } catch (err) {
+      // A rejected provider event or tool delta ends our ownership of the
+      // response even when the server is still producing output.
+      controller.abort();
       sentenceQueue?.stop();
       if (speechSentenceQueueRef.current === sentenceQueue) {
         speechSentenceQueueRef.current = null;
@@ -1648,7 +1640,7 @@ export function ChatView({
     );
   }
 
-  const modelSelector = (readyModels.length > 1 || stewardStatus?.enabled) ? (
+  const modelSelector = (readyModels.length > 1 || stewardStatus?.enabled || modelCatalogById[selectedModelId ?? '']?.inference_capability) ? (
     <ReadyModelSelect value={selectedModelId} onChange={selectModel} fabricEnabled={stewardStatus?.enabled === true} models={readyModels} />
   ) : undefined;
 
@@ -1672,6 +1664,11 @@ export function ChatView({
         />
       </MessagesScroll>
       <InputArea>
+        {modelCatalogById[selectedModelId ?? '']?.inference_capability && <p role="status">
+          {modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_label}
+          {' · '}{modelCatalogById[selectedModelId ?? ''].inference_capability?.processing_domain} processing
+          {modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_url && <>{' · '}<a href={modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_url ?? undefined} target="_blank" rel="noopener noreferrer">Manage usage</a></>}
+        </p>}
         {selectedImageProfile && <ImageParamsPanel params={imageParams} onChange={setImageParams} imageProfile={selectedImageProfile} streamingAvailable={false} />}
         <ChatForm
           onSend={handleSend}

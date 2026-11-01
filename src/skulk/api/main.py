@@ -112,6 +112,7 @@ from skulk.api.field_telemetry import (
     prepare_telemetry_config_update,
     tap_generation_stream,
 )
+from skulk.api.inference_gateway import ChatCatalog, GatewaySigner, chat_response
 from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import (
     fetch_card_summary,
@@ -130,6 +131,7 @@ from skulk.api.node_health import (
     live_skulk_build_mismatch,
 )
 from skulk.api.operator_auth import (
+    authorize_plugin_owner_request,
     authorize_plugin_request,
     create_operator_auth_router,
 )
@@ -401,6 +403,7 @@ from skulk.shared.backends import (
 from skulk.shared.constants import (
     DASHBOARD_DIR,
     SKULK_CACHE_HOME,
+    SKULK_DATA_HOME,
     SKULK_EVENT_LOG_DIR,
     SKULK_IMAGE_CACHE_DIR,
     SKULK_IMAGE_TRANSPORT_DEBUG,
@@ -2125,6 +2128,9 @@ class API:
         )
         self._reconciliation_lock = asyncio.Lock()
         self._config_path = resolve_config_path()
+        self._inference_signer = GatewaySigner(
+            SKULK_DATA_HOME / "inference" / "gateway.key"
+        )
         # Field telemetry (opt-in, consent-gated in skulk.yaml). The config
         # provider re-reads the file per check so dashboard consent changes
         # apply without a restart; the hardware provider snapshots the
@@ -2772,6 +2778,17 @@ class API:
                 "verification state, and warn-only advisories."
             ),
         )(self.get_models)
+        self.app.get(
+            "/v1/inference/gateway",
+            tags=["Capabilities"],
+            summary="Describe this API's inference gateway key",
+            description=(
+                "Return the public signing key for experimental capability chat. "
+                "This grants no authority. A capability owner must explicitly delegate "
+                "models and policy to this key before it can submit inference. "
+                "Private key material remains on this API host."
+            ),
+        )(self.inference_gateway_identity)
         self.app.get(
             "/v1/models",
             tags=["Models"],
@@ -6903,6 +6920,23 @@ class API:
         Returns:
             A streaming or collected chat-completions response.
         """
+        if str(payload.model).startswith("capability/"):
+            # Account-backed inference needs its own explicit delegation. The
+            # first gateway contract admits only direct owner requests; paired
+            # devices and ordinary LAN requests cannot inherit that authority.
+            await authorize_plugin_owner_request(request)
+            raw = await request.body()
+            if len(raw) > 49152:
+                raise HTTPException(413, "Capability chat input exceeds its byte bound")
+            try:
+                payload = ChatCompletionRequest.model_validate_json(
+                    raw, strict=True, extra="forbid"
+                )
+            except ValueError:
+                raise HTTPException(
+                    400, "Unsupported or invalid capability chat request"
+                ) from None
+            return await self._capability_chat_completions(payload)
         installation_reader = None
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
             try:
@@ -8891,6 +8925,13 @@ class API:
                 )
 
         async def cancel_output() -> None:
+            # Explicit cancellation also owns unread receiver retirement:
+            # closing an unstarted async generator never enters its finally.
+            if receive_state.input_stream is not None:
+                self._schedule_provider_input_close(receive_state.input_stream)
+            self._provider_stream_receivers.pop(call_id, None)
+            output_sender.close()
+            output_receiver.close()
             if receive_state.cancellation_scheduled:
                 return
             receive_state.cancel_provider = True
@@ -10759,6 +10800,137 @@ class API:
             ),
         )
 
+    async def inference_gateway_identity(self) -> dict[str, str]:
+        """Return this host's public inference key, conferring no caller permission."""
+        try:
+            key = await asyncio.to_thread(self._inference_signer.public_key)
+        except (OSError, ValueError):
+            raise HTTPException(503, "Inference gateway key is unavailable") from None
+        return {"contract": "chat.completions@0.1.0", "public_key": key}
+
+    async def _capability_chat_catalogs(self) -> list[ChatCatalog]:
+        """Read bounded cached catalogs from locally installed capabilities only."""
+        if self._extensions is None:
+            return []
+        descriptors = self._extensions.capability_descriptors
+        observed: dict[int, ChatCatalog] = {}
+
+        async def read_catalog(index: int, descriptor: CapabilityDescriptor) -> None:
+            result = await self._call_capability(
+                self.node_id,
+                descriptor.id,
+                descriptor.version,
+                descriptor_revision(descriptor),
+                {},
+                timeout_seconds=1,
+            )
+            if not result.ok or not result.result:
+                return
+            try:
+                catalog = ChatCatalog.model_validate_json(json.dumps(result.result))
+            except ValueError:
+                return
+            if catalog.expires_at <= time.time():
+                return
+            if not any(
+                item.id == catalog.callable_id
+                and item.version == catalog.callable_version
+                and descriptor_revision(item) == catalog.descriptor_revision
+                and item.io_mode == "server_streaming"
+                and (item.annotations or {}).get("inference.contract")
+                == catalog.contract
+                and (item.annotations or {}).get("inference.authorization")
+                == "gateway.ed25519@0.1.0"
+                for item in descriptors
+            ):
+                return
+            observed[index] = catalog
+
+        # At most eight concurrent cached reads prevent ordering behind slow
+        # providers from starving a healthy destination. Retain completed reads
+        # even if the aggregate budget cancels the remaining handlers.
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(3):
+                async with asyncio.TaskGroup() as tasks:
+                    for index, descriptor in enumerate([
+                        item
+                        for item in descriptors
+                        if item.io_mode == "unary"
+                        and (item.annotations or {}).get("inference.catalog")
+                        == "chat.completions@0.1.0"
+                    ][:8]):
+                        tasks.create_task(read_catalog(index, descriptor))
+        catalogs: list[ChatCatalog] = []
+        for index in sorted(observed):
+            catalog = observed[index]
+            if not any(c.callable_id == catalog.callable_id for c in catalogs):
+                catalogs.append(catalog)
+        return catalogs
+
+    async def _capability_chat_completions(
+        self, payload: ChatCompletionRequest
+    ) -> StreamingResponse:
+        """Dispatch one direct-owner chat through an independently guarded capability."""
+        try:
+            catalogs = await self._capability_chat_catalogs()
+        except TimeoutError:
+            raise HTTPException(503, "Capability model discovery timed out") from None
+        selected = next(
+            (
+                (catalog, model)
+                for catalog in catalogs
+                for model in catalog.models
+                if catalog.model_id(model) == str(payload.model)
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(
+                404, "Capability model is unavailable or no longer delegated"
+            )
+        catalog, model = selected
+        if (
+            payload.inference_policy == "local_only"
+            and catalog.processing_domain != "local"
+        ) or (
+            payload.inference_policy == "included_only"
+            and catalog.usage not in {"none", "included_only"}
+        ):
+            raise HTTPException(403, "Hard inference policy excludes this capability")
+        from pydantic import JsonValue, TypeAdapter
+
+        body = TypeAdapter(dict[str, JsonValue]).validate_json(
+            payload.model_dump_json(exclude_none=True, exclude_unset=True)
+        )
+        body.pop("model", None)
+        try:
+            signed = await asyncio.to_thread(
+                self._inference_signer.sign, catalog, model.id, body
+            )
+        except (OSError, ValueError):
+            raise HTTPException(503, "Inference gateway key is unavailable") from None
+        session = await self._stream_capability(
+            self.node_id,
+            catalog.callable_id,
+            catalog.callable_version,
+            catalog.descriptor_revision,
+            signed,
+            timeout_seconds=150,
+        )
+        if not session.open_result.ok:
+            raise HTTPException(503, "Capability inference could not start")
+        return StreamingResponse(
+            chat_response(
+                session,
+                model=str(payload.model),
+                stream=payload.stream,
+                include_usage=payload.stream_options is not None
+                and payload.stream_options.include_usage,
+            ),
+            media_type="text/event-stream" if payload.stream else "application/json",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
         """Return available models with cluster-authoritative installed state.
 
@@ -10815,6 +10987,32 @@ class API:
                     catalog_source="bundled",
                 )
             )
+        if status != "downloaded":
+            try:
+                catalogs = await self._capability_chat_catalogs()
+            except TimeoutError:
+                catalogs = []
+            for catalog in catalogs:
+                entries.extend(
+                    ModelListModel(
+                        id=catalog.model_id(model),
+                        name=model.name,
+                        owned_by="capability",
+                        description="Owner-delegated inference capability",
+                        tasks=["TextGeneration"],
+                        tags=["capability", catalog.processing_domain],
+                        inference_capability={
+                            "contract": catalog.contract,
+                            "processing_domain": catalog.processing_domain,
+                            "usage": catalog.usage,
+                            "usage_label": catalog.usage_label,
+                            "usage_url": catalog.usage_url,
+                            "expires_at": catalog.expires_at,
+                            "features": list(model.features),
+                        },
+                    )
+                    for model in catalog.models
+                )
         return ModelList(data=entries)
 
     async def list_remote_code_approvals(self) -> list[RemoteCodeApprovalView]:
