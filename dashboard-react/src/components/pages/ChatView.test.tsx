@@ -91,6 +91,7 @@ afterEach(async () => {
   root = null;
   container = null;
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe('ChatView multimodal requests', () => {
@@ -466,6 +467,35 @@ describe('ChatView native images', () => {
 });
 
 describe('ChatView delegated inference capabilities', () => {
+  it.each([
+    { error: { message: 'Provider refused the request' } },
+    { choices: [{ delta: { tool_calls: [{ index: 32 }] } }] },
+  ])('aborts an open response when a provider event is rejected: %j', async event => {
+    let requestSignal: AbortSignal | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/models') return new Response(JSON.stringify({ data: [{ id: 'org/vision-model' }] }));
+      if (String(input) === '/v1/chat/completions') {
+        requestSignal = init?.signal ?? null;
+        return new Response(new ReadableStream({
+          start(stream) {
+            stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+            // Keep output open: only cancellation can retire a live provider.
+            init?.signal?.addEventListener('abort', () => stream.close(), { once: true });
+          },
+        }), { headers: { 'Content-Type': 'text/event-stream' } });
+      }
+      return new Response(JSON.stringify({ enabled: false }));
+    }));
+    await renderVisionChat();
+    const composer = container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!;
+    const send = container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!;
+    await act(async () => { await userEvent.fill(composer, 'Hello'); await userEvent.click(send); });
+    await waitForReact(() => Object.values(store.getState().chat.conversations).some(conversation =>
+      conversation.messages.some(message => message.role === 'assistant' && message.content.startsWith('Error:'))), 'rejected event did not finish the turn');
+    expect(requestSignal).not.toBeNull();
+    expect((requestSignal as AbortSignal | null)?.aborted).toBe(true);
+  });
+
   it('renders capability code and speaks its text through mounted TTS', async () => {
     const modelId = 'capability/fixture.chat/code';
     const spoken: Array<{ model: string; input: string }> = [];
@@ -514,6 +544,35 @@ describe('ChatView delegated inference capabilities', () => {
     expect(spoken.some(request => request.input.includes("print('hello')"))).toBe(false);
     store.dispatch(chatActions.setAutoSpeakAssistant(false));
   });
+});
+
+it('withdraws expired provider choices while catalog polling fails', async () => {
+  const started = Date.now();
+  let requests = 0;
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+  vi.setSystemTime(started);
+  vi.stubGlobal('fetch', vi.fn(async () => {
+    requests += 1;
+    if (requests > 1) throw new Error('catalog unavailable');
+    return new Response(JSON.stringify({ data: [
+      { id: 'org/native', name: 'Native model' },
+      { id: 'capability/fixture.chat/short', name: 'Short provider', inference_capability: { expires_at: started / 1000 + 20 } },
+      { id: 'capability/fixture.chat/long', name: 'Long provider', inference_capability: { expires_at: started / 1000 + 40 } },
+    ] }));
+  }));
+  function Choices() {
+    const catalog = useChatModelCatalog();
+    return <output>{Object.values(catalog.models).map(model => model.name).join(', ')}</output>;
+  }
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+  await act(async () => { root?.render(<Choices />); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(container.textContent).toBe('Native model, Short provider, Long provider');
+  await act(async () => { await vi.advanceTimersByTimeAsync(21000); });
+  expect(requests).toBeGreaterThan(1);
+  expect(container.textContent).toBe('Native model, Long provider');
+  await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
+  expect(container.textContent).toBe('Native model');
 });
 
 it('preserves a saved capability conversation while native models are already ready', async () => {

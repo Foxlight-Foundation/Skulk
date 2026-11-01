@@ -1467,6 +1467,9 @@ export function ChatView({
         );
       }
     } catch (err) {
+      // A rejected provider event or tool delta ends our ownership of the
+      // response even when the server is still producing output.
+      controller.abort();
       sentenceQueue?.stop();
       if (speechSentenceQueueRef.current === sentenceQueue) {
         speechSentenceQueueRef.current = null;

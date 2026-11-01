@@ -27,7 +27,24 @@ export function useChatModelCatalog(provided?: ChatModelCatalog): ChatModelCatal
     const timer = window.setInterval(() => { void refresh(); }, 15000);
     return () => { disposed = true; window.clearInterval(timer); };
   }, [shared]);
-  return provided ?? catalog;
+  const current = provided ?? catalog;
+  useEffect(() => {
+    if (shared) return;
+    const expiries = Object.values(catalog.models)
+      .flatMap(model => model.inference_capability ? [model.inference_capability.expires_at * 1000] : []);
+    if (expiries.length === 0) return;
+    // Polling can fail or hang. Withdraw cached choices at their own expiry
+    // so every consumer, including memoized selectors, sees fresh availability.
+    const timer = window.setTimeout(() => {
+      setCatalog(previous => ({
+        ...previous,
+        models: Object.fromEntries(Object.entries(previous.models).filter(([, model]) =>
+          !model.inference_capability || model.inference_capability.expires_at * 1000 > Date.now())),
+      }));
+    }, Math.min(2147483647, Math.max(0, Math.min(...expiries) - Date.now())));
+    return () => window.clearTimeout(timer);
+  }, [catalog.models, shared]);
+  return current;
 }
 
 /** Return delegated model choices without inventing native mounted instances. */
