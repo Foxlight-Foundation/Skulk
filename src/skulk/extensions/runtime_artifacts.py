@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal, final
+from typing import Annotated, Literal, Self, final
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -22,7 +22,14 @@ from packaging.specifiers import SpecifierSet
 from packaging.tags import sys_tags
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    model_validator,
+)
 
 from skulk.extensions.runtime_files import is_desktop_metadata, read_private
 
@@ -137,7 +144,7 @@ ACCEPTED_RELEASE_PROTOCOLS: tuple[int, ...] = (1,)
 one, the previous. A capability published against the previous protocol keeps
 installing for one release cycle; anything else is refused by name."""
 
-ACCEPTED_RUNTIME_PROTOCOLS: tuple[int, ...] = (2,)
+ACCEPTED_RUNTIME_PROTOCOLS: tuple[int, ...] = (2, 3)
 """Isolated runtime envelope protocols this host installs, on the same rule."""
 
 
@@ -219,6 +226,25 @@ class _RuntimeClaims(_Contract):
     platform: RuntimePlatform
     release: _ReleaseClaims
     wheels: tuple[RuntimeWheel, ...] = Field(min_length=1, max_length=64)
+    application_roots: tuple[
+        Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=128)],
+        ...,
+    ] = Field(
+        default=(),
+        max_length=8,
+        description="V3 signed application dependency roots in the wheel inventory.",
+    )
+
+    @model_validator(mode="after")
+    def validate_application_roots(self) -> Self:
+        """Keep v2 wire shape intact and require explicit, unique v3 roots."""
+        if self.protocol == 2 and "application_roots" in self.model_fields_set:
+            raise ValueError("runtime v2 cannot declare application roots")
+        if self.protocol == 3 and not self.application_roots:
+            raise ValueError("runtime v3 requires application roots")
+        if len(set(self.application_roots)) != len(self.application_roots):
+            raise ValueError("runtime has duplicate application roots")
+        return self
 
 
 class _Signed(_Contract):
@@ -362,7 +388,7 @@ def _check_protocol_window(runtime: dict[str, JsonValue]) -> None:
 def verify_runtime(
     metadata: bytes, trust: RuntimeTrust, host: QualifiedHost, *, now: int
 ) -> VerifiedRuntime:
-    """Authenticate complete v2 metadata, then enforce local trust and compatibility.
+    """Authenticate runtime metadata, then enforce local trust and compatibility.
 
     Plugin-specific manifest fields are signed opaque data. No plugin package,
     provider policy or private dependency is imported to inspect a release.
@@ -417,6 +443,8 @@ def verify_runtime(
         or sum(wheel.size for wheel in claims.wheels) > 536870912
     ):
         raise ValueError("ambiguous or oversized runtime inventory")
+    if not set(claims.application_roots) <= set(inventory):
+        raise ValueError("runtime omits an application dependency root")
     if (
         hashlib.sha256(canonical_json(dict(inventory))).hexdigest()
         != release.dependency_lock_sha256
@@ -545,6 +573,8 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
     expanded = 0
     inventory = runtime.inventory
     launchers: list[str] = []
+    providers: set[str] = set()
+    dependencies: dict[str, tuple[str, ...]] = {}
     for wheel in runtime.claims.wheels:
         content = read_private(directory / wheel.filename, wheel.size)
         if (
@@ -591,7 +621,11 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
             # Only after the entry-count, expanded-size and single-metadata
             # bounds hold: a malformed wheel must not get decompression work
             # out of the launcher scan before it is rejected.
-            launchers += runtime_launchers(archive)
+            declared = runtime_launchers(archive)
+            launchers += declared
+            if declared:
+                providers.add(str(name))
+            required: list[str] = []
             for value in parsed.get_all("Requires-Dist", []):
                 requirement = Requirement(str(value))
                 if requirement.marker is not None and not requirement.marker.evaluate(
@@ -606,6 +640,8 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
                     or Version(inventory[dependency]) not in requirement.specifier
                 ):
                     raise ValueError("incomplete or incompatible wheel dependency")
+                required.append(dependency)
+            dependencies[str(name)] = tuple(required)
         result[wheel.filename] = content
     if len(launchers) != len(set(launchers)):
         # Which distribution answers importlib.metadata first is not bound by
@@ -618,4 +654,18 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
         raise ValueError(
             "bundle carries no owner entrypoint and no signed wheel declares one"
         )
+    if runtime.claims.protocol == 3:
+        # V3 launchers declare their own dependency edges. The host can verify
+        # the complete graph without importing a plugin or knowing SDK-specific
+        # package names. V2 retains its original admission behavior.
+        pending = [*providers, *runtime.claims.application_roots]
+        visited: set[str] = set()
+        while pending:
+            name = pending.pop()
+            if name in visited:
+                continue
+            visited.add(name)
+            pending.extend(dependencies[name])
+        if visited != set(inventory):
+            raise ValueError("runtime contains undeclared dependency packages")
     return result

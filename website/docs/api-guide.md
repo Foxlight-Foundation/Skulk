@@ -4885,6 +4885,17 @@ for automation, source rotation and advanced lifecycle operations.
 
 ### Stable local manager runtime
 
+Managed capability installation accepts runtime envelopes 2 and 3. The release
+inspection, stage and activation routes retain their existing methods, parameters,
+authentication and explicit consent flow. V3's signed metadata adds
+`application_roots`, one to eight unique canonical distribution names contained
+in the exact wheel inventory. Before installation, the host verifies the complete
+dependency graph from those roots and launcher-provider wheels; it refuses missing,
+incompatible, URL/extra-dependent or undeclared packages without contacting an
+index. Existing v2 releases retain their signed shape and behavior. A host outside
+the declared protocol window returns the authenticated update-or-select-another-
+release diagnostic; a compatible reader must be deployed before publishing v3.
+
 The local setup implementation stages a separate service copy through
 `stage_service_runtime(root)` and selects it through
 `activate_service_runtime(root, snapshot)`. These are owner-local setup functions,

@@ -45,6 +45,8 @@ def artifacts(
     duplicate_launcher: bool = False,
     platform: str = "macos-arm64",
     runtime_protocol: int = 2,
+    application_roots: tuple[str, ...] | None = None,
+    unrelated_wheel: bool = False,
     release_protocol: int = 1,
     bundle_id: str = "example.plugin",
     manifest_extra: dict[str, JsonValue] | None = None,
@@ -78,7 +80,7 @@ def artifacts(
             archive.writestr(name, content)
     wheel = buffer.getvalue()
     extra: bytes | None = None
-    if duplicate_launcher:
+    if duplicate_launcher or unrelated_wheel:
         # A second signed wheel claiming the same launcher: metadata order,
         # not the signature, would decide which owner starts.
         dup = io.BytesIO()
@@ -89,9 +91,11 @@ def artifacts(
             + "METADATA": "Metadata-Version: 2.1\nName: example-dup\nVersion: 1.0\n",
             dup_prefix
             + "WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
-            dup_prefix
-            + "entry_points.txt": "[skulk.capability_runtime]\nowner = example_dup:main\n",
         }
+        if duplicate_launcher:
+            dup_files[dup_prefix + "entry_points.txt"] = (
+                "[skulk.capability_runtime]\nowner = example_dup:main\n"
+            )
         dup_files[dup_prefix + "RECORD"] = (
             "".join(f"{name},,\n" for name in dup_files) + dup_prefix + "RECORD,,\n"
         )
@@ -173,6 +177,10 @@ def artifacts(
         },
         "wheels": wheel_claims,
     }
+    if runtime_protocol == 3 or application_roots is not None:
+        payload["application_roots"] = list(
+            ("example-dep",) if application_roots is None else application_roots
+        )
     signed = canonical_json(
         {"runtime": payload, "signature": key.sign(canonical_json(payload)).hex()}
     )
@@ -216,7 +224,70 @@ def test_a_skulk_update_keeps_an_installed_release_running(tmp_path: Path) -> No
     updated = replace(host, skulk_version="1.9.4", skulk_build_sha256="f" * 64)
     assert verify_runtime(metadata, trust, updated, now=now).digest
     with pytest.raises(ValueError):
-        verify_runtime(metadata, trust, replace(updated, skulk_version="2.0.0"), now=now)
+        verify_runtime(
+            metadata, trust, replace(updated, skulk_version="2.0.0"), now=now
+        )
+
+
+@pytest.mark.parametrize(
+    "roots",
+    [
+        (),
+        ("missing",),
+        ("example-dep", "example-dep"),
+        ("Bad_Name",),
+        ("example-dep[extra]",),
+        tuple(f"root-{index}" for index in range(9)),
+    ],
+)
+def test_v3_requires_bounded_unique_present_application_roots(
+    tmp_path: Path, roots: tuple[str, ...]
+) -> None:
+    """Signed metadata cannot omit roots or grant unbounded dependency authority."""
+    metadata, trust, host = artifacts(
+        tmp_path, runtime_protocol=3, application_roots=roots
+    )
+    with pytest.raises(ValueError):
+        verify_runtime(metadata, trust, host, now=int(time.time()))
+
+
+def test_v2_keeps_original_wire_shape(tmp_path: Path) -> None:
+    """Legacy records remain valid and cannot acquire unsigned new-version claims."""
+    metadata, trust, host = artifacts(tmp_path, application_roots=("example-dep",))
+    with pytest.raises(ValueError, match="v2"):
+        verify_runtime(metadata, trust, host, now=int(time.time()))
+    original, trust, host = artifacts(tmp_path / "legacy")
+    runtime = verify_runtime(original, trust, host, now=int(time.time()))
+    assert runtime.claims.application_roots == ()
+    assert b"application_roots" not in runtime.payload
+
+
+@pytest.mark.parametrize("protocol", [2, 3])
+def test_v3_refuses_unreachable_packages_without_changing_v2(
+    tmp_path: Path, protocol: int
+) -> None:
+    """V3's graph is exact while legacy admission continues to read existing bytes."""
+    metadata, trust, host = artifacts(
+        tmp_path, runtime_protocol=protocol, unrelated_wheel=True
+    )
+    runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+    if protocol == 3:
+        with pytest.raises(ValueError, match="undeclared"):
+            verified_artifacts(runtime, tmp_path)
+    else:
+        assert len(verified_artifacts(runtime, tmp_path)) == 3
+
+
+def test_v3_root_tampering_is_refused_before_claim_interpretation(
+    tmp_path: Path,
+) -> None:
+    """A malformed changed claim is first a bad signature, never an unauthenticated hint."""
+    metadata, trust, host = artifacts(tmp_path, runtime_protocol=3)
+    metadata = metadata.replace(
+        b'"application_roots":["example-dep"]', b'"application_roots":["missing"]'
+    )
+    with pytest.raises(ValueError, match="signature"):
+        verify_runtime(metadata, trust, host, now=int(time.time()))
 
 
 @pytest.mark.parametrize(
@@ -306,12 +377,13 @@ def test_platform_family_is_derived_and_legacy_names_still_match() -> None:
     assert not platform_matches("macos-arm64", "macos-x86_64")
 
 
+@pytest.mark.parametrize("runtime_protocol", [2, 3])
 async def test_offline_stage_and_reconnect_leave_host_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime_protocol: int
 ) -> None:
     """Install an exact wheel in a fresh environment, then reuse only cached bytes."""
     source = tmp_path / "source"
-    metadata, trust, host = artifacts(source)
+    metadata, trust, host = artifacts(source, runtime_protocol=runtime_protocol)
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
     root = tmp_path / "installation"
     installer = RuntimeInstaller(root)

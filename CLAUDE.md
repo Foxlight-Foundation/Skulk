@@ -1764,6 +1764,15 @@ GitHub's API doesn't support direct image upload for PR comments. Workaround:
 
 ### Extension runtime ownership
 
+`extensions/runtime_artifacts.py` reads signed runtime envelopes 2 and 3 without
+importing plugin code. V2 retains its original shape. V3 requires 1–8 unique,
+canonical `application_roots` names in the exact wheel inventory; a static graph
+from them and launcher-provider distributions must reach every signed wheel.
+All version/URL/extra/native-tag/hash/archive checks run before offline pip.
+No package resolver or SDK import participates. Publish v3 capabilities only
+after their hosts have this compatible reader; ordinary v2 installations remain
+valid. Runtime IPC protocol and ordinary lifecycle HTTP routes are unchanged.
+
 The CLI creates and serves Node on one event loop. API runtime entry invokes
 extension startup; optional asynchronous on_stop hooks receive a shared thirty-second
 shielded cleanup budget after discovery withdrawal. CapabilityReadiness is an
