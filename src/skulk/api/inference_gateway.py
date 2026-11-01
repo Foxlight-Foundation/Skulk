@@ -101,17 +101,32 @@ class GatewaySigner:
 
     def _key(self) -> Ed25519PrivateKey:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            descriptor = os.open(
-                self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-            )
-        except FileExistsError:
-            pass
-        else:
-            with os.fdopen(descriptor, "wb") as target:
-                target.write(Ed25519PrivateKey.generate().private_bytes_raw())
-                target.flush()
-                os.fsync(target.fileno())
+        if not self.path.exists():
+            # Publish a complete, durable key without replacing a concurrent
+            # winner. Readers must never observe a first writer's empty file.
+            temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
+            try:
+                descriptor = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                )
+                with os.fdopen(descriptor, "wb") as target:
+                    target.write(Ed25519PrivateKey.generate().private_bytes_raw())
+                    target.flush()
+                    os.fsync(target.fileno())
+                try:
+                    os.link(temporary, self.path)
+                except FileExistsError:
+                    pass
+                else:
+                    parent = os.open(self.path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(parent)
+                    finally:
+                        os.close(parent)
+            finally:
+                temporary.unlink(missing_ok=True)
         descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor, "rb") as source:
             metadata = os.fstat(source.fileno())

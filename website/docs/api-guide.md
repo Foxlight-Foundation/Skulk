@@ -6465,6 +6465,8 @@ a recipient must still explicitly confirm the exact I2P policy to Resume.
 and this API host's Ed25519 `public_key`. It accepts no parameters and exposes
 no private signing key or provider credential. The key grants no permission;
 a separately installed capability must hold an explicit owner delegation.
+First use atomically publishes a complete, owner-protected key; concurrent
+requests retain the same identity, and interrupted creation can be retried.
 
 **GET** `/models` and **GET** `/v1/models` additionally list fresh, owner-enabled
 capability models with namespaced IDs `capability/<callable-id>/<model-slug>`
@@ -6475,6 +6477,9 @@ catalogs concurrently from up to eight local installed providers with one-second
 individual and three-second aggregate deadlines; completed reads survive expiry.
 It does not fetch an
 upstream account catalog or token. Missing/stale catalogs withdraw availability.
+The dashboard withdraws cached capability choices at their advertised expiry
+even when catalog polling fails. Its native artifact download picker excludes
+these delegated choices; they remain available in the chat selector.
 
 **POST** `/v1/chat/completions` accepts these exact IDs with ordinary `messages`,
 `stream` and `stream_options.include_usage`. Provider-supported request controls
@@ -6509,3 +6514,6 @@ integration, TTS engine or tool executor is added to Core. The dashboard's norma
 code rendering, client tool handling and mounted speech playback compose with
 these text streams. This adapter does not expose capability models through the
 instance-constrained, Responses or Claude adapters.
+Rejected provider events or invalid function-call deltas abort the dashboard's
+active HTTP request so the provider cancellation path runs without waiting for
+further output.
