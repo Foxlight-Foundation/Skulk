@@ -418,6 +418,34 @@ are scoped observations, not prerequisites for loading or publication. The
 [Strix Vulkan qualification record](audio-cpp-strix-qualification.md) reports one
 tested configuration without excluding other compatible hardware.
 
+### `[separation]`
+
+Native source separation uses `tasks = ["AudioSeparation"]` and a typed
+`[separation]` section. The initial `htdemucs` profile declares only this task,
+with no speech `[audio]` or generation `[music]` section. Its ordered stems are
+`drums`, `bass`, `other`, and `vocals`, each natively stereo at 44,100 Hz.
+The registry derives `audio.separate` only from this explicit task; a generic
+upstream audio pipeline tag does not establish source separation.
+
+| Field | Model truth |
+| --- | --- |
+| `family` | `htdemucs` |
+| `stems` | The exact ordered native four-role list above |
+| `sample_rate`, `audio_channels` | 44,100 Hz and two channels per stem |
+| `weights_file` | Canonical relative `.safetensors` path beneath the artifact loader root |
+| `encoder_depth` | Actual hybrid encoder depth |
+| `transformer_layers_per_branch`, `transformer_channels` | Actual per-branch transformer depth and width; top-level `n_layers` and `hidden_size` must match |
+| `trained_segment_seconds` | Positive finite training window, independent of source duration and requested split size |
+
+The inspected HTDemucs artifact has encoder depth four, five transformer layers
+per branch at width 512, and a 7.8-second trained window. Its exact artifact
+bundle contains only the selected safetensors object with its SHA-256 identity;
+`storage_size.in_bytes` equals the bundle's complete download size. Weights are
+a separate download from the engine runtime. The section does not choose a
+device, precision policy, split size, overlap, shifts or export encoding, and
+does not declare a ready model. These remain serving/admission contracts.
+`/v1/models` exposes this typed metadata as `separation`.
+
 ### `[video]`
 
 Declares audio-video generation truth independently of an engine. `modes`

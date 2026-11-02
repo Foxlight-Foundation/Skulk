@@ -41,7 +41,11 @@ async def test_native_listener_snapshot_reports_reachable_assigned_ports(
                 writer.close()
                 await writer.wait_closed()
             after = await router.host_network("v0.0.2", "test-token")
-            assert before == after
+            # Wildcard listeners report one NewListenAddr per interface. More
+            # can arrive while the real connections above yield to the swarm;
+            # existing listeners and identity must survive that discovery.
+            assert set(before.control) <= set(after.control)
+            assert before.model_copy(update={"control": after.control}) == after
     finally:
         receiving.cancel()
         with suppress(asyncio.CancelledError):

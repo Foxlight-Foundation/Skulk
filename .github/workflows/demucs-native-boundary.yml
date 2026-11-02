@@ -1,0 +1,146 @@
+name: Native separation packages
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/demucs-native-boundary.yml'
+      - 'packaging/skulk-demucs/**'
+      - 'src/skulk/provisioning/__init__.py'
+      - 'src/skulk/provisioning/demucs_package.py'
+      - 'src/skulk/provisioning/tests/test_demucs_package.py'
+      - 'src/skulk/provisioning/demucs_runtime.py'
+      - 'src/skulk/provisioning/tests/test_demucs_runtime.py'
+      - 'src/skulk/provisioning/native_install_process.py'
+      - 'src/skulk/provisioning/_native_install_guard.py'
+      - 'src/skulk/provisioning/tests/test_native_install_process.py'
+      - 'src/skulk/utils/process_groups.py'
+      - 'src/skulk/utils/runtime_files.py'
+      - 'src/skulk/extensions/runtime_files.py'
+      - 'src/skulk/_pyinstaller/__init__.py'
+      - 'src/skulk/_pyinstaller/hook-skulk.provisioning.native_install_process.py'
+      - 'packaging/pyinstaller/skulk.spec'
+      - 'src/skulk/shared/types/audio_separation.py'
+      - 'src/skulk/worker/runner/demucs/**'
+      - 'scripts/qualify_demucs_native.py'
+      - 'scripts/stage_demucs_candidate.py'
+      - 'scripts/qualify_demucs_cache.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demucs-boundary-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Offline package execution (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            target: macosx_14_0_arm64
+            runner: macos-15
+          - platform: linux-amd64
+            target: manylinux_2_28_x86_64
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            target: manylinux_2_28_aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Select an output workspace outside the source checkout
+        run: printf 'PACKAGE_ROOT=%s/demucs-package\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Prepare the supported Core controller and build tools
+        run: |
+          uv venv --managed-python --python 3.13.13 "$PACKAGE_ROOT/tools"
+          uv pip install --python "$PACKAGE_ROOT/tools/bin/python" pydantic==2.12.5 psutil==7.2.1 packaging==26.0 basedpyright==1.37.1 pytest==9.1.1 httpx==0.28.1
+          "$PACKAGE_ROOT/tools/bin/python" -c 'import os; assert hasattr(os, "waitid"), "Core requires non-reaping process observation"'
+      - name: Check producer typing and offline refusal regressions
+        env:
+          PYTHONPATH: packaging/skulk-demucs
+        run: |
+          "$PACKAGE_ROOT/tools/bin/basedpyright" --project packaging/skulk-demucs/pyrightconfig.build.json --pythonpath "$PACKAGE_ROOT/tools/bin/python"
+          "$PACKAGE_ROOT/tools/bin/python" -B -m unittest discover -s packaging/skulk-demucs/producer_tests
+      - name: Exercise installer supervision and cache policy on the actual controller platform
+        env:
+          PYTHONPATH: src
+        run: |
+          "$PACKAGE_ROOT/tools/bin/python" -B -m pytest -q -c /dev/null --noconftest -o cache_dir="$PACKAGE_ROOT/process-test-cache" src/skulk/provisioning/tests/test_native_install_process.py src/skulk/provisioning/tests/test_demucs_runtime.py --basetemp "$PACKAGE_ROOT/process-tests"
+      - name: Stage the exact inference library source outside the checkout
+        run: |
+          source_revision=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["revision"])')
+          source_repository=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["repository"])')
+          git init "$PACKAGE_ROOT/source"
+          git -C "$PACKAGE_ROOT/source" fetch --depth 1 "$source_repository" "$source_revision"
+          git -C "$PACKAGE_ROOT/source" checkout --detach FETCH_HEAD
+          test "$(git -C "$PACKAGE_ROOT/source" rev-parse HEAD)" = "$source_revision"
+      - name: Collect only hash-pinned wheels and standalone Python
+        run: |
+          "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-demucs/fetch_wheels.py '${{ matrix.platform }}' --output "$PACKAGE_ROOT/intake"
+      - name: Build twice from clean committed sources and compare complete bytes
+        run: |
+          python_archive=$(find "$PACKAGE_ROOT/intake/python" -name '*.tar.gz' -type f)
+          for build in first second; do
+            "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-demucs/build_wheel.py --repository "$PWD" --source "$PACKAGE_ROOT/source" --wrapper "$PWD/packaging/skulk-demucs/skulk_demucs" --wheelhouse "$PACKAGE_ROOT/intake/wheels" --python-archive "$python_archive" --lock "$PWD/packaging/skulk-demucs/locks/${{ matrix.platform }}-cpu-py312.lock" --target '${{ matrix.target }}' --output "$PACKAGE_ROOT/$build"
+          done
+          cmp "$PACKAGE_ROOT/first/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" "$PACKAGE_ROOT/second/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl"
+      - name: Install in a fresh private environment with no indexes or developer paths
+        env:
+          PYTHONPATH: src
+        run: |
+          package_sha=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["sha256"])')
+          "$PACKAGE_ROOT/tools/bin/python" -B scripts/stage_demucs_candidate.py --wheel "$PACKAGE_ROOT/first/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" --sha256 "$package_sha" --output "$PACKAGE_ROOT/installed"
+      - name: Verify installed native codecs, strict typing and CPU math
+        env:
+          HF_HUB_OFFLINE: '1'
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+          PYTORCH_ENABLE_MPS_FALLBACK: '0'
+        run: |
+          "$PACKAGE_ROOT/tools/bin/basedpyright" --project packaging/skulk-demucs/pyrightconfig.json --pythonpath "$PACKAGE_ROOT/installed/runtime/bin/python"
+          "$PACKAGE_ROOT/installed/runtime/bin/python" -I -B packaging/skulk-demucs/verify_runtime.py
+      - name: Prove real offline preparation, verified reuse and interrupted-selection recovery
+        env:
+          PYTHONPATH: src
+        run: |
+          package_sha=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["sha256"])')
+          payload_sha=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["payload_sha256"])')
+          "$PACKAGE_ROOT/tools/bin/python" -B scripts/qualify_demucs_cache.py --wheel "$PACKAGE_ROOT/first/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" --sha256 "$package_sha" --payload-sha256 "$payload_sha" --target '${{ matrix.target }}' --output "$PACKAGE_ROOT/cache-proof"
+      - name: Fetch only the immutable smoke-test model object separately
+        env:
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+        run: uvx --from huggingface-hub==2.4.0 hf download adefossez/HTDemucs 955717e8.safetensors --revision cbc8a9b1a87023b7fd74e7b3412e6321c0eab003 --local-dir "$PACKAGE_ROOT/model"
+      - name: Exercise actual installed load, mono resampling and complete export
+        env:
+          PYTHONPATH: src
+        run: |
+          "$PACKAGE_ROOT/tools/bin/python" scripts/qualify_demucs_native.py --interpreter "$PACKAGE_ROOT/installed/runtime/bin/python" --weights "$PACKAGE_ROOT/model/955717e8.safetensors" --output "$PACKAGE_ROOT/proof"
+      - name: Retain exact installed dependency observations
+        if: always()
+        run: |
+          if [[ -x "$PACKAGE_ROOT/installed/runtime/bin/python" ]]; then
+            "$PACKAGE_ROOT/installed/runtime/bin/python" -I -B -c 'from importlib.metadata import distributions; print("\n".join(sorted("{}=={}".format(item.metadata["Name"], item.version) for item in distributions())))' > "$PACKAGE_ROOT/native-dependencies.txt"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: demucs-candidate-${{ matrix.platform }}
+          compression-level: 0
+          path: |
+            ${{ env.PACKAGE_ROOT }}/first/*.whl
+            ${{ env.PACKAGE_ROOT }}/first/*.json
+            ${{ env.PACKAGE_ROOT }}/intake/wheel-receipt.json
+            ${{ env.PACKAGE_ROOT }}/installed/installation.json
+            ${{ env.PACKAGE_ROOT }}/installer-diagnostics/**/*.log
+            ${{ env.PACKAGE_ROOT }}/native-dependencies.txt
+            ${{ env.PACKAGE_ROOT }}/proof/measurement.json
+            ${{ env.PACKAGE_ROOT }}/proof/supervision.json
+            ${{ env.PACKAGE_ROOT }}/cache-proof/qualification.json
+            ${{ env.PACKAGE_ROOT }}/cache-proof/cache/**/diagnostics/**/*.log

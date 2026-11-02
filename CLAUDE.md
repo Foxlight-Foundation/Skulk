@@ -503,6 +503,88 @@ the serial permit to another admitted job.
 Generic `/v1/cancel/{command_id}` also uses music-specific cancellation and
 output cleanup. An ordered terminal task starts a short terminal-frame
 deadline, so a dropped `MusicChunk` cannot retain an active job indefinitely.
+
+The initiative-only source-separation native boundary is separate:
+`shared/types/audio_separation.py` validates bounded source WAVs, a complete
+aligned four-stem manifest and private job/result records.
+`stem_from_wav` independently measures PCM24 stereo output geometry, full-file
+digest and encoded peak without native dependencies. The process supervisor
+compares every measured fact, including peak, with the declared stem manifest.
+Large validation scans belong off the API event loop; partial content still
+requires complete-set settlement before exposure.
+`api/separation_jobs.py` owns a separate bounded metadata index: four active and
+64 retained jobs, with a 1 MiB on-disk ceiling. A complete receipt requires the
+authoritative worker/source manifest, successful render termination and all four
+verified local artifacts. Content callers must gate reads on completed status;
+the internal candidate manifest is not a public result. A lifetime file fence
+prevents overlapping owners; uncertain writes fence the index until reopened.
+Restart fails incomplete jobs; unexpired complete receipts are not evicted to
+admit another job. This lifecycle component is not yet wired to HTTP or tasks.
+`worker/runner/demucs/process.py` supervises `packaging/skulk-demucs/` under an
+isolated interpreter, with complete file/digest checks, bounded progress,
+process-group cancellation and parent-death cleanup. It is not yet registered in
+bootstrap, placement, engine inventory or REST. Dependencies stay outside Core;
+the exact local HTDemucs safetensors artifact is fully hashed before loading.
+Native codec/probe checks run separately via `packaging/skulk-demucs/verify_runtime.py`
+inside the candidate native environment. Packaging must dereference the canonical
+contract symlink; a source-tree path is not a distributable runtime dependency.
+The candidate producer (`build_wheel.py`) requires clean committed inputs and
+seals a complete platform hash lock plus the `python.json`-pinned standalone
+3.12.13 interpreter into deterministic wheels. `verify_package.py` performs fresh
+offline installation and checks expanded import bytes against original wheels.
+Build-tool typing uses `pyrightconfig.build.json` under Core's 3.13 interpreter;
+native typing uses the separate `pyrightconfig.json`. The three-platform workflow
+executes installed CPU candidates, not development import paths. This does not
+register the production cache/provisioner, ready backend or accelerator support.
+`provisioning/demucs_package.py` is now the canonical dependency-light package
+contract, expanded Python/venv/import validator and fresh bootstrap; standalone
+`package_inputs.py` links it. Bootstrap accepts an explicit command runner;
+verification exposes cancellation checkpoints and never trusts local completion
+receipts as integrity evidence. Complete cache orchestration/readiness remains
+unregistered. Keep standalone producer and cached-tree refusal tests in sync.
+`provisioning/native_install_process.py` supplies the supervised bootstrap
+command runner. Its standard-library guardian retains the owned session leader
+and optional inherited build lock until descendant drain; controller loss kills
+the complete group. Output is capped at 128 KiB per stream and 32 commands per
+runner. Cancellation/deadlines must remain active while commands execute; never
+reap the leader or delete installation files before the full drain. Native CI
+runs actual process, lock and parent-loss cases on all three architectures.
+Frozen Core must supply a verified guardian interpreter, not its application
+launcher. `native_installer_data_files` and its PyInstaller hook/spec data keep
+the exact guardian source available to that independent Python.
+The owner may clean new installation files only when `runner.quiescent` is
+true. A failed drain retains the original unreaped handle and blocks subsequent
+commands; retry `runner.drain()` without reconstructing ownership from a PID.
+The guardian catches TERM until final KILL so controller loss during drain
+cannot release its watchdog/lock early; native commands retain default TERM.
+`provisioning/__init__.py` lazily resolves legacy exports so native helper imports
+do not initialize unrelated engines. Preserve their backing objects/signatures;
+exercise cold imports in the small native controller environment as well as the
+full Core environment.
+
+The initiative cache controller `provisioning/demucs_runtime.py` verifies CPU
+package/payload/ABI before execution, serializes disk and per-build preparation,
+uses stable UUID installations and rechecks every cached byte before CPU/MPS
+probing. Offline mode never downloads; complete unpublished generations can be
+recovered after verification. Selection records are not integrity authorities.
+Retain the controller for the worker lifetime and cancel/join a running prepare
+before close; failed cleanup retains its original runner for retry. Never delete
+old or possibly published generations. Cleanup retries drain first and reacquire
+the global cache fence before touching files. Persistent `published/<uuid>`
+markers protect generations once handed out, even after selection changes;
+they never authorize integrity or execution. Downloads checkpoint each raw
+transport read rather than waiting to buffer a large chunk. This is not worker/backend/model-ready
+registration. Protected filesystem helpers are shared in `utils/runtime_files.py`
+with compatibility reexports from the old extensions path, avoiding plugin
+initialization during engine preparation. GPU profiles remain separate gates.
+
+Native separator cards use `ModelTask.AudioSeparation` and frozen
+`shared/models/separation.py::SeparationCardConfig`. Keep the registry's typed
+`[separation]` contract in sync: one SHA-256 safetensors object, ordered native
+stems, real transformer dimensions and a finite trained window. `/v1/models`
+projects this model truth separately from speech/music and does not imply a
+mounted runner. This metadata addition is not a replicated execution-task union.
+
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the
@@ -1772,6 +1854,15 @@ GitHub's API doesn't support direct image upload for PR comments. Workaround:
    The images still render in the PR comment because they reference the permanent commit SHA.
 
 ### Extension runtime ownership
+
+`extensions/runtime_artifacts.py` reads signed runtime envelopes 2 and 3 without
+importing plugin code. V2 retains its original shape. V3 requires 1–8 unique,
+canonical `application_roots` names in the exact wheel inventory; a static graph
+from them and launcher-provider distributions must reach every signed wheel.
+All version/URL/extra/native-tag/hash/archive checks run before offline pip.
+No package resolver or SDK import participates. Publish v3 capabilities only
+after their hosts have this compatible reader; ordinary v2 installations remain
+valid. Runtime IPC protocol and ordinary lifecycle HTTP routes are unchanged.
 
 The CLI creates and serves Node on one event loop. API runtime entry invokes
 extension startup; optional asynchronous on_stop hooks receive a shared thirty-second

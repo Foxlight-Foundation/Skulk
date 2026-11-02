@@ -1264,6 +1264,124 @@ grace deadline fails the job and releases its admission slot. A session reset
 closes in-flight music streams, and a create request waiting on that session
 fails instead of dispatching a command into the replacement session.
 
+## Source-separation native boundary (initiative)
+
+The native bootstrap command runner in `provisioning/native_install_process.py`
+owns a private session for each command. Its standard-library-only guardian
+retains the session leader and optional build lock after command completion,
+until the controller drains every descendant. Parent loss kills the complete
+group. Cancellation, per-command deadlines and bounded private output are part
+of this same boundary; an installer's successful exit cannot leave a writer
+behind. A frozen Core supplies its verified standalone Python for the guardian,
+and freezer hooks retain the guardian's exact source outside PYZ; an app launcher
+is never implicitly used as Python. This helper does not register preparation,
+cache recovery or readiness.
+If descendant drain fails, the runner retains its unreaped process handle and
+refuses another command. The owner can retry `drain()`; `quiescent` becomes true
+only after complete cleanup, allowing removal of new incomplete installation
+files without racing a writer or signalling a reused PID.
+The guardian catches TERM during group shutdown, keeping its watcher and lock
+until KILL; controller loss in that interval still stops resistant descendants.
+Its caught handler resets to default when the native command executes.
+
+The provisioning package resolves its established public exports lazily. Importing
+the dependency-light integrity and installer helpers does not initialize unrelated
+resident engines or require their dependency sets. Explicit legacy exports retain
+their original backing objects and signatures. Native CI checks cold helper
+imports in its small controller environment before exercising real processes.
+
+`provisioning/demucs_runtime.py` now supplies the owned `DemucsRuntimeCache`
+controller for the CPU package on all three targets and its optional Apple MPS
+probe. It checks the host ABI and independently pinned package/payload identities
+before execution, uses global disk and exact-build file fences, and installs at
+stable UUID paths. Offline reuse and recovery of complete unpublished generations
+repeat full source/interpreter/venv/import verification and a closed FP32 device
+probe. Atomic fsynced selection records are hints, never integrity authorities.
+Prior generations survive repair. Cancellation removes newly owned incomplete
+files only after confirmed process drain; failed drains retain the exact owner
+for retry or close. Free-disk reserve, download size/hash, generation count,
+command output and preparation/probe deadlines are bounded. Cleanup retry drains its original owner before
+reacquiring the cache fence, then preserves every generation with publication
+history. A private `published/<uuid>` marker is synced before selection changes;
+it protects against deletion, never authorizes cached code. This history remains
+when selection moves or disappears. Close waits at most five seconds for another
+preparation owner, retaining cleanup for explicit retry. Raw downloads check
+cancellation/deadlines on each transport read, without a MiB buffering delay.
+The controller is not yet connected to worker preparation, placement, a published inventory or
+loaded-model readiness. CUDA/ROCm package profiles and admission remain separate
+integration gates.
+
+Protected runtime file/lock helpers live in `utils/runtime_files.py`; the old
+`extensions/runtime_files.py` path reexports the same functions and class. Engine
+preparation can use them without loading the plugin subsystem. There is no new
+engine plugin ABI or activation framework.
+
+`shared/models/separation.py` defines immutable native separator card metadata.
+`AudioSeparation` and `[separation]` must agree, selecting one exact safetensors
+object and real transformer geometry, with speech and music sections excluded.
+The registry derives `audio.separate` explicitly and `/v1/models` projects the
+same typed information. This reader vocabulary does not add an execution task
+to the replicated task union or advertise a loaded runner.
+
+The isolated `api/separation_jobs.py` lifecycle component owns a private,
+exclusively locked metadata index. Four jobs may be active and 64 retained,
+within a 1 MiB serialized bound. Source and result bytes remain outside it.
+The authoritative placed worker and original identity bind a complete manifest;
+render termination and four independently verified local stems are separate
+completion conditions. Its output receipt stays absent until all conditions
+hold, and content handlers must also require completed status. Partial results
+never become an individually downloadable completed job.
+
+The dependency-free `stem_from_wav` validator shares input container validation
+and measures encoded PCM24 stereo samples, geometry and complete-file digest.
+The native process supervisor compares the measured peak as well as byte and
+timebase identity with each declared stem. Large scans must run outside the API
+event loop. A valid silent estimated stem remains valid; content verification
+does not infer musical quality or the presence of a vocal performance.
+
+Transitions become visible only after a synced atomic write. If persistence is
+uncertain, the registry refuses further reads/writes until its owner reopens it.
+Restart fails interrupted jobs without exposing partial results; complete
+receipts remain subject to independent file adoption. Failure/cancellation is
+terminal, and unexpired complete results cannot be evicted merely to admit work.
+This component is not yet connected to HTTP routes, task admission or media
+handlers; it does not enable separation in the product by itself.
+
+The dependency-light `provisioning/demucs_package.py` is the shared package
+contract and integrity boundary. Standalone build tools use an explicit repository
+link rather than a duplicate validator; resident Core imports no build-tool code.
+Its fresh offline bootstrap receives an injected supervised command runner. Cache
+verification checks the sealed object, extracted source, complete standalone
+Python and links, venv configuration and all installed import bytes before
+execution. A mutable completion receipt cannot authorize reuse. These helpers do
+not register production cache orchestration, host/device readiness or placement.
+
+The `shared/types/audio_separation.py` contract and
+`worker/runner/demucs/process.py` supervisor define an isolated HTDemucs job
+boundary. This component is not registered in model mounting, placement or REST;
+it does not advertise ready separation capacity. Existing music and speech
+requests retain their current contracts.
+
+The candidate wrapper in `packaging/skulk-demucs/` verifies one pinned local
+safetensors artifact and bounded original WAV before normalized FP32 inference.
+It returns drums, bass, other and vocals as a complete aligned PCM24 stereo set
+at 44.1 kHz, with one common clipping-protection gain. The supervisor checks all
+four file identities and geometries; cancellation, deadline and resource refusal
+drain its owned process group before partial-file removal. JSON carries metadata,
+never audio samples. The native package README documents the separate runtime
+and its current packaging/admission boundary.
+
+Candidate packages contain the exact pinned standalone Python 3.12.13 archive,
+the closed adapter/library source, licenses and a complete target-specific hash
+lock of dependency wheels. The producer requires clean source revisions and
+emits deterministic package bytes plus complete object and payload identities.
+The three-platform CI installs these candidates into a fresh private environment
+with no package indexes or development import paths, checks expanded import code
+and native libraries against the original sealed wheels, and exercises actual
+CPU model loading/resampling/export. This validation tool does not implement the
+production engine cache or advertise readiness. Accelerator and full-workload
+qualification, engine admission and signed distribution remain separate gates.
+
 ## Speech serving
 
 Speech models are ordinary model cards with an `[audio]` section, served by a
@@ -2340,6 +2458,14 @@ journal retains operation IDs, monotonic trust and interrupted generations.
 Cancellation of a waiting interface does not abandon owned installation work;
 only the fsynced completion marker publishes a staged generation. Staging never
 switches the active owner or changes cleanup state.
+Runtime envelopes 2 and 3 are accepted. Version two retains its original signed
+wire shape. Version three signs one to eight canonical `application_roots`
+distribution names so a capability can carry its own libraries in the isolated
+wheelhouse. The generic verifier checks that every root exists and that the
+dependency graph starting from those roots and launcher-provider wheels covers
+the exact signed inventory. Missing, incompatible, external-URL, extra-dependent
+or unreachable packages are refused before installation. No plugin or SDK is
+imported to inspect the graph, and no package resolver runs on the host.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can
 execute startup code; runtime commands disable bytecode writes. The interpreter

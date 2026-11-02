@@ -27,7 +27,7 @@ import skulk.store.mirror_host as mirror_host
 import skulk.store.model_store_server as store_server
 from skulk.main import Node
 from skulk.shared.types.common import NodeId
-from skulk.store.mirror_contracts import MirrorJob, MirrorRequest
+from skulk.store.mirror_contracts import MirrorJob, MirrorPage, MirrorRequest
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_server import ModelStoreServer
 from skulk.store.preservation_contracts import (
@@ -62,6 +62,16 @@ async def listening(host: PreservationHost, identity: str) -> MirrorJob:
             assert job.state in {"queued", "running"}, job
             if job.activity and job.activity.running and job.activity.http_port:
                 return job
+            await asyncio.sleep(0.025)
+
+
+async def configured_page(host: PreservationHost) -> MirrorPage:
+    """Wait for a policy observation when a busy filesystem returns unavailable."""
+    async with asyncio.timeout(30):
+        while True:
+            page = await host.mirrors.page()
+            if page.configured and page.available and page.policy_id is not None:
+                return page
             await asyncio.sleep(0.025)
 
 
@@ -707,7 +717,7 @@ async def test_failed_shutdown_can_reconcile_workers_and_release_journal(
                 configuration=configuration(),
             ),
         )
-        page = await host.mirrors.page()
+        page = await configured_page(host)
         expires = int(time.time()) + 300
         await complete(
             host,
