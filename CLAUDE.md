@@ -522,7 +522,9 @@ Restart fails incomplete jobs; unexpired complete receipts are not evicted to
 admit another job. The new private `api/separation_media.py` owns all four WAV
 roles with independent closed-file verification, sync and complete-only adoption
 after restart. All roles share outstanding unwritten filesystem promises and
-one safety reserve; written bytes are not charged twice. File, job-directory,
+one safety reserve; written bytes are not charged twice. Failed first-time
+initialization removes only its new empty directories before releasing ownership,
+so retry repeats every required new-root sync. File, job-directory,
 role-directory and newly created storage-root links are synced before receipts.
 Partial sets never become content; cleanup removes only API copies.
 Existing video/music handlers ignore the four new separation output purposes.
@@ -537,7 +539,9 @@ then stamp `separation_policy`; the worker rejects policy drift before load.
 `shared/models/separation_runtime.py` owns exact tensor/constructor matching and
 the actual FP32/two-thread/7.8-second/120-second workload estimate, including
 source/result buffers and native workspace, with a 3 GiB reference floor.
-CPU admission uses system RAM even on discrete-GPU hosts. These are runtime
+CPU admission uses system RAM even on discrete-GPU hosts. Native assignments
+represent the complete workload directly; text-layer construction cannot switch
+that admitted CPU workload back to an unrelated exhausted VRAM pool. These are runtime
 requirements, never a tested-hardware permission list. The immutable inventory
 pins CPU packages for all three targets; Mac can explicitly probe MPS. CUDA/ROCm
 need separate real dependency/memory profiles. No engine readiness, worker

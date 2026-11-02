@@ -1348,6 +1348,8 @@ floor. This is an engine/workload estimate, not a card-level universal memory
 requirement or hardware qualification. Ordinary and exact placement use the
 complete estimate; the worker repeats it and refuses absent or changed policy
 before loading. An explicit CPU lane uses host RAM even beside a discrete GPU.
+Its complete native assignment bypasses proportional text-layer allocation, so
+assignment construction cannot switch that decision to unrelated exhausted VRAM.
 No native backend is advertised and no mounted runner or preparation operation
 is registered by this foundation alone.
 
@@ -1384,6 +1386,8 @@ set, four active jobs and 64 retained sets, with 64 MiB per file and 256 MiB per
 set. Filesystem admission deducts outstanding unwritten promises across all four
 roles from the shared free-space safety headroom; already written bytes are not
 charged again. Reordered chunks remain promised until they are written.
+Failed first-time initialization removes only its new empty directories under
+the ownership fence; retry repeats the required ancestor syncs.
 Identical repeated opens preserve progress. A late invalid file removes
 only that job's API result copies; originals and native output remain outside
 this owner's authority. Closed files receive independent digest, PCM24 stereo

@@ -365,6 +365,18 @@ def test_failed_new_root_sync_releases_ownership(
     monkeypatch.setattr(os, "fsync", refuse)
     with pytest.raises(OSError, match="root sync failure"):
         SeparationMediaStore(root)
-    monkeypatch.setattr(os, "fsync", real_sync)
+    assert not root.exists() and not root.parent.exists()
+    retried = False
+
+    def observe_retry(descriptor: int) -> None:
+        nonlocal retried
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (parent.st_dev, parent.st_ino):
+            retried = True
+        real_sync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", observe_retry)
     reopened = SeparationMediaStore(root)
+    assert retried
+    retain(reopened, "drums")
     reopened.close()

@@ -16,6 +16,7 @@ from skulk.master.placement_utils import (
     get_mlx_ring_hosts_by_node,
     get_shard_assignments,
     get_shard_assignments_for_llama_rpc,
+    get_single_host_separation_shard_assignments,
     get_single_host_video_shard_assignments,
     get_smallest_cycles,
 )
@@ -1632,6 +1633,13 @@ def place_instance(
             )
         shard_assignments = get_shard_assignments_for_llama_rpc(
             command.model_card, selected_cycle, driver_node
+        )
+    elif command.model_card.separation is not None:
+        # The cycle filter admitted the complete native workload on the actual
+        # backend's memory pool. Generic text layer allocation would reinterpret
+        # a CPU placement through an unrelated (possibly exhausted) GPU pool.
+        shard_assignments = get_single_host_separation_shard_assignments(
+            command.model_card, selected_cycle.node_ids[0]
         )
     elif single_node_backend == "mlx_video-metal":
         shard_assignments = get_single_host_video_shard_assignments(

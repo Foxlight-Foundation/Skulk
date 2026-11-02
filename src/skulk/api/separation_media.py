@@ -95,9 +95,12 @@ class SeparationMediaStore:
             tuple[CommandId, SeparationStemName], StoredSeparationStem
         ] = {}
         self._known: set[CommandId] = set()
+        created_roles: list[Path] = []
         try:
             for name in SEPARATION_STEMS:
                 directory = root / name
+                if not directory.exists():
+                    created_roles.append(directory)
                 private_directory(directory)
                 self._stores[name] = VideoStore(
                     directory, max_total_bytes=max_total_bytes
@@ -107,8 +110,20 @@ class SeparationMediaStore:
             for created in created_roots:
                 _sync_directory(created.parent)
         except BaseException:
-            self._ownership.close()
-            self._ownership = None
+            try:
+                # No result work can start before construction returns. Roll
+                # back only directories this attempt created, under its fence,
+                # so retry cannot mistake unsynced new roots for durable ones.
+                # rmdir refuses any unexpected content rather than deleting it.
+                for directory in reversed(created_roles):
+                    directory.rmdir()
+                if root in created_roots:
+                    (root / "service.lock").unlink()
+                    for directory in created_roots:
+                        directory.rmdir()
+            finally:
+                self._ownership.close()
+                self._ownership = None
             raise
 
     def _check(self, command_id: CommandId) -> None:

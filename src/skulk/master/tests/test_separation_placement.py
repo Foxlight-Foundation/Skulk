@@ -58,7 +58,9 @@ def memory(available: int) -> dict[NodeId, MemoryUsage]:
     )}
 
 
-def place(observed: NodeResources | None, available: int) -> Instance:
+def place(
+    observed: NodeResources | None, available: int, *, unrelated_vram_bytes: int = 128 * 1024**2
+) -> Instance:
     """Exercise ordinary placement without replacing its backend or fit logic."""
     topology = Topology()
     topology.add_node(NODE)
@@ -68,7 +70,7 @@ def place(observed: NodeResources | None, available: int) -> Instance:
         topology, {}, memory(available), {},
         node_resources={NODE: observed} if observed is not None else {},
         # A CPU engine must not be admitted against an unrelated discrete GPU.
-        node_vram={NODE: Memory.from_mb(128)},
+        node_vram={NODE: Memory.from_bytes(unrelated_vram_bytes)},
     )
     return next(iter(result.values()))
 
@@ -156,3 +158,16 @@ def test_exact_native_assignment_cannot_load_only_part_of_model(partial: str) ->
     with pytest.raises(PlacementError, match="partial"):
         add_instance_to_placements(CreateInstance(instance=instance), Topology(), {}, memory(4 * 1024**3),
                                    node_resources={NODE: resources()})
+
+
+@pytest.mark.parametrize("vram_bytes", [0, 32 * 1024**2])
+def test_native_cpu_assignment_does_not_allocate_layers_in_exhausted_vram(vram_bytes: int) -> None:
+    """Admitted system RAM remains the pool through actual assignment construction."""
+    instance = place(resources(), 4 * 1024**3, unrelated_vram_bytes=vram_bytes)
+    assignments = instance.shard_assignments
+    assert len(assignments.runner_to_shard) == len(assignments.node_to_runner) == 1
+    shard = next(iter(assignments.runner_to_shard.values()))
+    assert shard.device_rank == 0 and shard.world_size == 1
+    assert (shard.start_layer, shard.end_layer, shard.n_layers) == (0, card().n_layers, card().n_layers)
+    assert shard.resolved_backend == "demucs-cpu"
+    assert shard.separation_policy == resolve_demucs_policy(card(), "demucs-cpu")

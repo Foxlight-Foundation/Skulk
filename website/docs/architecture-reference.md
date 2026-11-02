@@ -105,7 +105,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   `BaseShardMetadata.separation_policy` binds that policy to admission; absent or
   changed policy fails the worker guard. Ordinary/exact placement require live
   verified backend/build resources and the full 120-second workload reservation,
-  not just tensor size. The CPU lane uses system RAM, not unrelated VRAM.
+  not just tensor size. The CPU lane uses system RAM, not unrelated VRAM; complete native assignment
+  construction bypasses the text-layer allocator after workload admission.
   `provisioning/demucs_inventory.py` pins separate CPU objects for Mac ARM64,
   Linux amd64 and Linux ARM64; the Mac package can explicitly probe MPS. GPU
   dependency and memory profiles remain required. The 3 GiB planning floor is an
@@ -135,7 +136,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   256 MiB per set. Filesystem headroom deducts every role's outstanding unwritten
   promises, including reordered chunks, without charging written bytes twice.
   Closed independent facts, synced bytes, job/role directories and newly created
-  storage-root links precede receipts;
+  storage-root links precede receipts. Failed first-time setup removes only new
+  empty directories under its fence, so retry repeats the ancestor syncs;
   only a durable completed manifest exposes content. Restart adopts all four
   exact files or none, and invalid partial sets delete only owned API copies.
   `OUTPUT_MEDIA` adds `separation_drums/bass/other/vocals`; the existing

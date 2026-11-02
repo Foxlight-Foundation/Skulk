@@ -1058,6 +1058,32 @@ def _allocate_and_validate_layers(
     return layer_allocations
 
 
+def get_single_host_separation_shard_assignments(
+    model_card: ModelCard, node_id: NodeId
+) -> ShardAssignments:
+    """Represent one already admitted complete native separation workload.
+
+    Args:
+        model_card: Exact separation card admitted against its full workload.
+        node_id: Selected single host with verified native runtime resources.
+
+    Returns:
+        A complete rank-zero assignment, without allocating proportional text
+        layers against unrelated VRAM or loading any native model.
+    """
+    if model_card.separation is None:
+        raise ValueError("single-host separation assignments require a separation card")
+    runner_id = RunnerId()
+    return ShardAssignments(
+        model_id=model_card.model_id,
+        node_to_runner={node_id: runner_id},
+        runner_to_shard={runner_id: PipelineShardMetadata(
+            model_card=model_card, device_rank=0, world_size=1,
+            start_layer=0, end_layer=model_card.n_layers, n_layers=model_card.n_layers,
+        )},
+    )
+
+
 def get_single_host_video_shard_assignments(
     model_card: ModelCard, node_id: NodeId
 ) -> ShardAssignments:
