@@ -1,0 +1,13 @@
+# Dependencies of the owned, WAV-only inference adapter. The pinned upstream
+# library source is staged separately using source.json, as in native video.
+# Complete platform wheelhouses/hash locks remain a publication gate.
+einops==0.8.2
+julius==0.2.8
+numpy==2.2.6
+pydantic==2.12.5
+pyyaml==6.0.3
+safetensors==0.8.0
+scipy==1.17.1
+soundfile==0.13.1
+torch==2.8.0
+tqdm==4.70.1

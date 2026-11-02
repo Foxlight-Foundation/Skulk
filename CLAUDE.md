@@ -503,6 +503,19 @@ the serial permit to another admitted job.
 Generic `/v1/cancel/{command_id}` also uses music-specific cancellation and
 output cleanup. An ordered terminal task starts a short terminal-frame
 deadline, so a dropped `MusicChunk` cannot retain an active job indefinitely.
+
+The initiative-only source-separation native boundary is separate:
+`shared/types/audio_separation.py` validates bounded source WAVs, a complete
+aligned four-stem manifest and private job/result records.
+`worker/runner/demucs/process.py` supervises `packaging/skulk-demucs/` under an
+isolated interpreter, with complete file/digest checks, bounded progress,
+process-group cancellation and parent-death cleanup. It is not yet registered in
+bootstrap, placement, engine inventory or REST. Dependencies stay outside Core;
+the exact local HTDemucs safetensors artifact is fully hashed before loading.
+Native codec/probe checks run separately via `packaging/skulk-demucs/verify_runtime.py`
+inside the candidate native environment. Packaging must dereference the canonical
+contract symlink; a source-tree path is not a distributable runtime dependency.
+
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the

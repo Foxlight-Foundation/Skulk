@@ -1264,6 +1264,23 @@ grace deadline fails the job and releases its admission slot. A session reset
 closes in-flight music streams, and a create request waiting on that session
 fails instead of dispatching a command into the replacement session.
 
+## Source-separation native boundary (initiative)
+
+The `shared/types/audio_separation.py` contract and
+`worker/runner/demucs/process.py` supervisor define an isolated HTDemucs job
+boundary. This component is not registered in model mounting, placement or REST;
+it does not advertise ready separation capacity. Existing music and speech
+requests retain their current contracts.
+
+The candidate wrapper in `packaging/skulk-demucs/` verifies one pinned local
+safetensors artifact and bounded original WAV before normalized FP32 inference.
+It returns drums, bass, other and vocals as a complete aligned PCM24 stereo set
+at 44.1 kHz, with one common clipping-protection gain. The supervisor checks all
+four file identities and geometries; cancellation, deadline and resource refusal
+drain its owned process group before partial-file removal. JSON carries metadata,
+never audio samples. The native package README documents the separate runtime
+and its current packaging/admission boundary.
+
 ## Speech serving
 
 Speech models are ordinary model cards with an `[audio]` section, served by a

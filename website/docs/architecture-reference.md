@@ -12,6 +12,17 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
+- **Source-separation native boundary (initiative):**
+  `shared/types/audio_separation.py` is the strict standalone source/four-stem
+  and private process protocol; its WAV validator bounds encoded/decoded geometry
+  and rejects malformed/nonfinite input. `worker/runner/demucs/process.py` owns
+  one isolated native job, bounded progress/result JSON, complete file verification,
+  process-tree cancellation and partial-output cleanup. `packaging/skulk-demucs/`
+  contains the offline-loading FP32 HTDemucs adapter. Its `contracts.py` link must
+  become ordinary canonical contract bytes in a native wheel. Four aligned PCM24
+  stereo WAVs share one gain; process RSS and device allocator peaks stay separate.
+  No mount/bootstrap, placement, engine inventory or REST route is registered yet.
+
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority

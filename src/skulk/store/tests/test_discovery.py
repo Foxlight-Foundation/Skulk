@@ -54,6 +54,7 @@ from skulk.store.discovery_contracts import (
     DiscoveryResults,
     SourceReview,
 )
+from skulk.store.discovery_host import METADATA_WORKER_SECONDS
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation_contracts import (
     KitUploadStatus,
@@ -211,7 +212,10 @@ async def enroll(client: httpx.AsyncClient, encoded: bytes) -> SourceReview:
 
 async def metadata_settled(client: httpx.AsyncClient, job_id: str) -> DiscoveryJob:
     """Observe retained native jobs rather than running work in the browser."""
-    async with asyncio.timeout(30):
+    # Real cold workers have the production metadata budget, including native
+    # imports under concurrent filesystem load. Leave time for its terminal
+    # journal observation rather than timing out before the worker's deadline.
+    async with asyncio.timeout(METADATA_WORKER_SECONDS + 10):
         while True:
             response = await client.get("/preservation/discovery/jobs/" + job_id)
             assert response.status_code == 200, response.text
