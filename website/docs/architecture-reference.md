@@ -19,8 +19,22 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Gateway keys stay host-local. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
-  Up to eight cached catalogs are read concurrently under individual and aggregate
-  deadlines, retaining completed results. Stream cleanup owns cancellation and
+  Up to eight cached catalogs are read concurrently under five-second individual
+  and six-second aggregate deadlines, including managed-owner validation overhead
+  and retaining completed results. Overlapping callers share that read, including
+  queue time in its budget; later callers always read afresh. Transient overload
+  or provider errors allow at most three cached-read attempts inside the same
+  budget; successful withdrawal is immediate and generation is never replayed.
+  The macOS manager uses launchd `Interactive` scheduling in both scopes, so
+  owners, children and isolated schema workers inherit responsive CPU/I/O policy.
+  Only the exact prior generated `Background` unit is accepted for scheduling
+  migration; unrelated definition changes remain refused.
+  Cached empty-input unary metadata may opt into `skulk.admission=metadata`
+  with supporting SDK owners. Its separate bounded slot and control connection
+  keep discovery independent of stream media without stale availability caching.
+  Workloads retain fail-fast admission; identity, deadlines and capability-owned
+  authorization remain enforced.
+  Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.
 
 - **Native model preservation:** `store/preservation_export.py` resolves exact

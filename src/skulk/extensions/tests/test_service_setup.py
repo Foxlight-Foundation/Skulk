@@ -104,6 +104,7 @@ def test_fixed_system_definitions_and_foreign_unit_refusal(
             str(layout.root),
         ]
         assert payload["RunAtLoad"] is True and payload["KeepAlive"] is True
+        assert payload["ProcessType"] == "Interactive"
         payload["UserName"] = "root"
         altered = plistlib.dumps(payload, sort_keys=True)
         if sys.platform == "darwin":

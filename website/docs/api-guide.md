@@ -4988,6 +4988,12 @@ configuration must live outside Git checkouts and remain available after boot.
 
 A user-scope definition must belong to the owner and not be writable by others;
 a system definition must belong to root.
+Both macOS scopes use launchd `Interactive` scheduling. The manager owns
+interactive inference and management; its owners, children and bounded schema
+workers must not inherit background CPU/I/O throttling. Existing macOS services
+adopt this policy when setup is rerun after upgrading Skulk.
+Setup accepts the exact previously generated `Background` definition for this
+migration; changed accounts, paths, environment or other unit fields remain refused.
 
 Setup copies the node's own Python environment, which must be dedicated to
 Skulk: a virtual environment, or a packaged runtime whose interpreter prefix
@@ -5274,6 +5280,15 @@ while ready. A cached descriptor does not grant continued admission: new unary
 and streaming calls to an unavailable capability return typed `not_found`.
 Readiness is rechecked after asynchronous stream admission. Already admitted
 calls retain their normal deadline and cancellation behavior.
+
+
+Cached empty-input unary metadata can declare `skulk.admission=metadata` with
+supporting managed SDK owners. One separate metadata slot remains available while
+stream media is active; the primary control wire stays serialized with health.
+Core does not queue these reads behind generation or cache old availability.
+Readiness, descriptor identity, caller deadlines and capability authorization
+still apply. Workload admission remains fail-fast. Older owners treat the
+annotation as ordinary unary admission; capabilities must pin a supporting owner.
 
 
 ### List a node's served capabilities
@@ -6473,8 +6488,17 @@ capability models with namespaced IDs `capability/<callable-id>/<model-slug>`
 and an `inference_capability` object containing processing domain, usage class,
 usage label/link and expiry. They are separate from mounted instances and are
 omitted from the `status=downloaded` filter. Discovery reads bounded cached
-catalogs concurrently from up to eight local installed providers with one-second
-individual and three-second aggregate deadlines; completed reads survive expiry.
+catalogs concurrently from up to eight local installed providers with five-second
+individual and six-second aggregate deadlines; completed reads survive expiry.
+The individual budget includes managed-owner IPC and schema validation, so a
+normal cached read can finish without restarting a healthy capability.
+Overlapping callers share one discovery result instead of competing for a
+managed owner's single call slot. Waiting and discovery share the same overall
+budget. A later non-overlapping request reads afresh; this does not retain a
+provider catalog after its next successful withdrawal.
+Transient `overloaded` or `provider_error` refusals permit at most three attempts
+inside the same individual budget. Only cached discovery is retried; generation
+is never automatically replayed. A successful empty result withdraws immediately.
 It does not fetch an
 upstream account catalog or token. Missing/stale catalogs withdraw availability.
 The dashboard withdraws cached capability choices at their advertised expiry

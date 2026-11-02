@@ -1999,6 +1999,9 @@ class API:
         # _MAX_CONCURRENT_CAPABILITY_CALLS (single-threaded loop => plain int).
         self._active_capability_calls = 0
         self._active_capability_streams: dict[str, _ActiveProviderStream] = {}
+        self._chat_catalog_lock = asyncio.Lock()
+        self._chat_catalog_generation = 0
+        self._chat_catalog_snapshot: list[ChatCatalog] = []
         self._provider_stream_sender = provider_stream_sender
         self._provider_stream_receiver = provider_stream_receiver
         self._realtime_audio_sender = realtime_audio_sender
@@ -2775,7 +2778,8 @@ class API:
                 "the current signed registry snapshot, and final operator-owned "
                 "custom overrides. Entries expose active "
                 "installed identity, current registry identity, update availability, "
-                "verification state, and warn-only advisories."
+                "verification state, and warn-only advisories. Capability catalog "
+                "reads have a six-second overall limit."
             ),
         )(self.get_models)
         self.app.get(
@@ -2798,7 +2802,8 @@ class API:
                 "than only running instances. Entries distinguish the active "
                 "installed generation from current signed registry truth and "
                 "report updates, verification, advisories, and repository-code "
-                "authorization provenance."
+                "authorization provenance. Capability catalog reads have a "
+                "six-second overall limit."
             ),
         )(self.get_models)
         self.app.get(
@@ -10809,22 +10814,82 @@ class API:
         return {"contract": "chat.completions@0.1.0", "public_key": key}
 
     async def _capability_chat_catalogs(self) -> list[ChatCatalog]:
-        """Read bounded cached catalogs from locally installed capabilities only."""
+        """Share bounded discovery among overlapping callers, never later reads."""
+        if self._extensions is None:
+            return []
+        generation = self._chat_catalog_generation
+        deadline = asyncio.get_running_loop().time() + 6
+        try:
+            async with asyncio.timeout(6):
+                await self._chat_catalog_lock.acquire()
+        except TimeoutError:
+            return []
+        try:
+            if generation == self._chat_catalog_generation:
+                # Managed owners can admit only one call at a time. Readers
+                # arriving during this read share its result instead of making
+                # competing calls that falsely withdraw a healthy provider.
+                self._chat_catalog_snapshot = []
+                try:
+                    self._chat_catalog_snapshot = (
+                        await self._read_capability_chat_catalogs(
+                            max(0.0, deadline - asyncio.get_running_loop().time())
+                        )
+                    )
+                finally:
+                    # Failed/cancelled leaders also end their cohort. Waiters
+                    # see its empty result; a later call always reads afresh.
+                    self._chat_catalog_generation += 1
+            now = time.time()
+            return [
+                catalog
+                for catalog in self._chat_catalog_snapshot
+                if catalog.expires_at > now
+            ]
+        finally:
+            self._chat_catalog_lock.release()
+
+    async def _read_capability_chat_catalogs(
+        self, budget_seconds: float
+    ) -> list[ChatCatalog]:
+        """Read one local discovery cohort within its remaining caller budget."""
         if self._extensions is None:
             return []
         descriptors = self._extensions.capability_descriptors
         observed: dict[int, ChatCatalog] = {}
 
         async def read_catalog(index: int, descriptor: CapabilityDescriptor) -> None:
-            result = await self._call_capability(
-                self.node_id,
-                descriptor.id,
-                descriptor.version,
-                descriptor_revision(descriptor),
-                {},
-                timeout_seconds=1,
-            )
-            if not result.ok or not result.result:
+            deadline = asyncio.get_running_loop().time() + min(5, budget_seconds)
+            result: CapabilityResult | None = None
+            for attempt in range(3):
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return
+                result = await self._call_capability(
+                    self.node_id,
+                    descriptor.id,
+                    descriptor.version,
+                    descriptor_revision(descriptor),
+                    {},
+                    # Owner IPC and isolated validation share this whole budget,
+                    # including retries; inference itself is never replayed.
+                    timeout_seconds=remaining,
+                )
+                if result.ok:
+                    break
+                if (
+                    result.error is None
+                    or result.error.code not in {"overloaded", "provider_error"}
+                    or attempt == 2
+                ):
+                    return
+                # A managed owner may still be retiring its previous call. Only
+                # this explicitly cached, read-only discovery can be retried;
+                # a successful empty catalog is authoritative withdrawal.
+                await asyncio.sleep(
+                    min(0.1, max(0.0, deadline - asyncio.get_running_loop().time()))
+                )
+            if result is None or not result.ok or not result.result:
                 return
             try:
                 catalog = ChatCatalog.model_validate_json(json.dumps(result.result))
@@ -10850,7 +10915,7 @@ class API:
         # providers from starving a healthy destination. Retain completed reads
         # even if the aggregate budget cancels the remaining handlers.
         with contextlib.suppress(TimeoutError):
-            async with asyncio.timeout(3):
+            async with asyncio.timeout(budget_seconds):
                 async with asyncio.TaskGroup() as tasks:
                     for index, descriptor in enumerate([
                         item
