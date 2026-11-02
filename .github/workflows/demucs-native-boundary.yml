@@ -6,9 +6,20 @@ on:
     paths:
       - '.github/workflows/demucs-native-boundary.yml'
       - 'packaging/skulk-demucs/**'
+      - 'src/skulk/provisioning/__init__.py'
+      - 'src/skulk/provisioning/demucs_package.py'
+      - 'src/skulk/provisioning/tests/test_demucs_package.py'
+      - 'src/skulk/provisioning/native_install_process.py'
+      - 'src/skulk/provisioning/_native_install_guard.py'
+      - 'src/skulk/provisioning/tests/test_native_install_process.py'
+      - 'src/skulk/utils/process_groups.py'
+      - 'src/skulk/_pyinstaller/__init__.py'
+      - 'src/skulk/_pyinstaller/hook-skulk.provisioning.native_install_process.py'
+      - 'packaging/pyinstaller/skulk.spec'
       - 'src/skulk/shared/types/audio_separation.py'
       - 'src/skulk/worker/runner/demucs/**'
       - 'scripts/qualify_demucs_native.py'
+      - 'scripts/stage_demucs_candidate.py'
 
 permissions:
   contents: read
@@ -45,7 +56,7 @@ jobs:
       - name: Prepare the supported Core controller and build tools
         run: |
           uv venv --managed-python --python 3.13.13 "$PACKAGE_ROOT/tools"
-          uv pip install --python "$PACKAGE_ROOT/tools/bin/python" pydantic==2.12.5 psutil==7.2.1 packaging==26.0 basedpyright==1.37.1
+          uv pip install --python "$PACKAGE_ROOT/tools/bin/python" pydantic==2.12.5 psutil==7.2.1 packaging==26.0 basedpyright==1.37.1 pytest==9.1.1
           "$PACKAGE_ROOT/tools/bin/python" -c 'import os; assert hasattr(os, "waitid"), "Core requires non-reaping process observation"'
       - name: Check producer typing and offline refusal regressions
         env:
@@ -53,6 +64,11 @@ jobs:
         run: |
           "$PACKAGE_ROOT/tools/bin/basedpyright" --project packaging/skulk-demucs/pyrightconfig.build.json --pythonpath "$PACKAGE_ROOT/tools/bin/python"
           "$PACKAGE_ROOT/tools/bin/python" -B -m unittest discover -s packaging/skulk-demucs/producer_tests
+      - name: Exercise owned installer supervision on the actual controller platform
+        env:
+          PYTHONPATH: src
+        run: |
+          "$PACKAGE_ROOT/tools/bin/python" -B -m pytest -q -c /dev/null --noconftest -o cache_dir="$PACKAGE_ROOT/process-test-cache" src/skulk/provisioning/tests/test_native_install_process.py --basetemp "$PACKAGE_ROOT/process-tests"
       - name: Stage the exact inference library source outside the checkout
         run: |
           source_revision=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["revision"])')
@@ -72,9 +88,11 @@ jobs:
           done
           cmp "$PACKAGE_ROOT/first/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" "$PACKAGE_ROOT/second/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl"
       - name: Install in a fresh private environment with no indexes or developer paths
+        env:
+          PYTHONPATH: src
         run: |
           package_sha=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["sha256"])')
-          "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-demucs/verify_package.py --wheel "$PACKAGE_ROOT/first/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" --sha256 "$package_sha" --output "$PACKAGE_ROOT/installed"
+          "$PACKAGE_ROOT/tools/bin/python" -B scripts/stage_demucs_candidate.py --wheel "$PACKAGE_ROOT/first/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" --sha256 "$package_sha" --output "$PACKAGE_ROOT/installed"
       - name: Verify installed native codecs, strict typing and CPU math
         env:
           HF_HUB_OFFLINE: '1'
@@ -108,6 +126,7 @@ jobs:
             ${{ env.PACKAGE_ROOT }}/first/*.json
             ${{ env.PACKAGE_ROOT }}/intake/wheel-receipt.json
             ${{ env.PACKAGE_ROOT }}/installed/installation.json
+            ${{ env.PACKAGE_ROOT }}/installer-diagnostics/**/*.log
             ${{ env.PACKAGE_ROOT }}/native-dependencies.txt
             ${{ env.PACKAGE_ROOT }}/proof/measurement.json
             ${{ env.PACKAGE_ROOT }}/proof/supervision.json

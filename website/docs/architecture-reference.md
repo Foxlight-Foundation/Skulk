@@ -28,6 +28,27 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   these tools do not provide production cache reuse or accelerator qualification.
   No mount/bootstrap, placement, engine inventory or REST route is registered yet.
 
+- **Native separation package integrity (initiative):** `provisioning/demucs_package.py` owns shared strict package/interpreter contracts, offline bootstrap with an injected command runner, cooperative verification checkpoints and cached source/Python/venv/import integrity. Standalone `package_inputs.py` links that same source; Core never imports private build tools. Mutable receipts are not authorities. Cache orchestration, device probing and ready capacity are not registered by these helpers.
+
+- **Native installer supervision (initiative):**
+  `provisioning/native_install_process.py` implements the bootstrap command runner.
+  A standard-library-only `_native_install_guard.py` starts each command in its
+  private session, reports completion on a four-byte pipe, retains an optional
+  inherited build lock and kills the group on controller death.
+  Its caught TERM handler survives graceful drain until KILL, preserving the
+  watcher/lock if the controller dies during shutdown; command exec resets it.
+  Non-reaping observation keeps the session leader owned until every descendant is drained.
+  Failed cleanup retains the original process handle for `drain()` retry and
+  blocks further commands; `quiescent` authorizes cleanup of new incomplete files.
+  Each stream is capped at 128 KiB, each runner at 32 commands, logs are private,
+  and owner cancellation plus per-command deadlines remain active. Frozen Core
+  explicitly supplies a verified guardian Python; freezer hook/spec data retain
+  actual guardian source outside PYZ. Native CI exercises process, lock, parent
+  loss and packaging closure on all three architectures. Production cache
+  orchestration and readiness are still unregistered.
+  The package facade uses lazy exports with unchanged static signatures and
+  backing objects; cold helper imports cannot initialize unrelated provisioners.
+
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority

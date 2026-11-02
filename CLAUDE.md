@@ -523,6 +523,31 @@ Build-tool typing uses `pyrightconfig.build.json` under Core's 3.13 interpreter;
 native typing uses the separate `pyrightconfig.json`. The three-platform workflow
 executes installed CPU candidates, not development import paths. This does not
 register the production cache/provisioner, ready backend or accelerator support.
+`provisioning/demucs_package.py` is now the canonical dependency-light package
+contract, expanded Python/venv/import validator and fresh bootstrap; standalone
+`package_inputs.py` links it. Bootstrap accepts an explicit command runner;
+verification exposes cancellation checkpoints and never trusts local completion
+receipts as integrity evidence. Complete cache orchestration/readiness remains
+unregistered. Keep standalone producer and cached-tree refusal tests in sync.
+`provisioning/native_install_process.py` supplies the supervised bootstrap
+command runner. Its standard-library guardian retains the owned session leader
+and optional inherited build lock until descendant drain; controller loss kills
+the complete group. Output is capped at 128 KiB per stream and 32 commands per
+runner. Cancellation/deadlines must remain active while commands execute; never
+reap the leader or delete installation files before the full drain. Native CI
+runs actual process, lock and parent-loss cases on all three architectures.
+Frozen Core must supply a verified guardian interpreter, not its application
+launcher. `native_installer_data_files` and its PyInstaller hook/spec data keep
+the exact guardian source available to that independent Python.
+The owner may clean new installation files only when `runner.quiescent` is
+true. A failed drain retains the original unreaped handle and blocks subsequent
+commands; retry `runner.drain()` without reconstructing ownership from a PID.
+The guardian catches TERM until final KILL so controller loss during drain
+cannot release its watchdog/lock early; native commands retain default TERM.
+`provisioning/__init__.py` lazily resolves legacy exports so native helper imports
+do not initialize unrelated engines. Preserve their backing objects/signatures;
+exercise cold imports in the small native controller environment as well as the
+full Core environment.
 
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):

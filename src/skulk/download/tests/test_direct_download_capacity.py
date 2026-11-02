@@ -295,4 +295,5 @@ async def test_direct_download_admission_and_transfer_are_serialized(
     )
 
     assert maximum_active_transfers == 1
-    assert registered_model_ids == [ModelId("org/first"), ModelId("org/second")]
+    # Concurrent metadata work can reach admission in either scheduler order.
+    assert sorted(registered_model_ids) == [ModelId("org/first"), ModelId("org/second")]

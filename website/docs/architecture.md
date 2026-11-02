@@ -1266,6 +1266,39 @@ fails instead of dispatching a command into the replacement session.
 
 ## Source-separation native boundary (initiative)
 
+The native bootstrap command runner in `provisioning/native_install_process.py`
+owns a private session for each command. Its standard-library-only guardian
+retains the session leader and optional build lock after command completion,
+until the controller drains every descendant. Parent loss kills the complete
+group. Cancellation, per-command deadlines and bounded private output are part
+of this same boundary; an installer's successful exit cannot leave a writer
+behind. A frozen Core supplies its verified standalone Python for the guardian,
+and freezer hooks retain the guardian's exact source outside PYZ; an app launcher
+is never implicitly used as Python. This helper does not register preparation,
+cache recovery or readiness.
+If descendant drain fails, the runner retains its unreaped process handle and
+refuses another command. The owner can retry `drain()`; `quiescent` becomes true
+only after complete cleanup, allowing removal of new incomplete installation
+files without racing a writer or signalling a reused PID.
+The guardian catches TERM during group shutdown, keeping its watcher and lock
+until KILL; controller loss in that interval still stops resistant descendants.
+Its caught handler resets to default when the native command executes.
+
+The provisioning package resolves its established public exports lazily. Importing
+the dependency-light integrity and installer helpers does not initialize unrelated
+resident engines or require their dependency sets. Explicit legacy exports retain
+their original backing objects and signatures. Native CI checks cold helper
+imports in its small controller environment before exercising real processes.
+
+The dependency-light `provisioning/demucs_package.py` is the shared package
+contract and integrity boundary. Standalone build tools use an explicit repository
+link rather than a duplicate validator; resident Core imports no build-tool code.
+Its fresh offline bootstrap receives an injected supervised command runner. Cache
+verification checks the sealed object, extracted source, complete standalone
+Python and links, venv configuration and all installed import bytes before
+execution. A mutable completion receipt cannot authorize reuse. These helpers do
+not register production cache orchestration, host/device readiness or placement.
+
 The `shared/types/audio_separation.py` contract and
 `worker/runner/demucs/process.py` supervisor define an isolated HTDemucs job
 boundary. This component is not registered in model mounting, placement or REST;
