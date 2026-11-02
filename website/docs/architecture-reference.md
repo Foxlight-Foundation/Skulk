@@ -28,6 +28,21 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   these tools do not provide production cache reuse or accelerator qualification.
   No mount/bootstrap, placement, engine inventory or REST route is registered yet.
 
+- **Resident native separator (initiative):** `worker/runner/demucs/resident.py`
+  owns an isolated `--serve` lifetime with an inherited filesystem fence. Actual
+  pinned weights and complete model placement precede readiness; returned installed
+  payload/weight identities and fixed device/thread policy must match the owner.
+  Serial correlated requests reuse the model; private records are bounded at
+  16 KiB, progress replaceable, terminal queue separate. Absolute deadlines cover
+  writes, execution and independent complete-file verification. Failure/cancel
+  drains the whole group before incomplete-job cleanup/fence release; incomplete
+  drain retains ownership for retry. Completed files/originals survive. Idle
+  liveness checks withdraw stale readiness. Worker activation, inventory and
+  resource admission remain unwired. Candidate CI proves actual sealed CPU
+  reuse, cancel/reload and parent-death inherited fencing, not music quality or
+  120-second production memory fit. Warm load time is zero; native RSS is the
+  process lifetime high-water mark rather than a per-job measurement.
+
 - **Native separation package integrity (initiative):** `provisioning/demucs_package.py` owns shared strict package/interpreter contracts, offline bootstrap with an injected command runner, cooperative verification checkpoints and cached source/Python/venv/import integrity. Standalone `package_inputs.py` links that same source; Core never imports private build tools. Mutable receipts are not authorities. Cache orchestration, device probing and ready capacity are not registered by these helpers.
 
 - **Native installer supervision (initiative):**

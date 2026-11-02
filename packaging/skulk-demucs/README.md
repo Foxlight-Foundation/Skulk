@@ -1,7 +1,8 @@
 # Native source-separation adapter
 
-This initiative-only component implements a supervised, per-job HTDemucs
-process. It is **not yet a provisionable engine or public API**. There is no
+This initiative-only component implements a supervised, resident HTDemucs
+model process, plus a one-job validation path. It is **not yet a mounted engine
+or public API**. There is no
 model-mount/bootstrap dispatch or ready capacity advertisement for it. Studio's
 stem control remains disabled until task, resource admission, addressed input /
 four-result delivery, persistence and installed acceptance are connected.
@@ -89,17 +90,40 @@ subsequent commands.
 This command helper does not yet implement production cache/download recovery
 or advertise a ready backend.
 
-Normal cache reuse/invalidation, installation supervision, resource admission,
-GPU-device binding, accelerator packages and signed publication are still needed.
+The initiative cache controller supplies exact verified installation/reuse;
+worker activation, resource admission, GPU-device binding, accelerator packages
+and signed publication are still needed.
 CPU package execution alone does not qualify an accelerator or full-length
 workload. The workflow retains candidate artifacts; it does not promote them.
 
 ## Local protocol
 
-Core's `worker/runner/demucs/process.py` starts the isolated interpreter with
-`-I -B -m skulk_demucs --job <owned-job> --parent-pid <owner>` in its own process
-session. The private job has exact worker-owned paths and a device/thread/segment
-policy; public request metadata cannot contain paths or native options. The
+Core's `worker/runner/demucs/resident.py` starts the isolated interpreter with
+`-I -B -m skulk_demucs --serve <owned-config> --parent-pid <owner>` in its own
+process session. It inherits a lifetime filesystem fence. The ready frame follows
+full pinned-weight verification, construction, FP32 device probing and placement
+of the complete model on the explicit device. Core compares actual installed
+payload/weight identities and device/thread policy before accepting readiness.
+A cached library probe alone is not loaded-model readiness. Worker activation
+and ready-capacity publication are not connected by this component.
+
+One loaded model accepts serial requests with contiguous sequence numbers and
+correlated request IDs. Newline-delimited control records are capped at 16 KiB;
+progress is replaceable and cannot evict terminal frames. Control writes, model
+load, execution and complete-file verification observe cancellation and absolute
+deadlines. Any failed inference/protocol/output check withdraws readiness and
+drains the whole native lifetime. Partial-file deletion and fence release follow
+confirmed drain; failed cleanup retains ownership and files for a later close.
+Previously completed results survive cancellation and fresh model loading. Idle
+liveness must be polled by the future worker supervisor; a remembered ready frame
+does not remain valid after a native crash. Warm results report zero model-load
+time; process RSS is the lifetime high-water mark, potentially from an earlier
+job. It is not a per-request allocation measurement.
+
+`worker/runner/demucs/process.py` retains the one-job validation helper using
+`--job <owned-job>`. Every private job has exact worker-owned paths and a
+device/thread/segment policy; public requests cannot contain paths or native
+options. The
 runtime forces offline Hub loading and disables MPS CPU fallback. CUDA/HIP use
 FP32 with TF32 disabled. A weightless math probe is not loaded model readiness.
 
@@ -173,6 +197,16 @@ Process RSS and CUDA/HIP allocator peaks are separately named measurements,
 not total device or host memory requirements. Native pipeline timing excludes
 interpreter/import startup and parent verification; the separate `supervision.json`
 measurement includes the complete supervised process wall time.
+
+`scripts/qualify_demucs_resident.py` exercises the actual installed package and
+model on each CPU target: two short jobs in the same process, cancellation after
+the separating stage begins on a longer source, full drain/partial cleanup,
+reload and another job with earlier completed files and originals preserved.
+It also kills a separate controller while its native child is paused: the
+inherited fence must remain held, then release after the resumed native watchdog
+observes parent death. The retained receipt distinguishes load time, supervised
+job time, sampled native RSS and whole qualification wall time. These analytic
+signals do not establish music quality or full-length production memory fit.
 
 ## Initiative library-cache integration
 

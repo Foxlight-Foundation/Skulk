@@ -59,9 +59,12 @@ def separation_environment(threads: int) -> dict[str, str]:
 
 
 def verify_native_result(
-    directory: Path, job: NativeSeparationJob
+    directory: Path,
+    job: NativeSeparationJob,
+    *,
+    checkpoint: Callable[[], None] | None = None,
 ) -> NativeSeparationResult:
-    """Verify bounded completion JSON and all four exact files before returning."""
+    """Verify all exact files, with optional owner checks between bounded WAV scans."""
     with (directory / "result.json").open("rb") as result:
         record = result.read(16 * 1024 + 1)
     if len(record) > 16 * 1024:
@@ -70,12 +73,16 @@ def verify_native_result(
     if measured.output.source != job.source or measured.device != job.device:
         raise ValueError("native separation completed a different source or device")
     for stem in measured.output.stems:
+        if checkpoint is not None:
+            checkpoint()
         with (directory / f"{stem.name}.wav").open("rb") as source:
             data = source.read(MAX_SEPARATION_STEM_BYTES + 1)
         if stem_from_wav(stem.name, data) != stem:
             raise ValueError(
                 "native separation stem bytes differ from its completion manifest"
             )
+        if checkpoint is not None:
+            checkpoint()
     return measured
 
 

@@ -1362,6 +1362,22 @@ boundary. This component is not registered in model mounting, placement or REST;
 it does not advertise ready separation capacity. Existing music and speech
 requests retain their current contracts.
 
+`worker/runner/demucs/resident.py` owns the corresponding loaded-model lifetime.
+The isolated `--serve` process verifies exact weights and places the complete
+model on its explicit FP32 device before a ready frame reports actual installed
+payload/weight identities and fixed device/thread policy. Core compares those
+facts with its admitted pins. Serial correlated requests reuse that model;
+bounded newline records and replaceable progress keep terminal delivery separate.
+Absolute deadlines include control writes and independent four-WAV verification.
+Cancellation or a protocol, model or output failure withdraws readiness and drains
+the complete native group before incomplete-job deletion or inherited-fence
+release. Earlier completed files and original audio survive. Failed drain retains
+ownership/files for close retry. Idle liveness checks withdraw a stale ready
+receipt; worker polling/publication and resource admission remain separate work.
+The three-platform candidate workflow proves actual installed model reuse,
+in-flight cancellation/reload and controller-death fencing. Its short synthetic
+signals do not establish musical usefulness or full-workload admission limits.
+
 The candidate wrapper in `packaging/skulk-demucs/` verifies one pinned local
 safetensors artifact and bounded original WAV before normalized FP32 inference.
 It returns drums, bass, other and vocals as a complete aligned PCM24 stereo set
