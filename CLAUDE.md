@@ -523,6 +523,12 @@ Build-tool typing uses `pyrightconfig.build.json` under Core's 3.13 interpreter;
 native typing uses the separate `pyrightconfig.json`. The three-platform workflow
 executes installed CPU candidates, not development import paths. This does not
 register the production cache/provisioner, ready backend or accelerator support.
+`provisioning/demucs_package.py` is now the canonical dependency-light package
+contract, expanded Python/venv/import validator and fresh bootstrap; standalone
+`package_inputs.py` links it. Bootstrap accepts an explicit command runner;
+verification exposes cancellation checkpoints and never trusts local completion
+receipts as integrity evidence. Complete cache orchestration/readiness remains
+unregistered. Keep standalone producer and cached-tree refusal tests in sync.
 
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):

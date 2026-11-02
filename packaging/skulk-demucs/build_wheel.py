@@ -19,6 +19,8 @@ from typing import Literal
 
 from package_inputs import (
     PYTHON_VERSION,
+    TARGETS,
+    locked_dependencies,
     read_python_catalog,
     verify_python_archive,
 )
@@ -43,11 +45,6 @@ UPSTREAM_MODULES = (
     "transformer.py",
     "utils.py",
     "wiener.py",
-)
-TARGETS = (
-    "macosx_14_0_arm64",
-    "manylinux_2_28_x86_64",
-    "manylinux_2_28_aarch64",
 )
 ADAPTER_MODULES: frozenset[str] = frozenset(
     (
@@ -105,36 +102,6 @@ def target_tags(target: str) -> list[Tag]:
 def dependency_matches(filename: str, target: str) -> bool:
     """Require the selected CPU/OS/CPython ABI rather than only a lock hash."""
     return bool(parse_wheel_filename(filename)[3] & set(target_tags(target)))
-
-
-def locked_dependencies(lock: bytes) -> dict[str, tuple[Version, frozenset[str]]]:
-    """Read a closed version/hash lock with no URLs, markers or index directives."""
-    if len(lock) > 2 * 1024 * 1024:
-        raise ValueError("native dependency lock exceeds its bound")
-    entries = lock.decode().replace("\\\n", " ").splitlines()
-    result: dict[str, tuple[Version, frozenset[str]]] = {}
-    for entry in entries:
-        stripped = entry.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        match = re.fullmatch(
-            r"([a-zA-Z0-9][a-zA-Z0-9_.-]*)==([^\s;]+)((?:\s+--hash=sha256:[a-f0-9]{64})+)",
-            stripped,
-        )
-        if match is None:
-            raise ValueError(
-                "native lock requires exact versions and SHA-256 hashes only"
-            )
-        name = canonicalize_name(match[1])
-        if name in result:
-            raise ValueError("duplicate native dependency")
-        result[name] = (
-            Version(match[2]),
-            frozenset(re.findall(r"--hash=sha256:([a-f0-9]{64})", match[3])),
-        )
-    if not result or len(result) > 128:
-        raise ValueError("native lock must contain a bounded complete dependency set")
-    return result
 
 
 def clean_revision(root: Path) -> str:

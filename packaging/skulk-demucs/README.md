@@ -56,6 +56,17 @@ source checkout**: the producer refuses dirty or uncommitted source inputs.
 
 The verifier is a **candidate validation tool**, not the production engine-cache
 installer. Its completion receipt does not authorize a backend or support claim.
+The resident-safe contracts and validators live in
+`src/skulk/provisioning/demucs_package.py`; `package_inputs.py` is an explicit
+repository link to that dependency-light source. Core never imports a private
+build tool. The fresh CLI delegates to the same bootstrap with an injected
+command runner. `verify_cached_runtime` checks the original sealed object,
+extracted source payload, complete standalone interpreter bytes/link topology,
+private venv configuration and installed imports before any cached Python runs.
+Completion receipts do not authorize reuse. Its cancellation checkpoints let a
+future supervising owner stop hashing/extraction safely. The current candidate
+CLI remains fresh-only; a verified library tree is not model or device readiness.
+
 Normal cache reuse/invalidation, installation supervision, resource admission,
 GPU-device binding, accelerator packages and signed publication are still needed.
 CPU package execution alone does not qualify an accelerator or full-length

@@ -1266,6 +1266,15 @@ fails instead of dispatching a command into the replacement session.
 
 ## Source-separation native boundary (initiative)
 
+The dependency-light `provisioning/demucs_package.py` is the shared package
+contract and integrity boundary. Standalone build tools use an explicit repository
+link rather than a duplicate validator; resident Core imports no build-tool code.
+Its fresh offline bootstrap receives an injected supervised command runner. Cache
+verification checks the sealed object, extracted source, complete standalone
+Python and links, venv configuration and all installed import bytes before
+execution. A mutable completion receipt cannot authorize reuse. These helpers do
+not register production cache orchestration, host/device readiness or placement.
+
 The `shared/types/audio_separation.py` contract and
 `worker/runner/demucs/process.py` supervisor define an isolated HTDemucs job
 boundary. This component is not registered in model mounting, placement or REST;

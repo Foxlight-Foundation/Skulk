@@ -15,6 +15,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Source-separation native boundary (initiative):**
   `shared/types/audio_separation.py` is the strict standalone source/four-stem
   and private process protocol; its WAV validator bounds encoded/decoded geometry
+- **Native separation package integrity (initiative):** `provisioning/demucs_package.py` owns shared strict package/interpreter contracts, offline bootstrap with an injected command runner, cooperative verification checkpoints and cached source/Python/venv/import integrity. Standalone `package_inputs.py` links that same source; Core never imports private build tools. Mutable receipts are not authorities. Cache orchestration, device probing and ready capacity are not registered by these helpers.
+
   and rejects malformed/nonfinite input. `worker/runner/demucs/process.py` owns
   one isolated native job, bounded progress/result JSON, complete file verification,
   process-tree cancellation and partial-output cleanup. `packaging/skulk-demucs/`
