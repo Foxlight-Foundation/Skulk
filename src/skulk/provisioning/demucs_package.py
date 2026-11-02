@@ -659,7 +659,22 @@ def verify_cached_runtime(
         raise ValueError(
             "cached native virtual environment selected a foreign interpreter"
         )
-    native = runtime / "bin/python"
+    binary_root = runtime / "bin"
+    if binary_root.is_symlink() or not binary_root.is_dir():
+        raise ValueError("cached native executable directory is missing or redirected")
+    for count, entry in enumerate(binary_root.iterdir(), start=1):
+        _checkpoint(checkpoint)
+        if count > 512:
+            raise ValueError("cached native executable directory exceeds its bound")
+        # CPython honors adjacent ._pth files even in isolated mode, and a
+        # bin/pyvenv.cfg takes precedence over the root configuration checked
+        # above. Case folding also covers case-insensitive supported hosts.
+        name = entry.name.casefold()
+        if name.endswith("._pth") or name == "pyvenv.cfg":
+            raise ValueError(
+                "cached native executable has an untrusted startup override"
+            )
+    native = binary_root / "python"
     site = runtime / "lib/python3.12/site-packages"
     if (
         not native.is_file()

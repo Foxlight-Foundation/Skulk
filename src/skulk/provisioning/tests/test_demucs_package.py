@@ -284,3 +284,42 @@ def test_cached_ready_receipt_does_not_authorize_changed_installed_code(
     ).write_bytes(b"changed installed code")
     with pytest.raises(ValueError, match="differs from trusted package bytes"):
         verify_cached_runtime(wheel, root, sha256, payload_sha256)
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "python._pth",
+        "python3._pth",
+        "python3.12._pth",
+        "PYTHON._PTH",
+        "pyvenv.cfg",
+        "PYVENV.CFG",
+    ),
+)
+def test_adjacent_python_startup_overrides_are_refused(
+    cached_fixture: tuple[Path, Path, str, str], name: str
+) -> None:
+    """Isolated mode does not make adjacent interpreter path overrides safe."""
+    wheel, root, sha256, payload_sha256 = cached_fixture
+    contents = (
+        "home = /unverified/python/bin\ninclude-system-site-packages = false\n"
+        if name.casefold() == "pyvenv.cfg"
+        else "/unverified/import/root\nimport site\n"
+    )
+    (root / "runtime/bin" / name).write_text(contents)
+    with pytest.raises(ValueError, match="startup override"):
+        verify_cached_runtime(wheel, root, sha256, payload_sha256)
+
+
+def test_redirected_executable_directory_cannot_hide_startup_overrides(
+    cached_fixture: tuple[Path, Path, str, str], tmp_path: Path
+) -> None:
+    """A verified final executable target cannot authorize a foreign bin directory."""
+    wheel, root, sha256, payload_sha256 = cached_fixture
+    binary_root = root / "runtime/bin"
+    foreign = tmp_path / "foreign-bin"
+    binary_root.rename(foreign)
+    binary_root.symlink_to(foreign, target_is_directory=True)
+    with pytest.raises(ValueError, match="executable directory"):
+        verify_cached_runtime(wheel, root, sha256, payload_sha256)

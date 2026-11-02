@@ -6,6 +6,8 @@ on:
     paths:
       - '.github/workflows/demucs-native-boundary.yml'
       - 'packaging/skulk-demucs/**'
+      - 'src/skulk/provisioning/demucs_package.py'
+      - 'src/skulk/provisioning/tests/test_demucs_package.py'
       - 'src/skulk/shared/types/audio_separation.py'
       - 'src/skulk/worker/runner/demucs/**'
       - 'scripts/qualify_demucs_native.py'

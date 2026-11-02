@@ -63,7 +63,9 @@ build tool. The fresh CLI delegates to the same bootstrap with an injected
 command runner. `verify_cached_runtime` checks the original sealed object,
 extracted source payload, complete standalone interpreter bytes/link topology,
 private venv configuration and installed imports before any cached Python runs.
-Completion receipts do not authorize reuse. Its cancellation checkpoints let a
+Completion receipts do not authorize reuse. Adjacent interpreter path sidecars
+(`._pth` and a shadowing `bin/pyvenv.cfg`) are refused even though Python runs
+in isolated mode; a redirected executable directory is also refused. Its cancellation checkpoints let a
 future supervising owner stop hashing/extraction safely. The current candidate
 CLI remains fresh-only; a verified library tree is not model or device readiness.
 
