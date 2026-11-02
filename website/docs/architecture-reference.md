@@ -21,6 +21,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   contains the offline-loading FP32 HTDemucs adapter. Its `contracts.py` link must
   become ordinary canonical contract bytes in a native wheel. Four aligned PCM24
   stereo WAVs share one gain; process RSS and device allocator peaks stay separate.
+  `build_wheel.py` seals clean source revisions, complete platform dependency locks
+  and a `python.json`-pinned standalone interpreter into reproducible candidates.
+  `verify_package.py` tests fresh offline installation and expanded-tree integrity
+  against sealed wheel bytes. Three-platform CI exercises installed CPU packages;
+  these tools do not provide production cache reuse or accelerator qualification.
   No mount/bootstrap, placement, engine inventory or REST route is registered yet.
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`

@@ -515,6 +515,14 @@ the exact local HTDemucs safetensors artifact is fully hashed before loading.
 Native codec/probe checks run separately via `packaging/skulk-demucs/verify_runtime.py`
 inside the candidate native environment. Packaging must dereference the canonical
 contract symlink; a source-tree path is not a distributable runtime dependency.
+The candidate producer (`build_wheel.py`) requires clean committed inputs and
+seals a complete platform hash lock plus the `python.json`-pinned standalone
+3.12.13 interpreter into deterministic wheels. `verify_package.py` performs fresh
+offline installation and checks expanded import bytes against original wheels.
+Build-tool typing uses `pyrightconfig.build.json` under Core's 3.13 interpreter;
+native typing uses the separate `pyrightconfig.json`. The three-platform workflow
+executes installed CPU candidates, not development import paths. This does not
+register the production cache/provisioner, ready backend or accelerator support.
 
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
