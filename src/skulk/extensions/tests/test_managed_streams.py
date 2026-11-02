@@ -118,208 +118,60 @@ def _ack(call_id: str = "call") -> bytes:
     return len(header).to_bytes(4, "big") + header
 
 
-@pytest.mark.parametrize("waiting_mode", ["unary", "stream"])
-@pytest.mark.parametrize("outcome", ["success", "cancel", "deadline", "withdrawn", "reassigned"])
-async def test_owner_invocations_share_one_deadline_bound_slot(
-    waiting_mode: Literal["unary", "stream"],
-    outcome: Literal["success", "cancel", "deadline", "withdrawn", "reassigned"],
-) -> None:
-    """Queue behind active media without blocking health or admitting withdrawn work."""
-    requests: asyncio.Queue[bytes] = asyncio.Queue()
-    release = asyncio.Event()
-    queued_contacted_owner = asyncio.Event()
-
-    async def handle(
-        _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        request = TypeAdapter(dict[str, JsonValue]).validate_json(await requests.get())
-        if request["operation"] == "describe-extended":
-            writer.write(
-                json.dumps(
-                    {
-                        "result": {
-                            "transport_node_id": str(host_context.node_id),
-                            "protocol": 4,
-                            "nodes": [node.model_dump(mode="json") for node in owner.nodes],
-                        }
-                    }
-                ).encode()
-                + b"\n"
-            )
-            await writer.drain()
-            return
-        invocation = request["invoke"]
-        assert isinstance(invocation, dict)
-        call_id = invocation["call_id"]
-        assert isinstance(call_id, str)
-        if call_id == "queued":
-            queued_contacted_owner.set()
-        if request["operation"] == "invoke":
-            writer.write(b'{"result":{"value":"cached"}}\n')
-            await writer.drain()
-            return
-        assert request["operation"] == "stream"
-        await write_managed_frame(
-            writer,
-            CapabilityStreamFrame(
-                call_id=call_id,
-                direction="provider_to_caller",
-                sequence=1,
-                kind="chunk",
-                payload={},
-            ),
-        )
-        await release.wait()
-        await write_managed_frame(
-            writer,
-            CapabilityStreamFrame(
-                call_id=call_id,
-                direction="provider_to_caller",
-                sequence=2,
-                kind="completed",
-            ),
-        )
-        writer.write(_ack(call_id))
-        await writer.drain()
-
-    async with _stream_fixture(handle, on_request=requests.put_nowait) as (
-        owner,
-        host_context,
-        call,
-    ):
-        catalog = CapabilityDescriptor(
-            id="catalog",
-            version="1.0.0",
-            title="Cached catalog",
-            description="A unary read sharing the installed node's invocation slot.",
-            input_schema={},
-            output_schema={},
-        )
-        owner.nodes = (
-            owner.nodes[0].model_copy(
-                update={"descriptors": (*owner.nodes[0].descriptors, catalog)}
-            ),
-        )
-        queued_call = call.model_copy(
-            update={
-                "call_id": "queued",
-                "capability_id": catalog.id if waiting_mode == "unary" else call.capability_id,
-                "descriptor_revision": descriptor_revision(catalog)
-                if waiting_mode == "unary"
-                else call.descriptor_revision,
-                "timeout_seconds": 0.1 if outcome == "deadline" else 2.0,
-            }
-        )
-
-        async def waiting_call() -> dict[str, object] | list[CapabilityStreamFrame]:
-            if waiting_mode == "unary":
-                return await owner.handle_call(host_context, queued_call)
-            return [
-                frame async for frame in owner.handle_stream(host_context, queued_call)
-            ]
-
-        stream = owner.handle_stream(host_context, call)
-        queued: asyncio.Task[dict[str, object] | list[CapabilityStreamFrame]] | None = None
-        try:
-            assert (await anext(stream)).kind == "chunk"
-            queued = asyncio.create_task(waiting_call())
-            await asyncio.sleep(0.02)
-            assert not queued_contacted_owner.is_set()
-            async with asyncio.timeout(0.5):
-                await owner.refresh()
-            assert owner.available
-            if outcome == "cancel":
-                queued.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await queued
-            elif outcome == "deadline":
-                with pytest.raises(TimeoutError):
-                    await queued
-            elif outcome == "withdrawn":
-                owner.disabled = True
-            elif outcome == "reassigned":
-                owner.nodes = (owner.nodes[0].model_copy(update={"node_id": "replacement"}),)
-            assert not queued_contacted_owner.is_set()
-            release.set()
-            assert [frame.kind async for frame in stream] == ["completed"]
-            if outcome == "success":
-                result = await queued
-                if waiting_mode == "unary":
-                    assert result == {"value": "cached"}
-                else:
-                    assert isinstance(result, list) and result[-1].kind == "completed"
-                assert queued_contacted_owner.is_set()
-            elif outcome in {"withdrawn", "reassigned"}:
-                with pytest.raises(RuntimeError, match="unavailable"):
-                    await queued
-                assert not queued_contacted_owner.is_set()
-        finally:
-            release.set()
-            if queued is not None:
-                queued.cancel()
-                await asyncio.gather(queued, return_exceptions=True)
-            await stream.aclose()
-        assert owner.invocation_slots == {}
-
-
-async def test_sibling_nodes_have_independent_invocation_slots() -> None:
-    """A streaming child must not block a sibling child's unary invocation."""
+async def test_streaming_node_keeps_cached_metadata_control_independent() -> None:
+    """A long managed stream must not consume its cached metadata read budget."""
     requests: asyncio.Queue[bytes] = asyncio.Queue()
     release = asyncio.Event()
 
-    async def handle(
-        _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def handle(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         request = TypeAdapter(dict[str, JsonValue]).validate_json(await requests.get())
-        if request["operation"] == "invoke":
-            assert request["node_id"] == "sibling"
-            writer.write(b'{"result":{"independent":true}}\n')
-            await writer.drain()
-            return
         assert request["node_id"] == "installed"
-        await write_managed_frame(
-            writer,
-            CapabilityStreamFrame(
-                call_id="call", direction="provider_to_caller",
-                sequence=1, kind="chunk", payload={},
-            ),
-        )
+        if request["operation"] == "invoke":
+            writer.write(b'{"result":{"cached":true}}\n')
+            await writer.drain()
+            return
+        await write_managed_frame(writer, CapabilityStreamFrame(
+            call_id="call", direction="provider_to_caller", sequence=1,
+            kind="chunk", payload={},
+        ))
         await release.wait()
-        await write_managed_frame(
-            writer,
-            CapabilityStreamFrame(
-                call_id="call", direction="provider_to_caller",
-                sequence=2, kind="completed",
-            ),
-        )
+        await write_managed_frame(writer, CapabilityStreamFrame(
+            call_id="call", direction="provider_to_caller", sequence=2,
+            kind="completed",
+        ))
         writer.write(_ack())
         await writer.drain()
 
-    async with _stream_fixture(handle, on_request=requests.put_nowait) as (
+    async with _stream_fixture(handle, timeout=15.0, on_request=requests.put_nowait) as (
         owner, host_context, call,
     ):
-        descriptor = CapabilityDescriptor(
-            id="sibling", version="1.0.0", title="Sibling", description="Independent child",
-            input_schema={}, output_schema={},
+        metadata = CapabilityDescriptor(
+            id="metadata", version="1.0.0", title="Cached metadata",
+            description="Independent read-only control traffic.",
+            input_schema={"type": "object", "additionalProperties": False},
+            output_schema={}, annotations={"skulk.admission": "metadata"},
         )
-        owner.nodes = (*owner.nodes, owner.nodes[0].model_copy(update={
-            "node_id": "sibling", "descriptors": (descriptor,),
-        }))
+        owner.nodes = (owner.nodes[0].model_copy(update={
+            "descriptors": (*owner.nodes[0].descriptors, metadata),
+        }),)
         stream = owner.handle_stream(host_context, call)
         try:
             assert (await anext(stream)).kind == "chunk"
-            sibling = call.model_copy(update={
-                "capability_id": descriptor.id,
-                "descriptor_revision": descriptor_revision(descriptor),
-                "timeout_seconds": 0.2,
+            await asyncio.sleep(6.0)
+            # This fixture supplies cached health, independent of the wire read.
+            # The SDK's real-process test separately qualifies concurrent health.
+            owner.observed = time.monotonic()
+            read = call.model_copy(update={
+                "capability_id": metadata.id,
+                "descriptor_revision": descriptor_revision(metadata),
+                "timeout_seconds": 0.4,
             })
-            assert await owner.handle_call(host_context, sibling) == {"independent": True}
+            assert await owner.handle_call(host_context, read) == {"cached": True}
             release.set()
             assert [frame.kind async for frame in stream] == ["completed"]
         finally:
             release.set()
             await stream.aclose()
-        assert owner.invocation_slots == {}
 
 
 @pytest.mark.parametrize("invalid_input", [False, True])

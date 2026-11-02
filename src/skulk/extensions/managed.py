@@ -356,7 +356,6 @@ class ManagedOwner:
         self.unavailable_reason: str | None = None
         self.unavailable_noted = 0.0
         self.refresh_lock = asyncio.Lock()
-        self.invocation_slots: dict[str, tuple[asyncio.Lock, int]] = {}
 
     def chat_middleware(self) -> None:
         """Managed owners do not intercept inference output."""
@@ -898,57 +897,7 @@ class ManagedOwner:
     async def handle_call(
         self, context: ExtensionContext, call: CapabilityCall
     ) -> dict[str, object]:
-        """Queue one unary invocation within its deadline, then recheck readiness."""
-        async with self._admit_owner_call(context, call) as admitted:
-            return await self._invoke_owner(context, admitted)
-
-    @contextlib.asynccontextmanager
-    async def _admit_owner_call(
-        self, context: ExtensionContext, call: CapabilityCall
-    ) -> AsyncIterator[CapabilityCall]:
-        # The SDK grants each child one invocation slot shared by unary and
-        # streaming calls. Count holders and waiters so cancellation cannot
-        # leak slots or let a new lock race existing waiters. Health/describe
-        # use independent control IO; sibling children remain independent.
-        deadline = asyncio.get_running_loop().time() + call.timeout_seconds
-        qualified_id = f"{call.capability_id}@{call.version}"
-        if self.context is not context or not self.capability_ready(qualified_id):
-            raise RuntimeError("managed capability unavailable")
-        node_id = next(
-            node.node_id
-            for node in self.nodes
-            if any(item.qualified_id == qualified_id for item in node.descriptors)
-        )
-        lock, users = self.invocation_slots.get(node_id, (asyncio.Lock(), 0))
-        self.invocation_slots[node_id] = (lock, users + 1)
-        try:
-            async with asyncio.timeout_at(deadline), lock:
-                # A queued capability may be disabled or moved to another
-                # child. Do not dispatch it using admission for its old node.
-                if (
-                    self.context is not context
-                    or not self.capability_ready(qualified_id)
-                    or not any(
-                        node.node_id == node_id
-                        and any(item.qualified_id == qualified_id for item in node.descriptors)
-                        for node in self.nodes
-                    )
-                ):
-                    raise RuntimeError("managed capability unavailable")
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError("managed invocation admission timed out")
-                yield call.model_copy(update={"timeout_seconds": remaining})
-        finally:
-            _, users = self.invocation_slots[node_id]
-            if users == 1:
-                del self.invocation_slots[node_id]
-            else:
-                self.invocation_slots[node_id] = (lock, users - 1)
-
-    async def _invoke_owner(
-        self, context: ExtensionContext, call: CapabilityCall
-    ) -> dict[str, object]:
+        """Forward one admitted unary call with its exact installed node and deadline."""
         qualified_id = f"{call.capability_id}@{call.version}"
         if self.context is not context or not self.capability_ready(qualified_id):
             raise RuntimeError("managed capability unavailable")
@@ -1011,21 +960,6 @@ class ManagedOwner:
                 yield frame
 
     async def _stream(
-        self,
-        context: ExtensionContext,
-        call: CapabilityCall,
-        input_frames: AsyncIterator[CapabilityStreamFrame],
-    ) -> AsyncGenerator[CapabilityStreamFrame, None]:
-        async with (
-            self._admit_owner_call(context, call) as admitted,
-            contextlib.aclosing(
-                self._stream_admitted(context, admitted, input_frames)
-            ) as frames,
-        ):
-            async for frame in frames:
-                yield frame
-
-    async def _stream_admitted(
         self,
         context: ExtensionContext,
         call: CapabilityCall,
