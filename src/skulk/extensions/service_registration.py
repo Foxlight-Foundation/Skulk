@@ -219,7 +219,11 @@ class ServiceLayout:
                     "ThrottleInterval": 10,
                     "ExitTimeOut": 180,
                     "Umask": 0o077,
-                    "ProcessType": "Background",
+                    # This service owns interactive inference and management,
+                    # including short-lived schema workers. Background launchd
+                    # scheduling is inherited and can starve valid admissions
+                    # past their deadlines even when CPU is available.
+                    "ProcessType": "Interactive",
                     "StandardOutPath": "/dev/null",
                     "StandardErrorPath": "/dev/null",
                 },

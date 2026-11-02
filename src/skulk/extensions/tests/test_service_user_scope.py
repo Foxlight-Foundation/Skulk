@@ -78,6 +78,7 @@ def test_user_agent_runs_as_its_owner_without_naming_one(tmp_path: Path) -> None
     assert cast(list[str], agent["ProgramArguments"])[0] == str(python)
     assert agent["WorkingDirectory"] == str(layout.root)
     assert agent["KeepAlive"] is True and agent["RunAtLoad"] is True
+    assert agent["ProcessType"] == "Interactive"
     layout.verify_existing(layout.definition(python))
 
 

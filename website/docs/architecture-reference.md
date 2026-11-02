@@ -25,6 +25,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   queue time in its budget; later callers always read afresh. Transient overload
   or provider errors allow at most three cached-read attempts inside the same
   budget; successful withdrawal is immediate and generation is never replayed.
+  The macOS manager uses launchd `Interactive` scheduling in both scopes, so
+  owners, children and isolated schema workers inherit responsive CPU/I/O policy.
   Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.
 

@@ -4988,6 +4988,10 @@ configuration must live outside Git checkouts and remain available after boot.
 
 A user-scope definition must belong to the owner and not be writable by others;
 a system definition must belong to root.
+Both macOS scopes use launchd `Interactive` scheduling. The manager owns
+interactive inference and management; its owners, children and bounded schema
+workers must not inherit background CPU/I/O throttling. Existing macOS services
+adopt this policy when setup is rerun after upgrading Skulk.
 
 Setup copies the node's own Python environment, which must be dedicated to
 Skulk: a virtual environment, or a packaged runtime whose interpreter prefix
