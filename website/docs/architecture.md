@@ -3659,5 +3659,7 @@ their supported scope. See the API guide for exact request and lifecycle fields.
   budget; successful withdrawal is immediate and generation is never replayed.
   The macOS manager uses launchd `Interactive` scheduling in both scopes, so
   owners, children and isolated schema workers inherit responsive CPU/I/O policy.
+  Only the exact prior generated `Background` unit is accepted for scheduling
+  migration; unrelated definition changes remain refused.
   Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.

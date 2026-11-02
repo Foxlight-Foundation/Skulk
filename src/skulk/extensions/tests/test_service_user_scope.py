@@ -93,6 +93,41 @@ def test_user_unit_starts_with_the_user_manager(tmp_path: Path) -> None:
     layout.verify_existing(unit.encode())
 
 
+@pytest.mark.parametrize("scope", ["user", "system"])
+@pytest.mark.parametrize(
+    "alteration", ["none", "account", "directory", "scheduling", "environment"]
+)
+def test_macos_scheduling_upgrade_accepts_only_the_exact_previous_unit(
+    tmp_path: Path,
+    scope: Literal["user", "system"],
+    alteration: Literal["none", "account", "directory", "scheduling", "environment"],
+) -> None:
+    """Migrate our old scheduling policy without adopting unrelated OS definitions."""
+    layout = (
+        _user_layout(tmp_path, "macos-arm64")
+        if scope == "user"
+        else ServiceLayout("macos-arm64", os.getuid(), os.getgid(), "owner", "owners")
+    )
+    payload = cast(
+        dict[str, object],
+        plistlib.loads(layout.definition(Path("/opt/python/bin/python3.13"))),
+    )
+    payload["ProcessType"] = "Background"
+    if alteration == "none":
+        layout.verify_existing(plistlib.dumps(payload, sort_keys=True))
+        return
+    if alteration == "account":
+        payload["UserName"] = "root"
+    elif alteration == "directory":
+        payload["WorkingDirectory"] = str(tmp_path / "unrelated")
+    elif alteration == "scheduling":
+        payload["ProcessType"] = "Standard"
+    elif alteration == "environment":
+        payload["EnvironmentVariables"] = {"INJECTED": "1"}
+    with pytest.raises(ValueError, match="differs from fixed contract"):
+        layout.verify_existing(plistlib.dumps(payload, sort_keys=True))
+
+
 def test_local_user_layout_honors_xdg_on_linux(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

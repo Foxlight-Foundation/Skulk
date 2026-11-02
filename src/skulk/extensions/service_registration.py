@@ -303,6 +303,14 @@ class ServiceLayout:
                 raise ValueError("invalid existing interpreter identity")
             python = value
         expected = self._render(Path(python), bundle)
+        if _is_macos(self.platform):
+            # Scheduling changes must not prevent replacing our own old unit.
+            # Accept only the exact previous renderer; owner, bootstrap, paths,
+            # permissions and every other field still match the fixed contract.
+            previous = cast(dict[str, object], plistlib.loads(expected))
+            previous["ProcessType"] = "Background"
+            if content == plistlib.dumps(previous, sort_keys=True):
+                return
         if not _is_macos(self.platform) and self.scope == "system":
             # Permit repair of only the exact prior generated unit. systemd
             # rejects its quoted WorkingDirectory before starting any process.

@@ -4992,6 +4992,8 @@ Both macOS scopes use launchd `Interactive` scheduling. The manager owns
 interactive inference and management; its owners, children and bounded schema
 workers must not inherit background CPU/I/O throttling. Existing macOS services
 adopt this policy when setup is rerun after upgrading Skulk.
+Setup accepts the exact previously generated `Background` definition for this
+migration; changed accounts, paths, environment or other unit fields remain refused.
 
 Setup copies the node's own Python environment, which must be dedicated to
 Skulk: a virtual environment, or a packaged runtime whose interpreter prefix

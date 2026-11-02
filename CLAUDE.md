@@ -1809,7 +1809,9 @@ default scope is a per-user launchd agent or systemd user unit registered by the
 owner with no elevation (`service_registration.register_user`); `setup --system`
 registers a system service through the sudo helper. Both macOS scopes use
 interactive scheduling so owner children and schema workers are not throttled
-as background work. Run it as the existing nonroot owner. It journals
+as background work. Run it as the existing nonroot owner.
+The verifier accepts only the exact prior generated macOS `Background` definition
+for scheduling migration; unrelated unit changes remain refused. Setup journals
 setup stages, preserves generated profile identity and copies exact qualified
 runtime dependencies without modifying Skulk's environment. Its fixed local sudo
 entrypoint `service_registration.py` must remain standard-library-only and execute
