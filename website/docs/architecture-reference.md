@@ -22,7 +22,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Up to eight cached catalogs are read concurrently under five-second individual
   and six-second aggregate deadlines, including managed-owner validation overhead
   and retaining completed results. Overlapping callers share that read, including
-  queue time in its budget; later callers always read afresh. Stream cleanup owns cancellation and
+  queue time in its budget; later callers always read afresh. Transient overload
+  or provider errors allow at most three cached-read attempts inside the same
+  budget; successful withdrawal is immediate and generation is never replayed.
+  Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.
 
 - **Native model preservation:** `store/preservation_export.py` resolves exact

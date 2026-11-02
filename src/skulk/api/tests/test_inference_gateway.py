@@ -54,6 +54,7 @@ class ChatFixture:
         self.local = namespace == "different.inference"
         self.calls = 0
         self.catalog_calls = 0
+        self.catalog_failures = 0
         self.catalog_active = False
         self.catalog_available = True
         self.catalog_started = asyncio.Event()
@@ -96,6 +97,9 @@ class ChatFixture:
     ) -> dict[str, object]:
         """Publish fresh fixture facts without making a provider request."""
         self.catalog_calls += 1
+        if self.catalog_failures:
+            self.catalog_failures -= 1
+            raise RuntimeError("fixture owner is retiring its previous call")
         if self.catalog_active:
             return {}
         self.catalog_active = True
@@ -401,6 +405,26 @@ async def test_overlapping_catalog_readers_share_one_read_without_later_caching(
     provider.catalog_available = False
     assert await api.read_chat_catalogs() == []
     assert provider.catalog_calls == 2
+
+
+@pytest.mark.parametrize("failures", [1, 2, 3])
+async def test_catalog_handoff_retries_are_bounded_and_never_replay_inference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failures: int
+) -> None:
+    """Transient refusal recovers, persistent refusal stops, and withdrawal wins."""
+    monkeypatch.setattr("skulk.api.main.SKULK_DATA_HOME", tmp_path)
+    signer = GatewaySigner(tmp_path / "inference" / "gateway.key")
+    provider = ChatFixture("managed.inference", signer.public_key())
+    provider.catalog_failures = failures
+    api = build_api(provider)
+    catalogs = await api.read_chat_catalogs()
+    assert len(catalogs) == (0 if failures == 3 else 1)
+    assert provider.catalog_calls == min(failures + 1, 3)
+    assert provider.calls == 0
+    provider.catalog_available = False
+    calls = provider.catalog_calls
+    assert await api.read_chat_catalogs() == []
+    assert provider.catalog_calls == calls + 1
 
 
 async def test_cancelling_catalog_waiter_keeps_the_active_read(

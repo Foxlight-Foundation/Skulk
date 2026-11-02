@@ -6481,6 +6481,9 @@ Overlapping callers share one discovery result instead of competing for a
 managed owner's single call slot. Waiting and discovery share the same overall
 budget. A later non-overlapping request reads afresh; this does not retain a
 provider catalog after its next successful withdrawal.
+Transient `overloaded` or `provider_error` refusals permit at most three attempts
+inside the same individual budget. Only cached discovery is retried; generation
+is never automatically replayed. A successful empty result withdraws immediately.
 It does not fetch an
 upstream account catalog or token. Missing/stale catalogs withdraw availability.
 The dashboard withdraws cached capability choices at their advertised expiry

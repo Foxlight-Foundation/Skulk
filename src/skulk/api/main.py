@@ -10859,18 +10859,37 @@ class API:
         observed: dict[int, ChatCatalog] = {}
 
         async def read_catalog(index: int, descriptor: CapabilityDescriptor) -> None:
-            result = await self._call_capability(
-                self.node_id,
-                descriptor.id,
-                descriptor.version,
-                descriptor_revision(descriptor),
-                {},
-                # Managed calls include owner IPC and isolated schema workers.
-                # One second can cancel a healthy cached read and restart its
-                # child; allow the normal five-second managed call budget.
-                timeout_seconds=5,
-            )
-            if not result.ok or not result.result:
+            deadline = asyncio.get_running_loop().time() + min(5, budget_seconds)
+            result: CapabilityResult | None = None
+            for attempt in range(3):
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return
+                result = await self._call_capability(
+                    self.node_id,
+                    descriptor.id,
+                    descriptor.version,
+                    descriptor_revision(descriptor),
+                    {},
+                    # Owner IPC and isolated validation share this whole budget,
+                    # including retries; inference itself is never replayed.
+                    timeout_seconds=remaining,
+                )
+                if result.ok:
+                    break
+                if (
+                    result.error is None
+                    or result.error.code not in {"overloaded", "provider_error"}
+                    or attempt == 2
+                ):
+                    return
+                # A managed owner may still be retiring its previous call. Only
+                # this explicitly cached, read-only discovery can be retried;
+                # a successful empty catalog is authoritative withdrawal.
+                await asyncio.sleep(
+                    min(0.1, max(0.0, deadline - asyncio.get_running_loop().time()))
+                )
+            if result is None or not result.ok or not result.result:
                 return
             try:
                 catalog = ChatCatalog.model_validate_json(json.dumps(result.result))
