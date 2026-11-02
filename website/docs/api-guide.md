@@ -2359,6 +2359,11 @@ cards retain final override precedence.
 
 Each entry also separates discovery truth from runtime truth:
 
+- `separation`, when present, describes an explicit `AudioSeparation` model's
+  `family`, ordered `stems`, `sample_rate`, `audio_channels`, and
+  `trained_segment_seconds`. It is independent of speech's
+  `audio` and text-to-music's `music` metadata. This optional object describes
+  model truth and does not imply a mounted separator or grant execution.
 - `registry_architecture` is the trusted open architecture identifier retained
   from the signed catalog.
 - `capability_claims` reports signed model/artifact capabilities even when no

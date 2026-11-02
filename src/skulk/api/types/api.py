@@ -27,7 +27,9 @@ from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
     RegistryEngineSupportClaim,
 )
+from skulk.shared.models.separation import separation_is_absent
 from skulk.shared.models.video_support import video_engine_feature_builds
+from skulk.shared.types.audio_separation import SeparationStemName
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.music import MusicJobStatus, MusicOutputManifest
@@ -402,6 +404,11 @@ class ModelListModel(BaseModel):
         default=None,
         description="Text-to-music family, lyric rule, and generation-target bounds.",
     )
+    separation: "SeparationCapabilitySection | None" = Field(
+        default=None,
+        exclude_if=separation_is_absent,
+        description="Native separator stem roles and sampling geometry; not loaded readiness.",
+    )
     tooling: "ToolingCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative tool-calling metadata from the model card.",
@@ -742,6 +749,38 @@ class MusicCapabilitySection(BaseModel):
             lyrics=config.lyrics.value,
             min_seconds=config.min_seconds,
             max_seconds=config.max_seconds,
+        )
+
+
+class SeparationCapabilitySection(BaseModel):
+    """Public native stem geometry, independent of a mounted runner's readiness."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    family: Literal["htdemucs"] = Field(description="Explicit native separator family.")
+    stems: tuple[SeparationStemName, ...] = Field(
+        min_length=4, max_length=4, description="Ordered native output stem roles."
+    )
+    sample_rate: Literal[44100] = Field(description="Native samples per second.")
+    audio_channels: Literal[2] = Field(description="Native channels per stem.")
+    trained_segment_seconds: float = Field(
+        gt=0,
+        allow_inf_nan=False,
+        description="Training window, independent of API source or split limits.",
+    )
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "SeparationCapabilitySection | None":
+        """Project explicit separator truth; return None for other model kinds."""
+        config = model_card.separation
+        if config is None:
+            return None
+        return cls(
+            family=config.family,
+            stems=config.stems,
+            sample_rate=config.sample_rate,
+            audio_channels=config.audio_channels,
+            trained_segment_seconds=config.trained_segment_seconds,
         )
 
 

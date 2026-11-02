@@ -549,6 +549,29 @@ do not initialize unrelated engines. Preserve their backing objects/signatures;
 exercise cold imports in the small native controller environment as well as the
 full Core environment.
 
+The initiative cache controller `provisioning/demucs_runtime.py` verifies CPU
+package/payload/ABI before execution, serializes disk and per-build preparation,
+uses stable UUID installations and rechecks every cached byte before CPU/MPS
+probing. Offline mode never downloads; complete unpublished generations can be
+recovered after verification. Selection records are not integrity authorities.
+Retain the controller for the worker lifetime and cancel/join a running prepare
+before close; failed cleanup retains its original runner for retry. Never delete
+old or possibly published generations. Cleanup retries drain first and reacquire
+the global cache fence before touching files. Persistent `published/<uuid>`
+markers protect generations once handed out, even after selection changes;
+they never authorize integrity or execution. Downloads checkpoint each raw
+transport read rather than waiting to buffer a large chunk. This is not worker/backend/model-ready
+registration. Protected filesystem helpers are shared in `utils/runtime_files.py`
+with compatibility reexports from the old extensions path, avoiding plugin
+initialization during engine preparation. GPU profiles remain separate gates.
+
+Native separator cards use `ModelTask.AudioSeparation` and frozen
+`shared/models/separation.py::SeparationCardConfig`. Keep the registry's typed
+`[separation]` contract in sync: one SHA-256 safetensors object, ordered native
+stems, real transformer dimensions and a finite trained window. `/v1/models`
+projects this model truth separately from speech/music and does not imply a
+mounted runner. This metadata addition is not a replicated execution-task union.
+
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the

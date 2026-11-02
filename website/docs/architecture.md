@@ -1290,6 +1290,39 @@ resident engines or require their dependency sets. Explicit legacy exports retai
 their original backing objects and signatures. Native CI checks cold helper
 imports in its small controller environment before exercising real processes.
 
+`provisioning/demucs_runtime.py` now supplies the owned `DemucsRuntimeCache`
+controller for the CPU package on all three targets and its optional Apple MPS
+probe. It checks the host ABI and independently pinned package/payload identities
+before execution, uses global disk and exact-build file fences, and installs at
+stable UUID paths. Offline reuse and recovery of complete unpublished generations
+repeat full source/interpreter/venv/import verification and a closed FP32 device
+probe. Atomic fsynced selection records are hints, never integrity authorities.
+Prior generations survive repair. Cancellation removes newly owned incomplete
+files only after confirmed process drain; failed drains retain the exact owner
+for retry or close. Free-disk reserve, download size/hash, generation count,
+command output and preparation/probe deadlines are bounded. Cleanup retry drains its original owner before
+reacquiring the cache fence, then preserves every generation with publication
+history. A private `published/<uuid>` marker is synced before selection changes;
+it protects against deletion, never authorizes cached code. This history remains
+when selection moves or disappears. Close waits at most five seconds for another
+preparation owner, retaining cleanup for explicit retry. Raw downloads check
+cancellation/deadlines on each transport read, without a MiB buffering delay.
+The controller is not yet connected to worker preparation, placement, a published inventory or
+loaded-model readiness. CUDA/ROCm package profiles and admission remain separate
+integration gates.
+
+Protected runtime file/lock helpers live in `utils/runtime_files.py`; the old
+`extensions/runtime_files.py` path reexports the same functions and class. Engine
+preparation can use them without loading the plugin subsystem. There is no new
+engine plugin ABI or activation framework.
+
+`shared/models/separation.py` defines immutable native separator card metadata.
+`AudioSeparation` and `[separation]` must agree, selecting one exact safetensors
+object and real transformer geometry, with speech and music sections excluded.
+The registry derives `audio.separate` explicitly and `/v1/models` projects the
+same typed information. This reader vocabulary does not add an execution task
+to the replicated task union or advertise a loaded runner.
+
 The dependency-light `provisioning/demucs_package.py` is the shared package
 contract and integrity boundary. Standalone build tools use an explicit repository
 link rather than a duplicate validator; resident Core imports no build-tool code.

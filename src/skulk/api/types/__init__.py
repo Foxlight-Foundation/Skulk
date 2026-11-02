@@ -93,6 +93,7 @@ from .api import ReconciliationStatus as ReconciliationStatus
 from .api import RemoteCodeApprovalView as RemoteCodeApprovalView
 from .api import ResolvedModelCapabilities as ResolvedModelCapabilities
 from .api import RuntimeCapabilitySection as RuntimeCapabilitySection
+from .api import SeparationCapabilitySection as SeparationCapabilitySection
 from .api import StartDownloadParams as StartDownloadParams
 from .api import StartDownloadResponse as StartDownloadResponse
 from .api import StoreDownloadRequest as StoreDownloadRequest

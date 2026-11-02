@@ -288,6 +288,27 @@ def _candidate_manifest(archive: zipfile.ZipFile) -> BuildManifest:
     return manifest
 
 
+def inspect_candidate(
+    wheel: Path,
+    expected_sha256: str,
+    *,
+    checkpoint: Checkpoint | None = None,
+) -> BuildManifest:
+    """Check sealed object/manifest identities without extracting or executing.
+
+    An owner can bind payload and platform policy before fresh bootstrap. Whole
+    package bytes, not an adjacent descriptor or mutable cache record, authorize
+    the manifest; payload members are additionally verified during extraction.
+    """
+    if (
+        file_digest(wheel, limit=MAX_PACKAGE_BYTES, checkpoint=checkpoint)
+        != expected_sha256
+    ):
+        raise ValueError("candidate package differs from its expected digest")
+    with zipfile.ZipFile(wheel) as archive:
+        return _candidate_manifest(archive)
+
+
 def unpack_candidate(
     wheel: Path,
     destination: Path,
@@ -657,7 +678,8 @@ def verify_cached_runtime(
         # foreign/bin alias may resolve to this exact executable while selecting
         # foreign/lib instead. Only the known base spelling or its canonical
         # spelling is admitted, without resolving caller-controlled aliases.
-        or configuration.get("home") not in {str(base.parent), str(base.parent.resolve())}
+        or configuration.get("home")
+        not in {str(base.parent), str(base.parent.resolve())}
         or configuration.get("executable") not in {str(base), str(base.resolve())}
     ):
         raise ValueError(

@@ -185,7 +185,13 @@ def cached_fixture(
         "members": {
             name: hashlib.sha256(data).hexdigest() for name, data in members.items()
         },
-        "features": ["audio.separate"],
+        "features": [
+            "audio.separate",
+            "four_stems",
+            "pcm24",
+            "offline_loader",
+            "bundled_python",
+        ],
     }
     payload_sha256 = hashlib.sha256(
         json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
@@ -341,7 +347,9 @@ def test_virtual_environment_cannot_select_a_foreign_alias_of_verified_python(
     configured = foreign / "bin" if field == "home" else foreign / "bin/python3.12"
     original = base.parent if field == "home" else base
     configuration.write_text(
-        configuration.read_text().replace(f"{field} = {original}", f"{field} = {configured}")
+        configuration.read_text().replace(
+            f"{field} = {original}", f"{field} = {configured}"
+        )
     )
     with pytest.raises(ValueError, match="foreign interpreter"):
         verify_cached_runtime(wheel, root, sha256, payload_sha256)
