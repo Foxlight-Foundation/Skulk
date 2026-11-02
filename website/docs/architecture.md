@@ -3661,5 +3661,9 @@ their supported scope. See the API guide for exact request and lifecycle fields.
   owners, children and isolated schema workers inherit responsive CPU/I/O policy.
   Only the exact prior generated `Background` unit is accepted for scheduling
   migration; unrelated definition changes remain refused.
+  Managed adapters serialize unary and streaming invocations per installed capability node,
+  including stream cleanup acknowledgment. Queue time consumes the caller's same
+  deadline; remaining time and fresh readiness are checked before owner contact.
+  Health/descriptions and different owners remain independent; no generation is replayed.
   Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.

@@ -5280,6 +5280,11 @@ while ready. A cached descriptor does not grant continued admission: new unary
 and streaming calls to an unavailable capability return typed `not_found`.
 Readiness is rechecked after asynchronous stream admission. Already admitted
 calls retain their normal deadline and cancellation behavior.
+Local managed adapters share one invocation slot per installed capability node across
+unary and streaming calls. Waiting uses the same caller deadline, and readiness
+is rechecked before contacting the owner. Stream ownership lasts through cleanup
+acknowledgment. Health and description requests use their independent control
+path; sibling nodes and separate owners keep independent invocation slots. No generation is replayed.
 
 
 ### List a node's served capabilities

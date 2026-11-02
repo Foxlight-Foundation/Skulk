@@ -1810,6 +1810,12 @@ owner with no elevation (`service_registration.register_user`); `setup --system`
 registers a system service through the sudo helper. Both macOS scopes use
 interactive scheduling so owner children and schema workers are not throttled
 as background work. Run it as the existing nonroot owner.
+Managed adapters share one invocation slot per installed capability node across
+unary and streaming calls, respecting the SDK's single-slot contract. Queue time consumes
+the caller deadline; admission rechecks readiness and passes only the remaining
+budget to the owner. Stream cleanup completes before slot release. Health and
+descriptions remain independent, as do sibling nodes and different owners;
+generation is never replayed.
 The verifier accepts only the exact prior generated macOS `Background` definition
 for scheduling migration; unrelated unit changes remain refused. Setup journals
 setup stages, preserves generated profile identity and copies exact qualified
