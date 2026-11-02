@@ -25,6 +25,7 @@ on:
       - 'scripts/qualify_demucs_native.py'
       - 'scripts/stage_demucs_candidate.py'
       - 'scripts/qualify_demucs_cache.py'
+      - 'scripts/qualify_demucs_resident.py'
 
 permissions:
   contents: read
@@ -68,12 +69,12 @@ jobs:
           PYTHONPATH: packaging/skulk-demucs
         run: |
           "$PACKAGE_ROOT/tools/bin/basedpyright" --project packaging/skulk-demucs/pyrightconfig.build.json --pythonpath "$PACKAGE_ROOT/tools/bin/python"
-          "$PACKAGE_ROOT/tools/bin/python" -B -m unittest discover -s packaging/skulk-demucs/producer_tests
+          "$PACKAGE_ROOT/tools/bin/python" -B -m pytest -q -c /dev/null --noconftest -o cache_dir="$PACKAGE_ROOT/producer-test-cache" packaging/skulk-demucs/producer_tests --basetemp "$PACKAGE_ROOT/producer-tests"
       - name: Exercise installer supervision and cache policy on the actual controller platform
         env:
           PYTHONPATH: src
         run: |
-          "$PACKAGE_ROOT/tools/bin/python" -B -m pytest -q -c /dev/null --noconftest -o cache_dir="$PACKAGE_ROOT/process-test-cache" src/skulk/provisioning/tests/test_native_install_process.py src/skulk/provisioning/tests/test_demucs_runtime.py --basetemp "$PACKAGE_ROOT/process-tests"
+          "$PACKAGE_ROOT/tools/bin/python" -B -m pytest -q -c /dev/null --noconftest -o cache_dir="$PACKAGE_ROOT/process-test-cache" src/skulk/provisioning/tests/test_native_install_process.py src/skulk/provisioning/tests/test_demucs_runtime.py src/skulk/worker/runner/demucs/tests/test_resident.py --basetemp "$PACKAGE_ROOT/process-tests"
       - name: Stage the exact inference library source outside the checkout
         run: |
           source_revision=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["revision"])')
@@ -122,6 +123,12 @@ jobs:
           PYTHONPATH: src
         run: |
           "$PACKAGE_ROOT/tools/bin/python" scripts/qualify_demucs_native.py --interpreter "$PACKAGE_ROOT/installed/runtime/bin/python" --weights "$PACKAGE_ROOT/model/955717e8.safetensors" --output "$PACKAGE_ROOT/proof"
+      - name: Prove loaded model reuse, inference cancellation, reload and owner death
+        env:
+          PYTHONPATH: src
+        run: |
+          payload_sha=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["payload_sha256"])')
+          "$PACKAGE_ROOT/tools/bin/python" -B scripts/qualify_demucs_resident.py --interpreter "$PACKAGE_ROOT/installed/runtime/bin/python" --weights "$PACKAGE_ROOT/model/955717e8.safetensors" --payload-sha256 "$payload_sha" --output "$PACKAGE_ROOT/resident-proof"
       - name: Retain exact installed dependency observations
         if: always()
         run: |
@@ -142,5 +149,7 @@ jobs:
             ${{ env.PACKAGE_ROOT }}/native-dependencies.txt
             ${{ env.PACKAGE_ROOT }}/proof/measurement.json
             ${{ env.PACKAGE_ROOT }}/proof/supervision.json
+            ${{ env.PACKAGE_ROOT }}/resident-proof/qualification.json
+            ${{ env.PACKAGE_ROOT }}/resident-proof/owner-probe.log
             ${{ env.PACKAGE_ROOT }}/cache-proof/qualification.json
             ${{ env.PACKAGE_ROOT }}/cache-proof/cache/**/diagnostics/**/*.log

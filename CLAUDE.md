@@ -525,6 +525,17 @@ isolated interpreter, with complete file/digest checks, bounded progress,
 process-group cancellation and parent-death cleanup. It is not yet registered in
 bootstrap, placement, engine inventory or REST. Dependencies stay outside Core;
 the exact local HTDemucs safetensors artifact is fully hashed before loading.
+`worker/runner/demucs/resident.py` adds a private `--serve` model lifetime:
+actual weight verification/FP32 placement precedes ready, and Core compares
+installed payload, weight, device and thread policy. Serial correlated bounded
+records reuse the loaded model. Absolute control/execution/verification deadlines,
+separate terminal admission, idle liveness withdrawal and inherited lifetime
+fencing apply. Cancellation/failure drains before deleting only incomplete output;
+failed drain retains ownership for retry, while complete outputs survive reload.
+This does not register a worker/backend or publish ready capacity. Candidate CI
+exercises actual sealed reuse, inference cancellation/reload and owner death;
+synthetic fixtures are not musical or full-workload qualification. Warm result
+load time is zero and process RSS remains a lifetime high-water mark.
 Native codec/probe checks run separately via `packaging/skulk-demucs/verify_runtime.py`
 inside the candidate native environment. Packaging must dereference the canonical
 contract symlink; a source-tree path is not a distributable runtime dependency.

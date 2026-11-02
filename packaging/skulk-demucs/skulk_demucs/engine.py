@@ -10,8 +10,9 @@ import resource
 import sys
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol, Self, cast
+from typing import Final, Literal, Protocol, Self, cast, final
 
 import torch
 from torch.version import hip
@@ -22,7 +23,9 @@ from .contracts import (
     NativeSeparationJob,
     NativeSeparationProgress,
     NativeSeparationResult,
+    NativeSeparationServeConfig,
     SeparationDevice,
+    SeparationStemName,
 )
 from .media import export_stems, read_original, resample_original
 
@@ -39,6 +42,10 @@ class SeparationModel(Protocol):
     sources: list[str]
     samplerate: int
     audio_channels: int
+
+    def to(self, device: str) -> Self:
+        """Move the complete model to the explicit native device before readiness."""
+        ...
 
     def eval(self) -> Self:
         """Select inference behavior without changing the declared model geometry."""
@@ -126,8 +133,80 @@ def probe_device(device: SeparationDevice) -> str:
     return native
 
 
+@final
+@dataclass(frozen=True)
+class LoadedSeparator:
+    """One verified native model retained until its supervised process exits.
+
+    Only the single native request loop invokes this object. Inference does not
+    construct a second model or reconfigure the admitted device/thread policy.
+    """
+
+    configuration: NativeSeparationServeConfig
+    model: SeparationModel
+    native_device: str
+    load_seconds: float
+    weights_sha256: str = WEIGHT_SHA256
+    sample_rate: Literal[44100] = MODEL_RATE
+    audio_channels: Literal[2] = 2
+    stems: tuple[SeparationStemName, ...] = SEPARATION_STEMS
+
+    def run(
+        self,
+        job: NativeSeparationJob,
+        progress: Callable[[NativeSeparationProgress], None],
+    ) -> NativeSeparationResult:
+        """Separate one original using the already loaded immutable model policy."""
+        return _separate_loaded(self, job, progress)
+
+
+def load_separator(configuration: NativeSeparationServeConfig) -> LoadedSeparator:
+    """Verify exact weights and place their complete model before reporting ready."""
+    started = time.monotonic()
+    torch.set_num_threads(configuration.threads)
+    native = probe_device(configuration.device)
+    weights = Path(configuration.weights_path)
+    verify_weights(weights)
+    loader_module: object = importlib.import_module("demucs.hf")
+    loader = cast(ModelLoader, cast(object, loader_module))
+    model = loader.load_safetensors_model(weights).eval().to(native)
+    if (
+        tuple(model.sources) != SEPARATION_STEMS
+        or model.samplerate != MODEL_RATE
+        or model.audio_channels != 2
+    ):
+        raise ValueError("loaded HTDemucs geometry differs from the selected artifact")
+    return LoadedSeparator(configuration, model, native, time.monotonic() - started)
+
+
 def separate(
     job: NativeSeparationJob, progress: Callable[[NativeSeparationProgress], None]
+) -> NativeSeparationResult:
+    """Keep the original single-job validation helper over the resident engine.
+
+    Normal worker integration uses the separately supervised resident lifetime.
+    This helper loads once for its one job and retains scoped prototype timing.
+    """
+    started = time.monotonic()
+    progress(NativeSeparationProgress(stage="loading"))
+    separator = load_separator(
+        NativeSeparationServeConfig(
+            weights_path=job.weights_path, device=job.device, threads=job.threads
+        )
+    )
+    result = separator.run(job, progress)
+    return result.model_copy(
+        update={
+            "load_seconds": separator.load_seconds,
+            "total_seconds": time.monotonic() - started,
+        }
+    )
+
+
+def _separate_loaded(
+    separator: LoadedSeparator,
+    job: NativeSeparationJob,
+    progress: Callable[[NativeSeparationProgress], None],
 ) -> NativeSeparationResult:
     """Produce a verified complete set from exact local input/model bytes.
 
@@ -137,10 +216,17 @@ def separate(
     """
     started = time.monotonic()
     progress(NativeSeparationProgress(stage="verifying"))
-    torch.set_num_threads(job.threads)
-    native = probe_device(job.device)
-    weights = Path(job.weights_path)
-    verify_weights(weights)
+    configuration = separator.configuration
+    if (job.weights_path, job.device, job.threads) != (
+        configuration.weights_path,
+        configuration.device,
+        configuration.threads,
+    ):
+        raise ValueError(
+            "job cannot change the resident model, device or thread policy"
+        )
+    native = separator.native_device
+    model = separator.model
     samples = read_original(Path(job.source_path), job.source)
     directory = Path(job.output_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -157,20 +243,6 @@ def separate(
         raise ValueError(
             "source resampling did not preserve finite stereo frame geometry"
         )
-    progress(NativeSeparationProgress(stage="loading"))
-    load_started = time.monotonic()
-    loader_module: object = importlib.import_module("demucs.hf")
-    loader = cast(ModelLoader, cast(object, loader_module))
-    model = loader.load_safetensors_model(weights).eval()
-    if (
-        tuple(model.sources) != SEPARATION_STEMS
-        or model.samplerate != MODEL_RATE
-        or model.audio_channels != 2
-    ):
-        raise ValueError(
-            "loaded HTDemucs model geometry differs from the selected artifact"
-        )
-    load_seconds = time.monotonic() - load_started
     application_module: object = importlib.import_module("demucs.apply")
     application = cast(ModelApplication, cast(object, application_module))
     # Match the actual upstream tensor API, including epsilon for silence.
@@ -226,7 +298,7 @@ def separate(
     return NativeSeparationResult(
         output=output,
         device=job.device,
-        load_seconds=load_seconds,
+        load_seconds=0.0,
         separation_seconds=inference_seconds,
         total_seconds=time.monotonic() - started,
         process_peak_rss_bytes=int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)

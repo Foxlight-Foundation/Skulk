@@ -53,6 +53,7 @@ ADAPTER_MODULES: frozenset[str] = frozenset(
         "bindings.py",
         "contracts.py",
         "engine.py",
+        "server.py",
         "media.py",
         "py.typed",
     )
@@ -355,6 +356,7 @@ def assemble_wheel(
             "pcm24",
             "offline_loader",
             "bundled_python",
+            "resident_model",
         ],
     }
     identity = hashlib.sha256(

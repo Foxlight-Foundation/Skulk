@@ -12,20 +12,28 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from .contracts import NativeSeparationJob, NativeSeparationProgress
+from .contracts import (
+    NativeSeparationFrame,
+    NativeSeparationJob,
+    NativeSeparationProgress,
+    NativeSeparationServeConfig,
+)
 
 
 class Arguments(argparse.Namespace):
     """Typed private local CLI arguments, never an exposed HTTP surface."""
 
-    job: Path
+    job: Path | None
+    serve: Path | None
     parent_pid: int
 
 
 def main() -> None:
-    """Execute one strict local job and stop the process group if its owner dies."""
+    """Run a strict job or resident model; stop its group when the owner dies."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--job", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--job", type=Path)
+    mode.add_argument("--serve", type=Path)
     parser.add_argument("--parent-pid", type=int, required=True)
     arguments = Arguments()
     parser.parse_args(namespace=arguments)
@@ -50,20 +58,38 @@ def main() -> None:
     def progress(record: NativeSeparationProgress) -> None:
         print(record.model_dump_json(), file=protocol, flush=True)
 
-    with arguments.job.open("rb") as source:
+    selected = arguments.serve or arguments.job
+    assert selected is not None
+    with selected.open("rb") as source:
         data = source.read(16 * 1024 + 1)
     if len(data) > 16 * 1024:
-        raise ValueError("native separation job exceeds its private protocol bound")
-    job = NativeSeparationJob.model_validate_json(data)
-    # Upstream diagnostics cannot become protocol messages or block an unbounded
-    # stdout parser. Only owned typed progress records use the original stdout.
+        raise ValueError("native separation configuration exceeds its private bound")
+    # Upstream diagnostics cannot become protocol messages. Owned output keeps
+    # the original stdout, even while native imports print to redirected stderr.
     with contextlib.redirect_stdout(sys.stderr):
-        from .engine import separate
+        if arguments.serve is not None:
+            from .server import installed_payload_identity, serve
 
-        result = separate(job, progress)
-    destination = Path(job.output_dir) / "result.json"
-    with destination.open("x") as completed:
-        completed.write(result.model_dump_json())
+            def frame(record: NativeSeparationFrame) -> None:
+                encoded = record.model_dump_json()
+                if len(encoded.encode("utf-8")) + 1 > 16 * 1024:
+                    raise ValueError("native resident response exceeds its bound")
+                print(encoded, file=protocol, flush=True)
+
+            serve(
+                NativeSeparationServeConfig.model_validate_json(data),
+                sys.stdin.buffer,
+                frame,
+                payload_sha256=installed_payload_identity(),
+            )
+        else:
+            from .engine import separate
+
+            job = NativeSeparationJob.model_validate_json(data)
+            result = separate(job, progress)
+            destination = Path(job.output_dir) / "result.json"
+            with destination.open("x") as completed:
+                completed.write(result.model_dump_json())
 
 
 if __name__ == "__main__":

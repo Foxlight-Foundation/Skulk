@@ -11,7 +11,7 @@ import hashlib
 import math
 import struct
 from collections.abc import Iterator
-from typing import Final, Literal, Self, cast, final
+from typing import Annotated, Final, Literal, Self, cast, final
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -408,7 +408,7 @@ class NativeSeparationResult(SeparationContract):
     load_seconds: float = Field(
         ge=0.0,
         allow_inf_nan=False,
-        description="Observed model construction and load wall time.",
+        description="Observed model construction/load wall time; zero for resident reuse, whose startup is reported by NativeSeparationReady.",
     )
     separation_seconds: float = Field(
         ge=0.0,
@@ -422,10 +422,138 @@ class NativeSeparationResult(SeparationContract):
     )
     process_peak_rss_bytes: int = Field(
         ge=0,
-        description="Process RSS high water; excludes unreported device/driver allocations.",
+        description="Process lifetime RSS high water, including prior resident jobs; excludes unreported device/driver allocations.",
     )
     device_peak_allocated_bytes: int | None = Field(
         default=None,
         ge=0,
         description="CUDA/HIP allocator high water where measurable; not whole-device consumption.",
     )
+
+
+@final
+class NativeSeparationServeConfig(SeparationContract):
+    """Fixed worker-owned model/device policy for one resident native lifetime."""
+
+    weights_path: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Exact worker-staged safetensors path, never a public request field.",
+    )
+    device: SeparationDevice = Field(
+        description="Explicit native lane selected before model construction; no fallback."
+    )
+    threads: int = Field(
+        ge=1, le=32, description="Fixed admitted CPU thread budget for this lifetime."
+    )
+
+
+@final
+class NativeSeparationServeRequest(SeparationContract):
+    """One private job correlated within a single resident-model process."""
+
+    request_id: str = Field(
+        pattern=r"^[a-f0-9]{32}$", description="Supervisor-owned request identity."
+    )
+    sequence: int = Field(
+        ge=1,
+        le=2**63 - 1,
+        description="Contiguous request sequence within this one native lifetime; retries do not replay execution.",
+    )
+    job: NativeSeparationJob = Field(
+        description="Bounded worker paths and verified original for this execution."
+    )
+
+
+@final
+class NativeSeparationReady(SeparationContract):
+    """A resident model actually loaded on the explicit device, not a library probe."""
+
+    kind: Literal["ready"] = "ready"
+    protocol: Literal[1] = Field(
+        default=1, description="Private resident protocol version."
+    )
+    payload_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="Actual installed native manifest identity.",
+    )
+    weights_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="Complete verified weights loaded in memory.",
+    )
+    device: SeparationDevice = Field(
+        description="Explicit loaded lane, without fallback."
+    )
+    threads: int = Field(
+        ge=1, le=32, description="Actual configured CPU thread budget."
+    )
+    load_seconds: float = Field(
+        ge=0,
+        allow_inf_nan=False,
+        description="Weight verification, model construction and device placement wall time; excludes interpreter imports.",
+    )
+    sample_rate: Literal[44100] = Field(
+        description="Verified native model sample rate."
+    )
+    audio_channels: Literal[2] = Field(description="Verified native model channels.")
+    stems: tuple[SeparationStemName, ...] = Field(
+        min_length=4, max_length=4, description="Actual ordered model output roles."
+    )
+
+    @model_validator(mode="after")
+    def validate_stem_order(self) -> NativeSeparationReady:
+        """Refuse loaded models with a different ordered output contract."""
+        if self.stems != SEPARATION_STEMS:
+            raise ValueError("resident separation model has different output roles")
+        return self
+
+
+@final
+class NativeSeparationResidentProgress(SeparationContract):
+    """A bounded progress observation correlated to its resident request."""
+
+    kind: Literal["progress"] = "progress"
+    request_id: str = Field(
+        pattern=r"^[a-f0-9]{32}$", description="Owning native request."
+    )
+    progress: NativeSeparationProgress = Field(
+        description="Replaceable stage progress."
+    )
+
+
+@final
+class NativeSeparationCompleted(SeparationContract):
+    """Complete native result facts, independently verified again by the supervisor."""
+
+    kind: Literal["completed"] = "completed"
+    request_id: str = Field(
+        pattern=r"^[a-f0-9]{32}$", description="Owning native request."
+    )
+    result: NativeSeparationResult = Field(
+        description="Complete measured four-stem set."
+    )
+
+
+@final
+class NativeSeparationFailed(SeparationContract):
+    """Sanitized terminal failure; the resident lifetime ends after this frame."""
+
+    kind: Literal["failed"] = "failed"
+    request_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{32}$",
+        description="Owning request, absent when request framing itself was invalid.",
+    )
+    code: Literal["request_failed"] = Field(
+        default="request_failed",
+        description="Private diagnostics retain actual details.",
+    )
+
+
+type NativeSeparationFrame = Annotated[
+    NativeSeparationReady
+    | NativeSeparationResidentProgress
+    | NativeSeparationCompleted
+    | NativeSeparationFailed,
+    Field(discriminator="kind"),
+]
