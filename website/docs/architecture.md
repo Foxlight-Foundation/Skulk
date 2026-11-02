@@ -1281,6 +1281,17 @@ drain its owned process group before partial-file removal. JSON carries metadata
 never audio samples. The native package README documents the separate runtime
 and its current packaging/admission boundary.
 
+Candidate packages contain the exact pinned standalone Python 3.12.13 archive,
+the closed adapter/library source, licenses and a complete target-specific hash
+lock of dependency wheels. The producer requires clean source revisions and
+emits deterministic package bytes plus complete object and payload identities.
+The three-platform CI installs these candidates into a fresh private environment
+with no package indexes or development import paths, checks expanded import code
+and native libraries against the original sealed wheels, and exercises actual
+CPU model loading/resampling/export. This validation tool does not implement the
+production engine cache or advertise readiness. Accelerator and full-workload
+qualification, engine admission and signed distribution remain separate gates.
+
 ## Speech serving
 
 Speech models are ordinary model cards with an `[audio]` section, served by a

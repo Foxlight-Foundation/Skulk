@@ -1,4 +1,4 @@
-name: Native separation boundary
+name: Native separation packages
 
 on:
   workflow_dispatch:
@@ -19,71 +19,95 @@ concurrency:
 
 jobs:
   native:
-    name: Native contracts and codecs (${{ matrix.platform }})
+    name: Offline package execution (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macos-arm64
+            target: macosx_14_0_arm64
             runner: macos-15
           - platform: linux-amd64
+            target: manylinux_2_28_x86_64
             runner: ubuntu-24.04
           - platform: linux-arm64
+            target: manylinux_2_28_aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@v6
-      - name: Prepare a separate candidate interpreter
+      - name: Select an output workspace outside the source checkout
+        run: printf 'PACKAGE_ROOT=%s/demucs-package\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Prepare the supported Core controller and build tools
         run: |
-          uv venv --managed-python --python 3.12.13 .native-validation
-          if [[ "$RUNNER_OS" == "Linux" ]]; then
-            uv pip install --python .native-validation/bin/python torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-          fi
-          uv pip install --python .native-validation/bin/python -r packaging/skulk-demucs/requirements.in
-      - name: Prepare the supported Core controller interpreter
-        run: |
-          uv venv --managed-python --python 3.13.13 .core-controller
-          uv pip install --python .core-controller/bin/python pydantic==2.12.5 psutil==7.2.1
-          .core-controller/bin/python -c 'import os; assert hasattr(os, "waitid"), "Core requires non-reaping process observation"'
-      - name: Stage the exact inference library source
-        run: |
-          source_revision=$(.native-validation/bin/python -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["revision"])')
-          source_repository=$(.native-validation/bin/python -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["repository"])')
-          git init .native-source
-          git -C .native-source fetch --depth 1 "$source_repository" "$source_revision"
-          git -C .native-source checkout --detach FETCH_HEAD
-          test "$(git -C .native-source rev-parse HEAD)" = "$source_revision"
-          .native-validation/bin/python -c 'import pathlib,sysconfig; pathlib.Path(sysconfig.get_path("purelib"), "skulk-demucs-candidate.pth").write_text(str(pathlib.Path(".native-source").resolve()) + "\n" + str(pathlib.Path("packaging/skulk-demucs").resolve()) + "\n")'
-      - name: Check strict standalone typing
-        run: uvx --from basedpyright==1.37.1 basedpyright --project packaging/skulk-demucs/pyrightconfig.json --pythonpath "$PWD/.native-validation/bin/python"
-      - name: Verify native codecs and CPU probe without model downloads
+          uv venv --managed-python --python 3.13.13 "$PACKAGE_ROOT/tools"
+          uv pip install --python "$PACKAGE_ROOT/tools/bin/python" pydantic==2.12.5 psutil==7.2.1 packaging==26.0 basedpyright==1.37.1
+          "$PACKAGE_ROOT/tools/bin/python" -c 'import os; assert hasattr(os, "waitid"), "Core requires non-reaping process observation"'
+      - name: Check producer typing and offline refusal regressions
         env:
           PYTHONPATH: packaging/skulk-demucs
+        run: |
+          "$PACKAGE_ROOT/tools/bin/basedpyright" --project packaging/skulk-demucs/pyrightconfig.build.json --pythonpath "$PACKAGE_ROOT/tools/bin/python"
+          "$PACKAGE_ROOT/tools/bin/python" -B -m unittest discover -s packaging/skulk-demucs/producer_tests
+      - name: Stage the exact inference library source outside the checkout
+        run: |
+          source_revision=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["revision"])')
+          source_repository=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["repository"])')
+          git init "$PACKAGE_ROOT/source"
+          git -C "$PACKAGE_ROOT/source" fetch --depth 1 "$source_repository" "$source_revision"
+          git -C "$PACKAGE_ROOT/source" checkout --detach FETCH_HEAD
+          test "$(git -C "$PACKAGE_ROOT/source" rev-parse HEAD)" = "$source_revision"
+      - name: Collect only hash-pinned wheels and standalone Python
+        run: |
+          "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-demucs/fetch_wheels.py '${{ matrix.platform }}' --output "$PACKAGE_ROOT/intake"
+      - name: Build twice from clean committed sources and compare complete bytes
+        run: |
+          python_archive=$(find "$PACKAGE_ROOT/intake/python" -name '*.tar.gz' -type f)
+          for build in first second; do
+            "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-demucs/build_wheel.py --repository "$PWD" --source "$PACKAGE_ROOT/source" --wrapper "$PWD/packaging/skulk-demucs/skulk_demucs" --wheelhouse "$PACKAGE_ROOT/intake/wheels" --python-archive "$python_archive" --lock "$PWD/packaging/skulk-demucs/locks/${{ matrix.platform }}-cpu-py312.lock" --target '${{ matrix.target }}' --output "$PACKAGE_ROOT/$build"
+          done
+          cmp "$PACKAGE_ROOT/first/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" "$PACKAGE_ROOT/second/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl"
+      - name: Install in a fresh private environment with no indexes or developer paths
+        run: |
+          package_sha=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["sha256"])')
+          "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-demucs/verify_package.py --wheel "$PACKAGE_ROOT/first/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" --sha256 "$package_sha" --output "$PACKAGE_ROOT/installed"
+      - name: Verify installed native codecs, strict typing and CPU math
+        env:
           HF_HUB_OFFLINE: '1'
           HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
           PYTORCH_ENABLE_MPS_FALLBACK: '0'
-        run: .native-validation/bin/python packaging/skulk-demucs/verify_runtime.py
-      - name: Fetch only the immutable smoke-test model object
+        run: |
+          "$PACKAGE_ROOT/tools/bin/basedpyright" --project packaging/skulk-demucs/pyrightconfig.json --pythonpath "$PACKAGE_ROOT/installed/runtime/bin/python"
+          "$PACKAGE_ROOT/installed/runtime/bin/python" -I -B packaging/skulk-demucs/verify_runtime.py
+      - name: Fetch only the immutable smoke-test model object separately
         env:
           HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
-        run: uvx --from huggingface-hub==2.4.0 hf download adefossez/HTDemucs 955717e8.safetensors --revision cbc8a9b1a87023b7fd74e7b3412e6321c0eab003 --local-dir .native-model
-      - name: Exercise actual supervised load, mono resampling and complete export
+        run: uvx --from huggingface-hub==2.4.0 hf download adefossez/HTDemucs 955717e8.safetensors --revision cbc8a9b1a87023b7fd74e7b3412e6321c0eab003 --local-dir "$PACKAGE_ROOT/model"
+      - name: Exercise actual installed load, mono resampling and complete export
         env:
           PYTHONPATH: src
-        run: .core-controller/bin/python scripts/qualify_demucs_native.py --interpreter .native-validation/bin/python --weights .native-model/955717e8.safetensors --output .native-proof
-      - name: Retain exact candidate dependency observations
+        run: |
+          "$PACKAGE_ROOT/tools/bin/python" scripts/qualify_demucs_native.py --interpreter "$PACKAGE_ROOT/installed/runtime/bin/python" --weights "$PACKAGE_ROOT/model/955717e8.safetensors" --output "$PACKAGE_ROOT/proof"
+      - name: Retain exact installed dependency observations
         if: always()
         run: |
-          uv pip freeze --python .native-validation/bin/python > native-dependencies.txt
-          uv pip freeze --python .core-controller/bin/python > controller-dependencies.txt
+          if [[ -x "$PACKAGE_ROOT/installed/runtime/bin/python" ]]; then
+            "$PACKAGE_ROOT/installed/runtime/bin/python" -I -B -c 'from importlib.metadata import distributions; print("\n".join(sorted("{}=={}".format(item.metadata["Name"], item.version) for item in distributions())))' > "$PACKAGE_ROOT/native-dependencies.txt"
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: demucs-boundary-${{ matrix.platform }}
+          name: demucs-candidate-${{ matrix.platform }}
+          compression-level: 0
           path: |
-            native-dependencies.txt
-            controller-dependencies.txt
-            .native-proof/measurement.json
-            .native-proof/supervision.json
+            ${{ env.PACKAGE_ROOT }}/first/*.whl
+            ${{ env.PACKAGE_ROOT }}/first/*.json
+            ${{ env.PACKAGE_ROOT }}/intake/wheel-receipt.json
+            ${{ env.PACKAGE_ROOT }}/installed/installation.json
+            ${{ env.PACKAGE_ROOT }}/native-dependencies.txt
+            ${{ env.PACKAGE_ROOT }}/proof/measurement.json
+            ${{ env.PACKAGE_ROOT }}/proof/supervision.json

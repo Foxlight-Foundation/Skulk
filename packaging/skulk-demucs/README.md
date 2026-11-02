@@ -7,17 +7,59 @@ stem control remains disabled until task, resource admission, addressed input /
 four-result delivery, persistence and installed acceptance are connected.
 
 The base Skulk installation does not install this runtime or its requirements.
-`requirements.in` describes the candidate dependency policy; complete immutable
-offline wheelhouses, platform hash locks, provenance and provisioning are still
-publication gates. Never install it into the resident Core or Studio environment.
+`requirements.in` describes the candidate dependency policy. The `locks/` CPU
+profiles close every transitive wheel by version and SHA-256 for macOS ARM64,
+Linux x86_64 and Linux ARM64. `python.json` pins the complete standalone CPython
+3.12.13 archive for each target, including its original release URL, size and
+digest. Never install these dependencies into the resident Core or Studio
+environment. Publication and Core provisioning remain separate gates.
 
 `source.json` binds the upstream inference library. This owned adapter uses
 `demucs.hf`'s exact safetensors loader and `demucs.apply`, with its own bounded
 libsndfile WAV I/O. Its dependencies are pinned separately from upstream's general
 audio CLI. Hub downloading remains outside the native runtime. The package builder
-must bundle the exact library source and licenses with this adapter; users do not
-need a Git checkout. Candidate CI uses staged source paths and proves execution,
-while immutable packaged installation remains a separate gate.
+bundles the exact library source and licenses with this adapter; users do not
+need a Git checkout. Candidate CI builds and installs a sealed package without
+development import paths before exercising the actual model.
+
+## Reproducible candidate packages
+
+The build controller uses Core's Python 3.13, separately from the bundled native
+Python 3.12.13. All intake, build and installation output must live **outside the
+source checkout**: the producer refuses dirty or uncommitted source inputs.
+
+1. Fetch the exact author commit in `source.json` into a clean source directory.
+2. Run `fetch_wheels.py <profile> --output <intake>` with one of `macos-arm64`,
+   `linux-amd64` or `linux-arm64`. It downloads only objects matching the existing
+   target hash lock and interpreter pin. Changed cached objects, incomplete
+   inventories and foreign archives fail; the command never installs or publishes.
+3. Run `build_wheel.py` with explicit `--repository`, `--source`, `--wrapper`,
+   `--wheelhouse`, `--lock`, `--python-archive`, `--target` and `--output` paths.
+   `--wrapper` must be this checkout's `packaging/skulk-demucs/skulk_demucs`.
+   The producer checks the target ABI and actual dependency metadata closure,
+   dereferences the canonical contract into regular bytes and includes both
+   component notices and every dependency's original wheel. SoundFile must
+   include its platform libsndfile library. Weights remain a separate download.
+4. Repeat the build into another fresh output directory and compare complete
+   wheel bytes. Stored ZIP members, fixed timestamps and sorted records make the
+   candidate deterministic. Its adjacent JSON records complete size/SHA-256,
+   payload identity, platform, interpreter and exact source revisions.
+5. Run `verify_package.py --wheel <candidate> --sha256 <expected> --output <new-root>`
+   on the target OS/CPU. It verifies the entire package, manifest and member
+   inventory, safely extracts the bounded interpreter archive, creates a private
+   environment and installs with no index, no cache and the complete hash lock.
+   No developer source path or pre-cached managed interpreter is required.
+   Expanded import code and native libraries are checked against the sealed
+   wheel bytes, including rejection of missing or injected files. Installed
+   RECORDs are not trusted as integrity evidence. The output root is never
+   reused or overwritten; failed validation remains available for inspection.
+
+The verifier is a **candidate validation tool**, not the production engine-cache
+installer. Its completion receipt does not authorize a backend or support claim.
+Normal cache reuse/invalidation, installation supervision, resource admission,
+GPU-device binding, accelerator packages and signed publication are still needed.
+CPU package execution alone does not qualify an accelerator or full-length
+workload. The workflow retains candidate artifacts; it does not promote them.
 
 ## Local protocol
 
@@ -83,11 +125,18 @@ coprime-rate resampling memory/signal regressions.
 Real-model execution and listening evidence remain separate from these analytic
 tests. `scripts/qualify_demucs_native.py` exercises the actual isolated CLI and
 Core supervisor using explicit local weights, with a mono/odd-frame resampling
-fixture or an explicit original WAV. The three-platform candidate workflow fetches
-only the immutable test weight object separately, runs that smoke and retains its
-measurements. The controller uses Core's supported Python 3.13, separately from
-the native engine's pinned Python 3.12.13. It uses a development import path, so it is not normal packaged
-installation evidence. Process RSS and CUDA/HIP allocator peaks are separately named measurements,
+fixture or an explicit original WAV. The three-platform candidate workflow builds
+twice, compares complete bytes, installs the actual package offline, runs native
+codec checks and fetches only the immutable test weight object separately for
+the supervised model smoke. It retains exact package identities and measurements.
+This is packaged CPU execution evidence, separate from normal provisioned-engine
+and installed Studio acceptance. The smoke requests a two-second **split chunk**.
+The pinned HTDemucs model retains `use_train_segment=True` and pads each forward
+pass to its 7.8-second training window, even for that shorter chunk. Shorter
+splits are not a lower-memory model mode. Admission must account for the trained
+forward window plus the full source and four-result buffers; this short-source
+smoke does not qualify the complete production workload's memory requirement.
+Process RSS and CUDA/HIP allocator peaks are separately named measurements,
 not total device or host memory requirements. Native pipeline timing excludes
 interpreter/import startup and parent verification; the separate `supervision.json`
 measurement includes the complete supervised process wall time.
