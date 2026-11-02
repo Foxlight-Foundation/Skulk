@@ -521,13 +521,17 @@ prevents overlapping owners; uncertain writes fence the index until reopened.
 Restart fails incomplete jobs; unexpired complete receipts are not evicted to
 admit another job. The new private `api/separation_media.py` owns all four WAV
 roles with independent closed-file verification, sync and complete-only adoption
-after restart. Partial sets never become content; cleanup removes only API copies.
+after restart. All roles share outstanding unwritten filesystem promises and
+one safety reserve; written bytes are not charged twice. File, job-directory,
+role-directory and newly created storage-root links are synced before receipts.
+Partial sets never become content; cleanup removes only API copies.
 Existing video/music handlers ignore the four new separation output purposes.
 HTTP and addressed worker execution remain unwired.
 
 The separation foundation adds frozen `AudioSeparation` command/task variants
 and `SeparationChunk` metadata. The master admits one job per actually ready,
-complete single-host separator, counting pending events in the same batch.
+complete single-host separator. Master-local reservations span consecutive
+commands until indexed task creation applies, when State takes over admission.
 Both placement entries require live verified native backend/build resources,
 then stamp `separation_policy`; the worker rejects policy drift before load.
 `shared/models/separation_runtime.py` owns exact tensor/constructor matching and

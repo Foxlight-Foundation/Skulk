@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import os
 import time
 import wave
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 from skulk.api.separation_jobs import SeparationJob
 from skulk.api.separation_media import SeparationMediaStore
+from skulk.api.video_store import VideoStore
 from skulk.shared.types.audio_separation import (
     SEPARATION_STEMS,
     AudioSeparationOutput,
@@ -214,3 +216,155 @@ def test_total_budget_cannot_evict_previous_closed_stems(tmp_path: Path) -> None
         assert len(tuple((tmp_path / "media").glob("*/native-result/output.wav"))) == 2
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("second", ["bass", "other", "vocals"])
+def test_roles_share_unwritten_filesystem_promises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second: SeparationStemName
+) -> None:
+    """One remaining file's free space cannot be promised again to another role."""
+    size = len(wav())
+
+    def free(_self: VideoStore) -> int:
+        return 1024**3 + size
+
+    monkeypatch.setattr(VideoStore, "_free_disk_bytes", free)
+    store = SeparationMediaStore(tmp_path / "media")
+    try:
+        store.open_assembly(queued().id, "drums", total_bytes=size, total_chunks=1)
+        # These same unchanged filesystem bytes are visible from every child.
+        with pytest.raises(ValueError, match="filesystem headroom"):
+            store.open_assembly(queued().id, second, total_bytes=size, total_chunks=1)
+        assert store.reserved_bytes() == size
+    finally:
+        store.close()
+
+
+def test_written_bytes_are_not_reserved_twice_across_roles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Actual disk consumption plus remaining promises has one consistent budget."""
+    data = wav()
+    available = [1024**3 + 3 * len(data)]
+
+    def free(_self: VideoStore) -> int:
+        return available[0]
+
+    monkeypatch.setattr(VideoStore, "_free_disk_bytes", free)
+    store = SeparationMediaStore(tmp_path / "media")
+    try:
+        for name in ("drums", "bass"):
+            store.open_assembly(queued().id, name, total_bytes=len(data), total_chunks=1)
+        store.append(queued().id, "drums", 1, data)
+        available[0] -= len(data)  # The filesystem now accounts for this write.
+        store.open_assembly(queued().id, "other", total_bytes=len(data), total_chunks=1)
+        with pytest.raises(ValueError, match="filesystem headroom"):
+            store.open_assembly(queued().id, "vocals", total_bytes=len(data), total_chunks=1)
+        assert store.reserved_bytes() == 3 * len(data)
+    finally:
+        store.close()
+
+
+def test_reordered_chunks_still_reserve_their_unwritten_disk_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RAM-stashed media has not consumed disk space and still needs its promise."""
+    data = wav()
+
+    def free(_self: VideoStore) -> int:
+        return 1024**3 + 2 * len(data)
+
+    monkeypatch.setattr(VideoStore, "_free_disk_bytes", free)
+    store = SeparationMediaStore(tmp_path / "media")
+    try:
+        store.open_assembly(queued().id, "drums", total_bytes=len(data), total_chunks=2)
+        store.append(queued().id, "drums", 2, data[1000:])
+        store.open_assembly(queued().id, "bass", total_bytes=len(data), total_chunks=1)
+        with pytest.raises(ValueError, match="filesystem headroom"):
+            store.open_assembly(queued().id, "other", total_bytes=100, total_chunks=1)
+        assert store.reserved_bytes() == 2 * len(data)
+    finally:
+        store.close()
+
+
+def test_receipts_sync_file_job_role_and_new_root_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed result cannot outlive any unsynced parent directory entry."""
+    root = tmp_path / "new-parent" / "media"
+    real_sync = os.fsync
+    synced: list[tuple[int, int]] = []
+
+    def observe(descriptor: int) -> None:
+        real_sync(descriptor)
+        info = os.fstat(descriptor)
+        synced.append((info.st_dev, info.st_ino))
+
+    def identity(path: Path) -> tuple[int, int]:
+        info = path.stat()
+        return info.st_dev, info.st_ino
+
+    monkeypatch.setattr(os, "fsync", observe)
+    store = SeparationMediaStore(root)
+    try:
+        for directory in (tmp_path, root.parent, root, *(root / name for name in SEPARATION_STEMS)):
+            assert identity(directory) in synced
+        synced.clear()
+        retain(store, "drums")
+        job_directory = root / "drums" / queued().id
+        # Ordering matters: file bytes, its directory entry, then that
+        # directory's own link must settle before the receipt is returned.
+        assert synced[-3:] == [
+            identity(job_directory / "output.wav"),
+            identity(job_directory),
+            identity(job_directory.parent),
+        ]
+    finally:
+        store.close()
+
+
+def test_failed_role_sync_cannot_return_a_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A durability error removes only the failed job's private API copies."""
+    root = tmp_path / "media"
+    store = SeparationMediaStore(root)
+    real_sync = os.fsync
+    role = (root / "drums").stat()
+
+    def refuse(descriptor: int) -> None:
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (role.st_dev, role.st_ino):
+            raise OSError("injected role sync failure")
+        real_sync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", refuse)
+    try:
+        with pytest.raises(OSError, match="role sync failure"):
+            retain(store, "drums")
+        assert store.reserved_bytes() == 0
+        assert not tuple(root.glob("*/native-result/output.wav"))
+    finally:
+        store.close()
+
+
+def test_failed_new_root_sync_releases_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failed storage initialization cannot retain a lock or claim durability."""
+    root = tmp_path / "new-parent" / "media"
+    real_sync = os.fsync
+    parent = tmp_path.stat()
+
+    def refuse(descriptor: int) -> None:
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (parent.st_dev, parent.st_ino):
+            raise OSError("injected root sync failure")
+        real_sync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", refuse)
+    with pytest.raises(OSError, match="root sync failure"):
+        SeparationMediaStore(root)
+    monkeypatch.setattr(os, "fsync", real_sync)
+    reopened = SeparationMediaStore(root)
+    reopened.close()

@@ -1,11 +1,14 @@
+# pyright: reportPrivateUsage=false
 """Real task/event admission cannot overbook a resident separator within a batch."""
 
 import tomllib
 from pathlib import Path
 
+import anyio
 import pytest
 
 from skulk.master.main import (
+    Master,
     separation_generation_events,
     separation_generation_instances,
 )
@@ -15,10 +18,23 @@ from skulk.shared.types.audio_separation import (
     AudioSeparationTaskParams,
     SeparationSource,
 )
-from skulk.shared.types.commands import AudioSeparation
-from skulk.shared.types.common import ModelId, NodeId
-from skulk.shared.types.events import TaskCreated, TaskFailed
+from skulk.shared.types.commands import (
+    AudioSeparation,
+    ForwarderCommand,
+    ForwarderDownloadCommand,
+)
+from skulk.shared.types.common import ModelId, NodeId, SessionId, SystemId
+from skulk.shared.types.events import (
+    Event,
+    GlobalForwarderEvent,
+    IndexedEvent,
+    LocalForwarderEvent,
+    TaskCreated,
+    TaskFailed,
+    TaskStatusUpdated,
+)
 from skulk.shared.types.state import State
+from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.tasks import AudioSeparation as SeparationTask
 from skulk.shared.types.tasks import TaskStatus
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
@@ -31,6 +47,7 @@ from skulk.shared.types.worker.runners import (
     ShardAssignments,
 )
 from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.utils.channels import channel
 
 
 def state(status: RunnerStatus, replicas: int = 1) -> State:
@@ -170,3 +187,66 @@ def test_old_or_partial_native_model_has_no_generation_capacity(field: str) -> N
     changed = instance.model_copy(update={"shard_assignments": assignments.model_copy(update={"runner_to_shard": {runner: shard}})})
     snapshot = snapshot.model_copy(update={"instances": {instance.instance_id: changed}})
     assert not separation_generation_instances(snapshot, ModelId("adefossez/HTDemucs"))
+
+
+@pytest.mark.parametrize("replicas", [1, 2])
+async def test_processor_reserves_across_commands_until_indexed_application(replicas: int) -> None:
+    """Delayed event application cannot overbook one or several resident models."""
+    node = NodeId("master")
+    commands, receiver = channel[ForwarderCommand]()
+    events, output = channel[Event]()
+    global_sender, _ = channel[GlobalForwarderEvent]()
+    _, local = channel[LocalForwarderEvent]()
+    sync_sender, sync_receiver = channel[StateSyncMessage]()
+    downloads, _ = channel[ForwarderDownloadCommand]()
+    master = Master(
+        node, SessionId(master_node_id=node, election_clock=0),
+        event_sender=events, global_event_sender=global_sender,
+        local_event_receiver=local, command_receiver=receiver,
+        state_sync_receiver=sync_receiver, state_sync_sender=sync_sender,
+        download_command_sender=downloads,
+    )
+    master.state = state(RunnerReady(), replicas)
+    admitted: list[TaskCreated] = []
+    try:
+        async with anyio.create_task_group() as group:
+            group.start_soon(master._command_processor)
+            with anyio.fail_after(3):
+                for _ in range(replicas):
+                    request = command()
+                    await commands.send(ForwarderCommand(origin=SystemId("API"), command=request))
+                    event = await output.receive()
+                    assert isinstance(event, TaskCreated)
+                    assert isinstance(event.task, SeparationTask)
+                    assert event.task.command_id == request.command_id
+                    assert event.task.task_status == TaskStatus.Pending
+                    admitted.append(event)
+                assert not master.state.tasks
+                assert len({item.task.instance_id for item in admitted}) == replicas
+                assert len(master._pending_separation_reservations) == replicas
+                await commands.send(ForwarderCommand(origin=SystemId("API"), command=command()))
+                refused = await output.receive()
+                assert isinstance(refused, TaskCreated) and refused.task.task_status == TaskStatus.Failed
+                assert isinstance(await output.receive(), TaskFailed)
+                # Hand capacity from the local decision set to indexed State.
+                # Applied pending work still consumes it; terminal history does not.
+                for index, event in enumerate(admitted):
+                    master._apply_indexed_event(IndexedEvent(idx=index, event=event))
+                assert not master._pending_separation_reservations
+                await commands.send(ForwarderCommand(origin=SystemId("API"), command=command()))
+                persisted_refusal = await output.receive()
+                assert isinstance(persisted_refusal, TaskCreated)
+                assert persisted_refusal.task.task_status == TaskStatus.Failed
+                assert isinstance(await output.receive(), TaskFailed)
+                master._apply_indexed_event(IndexedEvent(
+                    idx=replicas,
+                    event=TaskStatusUpdated(task_id=admitted[0].task_id, task_status=TaskStatus.Complete),
+                ))
+                await commands.send(ForwarderCommand(origin=SystemId("API"), command=command()))
+                recovered = await output.receive()
+                assert isinstance(recovered, TaskCreated)
+                assert recovered.task.task_status == TaskStatus.Pending
+                assert recovered.task.instance_id == admitted[0].task.instance_id
+            group.cancel_scope.cancel()
+    finally:
+        master._event_log.close()

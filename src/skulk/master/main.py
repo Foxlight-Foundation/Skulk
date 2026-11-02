@@ -1161,6 +1161,10 @@ class Master:
         # their GPU capacity before queuing the event so consecutive decisions
         # cannot spend the same memory while that echo is outstanding.
         self._pending_instance_reservations: dict[InstanceId, Instance] = {}
+        # Task events use the same asynchronous indexed path as placements.
+        # Reserve serial native capacity across command iterations until State
+        # contains the admission, rather than relying on one command's list.
+        self._pending_separation_reservations: dict[TaskId, TaskCreated] = {}
         self._runner_loaded_at: dict[RunnerId, float] = {}
         # Restart recovery (initiative/restart-recovery). A cold start, with no
         # prior replicated view, is a single-node reboot or a whole-cluster
@@ -1422,6 +1426,8 @@ class Master:
             self._pending_instance_reservations.pop(indexed.event.instance.instance_id, None)
         elif isinstance(indexed.event, InstanceDeleted):
             self._pending_instance_reservations.pop(indexed.event.instance_id, None)
+        if isinstance(indexed.event, TaskCreated):
+            self._pending_separation_reservations.pop(indexed.event.task_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
         if isinstance(indexed.event, AudioCppPreparationCompleted):
             self._record_audio_cpp_preparation(indexed.event)
@@ -1774,9 +1780,15 @@ class Master:
         return credit
 
     async def _queue_control_event(self, event: Event) -> None:
-        """Reserve a new placement before its asynchronous indexed echo returns."""
+        """Reserve placement and serial native work before the indexed echo returns."""
         if isinstance(event, InstanceCreated):
             self._pending_instance_reservations[event.instance.instance_id] = event.instance
+        if (
+            isinstance(event, TaskCreated)
+            and isinstance(event.task, AudioSeparationTask)
+            and event.task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+        ):
+            self._pending_separation_reservations[event.task_id] = event
         await self.event_sender.send(event)
 
     def _placement_reservations(
@@ -3311,7 +3323,9 @@ class Master:
                                 )
                         case AudioSeparation():
                             admitted, task_id = separation_generation_events(
-                                self.state, command, generated_events
+                                self.state,
+                                command,
+                                (*self._pending_separation_reservations.values(), *generated_events),
                             )
                             generated_events.extend(admitted)
                             self.command_task_mapping[command.command_id] = task_id

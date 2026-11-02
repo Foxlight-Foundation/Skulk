@@ -1326,8 +1326,9 @@ The separation execution foundation adds distinct frozen `AudioSeparation`
 command/task variants and a complete-manifest `SeparationChunk`. No source or
 result WAV enters replicated State or the event log. The master admits only a
 complete single-host native model in `RunnerReady`, with an explicit build and
-bound execution policy. Pending admissions from the same master batch reserve
-that instance before their events apply; one model runs one separation at a time.
+bound execution policy. Master-local reservations span consecutive commands
+until indexed task creation applies; the applied task then holds that capacity.
+One model runs one separation at a time.
 
 `shared/models/separation_runtime.py` resolves the implemented exact tensor and
 constructor by artifact identity, not repository name or tested hardware. A
@@ -1380,10 +1381,14 @@ terminal, and unexpired complete results cannot be evicted merely to admit work.
 `api/separation_media.py` supplies separate private four-role output storage over
 the existing WAV assemblers. It reserves at most four active transfers per job
 set, four active jobs and 64 retained sets, with 64 MiB per file and 256 MiB per
-set. Identical repeated opens preserve progress. A late invalid file removes
+set. Filesystem admission deducts outstanding unwritten promises across all four
+roles from the shared free-space safety headroom; already written bytes are not
+charged again. Reordered chunks remain promised until they are written.
+Identical repeated opens preserve progress. A late invalid file removes
 only that job's API result copies; originals and native output remain outside
 this owner's authority. Closed files receive independent digest, PCM24 stereo
-44.1 kHz, geometry and peak checks and are synced before internal receipts.
+44.1 kHz, geometry and peak checks. File bytes, job/role directories and newly
+created storage-root links are synced before internal receipts.
 Restart adopts all four exact files or exposes none. Content access additionally
 requires the durable completed job and matching unexpired complete manifest.
 Partial results stay private even if every transfer has finished. Four new

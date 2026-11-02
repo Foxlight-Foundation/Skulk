@@ -35,6 +35,15 @@ from skulk.shared.types.common import CommandId
 from skulk.utils.runtime_files import RuntimeLock, private_directory
 
 
+def _sync_directory(path: Path) -> None:
+    """Persist directory entries before any corresponding durable job receipt."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 @final
 @dataclass(frozen=True)
 class StoredSeparationStem:
@@ -68,6 +77,14 @@ class SeparationMediaStore:
             <= MAX_RETAINED_SEPARATION_JOBS * MAX_SEPARATION_SET_BYTES
         ):
             raise ValueError("separation media budget is outside its bounded policy")
+        # mkdir(parents=True) can introduce more than one missing ancestor.
+        # Persist their links bottom-up too, without syncing unrelated ancestors
+        # above the nearest already-existing directory.
+        created_roots: list[Path] = []
+        ancestor = root
+        while not ancestor.exists():
+            created_roots.append(ancestor)
+            ancestor = ancestor.parent
         self.root = root
         self.max_total_bytes = max_total_bytes
         self._mutex = threading.RLock()
@@ -85,6 +102,10 @@ class SeparationMediaStore:
                 self._stores[name] = VideoStore(
                     directory, max_total_bytes=max_total_bytes
                 )
+                _sync_directory(directory)
+            _sync_directory(root)
+            for created in created_roots:
+                _sync_directory(created.parent)
         except BaseException:
             self._ownership.close()
             self._ownership = None
@@ -137,6 +158,13 @@ class SeparationMediaStore:
                 raise ValueError("separation retained-result capacity is full")
             if self.reserved_bytes() + total_bytes > self.max_total_bytes:
                 raise ValueError("separation media byte capacity is full")
+            headroom = self._stores[name].disk_headroom_bytes()
+            promised = sum(store.unwritten_bytes() for store in self._stores.values())
+            # All four role stores use this owner's filesystem. Their child
+            # checks cannot independently promise the same free bytes; count
+            # every outstanding write before opening another role or job.
+            if headroom is not None and promised + total_bytes > headroom:
+                raise ValueError("separation filesystem headroom is insufficient")
             evicted = self._stores[name].open_assembly(
                 command_id,
                 "music",
@@ -191,11 +219,10 @@ class SeparationMediaStore:
                 )
             # The durable job index must never outlive an unsynced result copy.
             os.fsync(source.fileno())
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _sync_directory(path.parent)
+        # The WAV entry and the job directory's link are separate durability
+        # boundaries. Syncing only the job directory can lose its parent entry.
+        _sync_directory(path.parent.parent)
         return facts
 
     def commit(

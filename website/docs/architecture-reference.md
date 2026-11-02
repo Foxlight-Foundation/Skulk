@@ -98,7 +98,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   command/task variants carry only model/source metadata. `SeparationChunk`
   carries one complete four-stem manifest or failure, never WAV bytes.
   `master/main.py::separation_generation_instances` admits one active job per
-  ready complete single-host model, counting same-batch pending reservations.
+  ready complete single-host model. Master-local reservations survive consecutive
+  command iterations until indexed task creation transfers admission to State.
   `shared/models/separation_runtime.py` binds exact tensor/constructor identity,
   explicit CPU/MPS/CUDA/ROCm spelling, FP32, two threads and a 7.8-second window.
   `BaseShardMetadata.separation_policy` binds that policy to admission; absent or
@@ -131,7 +132,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Silence is a valid estimated stem and is not a musical-quality diagnosis.
   `api/separation_media.py` owns separate private four-role WAV assemblers under
   a lifetime fence, four active jobs/64 retained sets, 64 MiB per stem and
-  256 MiB per set. Closed independent facts and synced bytes precede receipts;
+  256 MiB per set. Filesystem headroom deducts every role's outstanding unwritten
+  promises, including reordered chunks, without charging written bytes twice.
+  Closed independent facts, synced bytes, job/role directories and newly created
+  storage-root links precede receipts;
   only a durable completed manifest exposes content. Restart adopts all four
   exact files or none, and invalid partial sets delete only owned API copies.
   `OUTPUT_MEDIA` adds `separation_drums/bass/other/vocals`; the existing
