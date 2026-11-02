@@ -57,8 +57,13 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   generations, full cached-byte verification, offline bootstrap and a closed
   CPU/MPS FP32 probe precede fsynced atomic selection. Old generations survive
   repair; only newly owned unactivated output is cleaned after actual drain.
-  Retained cleanup handles survive failures for explicit retry/close. There is
-  a 10 GiB host free-space reserve, a 16-generation bound, exact streamed
+  Retained cleanup handles survive failures for explicit retry/close. A
+  persistent `published/<uuid>` deletion-protection marker is synced
+  before selection; it is never an integrity authority. Retry drains before
+  reacquiring the global fence and checks this history even if selection vanished.
+  Close waits at most five seconds for another preparation and retains cleanup
+  on timeout. Raw transport reads each checkpoint cancellation/total deadlines.
+  Bounds include a 10 GiB host free-space reserve, a 16-generation limit, exact streamed
   download size/hash, a default 30-minute total preparation budget (at most two
   hours), and a 300-second cold library/device probe bound. This is library
   preparation, not loaded-model readiness. Worker/task/inventory registration

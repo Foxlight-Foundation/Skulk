@@ -556,7 +556,11 @@ probing. Offline mode never downloads; complete unpublished generations can be
 recovered after verification. Selection records are not integrity authorities.
 Retain the controller for the worker lifetime and cancel/join a running prepare
 before close; failed cleanup retains its original runner for retry. Never delete
-old or possibly published generations. This is not worker/backend/model-ready
+old or possibly published generations. Cleanup retries drain first and reacquire
+the global cache fence before touching files. Persistent `published/<uuid>`
+markers protect generations once handed out, even after selection changes;
+they never authorize integrity or execution. Downloads checkpoint each raw
+transport read rather than waiting to buffer a large chunk. This is not worker/backend/model-ready
 registration. Protected filesystem helpers are shared in `utils/runtime_files.py`
 with compatibility reexports from the old extensions path, avoiding plugin
 initialization during engine preparation. GPU profiles remain separate gates.

@@ -1,4 +1,4 @@
-"""Exercise real offline cache preparation, reuse and unpublished recovery.
+"""Exercise real offline cache preparation, reuse and lost-selection recovery.
 
 The caller supplies a reviewed package and independent whole/payload identities.
 Only a new task-owned directory is accepted. This never downloads weights,
@@ -116,7 +116,7 @@ def main() -> None:
         if prepare("verified-offline-reuse", "cpu") != generation:
             raise AssertionError("cache reuse unexpectedly installed a generation")
         (cache_root / wheel.sha256 / "selected.json").unlink()
-        if prepare("unpublished-offline-recovery", "cpu") != generation:
+        if prepare("lost-selection-offline-recovery", "cpu") != generation:
             raise AssertionError("lost-selection recovery replaced its intact runtime")
         if arguments.mps and prepare("verified-mps-no-fallback", "mps") != generation:
             raise AssertionError("MPS probing replaced its intact CPU/MPS runtime")

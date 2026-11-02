@@ -212,7 +212,10 @@ def download_demucs_package(
             destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
         )
         with os.fdopen(descriptor, "wb") as target:
-            for block in response.iter_raw(chunk_size=1024 * 1024):
+            # A large iterator chunk can buffer a slow continuous response for
+            # minutes without tripping its per-read timeout. Check the owner on
+            # each transport read instead of waiting to fill a MiB buffer.
+            for block in response.iter_raw():
                 checkpoint()
                 size += len(block)
                 if size > wheel.size_bytes:
@@ -332,13 +335,38 @@ class DemucsRuntimeCache:
     ) -> None:
         self._pending = (runner, generation, activation_attempted)
         runner.drain()
-        if (
-            not activation_attempted
-            and generation is not None
-            and generation.is_dir()
-            and not generation.is_symlink()
-        ):
+        self._remove_unpublished(generation, activation_attempted)
+        self._pending = None
+
+    @staticmethod
+    def _remove_unpublished(
+        generation: Path | None, activation_attempted: bool
+    ) -> None:
+        # Callers hold the global reservation fence. Presence is conservative
+        # deletion protection only, never an integrity or execution authority.
+        # Keep publication history even after the current selection moves away.
+        if activation_attempted or generation is None:
+            return
+        marker = generation.parent.parent / "published" / generation.name
+        try:
+            marker.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return
+        if generation.is_dir() and not generation.is_symlink():
             shutil.rmtree(generation)
+
+    def _retry_pending(self, checkpoint: Checkpoint) -> None:
+        if self._pending is None:
+            return
+        runner, generation, activation_attempted = self._pending
+        # Drain first: a surviving guardian may itself retain this global lock.
+        # Then reacquire the fence before touching files, because a different
+        # controller may have recovered them since the original call unwound.
+        runner.drain()
+        with _owned_lock(self.root, checkpoint):
+            self._remove_unpublished(generation, activation_attempted)
         self._pending = None
 
     def close(self) -> None:
@@ -346,15 +374,24 @@ class DemucsRuntimeCache:
 
         Refuse while a preparation call is active. Failed cleanup stays retained
         for another explicit retry, and its generation is never deleted before
-        complete process drain. Published and older generations remain intact.
+        complete process drain. Retry reacquires the cache fence after draining;
+        waiting for another owner is bounded at five seconds. Published and
+        older generations remain intact, even if the selection hint disappeared.
         """
         if not self._guard.acquire(blocking=False):
             raise RuntimeError(
                 "cancel and join native preparation before closing its cache"
             )
         try:
-            if self._pending is not None:
-                self._finish(*self._pending)
+            deadline = time.monotonic() + 5.0
+
+            def checkpoint() -> None:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "separation cleanup is waiting for another preparation; retry close"
+                    )
+
+            self._retry_pending(checkpoint)
         finally:
             self._guard.release()
 
@@ -382,6 +419,17 @@ class DemucsRuntimeCache:
                 "separation preparation deadline must be finite and within two hours"
             )
         deadline = time.monotonic() + timeout_seconds
+
+        def checkpoint() -> None:
+            if is_cancelled():
+                raise DemucsPreparationCancelledError(
+                    "native separation preparation cancelled"
+                )
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "native separation preparation exceeded its deadline"
+                )
+
         while True:
             if is_cancelled():
                 raise DemucsPreparationCancelledError(
@@ -394,8 +442,7 @@ class DemucsRuntimeCache:
             if self._guard.acquire(timeout=0.05):
                 break
         try:
-            if self._pending is not None:
-                self._finish(*self._pending)
+            self._retry_pending(checkpoint)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
@@ -483,8 +530,10 @@ class DemucsRuntimeCache:
             with _owned_lock(build, checkpoint):
                 objects = build / "objects"
                 generations = build / "generations"
+                publications = build / "published"
                 private_directory(objects)
                 private_directory(generations)
+                private_directory(publications)
                 package = objects / wheel.filename
                 progress("verifying")
                 try:
@@ -555,6 +604,10 @@ class DemucsRuntimeCache:
                         progress("probing")
                         _probe(interpreter, wheel, device, runner)
                         checkpoint(force_disk=True)
+                        # Mark potential publication before replacing selection.
+                        # A former installer's deferred cleanup must preserve
+                        # this generation even if selection changes or disappears.
+                        write_private(publications / generation.name, b"1\n")
                         write_private(
                             build / "selected.json",
                             _CompletedGeneration(
@@ -625,6 +678,7 @@ class DemucsRuntimeCache:
                     # the generation once activation is attempted; never delete a
                     # possibly published interpreter underneath a concurrent user.
                     activation_attempted = True
+                    write_private(publications / generation.name, b"1\n")
                     write_private(
                         build / "selected.json",
                         _CompletedGeneration(

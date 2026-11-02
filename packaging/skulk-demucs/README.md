@@ -200,3 +200,12 @@ the same generation after removing its selection hint. `--mps` additionally
 requires native Apple MPS execution without CPU fallback. The native workflow
 runs the CPU cases on all three targets and retains the measured receipts;
 these checks do not grant model support or production admission.
+
+Deferred cleanup must reacquire the global reservation fence after draining its
+original process owner. A recovered generation may have been handed out since
+the failure. The private `published/<uuid>` history is synced before selection
+and prevents deletion even when the current selection hint changes or vanishes;
+it never substitutes for package/interpreter/import verification. Close bounds
+waiting for another preparation at five seconds and retains ownership for retry.
+Download cancellation and total deadlines are checked on each raw transport
+read, without waiting to fill a large iterator buffer.

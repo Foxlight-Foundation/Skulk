@@ -7,7 +7,7 @@ import json
 import shutil
 import threading
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -405,6 +405,190 @@ def test_failed_cleanup_retains_runner_for_explicit_close_retry(
     cache.close()
     assert attempts[0] is attempts[1]
     assert not tuple(generations.iterdir())
+
+
+@pytest.mark.parametrize("retry_prepare", [False, True])
+def test_cleanup_retry_cannot_delete_a_generation_recovered_by_another_owner(
+    tmp_path: Path,
+    controlled: ControlledNativeInstall,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_prepare: bool,
+) -> None:
+    """Recovery can publish retained files before their former owner retries cleanup."""
+    original = NativeInstallCommandRunner.drain
+    failed = False
+
+    def drain(runner: NativeInstallCommandRunner) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise PermissionError("controlled initial cleanup failure")
+        original(runner)
+
+    monkeypatch.setattr(NativeInstallCommandRunner, "drain", drain)
+    root = tmp_path / "cache"
+    former = runtime.DemucsRuntimeCache(root)
+    controlled.fail_probe = True
+    with pytest.raises(PermissionError, match="initial cleanup"):
+        prepare(former, controlled)
+    controlled.fail_probe = False
+    recovered = prepare(runtime.DemucsRuntimeCache(root), controlled, offline=True)
+    # A selection hint is not a complete publication history. A later selection
+    # or its interrupted replacement must not make previously handed-out files
+    # eligible for deletion by their former installer.
+    (root / controlled.wheel.sha256 / "selected.json").unlink()
+    if retry_prepare:
+        assert (
+            prepare(former, controlled, offline=True).generation == recovered.generation
+        )
+    else:
+        former.close()
+    assert recovered.interpreter.is_file()
+    assert controlled.installs == 1
+
+
+def test_cleanup_retry_waits_for_another_owners_recovery_probe(
+    tmp_path: Path,
+    controlled: ControlledNativeInstall,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup cannot erase a generation between another owner's verification and publication."""
+    original = NativeInstallCommandRunner.drain
+    failed_runner: NativeInstallCommandRunner | None = None
+    cleanup_started = threading.Event()
+
+    def drain(runner: NativeInstallCommandRunner) -> None:
+        nonlocal failed_runner
+        if failed_runner is None:
+            failed_runner = runner
+            raise PermissionError("controlled initial cleanup failure")
+        if runner is failed_runner:
+            cleanup_started.set()
+        original(runner)
+
+    monkeypatch.setattr(NativeInstallCommandRunner, "drain", drain)
+    root = tmp_path / "cache"
+    former = runtime.DemucsRuntimeCache(root)
+    controlled.fail_probe = True
+    with pytest.raises(PermissionError, match="initial cleanup"):
+        prepare(former, controlled)
+    controlled.fail_probe = False
+    probing = threading.Event()
+    release = threading.Event()
+
+    def progress(phase: runtime.PreparationPhase) -> None:
+        if phase == "probing":
+            probing.set()
+            assert release.wait(5)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        recovering = executor.submit(
+            runtime.DemucsRuntimeCache(root).prepare,
+            controlled.wheel,
+            device="cpu",
+            offline=True,
+            is_cancelled=lambda: False,
+            progress=progress,
+            download=controlled.download,
+        )
+        try:
+            assert probing.wait(5)
+            closing = executor.submit(former.close)
+            assert cleanup_started.wait(5)
+            with pytest.raises(TimeoutError):
+                closing.result(timeout=0.1)
+        finally:
+            release.set()
+        recovered = recovering.result(timeout=10)
+        closing.result(timeout=10)
+    assert recovered.interpreter.is_file() and controlled.installs == 1
+
+
+def test_cleanup_lock_timeout_retains_files_and_original_retry_ownership(
+    tmp_path: Path,
+    controlled: ControlledNativeInstall,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A busy peer bounds close without discarding cleanup or forcing its fence."""
+    original = NativeInstallCommandRunner.drain
+    failed = False
+
+    def drain(runner: NativeInstallCommandRunner) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise PermissionError("controlled initial cleanup failure")
+        original(runner)
+
+    monkeypatch.setattr(NativeInstallCommandRunner, "drain", drain)
+    root = tmp_path / "cache"
+    cache = runtime.DemucsRuntimeCache(root)
+    controlled.fail_probe = True
+    with pytest.raises(PermissionError, match="initial cleanup"):
+        prepare(cache, controlled)
+    generations = root / controlled.wheel.sha256 / "generations"
+    other_owner = RuntimeLock(root)
+    times = iter((0.0, 0.0, 6.0))
+
+    def now() -> float:
+        return next(times)
+
+    def pause(_seconds: float) -> None:
+        pass
+
+    try:
+        with monkeypatch.context() as clock_patch:
+            clock_patch.setattr(
+                runtime, "time", SimpleNamespace(monotonic=now, sleep=pause)
+            )
+            with pytest.raises(TimeoutError, match="retry close"):
+                cache.close()
+        assert len(tuple(generations.iterdir())) == 1
+    finally:
+        other_owner.close()
+    cache.close()
+    assert not tuple(generations.iterdir())
+
+
+@pytest.mark.parametrize("deadline", [False, True])
+def test_download_checks_each_transport_read_before_buffering_a_mebibyte(
+    tmp_path: Path, controlled: ControlledNativeInstall, deadline: bool
+) -> None:
+    """A slow trickle cannot hide cancellation or a total-stage deadline."""
+    stop = False
+    closed = False
+
+    class SlowStream(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            nonlocal stop
+            stop = True
+            yield b"partial"
+            raise AssertionError("download read again before checking its owner")
+
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    def checkpoint() -> None:
+        if stop:
+            if deadline:
+                raise TimeoutError("controlled stage deadline")
+            raise runtime.DemucsPreparationCancelledError("controlled cancellation")
+
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            headers={"Content-Length": str(controlled.wheel.size_bytes)},
+            stream=SlowStream(),
+        )
+    )
+    expected = TimeoutError if deadline else runtime.DemucsPreparationCancelledError
+    destination = tmp_path / "partial.whl"
+    with pytest.raises(expected):
+        runtime.download_demucs_package(
+            controlled.wheel, destination, checkpoint, transport=transport
+        )
+    assert closed and destination.stat().st_size == 0
 
 
 def test_disk_admission_refuses_before_bootstrap(

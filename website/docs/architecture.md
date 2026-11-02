@@ -1300,8 +1300,14 @@ probe. Atomic fsynced selection records are hints, never integrity authorities.
 Prior generations survive repair. Cancellation removes newly owned incomplete
 files only after confirmed process drain; failed drains retain the exact owner
 for retry or close. Free-disk reserve, download size/hash, generation count,
-command output and preparation/probe deadlines are bounded. This controller is
-not yet connected to worker preparation, placement, a published inventory or
+command output and preparation/probe deadlines are bounded. Cleanup retry drains its original owner before
+reacquiring the cache fence, then preserves every generation with publication
+history. A private `published/<uuid>` marker is synced before selection changes;
+it protects against deletion, never authorizes cached code. This history remains
+when selection moves or disappears. Close waits at most five seconds for another
+preparation owner, retaining cleanup for explicit retry. Raw downloads check
+cancellation/deadlines on each transport read, without a MiB buffering delay.
+The controller is not yet connected to worker preparation, placement, a published inventory or
 loaded-model readiness. CUDA/ROCm package profiles and admission remain separate
 integration gates.
 
