@@ -74,7 +74,8 @@ for name in ("drums","bass","other","vocals"):
     stems.append(dict(name=name,content_type="audio/wav",size_bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),sample_rate=rate,frames=frames,channels=2,bit_depth=24,peak=0.0))
 if mode == "missing": (directory / "vocals.wav").unlink()
 if mode == "corrupt": (directory / "bass.wav").write_bytes(b"corrupt")
-output=dict(source=job["source"],stems=stems,common_gain=1.0,pre_gain_peak=0.0)
+if mode == "peak": stems[0]["peak"]=0.5
+output=dict(source=job["source"],stems=stems,common_gain=1.0,pre_gain_peak=0.5 if mode == "peak" else 0.0)
 result=dict(output=output,device=job["device"],load_seconds=0.0,separation_seconds=0.0,total_seconds=0.0,process_peak_rss_bytes=0,device_peak_allocated_bytes=None)
 (directory / "result.json").write_text(json.dumps(result))
 """)
@@ -113,7 +114,7 @@ def test_complete_result_is_verified_and_original_is_unchanged(
 
 
 @pytest.mark.parametrize(
-    "mode", ["missing", "corrupt", "crash", "malformed", "oversized"]
+    "mode", ["missing", "corrupt", "peak", "crash", "malformed", "oversized"]
 )
 def test_partial_or_invalid_completion_removes_owned_outputs(
     interpreter: Path, tmp_path: Path, mode: str

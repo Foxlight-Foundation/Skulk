@@ -1323,6 +1323,30 @@ The registry derives `audio.separate` explicitly and `/v1/models` projects the
 same typed information. This reader vocabulary does not add an execution task
 to the replicated task union or advertise a loaded runner.
 
+The isolated `api/separation_jobs.py` lifecycle component owns a private,
+exclusively locked metadata index. Four jobs may be active and 64 retained,
+within a 1 MiB serialized bound. Source and result bytes remain outside it.
+The authoritative placed worker and original identity bind a complete manifest;
+render termination and four independently verified local stems are separate
+completion conditions. Its output receipt stays absent until all conditions
+hold, and content handlers must also require completed status. Partial results
+never become an individually downloadable completed job.
+
+The dependency-free `stem_from_wav` validator shares input container validation
+and measures encoded PCM24 stereo samples, geometry and complete-file digest.
+The native process supervisor compares the measured peak as well as byte and
+timebase identity with each declared stem. Large scans must run outside the API
+event loop. A valid silent estimated stem remains valid; content verification
+does not infer musical quality or the presence of a vocal performance.
+
+Transitions become visible only after a synced atomic write. If persistence is
+uncertain, the registry refuses further reads/writes until its owner reopens it.
+Restart fails interrupted jobs without exposing partial results; complete
+receipts remain subject to independent file adoption. Failure/cancellation is
+terminal, and unexpired complete results cannot be evicted merely to admit work.
+This component is not yet connected to HTTP routes, task admission or media
+handlers; it does not enable separation in the product by itself.
+
 The dependency-light `provisioning/demucs_package.py` is the shared package
 contract and integrity boundary. Standalone build tools use an explicit repository
 link rather than a duplicate validator; resident Core imports no build-tool code.
@@ -2434,6 +2458,14 @@ journal retains operation IDs, monotonic trust and interrupted generations.
 Cancellation of a waiting interface does not abandon owned installation work;
 only the fsynced completion marker publishes a staged generation. Staging never
 switches the active owner or changes cleanup state.
+Runtime envelopes 2 and 3 are accepted. Version two retains its original signed
+wire shape. Version three signs one to eight canonical `application_roots`
+distribution names so a capability can carry its own libraries in the isolated
+wheelhouse. The generic verifier checks that every root exists and that the
+dependency graph starting from those roots and launcher-provider wheels covers
+the exact signed inventory. Missing, incompatible, external-URL, extra-dependent
+or unreachable packages are refused before installation. No plugin or SDK is
+imported to inspect the graph, and no package resolver runs on the host.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can
 execute startup code; runtime commands disable bytecode writes. The interpreter
@@ -3745,6 +3777,20 @@ their supported scope. See the API guide for exact request and lifecycle fields.
   Gateway keys stay host-local. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
-  Up to eight cached catalogs are read concurrently under individual and aggregate
-  deadlines, retaining completed results. Stream cleanup owns cancellation and
+  Up to eight cached catalogs are read concurrently under five-second individual
+  and six-second aggregate deadlines, including managed-owner validation overhead
+  and retaining completed results. Overlapping callers share that read, including
+  queue time in its budget; later callers always read afresh. Transient overload
+  or provider errors allow at most three cached-read attempts inside the same
+  budget; successful withdrawal is immediate and generation is never replayed.
+  The macOS manager uses launchd `Interactive` scheduling in both scopes, so
+  owners, children and isolated schema workers inherit responsive CPU/I/O policy.
+  Only the exact prior generated `Background` unit is accepted for scheduling
+  migration; unrelated definition changes remain refused.
+  Cached empty-input unary metadata may opt into `skulk.admission=metadata`
+  with supporting SDK owners. Its separate bounded slot and control connection
+  keep discovery independent of stream media without stale availability caching.
+  Workloads retain fail-fast admission; identity, deadlines and capability-owned
+  authorization remain enforced.
+  Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.

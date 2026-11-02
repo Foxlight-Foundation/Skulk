@@ -224,6 +224,11 @@ def source_from_wav(data: bytes) -> SeparationSource:
     sample geometry and nonfinite float samples. Callers must bound input reads
     before constructing ``data``; this function performs no file or network I/O.
     """
+    return _source_and_samples(data)[0]
+
+
+def _source_and_samples(data: bytes) -> tuple[SeparationSource, memoryview]:
+    """Validate once and retain a view of sample bytes without another allocation."""
     if not 44 <= len(data) <= MAX_SEPARATION_SOURCE_BYTES:
         raise ValueError("separation WAV must fit the 64 MiB encoded bound")
     if (
@@ -307,7 +312,36 @@ def source_from_wav(data: bytes) -> SeparationSource:
         ):
             if not math.isfinite(sample) or abs(sample) > 3.4028234663852886e38:
                 raise ValueError("floating WAV samples must remain finite in float32")
-    return source
+    return source, sample_chunk
+
+
+def stem_from_wav(name: SeparationStemName, data: bytes) -> SeparatedStem:
+    """Measure one bounded PCM24 stereo result independently of its producer.
+
+    Hash every encoded byte and scan actual signed PCM samples for the peak.
+    This shares source container/geometry validation and makes no file, network
+    or native-library calls. The caller still compares the returned facts with
+    the authoritative manifest, checks complete-set identity and gates content
+    visibility. Bound reads before constructing ``data`` and run large scans
+    outside the API event loop.
+    """
+    source, samples = _source_and_samples(data)
+    if (source.encoding, source.bit_depth, source.channels) != ("pcm", 24, 2):
+        raise ValueError("separated output requires PCM24 stereo WAV")
+    peak_integer = 0
+    for offset in range(0, len(samples), 3):
+        peak_integer = max(
+            peak_integer,
+            abs(int.from_bytes(samples[offset : offset + 3], "little", signed=True)),
+        )
+    return SeparatedStem(
+        name=name,
+        size_bytes=source.size_bytes,
+        sha256=source.sha256,
+        sample_rate=source.sample_rate,
+        frames=source.frames,
+        peak=peak_integer / 8388608,
+    )
 
 
 SeparationDevice = Literal["cpu", "mps", "cuda", "rocm"]

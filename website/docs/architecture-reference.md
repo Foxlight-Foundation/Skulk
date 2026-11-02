@@ -79,6 +79,22 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   catalog projects this metadata separately from speech/music. Reader metadata
   does not create an execution task or loaded-model readiness.
 
+- **Separation job lifecycle component:** `api/separation_jobs.py` persists
+  source-bound metadata only, with four active/64 retained jobs and a 1 MiB
+  index ceiling. A lifetime OS fence and in-process lock serialize ownership.
+  Durable transitions precede acknowledgment; uncertain writes fence all access
+  until reopen. Interrupted jobs fail on restart. Completion requires one fixed
+  authoritative worker/source manifest, terminal render success and all four
+  locally verified stem receipts, retaining their earliest expiry. `output` is
+  absent before completion; content handlers must enforce the same gate.
+  Cancellation/failure cannot be revived by late frames. Unexpired complete
+  records are never evicted for admission. HTTP/task/media wiring is still absent.
+  `shared/types/audio_separation.py::stem_from_wav` independently measures a
+  complete bounded PCM24 stereo WAV's digest, geometry and signed-sample peak.
+  It shares the input container parser without native dependencies; large scans
+  belong off-loop. Native result verification compares every measured stem fact.
+  Silence is a valid estimated stem and is not a musical-quality diagnosis.
+
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
@@ -86,8 +102,22 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Gateway keys stay host-local. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
-  Up to eight cached catalogs are read concurrently under individual and aggregate
-  deadlines, retaining completed results. Stream cleanup owns cancellation and
+  Up to eight cached catalogs are read concurrently under five-second individual
+  and six-second aggregate deadlines, including managed-owner validation overhead
+  and retaining completed results. Overlapping callers share that read, including
+  queue time in its budget; later callers always read afresh. Transient overload
+  or provider errors allow at most three cached-read attempts inside the same
+  budget; successful withdrawal is immediate and generation is never replayed.
+  The macOS manager uses launchd `Interactive` scheduling in both scopes, so
+  owners, children and isolated schema workers inherit responsive CPU/I/O policy.
+  Only the exact prior generated `Background` unit is accepted for scheduling
+  migration; unrelated definition changes remain refused.
+  Cached empty-input unary metadata may opt into `skulk.admission=metadata`
+  with supporting SDK owners. Its separate bounded slot and control connection
+  keep discovery independent of stream media without stale availability caching.
+  Workloads retain fail-fast admission; identity, deadlines and capability-owned
+  authorization remain enforced.
+  Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.
 
 - **Native model preservation:** `store/preservation_export.py` resolves exact
@@ -705,6 +735,15 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
   or the API event log.
 
 ### Extensions (plugins)
+
+- **Signed dependency roots:** `runtime_artifacts.py` accepts isolated runtime
+  protocols 2 and 3. V2 signed bytes/claims remain unchanged; v3 requires 1–8
+  unique canonical `application_roots` present in its exact signed wheel
+  inventory. Before pip, v3's graph from declared roots plus launcher-provider
+  wheels must cover every package. Metadata, native tags, hashes, dependency
+  versions, URL/extra refusal and archive bounds remain enforced. Verification
+  imports no provider SDK and resolves nothing online. Deploy this reader before
+  offering v3 capability releases.
 
 - **Proposal review:** `proposal_review.py` exports `ProposalReference`, summary,
   field, page and review models plus `NodeProposalReviewProvider`. `api/plugins.py`

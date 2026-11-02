@@ -19,7 +19,7 @@ from skulk.shared.types.audio_separation import (
     NativeSeparationJob,
     NativeSeparationProgress,
     NativeSeparationResult,
-    source_from_wav,
+    stem_from_wav,
 )
 from skulk.utils.process_groups import observe_process_exit, terminate_process_group
 
@@ -72,24 +72,7 @@ def verify_native_result(
     for stem in measured.output.stems:
         with (directory / f"{stem.name}.wav").open("rb") as source:
             data = source.read(MAX_SEPARATION_STEM_BYTES + 1)
-        facts = source_from_wav(data)
-        if (
-            facts.size_bytes,
-            facts.sha256,
-            facts.frames,
-            facts.sample_rate,
-            facts.channels,
-            facts.bit_depth,
-            facts.encoding,
-        ) != (
-            stem.size_bytes,
-            stem.sha256,
-            stem.frames,
-            stem.sample_rate,
-            2,
-            24,
-            "pcm",
-        ):
+        if stem_from_wav(stem.name, data) != stem:
             raise ValueError(
                 "native separation stem bytes differ from its completion manifest"
             )

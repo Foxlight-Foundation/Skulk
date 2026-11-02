@@ -507,6 +507,19 @@ deadline, so a dropped `MusicChunk` cannot retain an active job indefinitely.
 The initiative-only source-separation native boundary is separate:
 `shared/types/audio_separation.py` validates bounded source WAVs, a complete
 aligned four-stem manifest and private job/result records.
+`stem_from_wav` independently measures PCM24 stereo output geometry, full-file
+digest and encoded peak without native dependencies. The process supervisor
+compares every measured fact, including peak, with the declared stem manifest.
+Large validation scans belong off the API event loop; partial content still
+requires complete-set settlement before exposure.
+`api/separation_jobs.py` owns a separate bounded metadata index: four active and
+64 retained jobs, with a 1 MiB on-disk ceiling. A complete receipt requires the
+authoritative worker/source manifest, successful render termination and all four
+verified local artifacts. Content callers must gate reads on completed status;
+the internal candidate manifest is not a public result. A lifetime file fence
+prevents overlapping owners; uncertain writes fence the index until reopened.
+Restart fails incomplete jobs; unexpired complete receipts are not evicted to
+admit another job. This lifecycle component is not yet wired to HTTP or tasks.
 `worker/runner/demucs/process.py` supervises `packaging/skulk-demucs/` under an
 isolated interpreter, with complete file/digest checks, bounded progress,
 process-group cancellation and parent-death cleanup. It is not yet registered in
@@ -1842,6 +1855,15 @@ GitHub's API doesn't support direct image upload for PR comments. Workaround:
 
 ### Extension runtime ownership
 
+`extensions/runtime_artifacts.py` reads signed runtime envelopes 2 and 3 without
+importing plugin code. V2 retains its original shape. V3 requires 1–8 unique,
+canonical `application_roots` names in the exact wheel inventory; a static graph
+from them and launcher-provider distributions must reach every signed wheel.
+All version/URL/extra/native-tag/hash/archive checks run before offline pip.
+No package resolver or SDK import participates. Publish v3 capabilities only
+after their hosts have this compatible reader; ordinary v2 installations remain
+valid. Runtime IPC protocol and ordinary lifecycle HTTP routes are unchanged.
+
 The CLI creates and serves Node on one event loop. API runtime entry invokes
 extension startup; optional asynchronous on_stop hooks receive a shared thirty-second
 shielded cleanup budget after discovery withdrawal. CapabilityReadiness is an
@@ -1876,7 +1898,17 @@ Managed-plugin setup is `skulk-plugin-service setup`, implemented by
 `POST /v1/plugins/managed/service/setup` (`extensions/service_autosetup.py`). The
 default scope is a per-user launchd agent or systemd user unit registered by the
 owner with no elevation (`service_registration.register_user`); `setup --system`
-registers a system service through the sudo helper. Run it as the existing nonroot owner. It journals
+registers a system service through the sudo helper. Both macOS scopes use
+interactive scheduling so owner children and schema workers are not throttled
+as background work. Run it as the existing nonroot owner.
+Cached, empty-input unary metadata may declare `skulk.admission=metadata` on
+supporting SDK owners. Those owners enforce one separate metadata slot while
+stream media is active; Core keeps the control connections independent. Readiness,
+descriptor fencing, deadlines and capability-owned authorization still apply.
+Workload admission remains fail-fast; Core does not queue a signed request until
+its proof expires or reuse stale model availability while generation is busy.
+The verifier accepts only the exact prior generated macOS `Background` definition
+for scheduling migration; unrelated unit changes remain refused. Setup journals
 setup stages, preserves generated profile identity and copies exact qualified
 runtime dependencies without modifying Skulk's environment. Its fixed local sudo
 entrypoint `service_registration.py` must remain standard-library-only and execute

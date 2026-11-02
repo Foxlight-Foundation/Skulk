@@ -13,6 +13,7 @@ from typing import Literal
 
 import anyio
 import pytest
+from pydantic import JsonValue, TypeAdapter
 
 from skulk.extensions import CapabilityCall, CapabilityDescriptor, CapabilityStreamFrame
 from skulk.extensions.capabilities import descriptor_revision
@@ -31,6 +32,7 @@ async def _stream_fixture(
     handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
     timeout: float = 2.0,
     mode: Literal["server_streaming", "bidirectional"] = "server_streaming",
+    on_request: Callable[[bytes], None] | None = None,
 ) -> AsyncIterator[tuple[ManagedOwner, ExtensionContext, CapabilityCall]]:
     with tempfile.TemporaryDirectory(prefix="managed-frames-", dir="/tmp") as name:
         root = Path(name)
@@ -47,7 +49,9 @@ async def _stream_fixture(
             assert task is not None
             clients.add(task)
             try:
-                await reader.readline()
+                raw = await reader.readline()
+                if on_request is not None:
+                    on_request(raw)
                 await handler(reader, writer)
             finally:
                 writer.close()
@@ -112,6 +116,62 @@ def _ack(call_id: str = "call") -> bytes:
         {"protocol": 4, "frame": {"kind": "end", "call_id": call_id}, "media_size": 0}
     ).encode()
     return len(header).to_bytes(4, "big") + header
+
+
+async def test_streaming_node_keeps_cached_metadata_control_independent() -> None:
+    """A long managed stream must not consume its cached metadata read budget."""
+    requests: asyncio.Queue[bytes] = asyncio.Queue()
+    release = asyncio.Event()
+
+    async def handle(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        request = TypeAdapter(dict[str, JsonValue]).validate_json(await requests.get())
+        assert request["node_id"] == "installed"
+        if request["operation"] == "invoke":
+            writer.write(b'{"result":{"cached":true}}\n')
+            await writer.drain()
+            return
+        await write_managed_frame(writer, CapabilityStreamFrame(
+            call_id="call", direction="provider_to_caller", sequence=1,
+            kind="chunk", payload={},
+        ))
+        await release.wait()
+        await write_managed_frame(writer, CapabilityStreamFrame(
+            call_id="call", direction="provider_to_caller", sequence=2,
+            kind="completed",
+        ))
+        writer.write(_ack())
+        await writer.drain()
+
+    async with _stream_fixture(handle, timeout=15.0, on_request=requests.put_nowait) as (
+        owner, host_context, call,
+    ):
+        metadata = CapabilityDescriptor(
+            id="metadata", version="1.0.0", title="Cached metadata",
+            description="Independent read-only control traffic.",
+            input_schema={"type": "object", "additionalProperties": False},
+            output_schema={}, annotations={"skulk.admission": "metadata"},
+        )
+        owner.nodes = (owner.nodes[0].model_copy(update={
+            "descriptors": (*owner.nodes[0].descriptors, metadata),
+        }),)
+        stream = owner.handle_stream(host_context, call)
+        try:
+            assert (await anext(stream)).kind == "chunk"
+            await asyncio.sleep(6.0)
+            # This fixture supplies cached health, independent of the wire read.
+            # The SDK's real-process test separately qualifies concurrent health.
+            owner.observed = time.monotonic()
+            read = call.model_copy(update={
+                "capability_id": metadata.id,
+                "descriptor_revision": descriptor_revision(metadata),
+                "timeout_seconds": 0.4,
+            })
+            assert await owner.handle_call(host_context, read) == {"cached": True}
+            release.set()
+            assert [frame.kind async for frame in stream] == ["completed"]
+        finally:
+            release.set()
+            await stream.aclose()
 
 
 @pytest.mark.parametrize("invalid_input", [False, True])

@@ -133,3 +133,7 @@ from .api import WebSearchResult as WebSearchResult
 from .api import WebSearchToolRequest as WebSearchToolRequest
 from .api import WebSearchToolResponse as WebSearchToolResponse
 from .api import normalize_image_size as normalize_image_size
+from .separation import SeparationDeletedResponse as SeparationDeletedResponse
+from .separation import SeparationListResponse as SeparationListResponse
+from .separation import SeparationResource as SeparationResource
+from .separation import separation_resource as separation_resource
