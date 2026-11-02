@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import importlib
 import tempfile
+import tracemalloc
 import unittest
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 from skulk_demucs.bindings import soundfile
 from skulk_demucs.contracts import SeparationSource, source_from_wav
 from skulk_demucs.engine import WEIGHT_SIZE, probe_device, verify_weights
-from skulk_demucs.media import export_stems, read_original
+from skulk_demucs.media import export_stems, read_original, resample_original
 
 
 class NativeMediaTests(unittest.TestCase):
@@ -19,8 +21,80 @@ class NativeMediaTests(unittest.TestCase):
 
     def test_model_and_resampler_dependencies_import(self) -> None:
         """Codec success must not hide broken model or resampler dependencies."""
-        for name in ("demucs.hf", "demucs.apply", "julius"):
+        for name in ("demucs.hf", "demucs.apply", "julius", "scipy.signal"):
             self.assertIsNotNone(importlib.import_module(name))
+
+    def test_coprime_resampling_bounds_workspace_and_preserves_signal(self) -> None:
+        """Valid coprime rates must not allocate a quadratic phase filter bank."""
+        for rate, channels in ((44101, 1), (191999, 2), (8001, 1), (48000, 2)):
+            with self.subTest(rate=rate, channels=channels):
+                frames = rate + 1
+                tone = (
+                    np.sin(2 * np.pi * 1000 * np.arange(frames) / rate) * 0.25
+                ).astype(np.float32)
+                samples = np.stack(
+                    [tone * (-1) ** index for index in range(channels)], axis=1
+                )
+                original = samples.copy()
+                source = SeparationSource(
+                    sha256="a" * 64,
+                    size_bytes=44 + frames * channels * 4,
+                    sample_rate=rate,
+                    channels=channels,
+                    frames=frames,
+                    encoding="float",
+                    bit_depth=32,
+                )
+                tracemalloc.start()
+                try:
+                    output = resample_original(samples, source, 44100)
+                    _, peak_bytes = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(peak_bytes, 256 * 1024 * 1024)
+                self.assertEqual(output.dtype, np.float32)
+                expected_frames = (2 * frames * 44100 + rate) // (2 * rate)
+                self.assertEqual(output.shape, (expected_frames, channels))
+                self.assertTrue(np.isfinite(output).all())
+                expected: npt.NDArray[np.float32] = (
+                    np.sin(2 * np.pi * 1000 * np.arange(expected_frames) / 44100) * 0.25
+                ).astype(np.float32)
+                for channel in range(channels):
+                    sign = 1.0 if channel % 2 == 0 else -1.0
+                    np.testing.assert_allclose(
+                        output[100:-100, channel],
+                        expected[100:-100] * sign,
+                        atol=0.001,
+                        rtol=0,
+                    )
+                np.testing.assert_array_equal(samples, original)
+
+    def test_resampling_uses_nearest_frame_duration_and_preserves_native(self) -> None:
+        """Fractional tail conversion changes at most one frame and never time zero."""
+        for frames, rate, expected in (
+            (8001, 8000, 44106),
+            (8002, 8000, 44111),
+            (44101, 44100, 44101),
+        ):
+            with self.subTest(frames=frames, rate=rate):
+                samples = np.zeros((frames, 1), dtype=np.float32)
+                samples[frames // 2] = 0.5
+                source = SeparationSource(
+                    sha256="a" * 64,
+                    size_bytes=44 + frames * 4,
+                    sample_rate=rate,
+                    channels=1,
+                    frames=frames,
+                    encoding="float",
+                    bit_depth=32,
+                )
+                output = resample_original(samples, source, 44100)
+                self.assertEqual(output.shape, (expected, 1))
+                self.assertLessEqual(
+                    abs(int(np.argmax(output)) - frames // 2 * 44100 / rate), 0.5
+                )
+                if rate == 44100:
+                    self.assertIs(output, samples)
 
     def test_shared_gain_and_encoded_alignment(self) -> None:
         """One attenuation preserves all four source ratios without PCM clipping."""

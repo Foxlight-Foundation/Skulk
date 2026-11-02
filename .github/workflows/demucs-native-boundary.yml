@@ -37,12 +37,16 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Prepare a separate candidate interpreter
         run: |
-          uv venv --python 3.12 .native-validation
+          uv venv --managed-python --python 3.12.13 .native-validation
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             uv pip install --python .native-validation/bin/python torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
           fi
           uv pip install --python .native-validation/bin/python -r packaging/skulk-demucs/requirements.in
-          uv pip install --python .native-validation/bin/python psutil==7.2.1
+      - name: Prepare the supported Core controller interpreter
+        run: |
+          uv venv --managed-python --python 3.13.13 .core-controller
+          uv pip install --python .core-controller/bin/python pydantic==2.12.5 psutil==7.2.1
+          .core-controller/bin/python -c 'import os; assert hasattr(os, "waitid"), "Core requires non-reaping process observation"'
       - name: Stage the exact inference library source
         run: |
           source_revision=$(.native-validation/bin/python -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["revision"])')
@@ -68,15 +72,18 @@ jobs:
       - name: Exercise actual supervised load, mono resampling and complete export
         env:
           PYTHONPATH: src
-        run: .native-validation/bin/python scripts/qualify_demucs_native.py --interpreter .native-validation/bin/python --weights .native-model/955717e8.safetensors --output .native-proof
+        run: .core-controller/bin/python scripts/qualify_demucs_native.py --interpreter .native-validation/bin/python --weights .native-model/955717e8.safetensors --output .native-proof
       - name: Retain exact candidate dependency observations
         if: always()
-        run: uv pip freeze --python .native-validation/bin/python > native-dependencies.txt
+        run: |
+          uv pip freeze --python .native-validation/bin/python > native-dependencies.txt
+          uv pip freeze --python .core-controller/bin/python > controller-dependencies.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: demucs-boundary-${{ matrix.platform }}
           path: |
             native-dependencies.txt
+            controller-dependencies.txt
             .native-proof/measurement.json
             .native-proof/supervision.json

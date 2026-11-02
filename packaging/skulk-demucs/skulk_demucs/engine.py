@@ -24,7 +24,7 @@ from .contracts import (
     NativeSeparationResult,
     SeparationDevice,
 )
-from .media import export_stems, read_original
+from .media import export_stems, read_original, resample_original
 
 WEIGHT_SHA256: Final = (
     "d9fa14133cfcc034a6758923bb3a8ca9f8dfd0b582134643bbf83f72c17576dd"
@@ -71,16 +71,6 @@ class ModelApplication(Protocol):
         callback: Callable[[Mapping[str, object]], None],
     ) -> torch.Tensor:
         """Separate one batch, keeping long-lived input/output tensors on CPU."""
-        ...
-
-
-class Resampler(Protocol):
-    """Explicit-length bandlimited resampling at the pinned julius boundary."""
-
-    def resample_frac(
-        self, waveform: torch.Tensor, old_sr: int, new_sr: int, *, output_length: int
-    ) -> torch.Tensor:
-        """Return the requested nearest-frame duration without a guessed trim."""
         ...
 
 
@@ -156,18 +146,13 @@ def separate(
     directory.mkdir(parents=True, exist_ok=True)
     if any(path.name != "job.json" for path in directory.iterdir()):
         raise ValueError("separation output directory must be new and command-private")
-    waveform = torch_arrays.from_numpy(samples.T.copy())
+    resampled = resample_original(samples, job.source, MODEL_RATE)
+    waveform = torch_arrays.from_numpy(resampled.T.copy())
     if job.source.channels == 1:
         waveform = waveform.expand(2, -1).contiguous()
     frames = (2 * job.source.frames * MODEL_RATE + job.source.sample_rate) // (
         2 * job.source.sample_rate
     )
-    if job.source.sample_rate != MODEL_RATE:
-        resampler_module: object = importlib.import_module("julius")
-        resampler = cast(Resampler, cast(object, resampler_module))
-        waveform = resampler.resample_frac(
-            waveform, job.source.sample_rate, MODEL_RATE, output_length=frames
-        )
     if tuple(waveform.shape) != (2, frames) or not bool(torch.isfinite(waveform).all()):
         raise ValueError(
             "source resampling did not preserve finite stereo frame geometry"

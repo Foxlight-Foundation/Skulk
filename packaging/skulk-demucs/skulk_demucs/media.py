@@ -11,6 +11,7 @@ from typing import cast
 import numpy as np
 import numpy.typing as npt
 
+from .bindings import polyphase
 from .bindings import soundfile as sf
 from .contracts import (
     MAX_SEPARATION_SOURCE_BYTES,
@@ -38,6 +39,53 @@ def read_original(path: Path, expected: SeparationSource) -> npt.NDArray[np.floa
     ):
         raise ValueError("WAV decoder disagrees with verified finite source geometry")
     return decoded
+
+
+def resample_original(
+    samples: npt.NDArray[np.float32], source: SeparationSource, target_rate: int
+) -> npt.NDArray[np.float32]:
+    """Resample verified original frames without an unbounded phase filter bank.
+
+    Keep mono input mono during conversion; the model adapter duplicates it
+    afterward. Return the nearest frame count, retaining the original time zero.
+    The pinned SciPy polyphase implementation allocates one FIR of length
+    ``20 * max(up, down) + 1`` after reducing the rates by their GCD. Bounding
+    both rates to 192 kHz therefore bounds its filter workspace even when the
+    rates are coprime. Julius instead builds a bank proportional to the product
+    of the reduced rates and can exhaust memory on valid 44,101 Hz input.
+    """
+    if (
+        not 8000 <= target_rate <= 192000
+        or samples.shape != (source.frames, source.channels)
+        or not np.isfinite(samples).all()
+    ):
+        raise ValueError("resampling requires finite admitted source geometry and rate")
+    if source.sample_rate == target_rate:
+        return samples
+    frames = (2 * source.frames * target_rate + source.sample_rate) // (
+        2 * source.sample_rate
+    )
+    resampled = polyphase.resample_poly(
+        samples,
+        target_rate,
+        source.sample_rate,
+        axis=0,
+        window=("kaiser", 5.0),
+        padtype="constant",
+        cval=0.0,
+    )
+    ceiling = (
+        source.frames * target_rate + source.sample_rate - 1
+    ) // source.sample_rate
+    if (
+        resampled.shape != (ceiling, source.channels)
+        or not np.isfinite(resampled).all()
+    ):
+        raise ValueError("polyphase resampling returned invalid finite source geometry")
+    # SciPy returns ceil(N * up / down). Our manifest uses nearest-frame
+    # duration; discard only that possible final fractional-frame sample, never
+    # pad missing audio or trim the beginning to make a malformed output fit.
+    return resampled[:frames]
 
 
 def export_stems(

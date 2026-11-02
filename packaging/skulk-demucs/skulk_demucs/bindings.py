@@ -81,12 +81,32 @@ class TensorArray(Protocol):
         ...
 
 
+class PolyphaseResampler(Protocol):
+    """Pinned SciPy's NumPy float32 API without its untyped public wrapper."""
+
+    def resample_poly(
+        self,
+        x: npt.NDArray[np.float32],
+        up: int,
+        down: int,
+        *,
+        axis: Literal[0],
+        window: tuple[Literal["kaiser"], float],
+        padtype: Literal["constant"],
+        cval: float,
+    ) -> npt.NDArray[np.float32]:
+        """Filter frame-major samples with one finite polyphase coefficient array."""
+        ...
+
+
 soundfile_module: object = importlib.import_module("soundfile")
 soundfile = cast(SoundFile, cast(object, soundfile_module))
 safetensors_module: object = importlib.import_module("safetensors")
 safetensors = cast(SafeTensors, cast(object, safetensors_module))
 torch_module: object = importlib.import_module("torch")
 torch_arrays = cast(TorchArrayBridge, cast(object, torch_module))
+scipy_signal_module: object = importlib.import_module("scipy.signal")
+polyphase = cast(PolyphaseResampler, cast(object, scipy_signal_module))
 
 
 def array_from_tensor(tensor: torch.Tensor) -> npt.NDArray[np.float32]:

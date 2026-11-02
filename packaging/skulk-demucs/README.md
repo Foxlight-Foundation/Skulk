@@ -45,9 +45,13 @@ Only the exact HTDemucs artifact is accepted:
 The adapter checks the complete hash and constructor before the safetensors
 loader. It never calls upstream `get_model`, Hub model management or its legacy
 pickle fallback. The source is verified as finite uncompressed mono/stereo WAV,
-1–120 seconds, <=64 MiB encoded and <=128 MiB decoded. Mono is explicitly
-duplicated for the stereo model. Julius resamples to 44.1 kHz using the nearest
-integer frame count; no guessed duration, trim, offset or silence is appended.
+1–120 seconds, <=64 MiB encoded and <=128 MiB decoded. SciPy's pinned polyphase
+FIR resamples to 44.1 kHz before mono is duplicated for the stereo model. Its
+coefficient workspace is linear in the reduced rates, avoiding Julius's large
+phase bank for valid coprime rates such as 44,101 Hz. Time zero is retained; the
+duration uses the nearest integer frame count. At most one final fractional-frame
+sample is removed from SciPy's ceiling-length result; missing audio is never
+padded. Julius remains an upstream Demucs internal dependency.
 
 Input normalization/denormalization follows the pinned upstream tensor API,
 with one reproducible seeded shift, split inference and overlap 0.25. The four
@@ -74,13 +78,15 @@ trees; they do not establish Demucs model quality or accelerator qualification.
 Within a separately prepared candidate native environment, make this package
 importable and run `python packaging/skulk-demucs/verify_runtime.py` plus a strict
 type check against that interpreter. This exercises real libsndfile/torch APIs,
-shared gain, finite aligned output, original protection and exact-model refusal.
+shared gain, finite aligned output, original protection, exact-model refusal and
+coprime-rate resampling memory/signal regressions.
 Real-model execution and listening evidence remain separate from these analytic
 tests. `scripts/qualify_demucs_native.py` exercises the actual isolated CLI and
 Core supervisor using explicit local weights, with a mono/odd-frame resampling
 fixture or an explicit original WAV. The three-platform candidate workflow fetches
 only the immutable test weight object separately, runs that smoke and retains its
-measurements. It uses a development import path, so it is not normal packaged
+measurements. The controller uses Core's supported Python 3.13, separately from
+the native engine's pinned Python 3.12.13. It uses a development import path, so it is not normal packaged
 installation evidence. Process RSS and CUDA/HIP allocator peaks are separately named measurements,
 not total device or host memory requirements. Native pipeline timing excludes
 interpreter/import startup and parent verification; the separate `supervision.json`
