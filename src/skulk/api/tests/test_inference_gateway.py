@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from pydantic import JsonValue, TypeAdapter
 
-from skulk.api.inference_gateway import GatewaySigner, chat_response
+from skulk.api.inference_gateway import ChatCatalog, GatewaySigner, chat_response
 from skulk.api.main import API
 from skulk.api.types import ModelList
 from skulk.extensions import (
@@ -53,6 +53,10 @@ class ChatFixture:
         self.delay = delay
         self.local = namespace == "different.inference"
         self.calls = 0
+        self.catalog_calls = 0
+        self.catalog_active = False
+        self.catalog_available = True
+        self.catalog_started = asyncio.Event()
         self.closed = False
         self.nonces: set[str] = set()
         self.chat = CapabilityDescriptor(
@@ -91,7 +95,17 @@ class ChatFixture:
         self, context: ExtensionContext, call: CapabilityCall
     ) -> dict[str, object]:
         """Publish fresh fixture facts without making a provider request."""
-        await asyncio.sleep(self.delay)
+        self.catalog_calls += 1
+        if self.catalog_active:
+            return {}
+        self.catalog_active = True
+        self.catalog_started.set()
+        try:
+            await asyncio.sleep(self.delay)
+        finally:
+            self.catalog_active = False
+        if not self.catalog_available:
+            return {}
         return {
             "contract": "chat.completions@0.1.0",
             "target_node": "fixture-transport",
@@ -176,6 +190,10 @@ class ChatFixture:
 
 class InferenceTestAPI(API):
     """Exercise the ordinary provider workers without starting unrelated services."""
+
+    async def read_chat_catalogs(self) -> list[ChatCatalog]:
+        """Expose discovery for deterministic concurrent-reader lifecycle tests."""
+        return await self._capability_chat_catalogs()
 
     @asynccontextmanager
     async def providers(self) -> AsyncGenerator[None]:
@@ -367,6 +385,63 @@ async def test_managed_catalog_read_can_outlive_one_second(
             item.id for item in listing.data
         ]
         assert provider.calls == 0
+
+
+async def test_overlapping_catalog_readers_share_one_read_without_later_caching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent readers must not compete for a managed owner's single slot."""
+    monkeypatch.setattr("skulk.api.main.SKULK_DATA_HOME", tmp_path)
+    signer = GatewaySigner(tmp_path / "inference" / "gateway.key")
+    provider = ChatFixture("managed.inference", signer.public_key(), delay=0.1)
+    api = build_api(provider)
+    results = await asyncio.gather(*(api.read_chat_catalogs() for _ in range(3)))
+    assert all(len(catalogs) == 1 for catalogs in results)
+    assert provider.catalog_calls == 1 and provider.calls == 0
+    provider.catalog_available = False
+    assert await api.read_chat_catalogs() == []
+    assert provider.catalog_calls == 2
+
+
+async def test_cancelling_catalog_waiter_keeps_the_active_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A disconnected queued reader must not cancel another reader's work."""
+    monkeypatch.setattr("skulk.api.main.SKULK_DATA_HOME", tmp_path)
+    signer = GatewaySigner(tmp_path / "inference" / "gateway.key")
+    provider = ChatFixture("managed.inference", signer.public_key(), delay=0.1)
+    api = build_api(provider)
+    leader = asyncio.create_task(api.read_chat_catalogs())
+    await provider.catalog_started.wait()
+    waiter = asyncio.create_task(api.read_chat_catalogs())
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert len(await leader) == 1
+    assert provider.catalog_calls == 1
+
+
+async def test_cancelling_catalog_leader_releases_waiters_and_owns_no_later_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leader cancellation closes its read and leaves the next cohort usable."""
+    monkeypatch.setattr("skulk.api.main.SKULK_DATA_HOME", tmp_path)
+    signer = GatewaySigner(tmp_path / "inference" / "gateway.key")
+    provider = ChatFixture("managed.inference", signer.public_key(), delay=10)
+    api = build_api(provider)
+    leader = asyncio.create_task(api.read_chat_catalogs())
+    await provider.catalog_started.wait()
+    waiter = asyncio.create_task(api.read_chat_catalogs())
+    await asyncio.sleep(0)
+    leader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+    assert await waiter == []
+    assert provider.catalog_calls == 1 and not provider.catalog_active
+    provider.delay = 0
+    assert len(await api.read_chat_catalogs()) == 1
+    assert provider.catalog_calls == 2
 
 
 @pytest.mark.parametrize("healthy_first", [True, False])

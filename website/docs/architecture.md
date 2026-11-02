@@ -3653,5 +3653,6 @@ their supported scope. See the API guide for exact request and lifecycle fields.
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
   Up to eight cached catalogs are read concurrently under five-second individual
   and six-second aggregate deadlines, including managed-owner validation overhead
-  and retaining completed results. Stream cleanup owns cancellation and
+  and retaining completed results. Overlapping callers share that read, including
+  queue time in its budget; later callers always read afresh. Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.

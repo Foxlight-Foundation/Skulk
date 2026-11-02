@@ -1999,6 +1999,9 @@ class API:
         # _MAX_CONCURRENT_CAPABILITY_CALLS (single-threaded loop => plain int).
         self._active_capability_calls = 0
         self._active_capability_streams: dict[str, _ActiveProviderStream] = {}
+        self._chat_catalog_lock = asyncio.Lock()
+        self._chat_catalog_generation = 0
+        self._chat_catalog_snapshot: list[ChatCatalog] = []
         self._provider_stream_sender = provider_stream_sender
         self._provider_stream_receiver = provider_stream_receiver
         self._realtime_audio_sender = realtime_audio_sender
@@ -10811,7 +10814,45 @@ class API:
         return {"contract": "chat.completions@0.1.0", "public_key": key}
 
     async def _capability_chat_catalogs(self) -> list[ChatCatalog]:
-        """Read bounded cached catalogs from locally installed capabilities only."""
+        """Share bounded discovery among overlapping callers, never later reads."""
+        if self._extensions is None:
+            return []
+        generation = self._chat_catalog_generation
+        deadline = asyncio.get_running_loop().time() + 6
+        try:
+            async with asyncio.timeout(6):
+                await self._chat_catalog_lock.acquire()
+        except TimeoutError:
+            return []
+        try:
+            if generation == self._chat_catalog_generation:
+                # Managed owners can admit only one call at a time. Readers
+                # arriving during this read share its result instead of making
+                # competing calls that falsely withdraw a healthy provider.
+                self._chat_catalog_snapshot = []
+                try:
+                    self._chat_catalog_snapshot = (
+                        await self._read_capability_chat_catalogs(
+                            max(0.0, deadline - asyncio.get_running_loop().time())
+                        )
+                    )
+                finally:
+                    # Failed/cancelled leaders also end their cohort. Waiters
+                    # see its empty result; a later call always reads afresh.
+                    self._chat_catalog_generation += 1
+            now = time.time()
+            return [
+                catalog
+                for catalog in self._chat_catalog_snapshot
+                if catalog.expires_at > now
+            ]
+        finally:
+            self._chat_catalog_lock.release()
+
+    async def _read_capability_chat_catalogs(
+        self, budget_seconds: float
+    ) -> list[ChatCatalog]:
+        """Read one local discovery cohort within its remaining caller budget."""
         if self._extensions is None:
             return []
         descriptors = self._extensions.capability_descriptors
@@ -10855,7 +10896,7 @@ class API:
         # providers from starving a healthy destination. Retain completed reads
         # even if the aggregate budget cancels the remaining handlers.
         with contextlib.suppress(TimeoutError):
-            async with asyncio.timeout(6):
+            async with asyncio.timeout(budget_seconds):
                 async with asyncio.TaskGroup() as tasks:
                     for index, descriptor in enumerate([
                         item

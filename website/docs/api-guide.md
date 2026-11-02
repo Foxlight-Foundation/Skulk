@@ -6477,6 +6477,10 @@ catalogs concurrently from up to eight local installed providers with five-secon
 individual and six-second aggregate deadlines; completed reads survive expiry.
 The individual budget includes managed-owner IPC and schema validation, so a
 normal cached read can finish without restarting a healthy capability.
+Overlapping callers share one discovery result instead of competing for a
+managed owner's single call slot. Waiting and discovery share the same overall
+budget. A later non-overlapping request reads afresh; this does not retain a
+provider catalog after its next successful withdrawal.
 It does not fetch an
 upstream account catalog or token. Missing/stale catalogs withdraw availability.
 The dashboard withdraws cached capability choices at their advertised expiry
