@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import FrameType
 
 
 def main(arguments: list[str]) -> int:
@@ -24,6 +25,15 @@ def main(arguments: list[str]) -> int:
     parent, completion, lock = (int(value) for value in arguments[:3])
     if parent <= 1 or os.getppid() != parent or os.getpgrp() != os.getpid():
         return 2
+
+    def hold_during_drain(_signal_number: int, _frame: FrameType | None) -> None:
+        """Keep the parent watcher and inherited lock alive through the TERM phase."""
+        return None
+
+    # The controller sends TERM to the complete group before KILL. Its guardian
+    # must survive that interval in case the controller itself dies. Use a
+    # caught handler: unlike SIG_IGN, it resets to default when the command execs.
+    signal.signal(signal.SIGTERM, hold_during_drain)
 
     def watch_parent() -> None:
         while os.getppid() == parent:

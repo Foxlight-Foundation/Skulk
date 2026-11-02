@@ -1280,6 +1280,15 @@ If descendant drain fails, the runner retains its unreaped process handle and
 refuses another command. The owner can retry `drain()`; `quiescent` becomes true
 only after complete cleanup, allowing removal of new incomplete installation
 files without racing a writer or signalling a reused PID.
+The guardian catches TERM during group shutdown, keeping its watcher and lock
+until KILL; controller loss in that interval still stops resistant descendants.
+Its caught handler resets to default when the native command executes.
+
+The provisioning package resolves its established public exports lazily. Importing
+the dependency-light integrity and installer helpers does not initialize unrelated
+resident engines or require their dependency sets. Explicit legacy exports retain
+their original backing objects and signatures. Native CI checks cold helper
+imports in its small controller environment before exercising real processes.
 
 The dependency-light `provisioning/demucs_package.py` is the shared package
 contract and integrity boundary. Standalone build tools use an explicit repository

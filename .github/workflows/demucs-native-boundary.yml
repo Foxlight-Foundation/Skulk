@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/demucs-native-boundary.yml'
       - 'packaging/skulk-demucs/**'
+      - 'src/skulk/provisioning/__init__.py'
       - 'src/skulk/provisioning/demucs_package.py'
       - 'src/skulk/provisioning/tests/test_demucs_package.py'
       - 'src/skulk/provisioning/native_install_process.py'

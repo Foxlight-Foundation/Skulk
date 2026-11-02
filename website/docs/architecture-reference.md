@@ -34,8 +34,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   `provisioning/native_install_process.py` implements the bootstrap command runner.
   A standard-library-only `_native_install_guard.py` starts each command in its
   private session, reports completion on a four-byte pipe, retains an optional
-  inherited build lock and kills the group on controller death. Non-reaping
-  observation keeps the session leader owned until every descendant is drained.
+  inherited build lock and kills the group on controller death.
+  Its caught TERM handler survives graceful drain until KILL, preserving the
+  watcher/lock if the controller dies during shutdown; command exec resets it.
+  Non-reaping observation keeps the session leader owned until every descendant is drained.
   Failed cleanup retains the original process handle for `drain()` retry and
   blocks further commands; `quiescent` authorizes cleanup of new incomplete files.
   Each stream is capped at 128 KiB, each runner at 32 commands, logs are private,
@@ -44,6 +46,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   actual guardian source outside PYZ. Native CI exercises process, lock, parent
   loss and packaging closure on all three architectures. Production cache
   orchestration and readiness are still unregistered.
+  The package facade uses lazy exports with unchanged static signatures and
+  backing objects; cold helper imports cannot initialize unrelated provisioners.
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream

@@ -542,6 +542,12 @@ the exact guardian source available to that independent Python.
 The owner may clean new installation files only when `runner.quiescent` is
 true. A failed drain retains the original unreaped handle and blocks subsequent
 commands; retry `runner.drain()` without reconstructing ownership from a PID.
+The guardian catches TERM until final KILL so controller loss during drain
+cannot release its watchdog/lock early; native commands retain default TERM.
+`provisioning/__init__.py` lazily resolves legacy exports so native helper imports
+do not initialize unrelated engines. Preserve their backing objects/signatures;
+exercise cold imports in the small native controller environment as well as the
+full Core environment.
 
 A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):

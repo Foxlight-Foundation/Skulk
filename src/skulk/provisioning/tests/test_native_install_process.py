@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,31 @@ def _environment() -> dict[str, str]:
 
 def _checkpoint() -> None:
     pass
+
+
+def test_native_helpers_do_not_import_unrelated_provisioners() -> None:
+    """A small native controller must not inherit the resident engine dependency set."""
+    source = Path(__file__).resolve().parents[3]
+    code = (
+        "import importlib.abc,sys;"
+        f"sys.path.insert(0,{str(source)!r});\n"
+        "class RefuseUnrelated(importlib.abc.MetaPathFinder):\n"
+        " def find_spec(self,fullname,path=None,target=None):\n"
+        "  if fullname in {'skulk.provisioning.audio_cpp','skulk.provisioning.comfy','skulk.provisioning.llama_server'}:\n"
+        "   raise AssertionError('native helper imported unrelated provisioner: '+fullname)\n"
+        "sys.meta_path.insert(0,RefuseUnrelated());"
+        "import skulk.provisioning.native_install_process;"
+        "import skulk.provisioning.demucs_package;"
+        "assert 'torch' not in sys.modules"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", code],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=20,
+    )
+    assert completed.returncode == 0, completed.stderr.decode()
 
 
 def _assert_stopped(identifier: int) -> None:
@@ -373,3 +399,71 @@ def test_controller_death_stops_guardian_and_native_children(tmp_path: Path) -> 
         if process.poll() is None:
             process.kill()
         process.wait(timeout=3)
+
+
+def test_controller_loss_during_term_drain_keeps_guardian_and_lock(
+    tmp_path: Path,
+) -> None:
+    """A guardian survives TERM until the owner or its watcher kills descendants."""
+    marker = tmp_path / "descendant.pid"
+    draining = tmp_path / "draining.pid"
+    lock_path = tmp_path / "build.lock"
+    core_source = str(Path(native_install_process.__file__).parents[2])
+    controller = (
+        "import fcntl,os,signal,sys,time;"
+        f"sys.path.insert(0,{core_source!r});"
+        "from pathlib import Path;"
+        "from skulk.provisioning import native_install_process as native;"
+        f"lock=os.open({str(lock_path)!r},os.O_RDWR|os.O_CREAT,0o600);"
+        "fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB);\n"
+        "def pause_before_kill(process,**kwargs):\n"
+        " os.close(lock)\n"
+        " os.killpg(process.pid,signal.SIGTERM)\n"
+        " deadline=time.monotonic()+.25\n"
+        " while native.observe_process_exit(process) is None and time.monotonic()<deadline:time.sleep(.01)\n"
+        f" Path({str(draining)!r}).write_text(str(process.pid))\n"
+        " while True:time.sleep(.025)\n"
+        "native.terminate_process_group=pause_before_kill;"
+        f"runner=native.NativeInstallCommandRunner(Path({str(tmp_path / 'logs')!r}),checkpoint=lambda:None,lock_descriptor=lock);"
+        f"runner({_tree_command(marker, exit_parent=True)!r},environment={{}},timeout_seconds=30,capture=False)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", controller], start_new_session=True
+    )
+    descendant: psutil.Process | None = None
+    guardian: psutil.Process | None = None
+    contender: int | None = None
+    try:
+        deadline = time.monotonic() + 10
+        while not draining.exists():
+            assert process.poll() is None, "controller failed before drain barrier"
+            assert time.monotonic() < deadline
+            time.sleep(0.025)
+        descendant = psutil.Process(int(marker.read_text()))
+        guardian = psutil.Process(int(draining.read_text()))
+        contender = os.open(lock_path, os.O_RDWR)
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert guardian.status() != psutil.STATUS_ZOMBIE
+        process.kill()
+        process.wait(timeout=3)
+        deadline = time.monotonic() + 3
+        while True:
+            try:
+                active = descendant.is_running() and descendant.status() != psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                active = False
+            if not active:
+                break
+            assert time.monotonic() < deadline, "parent loss left a native writer alive"
+            time.sleep(0.025)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=3)
+        for owned in (descendant, guardian):
+            if owned is not None:
+                with suppress(psutil.NoSuchProcess):
+                    owned.kill()
+        if contender is not None:
+            os.close(contender)
