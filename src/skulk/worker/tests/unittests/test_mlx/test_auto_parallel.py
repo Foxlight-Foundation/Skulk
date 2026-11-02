@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import json
 import multiprocessing as mp
 import os
 import tempfile
+import time
 from collections.abc import Callable
-from typing import Any, cast
+from multiprocessing.process import BaseProcess
+from multiprocessing.queues import Queue
+from queue import Empty
+from typing import cast
 
 import mlx.core as mx
 import mlx.nn as mlx_nn
@@ -17,6 +23,8 @@ from skulk.worker.engines.mlx.auto_parallel import (
     patch_pipeline_model,
 )
 from skulk.worker.tests.unittests.test_mlx.conftest import MockLayer
+
+PipelineResult = tuple[int, bool, mx.array | str]
 
 
 class _FakeCacheEntry:
@@ -35,8 +43,9 @@ def run_pipeline_device(
     rank: int,
     world_size: int,
     hostfile_path: str,
-    result_queue: Any,  # pyright: ignore[reportAny]
+    result_queue: Queue[PipelineResult],
 ) -> None:
+    """Run the real two-rank wrapper and report its actual result or failure."""
     import os
 
     os.environ["MLX_HOSTFILE"] = hostfile_path
@@ -75,9 +84,9 @@ def run_pipeline_device(
         result = model(x)
         mx.eval(result)
         success = result.shape == x.shape
-        result_queue.put((rank, success, result))  # pyright: ignore[reportAny]
+        result_queue.put((rank, success, result))
     except Exception as e:
-        result_queue.put((rank, False, str(e)))  # pyright: ignore[reportAny]
+        result_queue.put((rank, False, str(e)))
 
 
 def test_single_wrapper_delegates_attributes() -> None:
@@ -108,6 +117,7 @@ def test_missing_attribute_raises() -> None:
 
 
 def test_composed_call_works() -> None:
+    """Wait for actual child results through cold starts and always reap workers."""
     ctx = mp.get_context("spawn")
 
     world_size = 2
@@ -119,10 +129,10 @@ def test_composed_call_works() -> None:
         json.dump(hosts, f)
         hostfile_path = f.name
 
+    result_queue: Queue[PipelineResult] = ctx.Queue()
+    processes: list[BaseProcess] = []
+    deadline = time.monotonic() + 90
     try:
-        result_queue: Any = ctx.Queue()
-
-        processes: list[Any] = []
         for rank in range(world_size):
             p = ctx.Process(
                 target=run_pipeline_device,
@@ -131,21 +141,38 @@ def test_composed_call_works() -> None:
             p.start()
             processes.append(p)
 
-        for p in processes:  # pyright: ignore[reportAny]
-            p.join(timeout=10)  # pyright: ignore[reportAny]
-
-        results: dict[int, Any] = {}
+        results: dict[int, mx.array] = {}
         errors: dict[int, str] = {}
-        while not result_queue.empty():  # pyright: ignore[reportAny]
-            rank, success, value = result_queue.get()  # pyright: ignore[reportAny]
+        # Queue.empty() is not a completion barrier. Collect while the children
+        # run: cold imports may exceed ten seconds, and joining writers before
+        # draining their queue can prevent their feeder threads from exiting.
+        while len(results) + len(errors) < world_size:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                rank, success, value = result_queue.get(timeout=min(0.5, remaining))
+            except Empty:
+                if not any(process.is_alive() for process in processes):
+                    break
+                continue
             if success:
+                assert isinstance(value, mx.array)
                 results[rank] = value
             else:
+                assert isinstance(value, str)
                 errors[rank] = value
 
         assert len(results) == world_size, (
-            f"Expected {world_size} results, got {len(results)}. Errors: {errors}"
+            f"Expected {world_size} results, got {len(results)}. Errors: {errors}. "
+            f"Exit codes: {[process.exitcode for process in processes]}"
         )
+
+        for process in processes:
+            process.join(timeout=max(0.0, deadline - time.monotonic()))
+            assert not process.is_alive(), (
+                "Pipeline worker did not drain after its result"
+            )
 
         for rank in range(world_size):
             assert rank in results, (
@@ -157,7 +184,18 @@ def test_composed_call_works() -> None:
                 f"Device {rank}: expected 4.0, got {result_array}"
             )
     finally:
-        os.unlink(hostfile_path)
+        try:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=1)
+                if process.is_alive():
+                    process.kill()
+                process.join(timeout=5)
+        finally:
+            result_queue.close()
+            result_queue.join_thread()
+            os.unlink(hostfile_path)
 
 
 def test_patch_pipeline_model_patches_nested_language_model(
@@ -181,7 +219,9 @@ def test_patch_pipeline_model_patches_nested_language_model(
         depends_calls.append((lhs, rhs))
         return lhs
 
-    monkeypatch.setattr("skulk.worker.engines.mlx.auto_parallel.mx.depends", _fake_depends)
+    monkeypatch.setattr(
+        "skulk.worker.engines.mlx.auto_parallel.mx.depends", _fake_depends
+    )
 
     model = FakeOuterModel()
     patch_pipeline_model(model, mx.distributed.init())

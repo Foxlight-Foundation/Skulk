@@ -1,0 +1,82 @@
+name: Native separation boundary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/demucs-native-boundary.yml'
+      - 'packaging/skulk-demucs/**'
+      - 'src/skulk/shared/types/audio_separation.py'
+      - 'src/skulk/worker/runner/demucs/**'
+      - 'scripts/qualify_demucs_native.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demucs-boundary-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native contracts and codecs (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-15
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare a separate candidate interpreter
+        run: |
+          uv venv --python 3.12 .native-validation
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            uv pip install --python .native-validation/bin/python torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          fi
+          uv pip install --python .native-validation/bin/python -r packaging/skulk-demucs/requirements.in
+          uv pip install --python .native-validation/bin/python psutil==7.2.1
+      - name: Stage the exact inference library source
+        run: |
+          source_revision=$(.native-validation/bin/python -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["revision"])')
+          source_repository=$(.native-validation/bin/python -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["repository"])')
+          git init .native-source
+          git -C .native-source fetch --depth 1 "$source_repository" "$source_revision"
+          git -C .native-source checkout --detach FETCH_HEAD
+          test "$(git -C .native-source rev-parse HEAD)" = "$source_revision"
+          .native-validation/bin/python -c 'import pathlib,sysconfig; pathlib.Path(sysconfig.get_path("purelib"), "skulk-demucs-candidate.pth").write_text(str(pathlib.Path(".native-source").resolve()) + "\n" + str(pathlib.Path("packaging/skulk-demucs").resolve()) + "\n")'
+      - name: Check strict standalone typing
+        run: uvx --from basedpyright==1.37.1 basedpyright --project packaging/skulk-demucs/pyrightconfig.json --pythonpath "$PWD/.native-validation/bin/python"
+      - name: Verify native codecs and CPU probe without model downloads
+        env:
+          PYTHONPATH: packaging/skulk-demucs
+          HF_HUB_OFFLINE: '1'
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+          PYTORCH_ENABLE_MPS_FALLBACK: '0'
+        run: .native-validation/bin/python packaging/skulk-demucs/verify_runtime.py
+      - name: Fetch only the immutable smoke-test model object
+        env:
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+        run: uvx --from huggingface-hub==2.4.0 hf download adefossez/HTDemucs 955717e8.safetensors --revision cbc8a9b1a87023b7fd74e7b3412e6321c0eab003 --local-dir .native-model
+      - name: Exercise actual supervised load, mono resampling and complete export
+        env:
+          PYTHONPATH: src
+        run: .native-validation/bin/python scripts/qualify_demucs_native.py --interpreter .native-validation/bin/python --weights .native-model/955717e8.safetensors --output .native-proof
+      - name: Retain exact candidate dependency observations
+        if: always()
+        run: uv pip freeze --python .native-validation/bin/python > native-dependencies.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: demucs-boundary-${{ matrix.platform }}
+          path: |
+            native-dependencies.txt
+            .native-proof/measurement.json
+            .native-proof/supervision.json
