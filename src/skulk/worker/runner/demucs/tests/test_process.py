@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import io
 import sys
+import time
 import venv
 import wave
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from skulk.shared.types.audio_separation import NativeSeparationJob, source_from_wav
+from skulk.worker.runner.demucs import process as native_process
 from skulk.worker.runner.demucs.process import (
     run_native_separation,
     separation_environment,
@@ -127,7 +130,7 @@ def test_partial_or_invalid_completion_removes_owned_outputs(
 
 @pytest.mark.parametrize("stop", ["cancel", "timeout", "pressure"])
 def test_inference_stop_drains_descendants_and_removes_partial_files(
-    interpreter: Path, tmp_path: Path, stop: str
+    interpreter: Path, tmp_path: Path, stop: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Cancellation/deadline/admission pressure stop even a TERM-resistant tree."""
     job = _job(tmp_path, "slow")
@@ -140,6 +143,27 @@ def test_inference_stop_drains_descendants_and_removes_partial_files(
         if stop == "pressure"
         else None
     )
+    if stop == "timeout":
+        started = time.monotonic()
+        armed: float | None = None
+
+        def inference_clock() -> float:
+            nonlocal armed
+            now = time.monotonic()
+            if now - started >= 10:
+                raise AssertionError(
+                    "native test fixture did not reach its inference barrier"
+                )
+            if armed is None and child_record.exists():
+                armed = now
+            # This case proves descendant drain during inference. Keep startup
+            # outside its half-second clock; a separate test covers expiry
+            # before startup. Production's actual total deadline is unchanged.
+            return started if armed is None else started + now - armed
+
+        monkeypatch.setattr(
+            native_process, "time", SimpleNamespace(monotonic=inference_clock)
+        )
     if stop == "cancel":
         assert (
             run_native_separation(
@@ -163,12 +187,28 @@ def test_inference_stop_drains_descendants_and_removes_partial_files(
     assert child_record.exists()
     import psutil
 
-    child = (
-        psutil.Process(int(child_record.read_text()))
-        if psutil.pid_exists(int(child_record.read_text()))
-        else None
-    )
-    assert child is None or child.status() == psutil.STATUS_ZOMBIE
+    try:
+        child = psutil.Process(int(child_record.read_text()))
+        assert child.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        pass
+
+
+def test_deadline_before_startup_drains_and_removes_partial_files(
+    interpreter: Path, tmp_path: Path
+) -> None:
+    """An expired total budget does not require the child to reach inference."""
+    job = _job(tmp_path, "slow")
+    with pytest.raises(ValueError, match="deadline"):
+        run_native_separation(
+            interpreter,
+            job,
+            progress=lambda _: None,
+            is_cancelled=lambda: False,
+            timeout_seconds=0.0,
+        )
+    assert not Path(job.output_dir).exists()
+    assert Path(job.source_path).is_file()
 
 
 def test_runtime_environment_owns_offline_and_thread_policy(

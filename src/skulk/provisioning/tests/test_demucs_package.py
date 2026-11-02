@@ -323,3 +323,25 @@ def test_redirected_executable_directory_cannot_hide_startup_overrides(
     binary_root.symlink_to(foreign, target_is_directory=True)
     with pytest.raises(ValueError, match="executable directory"):
         verify_cached_runtime(wheel, root, sha256, payload_sha256)
+
+
+@pytest.mark.parametrize("field", ("home", "executable"))
+def test_virtual_environment_cannot_select_a_foreign_alias_of_verified_python(
+    cached_fixture: tuple[Path, Path, str, str], tmp_path: Path, field: str
+) -> None:
+    """Resolving a configured alias can hide a different standard-library root."""
+    wheel, root, sha256, payload_sha256 = cached_fixture
+    base = root / "interpreter/python/bin/python3.12"
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    (foreign / "bin").symlink_to(base.parent, target_is_directory=True)
+    (foreign / "lib/python3.12").mkdir(parents=True)
+    (foreign / "lib/python3.12/sitecustomize.py").write_text("unverified code")
+    configuration = root / "runtime/pyvenv.cfg"
+    configured = foreign / "bin" if field == "home" else foreign / "bin/python3.12"
+    original = base.parent if field == "home" else base
+    configuration.write_text(
+        configuration.read_text().replace(f"{field} = {original}", f"{field} = {configured}")
+    )
+    with pytest.raises(ValueError, match="foreign interpreter"):
+        verify_cached_runtime(wheel, root, sha256, payload_sha256)

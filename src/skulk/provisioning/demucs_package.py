@@ -653,8 +653,12 @@ def verify_cached_runtime(
     if (
         configuration.get("include-system-site-packages") != "false"
         or configuration.get("version") != PYTHON_VERSION
-        or Path(configuration.get("home", "")).resolve() != base.parent.resolve()
-        or Path(configuration.get("executable", "")).resolve() != base.resolve()
+        # CPython searches relative to the configured spelling of home. A
+        # foreign/bin alias may resolve to this exact executable while selecting
+        # foreign/lib instead. Only the known base spelling or its canonical
+        # spelling is admitted, without resolving caller-controlled aliases.
+        or configuration.get("home") not in {str(base.parent), str(base.parent.resolve())}
+        or configuration.get("executable") not in {str(base), str(base.resolve())}
     ):
         raise ValueError(
             "cached native virtual environment selected a foreign interpreter"

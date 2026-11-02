@@ -65,9 +65,29 @@ extracted source payload, complete standalone interpreter bytes/link topology,
 private venv configuration and installed imports before any cached Python runs.
 Completion receipts do not authorize reuse. Adjacent interpreter path sidecars
 (`._pth` and a shadowing `bin/pyvenv.cfg`) are refused even though Python runs
-in isolated mode; a redirected executable directory is also refused. Its cancellation checkpoints let a
+in isolated mode; a redirected executable directory is also refused. The venv's
+configured base paths must use a known spelling, rather than a foreign alias
+that merely resolves to the same executable. Its cancellation checkpoints let a
 future supervising owner stop hashing/extraction safely. The current candidate
 CLI remains fresh-only; a verified library tree is not model or device readiness.
+
+Core's `NativeInstallCommandRunner` supplies owned command sessions to this
+bootstrap. Its guardian keeps the session leader and an optional build lock
+alive until descendant drain, and kills the entire group if Core disappears.
+Cancellation and command deadlines remain active; each stdout/stderr stream is
+capped at 128 KiB and retained only in private logs. The three-platform workflow
+exercises real cancellation, controller death and inherited-lock behavior.
+`scripts/stage_demucs_candidate.py` runs the actual fresh offline bootstrap
+through that supervisor on every target, using the bundle's verified Python
+for the guardian as well as the installer. Standalone `verify_package.py`
+retains its fresh-only shared-bootstrap interface.
+Frozen controllers explicitly supply a verified guardian Python; the freezer
+hook/spec retain its actual script source instead of relying on PYZ bytecode.
+The owner must retain incomplete files when `runner.quiescent` is false; failed
+cleanup retains the unreaped handle for an explicit `drain()` retry and blocks
+subsequent commands.
+This command helper does not yet implement production cache/download recovery
+or advertise a ready backend.
 
 Normal cache reuse/invalidation, installation supervision, resource admission,
 GPU-device binding, accelerator packages and signed publication are still needed.
