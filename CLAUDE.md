@@ -519,7 +519,27 @@ verified local artifacts. Content callers must gate reads on completed status;
 the internal candidate manifest is not a public result. A lifetime file fence
 prevents overlapping owners; uncertain writes fence the index until reopened.
 Restart fails incomplete jobs; unexpired complete receipts are not evicted to
-admit another job. This lifecycle component is not yet wired to HTTP or tasks.
+admit another job. The new private `api/separation_media.py` owns all four WAV
+roles with independent closed-file verification, sync and complete-only adoption
+after restart. Partial sets never become content; cleanup removes only API copies.
+Existing video/music handlers ignore the four new separation output purposes.
+HTTP and addressed worker execution remain unwired.
+
+The separation foundation adds frozen `AudioSeparation` command/task variants
+and `SeparationChunk` metadata. The master admits one job per actually ready,
+complete single-host separator, counting pending events in the same batch.
+Both placement entries require live verified native backend/build resources,
+then stamp `separation_policy`; the worker rejects policy drift before load.
+`shared/models/separation_runtime.py` owns exact tensor/constructor matching and
+the actual FP32/two-thread/7.8-second/120-second workload estimate, including
+source/result buffers and native workspace, with a 3 GiB reference floor.
+CPU admission uses system RAM even on discrete-GPU hosts. These are runtime
+requirements, never a tested-hardware permission list. The immutable inventory
+pins CPU packages for all three targets; Mac can explicitly probe MPS. CUDA/ROCm
+need separate real dependency/memory profiles. No engine readiness, worker
+preparation or mounted runner is activated by these components. Every isolated
+participant must be upgraded before new replicated execution variants are used;
+record a separate production reader transition before promotion.
 `worker/runner/demucs/process.py` supervises `packaging/skulk-demucs/` under an
 isolated interpreter, with complete file/digest checks, bounded progress,
 process-group cancellation and parent-death cleanup. It is not yet registered in

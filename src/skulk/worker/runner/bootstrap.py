@@ -474,6 +474,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
             card_serves_music=shard.model_card.music is not None,
+            card_serves_separation=shard.model_card.separation is not None,
             card_serves_embeddings=card_serves_embeddings(shard.model_card),
             card_has_native_image_profile=shard.model_card.image is not None,
             card_has_pinned_projector=(

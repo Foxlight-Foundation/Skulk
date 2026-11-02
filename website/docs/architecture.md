@@ -1320,8 +1320,41 @@ engine plugin ABI or activation framework.
 `AudioSeparation` and `[separation]` must agree, selecting one exact safetensors
 object and real transformer geometry, with speech and music sections excluded.
 The registry derives `audio.separate` explicitly and `/v1/models` projects the
-same typed information. This reader vocabulary does not add an execution task
-to the replicated task union or advertise a loaded runner.
+same typed information. Reader vocabulary alone does not advertise a loaded runner.
+
+The separation execution foundation adds distinct frozen `AudioSeparation`
+command/task variants and a complete-manifest `SeparationChunk`. No source or
+result WAV enters replicated State or the event log. The master admits only a
+complete single-host native model in `RunnerReady`, with an explicit build and
+bound execution policy. Pending admissions from the same master batch reserve
+that instance before their events apply; one model runs one separation at a time.
+
+`shared/models/separation_runtime.py` resolves the implemented exact tensor and
+constructor by artifact identity, not repository name or tested hardware. A
+mirror with identical weights is still compatible. `demucs-{cpu,metal,cuda,rocm}`
+names native engine lanes; the separate `provisioning/demucs_inventory.py`
+inventory currently pins CPU packages for all three supported OS/CPU targets,
+with explicit MPS probing available in the Mac package. CUDA and ROCm need their
+own real dependency and admission profiles before they can be prepared.
+
+An installable package is not a ready backend. Both placement entry points
+require live verified backend/build resources, reject partial shards and stamp
+`separation_policy` alongside the build. The implemented workload uses FP32,
+two threads, the trained 7.8-second window and bounded sources up to 120 seconds.
+Its shared peak estimate accounts for decoded/canonical sources, native workspace,
+four result buffers and verification, rounded with a 3 GiB conservative reference
+floor. This is an engine/workload estimate, not a card-level universal memory
+requirement or hardware qualification. Ordinary and exact placement use the
+complete estimate; the worker repeats it and refuses absent or changed policy
+before loading. An explicit CPU lane uses host RAM even beside a discrete GPU.
+No native backend is advertised and no mounted runner or preparation operation
+is registered by this foundation alone.
+
+These new replicated variants require every participant in the isolated
+validation segment to be upgraded before execution is enabled. Do not send them
+to older ordered-event readers; private native protocol compatibility does not
+establish replicated command/task compatibility. Production promotion needs its
+own recorded reader transition and installed acceptance.
 
 The isolated `api/separation_jobs.py` lifecycle component owns a private,
 exclusively locked metadata index. Four jobs may be active and 64 retained,
@@ -1344,8 +1377,20 @@ uncertain, the registry refuses further reads/writes until its owner reopens it.
 Restart fails interrupted jobs without exposing partial results; complete
 receipts remain subject to independent file adoption. Failure/cancellation is
 terminal, and unexpired complete results cannot be evicted merely to admit work.
-This component is not yet connected to HTTP routes, task admission or media
-handlers; it does not enable separation in the product by itself.
+`api/separation_media.py` supplies separate private four-role output storage over
+the existing WAV assemblers. It reserves at most four active transfers per job
+set, four active jobs and 64 retained sets, with 64 MiB per file and 256 MiB per
+set. Identical repeated opens preserve progress. A late invalid file removes
+only that job's API result copies; originals and native output remain outside
+this owner's authority. Closed files receive independent digest, PCM24 stereo
+44.1 kHz, geometry and peak checks and are synced before internal receipts.
+Restart adopts all four exact files or exposes none. Content access additionally
+requires the durable completed job and matching unexpired complete manifest.
+Partial results stay private even if every transfer has finished. Four new
+`OUTPUT_MEDIA` purposes identify drums, bass, other and vocals; existing
+video/music handlers ignore those purposes. HTTP and addressed execution wiring
+remain separate integration work; the storage component does not enable the
+feature by itself.
 
 The dependency-light `provisioning/demucs_package.py` is the shared package
 contract and integrity boundary. Standalone build tools use an explicit repository

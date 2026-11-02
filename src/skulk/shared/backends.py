@@ -49,6 +49,7 @@ EngineType = Literal[
     "test_video",
     "comfy",
     "audio_cpp",
+    "demucs",
     "stable_diffusion_cpp", "mlx_video",
 ]
 """Inference runtime that loads and runs a model; selects the worker runner.
@@ -106,6 +107,7 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "test_video",
     "comfy",
     "audio_cpp",
+    "demucs",
     "stable_diffusion_cpp",
     "mlx_video",
 )
@@ -418,6 +420,7 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
 _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx", "llama_cpp"})
 _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
 _MUSIC_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"audio_cpp"})
+_SEPARATION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"demucs"})
 # Engines with an embedding runner: the transformers runner serves ``mlx``
 # placements (safetensors cards), and ``llama_server`` runs a dedicated
 # ``--embeddings`` server (GGUF cards). Without this gate a card declaring
@@ -461,6 +464,7 @@ def platform_compatible_backends(
     card_serves_vision: bool,
     card_serves_speech: bool = False,
     card_serves_music: bool = False,
+    card_serves_separation: bool = False,
     card_serves_embeddings: bool = False,
     card_has_native_image_profile: bool = False,
     card_has_pinned_projector: bool = False,
@@ -485,6 +489,7 @@ def platform_compatible_backends(
         card_serves_vision: whether the card declares a vision capability.
         card_serves_speech: whether the card declares a speech capability.
         card_serves_music: whether the card declares a music workload.
+        card_serves_separation: whether native source separation is required.
         card_serves_embeddings: whether the card declares a text-embedding
             workload; only engines with an embedding runner remain.
         card_has_native_image_profile: whether complete typed image components
@@ -544,6 +549,17 @@ def platform_compatible_backends(
             if (engine := engine_of(tag)) is None
             or (engine in _MUSIC_SERVING_ENGINES and tag in AUDIO_CPP_COMPUTE_BACKENDS)
         )
+    if card_serves_separation:
+        filtered = frozenset(
+            tag
+            for tag in expand_engine_backends(filtered)
+            if engine_of(tag) in _SEPARATION_SERVING_ENGINES
+            and tag in {"demucs-cpu", "demucs-metal", "demucs-cuda", "demucs-rocm"}
+        )
+    else:
+        # A native separator cannot load a text/speech/music model merely
+        # because a broad card or operator declaration names its engine.
+        filtered = frozenset(tag for tag in filtered if engine_of(tag) != "demucs")
     if card_serves_embeddings:
         filtered = frozenset(
             tag

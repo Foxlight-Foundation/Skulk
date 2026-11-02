@@ -15,6 +15,7 @@ from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.tasks import (
+    AudioSeparation,
     AudioTranscription,
     CancelTask,
     ConnectToGroup,
@@ -526,6 +527,7 @@ def _pending_tasks(
                 ImageEdits,
                 VideoGeneration,
                 MusicGeneration,
+                AudioSeparation,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,

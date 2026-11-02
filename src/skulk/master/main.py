@@ -80,6 +80,7 @@ from skulk.shared.models.model_cards import (
 from skulk.shared.models.video_support import video_request_supported
 from skulk.shared.types.commands import (
     AddCustomModelCard,
+    AudioSeparation,
     AudioTranscription,
     CancelDownload,
     CreateInstance,
@@ -153,6 +154,9 @@ from skulk.shared.types.steward_actions import (
     StewardRestartInstanceAction,
     StewardStopInstanceAction,
     steward_action_proposal_is_prunable,
+)
+from skulk.shared.types.tasks import (
+    AudioSeparation as AudioSeparationTask,
 )
 from skulk.shared.types.tasks import (
     AudioTranscription as AudioTranscriptionTask,
@@ -345,6 +349,7 @@ _COMMAND_TASK_TYPES = (
     AudioTranscriptionTask,
     RealtimeAudioTranscriptionTask,
     MusicGenerationTask,
+    AudioSeparationTask,
 )
 
 
@@ -971,6 +976,85 @@ def music_generation_instances(state: State, model_id: ModelId) -> list[Instance
         )
         ranked.append((not ready, active, str(instance.instance_id), instance.instance_id))
     return [identifier for _, _, _, identifier in sorted(ranked)]
+
+
+def separation_generation_instances(
+    state: State, model_id: ModelId, pending_events: Sequence[Event] = ()
+) -> list[InstanceId]:
+    """Find idle, actually ready native separators, including same-batch admission.
+
+    Requests in one master batch see the same State snapshot. Counting only
+    that snapshot admits several tasks to a single nominally idle model. Pending
+    created tasks are therefore reservations until the ordered events apply.
+    No qualification/hardware permission list participates in this selection.
+    """
+    occupied = {
+        task.instance_id
+        for task in (
+            *state.tasks.values(),
+            *(event.task for event in pending_events if isinstance(event, TaskCreated)),
+        )
+        if isinstance(task, AudioSeparationTask)
+        and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+    }
+    eligible: list[InstanceId] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if (
+            assignments.model_id != model_id
+            or instance.instance_id in occupied
+            or len(assignments.runner_to_shard) != 1
+            or len(assignments.node_to_runner) != 1
+        ):
+            continue
+        runner_id, shard = next(iter(assignments.runner_to_shard.items()))
+        if (
+            shard.model_card.separation is None
+            or shard.world_size != 1
+            or shard.start_layer != 0
+            or shard.end_layer != shard.model_card.n_layers
+            or shard.n_layers != shard.model_card.n_layers
+            or shard.resolved_backend not in {
+                "demucs-cpu", "demucs-metal", "demucs-cuda", "demucs-rocm"
+            }
+            or shard.resolved_engine_build is None
+            or shard.separation_policy is None
+            or not isinstance(state.runners.get(runner_id), RunnerReady)
+        ):
+            continue
+        eligible.append(instance.instance_id)
+    return sorted(eligible, key=str)
+
+
+def separation_generation_events(
+    state: State,
+    command: AudioSeparation,
+    pending_events: Sequence[Event] = (),
+) -> tuple[list[Event], TaskId]:
+    """Reserve one idle separator or publish a correlated terminal refusal."""
+    eligible = separation_generation_instances(
+        state, ModelId(command.task_params.model), pending_events
+    )
+    identifier = TaskId()
+    result: list[Event] = [TaskCreated(
+        task_id=identifier,
+        task=AudioSeparationTask(
+            task_id=identifier,
+            command_id=command.command_id,
+            owner_node=command.owner_node,
+            instance_id=eligible[0] if eligible else InstanceId(str(command.command_id)),
+            task_status=TaskStatus.Pending if eligible else TaskStatus.Failed,
+            task_params=command.task_params,
+            trace_enabled=state.tracing_enabled,
+        ),
+    )]
+    if not eligible:
+        result.append(TaskFailed(
+            task_id=identifier,
+            error_type="audio_separation_unavailable",
+            error_message="No idle ready single-host source-separation instance serves the selected model",
+        ))
+    return result, identifier
 
 
 def _image_generation_events(state: State, command: ImageGeneration) -> tuple[list[Event], TaskId]:
@@ -3225,6 +3309,12 @@ class Master:
                                         ),
                                     )
                                 )
+                        case AudioSeparation():
+                            admitted, task_id = separation_generation_events(
+                                self.state, command, generated_events
+                            )
+                            generated_events.extend(admitted)
+                            self.command_task_mapping[command.command_id] = task_id
                         case MusicGeneration():
                             candidates = music_generation_instances(
                                 self.state, ModelId(command.task_params.model)
