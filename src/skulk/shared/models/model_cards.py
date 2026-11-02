@@ -64,6 +64,7 @@ from skulk.shared.models.registry import (
     TufRegistryClient,
 )
 from skulk.shared.models.registry_gguf_metadata import RegistryGgufArtifactMetadata
+from skulk.shared.models.separation import SeparationCardConfig, separation_is_absent
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
@@ -1366,6 +1367,7 @@ class ModelTask(str, Enum):
     SpeechToText = "SpeechToText"
     SpeechTranslation = "SpeechTranslation"
     TextToMusic = "TextToMusic"
+    AudioSeparation = "AudioSeparation"
     TextToVideo = "TextToVideo"
     ImageToVideo = "ImageToVideo"
     ReferenceToVideo = "ReferenceToVideo"
@@ -3019,7 +3021,7 @@ class ModelCard(CamelCaseModel):
     tasks: list[ModelTask]
     """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
     ``TextToImage``, ``ImageToImage``, ``TextToSpeech``, ``SpeechToText``,
-    ``SpeechTranslation``, ``TextToMusic``, ``TextToVideo``, ``ImageToVideo``,
+    ``SpeechTranslation``, ``TextToMusic``, ``AudioSeparation``, ``TextToVideo``, ``ImageToVideo``,
     ``ReferenceToVideo``); selects which runner handles it."""
     components: list[ComponentInfo] | None = None
     """For multi-component models (e.g. a diffusion stack), the per-component
@@ -3111,6 +3113,11 @@ class ModelCard(CamelCaseModel):
     rates); ``None`` for non-speech models."""
     music: MusicCardConfig | None = None
     """Text-to-music family, lyric requirement, and qualified target-duration bounds."""
+    separation: SeparationCardConfig | None = Field(
+        default=None,
+        exclude_if=separation_is_absent,
+        description="Native separator geometry, ordered stems and selected tensor artifact.",
+    )
     video: VideoCardConfig | None = None
     """Optional audio-video generation contract (modes, duration and frame
     grid, canvas rules, audio output, reference bounds, sampling defaults,
@@ -3418,6 +3425,40 @@ class ModelCard(CamelCaseModel):
             raise ValueError(
                 "placement.max_pipeline_split_layer must be smaller than n_layers"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_separation_artifact(self) -> "ModelCard":
+        """Bind native separation metadata to the task, geometry and exact object."""
+        profile = self.separation
+        if (ModelTask.AudioSeparation in self.tasks) != (profile is not None):
+            raise ValueError("AudioSeparation requires a [separation] section and vice versa")
+        if profile is None:
+            return self
+        if self.tasks != [ModelTask.AudioSeparation]:
+            raise ValueError("HTDemucs cards declare only AudioSeparation")
+        if self.audio is not None or self.music is not None:
+            raise ValueError("separation, speech and music sections must remain separate")
+        if (
+            self.n_layers != profile.transformer_layers_per_branch
+            or self.hidden_size != profile.transformer_channels
+        ):
+            raise ValueError("separation dimensions must match the actual transformer geometry")
+        bundle = self.artifact_bundle
+        if bundle is None:
+            raise ValueError("separation cards require an exact artifact bundle")
+        selected = (
+            f"{bundle.root}/{profile.weights_file}"
+            if bundle.root is not None
+            else profile.weights_file
+        )
+        if self.gguf_file is not None or tuple(item.path for item in bundle.files) != (selected,):
+            raise ValueError("separation bundle must contain only its selected safetensors")
+        object_id = bundle.files[0].object_id
+        if object_id is None or not object_id.startswith("sha256:"):
+            raise ValueError("separation weights require their exact SHA-256 object identity")
+        if self.storage_size.in_bytes != bundle.download_size:
+            raise ValueError("separation storage must equal its selected artifact size")
         return self
 
     @model_validator(mode="after")

@@ -173,3 +173,30 @@ Process RSS and CUDA/HIP allocator peaks are separately named measurements,
 not total device or host memory requirements. Native pipeline timing excludes
 interpreter/import startup and parent verification; the separate `supervision.json`
 measurement includes the complete supervised process wall time.
+
+## Initiative library-cache integration
+
+`DemucsRuntimeCache` prepares an exact reviewed CPU package at a stable private
+UUID generation and can verify CPU or Apple MPS library execution. It hashes
+complete cached source/interpreter/venv/import bytes, can bootstrap offline from
+a cached original package, and can recover a complete unpublished generation.
+Atomic selection follows successful verification/probing; local receipts never
+authorize changed bytes. Build/global fences, disk reserve and owned child-group
+supervision remain active through preparation. A failed drain retains its exact
+handle; cancel and join preparation before closing the controller. Previous or
+possibly published generations are preserved. This controller does not yet
+register worker preparation, model placement, cards or accelerator claims.
+
+The protected file utilities are shared from Core's `utils/runtime_files.py`,
+with compatibility exports for existing plugin callers. No engine plugin
+architecture is introduced. CUDA/ROCm package production, physical-device
+binding, workload admission and qualification remain required integration work.
+
+`scripts/qualify_demucs_cache.py` exercises the real controller against a sealed
+candidate. Supply the original wheel, its independent whole-object and payload
+SHA-256 pins, target tag and a new output directory. It seeds only the original
+package, then proves fresh offline preparation, verified reuse and recovery of
+the same generation after removing its selection hint. `--mps` additionally
+requires native Apple MPS execution without CPU fallback. The native workflow
+runs the CPU cases on all three targets and retains the measured receipts;
+these checks do not grant model support or production admission.

@@ -49,6 +49,31 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   The package facade uses lazy exports with unchanged static signatures and
   backing objects; cold helper imports cannot initialize unrelated provisioners.
 
+- **Native separation cache (initiative):** `provisioning/demucs_runtime.py`
+  defines exact CPU `DemucsWheel` pins and the owned `DemucsRuntimeCache`.
+  OS/libc/CPU eligibility and whole-object/payload/platform agreement precede any
+  interpreter execution. A cache-wide reservation fence and per-build fence
+  serialize installation; the guardian inherits the reservation. Stable UUID
+  generations, full cached-byte verification, offline bootstrap and a closed
+  CPU/MPS FP32 probe precede fsynced atomic selection. Old generations survive
+  repair; only newly owned unactivated output is cleaned after actual drain.
+  Retained cleanup handles survive failures for explicit retry/close. There is
+  a 10 GiB host free-space reserve, a 16-generation bound, exact streamed
+  download size/hash, a default 30-minute total preparation budget (at most two
+  hours), and a 300-second cold library/device probe bound. This is library
+  preparation, not loaded-model readiness. Worker/task/inventory registration
+  and CUDA/ROCm profiles remain unconnected.
+- **Protected runtime files:** `utils/runtime_files.py` owns private-directory,
+  bounded private-read, fsynced atomic-write and inherited file-lock helpers.
+  `extensions/runtime_files.py` reexports the same objects for existing callers;
+  provisioning does not import the plugin subsystem to acquire a file fence.
+- **Native separation card reader:** `shared/models/separation.py` owns frozen
+  `SeparationCardConfig`; `ModelTask.AudioSeparation` requires `[separation]`.
+  One SHA-256-identified safetensors object, ordered stems and native geometry
+  must agree with the artifact bundle and transformer depth/width. The model
+  catalog projects this metadata separately from speech/music. Reader metadata
+  does not create an execution task or loaded-model readiness.
+
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
