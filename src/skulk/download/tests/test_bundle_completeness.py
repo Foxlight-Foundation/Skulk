@@ -10,14 +10,17 @@ from pathlib import Path
 
 import pytest
 
+import skulk.download.download_utils as download_utils
 import skulk.shared.constants as constants
 from skulk.download.download_utils import (
     build_model_path,
     is_model_directory_complete,
     resolve_model_in_path,
 )
+from skulk.download.impl_shard_downloader import ResumableShardDownloader
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.store import installed_cards
 from skulk.store.installed_cards import (
     build_installed_card_record,
@@ -83,6 +86,66 @@ def _install(root: Path, card: ModelCard) -> Path:
     (artifact / ".skulk-source-revision").write_text(f"{REVISION}\n")
     write_installed_card(artifact, build_installed_card_record(artifact, card))
     return artifact
+
+
+@pytest.mark.parametrize("alias", [False, True])
+@pytest.mark.parametrize("bundle_root", [None, "payload/loader"])
+async def test_offline_download_status_recognizes_installed_bundle_without_hub_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias: bool,
+    bundle_root: str | None,
+) -> None:
+    """Canonical bundle custody is sufficient without a shard index or Hub listing."""
+    card = _card(bundle_root)
+    if not alias:
+        card = card.model_copy(update={"source_repository": None})
+    _install(tmp_path, card)
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", None)
+    shard = PipelineShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+    progress = await ResumableShardDownloader(offline=True).get_shard_download_status_for_shard(shard)
+    assert progress.status == "complete"
+    assert progress.completed_files == len(FILES)
+    assert progress.downloaded == card.storage_size
+
+
+@pytest.mark.parametrize("damage", ["missing", "short", "no_manifest", "revision"])
+async def test_offline_bundle_status_refuses_incomplete_or_other_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """Local discovery cannot turn bare or incomplete tensors into a ready download."""
+    card = _card().model_copy(update={"source_repository": None})
+    artifact = _install(tmp_path, card)
+    if damage == "missing":
+        (artifact / "vae/audio_vae.safetensors").unlink()
+    elif damage == "short":
+        (artifact / "vae/audio_vae.safetensors").write_bytes(b"short")
+    elif damage == "no_manifest":
+        installed_cards.installed_card_path(artifact).unlink()
+    else:
+        (artifact / ".skulk-source-revision").write_text("b" * 40)
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", None)
+    shard = PipelineShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+    progress = await ResumableShardDownloader(offline=True).get_shard_download_status_for_shard(shard)
+    assert progress.status != "complete"
 
 
 def test_bundle_directory_is_complete_by_its_installed_manifest(tmp_path: Path) -> None:
