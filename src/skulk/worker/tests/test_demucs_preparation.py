@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,49 @@ async def test_prepare_runs_off_loop_with_worker_policy_and_finite_budget(tmp_pa
     assert controller.engine_builds() == {"demucs-cpu": DEMUCS_PACKAGES[0].build_identity}
     await controller.close()
     assert controller.engine_builds() == {} and manager.active == 0
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_actual_executor_queue_consumes_absolute_preparation_deadline(tmp_path: Path, expired: bool) -> None:
+    """A saturated real executor cannot restart the admitted request's clock."""
+    async def exercise() -> None:
+        manager = Manager(tmp_path)
+        manager.release.set()
+        now = [100.0]
+        controller = DemucsPreparationController(manager, offline=True, clock=lambda: now[0])
+        occupied = threading.Event()
+        release = threading.Event()
+
+        def block() -> None:
+            occupied.set()
+            assert release.wait(5)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            loop = asyncio.get_running_loop()
+            loop.set_default_executor(executor)
+            blocker = loop.run_in_executor(None, block)
+            async with asyncio.timeout(2):
+                while not occupied.is_set():
+                    await asyncio.sleep(0.001)
+            queued = request(controller, "queued-expiry")
+            await asyncio.sleep(0.02)
+            assert not manager.calls
+            now[0] = 120.0 if expired else 110.0
+            release.set()
+            try:
+                await blocker
+                if expired:
+                    with pytest.raises(TimeoutError, match="executor capacity"):
+                        await queued
+                    assert not manager.calls and controller.engine_builds() == {}
+                else:
+                    await queued
+                    assert len(manager.calls) == 1 and manager.calls[0][2] == 10.0
+            finally:
+                release.set()
+                await controller.close()
+
+    asyncio.run(exercise())
 
 
 async def test_cancelling_coroutine_joins_owned_thread_before_return(tmp_path: Path) -> None:

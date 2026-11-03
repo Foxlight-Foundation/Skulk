@@ -117,10 +117,22 @@ class DemucsPreparationController:
         if len(self._active) >= 4:
             raise RuntimeError("native preparation request capacity is full")
         stopped = threading.Event()
-        task = asyncio.create_task(asyncio.to_thread(
-            self.manager.prepare, wheel, device=device, offline=self.offline,
-            is_cancelled=stopped.is_set, progress=progress, timeout_seconds=budget,
-        ))
+
+        def prepare_in_thread() -> PreparedDemucsRuntime:
+            # asyncio's shared executor can delay dispatch after coroutine
+            # admission. That queue consumes the original absolute deadline too;
+            # expired work must not begin installation with a refreshed budget.
+            remaining = expires_at - self.clock()
+            if stopped.is_set():
+                raise DemucsPreparationCancelledError("native preparation was cancelled")
+            if not math.isfinite(remaining) or not 0 < remaining <= 2 * 60 * 60:
+                raise TimeoutError("native preparation expired while waiting for executor capacity")
+            return self.manager.prepare(
+                wheel, device=device, offline=self.offline,
+                is_cancelled=stopped.is_set, progress=progress, timeout_seconds=remaining,
+            )
+
+        task = asyncio.create_task(asyncio.to_thread(prepare_in_thread))
         self._active[request_id] = stopped, task
         try:
             try:

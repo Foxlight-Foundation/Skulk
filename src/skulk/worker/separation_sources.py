@@ -8,6 +8,7 @@ neither a packet nor an API-supplied path can manufacture such a task.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from pathlib import Path
@@ -42,6 +43,19 @@ class SeparationSourceStore:
         self._tasks: dict[CommandId, AudioSeparation] = {}
         self._ready: dict[CommandId, Path] = {}
         try:
+            # A new process has no ownership proof for directories left by a
+            # prior worker or placed here externally. Preserve them, but charge
+            # every unresolved entry against admission across restarts. Stop the
+            # bounded scan at overflow rather than retaining an arbitrary list.
+            unresolved = 0
+            with os.scandir(root) as children:
+                for child in children:
+                    if child.name == "service.lock":
+                        continue
+                    unresolved += 1
+                    if unresolved > 4:
+                        raise ValueError("separation source root needs ownership-checked stale-copy recovery")
+            self._unresolved_count = unresolved
             self._store = VideoStore(root, max_total_bytes=4 * MAX_SEPARATION_SOURCE_BYTES)
         except BaseException:
             self._ownership.close()
@@ -53,6 +67,16 @@ class SeparationSourceStore:
             raise RuntimeError("separation source owner is closed")
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", str(command_id)) is None:
             raise ValueError("invalid separation source identity")
+
+    def unresolved_source_count(self) -> int:
+        """Count preserved prior/unknown entries that still consume input capacity.
+
+        The startup owner must prove prior reader drain and file ownership before
+        externally reconciling these entries and reopening the store. Merely
+        observing terminal State never authorizes deleting an unknown file.
+        """
+        with self._guard:
+            return self._unresolved_count
 
     def admit(self, task: AudioSeparation) -> None:
         """Reserve bytes for an authoritative local task, preserving identical opens.
@@ -75,8 +99,8 @@ class SeparationSourceStore:
                 ):
                     raise ValueError("separation source admission changed its owner or identity")
                 return
-            if len(self._tasks) >= 4:
-                raise ValueError("separation source capacity is full")
+            if len(self._tasks) + self._unresolved_count >= 4:
+                raise ValueError("separation source capacity is full; unresolved copies require ownership-checked recovery")
             directory = self.root / str(task.command_id)
             if directory.exists() or directory.is_symlink():
                 raise ValueError("separation source directory needs stale-copy cleanup")

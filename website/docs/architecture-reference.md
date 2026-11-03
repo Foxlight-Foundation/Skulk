@@ -94,6 +94,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   withdraw observations; no cache generation with publication history is evicted.
   `worker/demucs_preparation.py` bounds requests to four, runs effects off-loop,
   joins cancellation/shutdown before cache close and retains failed cleanup.
+  Shared-executor queue time consumes the absolute deadline; expired work starts
+  no native preparation effects.
   No event handler or resource provider is registered by these components.
 
 - **Native separation model and source ownership (initiative):**
@@ -105,7 +107,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   private original copies, including already verified waiting/running input.
   Full encoded hash and WAV facts precede acknowledgement. Unknown/terminal
   admission fails; cleanup failure keeps its slot/fence for retry. Drain readers
-  before close. The receiver must correlate authoritative State/owner/placement;
+  before close. Prior/unknown root entries count against the same four slots
+  after restart; bounded overflow refuses without deleting/following foreign
+  entries. Startup reconciliation requires ownership and prior reader drain.
+  The receiver must correlate authoritative State/owner/placement;
   no bootstrap, transport receiver or HTTP route is registered here.
 
 - **Native separation card reader:** `shared/models/separation.py` owns frozen

@@ -1320,7 +1320,9 @@ library build; an actual model still needs a separate loaded-ready receipt.
 `worker/demucs_preparation.py` supplies bounded asynchronous ownership of up to
 four explicit requests. Cancellation joins the installation thread; shutdown
 joins all work before closing its cache. Failed cleanup retains the original
-manager and fence for retry. These components register no worker event handlers
+manager and fence for retry. Shared-executor waiting consumes the original
+absolute request deadline; expired queued work cannot begin native effects.
+These components register no worker event handlers
 or resource provider yet. Published runtime generations remain retained when
 selection changes, so cache repair cannot delete a mounted interpreter.
 
@@ -1336,7 +1338,11 @@ It accepts an authoritative nonterminal task, preserves identical opens, checks
 size/hash and decoded WAV facts before acknowledgement, and refuses unknown frames.
 Failed deletion retains capacity and ownership for retry. Shutdown requires
 resident readers to drain first; interrupted copies are not restartable jobs or
-user originals. Receiver-level State/owner/placement correlation remains required.
+user originals. Prior or unknown root entries continue to consume slots after a
+restart, without following symlinks or deleting foreign content. An already
+overfull root refuses with a bounded scan. Startup must prove ownership and prior
+reader drain before reconciling those entries and reopening the owner.
+Receiver-level State/owner/placement correlation remains required.
 Neither module registers bootstrap dispatch, addressed transport or HTTP routes.
 
 Protected runtime file/lock helpers live in `utils/runtime_files.py`; the old

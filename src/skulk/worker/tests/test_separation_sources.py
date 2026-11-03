@@ -2,6 +2,8 @@
 
 import io
 import shutil
+import subprocess
+import sys
 import wave
 from pathlib import Path
 
@@ -217,3 +219,66 @@ def test_failed_delete_retains_capacity_and_owner_for_retry(tmp_path: Path, monk
     monkeypatch.setattr(shutil, "rmtree", remove)
     store.close()
     assert not any(path.exists() for path in retained)
+
+
+def test_abrupt_worker_exit_cannot_reset_source_capacity(tmp_path: Path) -> None:
+    """Four actual originals survive owner death and still charge the next owner."""
+    root = tmp_path / "inputs"
+    script = """
+import os
+from pathlib import Path
+import sys
+from skulk.worker.separation_sources import SeparationSourceStore
+from skulk.worker.tests.test_separation_sources import retain, task
+store = SeparationSourceStore(Path(sys.argv[1]))
+for index in range(4):
+    retain(store, task(f'crashed-{index}'))
+os._exit(0)
+"""
+    subprocess.run([sys.executable, "-c", script, str(root)], check=True, timeout=60)
+    for _ in range(2):
+        reopened = SeparationSourceStore(root)
+        try:
+            assert reopened.unresolved_source_count() == 4
+            with pytest.raises(ValueError, match="capacity"):
+                reopened.admit(task("next-worker"))
+            reopened.delete(CommandId("crashed-0"))  # No current ownership proof.
+            assert len(tuple(root.glob("*/original.wav"))) == 4
+        finally:
+            reopened.close()
+        assert len(tuple(root.glob("*/original.wav"))) == 4
+
+
+def test_unknown_entries_consume_slots_without_being_followed_or_deleted(tmp_path: Path) -> None:
+    """Preserve foreign files/symlinks while refusing an unbounded restart leak."""
+    root = tmp_path / "inputs"
+    root.mkdir(mode=0o700)
+    outside = tmp_path / "foreign.wav"
+    outside.write_bytes(source())
+    (root / "foreign-link").symlink_to(outside)
+    (root / "foreign-directory").mkdir()
+    (root / "foreign-file").write_bytes(b"preserve")
+    reopened = SeparationSourceStore(root)
+    assert reopened.unresolved_source_count() == 3
+    retained = retain(reopened, task("owned"))
+    with pytest.raises(ValueError, match="capacity"):
+        reopened.admit(task("overflow"))
+    reopened.close()
+    assert not retained.exists() and outside.read_bytes() == source()
+    assert (root / "foreign-link").is_symlink()
+    assert (root / "foreign-file").read_bytes() == b"preserve"
+    assert (root / "foreign-directory").is_dir()
+
+
+def test_overfull_unknown_root_refuses_boundedly_and_releases_new_fence(tmp_path: Path) -> None:
+    """A root already over policy cannot become empty capacity through a scan."""
+    root = tmp_path / "inputs"
+    root.mkdir(mode=0o700)
+    for index in range(5):
+        (root / f"unknown-{index}").mkdir()
+    with pytest.raises(ValueError, match="ownership-checked"):
+        SeparationSourceStore(root)
+    (root / "unknown-4").rmdir()
+    reopened = SeparationSourceStore(root)
+    assert reopened.unresolved_source_count() == 4
+    reopened.close()

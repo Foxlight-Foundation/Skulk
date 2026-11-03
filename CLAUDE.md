@@ -554,13 +554,16 @@ record a separate production reader transition before promotion.
 `provisioning/demucs_manager.py` owns fixed-package, actual-host preparation and
 private exact runtime lookup for the worker lifetime. Read-only inventory never
 installs; revalidation/shutdown withdraw library observations. The bounded async
-`worker/demucs_preparation.py` owner joins cancelled work before cache close and
-retains failed cleanup. `worker/runner/demucs/model.py` binds complete rank-zero
+`worker/demucs_preparation.py` owner joins cancelled work before cache close,
+charges shared-executor waiting to the absolute request deadline, and retains
+failed cleanup. `worker/runner/demucs/model.py` binds complete rank-zero
 placement, prepared build/device/policy and staged loader root to a real resident;
 source WAV facts are rechecked before inference and paths remain private.
 `worker/separation_sources.py` retains up to four private original copies,
 including verified waiting inputs; hash/WAV checks precede acknowledgement and
-failed deletion retains its slot/fence. Receivers still must correlate live
+failed deletion retains its slot/fence. Prior/unknown root entries still consume
+the four-copy bound after restart; preserve them until startup proves ownership
+and reader drain for reconciliation. Overfull roots refuse boundedly. Receivers still must correlate live
 State/owner/placement. Drain resident readers before closing input ownership.
 No event/resource/bootstrap/transport/HTTP activation is registered here.
 
