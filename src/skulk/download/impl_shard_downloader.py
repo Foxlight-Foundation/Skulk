@@ -289,6 +289,8 @@ class ResumableShardDownloader(ShardDownloader):
     async def ensure_shard(
         self, shard: ShardMetadata, config_only: bool = False
     ) -> Path:
+        """Ensure supported shard artifacts, refusing unsupported layouts before effects."""
+        shard.model_card.require_supported_artifact_operations(context="ensure shard")
         bundle_root = (
             shard.model_card.artifact_bundle.root
             if shard.model_card.artifact_bundle is not None

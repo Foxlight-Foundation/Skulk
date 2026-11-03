@@ -10,7 +10,16 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from enum import Enum
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NamedTuple, cast
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Final,
+    Literal,
+    NamedTuple,
+    cast,
+    final,
+)
 
 import aiofiles
 import aiofiles.os as aios
@@ -1002,7 +1011,7 @@ def model_engine_requirements(model_card: "ModelCard") -> frozenset[str]:
     declared = model_card.placement.compatible_backends
     if declared:
         return declared
-    if model_card.music is not None:
+    if model_card.music is not None and model_card.music.native is None:
         return frozenset({"audio_cpp"})
     if model_card.separation is not None:
         return frozenset({"demucs"})
@@ -1369,6 +1378,7 @@ class ModelTask(str, Enum):
     SpeechToText = "SpeechToText"
     SpeechTranslation = "SpeechTranslation"
     TextToMusic = "TextToMusic"
+    MusicEditing = "MusicEditing"
     AudioSeparation = "AudioSeparation"
     TextToVideo = "TextToVideo"
     ImageToVideo = "ImageToVideo"
@@ -1423,9 +1433,18 @@ def _music_component_matches_role(component_path: str, role: str) -> bool:
     return name.endswith(".gguf") and (stem == role or stem.startswith(f"{role}_"))
 
 
+def native_music_is_absent(value: object) -> bool:
+    """Omit absent native metadata to preserve existing signed card bytes."""
+    return value is None
+
+
 class MusicCardConfig(CamelCaseModel):
     """Model truth for bounded text-to-music generation, separate from speech."""
 
+    native: "NativeAceMusicConfig | None" = Field(
+        default=None, exclude_if=native_music_is_absent,
+        description="Exact native ACE base components and intrinsic editing modes; absent for audio.cpp GGUF cards.",
+    )
     family: MusicModelFamily
     """Architecture family used by the runner's fixed option translator."""
     lyrics: MusicLyricRequirement
@@ -1471,6 +1490,8 @@ class MusicCardConfig(CamelCaseModel):
 
     @model_validator(mode="after")
     def _validate_bounds(self) -> "MusicCardConfig":
+        if self.native is not None and self.family != MusicModelFamily.AceStep15:
+            raise ValueError("native music components require ACE-Step 1.5")
         if self.min_seconds > self.max_seconds:
             raise ValueError("music min_seconds cannot exceed max_seconds")
         if self.max_seconds > 120:
@@ -2197,6 +2218,81 @@ class ArtifactBundleConfig(CamelCaseModel):
             prefix = f"{self.root}/"
             if any(path != self.root and not path.startswith(prefix) for path in paths):
                 raise ValueError("artifact bundle files must remain beneath root")
+        return self
+
+
+MusicEditMode = Literal["add_part", "repaint", "continue"]
+"""Intrinsic native editing operations, independent of installed runner support."""
+MusicPartClass = Literal[
+    "woodwinds", "brass", "fx", "synth", "strings", "percussion", "keyboard",
+    "guitar", "bass", "drums", "backing_vocals", "vocals",
+]
+"""Native ACE track classes; instrument detail belongs in the musical caption."""
+
+
+@final
+class NativeMusicArtifactConfig(FrozenModel):
+    """One separately pinned native music component and its complete file set."""
+
+    repo: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")] = Field(
+        description="Hub repository containing this component, never a URL or local path."
+    )
+    revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] = Field(
+        description="Immutable source commit for every selected component file."
+    )
+    license: LicenseCardConfig = Field(description="License facts attributed to this component.")
+    artifact_bundle: ArtifactBundleConfig = Field(
+        description="Exact source-relative files, byte sizes, object identities and loader root."
+    )
+
+    @model_validator(mode="after")
+    def validate_objects(self) -> "NativeMusicArtifactConfig":
+        """Require positive sizes and strong identities for selected tensor weights."""
+        for item in self.artifact_bundle.files:
+            if item.size_bytes <= 0 or item.object_id is None:
+                raise ValueError("native music files require positive sizes and object identities")
+            if item.path.endswith(".safetensors") and not item.object_id.startswith("sha256:"):
+                raise ValueError("native music tensor weights require SHA-256 identities")
+        return self
+
+
+@final
+class NativeAceMusicConfig(FrozenModel):
+    """Native ACE base model truth; does not advertise ready execution capacity."""
+
+    variant: Literal["base"] = Field(description="Base checkpoint variant; Turbo does not implement native lego editing.")
+    sample_rate: Literal[48000] = Field(description="Native generated audio sampling rate in Hz.")
+    audio_channels: Literal[2] = Field(description="Native generated audio channels.")
+    editing_modes: tuple[MusicEditMode, ...] = Field(min_length=1, max_length=3, description="Intrinsic supported editing operations, not qualification or readiness.")
+    part_classes: tuple[MusicPartClass, ...] = Field(min_length=1, max_length=12, description="Closed native track classes accepted for Add a part.")
+    text_encoder: NativeMusicArtifactConfig = Field(description="Pinned Qwen text encoder and tokenizer closure.")
+    autoencoder: NativeMusicArtifactConfig = Field(description="Pinned audio autoencoder configuration and weights.")
+
+    @field_validator("editing_modes", "part_classes", mode="before")
+    @classmethod
+    def coerce_arrays(cls, value: object) -> object:
+        """Accept persisted JSON/TOML arrays as immutable mode and class tuples."""
+        return tuple(cast("list[object]", value)) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_components(self) -> "NativeAceMusicConfig":
+        """Bind the native loader's roles to complete, non-executable selections."""
+        if len(set(self.editing_modes)) != len(self.editing_modes) or len(set(self.part_classes)) != len(self.part_classes):
+            raise ValueError("native music modes and part classes must be unique")
+        required = (
+            (self.text_encoder, "text encoder", frozenset({
+                "added_tokens.json", "chat_template.jinja", "config.json", "merges.txt",
+                "model.safetensors", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json", "vocab.json",
+            })),
+            (self.autoencoder, "autoencoder", frozenset({"config.json", "diffusion_pytorch_model.safetensors"})),
+        )
+        for component, role, names in required:
+            bundle = component.artifact_bundle
+            prefix = f"{bundle.root}/" if bundle.root is not None else ""
+            if {item.path for item in bundle.files} != {f"{prefix}{name}" for name in names}:
+                raise ValueError(f"native music {role} requires its complete exact file selection")
+        if self.text_encoder.repo == self.autoencoder.repo and self.text_encoder.revision != self.autoencoder.revision:
+            raise ValueError("native music components from one repository must pin one revision")
         return self
 
 
@@ -3023,7 +3119,7 @@ class ModelCard(CamelCaseModel):
     tasks: list[ModelTask]
     """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
     ``TextToImage``, ``ImageToImage``, ``TextToSpeech``, ``SpeechToText``,
-    ``SpeechTranslation``, ``TextToMusic``, ``AudioSeparation``, ``TextToVideo``, ``ImageToVideo``,
+    ``SpeechTranslation``, ``TextToMusic``, ``MusicEditing``, ``AudioSeparation``, ``TextToVideo``, ``ImageToVideo``,
     ``ReferenceToVideo``); selects which runner handles it."""
     components: list[ComponentInfo] | None = None
     """For multi-component models (e.g. a diffusion stack), the per-component
@@ -3325,6 +3421,25 @@ class ModelCard(CamelCaseModel):
         self.require_immutable_external_companions(context="signed registry cards")
         return self
 
+    def require_supported_artifact_operations(self, *, context: str) -> None:
+        """Reject byte work whose complete component layout is not implemented.
+
+        Args:
+            context: Artifact boundary included in the diagnostic.
+
+        Raises:
+            ValueError: Native music has metadata support, but its three-component
+                download, installation and preservation mapping is unavailable.
+                Reading or projecting the card does not perform this check.
+        """
+        # Parsing exact metadata must not certify a primary-only installation.
+        # Remove this refusal only with the complete native component lifecycle.
+        if self.music is not None and self.music.native is not None:
+            raise ValueError(
+                f"{context}: native music artifact operations require the complete "
+                "three-component download and store integration, which is not yet supported"
+            )
+
     def require_immutable_external_companions(self, *, context: str) -> None:
         """Reject external companion repositories without immutable revisions.
 
@@ -3469,12 +3584,21 @@ class ModelCard(CamelCaseModel):
         has_task = ModelTask.TextToMusic in self.tasks
         if has_task != (self.music is not None):
             raise ValueError("TextToMusic requires a [music] section and vice versa")
-        if has_task and self.tasks != [ModelTask.TextToMusic]:
+        native = self.music.native if self.music is not None else None
+        if (ModelTask.MusicEditing in self.tasks) != (native is not None):
+            raise ValueError("MusicEditing requires native [music.native] metadata and vice versa")
+        if native is not None:
+            if len(self.tasks) != 2 or set(self.tasks) != {ModelTask.TextToMusic, ModelTask.MusicEditing}:
+                raise ValueError("native ACE base declares TextToMusic and MusicEditing only")
+        elif has_task and self.tasks != [ModelTask.TextToMusic]:
             raise ValueError("TextToMusic must be the sole task on a music card")
         if self.music is not None and self.audio is not None:
             raise ValueError("music and speech [audio] sections must remain separate")
         if self.music is not None and self.artifact_bundle is None:
             raise ValueError("music cards require an artifact bundle")
+        if native is not None:
+            self._validate_native_music_artifact(native)
+            return self
         if self.music is not None and self.artifact_bundle is not None:
             root_prefix = (
                 f"{self.artifact_bundle.root}/"
@@ -3542,6 +3666,36 @@ class ModelCard(CamelCaseModel):
                         "ACE-Step artifact_bundle must contain only its selected GGUF"
                     )
         return self
+
+    def _validate_native_music_artifact(self, native: NativeAceMusicConfig) -> None:
+        """Bind native base weights and both companions to complete pinned bytes.
+
+        Model-repository Python is deliberately excluded. The native runtime
+        package will own the reviewed implementation, independently of weights.
+        """
+        bundle = self.artifact_bundle
+        if self.trust_remote_code:
+            raise ValueError("native music uses runtime-owned code; trust_remote_code must be false")
+        if self.gguf_file is not None or self.source_revision is None or bundle is None:
+            raise ValueError("native music requires pinned non-GGUF base artifacts")
+        prefix = f"{bundle.root}/" if bundle.root is not None else ""
+        if {item.path.removeprefix(prefix) for item in bundle.files} != {
+            "config.json", "model.safetensors", "silence_latent.pt",
+        }:
+            raise ValueError("native music base requires config, safetensors and silence latent only")
+        for item in bundle.files:
+            if item.size_bytes <= 0 or item.object_id is None:
+                raise ValueError("native music base files require positive sizes and object identities")
+            if item.path.removeprefix(prefix) != "config.json" and not item.object_id.startswith("sha256:"):
+                raise ValueError("native music base tensors require SHA-256 identities")
+        for component in (native.text_encoder, native.autoencoder):
+            if component.repo == self.artifact_repository and component.revision != self.source_revision:
+                raise ValueError("native music components from one repository must pin one revision")
+        if self.n_layers != 24 or self.hidden_size != 2048:
+            raise ValueError("native ACE base geometry must match its 24-layer 2048-wide backbone")
+        total = bundle.download_size + native.text_encoder.artifact_bundle.download_size + native.autoencoder.artifact_bundle.download_size
+        if self.storage_size.in_bytes != total:
+            raise ValueError("native music storage must equal the complete three-component selection")
 
     @model_validator(mode="after")
     def _validate_gguf_cache_geometry(self) -> "ModelCard":

@@ -8,6 +8,7 @@ signed request. This adapter initially serves direct owner requests on its host.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import secrets
@@ -29,12 +30,20 @@ from pydantic import (
     JsonValue,
     TypeAdapter,
     field_validator,
+    model_validator,
 )
 
-from skulk.extensions.streams import CapabilityStreamFrame, CapabilityStreamSession
+from skulk.extensions.streams import (
+    CapabilityStreamFrame,
+    CapabilityStreamSession,
+    InlineMediaAttachment,
+)
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 CONTRACT = "chat.completions@0.1.0"
+STREAMED_CONTRACT = "chat.completions@0.2.0"
+MAX_CHAT_BODY_BYTES = 16 * 1024 * 1024
+CHAT_BODY_MEDIA_TYPE = "application/vnd.skulk.chat-request+json"
 
 
 class ChatModel(BaseModel):
@@ -46,8 +55,15 @@ class ChatModel(BaseModel):
     id: str = Field(min_length=1, max_length=128, pattern=r"^[\w.:@-]+$")
     name: str = Field(min_length=1, max_length=256)
     features: tuple[
-        Literal["image_input", "function_tools", "reasoning_toggle"], ...
-    ] = Field(default=(), max_length=3)
+        Literal[
+            "image_input",
+            "function_tools",
+            "reasoning_toggle",
+            "text_file_input",
+            "pdf_input",
+        ],
+        ...,
+    ] = Field(default=(), max_length=5)
 
 
 class ChatCatalog(BaseModel):
@@ -56,10 +72,10 @@ class ChatCatalog(BaseModel):
     model_config = ConfigDict(
         frozen=True, strict=True, extra="forbid", allow_inf_nan=False
     )
-    contract: Literal["chat.completions@0.1.0"]
+    contract: Literal["chat.completions@0.1.0", "chat.completions@0.2.0"]
     target_node: str = Field(min_length=1, max_length=128, pattern=r"^[\w.:@-]+$")
     callable_id: str = Field(min_length=1, max_length=128, pattern=r"^[\w.:@-]+$")
-    callable_version: Literal["0.1.0"]
+    callable_version: Literal["0.1.0", "0.2.0"]
     descriptor_revision: str = Field(pattern=r"^[a-f0-9]{16}$")
     catalog_revision: str = Field(pattern=r"^[a-f0-9]{64}$")
     expires_at: float = Field(gt=0)
@@ -68,6 +84,33 @@ class ChatCatalog(BaseModel):
     usage: Literal["none", "included_only", "credits_possible", "unknown"]
     usage_label: str = Field(max_length=80)
     usage_url: str | None = Field(default=None, max_length=256)
+    maximum_body_bytes: int | None = Field(
+        default=None,
+        ge=2,
+        le=MAX_CHAT_BODY_BYTES,
+        description="Encoded request-media bound for the streamed-input contract.",
+    )
+
+    @model_validator(mode="after")
+    def input_contract(self) -> ChatCatalog:
+        """Refuse mismatched versions or media claims on the legacy contract."""
+        if (
+            self.contract == CONTRACT
+            and (
+                self.callable_version != "0.1.0" or self.maximum_body_bytes is not None
+            )
+        ) or (
+            self.contract == STREAMED_CONTRACT
+            and (self.callable_version != "0.2.0" or self.maximum_body_bytes is None)
+        ):
+            raise ValueError("inconsistent chat input contract")
+        if self.contract == CONTRACT and any(
+            feature in {"text_file_input", "pdf_input"}
+            for model in self.models
+            for feature in model.features
+        ):
+            raise ValueError("document features require streamed input")
+        return self
 
     @field_validator("usage_url")
     @classmethod
@@ -149,6 +192,8 @@ class GatewaySigner:
         self, catalog: ChatCatalog, model: str, request: dict[str, JsonValue]
     ) -> dict[str, object]:
         """Bind exact request, target, policy revision, nonce and short expiry."""
+        if catalog.contract != CONTRACT:
+            raise ValueError("legacy signing requires a legacy catalog")
         key = self._key()
         invocation: dict[str, JsonValue] = {
             "contract": CONTRACT,
@@ -174,6 +219,84 @@ class GatewaySigner:
                 413, "Capability chat request exceeds the signed input bound"
             )
         return {"invocation": invocation, "signature": key.sign(encoded).hex()}
+
+    def prepare(
+        self, catalog: ChatCatalog, model: str, request: dict[str, JsonValue]
+    ) -> tuple[dict[str, object], bytes | None]:
+        """Sign either complete v1 input or an exact bounded v2 media reference.
+
+        The returned bytes belong only to this invocation's input data channel.
+        Large requests never downgrade to the legacy contract or get replayed.
+        """
+        if catalog.contract == CONTRACT:
+            return self.sign(catalog, model, request), None
+        raw = json.dumps(
+            request, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode()
+        if catalog.maximum_body_bytes is None or len(raw) > catalog.maximum_body_bytes:
+            raise HTTPException(413, "Capability request exceeds its media input bound")
+        key = self._key()
+        invocation: dict[str, JsonValue] = {
+            "contract": STREAMED_CONTRACT,
+            "public_key": key.public_key().public_bytes_raw().hex(),
+            "target_node": catalog.target_node,
+            "callable_id": catalog.callable_id,
+            "descriptor_revision": catalog.descriptor_revision,
+            "catalog_revision": catalog.catalog_revision,
+            "model": model,
+            "body": {
+                "size_bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "media_type": CHAT_BODY_MEDIA_TYPE,
+            },
+            "nonce": secrets.token_hex(32),
+            "expires_at": time.time() + 30,
+        }
+        encoded = json.dumps(
+            invocation,
+            sort_keys=True,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode()
+        return {"invocation": invocation, "signature": key.sign(encoded).hex()}, raw
+
+
+async def send_chat_body(
+    session: CapabilityStreamSession,
+    raw: bytes,
+    disconnected: Callable[[], Awaitable[bool]],
+) -> None:
+    """Send bounded media and half-close; retire the call on any upload failure.
+
+    A v2 provider must consume and verify input before generating output. The
+    normal provider receive worker remains active during upload, including early
+    refusal and metadata. The upload deadline is inside the stream's existing
+    whole-call deadline, leaving provider execution its remaining budget.
+    """
+    try:
+        if session.input is None or len(raw) > MAX_CHAT_BODY_BYTES:
+            raise ValueError("stream does not accept the bounded input body")
+        async with asyncio.timeout(30):
+            for start in range(0, len(raw), 1024 * 1024):
+                if await disconnected():
+                    raise HTTPException(499, "Caller disconnected during input upload")
+                await session.input.send_chunk(
+                    payload={},
+                    media=InlineMediaAttachment(
+                        data=raw[start : start + 1024 * 1024],
+                        media_type=CHAT_BODY_MEDIA_TYPE,
+                    ),
+                )
+            if await disconnected():
+                raise HTTPException(499, "Caller disconnected during input upload")
+            await session.input.complete()
+    except BaseException:
+        # ASGI cancellation can interrupt the upload before a response iterator
+        # exists. Enter the same bounded cleanup ownership used by chat output.
+        async with _owned_frames(session):
+            pass
+        raise
 
 
 def _failure(code: str) -> dict[str, JsonValue]:

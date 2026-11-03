@@ -1,5 +1,6 @@
 import { createSlice, nanoid, type PayloadAction } from '@reduxjs/toolkit';
 import { DEFAULT_CONVERSATION_NAME, type ChatMessage, type Conversation } from '../../types/chat';
+import { chatDocumentIds, pruneChatDocuments, removeChatDocuments } from '../chatDocuments';
 
 /* ── Helpers ──────────────────────────────────────────── */
 
@@ -26,6 +27,11 @@ function stripTransientFields(
         const rest = { ...msg };
         delete rest.tokens;
         delete rest.generatedImages;
+        if (rest.attachments) rest.attachments = rest.attachments.map(attachment => {
+          const metadata = { ...attachment };
+          delete metadata.fileData;
+          return metadata;
+        });
         return rest;
       }),
     };
@@ -364,6 +370,42 @@ export const selectConversationsForModel =
 
 /* ── Persistence ──────────────────────────────────────── */
 
+function durableChatJson(chat: ChatState): string {
+  return JSON.stringify({
+    state: {
+      conversations: stripTransientFields(chat.conversations),
+      modelToConversationId: chat.modelToConversationId,
+      selectedVoice: chat.selectedVoice,
+      autoSpeakAssistant: chat.autoSpeakAssistant,
+      narrateCodeBlocks: chat.narrateCodeBlocks,
+      realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
+      autoSubmitVoice: chat.autoSubmitVoice,
+    },
+    version: 1,
+  });
+}
+
+/** Persist a document message before accepting its draft or starting inference. */
+export function persistDocumentMessage(chat: ChatState, conversationId: string, message: ChatMessage): void {
+  const conversation = chat.conversations[conversationId];
+  if (!conversation) throw new Error('The conversation is no longer available.');
+  // The ordinary subscriber is best effort; document handles need an explicit
+  // acknowledged write so successful blob storage cannot hide lost history.
+  const next: Conversation = {
+    ...conversation,
+    messages: [...conversation.messages, message],
+    name: conversation.name === DEFAULT_CONVERSATION_NAME ? autoName(message.content) : conversation.name,
+    updatedAt: message.timestamp,
+  };
+  try {
+    window.localStorage.setItem(DURABLE_STORAGE_KEY, durableChatJson({
+      ...chat, conversations: { ...chat.conversations, [conversationId]: next },
+    }));
+  } catch {
+    throw new Error('Could not save conversation history in this browser. Free browser storage and try again.');
+  }
+}
+
 /**
  * Wires localStorage (durable) and sessionStorage (per-tab) writes to the chat
  * slice. Strips transient message fields before writing to localStorage so
@@ -378,27 +420,25 @@ export function subscribeChatPersistence(
   if (typeof window === 'undefined') return () => {};
   let lastDurableJson: string | null = null;
   let lastSessionJson: string | null = null;
+  let documentReferences = chatDocumentIds(store.getState().chat.conversations);
+  void pruneChatDocuments(documentReferences).catch(() => {
+    console.warn('Abandoned chat document cleanup is unavailable.');
+  });
 
   return store.subscribe(() => {
     const chat = store.getState().chat;
 
-    const durable = {
-      state: {
-        conversations: stripTransientFields(chat.conversations),
-        modelToConversationId: chat.modelToConversationId,
-        selectedVoice: chat.selectedVoice,
-        autoSpeakAssistant: chat.autoSpeakAssistant,
-        narrateCodeBlocks: chat.narrateCodeBlocks,
-        realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
-        autoSubmitVoice: chat.autoSubmitVoice,
-      },
-      version: 1,
-    };
-    const durableJson = JSON.stringify(durable);
+    const durableJson = durableChatJson(chat);
     if (durableJson !== lastDurableJson) {
-      lastDurableJson = durableJson;
       try {
         window.localStorage.setItem(DURABLE_STORAGE_KEY, durableJson);
+        lastDurableJson = durableJson;
+        const current = chatDocumentIds(chat.conversations);
+        const removed = [...documentReferences].filter(id => !current.has(id));
+        documentReferences = current;
+        void removeChatDocuments(removed).catch(() => {
+          console.warn('Deleted chat document cleanup is unavailable.');
+        });
       } catch {
         /* ignore */
       }

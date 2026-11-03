@@ -13,6 +13,8 @@ export interface ChatUploadedFile {
   file?: File;
   textContent?: string;
   preview?: string;
+  /** Browser-owned IndexedDB document handle, created when the user sends. */
+  documentId?: string;
 }
 
 /** Audio container formats the dashboard can request from Skulk TTS models. */
@@ -51,6 +53,10 @@ export interface MessageAttachment {
   size?: number;
   preview?: string;
   textContent?: string;
+  /** Stable browser-local document handle; bytes stay out of localStorage. */
+  documentId?: string;
+  /** Request-scoped inline data, hydrated from IndexedDB before submission. */
+  fileData?: string;
 }
 
 /** One chat message in a conversation, including optional reasoning and token metadata. */

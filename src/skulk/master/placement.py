@@ -718,6 +718,7 @@ def _card_platform_backends(
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
         card_serves_music=card.music is not None,
+        card_has_native_music_profile=(card.music is not None and card.music.native is not None),
         card_serves_separation=card.separation is not None,
         card_serves_embeddings=card_serves_embeddings(card),
         card_has_native_image_profile=card.image is not None,

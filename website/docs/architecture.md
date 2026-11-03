@@ -1131,7 +1131,7 @@ support, so controllers must check live node support before and after submission
 
 ## Music engine admission
 
-Text-to-music cards use `TextToMusic` as their sole task and a typed `[music]`
+GGUF text-to-music cards use `TextToMusic` as their sole task and a typed `[music]`
 section, separate from speech's `[audio]` section. The initial MiniMax Music 3 Q4 and ACE-Step
 1.5 Turbo BF16 cards pin every required artifact at an immutable upstream
 revision. They declare no legacy compatible backend: each architecture,
@@ -3957,12 +3957,21 @@ their supported scope. See the API guide for exact request and lifecycle fields.
 ## Delegated capability inference
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
-  adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream
+  adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
   precedes signing; capability-owned policy independently admits the request.
   Gateway keys stay host-local. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
+  Version 0.2 keeps a signed body digest/length in control messages and transfers
+  bounded UTF-8 request bytes through the existing bidirectional provider media
+  path. It preserves model IDs and independently authorized provider admission;
+  native text/vision adapters refuse document parts before normalization.
+  V2 model features separately declare text-file and PDF input. The dashboard
+  follows those serving-path claims; submitted documents live in browser-local
+  IndexedDB with handles in persisted conversation metadata. Request-scoped
+  hydration preserves original bytes across turns without putting files into
+  localStorage, replicated State or logs. Missing/unsupported files stop sends.
   Up to eight cached catalogs are read concurrently under five-second individual
   and six-second aggregate deadlines, including managed-owner validation overhead
   and retaining completed results. Overlapping callers share that read, including
@@ -3980,3 +3989,20 @@ their supported scope. See the API guide for exact request and lifecycle fields.
   authorization remain enforced.
   Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.
+
+### Native ACE model contract
+
+Native ACE base cards preserve `TextToMusic` and `MusicEditing` as intrinsic
+tasks. Their `[music.native]` profile binds the primary safetensors/config/latent
+selection and independently pinned text encoder/tokenizer and audio autoencoder
+bundles, with complete identities, sizes and loader roots. Model-repository Python
+is excluded; the runtime owns its implementation. `/v1/models` reports intrinsic
+variant, edit modes, part classes and native audio geometry. This is distinct from
+the audio.cpp GGUF artifact contract. Placement filters these native profiles out
+of existing runners, and worker startup rejects incompatible legacy/manual
+assignments explicitly. A card reader does not establish native execution or a
+new editing API. Absent native metadata preserves existing signed music bytes.
+Download selection, direct/store transfers and installed records refuse native
+profiles before byte effects until their complete component lifecycle exists.
+Cache completeness is false, and the shared preservation export/recovery mapping
+refuses a primary-only closure.

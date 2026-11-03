@@ -464,6 +464,7 @@ def platform_compatible_backends(
     card_serves_vision: bool,
     card_serves_speech: bool = False,
     card_serves_music: bool = False,
+    card_has_native_music_profile: bool = False,
     card_serves_separation: bool = False,
     card_serves_embeddings: bool = False,
     card_has_native_image_profile: bool = False,
@@ -489,6 +490,8 @@ def platform_compatible_backends(
         card_serves_vision: whether the card declares a vision capability.
         card_serves_speech: whether the card declares a speech capability.
         card_serves_music: whether the card declares a music workload.
+        card_has_native_music_profile: whether the selected native ACE artifacts
+            require their own runner; audio.cpp cannot load these components.
         card_serves_separation: whether native source separation is required.
         card_serves_embeddings: whether the card declares a text-embedding
             workload; only engines with an embedding runner remain.
@@ -508,6 +511,11 @@ def platform_compatible_backends(
     Returns:
         The subset of tags whose engine can serve everything the card declares.
     """
+    # Native ACE has a distinct artifact and execution contract. Until its
+    # runner is implemented, no existing engine can load it; this limitation
+    # belongs here rather than deleting intrinsic generation/editing truth.
+    if card_has_native_music_profile:
+        return frozenset()
     # Legacy image runners do not yet consume the immutable component profile.
     if card_has_native_image_profile:
         filtered = frozenset(

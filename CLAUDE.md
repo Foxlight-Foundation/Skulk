@@ -12,6 +12,14 @@ Capability model IDs do not fabricate mounted model instances. Never add a
 provider credential or provider-specific client to this generic path. Cached
 catalog reads run concurrently with bounded deadlines; response cleanup owns
 provider cancellation and receiver retirement before its first SSE yield.
+Version 0.2 signs bounded request-body references and transfers the bytes through
+existing bidirectional provider media. Upload failure/disconnect owns cleanup
+before response iteration. Keep attachment interpretation in the capability;
+native text/vision execution refuses document parts before normalization.
+V2 model features distinguish text-file and PDF support. Dashboard documents are
+stored in browser-local IndexedDB (`store/chatDocuments.ts`) and hydrated into
+one request; localStorage holds conversation references, not document bodies.
+Missing files and unsupported destinations must never be silently omitted.
 
 Native installed preservation lives in `store/preservation_export.py`; complete
 card-selected mappings live in `store/preservation_closure.py`. Offline recovery
@@ -430,7 +438,7 @@ lanes retain their existing estimates.
 
 `NodeResources.engine_builds` hashes the executable for each concrete lane.
 `TextToMusic` is the sole
-task on a music card. The cards have
+task on a GGUF music card. The cards have
 their own `[music]` section and declare compatible audio.cpp engine requirements;
 representative signed qualification is evidence, not hardware eligibility. The
 `audio-cpp-engine-wheel` workflow builds the CPU-capable package for Apple
@@ -2627,3 +2635,15 @@ The existing stock-Kubo CI conformance step also exercises `test_mirror_native.p
 with synthetic complete recovery, native-only startup and precise descendant
 checks after abrupt worker loss. No physical fleet or public privacy qualification
 is implied by those local configured-runtime cases.
+
+Native ACE base cards additionally declare `MusicEditing` and `[music.native]`.
+The profile preserves generation/editing model truth and exact primary, text
+encoder/tokenizer and autoencoder artifact closures, independent of runtime
+availability. It excludes model-repository Python, requires runtime-owned code,
+and leaves existing GGUF serialization unchanged. Public model metadata reports
+native variant/edit modes/part classes/geometry. Existing engine placement and
+legacy/manual worker startup reject this distinct artifact contract until a
+native execution implementation exists; no editing endpoint is implied.
+Byte operations likewise refuse native profiles until all three components have
+supported download/store/preservation mappings; primary-only cache presence does
+not count as download completeness.

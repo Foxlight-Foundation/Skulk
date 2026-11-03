@@ -434,6 +434,10 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
 
     shard = bound_instance.bound_shard
     require_remote_code_approval(shard.model_card)
+    if shard.model_card.music is not None and shard.model_card.music.native is not None:
+        # A missing engine must fail explicitly even for legacy/manual assignments;
+        # returning None would fall through to MLX with incompatible native files.
+        raise RuntimeError("Native ACE-Step execution requires the native music runner")
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
 
@@ -475,6 +479,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
             card_serves_music=shard.model_card.music is not None,
+            card_has_native_music_profile=(shard.model_card.music is not None and shard.model_card.music.native is not None),
             card_serves_separation=shard.model_card.separation is not None,
             card_serves_embeddings=card_serves_embeddings(shard.model_card),
             card_has_native_image_profile=shard.model_card.image is not None,
@@ -599,20 +604,17 @@ def entrypoint(
                     separation_context.source_fence.close()
             return
         if bound_instance.is_music_model:
-            from skulk.shared.backends import engine_of
-            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
-
             resolved = shard.resolved_backend
-            music_engine = (
-                engine_of(resolved)
-                if resolved is not None
-                else _resolve_text_engine(bound_instance)
-            )
+            # Validate the artifact contract for stamped and fallback music
+            # assignments before importing the specialized runner.
+            music_engine = _resolve_text_engine(bound_instance)
             if music_engine != "audio_cpp":
                 raise RuntimeError(
                     "no audio.cpp engine serves this music placement on this node "
                     f"(resolved backend {resolved!r})"
                 )
+            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
+
             runner = AudioCppRunner(
                 bound_instance, event_sender, task_receiver, cancel_receiver
             )

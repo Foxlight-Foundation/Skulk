@@ -7,6 +7,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Native music model metadata
+
+- Read native ACE-Step base generation and editing capabilities with complete,
+  independently pinned base, text-encoder and audio-autoencoder file manifests.
+  Report intrinsic native modes and audio geometry in model metadata, while
+  rejecting incompatible existing runners. Existing music-card identities and
+  audio.cpp behavior are preserved; this reader adds no native editing endpoint.
+
 ### Separation result delivery
 
 - Prevent same-node stem transfers from blocking on their own reverse

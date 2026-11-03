@@ -6,6 +6,12 @@ import type { ChatMessage } from '../../types/chat';
 import { buildApiMessages } from './chatApiPayload';
 
 describe('buildApiMessages', () => {
+  it('refuses unsupported or unavailable documents rather than dropping them', () => {
+    const messages: ChatMessage[] = [{ id: 'doc', role: 'user', content: 'Summarize.', timestamp: 1,
+      attachments: [{ id: 'a', name: 'notes.txt', type: 'text/plain', documentId: 'saved' }] }];
+    expect(() => buildApiMessages(messages)).toThrow('selected model');
+    expect(() => buildApiMessages(messages, { text: true, pdf: false })).toThrow('unavailable');
+  });
   it('preserves uploaded image bytes as an image_url part before prompt text', () => {
     const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
     const messages: ChatMessage[] = [{

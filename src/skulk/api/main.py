@@ -80,6 +80,7 @@ from skulk.api.adapters.chat_completions import (
     collect_chat_response,
     fetch_image_url,
     generate_chat_stream,
+    reject_native_document_attachments,
     resolve_tool_choice,
 )
 from skulk.api.adapters.claude import (
@@ -113,7 +114,19 @@ from skulk.api.field_telemetry import (
     prepare_telemetry_config_update,
     tap_generation_stream,
 )
-from skulk.api.inference_gateway import ChatCatalog, GatewaySigner, chat_response
+from skulk.api.inference_gateway import (
+    CONTRACT as CHAT_GATEWAY_CONTRACT,
+)
+from skulk.api.inference_gateway import (
+    MAX_CHAT_BODY_BYTES,
+    ChatCatalog,
+    GatewaySigner,
+    chat_response,
+    send_chat_body,
+)
+from skulk.api.inference_gateway import (
+    STREAMED_CONTRACT as STREAMED_CHAT_GATEWAY_CONTRACT,
+)
 from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import (
     fetch_card_summary,
@@ -4986,7 +4999,8 @@ class API:
         over the harness's chunk stream.
 
         Refusals happen before the response begins, in this order: 400 for
-        client tool definitions, 400 for a tool_choice forcing a function
+        document attachments, 400 for client tool definitions, 400 for a
+        tool_choice forcing a function
         (the steward accepts no client tools, so a forced choice can never
         be honored), 404 when intelligent-fabric mode is off, 400 for a
         conversation with no question to answer, then 503 with the steward
@@ -4999,6 +5013,7 @@ class API:
             The streaming (SSE) or collected (JSON) chat-completions
             response for one steward turn.
         """
+        reject_native_document_attachments(payload)
         if payload.tools:
             raise HTTPException(
                 status_code=400,
@@ -6984,7 +6999,7 @@ class API:
             # devices and ordinary LAN requests cannot inherit that authority.
             await authorize_plugin_owner_request(request)
             raw = await request.body()
-            if len(raw) > 49152:
+            if len(raw) > MAX_CHAT_BODY_BYTES:
                 raise HTTPException(413, "Capability chat input exceeds its byte bound")
             try:
                 payload = ChatCompletionRequest.model_validate_json(
@@ -6994,7 +7009,7 @@ class API:
                 raise HTTPException(
                     400, "Unsupported or invalid capability chat request"
                 ) from None
-            return await self._capability_chat_completions(payload)
+            return await self._capability_chat_completions(payload, request)
         installation_reader = None
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
             try:
@@ -10955,11 +10970,20 @@ class API:
                 item.id == catalog.callable_id
                 and item.version == catalog.callable_version
                 and descriptor_revision(item) == catalog.descriptor_revision
-                and item.io_mode == "server_streaming"
+                and item.io_mode
+                == (
+                    "bidirectional"
+                    if catalog.contract == STREAMED_CHAT_GATEWAY_CONTRACT
+                    else "server_streaming"
+                )
                 and (item.annotations or {}).get("inference.contract")
                 == catalog.contract
                 and (item.annotations or {}).get("inference.authorization")
-                == "gateway.ed25519@0.1.0"
+                == (
+                    "gateway.ed25519@0.2.0"
+                    if catalog.contract == STREAMED_CHAT_GATEWAY_CONTRACT
+                    else "gateway.ed25519@0.1.0"
+                )
                 for item in descriptors
             ):
                 return
@@ -10971,23 +10995,37 @@ class API:
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(budget_seconds):
                 async with asyncio.TaskGroup() as tasks:
-                    for index, descriptor in enumerate([
-                        item
-                        for item in descriptors
-                        if item.io_mode == "unary"
-                        and (item.annotations or {}).get("inference.catalog")
-                        == "chat.completions@0.1.0"
-                    ][:8]):
+                    for index, descriptor in enumerate(
+                        [
+                            item
+                            for item in descriptors
+                            if item.io_mode == "unary"
+                            and (item.annotations or {}).get("inference.catalog")
+                            in {CHAT_GATEWAY_CONTRACT, STREAMED_CHAT_GATEWAY_CONTRACT}
+                        ][:8]
+                    ):
                         tasks.create_task(read_catalog(index, descriptor))
         catalogs: list[ChatCatalog] = []
         for index in sorted(observed):
             catalog = observed[index]
-            if not any(c.callable_id == catalog.callable_id for c in catalogs):
+            existing = next(
+                (
+                    i
+                    for i, c in enumerate(catalogs)
+                    if c.callable_id == catalog.callable_id
+                ),
+                None,
+            )
+            if existing is None:
                 catalogs.append(catalog)
+            elif catalog.contract == STREAMED_CHAT_GATEWAY_CONTRACT:
+                # One model address survives negotiation; new calls prefer v2.
+                # An admitted request is never retried on the legacy callable.
+                catalogs[existing] = catalog
         return catalogs
 
     async def _capability_chat_completions(
-        self, payload: ChatCompletionRequest
+        self, payload: ChatCompletionRequest, request: Request
     ) -> StreamingResponse:
         """Dispatch one direct-owner chat through an independently guarded capability."""
         try:
@@ -11023,8 +11061,8 @@ class API:
         )
         body.pop("model", None)
         try:
-            signed = await asyncio.to_thread(
-                self._inference_signer.sign, catalog, model.id, body
+            signed, media_body = await asyncio.to_thread(
+                self._inference_signer.prepare, catalog, model.id, body
             )
         except (OSError, ValueError):
             raise HTTPException(503, "Inference gateway key is unavailable") from None
@@ -11038,6 +11076,19 @@ class API:
         )
         if not session.open_result.ok:
             raise HTTPException(503, "Capability inference could not start")
+        if media_body is not None:
+            try:
+                await send_chat_body(session, media_body, request.is_disconnected)
+            except (
+                RuntimeError,
+                ValueError,
+                TimeoutError,
+                BrokenResourceError,
+                ClosedResourceError,
+            ):
+                raise HTTPException(
+                    503, "Capability request input could not complete"
+                ) from None
         return StreamingResponse(
             chat_response(
                 session,

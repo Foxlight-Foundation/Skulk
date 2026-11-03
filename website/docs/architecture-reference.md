@@ -238,12 +238,23 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   video/music handler refuses these roles without mutating either job family.
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
-  adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream
+  adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
   precedes signing; capability-owned policy independently admits the request.
   Gateway keys stay host-local. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
+  V2 catalog validation binds the duplex callable and gateway authorization
+  version. `GatewaySigner.prepare` returns a signed size/digest reference and
+  bounded UTF-8 media body; `send_chat_body` sends 1 MiB packets and half-closes
+  input inside the whole-call deadline, owning cleanup on upload failure.
+  The generic request maximum is 16 MiB; providers may advertise a smaller bound.
+  Native text/vision normalization rejects `ChatCompletionMessageFile` inputs.
+  V2 `text_file_input`/`pdf_input` model features gate Chat document selection.
+  `dashboard-react/src/store/chatDocuments.ts` owns browser-local IndexedDB
+  document storage, request hydration, reference deletion and aged orphan cleanup;
+  localStorage retains conversation handles rather than document bytes. Missing
+  or unsupported files fail visibly before request submission.
   Up to eight cached catalogs are read concurrently under five-second individual
   and six-second aggregate deadlines, including managed-owner validation overhead
   and retaining completed results. Overlapping callers share that read, including
@@ -2644,3 +2655,22 @@ not enter signed portable evidence or renew the explicit Resume grant.
 Direct public PMF transport, public replica health and native desktop distribution
 are not implied by these controls. Standalone core use remains independent of
 Skulk; existing PMF kit/recovery and model/registry/code authority stay separate.
+
+## Native ACE music metadata
+
+- `ModelTask.MusicEditing` accompanies `TextToMusic` only on native ACE base cards.
+- `MusicCardConfig.native`: variant `base`, 48 kHz stereo, closed unique editing
+  modes/part classes, pinned text-encoder/tokenizer and autoencoder bundles.
+- Primary bundle: config, safetensors, silence latent; complete three-component
+  storage accounting, immutable objects and loader roots; no repository Python.
+- `trust_remote_code=false`; reviewed implementation belongs to the runtime.
+- `platform_compatible_backends(card_has_native_music_profile=True)` excludes
+  current incompatible engines. The master passes this flag; worker bootstrap
+  also refuses native startup explicitly instead of falling back to MLX.
+- `/v1/models.music.native`: intrinsic variant/modes/classes/sample rate/channels;
+  does not assert a native runner or HTTP editing endpoint exists.
+- Absent native metadata is excluded from existing card/public serialization.
+- `ModelCard.require_supported_artifact_operations`: refuses native profile
+  download selection, direct/store transfers and installed records before effects.
+  Native cache completeness is false; preservation closure selection also refuses
+  until all three components have a supported byte lifecycle.

@@ -18,9 +18,12 @@ from skulk.shared.models.model_cards import (
     AudioResponseFormat,
     ModelCard,
     ModelId,
+    MusicEditMode,
+    MusicPartClass,
     VideoCardConfig,
     VideoCompanionKind,
     VideoMode,
+    native_music_is_absent,
 )
 from skulk.shared.models.registry import (
     RegistryAdvisory,
@@ -721,11 +724,27 @@ class AudioCapabilitySection(BaseModel):
         )
 
 
+class NativeMusicCapabilitySection(BaseModel):
+    """Intrinsic native ACE editing support, independent of live runner readiness."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    variant: Literal["base"] = Field(description="Native ACE checkpoint variant.")
+    editing_modes: tuple[MusicEditMode, ...] = Field(description="Model editing operations; not an assertion of current endpoint or runner availability.")
+    part_classes: tuple[MusicPartClass, ...] = Field(description="Native Add a part classes; finer instrumentation uses the prompt.")
+    sample_rate: Literal[48000] = Field(description="Native output sample rate in Hz.")
+    audio_channels: Literal[2] = Field(description="Native output channel count.")
+
+
 class MusicCapabilitySection(BaseModel):
-    """Public music model contract for constructing a valid POST /v1/music."""
+    """Intrinsic music model contract; live mounted capacity remains separate."""
 
     model_config = ConfigDict(frozen=True, strict=True)
 
+    native: NativeMusicCapabilitySection | None = Field(
+        default=None, exclude_if=native_music_is_absent,
+        description="Intrinsic native editing metadata; absent for existing GGUF generators.",
+    )
     family: Literal["minimax_music3", "ace_step_1_5"] = Field(
         description="Music model family."
     )
@@ -744,7 +763,13 @@ class MusicCapabilitySection(BaseModel):
         config = model_card.music
         if config is None:
             return None
+        native = config.native
         return cls(
+            native=NativeMusicCapabilitySection(
+                variant=native.variant, editing_modes=native.editing_modes,
+                part_classes=native.part_classes, sample_rate=native.sample_rate,
+                audio_channels=native.audio_channels,
+            ) if native is not None else None,
             family=config.family.value,
             lyrics=config.lyrics.value,
             min_seconds=config.min_seconds,
@@ -1438,7 +1463,38 @@ class ChatCompletionMessageImageUrl(BaseModel):
     image_url: dict[str, str]  # {"url": "data:image/png;base64,..."}
 
 
-ChatCompletionContentPart = ChatCompletionMessageText | ChatCompletionMessageImageUrl
+class ChatCompletionFile(BaseModel):
+    """Inline document bytes; interpretation and permission remain provider-owned."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    filename: str = Field(
+        min_length=1, max_length=128, description="Display filename, not a local path."
+    )
+    file_data: str = Field(
+        min_length=1,
+        max_length=16777216,
+        description="Inline base64 data URL accepted by the selected capability.",
+    )
+
+
+class ChatCompletionMessageFile(BaseModel):
+    """A capability document attachment; native text/vision adapters refuse it."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    type: Literal["file"] = Field(
+        default="file", description="Document content discriminator."
+    )
+    file: ChatCompletionFile = Field(
+        description="Inline file metadata and encoded bytes."
+    )
+
+
+ChatCompletionContentPart = (
+    ChatCompletionMessageText
+    | ChatCompletionMessageImageUrl
+    | ChatCompletionMessageFile
+)
+
 
 
 class ToolCallItem(BaseModel):

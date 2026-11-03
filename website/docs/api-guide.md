@@ -2191,6 +2191,16 @@ When a dedicated CUDA wheel is already cached, configure
 rehydration otherwise prefers the dedicated build over a primary-only override.
 
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
+Native ACE base card metadata can also describe intrinsic editing modes in
+`music.native`. Those safetensors components cannot be loaded by the audio.cpp
+runner; this section documents the existing generation job API, not a native
+editing endpoint.
+This reader also refuses native-profile downloads, installed-record creation
+and preservation until their complete three-component lifecycle is supported;
+native metadata alone does not establish a usable installation.
+Starting such a download reports `DownloadFailed` with an actionable reason;
+the node and its download command processor remain available for other work.
+
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
 the existing API authentication policy. Jobs and WAV content belong to the
@@ -4009,7 +4019,7 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or the earlier Skulk release that shipped an installed card, for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
-| `music` | object or null | Text-to-music family, lyric requirement, declared duration bounds, and WAV output format; null for non-music cards |
+| `music` | object or null | Intrinsic music family, lyric requirement, declared duration bounds and WAV output format; native ACE base additionally has `native` variant, `editing_modes`, `part_classes`, `sample_rate`, and `audio_channels`. Metadata does not imply ready execution capacity. Null for non-music cards. |
 | `image` | object or null | Native image family, immutable `components`, optional SDXL `unetStructure`, default canvas/steps/guidance, dimension and area limits, reference-image limit, alpha support and optional fixed sigma schedule; null for legacy or non-image cards |
 | `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, and the `video_shift`/`audio_shift` a render with the adapter uses when the request sets none, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), and every engine setting the job accepts with its default: `samplers` and `default_sampler`, `schedulers` and `default_scheduler`, the card's trained `video_shift`/`audio_shift` (null keeps the model's built-in value) with `shift_bounds`, `reference_fidelities` and `default_reference_fidelity` (empty and null unless the card serves `ref2va`), `codecs` and `default_codec`, `guides` (each guide the card derives from a `control` clip: `kind`, the `modes` it applies to, and the preprocessor `weights` it loads with their `repository` and `license`; empty without a ControlNet), `default_guide` (the guide a `control` clip gives when `control_kind` is omitted), and the ControlNet's own settings: `control_strength_bounds`, `default_control_strength` (the card's ControlNet's strength, else 1; null without a ControlNet), and `default_control_window` (the `control_start`/`control_end` a render takes when omitted). The lists are the engine's own, not a recommendation. Null for non-video cards |
 | `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
@@ -6623,6 +6633,22 @@ The dashboard withdraws cached capability choices at their advertised expiry
 even when catalog polling fails. Its native artifact download picker excludes
 these delegated choices; they remain available in the chat selector.
 
+The `inference_capability.features` list describes the enabled serving path.
+On the 0.2 contract, `text_file_input` permits inline UTF-8 `.txt` files and
+`pdf_input` permits inline PDFs. Missing features do not imply support; the
+legacy 0.1 contract cannot advertise either document feature. Provider policy
+and model validation still apply independently at admission.
+
+Chat's attachment picker follows these features. Documents are limited to eight
+per request including history, at most 8 MiB each, within the whole encoded
+request bound. Submitted document bytes are kept in browser-local IndexedDB;
+conversation metadata stores handles rather than embedding them in localStorage.
+Follow-up turns hydrate the original bytes. Missing files, storage failures,
+unsupported destinations and oversized histories stop submission with a visible
+error. Deleting messages/conversations removes their document references and
+local document data; old crash-abandoned submissions are cleaned after a day.
+This browser store is not an API upload service or a shared fabric file store.
+
 **POST** `/v1/chat/completions` accepts these exact IDs with ordinary `messages`,
 `stream` and `stream_options.include_usage`. Provider-supported request controls
 and full conversation history pass to the capability for independent validation.
@@ -6630,7 +6656,24 @@ Unsupported controls are refused by that provider rather than silently ignored.
 The optional `inference_policy` accepts `allow_external`, `local_only`, or
 `included_only`; local-only rejects nonlocal catalogs, and included-only rejects
 usage outside `none`/`included_only`, with 403. Unknown request fields return 400
-and signed inputs larger than 48 KiB return 413 before provider submission.
+Legacy `chat.completions@0.1.0` providers retain a 48 KiB signed-input bound.
+For `chat.completions@0.2.0`, the gateway signs the exact UTF-8 request-body length,
+digest and media type, then sends those bytes over the existing Fabric media
+channel in packets of at most 1 MiB. Encoded HTTP input is limited to 16 MiB;
+the selected provider can advertise a smaller bound. Oversize input returns 413
+before provider submission. When both versions are available for one callable,
+discovery prefers 0.2 without duplicating its model IDs. Requests are never
+automatically downgraded or replayed after admission.
+
+For supporting capabilities, user-message content may include
+`{"type":"file","file":{"filename":"notes.txt","file_data":"data:text/plain;base64,..."}}`.
+These inline attachments are interpreted and independently validated by the
+capability. No gateway file upload service, local-path resolution or remote-file
+fetching is provided. Native text/vision execution refuses document parts with 400
+before normalization. Catalog availability alone does not establish that every
+model accepts every document type. Input transfer has a 30-second phase deadline
+inside the existing whole-call deadline; disconnect or upload failure cancels
+the provider and retires the receiver before a response iterator is created.
 Both wire modes cap accumulated serialized delta characters at 262,144; overflow
 closes the provider stream and returns an `output_limit` error before forwarding
 the exceeding delta.

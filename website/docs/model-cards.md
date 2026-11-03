@@ -379,9 +379,10 @@ flags false.
 
 ### `[music]`
 
-Declares text-to-music model truth. A music card has `tasks = ["TextToMusic"]`
-as its sole task, a complete `artifact_bundle`, and no speech `[audio]`
-section. The registry derives `music.generate` from that task; it does not
+Declares music model truth, separate from speech `[audio]`. GGUF music cards
+have `tasks = ["TextToMusic"]` as their sole task and a complete
+`artifact_bundle`. Native ACE base cards declare both `TextToMusic` and
+`MusicEditing`, with the component contract below. The registry derives `music.generate` from that task; it does not
 classify every upstream `text-to-audio` repository as music.
 
 - `family`
@@ -401,14 +402,14 @@ classify every upstream `text-to-audio` repository as music.
 
 MiniMax's selected language model is also the card's `gguf_file`. Its bundle
 contains that model, the selected RVQ decoder and flow transformer, plus the
-required conditioner, vocoder, tokenizer, and configuration files. ACE-Step
+required conditioner, vocoder, tokenizer, and configuration files. ACE-Step GGUF
 selects one GGUF as `gguf_file`; its bundle contains only that file. See the
 registry's complete [MiniMax Q4](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/seed/cards/music_model_cards/audio-cpp--MiniMax-Music3-GGUF-Q4.toml)
 and [ACE-Step Turbo BF16](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/seed/cards/music_model_cards/audio-cpp--ACE-Step1.5-Turbo-BF16.toml)
 cards for exact component identities and sizes. Each other quant or selected
 variant requires its own card.
 
-Music cards declare `placement.compatible_backends = ["audio_cpp"]`. Placement
+GGUF music cards declare `placement.compatible_backends = ["audio_cpp"]`. Placement
 resolves an available concrete `audio_cpp-cpu`, `audio_cpp-metal`,
 `audio_cpp-vulkan`, `audio_cpp-cuda` or `audio_cpp-rocm` lane. First-use preparation
 can install a compatible engine; its ready probe and actual package requirements
@@ -417,6 +418,42 @@ requirements and current single-device binding limitation. Qualification records
 are scoped observations, not prerequisites for loading or publication. The
 [Strix Vulkan qualification record](audio-cpp-strix-qualification.md) reports one
 tested configuration without excluding other compatible hardware.
+
+### `[music.native]`
+
+Native ACE-Step 1.5 base uses **safetensors**, independently of audio.cpp's
+Turbo GGUF. The reader preserves its intrinsic generation and editing truth;
+this metadata does not assert that a native runner or editing endpoint is
+available. Current audio.cpp and MLX runners cannot load this selection.
+Master placement and manual/legacy worker startup refuse that mismatch.
+Downloads, installed-record creation and preservation also explicitly refuse
+native profiles until the full three-component byte lifecycle is implemented;
+a cached primary bundle alone is never considered download-complete.
+
+| Field | Meaning |
+| --- | --- |
+| `variant` | `base`; Turbo is not admitted as a native lego checkpoint. |
+| `sample_rate` / `audio_channels` | Native output geometry, 48,000 Hz / stereo. |
+| `editing_modes` | Unique closed values `add_part`, `repaint`, `continue`. Continue means temporal outpainting, not native track completion. |
+| `part_classes` | Unique native track classes: `woodwinds`, `brass`, `fx`, `synth`, `strings`, `percussion`, `keyboard`, `guitar`, `bass`, `drums`, `backing_vocals`, `vocals`. Finer instrumentation belongs in the prompt. |
+| `text_encoder` / `autoencoder` | Each has its own `repo`, immutable 40-character `revision`, `license`, and complete `artifact_bundle`. |
+
+The primary bundle contains only `config.json`, `model.safetensors` and
+`silence_latent.pt`. The 24-layer / 2048-wide base geometry must match the
+card. The text-encoder bundle contains its model, config, tokenizer and
+supporting vocabulary/template files; the autoencoder contains config and
+safetensors weights. All files require positive byte sizes and immutable
+object identities; tensor/latent weights require SHA-256. Each bundle keeps
+its own canonical source-relative loader root. Mirrors may use different
+roots without changing component roles. Components sharing a repository pin
+the same revision. `storage_size` includes all three complete selections.
+
+Repository-supplied Python is excluded from these file sets, and
+`trust_remote_code` must be false: the separately pinned engine package owns
+its reviewed implementation. No language-model planner checkpoint is implied
+by this profile. Existing GGUF card serialization omits `music.native`
+entirely, preserving installed identities. `/v1/models` projects the native
+variant, geometry, editing modes and part classes separately from readiness.
 
 ### `[separation]`
 

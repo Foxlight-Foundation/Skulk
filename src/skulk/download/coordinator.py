@@ -625,6 +625,20 @@ class DownloadCoordinator:
             )
             return
 
+        # A status probe may enter the same byte-selection path as a transfer.
+        # Refuse unsupported layouts here so only this request fails, instead
+        # of letting the exception tear down the coordinator's task group.
+        try:
+            shard.model_card.require_supported_artifact_operations(context="download admission")
+        except ValueError as error:
+            self._begin_attempt(model_id)
+            self._reset_progress_throttle(model_id)
+            await self._emit_status(DownloadFailed(
+                shard_metadata=shard, node_id=self.node_id,
+                error_message=str(error), model_directory=self._model_dir(model_id),
+            ))
+            return
+
         # Check if already downloading, complete, or recently failed
         if status is not None:
             if artifact_changed:

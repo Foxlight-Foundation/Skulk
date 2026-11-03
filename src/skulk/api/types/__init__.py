@@ -26,6 +26,7 @@ from .api import ChatCompletionChoice as ChatCompletionChoice
 from .api import ChatCompletionChunkResponse as ChatCompletionChunkResponse
 from .api import ChatCompletionContentPart as ChatCompletionContentPart
 from .api import ChatCompletionMessage as ChatCompletionMessage
+from .api import ChatCompletionMessageFile as ChatCompletionMessageFile
 from .api import ChatCompletionMessageImageUrl as ChatCompletionMessageImageUrl
 from .api import ChatCompletionMessageText as ChatCompletionMessageText
 from .api import ChatCompletionRequest as ChatCompletionRequest

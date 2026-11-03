@@ -1,4 +1,5 @@
 import { capabilityChatChoices, useChatModelCatalog, type ChatModelCatalog } from '../../hooks/useChatModelCatalog';
+import { hydrateChatDocuments, MAX_CHAT_REQUEST_BYTES } from '../../store/chatDocuments';
 import { mergeToolCallDeltas, type StreamToolCall } from './chatToolCalls';
 import { ImageParamsPanel, DEFAULT_IMAGE_PARAMS, type ImageGenerationParams } from '../display/ImageParamsPanel';
 import { requestDashboardImages } from './chatImageRequest';
@@ -21,7 +22,7 @@ import { modelSupportsTextChat } from '../../types/models';
 import type { InstanceCardData } from '../layout/InstancePanel';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
-import { chatActions } from '../../store/slices/chatSlice';
+import { chatActions, persistDocumentMessage } from '../../store/slices/chatSlice';
 import { useStore } from 'react-redux';
 import type { RootState } from '../../store';
 import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
@@ -1095,22 +1096,25 @@ export function ChatView({
       }
     }
 
+    const documentAttachments = files.filter(file => !file.type.startsWith('image/')).map(file => ({
+      id: file.id, name: file.name, type: file.type, size: file.size, documentId: file.documentId,
+    }));
+    const attachments = [...imageAttachments.map(({ dataUrl, file: f }) => ({
+      id: f.id, name: f.name, type: f.type, size: f.size, preview: dataUrl,
+    })), ...documentAttachments];
     const userMsg: ChatMessage = {
       id: uuidv4(),
       role: 'user',
       content: text,
       timestamp: Date.now(),
-      attachments: imageAttachments.length > 0
-        ? imageAttachments.map(({ dataUrl, file: f }) => ({
-            id: f.id,
-            name: f.name,
-            type: f.type,
-            size: f.size,
-            preview: dataUrl,
-          }))
-        : undefined,
+      attachments: attachments.length ? attachments : undefined,
     };
 
+    const currentChat = store.getState().chat;
+    if (currentChat.activeConversationId !== conversationId || currentChat.selectedModelId !== selectedModelId) {
+      throw new Error('The conversation changed while preparing attachments. Your draft was retained.');
+    }
+    if (documentAttachments.length) persistDocumentMessage(currentChat, conversationId, userMsg);
     dispatch(chatActions.appendConversationMessage({ conversationId, message: userMsg }));
     setIsLoading(true);
     setStreamingContent('');
@@ -1118,6 +1122,9 @@ export function ChatView({
     setTtftMs(null);
     setTps(null);
 
+    // Acknowledge submission after durable preparation, independently of the
+    // long-running inference, so the composer can safely clear this draft.
+    void (async () => {
     if (selectedImageProfile) {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -1256,7 +1263,10 @@ export function ChatView({
     };
 
     try {
-      const apiMessages: ApiMessagePayload[] = buildApiMessages(allMessages);
+      const apiMessages: ApiMessagePayload[] = buildApiMessages(await hydrateChatDocuments(allMessages), {
+        text: modelCatalogById[selectedModelId]?.inference_capability?.features?.includes('text_file_input') ?? false,
+        pdf: modelCatalogById[selectedModelId]?.inference_capability?.features?.includes('pdf_input') ?? false,
+      });
       const requestTools = selectedBuiltinTools.length > 0
         ? builtinToolDefinitions(selectedBuiltinTools)
         : undefined;
@@ -1271,16 +1281,18 @@ export function ChatView({
         let iterationThinking = '';
         const iterationToolCalls: StreamToolCall[] = [];
 
+        const requestBody = JSON.stringify({
+          model: selectedModelId, messages: apiMessages, stream: true,
+          ...(requestTools ? { tools: requestTools } : {}),
+          ...(supportsThinking ? { enable_thinking: thinkingEnabled } : {}),
+        });
+        if (selectedModelId.startsWith('capability/') && new TextEncoder().encode(requestBody).byteLength > MAX_CHAT_REQUEST_BYTES) {
+          throw new Error('The conversation exceeds the 16 MiB chat transport limit. Remove older attachments or start a new conversation.');
+        }
         const res = await operatorSession.fetch('/v1/chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1' },
-          body: JSON.stringify({
-            model: selectedModelId,
-            messages: apiMessages,
-            stream: true,
-            ...(requestTools ? { tools: requestTools } : {}),
-            ...(supportsThinking ? { enable_thinking: thinkingEnabled } : {}),
-          }),
+          body: requestBody,
           signal: controller.signal,
         });
 
@@ -1542,11 +1554,12 @@ export function ChatView({
     setIsLoading(false);
     abortRef.current = null;
     activeCommandIdRef.current = null;
-
+    })();
   }, [
     dispatch,
     imageParams,
     selectedImageProfile,
+    modelCatalogById,
     autoSpeakAssistant,
     canSendMessages,
     createSpeechSentenceQueue,
@@ -1683,6 +1696,9 @@ export function ChatView({
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
           supportsImageAttachments={canSendMessages && (selectedImageProfile ? selectedImageProfile.maxReferenceImages > 0 : supportsImageAttachments)}
+          supportsTextAttachments={canSendMessages && (modelCatalogById[selectedModelId ?? '']?.inference_capability?.features?.includes('text_file_input') ?? false)}
+          supportsPdfAttachments={canSendMessages && (modelCatalogById[selectedModelId ?? '']?.inference_capability?.features?.includes('pdf_input') ?? false)}
+          attachmentContext={`${activeConversationId}:${selectedModelId}`}
           canSendMessages={canSendMessages}
           transcriptionModels={readyTranscriptionModels}
           realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
