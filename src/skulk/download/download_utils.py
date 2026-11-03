@@ -56,7 +56,10 @@ from skulk.shared.types.worker.downloads import (
 from skulk.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 
 if TYPE_CHECKING:
-    from skulk.store.installed_cards import VerifiedDetachedInstalledCardCache
+    from skulk.store.installed_cards import (
+        InstalledCardRecord,
+        VerifiedDetachedInstalledCardCache,
+    )
 
 _SOURCE_REVISION_MARKER = ".skulk-source-revision"
 
@@ -1250,7 +1253,26 @@ def _detached_record_cache() -> "VerifiedDetachedInstalledCardCache":
     return _verified_detached_records
 
 
-def _installed_bundle_verdict(model_dir: Path) -> bool | None:
+def _installed_bundle_record(model_dir: Path) -> "InstalledCardRecord | None":
+    """Read the retained bundle inventory without inventing repository members."""
+    from skulk.store import installed_cards
+
+    try:
+        record = installed_cards.read_installed_card_with_fallback(
+            model_dir,
+            fallback_root=installed_cards.SKULK_INSTALLED_CARD_RECORDS_DIR,
+            verified_detached_cache=_detached_record_cache(),
+        )
+    except (OSError, ValueError):
+        return None
+    if record is None or record.schema_version not in {2, 3} or not record.files:
+        return None
+    return record
+
+
+def _installed_bundle_verdict(
+    model_dir: Path, *, record: "InstalledCardRecord | None" = None
+) -> bool | None:
     """Completeness by the installed bundle manifest, or ``None`` without one.
 
     A bundle-scoped artifact (a diffusion stack laid out by model folder, for
@@ -1260,22 +1282,10 @@ def _installed_bundle_verdict(model_dir: Path) -> bool | None:
     manifest is the completeness truth: every listed file present at its
     recorded size. A legacy sidecar without a manifest proves nothing here.
     """
-    from skulk.store import installed_cards
-
-    try:
-        # The adjacent sidecar, or the path-bound detached record a read-only
-        # model root keeps under the Skulk data directory. A detached record
-        # is trusted only after a full hash pass; the process-lifetime cache
-        # keeps that pass to once per unchanged artifact (file-stat changes
-        # invalidate it), since completeness is probed on every resolution.
-        record = installed_cards.read_installed_card_with_fallback(
-            model_dir,
-            fallback_root=installed_cards.SKULK_INSTALLED_CARD_RECORDS_DIR,
-            verified_detached_cache=_detached_record_cache(),
-        )
-    except (OSError, ValueError):
-        return None
-    if record is None or record.schema_version not in {2, 3} or not record.files:
+    # Detached inventories still require their path-bound full hash pass;
+    # the shared stat-invalidated cache avoids repeating it on every probe.
+    record = record or _installed_bundle_record(model_dir)
+    if record is None:
         return None
     # Same containment rule as verify_installed_file: a manifest entry must
     # resolve to a regular file beneath the artifact root, so an equal-sized
@@ -1295,13 +1305,61 @@ def _installed_bundle_verdict(model_dir: Path) -> bool | None:
     return True
 
 
+def _installed_bundle_covers_card(
+    record: "InstalledCardRecord", model_dir: Path, card: ModelCard
+) -> bool:
+    """Bind local fallback to the requested repository, revision and selected files."""
+    if (
+        record.artifact_repository != str(card.artifact_repository)
+        or card.source_revision is not None
+        and record.artifact_revision != card.source_revision
+        or not _source_revision_matches(model_dir, card.source_revision)
+    ):
+        return False
+    requested: list[tuple[str, int, str | None]] = [
+        (entry.path, entry.size_bytes, entry.object_id)
+        for entry in card.artifact_bundle.files
+    ] if card.artifact_bundle is not None else []
+    identities: dict[str, str | None] = {
+        entry.path: entry.object_id
+        for entry in record.model_card.artifact_bundle.files
+    } if record.model_card.artifact_bundle is not None else {}
+    if card.image is not None:
+        requested.extend(
+            (entry.path, entry.size_bytes, entry.object_id)
+            for entry in card.image.files_for_source(str(card.artifact_repository), card.source_revision or "main")
+        )
+    if record.model_card.image is not None:
+        identities.update(
+            (entry.path, entry.object_id)
+            for entry in record.model_card.image.files_for_source(record.artifact_repository, record.artifact_revision or "main")
+        )
+    inventory = {entry.path: entry for entry in record.files}
+    for path, size, object_id in requested:
+        entry = inventory.get(path)
+        if entry is None or entry.size_bytes != size:
+            return False
+        if object_id is None:
+            continue
+        if object_id.startswith("sha256:"):
+            if object_id != "sha256:" + entry.sha256:
+                return False
+        elif identities.get(path) != object_id:
+            return False
+    return True
+
+
 async def _build_file_list_from_local_directory(
     model_id: ModelId,
     recursive: bool = False,
+    *,
+    card: ModelCard | None = None,
+    revision: str | None = None,
 ) -> list[FileListEntry] | None:
     """Build a file list from locally existing model files.
 
-    Safetensors repos are resolved from their ``*.safetensors.index.json``. GGUF
+    Installed bundles are resolved from their verified manifest. Safetensors
+    repos are otherwise resolved from their ``*.safetensors.index.json``. GGUF
     repos have no index, so when the scanner finds none we fall back to listing
     the files on disk directly, which lets a pre-staged GGUF serve under
     ``--offline`` (no cached HF file-list), where the remote fetch would
@@ -1311,6 +1369,24 @@ async def _build_file_list_from_local_directory(
     if not await aios.path.exists(model_dir):
         return None
 
+    # A tensor bundle need not carry an MLX shard index or a GGUF. Use the
+    # same complete-manifest rule as path resolution before legacy layout
+    # probes, so a missing bundle member cannot hide behind an old index.
+    record = await asyncio.to_thread(_installed_bundle_record, model_dir)
+    if record is not None:
+        if not await asyncio.to_thread(_installed_bundle_verdict, model_dir, record=record):
+            return None
+        if revision not in (None, "main") and record.artifact_revision != revision:
+            return None
+        if card is not None and not await asyncio.to_thread(_installed_bundle_covers_card, record, model_dir, card):
+            return None
+        # A retained manifest proves only its members. Walking the directory
+        # could admit a different selection or fail on an unrelated symlink.
+        return [
+            FileListEntry(type="file", path=entry.path, size=entry.size_bytes)
+            for entry in record.files
+            if recursive or "/" not in entry.path
+        ]
     file_list = await asyncio.to_thread(_scan_model_directory, model_dir, recursive)
     if file_list:
         return file_list
@@ -1354,7 +1430,19 @@ async def fetch_file_list_with_cache(
     recursive: bool = False,
     skip_internet: bool = False,
     on_connection_lost: Callable[[], None] = lambda: None,
+    *,
+    local_model_id: ModelId | None = None,
+    local_model_card: ModelCard | None = None,
 ) -> list[FileListEntry]:
+    """Read an upstream listing, or a complete local inventory when unreachable.
+
+    ``model_id`` and ``revision`` identify the upstream listing/cache. An
+    explicit ``local_model_id`` identifies the installed alias directory when
+    a card selects artifacts from a differently named upstream repository.
+    ``local_model_card`` binds a retained inventory to the requested artifact
+    revision, selected sizes and object identities before reporting availability.
+    Neither local fallback downloads files or replaces source/card validation.
+    """
     target_dir = (await ensure_models_dir()) / "caches" / model_id.normalize()
     await aios.makedirs(target_dir, exist_ok=True)
     cache_file = target_dir / f"{model_id.normalize()}--{revision}--file_list.json"
@@ -1371,7 +1459,7 @@ async def fetch_file_list_with_cache(
             async with aiofiles.open(cache_file, "r") as f:
                 return TypeAdapter(list[FileListEntry]).validate_json(await f.read())
         local_file_list = await _build_file_list_from_local_directory(
-            model_id, recursive
+            local_model_id or model_id, recursive, card=local_model_card, revision=revision
         )
         if local_file_list is not None:
             logger.warning(
@@ -1407,7 +1495,7 @@ async def fetch_file_list_with_cache(
             async with aiofiles.open(cache_file, "r") as f:
                 return TypeAdapter(list[FileListEntry]).validate_json(await f.read())
         local_file_list = await _build_file_list_from_local_directory(
-            model_id, recursive
+            local_model_id or model_id, recursive, card=local_model_card, revision=revision
         )
         if local_file_list is not None:
             logger.warning(
@@ -2040,6 +2128,8 @@ async def download_shard(
             recursive=True,
             skip_internet=skip_internet,
             on_connection_lost=on_connection_lost,
+            local_model_id=shard.model_card.model_id,
+            local_model_card=shard.model_card,
         )
     except FileNotFoundError:
         not_started_progress = RepoDownloadProgress(

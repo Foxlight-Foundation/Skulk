@@ -387,6 +387,16 @@ manifest. An exact complete cache is used immediately, including while
 air-gapped. A stale generation is replaced atomically from the central store,
 and missing required companions disable the fast path.
 
+Offline nodes also recognize complete artifact bundles in their canonical model
+cache by the installed file manifest. These bundles do not need a safetensors
+shard index, a GGUF file or a cached Hub listing. The local lookup uses the
+installed model alias when its upstream repository has a different name;
+source revision and selected-file validation still apply. Missing or truncated
+manifest members remain unavailable offline.
+An older installed inventory must cover the requested revision, selected files,
+sizes and pinned object identities. A mismatch reports the model as unavailable;
+it does not stop download status processing or admit unrelated cached files.
+
 ### Pre-download capacity safety
 
 For each base or companion repository, the store client resolves the exact

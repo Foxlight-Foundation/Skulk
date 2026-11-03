@@ -7,17 +7,21 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+from typing import Never
 
 import pytest
 
+import skulk.download.download_utils as download_utils
 import skulk.shared.constants as constants
 from skulk.download.download_utils import (
     build_model_path,
     is_model_directory_complete,
     resolve_model_in_path,
 )
+from skulk.download.impl_shard_downloader import ResumableShardDownloader
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.store import installed_cards
 from skulk.store.installed_cards import (
     build_installed_card_record,
@@ -83,6 +87,128 @@ def _install(root: Path, card: ModelCard) -> Path:
     (artifact / ".skulk-source-revision").write_text(f"{REVISION}\n")
     write_installed_card(artifact, build_installed_card_record(artifact, card))
     return artifact
+
+
+@pytest.mark.parametrize("alias", [False, True])
+@pytest.mark.parametrize("bundle_root", [None, "payload/loader"])
+async def test_offline_download_status_recognizes_installed_bundle_without_hub_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias: bool,
+    bundle_root: str | None,
+) -> None:
+    """Canonical bundle custody is sufficient without a shard index or Hub listing."""
+    card = _card(bundle_root)
+    if not alias:
+        card = card.model_copy(update={"source_repository": None})
+    _install(tmp_path, card)
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", None)
+    shard = PipelineShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+    progress = await ResumableShardDownloader(offline=True).get_shard_download_status_for_shard(shard)
+    assert progress.status == "complete"
+    assert progress.completed_files == len(FILES)
+    assert progress.downloaded == card.storage_size
+
+
+@pytest.mark.parametrize("damage", ["missing", "short", "no_manifest", "revision"])
+async def test_offline_bundle_status_refuses_incomplete_or_other_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """Local discovery cannot turn bare or incomplete tensors into a ready download."""
+    card = _card().model_copy(update={"source_repository": None})
+    artifact = _install(tmp_path, card)
+    if damage == "missing":
+        (artifact / "vae/audio_vae.safetensors").unlink()
+    elif damage == "short":
+        (artifact / "vae/audio_vae.safetensors").write_bytes(b"short")
+    elif damage == "no_manifest":
+        installed_cards.installed_card_path(artifact).unlink()
+    else:
+        (artifact / ".skulk-source-revision").write_text("b" * 40)
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", None)
+    shard = PipelineShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+    progress = await ResumableShardDownloader(offline=True).get_shard_download_status_for_shard(shard)
+    assert progress.status != "complete"
+
+
+@pytest.mark.parametrize("change", ["path", "size", "digest"])
+@pytest.mark.parametrize("revision", [REVISION, "b" * 40])
+@pytest.mark.parametrize("offline", [False, True])
+async def test_offline_status_handles_changed_bundle_selection_without_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    revision: str,
+    offline: bool,
+) -> None:
+    """A previous generation's inventory is not the newly requested artifact."""
+    previous = _card().model_copy(update={"source_repository": None})
+    artifact = _install(tmp_path, previous)
+    bundle = previous.artifact_bundle
+    assert bundle is not None
+    files = list(bundle.files)
+    first = files[0]
+    if change == "path":
+        files[0] = first.model_copy(update={"path": "other-transformer.safetensors"})
+        (artifact / "other-transformer.safetensors").write_bytes(bytes(first.size_bytes))
+    elif change == "size":
+        files[0] = first.model_copy(update={"size_bytes": first.size_bytes + 1})
+    else:
+        files[0] = first.model_copy(update={"object_id": "sha256:" + "f" * 64})
+    size = sum(item.size_bytes for item in files)
+    selected = previous.model_copy(
+        update={
+            "source_revision": revision,
+            "storage_size": Memory.from_bytes(size),
+            "artifact_bundle": bundle.model_copy(
+                update={
+                    "bundle_id": _bundle_id([
+                        {"path": item.path, "size_bytes": item.size_bytes, "object_id": item.object_id or ""}
+                        for item in files
+                    ]),
+                    "download_size": size,
+                    "files": tuple(files),
+                }
+            ),
+        }
+    )
+    selected = ModelCard.model_validate_json(selected.model_dump_json())
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", None)
+
+    async def unavailable(*_args: object, **_kwargs: object) -> Never:
+        raise ConnectionError("upstream metadata is unavailable")
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_retry", unavailable)
+    shard = PipelineShardMetadata(
+        model_card=selected,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+    progress = await ResumableShardDownloader(offline=offline).get_shard_download_status_for_shard(shard)
+    assert progress.status != "complete"
 
 
 def test_bundle_directory_is_complete_by_its_installed_manifest(tmp_path: Path) -> None:
