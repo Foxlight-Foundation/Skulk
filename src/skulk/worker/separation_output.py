@@ -280,6 +280,16 @@ class SeparationOutputProducer:
             with anyio.fail_after(self.timeout_seconds):
                 for stem in entry.output.stems:
                     await self._stem(entry, stem)
+                    # The accepting API verifies and ACKs while consuming this
+                    # same rendezvous topic. Sending the next role before that
+                    # reverse terminal can occupy the router with a forward
+                    # frame the API cannot receive until its ACK is admitted.
+                    purpose = separation_purpose(stem.name)
+                    while purpose not in entry.accepted:
+                        if entry.aborted:
+                            raise ValueError("separation output delivery was cancelled")
+                        entry.changed = anyio.Event()
+                        await entry.changed.wait()
                 while len(entry.accepted) != len(SEPARATION_STEMS):
                     if entry.aborted:
                         raise ValueError("separation output delivery was cancelled")

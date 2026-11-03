@@ -601,8 +601,11 @@ routes raw source packets to the acknowledged-input planner gate. Background
 exact-runtime revalidation supplies a private bootstrap context; weights resolve
 only at LoadModel. Recovered unowned native jobs fail without automatic replay.
 `worker/separation_output.py` retains four result sets through bounded verification,
-OUTPUT_MEDIA delivery, exact reverse ACKs and joined sender/file cleanup. Sources
-remain reserved through result settlement and actual reader drain; shutdown
+OUTPUT_MEDIA delivery, exact reverse ACKs and joined sender/file cleanup.
+Each role waits for its own ACK before the next role is emitted. Separation output
+subscriptions filter API forward frames and Worker reverse control before their
+zero-buffer queues; ignored self-echoes cannot block an in-progress ACK sender.
+Sources remain reserved through result settlement and actual reader drain; shutdown
 releases service ownership without deleting potentially live originals. HTTP
 receiving routes use the same private owners. `result_custody.py` records an
 output directory inode before sending native work; source crash recovery waits

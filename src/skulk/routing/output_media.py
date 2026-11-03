@@ -36,6 +36,21 @@ OutputMediaPurpose = Literal[
 """Which artifact of a command an output stream carries."""
 
 
+def output_media_for_api(packet: OutputMediaPacket) -> bool:
+    """Filter separation ACK echoes while preserving legacy media subscriptions.
+
+    The API sends reverse terminals while consuming a result. Delivering those
+    terminals back into its rendezvous receiver would wait for that same
+    consumer and deadlock a same-node transfer.
+    """
+    return not packet.purpose.startswith("separation_") or packet.kind not in ("accepted", "cancelled")
+
+
+def output_media_for_worker(packet: OutputMediaPacket) -> bool:
+    """Filter unused separation frames while preserving legacy media subscriptions."""
+    return not packet.purpose.startswith("separation_") or packet.kind in ("accepted", "cancelled", "transport_failed")
+
+
 class OutputMediaPacket(CamelCaseModel):
     """One bounded generated-media frame or a reverse-routed terminal."""
 

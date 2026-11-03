@@ -7,6 +7,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Separation result delivery
+
+- Prevent same-node stem transfers from blocking on their own reverse
+  acknowledgments. Each role is acknowledged before the next begins; separation
+  subscriber predicates preserve zero-buffer bounds and existing video/music
+  admission.
+
 ### Offline model availability
 
 - Recognize complete installed artifact bundles without a safetensors shard

@@ -1439,7 +1439,13 @@ Each fixed WAV receives independent facts/digest checks before bounded binary
 frames enter OUTPUT_MEDIA; the native result record stays private. A finite
 five-minute total delivery/ACK budget and five-second sends apply. Only exact
 owner/model/role/terminal acknowledgements release a role, and deletion waits
-for every owned sender/file effect to drain. Failed or foreign-content cleanup
+for every owned sender/file effect to drain.
+Each role's ACK admits the next role. Separation API subscriptions accept forward output
+and failures; Worker subscriptions accept reverse control. These pure predicates
+run before their zero-buffer queues, preventing an ignored same-node echo or
+the next role from blocking the receiver that is still sending its ACK.
+Legacy video and generated-music subscriber admission is unchanged.
+Failed or foreign-content cleanup
 retains admission for retry. Source slots remain held through result settlement.
 The accepting API owner described below receives these roles. Native result
 directories get private inode receipts before any inference request. After a
