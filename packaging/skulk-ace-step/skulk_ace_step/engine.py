@@ -289,7 +289,11 @@ def load_music(
             raise ValueError("native music model-code inventory exceeds its bound")
         code = TypeAdapter(tuple[ModelCodeFile, ...]).validate_json(data)
     progress(NativeMusicProgress(stage="verifying_weights"))
-    view = prepare_weights(root / "checkpoints", configuration.weights, library, code)
+    # The pinned initializer resolves the checkpoint path, including macOS's
+    # temporary-directory aliases. Compare the same canonical private view.
+    view = prepare_weights(
+        root / "checkpoints", configuration.weights, library, code
+    ).resolve()
     api = api_loader()
     handler = api.handler()
 

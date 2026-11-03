@@ -9,7 +9,7 @@ import check_support
 import check_weights
 from skulk_ace_step.contracts import NativeMusicProgress
 from skulk_ace_step.engine import load_music
-from skulk_ace_step.upstream_bindings import NativeAPI
+from skulk_ace_step.upstream_bindings import NativeAPI, native_api
 
 
 class StopBeforeInferenceError(RuntimeError):
@@ -99,3 +99,42 @@ class NativeLoadingTests(unittest.TestCase):
             self.invoke()
         self.assertEqual(self.imports, 0)
         self.assertFalse((Path(self.config.directory) / "ready.json").exists())
+
+    def test_real_initializer_admits_verified_view_through_a_parent_path_alias(
+        self,
+    ) -> None:
+        """A platform's temporary-directory alias preserves the exact verified view."""
+        alias = self.fixture.root / "parent-alias"
+        alias.symlink_to(self.fixture.root, target_is_directory=True)
+        configuration = self.config.model_copy(
+            update={"directory": str(alias / "model")}
+        )
+        api = native_api()
+        handler = api.handler()
+        with (
+            patch.dict(os.environ),
+            patch.object(handler, "_sync_model_code_if_needed", return_value=None),
+            patch.object(
+                handler,
+                "_load_main_model_from_checkpoint",
+                side_effect=StopBeforeInferenceError(
+                    "controlled stop at first native tensor loader"
+                ),
+            ) as tensor_loader,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "controlled stop at first native tensor loader"
+            ):
+                load_music(
+                    configuration,
+                    "b" * 64,
+                    self.progress.append,
+                    runtime_root=self.fixture.runtime,
+                    code=self.fixture.code,
+                    api_loader=lambda: NativeAPI(
+                        handler=lambda: handler,
+                        constructors=api.constructors,
+                        generate=api.generate,
+                    ),
+                )
+            tensor_loader.assert_called_once()

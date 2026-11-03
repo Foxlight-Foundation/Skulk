@@ -61,7 +61,7 @@ class NativeEngineTests(unittest.TestCase):
         self.handler.vae = torch.nn.Linear(1, 1)
         self.calls = 0
         self.skip_source = False
-        self.fail = False
+        self.simulate_timeout = False
         self.wait: threading.Event | None = None
         self.entered = threading.Event()
         self.ready = NativeMusicReady(
@@ -108,7 +108,7 @@ class NativeEngineTests(unittest.TestCase):
         self.entered.set()
         if self.wait is not None:
             self.assertTrue(self.wait.wait(5))
-        if self.fail:
+        if self.simulate_timeout:
             raise TimeoutError("controlled native timeout")
         if tensor is None:
             tensor = torch.ones((2, 48000), dtype=torch.float32) * 0.25
@@ -185,7 +185,7 @@ class NativeEngineTests(unittest.TestCase):
 
     def test_native_timeout_retains_partial_input_and_poisons_model(self) -> None:
         """No resource is deleted while a timed-out upstream thread could still use it."""
-        self.fail = True
+        self.simulate_timeout = True
         with self.assertRaises(TimeoutError):
             self.engine.run(self.edit(), lambda _: None)
         directory = Path(self.configuration.directory) / "requests/take-1"
@@ -288,7 +288,9 @@ class NativeEngineTests(unittest.TestCase):
                 use_mlx_dit=False,
                 vae_checkpoint="official",
             )
-        self.assertEqual(reached, [(checkpoints, "acestep-v15-base", "official")])
+        self.assertEqual(
+            reached, [(checkpoints.resolve(), "acestep-v15-base", "official")]
+        )
         self.assertFalse(initialized)
         self.assertEqual(status, "Controlled stop before native tensor loading.")
         self.assertIsNone(self.handler.model)
