@@ -176,7 +176,7 @@ def test_different_model_is_not_a_fallback() -> None:
     )
 
 
-@pytest.mark.parametrize("field", ["world_size", "start_layer", "end_layer", "n_layers", "separation_policy"])
+@pytest.mark.parametrize("field", ["world_size", "device_rank", "start_layer", "end_layer", "n_layers", "separation_policy"])
 def test_old_or_partial_native_model_has_no_generation_capacity(field: str) -> None:
     """A nominal Ready state cannot bypass complete geometry and bound policy."""
     snapshot = state(RunnerReady())

@@ -87,6 +87,27 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   bounded private-read, fsynced atomic-write and inherited file-lock helpers.
   `extensions/runtime_files.py` reexports the same objects for existing callers;
   provisioning does not import the plugin subsystem to acquire a file fence.
+- **Native separation preparation ownership (initiative):**
+  `provisioning/demucs_manager.py` retains one cache and fixed package/host
+  inventory, serializes finite-budget preparation and exposes only verified
+  library builds plus private exact-runtime lookup. Revalidation/shutdown
+  withdraw observations; no cache generation with publication history is evicted.
+  `worker/demucs_preparation.py` bounds requests to four, runs effects off-loop,
+  joins cancellation/shutdown before cache close and retains failed cleanup.
+  No event handler or resource provider is registered by these components.
+
+- **Native separation model and source ownership (initiative):**
+  `worker/runner/demucs/model.py` checks complete rank-zero placement, stamped
+  build/device/policy and nested loader root before explicit real resident load.
+  Current process liveness governs readiness; every source is remeasured before
+  inference. Private command-derived result paths never enter State.
+  `worker/separation_sources.py` reuses raw media assembly for at most four
+  private original copies, including already verified waiting/running input.
+  Full encoded hash and WAV facts precede acknowledgement. Unknown/terminal
+  admission fails; cleanup failure keeps its slot/fence for retry. Drain readers
+  before close. The receiver must correlate authoritative State/owner/placement;
+  no bootstrap, transport receiver or HTTP route is registered here.
+
 - **Native separation card reader:** `shared/models/separation.py` owns frozen
   `SeparationCardConfig`; `ModelTask.AudioSeparation` requires `[separation]`.
   One SHA-256-identified safetensors object, ordered stems and native geometry
@@ -98,7 +119,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   command/task variants carry only model/source metadata. `SeparationChunk`
   carries one complete four-stem manifest or failure, never WAV bytes.
   `master/main.py::separation_generation_instances` admits one active job per
-  ready complete single-host model. Master-local reservations survive consecutive
+  ready complete single-host rank-zero model. Master-local reservations survive consecutive
   command iterations until indexed task creation transfers admission to State.
   `shared/models/separation_runtime.py` binds exact tensor/constructor identity,
   explicit CPU/MPS/CUDA/ROCm spelling, FP32, two threads and a 7.8-second window.
@@ -138,6 +159,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Closed independent facts, synced bytes, job/role directories and newly created
   storage-root links precede receipts. Failed first-time setup removes only new
   empty directories under its fence, so retry repeats the ancestor syncs;
+  committed-but-incomplete sets hold an active-job slot until completion or deletion;
   only a durable completed manifest exposes content. Restart adopts all four
   exact files or none, and invalid partial sets delete only owned API copies.
   `OUTPUT_MEDIA` adds `separation_drums/bass/other/vocals`; the existing

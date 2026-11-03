@@ -1311,6 +1311,34 @@ The controller is not yet connected to worker preparation, placement, a publishe
 loaded-model readiness. CUDA/ROCm package profiles and admission remain separate
 integration gates.
 
+`provisioning/demucs_manager.py` adds the persistent worker-lifetime preparation
+owner. It accepts only its fixed package inventory and actual host platform tags,
+serializes verification within the request's whole finite budget, and withdraws
+observations during revalidation or shutdown. An exact private runtime lookup
+does not install anything. Only successful byte/device verification publishes a
+library build; an actual model still needs a separate loaded-ready receipt.
+`worker/demucs_preparation.py` supplies bounded asynchronous ownership of up to
+four explicit requests. Cancellation joins the installation thread; shutdown
+joins all work before closing its cache. Failed cleanup retains the original
+manager and fence for retry. These components register no worker event handlers
+or resource provider yet. Published runtime generations remain retained when
+selection changes, so cache repair cannot delete a mounted interpreter.
+
+`worker/runner/demucs/model.py` binds an authoritative complete rank-zero
+placement to the prepared package, exact execution policy and staged loader
+root. It starts the real `ResidentSeparator` only on explicit load and observes
+current native liveness. Before inference it independently measures the bounded
+private original again and compares every source fact with the task. Native
+results use deterministic private command directories; paths never enter State.
+`worker/separation_sources.py` owns up to four private encoded input copies over
+the existing raw media assembler, including verified waiting/running sources.
+It accepts an authoritative nonterminal task, preserves identical opens, checks
+size/hash and decoded WAV facts before acknowledgement, and refuses unknown frames.
+Failed deletion retains capacity and ownership for retry. Shutdown requires
+resident readers to drain first; interrupted copies are not restartable jobs or
+user originals. Receiver-level State/owner/placement correlation remains required.
+Neither module registers bootstrap dispatch, addressed transport or HTTP routes.
+
 Protected runtime file/lock helpers live in `utils/runtime_files.py`; the old
 `extensions/runtime_files.py` path reexports the same functions and class. Engine
 preparation can use them without loading the plugin subsystem. There is no new
@@ -1325,7 +1353,7 @@ same typed information. Reader vocabulary alone does not advertise a loaded runn
 The separation execution foundation adds distinct frozen `AudioSeparation`
 command/task variants and a complete-manifest `SeparationChunk`. No source or
 result WAV enters replicated State or the event log. The master admits only a
-complete single-host native model in `RunnerReady`, with an explicit build and
+complete single-host rank-zero native model in `RunnerReady`, with an explicit build and
 bound execution policy. Master-local reservations span consecutive commands
 until indexed task creation applies; the applied task then holds that capacity.
 One model runs one separation at a time.
@@ -1388,7 +1416,8 @@ roles from the shared free-space safety headroom; already written bytes are not
 charged again. Reordered chunks remain promised until they are written.
 Failed first-time initialization removes only its new empty directories under
 the ownership fence; retry repeats the required ancestor syncs.
-Identical repeated opens preserve progress. A late invalid file removes
+Committed-but-incomplete sets retain their active-job slot until all roles
+commit or the set is deleted. Identical repeated opens preserve progress. A late invalid file removes
 only that job's API result copies; originals and native output remain outside
 this owner's authority. Closed files receive independent digest, PCM24 stereo
 44.1 kHz, geometry and peak checks. File bytes, job/role directories and newly

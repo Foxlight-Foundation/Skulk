@@ -526,13 +526,15 @@ one safety reserve; written bytes are not charged twice. Failed first-time
 initialization removes only its new empty directories before releasing ownership,
 so retry repeats every required new-root sync. File, job-directory,
 role-directory and newly created storage-root links are synced before receipts.
-Partial sets never become content; cleanup removes only API copies.
+Committed-but-incomplete sets retain their active-job slot until every role
+commits or the set is deleted. Partial sets never become content; cleanup removes
+only API copies.
 Existing video/music handlers ignore the four new separation output purposes.
 HTTP and addressed worker execution remain unwired.
 
 The separation foundation adds frozen `AudioSeparation` command/task variants
 and `SeparationChunk` metadata. The master admits one job per actually ready,
-complete single-host separator. Master-local reservations span consecutive
+complete single-host rank-zero separator. Master-local reservations span consecutive
 commands until indexed task creation applies, when State takes over admission.
 Both placement entries require live verified native backend/build resources,
 then stamp `separation_policy`; the worker rejects policy drift before load.
@@ -548,6 +550,20 @@ need separate real dependency/memory profiles. No engine readiness, worker
 preparation or mounted runner is activated by these components. Every isolated
 participant must be upgraded before new replicated execution variants are used;
 record a separate production reader transition before promotion.
+
+`provisioning/demucs_manager.py` owns fixed-package, actual-host preparation and
+private exact runtime lookup for the worker lifetime. Read-only inventory never
+installs; revalidation/shutdown withdraw library observations. The bounded async
+`worker/demucs_preparation.py` owner joins cancelled work before cache close and
+retains failed cleanup. `worker/runner/demucs/model.py` binds complete rank-zero
+placement, prepared build/device/policy and staged loader root to a real resident;
+source WAV facts are rechecked before inference and paths remain private.
+`worker/separation_sources.py` retains up to four private original copies,
+including verified waiting inputs; hash/WAV checks precede acknowledgement and
+failed deletion retains its slot/fence. Receivers still must correlate live
+State/owner/placement. Drain resident readers before closing input ownership.
+No event/resource/bootstrap/transport/HTTP activation is registered here.
+
 `worker/runner/demucs/process.py` supervises `packaging/skulk-demucs/` under an
 isolated interpreter, with complete file/digest checks, bounded progress,
 process-group cancellation and parent-death cleanup. It is not yet registered in
