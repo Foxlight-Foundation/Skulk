@@ -123,6 +123,23 @@ class PrepareAudioCpp(BaseCommand):
     )
 
 
+@final
+class PrepareDemucs(BaseCommand):
+    """Prepare one exact reviewed native package before ordinary placement."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    target_node: NodeId = Field(description="Chosen hardware-eligible worker.")
+    owner_node: NodeId = Field(description="API node waiting for verified resources.")
+    package_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="Whole-package SHA-256 from the fixed engine inventory.",
+    )
+    device: Literal["cpu", "mps"] = Field(
+        description="Explicit compute lane implemented by this package profile.",
+    )
+
+
 class TextEmbedding(BaseCommand):
     task_params: TextEmbeddingTaskParams
     owner_node: NodeId | None = None
@@ -176,7 +193,7 @@ class PlaceInstance(BaseCommand):
     min_nodes: int
     prepared_node_resources: dict[NodeId, NodeResources] = Field(
         default_factory=dict,
-        description="Worker-verified audio.cpp resources from this music mount preparation, scoped to this placement command.",
+        description="Worker-verified engine resources from this single-host music or separation preparation, scoped to this placement command.",
     )
     # Per-placement node exclusions — the planner treats these nodes as if
     # they were absent from the topology when scoring this placement only.
@@ -211,7 +228,7 @@ class CreateInstance(BaseCommand):
     instance: Instance
     prepared_node_resources: dict[NodeId, NodeResources] = Field(
         default_factory=dict,
-        description="Worker-verified audio.cpp resources for the exact music node, scoped to this placement command.",
+        description="Worker-verified engine resources for the exact music or separation node, scoped to this placement command.",
     )
 
 
@@ -396,6 +413,7 @@ Command = (
     | MusicGeneration
     | AudioSeparation
     | PrepareAudioCpp
+    | PrepareDemucs
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription

@@ -141,6 +141,60 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   registered here. Upgrade every isolated participant before enabling these
   new replicated variants; older ordered-event readers cannot consume them.
 
+- **Native original-input handshake (initiative):**
+  `worker/separation_input.py` uses `VISION_MEDIA` with the explicit raw
+  `separation_source` role; only that role accepts the new `requested` frame.
+  The selected worker resolves its actual complete local rank-zero task before
+  requesting bytes from the owning API. Unknown/terminal/nonlocal/ambiguous or
+  changed assignments cannot admit input. Open/chunk/completion can reorder;
+  independent full WAV verification and current task identity precede ACK and
+  acknowledged readiness. Four input slots, 180-second transfer deadline,
+  two-second request retry until open and bounded sends apply. Cancellation
+  joins file threads, preventing late writers/ACKs. Drain actual resident readers
+  before release/close; failed deletion remains owned. No bytes/paths in State.
+  The Worker lazily creates this owner for admitted tasks and routes the raw
+  role independently of vision/reference input. Planning requires its ready
+  command snapshot. Unowned interrupted jobs fail on state recovery; terminal
+  State cannot authorize source deletion while a reader fence is held. Shutdown
+  detaches service ownership without deleting live originals. The API now serves
+  the addressed original request after actual placement. Upgrade isolated media
+  readers before enabling it.
+
+- **Native runner adapter (initiative):** `worker/runner/demucs/runner.py`
+  supplies the shared dispatcher with an already validated resident binding.
+  One active/four queued tasks; real load/warmup precedes Ready. Only complete
+  metadata enters output chunks. Cancel drains before serial reload; shutdown
+  cancels reload. Failed reload/liveness withdraws Ready even after final-waiter
+  cancellation, without retroactively failing a verified complete render.
+  Private bootstrap context and background exact-runtime revalidation connect
+  this adapter to Worker supervisors without blocking unrelated planning.
+  First-mount staged weights resolve only at LoadModel.
+
+- **Native result producer (initiative):** `worker/separation_output.py` verifies
+  fixed private WAVs and emits bounded four-role OUTPUT_MEDIA frames. At most
+  four result sets are retained through sender drain, exact reverse ACKs and
+  cleanup success. Total delivery/ACK deadline is five minutes; sends are capped
+  at five seconds. Original slots remain reserved through result settlement.
+  Foreign content and failed deletion remain owned; no recursive deletion or
+  packet-provided file paths. Native `result_custody.py` persists a private
+  directory inode receipt before inference; stale source recovery requires reader
+  drain and exact result ownership before deleting known files. Unknown files,
+  symlinks or changed inodes keep their quota. The child process has umask 0077;
+  Core's global umask and sealed package bytes are unchanged.
+
+- **Separation HTTP owner (initiative):** `api/separation_api.py` registers six
+  operations at `/v1/audio/separations` using existing API authentication and
+  `api/types/separation.py` public projections. Metadata-only commands use normal
+  DATA queue ordering and cancellation. Original WAVs follow directed requests
+  from the authoritative placed worker; results follow four OUTPUT_MEDIA roles.
+  Input is one WAV plus closed request JSON; four uploads/active jobs, 64 MiB
+  original, 180-second upload/transfer budgets. Four verified stems plus render
+  completion are required; complete results have 24-hour retention within 2 GiB
+  and 64 records. Eight descriptor-leased downloads survive concurrent deletion.
+  Restart verifies complete sets, fails interrupted jobs and never replays edits.
+  Local paths/bytes never enter replicated State. Full installed acceptance and
+  normal publication are still release gates.
+
 - **Separation job lifecycle component:** `api/separation_jobs.py` persists
   source-bound metadata only, with four active/64 retained jobs and a 1 MiB
   index ceiling. A lifetime OS fence and in-process lock serialize ownership.

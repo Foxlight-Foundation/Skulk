@@ -22,7 +22,11 @@ from skulk.shared.types.audio_separation import (
 )
 from skulk.shared.types.common import CommandId
 from skulk.shared.types.tasks import AudioSeparation, TaskStatus
-from skulk.utils.runtime_files import RuntimeLock, private_directory, read_private
+from skulk.utils.runtime_files import RuntimeLock, read_private
+from skulk.worker.separation_custody import (
+    SOURCE_OWNERSHIP_FILE,
+    SeparationSourceCustody,
+)
 
 
 @final
@@ -35,32 +39,52 @@ class SeparationSourceStore:
     Acknowledgement follows full encoded identity and decoded WAV-fact checks.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self, root: Path, *, custody: SeparationSourceCustody | None = None
+    ) -> None:
         """Take an exclusive private input root without starting native execution."""
         self.root = root
         self._guard = threading.RLock()
+        if custody is not None and custody.root != root:
+            raise ValueError("source custody journal belongs to a different root")
+        self._custody = custody
         self._ownership: RuntimeLock | None = RuntimeLock(root, name="service.lock")
         self._tasks: dict[CommandId, AudioSeparation] = {}
         self._ready: dict[CommandId, Path] = {}
         try:
+            if custody is not None:
+                custody.load()
+                custody.recover()
             # A new process has no ownership proof for directories left by a
             # prior worker or placed here externally. Preserve them, but charge
             # every unresolved entry against admission across restarts. Stop the
             # bounded scan at overflow rather than retaining an arbitrary list.
-            unresolved = 0
-            with os.scandir(root) as children:
-                for child in children:
-                    if child.name == "service.lock":
-                        continue
-                    unresolved += 1
-                    if unresolved > 4:
-                        raise ValueError("separation source root needs ownership-checked stale-copy recovery")
-            self._unresolved_count = unresolved
-            self._store = VideoStore(root, max_total_bytes=4 * MAX_SEPARATION_SOURCE_BYTES)
+            self._unresolved_count = self._count_unresolved()
+            self._store = VideoStore(
+                root, max_total_bytes=4 * MAX_SEPARATION_SOURCE_BYTES
+            )
         except BaseException:
             self._ownership.close()
             self._ownership = None
             raise
+
+    def _count_unresolved(self) -> int:
+        count = 0
+        with os.scandir(self.root) as children:
+            for child in children:
+                if (
+                    child.name == "service.lock"
+                    or self._custody is not None
+                    and child.name == SOURCE_OWNERSHIP_FILE
+                    or CommandId(child.name) in self._tasks
+                ):
+                    continue
+                count += 1
+                if count > 4:
+                    raise ValueError(
+                        "separation source root needs ownership-checked stale-copy recovery"
+                    )
+        return count
 
     def _check(self, command_id: CommandId) -> None:
         if self._ownership is None:
@@ -77,6 +101,17 @@ class SeparationSourceStore:
         """
         with self._guard:
             return self._unresolved_count
+
+    def recover_stale(self) -> int:
+        """Retry ownership-checked stale cleanup after prior native readers exit."""
+        with self._guard:
+            if self._ownership is None:
+                raise RuntimeError("separation source owner is closed")
+            if self._custody is None:
+                return 0
+            recovered = self._custody.recover(tuple(self._tasks))
+            self._unresolved_count = self._count_unresolved()
+            return recovered
 
     def admit(self, task: AudioSeparation) -> None:
         """Reserve bytes for an authoritative local task, preserving identical opens.
@@ -97,18 +132,34 @@ class SeparationSourceStore:
                     or current.owner_node != task.owner_node
                     or current.task_params != task.task_params
                 ):
-                    raise ValueError("separation source admission changed its owner or identity")
+                    raise ValueError(
+                        "separation source admission changed its owner or identity"
+                    )
                 return
             if len(self._tasks) + self._unresolved_count >= 4:
-                raise ValueError("separation source capacity is full; unresolved copies require ownership-checked recovery")
+                raise ValueError(
+                    "separation source capacity is full; unresolved copies require ownership-checked recovery"
+                )
             directory = self.root / str(task.command_id)
             if directory.exists() or directory.is_symlink():
                 raise ValueError("separation source directory needs stale-copy cleanup")
-            private_directory(directory)
+            if self._custody is not None:
+                self._custody.claim(task)
+            try:
+                directory.mkdir(mode=0o700)
+            except BaseException:
+                if self._custody is not None:
+                    self._custody.forget(task.command_id)
+                self._unresolved_count = self._count_unresolved()
+                raise
             self._tasks[task.command_id] = task
             try:
+                if self._custody is not None:
+                    self._custody.remember_directory(task.command_id)
                 self._store.open_assembly(
-                    task.command_id, "music", content_type="audio/wav",
+                    task.command_id,
+                    "music",
+                    content_type="audio/wav",
                     total_bytes=task.task_params.source.size_bytes,
                     total_chunks=task.task_params.total_input_chunks,
                     keep=tuple(self._tasks),
@@ -185,6 +236,8 @@ class SeparationSourceStore:
             # otherwise repeated cleanup failures could bypass the input bound.
             if (self.root / str(command_id)).exists():
                 raise OSError("separation source cleanup is incomplete; retry delete")
+            if self._custody is not None:
+                self._custody.forget(command_id)
             self._tasks.pop(command_id)
             self._ready.pop(command_id, None)
 
@@ -197,3 +250,16 @@ class SeparationSourceStore:
                 self.delete(command_id)
             self._ownership.close()
             self._ownership = None
+
+    def detach(self) -> None:
+        """Release this service fence without deleting potentially live originals.
+
+        The worker calls this only after its receiver/file effects have joined.
+        A replacement owner uses durable custody and the separate inherited
+        native-reader fence to recover these files; parent shutdown is no drain
+        proof. This differs from close(), which requires all readers drained.
+        """
+        with self._guard:
+            if self._ownership is not None:
+                self._ownership.close()
+                self._ownership = None

@@ -1393,6 +1393,61 @@ to older ordered-event readers; private native protocol compatibility does not
 establish replicated command/task compatibility. Production promotion needs its
 own recorded reader transition and installed acceptance.
 
+`worker/separation_input.py` defines the isolated original-input handshake over
+`VISION_MEDIA`, with explicit `payload="separation_source"`. A new `requested`
+frame is valid only for this role. After observing the authoritative local task,
+the selected worker asks its owning API for one raw WAV. This avoids assuming
+that source bytes and indexed task creation arrive in the same cross-plane
+order. Unknown/terminal/nonlocal/partial or ambiguous task assignments cannot
+admit source storage, and packet fields cannot select a new owner/model/path.
+Opened/chunk/completed frames may reorder; acknowledgement follows independent
+full WAV verification and a fresh live-task check. Planning must use the
+receiver's acknowledged-ready observation, not file existence alone.
+
+The receiver owns at most four input copies, a 180-second transfer budget,
+two-second request retries until open and bounded transport calls. Coroutine
+cancellation joins owned file threads; a late verification cannot acknowledge a
+cancelled task or overrun the deadline. Accepted-input duplicate/cancel frames
+cannot delete bytes a resident may already be reading. Normal task cancellation
+and actual resident drain precede explicit source release. Failed deletion keeps
+the original owner for retry. Neither bytes nor paths enter State or event logs.
+On the initiative, the Worker now constructs the source owner lazily after
+an authoritative local task, routes this role to its receiver and gates ordinary
+planning on acknowledged inputs. Existing image/reference handling remains
+separate. A recovered snapshot fails unowned interrupted native jobs instead of
+silently replaying an uncertain edit. Terminal State alone cannot release a
+source: the Worker waits for actual ready/drained runner observations or the
+inherited kernel reader fence. Shutdown detaches source custody without deleting
+potentially live originals. Upgrade all participating media readers before
+isolated validation; normal installed acceptance remains a release gate.
+
+The isolated native `worker/runner/demucs/runner.py` adapter accepts one
+worker-validated resident model and uses the existing bounded dispatcher. It
+admits one active separation and four queued tasks, explicitly loads and warms
+the model before publishing Ready, and emits only complete four-stem metadata.
+Cancellation drains native work before serial reload; a failed reload or dead
+process cannot become Ready through either completion or final-waiter
+cancellation. A complete verified render remains successful if preparing the
+next lifetime fails. Shutdown also cancels an in-progress reload. This adapter
+is selected by the private prepared bootstrap context. First-mount weight
+resolution waits for LoadModel; background package/device revalidation does not
+block planning for unrelated instances.
+
+`worker/separation_output.py` owns four bounded result sets. The Worker binds
+each complete manifest to its admitted source/owner and private reader root.
+Each fixed WAV receives independent facts/digest checks before bounded binary
+frames enter OUTPUT_MEDIA; the native result record stays private. A finite
+five-minute total delivery/ACK budget and five-second sends apply. Only exact
+owner/model/role/terminal acknowledgements release a role, and deletion waits
+for every owned sender/file effect to drain. Failed or foreign-content cleanup
+retains admission for retry. Source slots remain held through result settlement.
+The accepting API owner described below receives these roles. Native result
+directories get private inode receipts before any inference request. After a
+crash, source recovery first acquires the inherited reader fence and reclaims
+only that exact result inode and known WAV/metadata files. Unknown content,
+changed inodes and symlinks retain the source's admission slot; an empty
+pre-receipt mkdir gap can be recovered without deleting foreign content.
+
 The isolated `api/separation_jobs.py` lifecycle component owns a private,
 exclusively locked metadata index. Four jobs may be active and 64 retained,
 within a 1 MiB serialized bound. Source and result bytes remain outside it.
@@ -1432,9 +1487,20 @@ Restart adopts all four exact files or exposes none. Content access additionally
 requires the durable completed job and matching unexpired complete manifest.
 Partial results stay private even if every transfer has finished. Four new
 `OUTPUT_MEDIA` purposes identify drums, bass, other and vocals; existing
-video/music handlers ignore those purposes. HTTP and addressed execution wiring
-remain separate integration work; the storage component does not enable the
-feature by itself.
+video/music handlers ignore those purposes. The initiative's `api/separation_api.py` now connects this storage to six REST
+operations under `/v1/audio/separations`: create/list/retrieve/content/cancel/delete.
+It uses the existing host authentication boundary, normal command/DATA routing,
+addressed original requests and four-role output delivery. A lazy lifetime owner
+joins disk work and source senders before releasing its fences. Uploads have
+strict multipart fields, byte and concurrency bounds, a three-minute deadline,
+and explicit spool cleanup on disconnect. Results retain the original source
+identity; only the existing strict public projector exposes complete manifests.
+Download descriptors are acquired under the API owner lock before response
+headers, so deletion cannot truncate an opened download. The accepting node
+retains 64 metadata records and up to 2 GiB of content, expires content after
+24 hours, and fails interrupted jobs on restart without replay. Complete sets
+are independently adopted or invalidated on reopen. Native/public installed
+acceptance and normal publication remain release gates.
 
 The dependency-light `provisioning/demucs_package.py` is the shared package
 contract and integrity boundary. Standalone build tools use an explicit repository
