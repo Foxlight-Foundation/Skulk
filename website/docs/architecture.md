@@ -1441,7 +1441,12 @@ five-minute total delivery/ACK budget and five-second sends apply. Only exact
 owner/model/role/terminal acknowledgements release a role, and deletion waits
 for every owned sender/file effect to drain.
 Each role's ACK admits the next role. Separation API subscriptions accept forward output
-and failures; Worker subscriptions accept reverse control. These pure predicates
+and failures; Worker subscriptions accept reverse control.
+The API sends ACKs and cancellation terminals in independent bounded tasks,
+so a second command's forward frame cannot block the first command's ACK.
+Each of four admitted jobs owns at most four role ACKs and one cancellation
+drain; its admission slot remains held until those senders join. Completion
+requires every role ACK to be admitted. These pure predicates
 run before their zero-buffer queues, preventing an ignored same-node echo or
 the next role from blocking the receiver that is still sending its ACK.
 Legacy video and generated-music subscriber admission is unchanged.

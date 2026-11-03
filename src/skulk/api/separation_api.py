@@ -27,6 +27,7 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.types import Receive, Scope, Send
 
 from skulk.api.separation_jobs import (
+    MAX_ACTIVE_SEPARATION_JOBS,
     MAX_RETAINED_SEPARATION_JOBS,
     SeparationJob,
     SeparationJobCapacityError,
@@ -126,6 +127,8 @@ class _Active:
     receipts: dict[SeparationStemName, StoredSeparationStem] = field(
         default_factory=dict
     )
+    acknowledging: set[SeparationStemName] = field(default_factory=set)
+    acknowledged: set[SeparationStemName] = field(default_factory=set)
 
 
 class _ContentResponse(StreamingResponse):
@@ -242,6 +245,10 @@ class SeparationAPI:
         self._media: SeparationMediaStore | None = None
         self._sources: SeparationSourceStore | None = None
         self.active: dict[CommandId, _Active] = {}
+        # Terminal metadata must drain outside the media consumer's lock. A
+        # blocked ACK otherwise prevents that consumer receiving another job's
+        # forward frame, which is itself keeping the router from accepting ACKs.
+        self._output_control_counts: dict[CommandId, int] = {}
         self._expired_content: set[CommandId] = set()
 
     @property
@@ -310,7 +317,7 @@ class SeparationAPI:
             response_model=SeparationResource,
             tags=tags,
             summary="Retrieve a separation job",
-            description="Read committed status and source facts. Output appears only after successful rendering and all four independently verified stems.",
+            description="Read committed status and source facts. Output appears only after successful rendering, all four independently verified stems and admitted return-path acknowledgements.",
         )(self.retrieve)
         app.get(
             "/v1/audio/separations/{separation_id}/content/{stem}",
@@ -508,6 +515,8 @@ class SeparationAPI:
             async with self.lock:
                 await self.ensure()
                 assert self.jobs is not None and self.sources is not None
+                if len(self.active.keys() | self._output_control_counts.keys()) >= MAX_ACTIVE_SEPARATION_JOBS:
+                    raise SeparationJobCapacityError("four separation jobs or reverse-control drains are active")
                 job = SeparationJob(
                     id=identifier,
                     model=ModelId(params.model),
@@ -828,9 +837,92 @@ class SeparationAPI:
                 )
             )
             completion = entry.completed.get(name)
-            if completion is not None:
+            if completion is not None and name not in entry.acknowledged:
+                self._acknowledge_stem(identifier, entry, name, completion)
+
+    def _acknowledge_stem(
+        self,
+        identifier: CommandId,
+        entry: _Active,
+        name: SeparationStemName,
+        completion: OutputMediaPacket,
+    ) -> None:
+        if name in entry.acknowledging:
+            return
+        entry.acknowledging.add(name)
+        self._start_output_control(identifier, entry, (completion.accepted(),), name)
+
+    def _start_output_control(
+        self,
+        identifier: CommandId,
+        entry: _Active,
+        packets: tuple[OutputMediaPacket, ...],
+        acknowledged_stem: SeparationStemName | None,
+    ) -> None:
+        # At most four role ACKs and one cancellation drain belong to each of
+        # four admitted jobs. Keep its slot after terminal failure until every
+        # sender joins, so rapid cancellations cannot grow detached work.
+        pending = self._output_control_counts.get(identifier, 0)
+        if pending >= len(SEPARATION_STEMS) + 1:
+            raise ValueError("separation reverse-control capacity is exhausted")
+        self._output_control_counts[identifier] = pending + 1
+        try:
+            self.tasks.start_soon(
+                self._send_output_control, identifier, entry, packets, acknowledged_stem
+            )
+        except BaseException:
+            self._release_output_control(identifier)
+            raise
+
+    def _release_output_control(self, identifier: CommandId) -> None:
+        pending = self._output_control_counts[identifier]
+        if pending == 1:
+            self._output_control_counts.pop(identifier)
+        else:
+            self._output_control_counts[identifier] = pending - 1
+
+    async def _send_output_control(
+        self,
+        identifier: CommandId,
+        entry: _Active,
+        packets: tuple[OutputMediaPacket, ...],
+        acknowledged_stem: SeparationStemName | None,
+    ) -> None:
+        try:
+            for packet in packets:
                 with anyio.fail_after(5):
-                    await self.send_output(completion.accepted())
+                    await self.send_output(packet)
+            if acknowledged_stem is not None:
+                async with self.lock:
+                    if self.active.get(identifier) is entry:
+                        entry.acknowledging.discard(acknowledged_stem)
+                        entry.acknowledged.add(acknowledged_stem)
+                        await self._settle_receipts(identifier, entry)
+        except (
+            anyio.BrokenResourceError,
+            anyio.ClosedResourceError,
+            OSError,
+            ValueError,
+            SeparationJobStorageError,
+            TimeoutError,
+        ) as error:
+            logger.opt(exception=error).warning("Separation reverse control failed")
+            if acknowledged_stem is not None:
+                async with self.lock:
+                    if self.active.get(identifier) is entry:
+                        await self._fail_locked(
+                            identifier, "Separation result acknowledgement failed.", cancel=False
+                        )
+        finally:
+            with anyio.CancelScope(shield=True):
+                async with self.lock:
+                    if acknowledged_stem is not None:
+                        entry.acknowledging.discard(acknowledged_stem)
+                    self._release_output_control(identifier)
+
+    async def _settle_receipts(self, identifier: CommandId, entry: _Active) -> None:
+        if entry.acknowledging or entry.acknowledged != set(SEPARATION_STEMS):
+            return
         settled = await separation_file_effect(lambda: self.jobs.settle(identifier))
         if settled is not None and settled.status == "completed":
             self.active.pop(identifier, None)
@@ -883,7 +975,7 @@ class SeparationAPI:
             return
         if name in entry.receipts:
             if packet.kind == "completed" and packet == entry.completed.get(name):
-                await self._record_receipts(identifier, entry)
+                self._acknowledge_stem(identifier, entry, name, packet)
             return
         if packet.kind != "opened" and name not in entry.opened:
             early = entry.early.setdefault(name, [])
@@ -978,24 +1070,23 @@ class SeparationAPI:
                     )
             self.close_queue(identifier)
             if entry.producer is not None:
-                for name in SEPARATION_STEMS:
-                    with contextlib.suppress(
-                        anyio.BrokenResourceError,
-                        anyio.ClosedResourceError,
-                        TimeoutError,
-                    ):
-                        with anyio.fail_after(5):
-                            await self.send_output(
-                                OutputMediaPacket(
-                                    source_node=self.node_id,
-                                    target_node=entry.producer,
-                                    command_id=identifier,
-                                    model=job.model,
-                                    purpose=separation_purpose(name),
-                                    kind="cancelled",
-                                    sequence=0,
-                                )
-                            )
+                self._start_output_control(
+                    identifier,
+                    entry,
+                    tuple(
+                        OutputMediaPacket(
+                            source_node=self.node_id,
+                            target_node=entry.producer,
+                            command_id=identifier,
+                            model=job.model,
+                            purpose=separation_purpose(name),
+                            kind="cancelled",
+                            sequence=0,
+                        )
+                        for name in SEPARATION_STEMS
+                    ),
+                    None,
+                )
 
     async def fail(
         self, identifier: CommandId, message: str, *, cancel: bool = False

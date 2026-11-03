@@ -14,6 +14,10 @@ This project records release notes here and mirrors public-facing notes in
   subscriber predicates preserve zero-buffer bounds and existing video/music
   admission.
 
+- Keep separation acknowledgements and cancellation terminals independent of
+  the media consumer across concurrent jobs, with bounded control ownership
+  and admission held until senders drain.
+
 ### Offline model availability
 
 - Recognize complete installed artifact bundles without a safetensors shard

@@ -280,10 +280,9 @@ class SeparationOutputProducer:
             with anyio.fail_after(self.timeout_seconds):
                 for stem in entry.output.stems:
                     await self._stem(entry, stem)
-                    # The accepting API verifies and ACKs while consuming this
-                    # same rendezvous topic. Sending the next role before that
-                    # reverse terminal can occupy the router with a forward
-                    # frame the API cannot receive until its ACK is admitted.
+                    # Keep only one unacknowledged role per command. The API
+                    # drains reverse control independently across commands so
+                    # another producer's forward frame cannot block this ACK.
                     purpose = separation_purpose(stem.name)
                     while purpose not in entry.accepted:
                         if entry.aborted:

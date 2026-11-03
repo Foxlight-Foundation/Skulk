@@ -175,7 +175,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   four result sets are retained through sender drain, exact reverse ACKs and
   cleanup success. Total delivery/ACK deadline is five minutes; sends are capped
   at five seconds. Original slots remain reserved through result settlement.
-  A role's ACK precedes emission of the next role. Typed subscriber predicates
+  A role's ACK precedes emission of the next role. API reverse control drains
+  independently of the media consumer: four jobs, at most four role ACKs plus
+  one cancellation drain per job, with admission retained until sender join
+  and completion gated on admitted role ACKs. Typed subscriber predicates
   admit separation forward packets only to APIs and reverse control only to Workers before
   their rendezvous queues, avoiding same-node ACK reentrancy without buffering
   additional audio.
