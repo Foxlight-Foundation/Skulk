@@ -6,6 +6,7 @@ selected, stay on libp2p gossipsub. These tests pin that decision without
 opening a network session.
 """
 
+from functools import partial
 from typing import Literal, cast
 
 import anyio
@@ -44,6 +45,47 @@ def _router(*, zenoh: bool) -> Router:
     fake_zenoh = cast(ZenohHandle, object()) if zenoh else None
     # node_id is required when zenoh is enabled (the data/<node_id> sub key).
     return Router(handle=fake_net, zenoh=fake_zenoh, node_id="test-node")
+
+
+async def test_separation_requests_retire_without_a_later_verification_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelled source handshakes cannot consume the shared vision stream cap."""
+    router = _router(zenoh=True)
+    published: list[VisionMediaPacket] = []
+
+    async def publish(topic: str, owner: str, data: bytes) -> None:
+        assert topic == VISION_MEDIA.topic and owner == "api-node"
+        published.append(VISION_MEDIA.deserialize(data))
+
+    monkeypatch.setattr(router, "_publish_routed_data_packet", publish)
+    outbound = router._zenoh_vision_out_send  # pyright: ignore[reportPrivateUsage]
+    assert outbound is not None
+    assert VISION_MEDIA.is_terminal is not None and VISION_MEDIA.stream_key is not None
+    async with anyio.create_task_group() as group:
+        group.start_soon(partial(
+            router._zenoh_networking_publish, vision_ingress=True  # pyright: ignore[reportPrivateUsage]
+        ))
+        for index in range(32):
+            request = VisionMediaPacket(
+                source_node=NodeId("worker-node"), target_node=NodeId("api-node"),
+                command_id=CommandId(f"cancelled-{index}"), model=ModelId("org/separator"),
+                payload="separation_source", sequence=0, kind="requested",
+                total_chunks=1, image_count=1,
+            )
+            await outbound.send(OutboundPacket(
+                topic=VISION_MEDIA.topic, routing_key=str(request.target_node),
+                stream_key=VISION_MEDIA.stream_key(request),
+                is_terminal=VISION_MEDIA.is_terminal(request), data=VISION_MEDIA.serialize(request),
+            ))
+            with anyio.fail_after(3):
+                while len(published) <= index or router.vision_media_egress_diagnostics().active_stream_queues:
+                    await anyio.sleep(0)
+        diagnostics = router.vision_media_egress_diagnostics()
+        assert len(published) == 32 and all(item.kind == "requested" for item in published)
+        assert diagnostics.active_stream_queues == 0
+        assert diagnostics.remote_frames_dropped == 0 and diagnostics.idle_stream_reclaims == 0
+        group.cancel_scope.cancel()
 
 
 async def test_connected_peer_count_none_without_zenoh() -> None:

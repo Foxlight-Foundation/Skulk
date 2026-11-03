@@ -3546,6 +3546,11 @@ class Worker:
                         if (
                             isinstance(task, AudioSeparation)
                             and task.task_id not in known
+                            # Snapshots are cluster-wide. A new follower owns no
+                            # input records for healthy work placed elsewhere.
+                            and local_separation_input_task(
+                                self.state, self.node_id, task.command_id
+                            ) == task
                             and task.task_status
                             in (TaskStatus.Pending, TaskStatus.Running)
                         ):

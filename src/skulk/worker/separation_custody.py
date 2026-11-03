@@ -131,6 +131,21 @@ class SeparationSourceCustody:
             self._records[command] = record
             raise
 
+    def reclaim_native_results(self, command: CommandId) -> bool:
+        """Reclaim this command's result before forgetting its durable source intent.
+
+        The caller must prove native read/output drain. A result can exist before
+        the supervisor observes its completion, so producer registration is not
+        sufficient evidence that no native files remain. False retains custody.
+        """
+        record = self._records.get(command)
+        if record is None:
+            return True
+        directory = separation_result_directory(
+            self.readers_root / record.reader_key, command
+        )
+        return reclaim_result_directory(directory)
+
     def recover(self, active: Collection[CommandId] = ()) -> int:
         """Reclaim stale owned copies only after an actual exclusive reader fence.
 
@@ -149,10 +164,7 @@ class SeparationSourceCustody:
             except BlockingIOError:
                 continue
             try:
-                result_directory = separation_result_directory(
-                    self.readers_root / record.reader_key, command
-                )
-                if not reclaim_result_directory(result_directory):
+                if not self.reclaim_native_results(command):
                     # Keep the only durable source/job intent until the exact
                     # result inode and every remaining file can be reclaimed.
                     continue

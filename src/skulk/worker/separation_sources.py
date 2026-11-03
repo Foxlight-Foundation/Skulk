@@ -230,6 +230,11 @@ class SeparationSourceStore:
             self._check(command_id)
             if command_id not in self._tasks:
                 return
+            if (
+                self._custody is not None
+                and not self._custody.reclaim_native_results(command_id)
+            ):
+                raise OSError("native separation result still needs owned cleanup")
             self._store.delete(command_id)
             # The shared assembler intentionally tolerates deletion failures.
             # This source owner must retain its slot/fence until bytes are gone;

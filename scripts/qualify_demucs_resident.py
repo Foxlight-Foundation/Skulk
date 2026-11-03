@@ -172,7 +172,21 @@ def owner_death(arguments: Arguments, root: Path) -> None:
                         "native watchdog did not stop after owner death"
                     )
                 time.sleep(0.05)
-            RuntimeLock(receipt.parent / "model", name="service.lock").close()
+            # A leader's zombie observation is not proof that the kernel has
+            # released every inherited descriptor. Require the actual fence
+            # under the same watchdog deadline instead of racing that release.
+            while True:
+                try:
+                    released = RuntimeLock(receipt.parent / "model", name="service.lock")
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise AssertionError(
+                            "native watchdog exited without releasing its inherited fence"
+                        ) from None
+                    time.sleep(0.05)
+                else:
+                    released.close()
+                    break
         finally:
             if native is not None and native.is_running():
                 with suppress(psutil.NoSuchProcess):

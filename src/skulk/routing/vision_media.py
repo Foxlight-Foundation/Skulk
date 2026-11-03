@@ -135,7 +135,10 @@ class VisionMediaPacket(CamelCaseModel):
     def is_terminal(self) -> bool:
         """Whether this packet closes its media stream."""
 
-        return self.kind not in ("requested", "opened", "chunk")
+        # A request is one standalone reverse notification, not an upload.
+        # Retaining its queue until a later verification ACK leaks capacity
+        # whenever cancellation prevents that ACK from being produced.
+        return self.kind not in ("opened", "chunk")
 
     def accepted(self) -> "VisionMediaPacket":
         """Build a terminal verification acknowledgement for the source API."""

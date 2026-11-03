@@ -19,6 +19,8 @@ from skulk.shared.types.events import (
     DemucsPreparationRequested,
     Event,
     IndexedEvent,
+    StateSnapshotHydrated,
+    TaskFailed,
 )
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.tasks import TaskStatus
@@ -27,11 +29,13 @@ from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import RunnerReady
 from skulk.utils.channels import Receiver, channel
 from skulk.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
-from skulk.utils.runtime_files import RuntimeLock
+from skulk.utils.runtime_files import RuntimeLock, write_private
 from skulk.worker import main as worker_module
 from skulk.worker import plan as worker_plan
 from skulk.worker.demucs_preparation import DemucsPreparationController
 from skulk.worker.main import Worker
+from skulk.worker.runner.demucs.model import separation_result_directory
+from skulk.worker.runner.demucs.result_custody import remember_result_directory
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 from skulk.worker.tests.test_demucs_preparation import Manager
 from skulk.worker.tests.test_separation_input import fixture as input_fixture
@@ -204,9 +208,11 @@ async def test_periodic_resources_use_same_worker_owner_for_readiness_and_withdr
         await worker._demucs_preparation.close()
 
 
+@pytest.mark.parametrize("foreign_result", [False, True])
 async def test_actual_worker_source_handshake_gates_planning_and_retains_live_reader(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    foreign_result: bool,
 ) -> None:
     """Real Worker ingress/custody cannot execute unverified or reclaim live input."""
     worker, _, _, _ = await fixture(tmp_path, monkeypatch)
@@ -280,6 +286,15 @@ async def test_actual_worker_source_handshake_gates_planning_and_retains_live_re
         # terminal replicated State still does not authorize deleting its WAV.
         root = worker._separation_readers[current.task.command_id][1]
         reader = RuntimeLock(root, name="attachment.lock")
+        # Simulate a native crash after output creation but before any completion
+        # reaches the producer. The durable source intent is the only owner left.
+        result = separation_result_directory(root, current.task.command_id)
+        result.parent.mkdir(mode=0o700, exist_ok=True)
+        result.mkdir(mode=0o700)
+        remember_result_directory(result)
+        write_private(result / "drums.wav", b"partial native output")
+        if foreign_result:
+            write_private(result / "keep", b"unknown file")
         worker.runners.clear()
         cancelled = current.task.model_copy(
             update={"task_status": TaskStatus.Cancelled}
@@ -288,10 +303,18 @@ async def test_actual_worker_source_handshake_gates_planning_and_retains_live_re
             update={"tasks": {cancelled.task_id: cancelled}}
         )
         await worker._reconcile_separation_media()
-        assert original.exists() and len(receiver.tracked_tasks()) == 1
+        assert original.exists() and result.exists() and len(receiver.tracked_tasks()) == 1
         reader.close()
+        if foreign_result:
+            with pytest.raises(OSError, match="owned cleanup"):
+                await worker._reconcile_separation_media()
+            assert original.exists() and result.exists()
+            assert len(receiver.tracked_tasks()) == 1
+            (result / "keep").unlink()
         await worker._reconcile_separation_media()
-        assert not original.exists() and receiver.tracked_tasks() == ()
+        assert not original.exists() and not result.exists()
+        assert not result.with_name("." + result.name + ".owner.json").exists()
+        assert receiver.tracked_tasks() == ()
         assert not worker._separation_readers
     finally:
         if reader is not None:
@@ -305,6 +328,51 @@ async def test_actual_worker_source_handshake_gates_planning_and_retains_live_re
         assert supervisor._realtime_audio_sender is not None
         supervisor._realtime_audio_sender.close()
         supervisor.runner_process.close()
+        await worker._demucs_preparation.close()
+
+
+@pytest.mark.parametrize(("local", "known", "fails"), [
+    (True, False, True), (False, False, False), (True, True, False),
+])
+async def test_actual_snapshot_bootstrap_fails_only_unrecovered_local_separations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    local: bool, known: bool, fails: bool,
+) -> None:
+    """Follower bootstrap cannot cancel a healthy remote task or replay a live owner."""
+    worker, _, outgoing, _ = await fixture(tmp_path, monkeypatch)
+    current, receiver = input_fixture()
+    worker.node_id = NodeId("node-0" if local else "unrelated-follower")
+    indexed, events = channel[IndexedEvent]()
+    worker.event_receiver = events
+    def preserve_config(*_arguments: object) -> None:
+        """This event test never mutates the operator's model-trust configuration."""
+    monkeypatch.setattr(worker_module, "persist_model_trust_config", preserve_config)
+    if known:
+        assert await receiver.begin(current.task.command_id)
+        worker._separation_inputs = receiver
+    try:
+        async with worker._tg as group:
+            group.start_soon(worker._event_applier)
+            snapshot = current.snapshot.model_copy(update={"last_event_applied_idx": 0})
+            await indexed.send(IndexedEvent(
+                idx=0, event=StateSnapshotHydrated(state=snapshot)
+            ))
+            with anyio.fail_after(2):
+                while current.task.task_id not in worker.state.tasks:
+                    await anyio.sleep(0)
+            if fails:
+                with anyio.fail_after(2):
+                    failure = await outgoing.receive()
+                assert isinstance(failure, TaskFailed) and failure.task_id == current.task.task_id
+            else:
+                with anyio.move_on_after(0.1) as observation:
+                    await outgoing.receive()
+                assert observation.cancel_called
+            group.cancel_scope.cancel()
+    finally:
+        indexed.close()
+        if known:
+            await receiver.close_after_drain()
         await worker._demucs_preparation.close()
 
 

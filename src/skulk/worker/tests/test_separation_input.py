@@ -236,7 +236,7 @@ async def test_worker_requests_only_its_actual_task_then_acknowledges_verified_s
     assert not await receiver.receive(packets(current.task)[0])
     assert current.copies.tasks == {} and current.sent == []
     assert await receiver.begin(current.task.command_id)
-    assert current.sent[0].kind == "requested" and not current.sent[0].is_terminal
+    assert current.sent[0].kind == "requested" and current.sent[0].is_terminal
     assert current.sent[0].source_node == NodeId("node-0")
     assert current.sent[0].target_node == current.task.owner_node
     assert (
