@@ -128,7 +128,7 @@ export interface ModelInfo {
     usage_url: string | null;
     expires_at: number;
     /** Provider-declared features narrowed by this integration's owner policy. */
-    features?: Array<'image_input' | 'function_tools' | 'reasoning_toggle'>;
+    features?: Array<'image_input' | 'function_tools' | 'reasoning_toggle' | 'text_file_input' | 'pdf_input'>;
   } | null;
   name?: string;
   context_length?: number;

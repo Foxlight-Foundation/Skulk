@@ -3655,6 +3655,11 @@ their supported scope. See the API guide for exact request and lifecycle fields.
   bounded UTF-8 request bytes through the existing bidirectional provider media
   path. It preserves model IDs and independently authorized provider admission;
   native text/vision adapters refuse document parts before normalization.
+  V2 model features separately declare text-file and PDF input. The dashboard
+  follows those serving-path claims; submitted documents live in browser-local
+  IndexedDB with handles in persisted conversation metadata. Request-scoped
+  hydration preserves original bytes across turns without putting files into
+  localStorage, replicated State or logs. Missing/unsupported files stop sends.
   Up to eight cached catalogs are read concurrently under five-second individual
   and six-second aggregate deadlines, including managed-owner validation overhead
   and retaining completed results. Overlapping callers share that read, including

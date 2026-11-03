@@ -25,6 +25,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   input inside the whole-call deadline, owning cleanup on upload failure.
   The generic request maximum is 16 MiB; providers may advertise a smaller bound.
   Native text/vision normalization rejects `ChatCompletionMessageFile` inputs.
+  V2 `text_file_input`/`pdf_input` model features gate Chat document selection.
+  `dashboard-react/src/store/chatDocuments.ts` owns browser-local IndexedDB
+  document storage, request hydration, reference deletion and aged orphan cleanup;
+  localStorage retains conversation handles rather than document bytes. Missing
+  or unsupported files fail visibly before request submission.
   Up to eight cached catalogs are read concurrently under five-second individual
   and six-second aggregate deadlines, including managed-owner validation overhead
   and retaining completed results. Overlapping callers share that read, including

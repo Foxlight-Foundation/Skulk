@@ -16,6 +16,10 @@ Version 0.2 signs bounded request-body references and transfers the bytes throug
 existing bidirectional provider media. Upload failure/disconnect owns cleanup
 before response iteration. Keep attachment interpretation in the capability;
 native text/vision execution refuses document parts before normalization.
+V2 model features distinguish text-file and PDF support. Dashboard documents are
+stored in browser-local IndexedDB (`store/chatDocuments.ts`) and hydrated into
+one request; localStorage holds conversation references, not document bodies.
+Missing files and unsupported destinations must never be silently omitted.
 
 Native installed preservation lives in `store/preservation_export.py`; complete
 card-selected mappings live in `store/preservation_closure.py`. Offline recovery

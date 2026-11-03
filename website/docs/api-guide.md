@@ -6505,6 +6505,22 @@ The dashboard withdraws cached capability choices at their advertised expiry
 even when catalog polling fails. Its native artifact download picker excludes
 these delegated choices; they remain available in the chat selector.
 
+The `inference_capability.features` list describes the enabled serving path.
+On the 0.2 contract, `text_file_input` permits inline UTF-8 `.txt` files and
+`pdf_input` permits inline PDFs. Missing features do not imply support; the
+legacy 0.1 contract cannot advertise either document feature. Provider policy
+and model validation still apply independently at admission.
+
+Chat's attachment picker follows these features. Documents are limited to eight
+per request including history, at most 8 MiB each, within the whole encoded
+request bound. Submitted document bytes are kept in browser-local IndexedDB;
+conversation metadata stores handles rather than embedding them in localStorage.
+Follow-up turns hydrate the original bytes. Missing files, storage failures,
+unsupported destinations and oversized histories stop submission with a visible
+error. Deleting messages/conversations removes their document references and
+local document data; old crash-abandoned submissions are cleaned after a day.
+This browser store is not an API upload service or a shared fabric file store.
+
 **POST** `/v1/chat/completions` accepts these exact IDs with ordinary `messages`,
 `stream` and `stream_options.include_usage`. Provider-supported request controls
 and full conversation history pass to the capability for independent validation.
