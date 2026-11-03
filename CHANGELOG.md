@@ -7,6 +7,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Offline model availability
+
+- Recognize complete installed artifact bundles without a safetensors shard
+  index, GGUF file or cached Hub listing, including model aliases that select
+  artifacts from a differently named repository. Preserve revision and selected
+  file checks; incomplete bundle members remain unavailable offline.
+
 ### Model preservation
 
 - Describe installed model inputs, outputs and reasoning from attributed registry

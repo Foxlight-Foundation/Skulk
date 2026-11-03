@@ -1301,7 +1301,8 @@ async def _build_file_list_from_local_directory(
 ) -> list[FileListEntry] | None:
     """Build a file list from locally existing model files.
 
-    Safetensors repos are resolved from their ``*.safetensors.index.json``. GGUF
+    Installed bundles are resolved from their verified manifest. Safetensors
+    repos are otherwise resolved from their ``*.safetensors.index.json``. GGUF
     repos have no index, so when the scanner finds none we fall back to listing
     the files on disk directly, which lets a pre-staged GGUF serve under
     ``--offline`` (no cached HF file-list), where the remote fetch would
@@ -1311,6 +1312,16 @@ async def _build_file_list_from_local_directory(
     if not await aios.path.exists(model_dir):
         return None
 
+    # A tensor bundle need not carry an MLX shard index or a GGUF. Use the
+    # same complete-manifest rule as path resolution before legacy layout
+    # probes, so a missing bundle member cannot hide behind an old index.
+    bundle_complete = await asyncio.to_thread(_installed_bundle_verdict, model_dir)
+    if bundle_complete is not None:
+        return (
+            await asyncio.to_thread(_list_local_files, model_dir, recursive)
+            if bundle_complete
+            else None
+        )
     file_list = await asyncio.to_thread(_scan_model_directory, model_dir, recursive)
     if file_list:
         return file_list
@@ -1354,7 +1365,16 @@ async def fetch_file_list_with_cache(
     recursive: bool = False,
     skip_internet: bool = False,
     on_connection_lost: Callable[[], None] = lambda: None,
+    *,
+    local_model_id: ModelId | None = None,
 ) -> list[FileListEntry]:
+    """Read an upstream listing, or a complete local inventory when unreachable.
+
+    ``model_id`` and ``revision`` identify the upstream listing/cache. An
+    explicit ``local_model_id`` identifies the installed alias directory when
+    a card selects artifacts from a differently named upstream repository.
+    Neither local fallback downloads files or replaces source/card validation.
+    """
     target_dir = (await ensure_models_dir()) / "caches" / model_id.normalize()
     await aios.makedirs(target_dir, exist_ok=True)
     cache_file = target_dir / f"{model_id.normalize()}--{revision}--file_list.json"
@@ -1371,7 +1391,7 @@ async def fetch_file_list_with_cache(
             async with aiofiles.open(cache_file, "r") as f:
                 return TypeAdapter(list[FileListEntry]).validate_json(await f.read())
         local_file_list = await _build_file_list_from_local_directory(
-            model_id, recursive
+            local_model_id or model_id, recursive
         )
         if local_file_list is not None:
             logger.warning(
@@ -1407,7 +1427,7 @@ async def fetch_file_list_with_cache(
             async with aiofiles.open(cache_file, "r") as f:
                 return TypeAdapter(list[FileListEntry]).validate_json(await f.read())
         local_file_list = await _build_file_list_from_local_directory(
-            model_id, recursive
+            local_model_id or model_id, recursive
         )
         if local_file_list is not None:
             logger.warning(
@@ -2040,6 +2060,7 @@ async def download_shard(
             recursive=True,
             skip_internet=skip_internet,
             on_connection_lost=on_connection_lost,
+            local_model_id=shard.model_card.model_id,
         )
     except FileNotFoundError:
         not_started_progress = RepoDownloadProgress(
