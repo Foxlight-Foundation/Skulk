@@ -348,6 +348,44 @@ async def test_vision_media_acknowledges_authoritative_task_owner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_source_role_never_enters_existing_vision_assembly() -> None:
+    """Raw native originals stay isolated until their own receiver is registered."""
+    worker, packet_sender, failures = _worker_with_vision_transport()
+    opened = VisionMediaPacket(
+        source_node=NodeId("api-node"),
+        target_node=NodeId("worker-node"),
+        command_id=CommandId("native-original"),
+        model=ModelId("org/separator"),
+        payload="separation_source",
+        kind="opened",
+        sequence=0,
+        image_count=1,
+        total_chunks=1,
+    )
+    chunk = VisionMediaPacket(
+        source_node=opened.source_node,
+        target_node=opened.target_node,
+        command_id=opened.command_id,
+        model=opened.model,
+        payload="separation_source",
+        kind="chunk",
+        sequence=1,
+        image_index=0,
+        total_chunks=1,
+        data=b"raw WAV bytes never become base64 images",
+    )
+    async with anyio.create_task_group() as group:
+        group.start_soon(worker._vision_media_packet_ingress)  # pyright: ignore[reportPrivateUsage]
+        await packet_sender.send(opened)
+        await packet_sender.send(chunk)
+        packet_sender.close()
+    assert worker.collect_vision_media_ingress_diagnostics().active_streams == 0
+    assert worker.input_chunk_buffer == {}
+    with pytest.raises(anyio.WouldBlock):
+        failures.receive_nowait()
+
+
+@pytest.mark.asyncio
 async def test_vision_media_accepts_sparse_new_index_with_cached_image() -> None:
     worker, packet_sender, acknowledgement_receiver = (
         _worker_with_vision_transport()

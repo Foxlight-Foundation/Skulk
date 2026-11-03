@@ -29,6 +29,7 @@ class VisionMediaPacket(CamelCaseModel):
         ge=0, description="Lifecycle sequence: open zero, chunks one-based."
     )
     kind: Literal[
+        "requested",
         "opened",
         "chunk",
         "completed",
@@ -60,18 +61,21 @@ class VisionMediaPacket(CamelCaseModel):
         max_length=1024,
         description="Bounded failure detail carried only by transport failures.",
     )
-    payload: Literal["base64_image", "reference_media"] = Field(
+    payload: Literal["base64_image", "reference_media", "separation_source"] = Field(
         default="base64_image",
         description=(
             "How chunk bytes are encoded: ASCII base64 image text for vision "
             "requests, or raw attachment bytes for video reference media, where "
-            "image_index is the attachment slot and image_count the slot count."
+            "image_index is the attachment slot and image_count the slot count. "
+            "separation_source carries one raw original WAV for an admitted task."
         ),
     )
 
     @model_validator(mode="after")
     def _validate_payload(self) -> "VisionMediaPacket":
-        if self.kind == "opened":
+        if self.kind == "requested" and self.payload != "separation_source":
+            raise ValueError("only separation source supports a worker input request")
+        if self.kind in ("opened", "requested"):
             if (
                 self.sequence != 0
                 or self.total_chunks is None
@@ -110,9 +114,14 @@ class VisionMediaPacket(CamelCaseModel):
                 raise ValueError(
                     "vision media completion sequence must follow all chunks"
                 )
-        elif self.kind not in ("opened", "chunk") and any(
+        elif self.kind not in ("opened", "requested", "chunk") and any(
             value is not None
-            for value in (self.image_index, self.total_chunks, self.image_count, self.sha256)
+            for value in (
+                self.image_index,
+                self.total_chunks,
+                self.image_count,
+                self.sha256,
+            )
         ):
             raise ValueError("vision media terminal has no media metadata")
 
@@ -126,6 +135,9 @@ class VisionMediaPacket(CamelCaseModel):
     def is_terminal(self) -> bool:
         """Whether this packet closes its media stream."""
 
+        # A request is one standalone reverse notification, not an upload.
+        # Retaining its queue until a later verification ACK leaks capacity
+        # whenever cancellation prevents that ACK from being produced.
         return self.kind not in ("opened", "chunk")
 
     def accepted(self) -> "VisionMediaPacket":

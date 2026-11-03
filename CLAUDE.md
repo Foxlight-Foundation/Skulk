@@ -530,7 +530,15 @@ Committed-but-incomplete sets retain their active-job slot until every role
 commits or the set is deleted. Partial sets never become content; cleanup removes
 only API copies.
 Existing video/music handlers ignore the four new separation output purposes.
-HTTP and addressed worker execution remain unwired.
+The initiative's `api/separation_api.py` now connects the six authenticated
+create/list/retrieve/content/cancel/delete routes under `/v1/audio/separations`
+to normal command/DATA routing and addressed source/results. Use the existing
+strict `api/types/separation.py` projections; no duplicate public job schema.
+Original upload: four handlers, closed metadata+file, 64 MiB/120 seconds,
+three-minute transfer deadline and spool cleanup on cancellation. Content:
+complete four-file set only, 2 GiB/64 records, 24-hour retention and eight
+leased downloads that survive concurrent deletion. Interrupted jobs fail on
+reopen; no automatic replay. Normal installed acceptance remains required.
 
 The separation foundation adds frozen `AudioSeparation` command/task variants
 and `SeparationChunk` metadata. The master admits one job per actually ready,
@@ -566,6 +574,41 @@ the four-copy bound after restart; preserve them until startup proves ownership
 and reader drain for reconciliation. Overfull roots refuse boundedly. Receivers still must correlate live
 State/owner/placement. Drain resident readers before closing input ownership.
 No event/resource/bootstrap/transport/HTTP activation is registered here.
+
+`worker/separation_input.py` owns the isolated original-input handshake on
+`VISION_MEDIA`'s explicit `separation_source` role. Only this role supports the
+new `requested` frame. The worker resolves its actual complete local task before
+requesting a raw WAV from the owning API; packet metadata cannot admit a task.
+Independent verification plus fresh live-task correlation precedes ACK and the
+planning readiness gate. Four slots,180-second transfer budget,two-second request
+retry until open and bounded sends apply. Coroutine cancellation joins file work.
+Native readers must drain before source release; late duplicate/cancel frames
+cannot delete a source in use. The component registers no receiver/runner/HTTP
+activation; existing vision/reference handling explicitly ignores the raw role.
+Upgrade participating media readers first. Bytes and paths never enter State.
+
+`worker/runner/demucs/runner.py` adapts an injected, already validated resident
+model to the shared bounded dispatcher: one active separation, four queued,
+explicit load/warmup before Ready, and metadata-only complete output chunks.
+Cancellation drains native work; reload/liveness failures withdraw readiness,
+including when the final queued task is cancelled. A verified completed render
+is not retroactively failed if the next model lifetime cannot reload. Shutdown
+cancels reload as well as inference. Bootstrap and addressed output ownership
+remain separate activation work; constructing this adapter starts no model.
+
+The initiative Worker lazily admits source custody from actual local tasks and
+routes raw source packets to the acknowledged-input planner gate. Background
+exact-runtime revalidation supplies a private bootstrap context; weights resolve
+only at LoadModel. Recovered unowned native jobs fail without automatic replay.
+`worker/separation_output.py` retains four result sets through bounded verification,
+OUTPUT_MEDIA delivery, exact reverse ACKs and joined sender/file cleanup. Sources
+remain reserved through result settlement and actual reader drain; shutdown
+releases service ownership without deleting potentially live originals. HTTP
+receiving routes use the same private owners. `result_custody.py` records an
+output directory inode before sending native work; source crash recovery waits
+for the inherited reader fence, reclaims only that exact result and known files,
+and preserves foreign/changed content and its quota. Native subprocess creation
+sets umask 0077 without changing Core or immutable package bytes.
 
 `worker/runner/demucs/process.py` supervises `packaging/skulk-demucs/` under an
 isolated interpreter, with complete file/digest checks, bounded progress,

@@ -2,7 +2,7 @@ import os
 import shutil
 import sys
 import tomllib
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
@@ -723,6 +723,7 @@ class InfoGatherer:
     thunderbolt_bridge_poll_interval: float | None = 10 if IS_DARWIN else None
     static_info_poll_interval: float | None = 60
     node_resources_poll_interval: float | None = 60
+    node_resources_provider: Callable[[], Awaitable[NodeResources]] | None = None
     rdma_ctl_poll_interval: float | None = 10 if IS_DARWIN else None
     disk_poll_interval: float | None = 30
     gpu_linux_poll_interval: float | None = 2 if IS_LINUX else None
@@ -860,7 +861,9 @@ class InfoGatherer:
                         else None
                     )
                     await self.info_sender.send(
-                        await NodeResources.gather(
+                        await self.node_resources_provider()
+                        if self.node_resources_provider is not None
+                        else await NodeResources.gather(
                             api_available=self.api_available,
                             data_transport=self.data_transport,
                             zenoh_connected_peers=zenoh_connected_peers,

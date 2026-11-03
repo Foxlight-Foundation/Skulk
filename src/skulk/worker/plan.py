@@ -88,6 +88,8 @@ def plan(
     on_demand_backends: Set[str] = frozenset(),
     engine_install_requested: Set[InstanceId] = frozenset(),
     engine_install_ready: Set[InstanceId] = frozenset(),
+    runner_creation_pending: Set[InstanceId] = frozenset(),
+    separation_media_ready: Set[CommandId] = frozenset(),
 ) -> Task | None:
     """Select the next local lifecycle task from current runners and cluster state.
 
@@ -104,11 +106,17 @@ def plan(
         # handshakes; shutting them down is the safest recovery path.
         _kill_runner(runners, all_runners, instances)
         or _cancel_tasks(runners, tasks)
-        or _create_runner(node_id, runners, instances)
+        or _create_runner(node_id, runners, instances, runner_creation_pending)
         or _model_needs_download(node_id, runners, global_download_status)
         or _engine_needs_install(runners, on_demand_backends, engine_install_requested)
         or _init_distributed_backend(runners, all_runners)
-        or _load_model(runners, all_runners, global_download_status, on_demand_backends, engine_install_ready)
+        or _load_model(
+            runners,
+            all_runners,
+            global_download_status,
+            on_demand_backends,
+            engine_install_ready,
+        )
         or _ready_to_warmup(runners, all_runners)
         or _pending_tasks(
             runners,
@@ -117,6 +125,7 @@ def plan(
             input_chunk_buffer or {},
             speech_media_ready or set(),
             reference_media_ready or set(),
+            separation_media_ready,
         )
     )
 
@@ -179,8 +188,11 @@ def _create_runner(
     node_id: NodeId,
     runners: Mapping[RunnerId, RunnerSupervisor],
     instances: Mapping[InstanceId, Instance],
+    pending: Set[InstanceId] = frozenset(),
 ) -> CreateRunner | None:
     for instance in instances.values():
+        if instance.instance_id in pending:
+            continue
         runner_id = instance.shard_assignments.node_to_runner.get(node_id, None)
         if runner_id is None:
             continue
@@ -516,6 +528,7 @@ def _pending_tasks(
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None,
     speech_media_ready: Set[CommandId],
     reference_media_ready: Set[CommandId],
+    separation_media_ready: Set[CommandId] = frozenset(),
 ) -> Task | None:
     for task in tasks.values():
         # Forward inference tasks to runners
@@ -569,6 +582,12 @@ def _pending_tasks(
                 and task.task_params.total_input_chunks > 0
             )
         ) and task.command_id not in speech_media_ready:
+            continue
+
+        if (
+            isinstance(task, AudioSeparation)
+            and task.command_id not in separation_media_ready
+        ):
             continue
 
         for runner in runners.values():

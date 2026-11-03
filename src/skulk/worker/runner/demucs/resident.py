@@ -37,6 +37,10 @@ from skulk.worker.runner.demucs.process import (
     separation_environment,
     verify_native_result,
 )
+from skulk.worker.runner.demucs.result_custody import (
+    discard_result_receipt,
+    remember_result_directory,
+)
 
 _FRAME = TypeAdapter[NativeSeparationFrame](NativeSeparationFrame)
 _RECORD_BYTES = 16 * 1024
@@ -61,8 +65,10 @@ def spawn_resident(
     configuration: Path,
     descriptor: int,
     environment: dict[str, str],
+    *,
+    source_fence: int | None = None,
 ) -> subprocess.Popen[bytes]:
-    """Launch the fixed installed resident CLI, never a caller-supplied command."""
+    """Launch the fixed CLI, retaining lifetime and optional source-reader fences."""
     return subprocess.Popen(
         [
             str(interpreter),
@@ -80,7 +86,11 @@ def spawn_resident(
         stderr=subprocess.PIPE,
         env=environment,
         start_new_session=True,
-        pass_fds=(descriptor,),
+        # The sealed native package creates its own WAV/result files. Restrict
+        # their modes at process creation without changing package bytes or
+        # mutating the multithreaded Core process's global umask.
+        umask=0o077,
+        pass_fds=(descriptor,) if source_fence is None else (descriptor, source_fence),
     )
 
 
@@ -347,7 +357,9 @@ class ResidentSeparator:
                 raise ResidentSeparationError("native reader cleanup remains pending")
         self._threads.clear()
         if self._pending_output is not None:
-            shutil.rmtree(self._pending_output)
+            with suppress(FileNotFoundError):
+                shutil.rmtree(self._pending_output)
+            discard_result_receipt(self._pending_output)
             self._pending_output = None
         if self._ownership is not None:
             self._ownership.close()
@@ -424,6 +436,7 @@ class ResidentSeparator:
             requested.mkdir(mode=0o700, exist_ok=False)
             directory = requested
             self._pending_output = directory
+            remember_result_directory(directory)
             self._sequence += 1
             request = NativeSeparationServeRequest(
                 request_id=uuid4().hex, sequence=self._sequence, job=job

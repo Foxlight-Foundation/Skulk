@@ -96,6 +96,7 @@ from skulk.shared.types.commands import (
     MusicGeneration,
     PlaceInstance,
     PrepareAudioCpp,
+    PrepareDemucs,
     ProposeStewardAction,
     RealtimeAudioTranscription,
     RefuseInstancePlacement,
@@ -118,6 +119,8 @@ from skulk.shared.types.events import (
     AudioCppPreparationRequested,
     CustomModelCardAdded,
     CustomModelCardDeleted,
+    DemucsPreparationCompleted,
+    DemucsPreparationRequested,
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
@@ -849,6 +852,7 @@ def retire_download_failure_lineages(
         present.add(instance_id)
     return kept, present
 
+
 def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
     """Rank viable text placements by readiness, ordinary role and active load.
 
@@ -1430,6 +1434,19 @@ class Master:
         if isinstance(indexed.event, TaskCreated):
             self._pending_separation_reservations.pop(indexed.event.task_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
+        if isinstance(indexed.event, DemucsPreparationCompleted):
+            result = indexed.event
+            resources = result.resources
+            if (
+                result.success
+                and resources is not None
+                and result.target_node in self.state.topology.list_nodes()
+                and any(
+                    lane.startswith("demucs-") and lane in resources.engine_builds
+                    for lane in resources.backends
+                )
+            ):
+                self._telemetry_view.node_resources[result.target_node] = resources
         if isinstance(indexed.event, AudioCppPreparationCompleted):
             self._record_audio_cpp_preparation(indexed.event)
 
@@ -1459,9 +1476,10 @@ class Master:
         self._telemetry_view.node_resources[event.target_node] = resources
 
     def _placement_resources_for_command(
-        self, command: PlaceInstance | CreateInstance,
+        self,
+        command: PlaceInstance | CreateInstance,
     ) -> Mapping[NodeId, NodeResources]:
-        """Overlay one verified music preparation for this placement only.
+        """Overlay one verified engine preparation for this placement only.
 
         Telemetry can deliver an older resource packet after the indexed
         preparation event. Carrying its worker-verified snapshot on the
@@ -1477,21 +1495,29 @@ class Master:
             else command.instance.shard_assignments.model_id
         )
         card = self._ordered_placement_model_card(model_id)
-        if card is None or ModelTask.TextToMusic not in card.tasks or len(prepared) != 1:
-            raise ValueError("Prepared audio.cpp resources require one music node")
+        if (
+            card is None
+            or not {ModelTask.TextToMusic, ModelTask.AudioSeparation}.intersection(
+                card.tasks
+            )
+            or len(prepared) != 1
+        ):
+            raise ValueError(
+                "Prepared engine resources require one single-host media node"
+            )
+        prefix = "demucs-" if ModelTask.AudioSeparation in card.tasks else "audio_cpp-"
         node_id, resources = next(iter(prepared.items()))
         if node_id not in self.state.topology.list_nodes():
-            raise ValueError("Prepared audio.cpp node is no longer a cluster member")
+            raise ValueError("Prepared engine node is no longer a cluster member")
         if isinstance(command, CreateInstance) and (
             node_id not in command.instance.shard_assignments.node_to_runner
         ):
-            raise ValueError("Prepared audio.cpp node does not match exact placement")
+            raise ValueError("Prepared engine node does not match exact placement")
         if not any(
-            backend.startswith("audio_cpp-")
-            and backend in resources.engine_builds
+            backend.startswith(prefix) and backend in resources.engine_builds
             for backend in resources.backends
         ):
-            raise ValueError("Prepared audio.cpp resources contain no ready build")
+            raise ValueError("Prepared engine resources contain no ready build")
         return {**self._telemetry_view.node_resources, node_id: resources}
 
     def _place_requested_instance(
@@ -3177,22 +3203,54 @@ class Master:
                         case TestCommand():
                             pass
                         case PrepareAudioCpp():
-                            if command.target_node not in self.state.topology.list_nodes():
-                                generated_events.append(AudioCppPreparationCompleted(
-                                    request_id=command.command_id,
-                                    target_node=command.target_node,
-                                    owner_node=command.owner_node,
-                                    success=False,
-                                    error="target node is not a live cluster member",
-                                ))
+                            if (
+                                command.target_node
+                                not in self.state.topology.list_nodes()
+                            ):
+                                generated_events.append(
+                                    AudioCppPreparationCompleted(
+                                        request_id=command.command_id,
+                                        target_node=command.target_node,
+                                        owner_node=command.owner_node,
+                                        success=False,
+                                        error="target node is not a live cluster member",
+                                    )
+                                )
                             else:
-                                generated_events.append(AudioCppPreparationRequested(
-                                    request_id=command.command_id,
-                                    target_node=command.target_node,
-                                    owner_node=command.owner_node,
-                                    variant=command.variant,
-                                    expires_at=time.time() + 300,
-                                ))
+                                generated_events.append(
+                                    AudioCppPreparationRequested(
+                                        request_id=command.command_id,
+                                        target_node=command.target_node,
+                                        owner_node=command.owner_node,
+                                        variant=command.variant,
+                                        expires_at=time.time() + 300,
+                                    )
+                                )
+                        case PrepareDemucs():
+                            if (
+                                command.target_node
+                                not in self.state.topology.list_nodes()
+                            ):
+                                generated_events.append(
+                                    DemucsPreparationCompleted(
+                                        request_id=command.command_id,
+                                        target_node=command.target_node,
+                                        owner_node=command.owner_node,
+                                        success=False,
+                                        error="target worker is not a live cluster member",
+                                    )
+                                )
+                            else:
+                                generated_events.append(
+                                    DemucsPreparationRequested(
+                                        request_id=command.command_id,
+                                        target_node=command.target_node,
+                                        owner_node=command.owner_node,
+                                        package_sha256=command.package_sha256,
+                                        device=command.device,
+                                        expires_at=time.time() + 30 * 60,
+                                    )
+                                )
                         case TextGeneration():
                             eligible = text_generation_instances(
                                 self.state, command.task_params.model
@@ -3258,7 +3316,9 @@ class Master:
                                     )
                                 )
                         case ImageGeneration():
-                            image_events, task_id = _image_generation_events(self.state, command)
+                            image_events, task_id = _image_generation_events(
+                                self.state, command
+                            )
                             generated_events.extend(image_events)
                             self.command_task_mapping[command.command_id] = task_id
                         case VideoGeneration():
@@ -3326,7 +3386,10 @@ class Master:
                             admitted, task_id = separation_generation_events(
                                 self.state,
                                 command,
-                                (*self._pending_separation_reservations.values(), *generated_events),
+                                (
+                                    *self._pending_separation_reservations.values(),
+                                    *generated_events,
+                                ),
                             )
                             generated_events.extend(admitted)
                             self.command_task_mapping[command.command_id] = task_id
@@ -3350,7 +3413,9 @@ class Master:
                                         owner_node=command.owner_node,
                                         instance_id=selected_instance_id,
                                         task_status=(
-                                            TaskStatus.Failed if unavailable else TaskStatus.Pending
+                                            TaskStatus.Failed
+                                            if unavailable
+                                            else TaskStatus.Pending
                                         ),
                                         task_params=command.task_params,
                                         trace_enabled=self.state.tracing_enabled,
@@ -3783,10 +3848,12 @@ class Master:
                                 )
                             else:
                                 try:
-                                    action_events, action_command_id, action_status = (
-                                        await self._execute_approved_steward_action(
-                                            proposal
-                                        )
+                                    (
+                                        action_events,
+                                        action_command_id,
+                                        action_status,
+                                    ) = await self._execute_approved_steward_action(
+                                        proposal
                                     )
                                 except (PlacementError, ValueError) as error:
                                     decided = proposal.model_copy(
@@ -3825,9 +3892,9 @@ class Master:
                                         }
                                     )
                                     generated_events.extend(action_events)
-                            self._ordered_steward_proposals[
-                                command.proposal_id
-                            ] = decided
+                            self._ordered_steward_proposals[command.proposal_id] = (
+                                decided
+                            )
                             self._prune_ordered_steward_action_proposals()
                             generated_events.insert(
                                 0, StewardActionProposalChanged(proposal=decided)
@@ -3987,9 +4054,11 @@ class Master:
                                     command.instance_id, frozenset()
                                 )
                                 try:
-                                    repair_memory, repair_vram = self._reserved_placement_inputs(
-                                        self._telemetry_view.node_memory,
-                                        self._placement_reservations(after_delete),
+                                    repair_memory, repair_vram = (
+                                        self._reserved_placement_inputs(
+                                            self._telemetry_view.node_memory,
+                                            self._placement_reservations(after_delete),
+                                        )
                                     )
                                     final_placement = place_instance(
                                         replace_command,
@@ -4049,9 +4118,13 @@ class Master:
                                         refused, command.node_id
                                     )
                                     try:
-                                        repair_memory, repair_vram = self._reserved_placement_inputs(
-                                            self._telemetry_view.node_memory,
-                                            self._placement_reservations(after_delete),
+                                        repair_memory, repair_vram = (
+                                            self._reserved_placement_inputs(
+                                                self._telemetry_view.node_memory,
+                                                self._placement_reservations(
+                                                    after_delete
+                                                ),
+                                            )
                                         )
                                         final_placement = place_instance(
                                             fallback,
