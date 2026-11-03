@@ -380,3 +380,37 @@ def test_failed_new_root_sync_releases_ownership(
     assert retried
     retain(reopened, "drums")
     reopened.close()
+
+
+@pytest.mark.parametrize("release", ["complete", "delete"])
+def test_committed_partial_sets_hold_active_slots_until_complete_or_deleted(
+    tmp_path: Path, release: str
+) -> None:
+    """Five partial jobs cannot hide their active slots by committing only drums."""
+    store = SeparationMediaStore(tmp_path / "media")
+    data = wav()
+    digest = hashlib.sha256(data).hexdigest()
+
+    def commit(identifier: CommandId, role: SeparationStemName) -> None:
+        store.open_assembly(identifier, role, total_bytes=len(data), total_chunks=1)
+        store.append(identifier, role, 1, data)
+        store.commit(identifier, role, sha256=digest, total_chunks=1)
+
+    try:
+        for number in range(4):
+            commit(CommandId(f"partial-{number}"), "drums")
+        with pytest.raises(ValueError, match="active-job"):
+            commit(CommandId("fifth"), "drums")
+        first = CommandId("partial-0")
+        if release == "complete":
+            for role in SEPARATION_STEMS[1:]:
+                commit(first, role)
+        else:
+            store.delete(first)
+        commit(CommandId("fifth"), "drums")
+        # Settling one job never frees another partial set's slot or its bytes.
+        with pytest.raises(ValueError, match="active-job"):
+            commit(CommandId("sixth"), "bass")
+        assert len(tuple((store.root / "drums").glob("partial-*/output.wav"))) == (4 if release == "complete" else 3)
+    finally:
+        store.close()

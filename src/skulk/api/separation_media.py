@@ -96,6 +96,9 @@ class SeparationMediaStore:
         ] = {}
         self._known: set[CommandId] = set()
         created_roles: list[Path] = []
+        # A committed first stem is still one active incomplete set. Keep its
+        # slot until all four roles settle or the owner explicitly deletes it.
+        self._incomplete: set[CommandId] = set()
         try:
             for name in SEPARATION_STEMS:
                 directory = root / name
@@ -163,8 +166,10 @@ class SeparationMediaStore:
                 return
             if len(self._opened) >= MAX_ACTIVE_SEPARATION_JOBS * 4:
                 raise ValueError("separation assembly capacity is full")
-            active = {identifier for identifier, _ in self._opened}
-            if command_id not in active and len(active) >= MAX_ACTIVE_SEPARATION_JOBS:
+            if (
+                command_id not in self._incomplete
+                and len(self._incomplete) >= MAX_ACTIVE_SEPARATION_JOBS
+            ):
                 raise ValueError("separation active-job assembly capacity is full")
             if (
                 command_id not in self._known
@@ -193,6 +198,7 @@ class SeparationMediaStore:
                     "protected separation content was unexpectedly evicted"
                 )
             self._known.add(command_id)
+            self._incomplete.add(command_id)
             self._opened[key] = (total_bytes, total_chunks)
 
     def append(
@@ -270,6 +276,8 @@ class SeparationMediaStore:
                 )
                 self._completed[(command_id, name)] = receipt
                 del self._opened[(command_id, name)]
+                if all((command_id, role) in self._completed for role in SEPARATION_STEMS):
+                    self._incomplete.discard(command_id)
                 return receipt
             except BaseException:
                 self.delete(command_id)
@@ -366,6 +374,7 @@ class SeparationMediaStore:
                 self._opened.pop((command_id, name), None)
                 self._completed.pop((command_id, name), None)
             self._known.discard(command_id)
+            self._incomplete.discard(command_id)
 
     def purge_unknown(self, keep: frozenset[CommandId]) -> int:
         """Remove orphan API-result directories after durable startup reconciliation."""

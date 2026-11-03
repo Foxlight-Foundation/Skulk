@@ -145,13 +145,13 @@ def test_exact_stale_native_build_cannot_substitute_live_package() -> None:
                                    node_resources={NODE: resources()})
 
 
-@pytest.mark.parametrize("partial", ["world", "start", "end", "layers"])
+@pytest.mark.parametrize("partial", ["world", "rank", "start", "end", "layers"])
 def test_exact_native_assignment_cannot_load_only_part_of_model(partial: str) -> None:
     """Internal exact commands enforce complete model geometry as ordinary ones do."""
     created = exact()
     assignment = created.instance.shard_assignments
     shard = assignment.runner_to_shard[RUNNER]
-    field = {"world": "world_size", "start": "start_layer", "end": "end_layer", "layers": "n_layers"}[partial]
+    field = {"world": "world_size", "rank": "device_rank", "start": "start_layer", "end": "end_layer", "layers": "n_layers"}[partial]
     altered = shard.model_copy(update={field: 2})
     instance = created.instance.model_copy(update={"shard_assignments": assignment.model_copy(
         update={"runner_to_shard": {RUNNER: altered}})})

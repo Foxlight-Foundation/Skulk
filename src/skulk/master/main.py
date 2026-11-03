@@ -1011,6 +1011,7 @@ def separation_generation_instances(
         if (
             shard.model_card.separation is None
             or shard.world_size != 1
+            or shard.device_rank != 0
             or shard.start_layer != 0
             or shard.end_layer != shard.model_card.n_layers
             or shard.n_layers != shard.model_card.n_layers
