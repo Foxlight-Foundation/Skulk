@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
-from typing import cast
+from typing import Literal, cast
 
 import anyio
 import httpx
@@ -24,6 +24,7 @@ from starlette import formparsers
 from starlette.types import Message
 
 from skulk.api import separation_api as separation_module
+from skulk.api.main import API
 from skulk.api.separation_api import SeparationAPI
 from skulk.api.types.separation import SeparationListResponse, SeparationResource
 from skulk.master.main import separation_generation_events
@@ -563,6 +564,92 @@ async def test_failed_acknowledgement_fails_job_and_releases_control_ownership(
         job = SeparationResource.model_validate_json((await client.get(f"/v1/audio/separations/{identifier}")).content)
         assert job.status == "failed" and job.output is None
         assert not harness.api.active and harness.api.media.reserved_bytes() == 0
+
+
+async def test_production_control_sender_cannot_complete_after_dropping_final_ack(
+    tmp_path: Path,
+) -> None:
+    """Use the API callback and a real channel broken after three admitted ACKs."""
+    async with fixture(tmp_path) as (harness, client):
+        control_send, control_receive = channel[OutputMediaPacket](0)
+        host = object.__new__(API)
+        host._output_media_packet_sender = control_send
+        harness.api.send_output = host._send_separation_output_terminal
+        identifier = await create(client)
+        task = await harness.task(identifier)
+        output = result(tmp_path / "native", task)
+        completed: set[str] = set()
+        failures: list[str] = []
+
+        async def forward(packet: OutputMediaPacket) -> None:
+            if packet.kind == "completed":
+                completed.add(packet.purpose)
+            await harness.api.receive_output(packet)
+
+        async def fail(_task: AudioSeparation, message: str) -> None:
+            failures.append(message)
+
+        producer = SeparationOutputProducer(NodeId("node-0"), forward, fail, timeout_seconds=10)
+        harness.producer = producer
+        producer.register(task, tmp_path / "native", output)
+        await harness.queues[identifier].send(SeparationChunk(model=ModelId(task.task_params.model), finish_reason="stop", output=output))
+
+        async def admit_three_acks() -> None:
+            accepted: set[str] = set()
+            with control_receive:
+                async for packet in control_receive:
+                    producer.receive(packet)
+                    if packet.kind == "accepted":
+                        accepted.add(packet.purpose)
+                        if len(accepted) == 3:
+                            return
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(admit_three_acks)
+            sending = asyncio.create_task(producer.deliver(identifier))
+            try:
+                with anyio.fail_after(4):
+                    while True:
+                        job = SeparationResource.model_validate_json((await client.get(f"/v1/audio/separations/{identifier}")).content)
+                        if job.status in ("failed", "completed", "cancelled"):
+                            break
+                        await anyio.sleep(0.01)
+                    assert len(completed) == 4
+                    assert job.status == "failed" and job.output is None
+                    while harness.api._output_control_counts:
+                        await anyio.sleep(0.01)
+                    assert not harness.api.active
+                    assert harness.api.media.reserved_bytes() == 0
+            finally:
+                if not sending.done():
+                    sending.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await sending
+                control_send.close()
+                group.cancel_scope.cancel()
+
+
+@pytest.mark.parametrize("transport", ["missing", "broken", "blocked"])
+async def test_strict_production_control_sender_propagates_admission_failure(
+    transport: Literal["missing", "broken", "blocked"],
+) -> None:
+    """Real transport absence, closure and caller deadlines remain failures."""
+    send, receive = channel[OutputMediaPacket](0)
+    host = object.__new__(API)
+    host._output_media_packet_sender = None if transport == "missing" else send
+    packet = OutputMediaPacket(source_node=NodeId("api"), target_node=NodeId("worker"), command_id=CommandId("strict-control"), model=ModelId("model"), purpose="separation_drums", kind="accepted", sequence=2)
+    try:
+        if transport == "blocked":
+            with pytest.raises(TimeoutError), anyio.fail_after(0.05):
+                await host._send_separation_output_terminal(packet)
+        else:
+            if transport == "broken":
+                receive.close()
+            with pytest.raises((anyio.ClosedResourceError, anyio.BrokenResourceError)):
+                await host._send_separation_output_terminal(packet)
+    finally:
+        send.close()
+        receive.close()
 
 
 @pytest.mark.parametrize(

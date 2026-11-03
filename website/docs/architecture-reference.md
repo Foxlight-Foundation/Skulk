@@ -178,7 +178,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   A role's ACK precedes emission of the next role. API reverse control drains
   independently of the media consumer: four jobs, at most four role ACKs plus
   one cancellation drain per job, with admission retained until sender join
-  and completion gated on admitted role ACKs. Typed subscriber predicates
+  and completion gated on admitted role ACKs. The API wires separation to
+  `_send_separation_output_terminal`: raw sender admission propagates channel
+  failures and caller cancellation/deadlines. The legacy best-effort terminal
+  helper remains on video/music paths. Typed subscriber predicates
   admit separation forward packets only to APIs and reverse control only to Workers before
   their rendezvous queues, avoiding same-node ACK reentrancy without buffering
   additional audio.

@@ -2297,7 +2297,9 @@ Success returns **202** with an `audio.separation` object containing `id`,
 encoded SHA-256 and size, sample rate, channels, frames, encoding and bit depth;
 it contains no file path or samples. `output` remains null until successful
 rendering, all four verified local files agree with the complete manifest, and
-their return-path acknowledgements have been admitted.
+their return-path acknowledgements have been admitted. An unavailable return
+transport or acknowledgement deadline fails the job, including when every WAV
+has already verified; it cannot silently report completion.
 
 Uploads have a three-minute deadline; a stalled body returns 408 and its partial
 spooled files are closed. Requests with invalid metadata or WAV data return 422; malformed multipart

@@ -605,7 +605,9 @@ OUTPUT_MEDIA delivery, exact reverse ACKs and joined sender/file cleanup.
 Each role waits for its own ACK before the next role is emitted.
 API reverse control uses independent bounded tasks (four role ACKs and one
 cancellation drain per admitted job, four job slots retained through sender
-join); completed output requires admitted role ACKs. This prevents another
+join); completed output requires admitted role ACKs. The production separation
+sender propagates channel failures and caller deadlines instead of suppressing
+failed admission. This prevents another
 command's forward frame blocking the media consumer's ACK. Output
 subscriptions filter API forward frames and Worker reverse control before their
 zero-buffer queues; ignored self-echoes cannot block an in-progress ACK sender.

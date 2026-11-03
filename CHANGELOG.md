@@ -16,7 +16,9 @@ This project records release notes here and mirrors public-facing notes in
 
 - Keep separation acknowledgements and cancellation terminals independent of
   the media consumer across concurrent jobs, with bounded control ownership
-  and admission held until senders drain.
+  and admission held until senders drain. Propagate separation control
+  admission failures so a dropped final acknowledgement cannot report a
+  completed job.
 
 ### Offline model availability
 
