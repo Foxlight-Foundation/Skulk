@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatUploadedFile, Conversation } from '../types/chat';
+import { randomHex32 } from '../utils/randomIds';
 
 /** Transport limits shared by the versioned document chat contract. */
 export const MAX_CHAT_DOCUMENT_BYTES = 8 * 1024 * 1024;
@@ -65,7 +66,7 @@ export async function storeChatDocuments(files: ChatUploadedFile[]): Promise<Cha
       throw new Error('The selected PDF does not have a valid PDF header.');
     }
     const blob = new Blob([bytes], { type: kind === 'text' ? 'text/plain' : 'application/pdf' });
-    return { file, id: crypto.randomUUID(), blob };
+    return { file, id: randomHex32(), blob };
   }));
   const db = await openDocuments();
   await new Promise<void>((resolve, reject) => {

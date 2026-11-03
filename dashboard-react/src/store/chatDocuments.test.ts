@@ -21,7 +21,7 @@ function history(files: ChatUploadedFile[]): ChatMessage[] {
     attachments: files.map(({ id, name, type, size, documentId }) => ({ id, name, type, size, documentId })) }];
 }
 
-afterEach(async () => { vi.restoreAllMocks(); await removeChatDocuments(savedIds.splice(0)); });
+afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); await removeChatDocuments(savedIds.splice(0)); });
 
 describe('browser-owned chat documents', () => {
   it('persists an 8 MiB document outside metadata and rehydrates the exact bytes after serialization', async () => {
@@ -47,6 +47,14 @@ describe('browser-owned chat documents', () => {
     const hydrated = await hydrateChatDocuments(history(stored));
     expect(hydrated[0].attachments?.[0].fileData).toBe('data:text/plain;base64,' + btoa(String.fromCharCode(...new TextEncoder().encode('狐 MARIGOLD'))));
     expect(hydrated[0].attachments?.[1].fileData).toBe('data:application/pdf;base64,' + btoa('%PDF-1.4\nJUNIPER'));
+  });
+
+  it('saves documents when randomUUID is unavailable on an HTTP dashboard', async () => {
+    const selected = upload('notes.txt', 'JUNIPER');
+    vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
+    const stored = await save([selected]);
+    expect(stored[0].documentId).toMatch(/^[a-f0-9]{32}$/);
+    expect((await hydrateChatDocuments(history(stored)))[0].attachments?.[0].fileData).toBe('data:text/plain;base64,' + btoa('JUNIPER'));
   });
 
   it.each([

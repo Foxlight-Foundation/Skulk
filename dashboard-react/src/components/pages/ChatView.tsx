@@ -22,7 +22,7 @@ import { modelSupportsTextChat } from '../../types/models';
 import type { InstanceCardData } from '../layout/InstancePanel';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
-import { chatActions } from '../../store/slices/chatSlice';
+import { chatActions, persistDocumentMessage } from '../../store/slices/chatSlice';
 import { useStore } from 'react-redux';
 import type { RootState } from '../../store';
 import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
@@ -1110,6 +1110,11 @@ export function ChatView({
       attachments: attachments.length ? attachments : undefined,
     };
 
+    const currentChat = store.getState().chat;
+    if (currentChat.activeConversationId !== conversationId || currentChat.selectedModelId !== selectedModelId) {
+      throw new Error('The conversation changed while preparing attachments. Your draft was retained.');
+    }
+    if (documentAttachments.length) persistDocumentMessage(currentChat, conversationId, userMsg);
     dispatch(chatActions.appendConversationMessage({ conversationId, message: userMsg }));
     setIsLoading(true);
     setStreamingContent('');
@@ -1117,6 +1122,9 @@ export function ChatView({
     setTtftMs(null);
     setTps(null);
 
+    // Acknowledge submission after durable preparation, independently of the
+    // long-running inference, so the composer can safely clear this draft.
+    void (async () => {
     if (selectedImageProfile) {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -1278,7 +1286,7 @@ export function ChatView({
           ...(requestTools ? { tools: requestTools } : {}),
           ...(supportsThinking ? { enable_thinking: thinkingEnabled } : {}),
         });
-        if (new TextEncoder().encode(requestBody).byteLength > MAX_CHAT_REQUEST_BYTES) {
+        if (selectedModelId.startsWith('capability/') && new TextEncoder().encode(requestBody).byteLength > MAX_CHAT_REQUEST_BYTES) {
           throw new Error('The conversation exceeds the 16 MiB chat transport limit. Remove older attachments or start a new conversation.');
         }
         const res = await operatorSession.fetch('/v1/chat/completions', {
@@ -1546,7 +1554,7 @@ export function ChatView({
     setIsLoading(false);
     abortRef.current = null;
     activeCommandIdRef.current = null;
-
+    })();
   }, [
     dispatch,
     imageParams,

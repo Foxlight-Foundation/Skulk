@@ -182,6 +182,32 @@ describe('ChatView multimodal requests', () => {
   });
 });
 
+describe('native vision input bounds', () => {
+  it('preserves native image requests beyond the capability media limit', async () => {
+    let encodedBytes = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/models') return new Response(JSON.stringify({ data: [{
+        id: 'org/vision-model', resolved_capabilities: { supports_image_input: true },
+      }] }));
+      if (String(input) === '/v1/chat/completions') {
+        encodedBytes = new TextEncoder().encode(String(init?.body)).byteLength;
+        return new Response('data: {"choices":[{"delta":{"content":"Native request accepted"}}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+      }
+      return new Response(JSON.stringify({ enabled: false }));
+    }));
+    await renderVisionChat();
+    await waitFor(() => !container?.querySelector<HTMLButtonElement>('[aria-label="Attach file"]')?.disabled, 'native vision did not become ready');
+    const raw = new Uint8Array(7 * 1024 * 1024);
+    raw.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    await act(async () => { await userEvent.upload(container!.querySelector<HTMLInputElement>('[aria-label="Image attachment file"]')!, [
+      new File([raw], 'first.png', { type: 'image/png' }), new File([raw], 'second.png', { type: 'image/png' }),
+    ]); });
+    await act(async () => { await userEvent.fill(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!, 'Compare both images.'); });
+    await act(async () => { await userEvent.click(container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!); });
+    await waitFor(() => encodedBytes > 16 * 1024 * 1024, 'native image request was capped by the capability contract');
+  }, 15000);
+});
+
 describe('ChatView completed-message speech', () => {
   it('replays a completed assistant turn as serial sentence requests', async () => {
     const requestedInputs: string[] = [];

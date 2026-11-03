@@ -18,6 +18,7 @@ vi.mock('../../i18n/tolgee', () => {
 vi.mock('../../store/endpoints/steward', () => ({ useGetStewardStatusQuery: () => ({ data: { enabled: false } }) }));
 
 const model = 'capability/provider/chat/document-model';
+const textOnlyModel = 'capability/provider/chat/text-only-model';
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -31,6 +32,10 @@ async function renderChat(): Promise<void> {
       [model]: { id: model, name: 'Document model', inference_capability: {
         contract: 'chat.completions@0.2.0', processing_domain: 'external', usage: 'unknown', usage_label: 'Fixture only', usage_url: null,
         expires_at: Date.now() / 1000 + 300, features: ['text_file_input', 'pdf_input'],
+      } },
+      [textOnlyModel]: { id: textOnlyModel, name: 'Text-only model', inference_capability: {
+        contract: 'chat.completions@0.2.0', processing_domain: 'external', usage: 'unknown', usage_label: 'Fixture only', usage_url: null,
+        expires_at: Date.now() / 1000 + 300, features: [],
       } },
     } }} /></ThemeProvider></Provider>);
   });
@@ -97,5 +102,43 @@ describe('Chat document submission', () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!.value).toBe('Keep this draft.');
     expect(container!.querySelector('[title="notes.txt"]')).not.toBeNull();
+  });
+
+  it('retains the draft when durable handle persistence fails and can retry after recovery', async () => {
+    const fetch = vi.fn(async () => new Response('data: {"choices":[{"delta":{"content":"Saved"}}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetch);
+    await renderChat();
+    const original = Storage.prototype.setItem;
+    const failure = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key, value) {
+      if (key === 'skulk-chat') throw new DOMException('Full', 'QuotaExceededError');
+      original.call(this, key, value);
+    });
+    await select([new File(['JUNIPER'], 'notes.txt', { type: 'text/plain' })], 'Keep this document.');
+    await waitFor(() => container!.textContent!.includes('Could not save conversation history'));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!.value).toBe('Keep this document.');
+    expect(container!.querySelector('[title="notes.txt"]')).not.toBeNull();
+    expect(Object.values(store.getState().chat.conversations).flatMap(conversation => conversation.messages)).toHaveLength(0);
+    failure.mockRestore();
+    await waitFor(() => !container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.disabled);
+    await act(async () => { await userEvent.click(container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!); });
+    await waitFor(() => fetch.mock.calls.length === 1);
+    expect(window.localStorage.getItem('skulk-chat')).toContain('documentId');
+  });
+
+  it('keeps selected files visible when switching to an unsupported model and back', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    await renderChat();
+    await act(async () => { await userEvent.upload(container!.querySelector<HTMLInputElement>('[aria-label="Chat attachment file"]')!, [new File(['JUNIPER'], 'notes.txt', { type: 'text/plain' })]); });
+    await act(async () => { await userEvent.fill(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!, 'Keep this draft.'); });
+    await act(async () => { store.dispatch(chatActions.selectModel(textOnlyModel)); });
+    await waitFor(() => container!.textContent!.includes('does not support these attachments'));
+    expect(container!.querySelector('[title="notes.txt"]')).not.toBeNull();
+    expect(container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.disabled).toBe(true);
+    expect(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!.value).toBe('Keep this draft.');
+    await act(async () => { store.dispatch(chatActions.selectModel(model)); });
+    await waitFor(() => !container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.disabled);
+    expect(container!.querySelector('[title="notes.txt"]')).not.toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

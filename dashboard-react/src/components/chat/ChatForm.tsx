@@ -27,7 +27,7 @@ export interface ChatFormProps {
   /** Updates the owner-controlled draft. */
   onDraftChange?: (value: string) => void;
 
-  onSend: (message: string, files: ChatUploadedFile[]) => void;
+  onSend: (message: string, files: ChatUploadedFile[]) => void | Promise<void>;
   onCancel?: () => void;
   isLoading?: boolean;
   placeholder?: string;
@@ -1039,11 +1039,6 @@ export function ChatForm({
   }, [supportsAttachments]);
 
   useEffect(() => {
-    clearFiles();
-    setAttachmentError(null);
-  }, [attachmentContext, clearFiles]);
-
-  useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
@@ -1085,7 +1080,10 @@ export function ChatForm({
           }
           realtimeConversationRef.current?.setInputPaused(true);
           realtimeCaptureRef.current?.setEnabled(false);
-          onSend(draft.trim(), prepared);
+          const acceptance = onSend(draft.trim(), prepared);
+          // Only document submission negotiates durable preparation. Existing
+          // text/voice handlers may return the whole generation promise.
+          if (prepared.some(file => file.documentId)) await acceptance;
           submitted = true;
           if (messageRef.current === draft) setMessage('');
           clearFiles();
