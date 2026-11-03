@@ -151,6 +151,7 @@ class ResidentMusic:
             conditioning: SeparationSource | None = None
             source: SeparationSource | None = None
             gain: float | None = None
+            conditioning_padding = 0
             samples: npt.NDArray[np.float32] | None = None
             if request.operation != "generate":
                 progress(
@@ -160,6 +161,7 @@ class ResidentMusic:
                 )
                 prepared = prepare_conditioning(request)
                 samples, source, gain = prepared.samples, prepared.source, prepared.gain
+                conditioning_padding = prepared.padding_frames
                 context = directory / "conditioning.wav"
                 conditioning = write_conditioning(context, samples)
             observation = _SourceObservation(
@@ -208,6 +210,7 @@ class ResidentMusic:
                 if conditioning is not None
                 else None,
                 conditioning_gain=gain,
+                conditioning_padding_frames=conditioning_padding,
                 padding_frames_removed=rendered.padding_frames_removed,
                 execution=execution,
                 output=facts,

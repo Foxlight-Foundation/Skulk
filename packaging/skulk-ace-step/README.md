@@ -86,10 +86,13 @@ permissions under the request's private directory. Results are native-rate
 stereo PCM24 WAV, capped at 120 seconds and 64 MiB; edited results must have the
 exact requested frame count. Only necessary output headroom attenuation is
 applied and reported. WAV facts and digests come from the actual encoded file.
-Pinned target conditioning pads to at least 128 latent frames (5.12 seconds).
-For a shorter edit only, the adapter removes that exact decoder tail after
-validating all decoded samples, and retains `padding_frames_removed` in its
-result receipt. It never crops a different overrun, hides nonfinite padding,
+Conditioning appends only the zero samples needed to reach the pinned codec's
+1,920-sample grid; originals and requested edit ranges remain unchanged.
+`conditioning_padding_frames` records this addition separately from Continue's
+intentional extension. Native preparation also has a 128-latent minimum
+(5.12 seconds). After validating all decoded samples, the adapter removes only
+the tail from that exact minimum or aligned extent and records
+`padding_frames_removed`. It never crops a different overrun, hides nonfinite padding,
 repairs a short result or changes a generated song's length this way.
 Files and directory entries are synced before completion is emitted. Core must
 independently verify the result and use its acknowledged media transport before

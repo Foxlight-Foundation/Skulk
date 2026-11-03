@@ -280,3 +280,42 @@ class NativeGenerationTests(unittest.TestCase):
         )
         self.assertEqual(generated.samples.shape[0], 245760)
         self.assertEqual(generated.padding_frames_removed, 0)
+
+    def test_long_edit_alignment_cannot_hide_short_nonfinite_or_arbitrary_output(
+        self,
+    ) -> None:
+        """Explicit input alignment authorizes only its precise finite decoded tail."""
+        edit = self.request(
+            operation="continue",
+            source=self.source.model_dump(mode="json"),
+            source_path="/private/source.wav",
+            target_frames=288001,
+            region_start_frame=48000,
+            region_end_frame=288001,
+        )
+        tensor = torch.zeros((2, 289920))
+        rendered = result_samples(
+            TensorResult(audios=[{"tensor": tensor, "sample_rate": 48000}]), edit
+        )
+        self.assertEqual(rendered.samples.shape, (288001, 2))
+        self.assertEqual(rendered.padding_frames_removed, 1919)
+        for frames in (288000, 288002, 289919, 289921):
+            with self.subTest(frames=frames), self.assertRaises(ValueError):
+                result_samples(
+                    TensorResult(
+                        audios=[
+                            {"tensor": torch.zeros((2, frames)), "sample_rate": 48000}
+                        ]
+                    ),
+                    edit,
+                )
+        for invalid in (float("nan"), float("inf")):
+            tensor = torch.zeros((2, 289920))
+            tensor[1, -1] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "nonfinite"
+            ):
+                result_samples(
+                    TensorResult(audios=[{"tensor": tensor, "sample_rate": 48000}]),
+                    edit,
+                )

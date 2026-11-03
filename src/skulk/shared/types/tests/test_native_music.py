@@ -19,6 +19,7 @@ from skulk.shared.types.native_music import (
     NativeMusicServeConfig,
     NativeMusicServeRequest,
     NativeMusicWeights,
+    native_music_conditioning_frames,
 )
 
 
@@ -205,6 +206,43 @@ def test_native_control_sequence_is_strict_positive_and_bounded(
         )
 
 
+def _result_body(
+    operation: str,
+    padding: object,
+    *,
+    frames: int = 48000,
+    conditioning_padding: object = 0,
+) -> dict[str, object]:
+    return dict(
+        request_id="take-1",
+        model_identity="a" * 64,
+        payload_sha256="b" * 64,
+        operation=operation,
+        seed=12025,
+        source_sha256="c" * 64 if operation != "generate" else None,
+        conditioning_sha256="d" * 64 if operation != "generate" else None,
+        conditioning_gain=1.0 if operation != "generate" else None,
+        conditioning_padding_frames=conditioning_padding,
+        padding_frames_removed=padding,
+        execution=dict(
+            device="cpu",
+            precision="float32",
+            text_encoder_device="cpu",
+            text_encoder_precision="float32",
+            autoencoder_device="cpu",
+            autoencoder_precision="float32",
+        ),
+        output=dict(
+            sha256="e" * 64,
+            size_bytes=44 + frames * 6,
+            frames=frames,
+            peak=0.25,
+            gain=1.0,
+        ),
+        generation_seconds=1.0,
+    )
+
+
 @pytest.mark.parametrize(
     ("operation", "padding", "accepted"),
     [
@@ -225,36 +263,65 @@ def test_native_result_padding_is_exact_bounded_and_edit_only(
     operation: str, padding: object, accepted: bool
 ) -> None:
     """A receipt cannot justify arbitrary cropping or generation length changes."""
-    body = dict(
-        request_id="take-1",
-        model_identity="a" * 64,
-        payload_sha256="b" * 64,
-        operation=operation,
-        seed=12025,
-        source_sha256="c" * 64 if operation != "generate" else None,
-        conditioning_sha256="d" * 64 if operation != "generate" else None,
-        conditioning_gain=1.0 if operation != "generate" else None,
-        padding_frames_removed=padding,
-        execution=dict(
-            device="cpu",
-            precision="float32",
-            text_encoder_device="cpu",
-            text_encoder_precision="float32",
-            autoencoder_device="cpu",
-            autoencoder_precision="float32",
-        ),
-        output=dict(
-            sha256="e" * 64,
-            size_bytes=44 + 48000 * 6,
-            frames=48000,
-            peak=0.25,
-            gain=1.0,
-        ),
-        generation_seconds=1.0,
-    )
+    body = _result_body(operation, padding)
     if accepted:
         result = NativeMusicResult.model_validate_json(json.dumps(body))
         assert result.padding_frames_removed == padding
     else:
         with pytest.raises(ValidationError):
             NativeMusicResult.model_validate_json(json.dumps(body))
+
+
+@pytest.mark.parametrize(
+    ("frames", "conditioning_padding", "removed", "accepted"),
+    [
+        (288001, 1919, 1919, True),
+        (1536001, 1919, 1919, True),
+        (5759999, 1, 1, True),
+        (48001, 1919, 197759, True),
+        (288001, 1919, 0, True),
+        (288001, 0, 1919, False),
+        (288001, 1918, 1919, False),
+        (288001, 1920, 1919, False),
+        (288001, -1, 1919, False),
+        (288001, True, 1919, False),
+        (288001, 1919.0, 1919, False),
+        (288001, 1919, 1918, False),
+        (288000, 0, 1920, False),
+    ],
+)
+def test_native_result_records_exact_codec_padding(
+    frames: int, conditioning_padding: object, removed: object, accepted: bool
+) -> None:
+    """Recorded alignment is bounded, strict and separate from decoder removal."""
+    body = _result_body(
+        "repaint", removed, frames=frames, conditioning_padding=conditioning_padding
+    )
+    if accepted:
+        result = NativeMusicResult.model_validate_json(json.dumps(body))
+        assert result.conditioning_padding_frames == conditioning_padding
+        assert result.padding_frames_removed == removed
+    else:
+        with pytest.raises(ValidationError):
+            NativeMusicResult.model_validate_json(json.dumps(body))
+
+
+@pytest.mark.parametrize("conditioning_padding", [1, 1919, True, 1.0])
+def test_native_generation_cannot_claim_conditioning_padding(
+    conditioning_padding: object,
+) -> None:
+    """Text-only generation cannot invent input-audio transformation lineage."""
+    body = _result_body("generate", 0, conditioning_padding=conditioning_padding)
+    with pytest.raises(ValidationError):
+        NativeMusicResult.model_validate_json(json.dumps(body))
+
+
+@pytest.mark.parametrize(
+    ("frames", "expected"),
+    [(48000, 48000), (48001, 49920), (245759, 245760), (288001, 289920), (5760000, 5760000)],
+)
+def test_native_conditioning_rounds_up_within_the_global_frame_ceiling(
+    frames: int, expected: int
+) -> None:
+    """Codec alignment retains the native frame clock and the 120-second limit."""
+    assert native_music_conditioning_frames(frames) == expected

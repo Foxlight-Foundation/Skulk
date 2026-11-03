@@ -34,9 +34,23 @@ NativeMusicPart = Literal[
 ]
 NATIVE_MUSIC_SAMPLE_RATE = 48_000
 NATIVE_MUSIC_MAX_FRAMES = 120 * NATIVE_MUSIC_SAMPLE_RATE
-NATIVE_MUSIC_MIN_DECODE_FRAMES = 128 * 1920
+NATIVE_MUSIC_LATENT_HOP_FRAMES = 1920
+NATIVE_MUSIC_MIN_DECODE_FRAMES = 128 * NATIVE_MUSIC_LATENT_HOP_FRAMES
 """Pinned ACE minimum of 128 latent frames, each decoding to 1,920 samples."""
 MAX_NATIVE_MUSIC_RECORD_BYTES = 256 * 1024
+
+
+def native_music_conditioning_frames(target_frames: int) -> int:
+    """Round an admitted target up to the pinned codec's 1,920-sample grid.
+
+    The caller supplies a validated native frame count. Padding belongs after
+    the requested timeline and must not change source samples or edit ranges.
+    """
+    return (
+        (target_frames + NATIVE_MUSIC_LATENT_HOP_FRAMES - 1)
+        // NATIVE_MUSIC_LATENT_HOP_FRAMES
+        * NATIVE_MUSIC_LATENT_HOP_FRAMES
+    )
 
 
 class NativeMusicContract(BaseModel):
@@ -450,11 +464,17 @@ class NativeMusicResult(NativeMusicContract):
         allow_inf_nan=False,
         description="Explicit shared context attenuation, when needed to avoid upstream input clipping; original bytes remain unchanged.",
     )
+    conditioning_padding_frames: int = Field(
+        default=0,
+        ge=0,
+        le=NATIVE_MUSIC_LATENT_HOP_FRAMES - 1,
+        description="Zero samples appended beyond the requested edit extent solely for codec alignment; excludes Continue's requested extension.",
+    )
     padding_frames_removed: int = Field(
         default=0,
         ge=0,
         le=NATIVE_MUSIC_MIN_DECODE_FRAMES - NATIVE_MUSIC_SAMPLE_RATE,
-        description="Only the pinned decoder's minimum-latent tail removed from a shorter edit; never an arbitrary length repair.",
+        description="Only the pinned decoder minimum or explicitly aligned conditioning tail removed from an edit; never an arbitrary length repair.",
     )
     execution: NativeMusicExecution = Field(
         description="Observed loaded component placement/precision after this request."
@@ -477,13 +497,21 @@ class NativeMusicResult(NativeMusicContract):
             raise ValueError(
                 "native music result lineage must match generation or editing"
             )
+        conditioning_frames = native_music_conditioning_frames(self.output.frames)
+        expected_conditioning_padding = (
+            conditioning_frames - self.output.frames
+            if self.operation != "generate"
+            else 0
+        )
+        if self.conditioning_padding_frames != expected_conditioning_padding:
+            raise ValueError("native music conditioning padding must match its codec grid")
         if self.padding_frames_removed and (
             self.operation == "generate"
             or self.output.frames + self.padding_frames_removed
-            != NATIVE_MUSIC_MIN_DECODE_FRAMES
+            != max(NATIVE_MUSIC_MIN_DECODE_FRAMES, conditioning_frames)
         ):
             raise ValueError(
-                "native music may remove only its minimum-latent edit padding"
+                "native music may remove only its verified codec edit padding"
             )
         return self
 

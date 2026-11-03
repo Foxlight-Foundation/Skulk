@@ -87,12 +87,19 @@ class NativeMediaTests(unittest.TestCase):
     def test_mono_coprime_rate_context_has_correct_native_clock_and_tone(self) -> None:
         """The bounded FIR keeps a real tone and frame map at nonstandard input rates."""
         request = self.request(rate=44101, frames=44108, channels=1)
-        samples = prepare_conditioning(request).samples
-        self.assertEqual(samples.shape, (request.target_frames, 2))
+        prepared = prepare_conditioning(request)
+        samples = prepared.samples
+        aligned_frames = (request.target_frames + 1919) // 1920 * 1920
+        self.assertEqual(samples.shape, (aligned_frames, 2))
+        self.assertEqual(prepared.padding_frames, aligned_frames - request.target_frames)
+        self.assertTrue(np.all(samples[request.target_frames:] == 0))
         self.assertTrue(np.isfinite(samples).all())
         self.assertTrue(np.array_equal(samples[:, 0], samples[:, 1]))
+        original_extent = samples[: request.target_frames, 0]
         frequency = float(
-            np.argmax(np.abs(np.fft.rfft(samples[:, 0]))) * 48000 / len(samples)
+            np.argmax(np.abs(np.fft.rfft(original_extent)))
+            * 48000
+            / len(original_extent)
         )
         self.assertLess(abs(frequency - 1000), 2)
 
@@ -215,6 +222,7 @@ class NativeMediaTests(unittest.TestCase):
             source_sha256=original.sha256,
             conditioning_sha256=conditioning.sha256,
             conditioning_gain=prepared.gain,
+            conditioning_padding_frames=prepared.padding_frames,
             output=output,
             generation_seconds=1.0,
             execution=NativeMusicExecution(

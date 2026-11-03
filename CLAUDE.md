@@ -2667,9 +2667,12 @@ sequences guard the loaded model. Private 0600 PCM24/result files are synced
 before completion. Native errors permanently retire the handle; the CLI kills
 its dedicated group even if terminal output fails, and its parent guardian kills
 an orphan. Never clean partial native state until that group has drained.
-Short edits may remove only the pinned 128-latent decoder's exact padded tail
-after full finite-sample validation. `padding_frames_removed` retains that
-lineage; arbitrary length repair and generation cropping remain forbidden.
+Conditioning appends a recorded zero tail to the pinned 1,920-sample codec grid,
+preserving original samples and edit ranges. `conditioning_padding_frames`
+excludes Continue's intentional extension. Only that exact aligned extent or the
+128-latent decoder minimum may be removed after full finite-sample validation;
+`padding_frames_removed` retains the removal. Arbitrary length repair and
+generation cropping remain forbidden.
 
 Build-time `producer_tests/` and `pyrightconfig.build.json` run with Core Python
 3.13. Native checks use `runtime_checks/check_*.py`, installed-only

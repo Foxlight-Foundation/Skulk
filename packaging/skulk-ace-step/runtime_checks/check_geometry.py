@@ -123,6 +123,35 @@ class NativeGeometryTests(unittest.TestCase):
 
     def test_short_edits_remove_only_actual_minimum_latent_padding(self) -> None:
         """Subsecond frame offsets and Continue survive the real padded codec path."""
+        self._assert_geometry(
+            (
+                ("repaint", 48000, 48000, False),
+                ("add_part", 48001, 48001, False),
+                ("continue", 48000, 96001, False),
+                ("repaint", 245759, 245759, False),
+                ("repaint", 245760, 245760, False),
+            )
+        )
+
+    def test_long_non_aligned_edits_preserve_silent_and_audible_geometry(self) -> None:
+        """Real codec rounding cannot drop the last frame of an imported context."""
+        self._assert_geometry(
+            (
+                ("repaint", 288001, 288001, False),
+                ("repaint", 288001, 288001, True),
+                ("add_part", 288001, 288001, False),
+                ("continue", 240001, 288001, False),
+                ("continue", 240001, 288001, True),
+                ("repaint", 288000, 288000, False),
+                ("repaint", 1536001, 1536001, False),
+                ("continue", 1488001, 1536001, False),
+            )
+        )
+
+    def _assert_geometry(
+        self, cases: tuple[tuple[str, int, int, bool], ...]
+    ) -> None:
+        """Run actual preprocessing, codec and splice around controlled diffusion."""
         factory = cast(
             CodecFactory,
             cast(
@@ -164,16 +193,9 @@ class NativeGeometryTests(unittest.TestCase):
             DecodeWaveforms,
             cast(object, getattr(handler, _WAVEFORM_DECODE_METHOD)),
         )
-        cases = (
-            ("repaint", 48000, 48000),
-            ("add_part", 48001, 48001),
-            ("continue", 48000, 96001),
-            ("repaint", 245759, 245759),
-            ("repaint", 245760, 245760),
-        )
-        for operation, source_frames, target_frames in cases:
+        for operation, source_frames, target_frames, silent in cases:
             with (
-                self.subTest(operation=operation, frames=target_frames),
+                self.subTest(operation=operation, frames=target_frames, silent=silent),
                 tempfile.TemporaryDirectory() as temporary,
             ):
                 root = Path(temporary)
@@ -181,7 +203,11 @@ class NativeGeometryTests(unittest.TestCase):
                 with original.open("wb") as stream:
                     soundfile.write(
                         stream,
-                        np.full((source_frames, 2), 0.125, dtype=np.float32),
+                        np.full(
+                            (source_frames, 2),
+                            0.0 if silent else 0.125,
+                            dtype=np.float32,
+                        ),
                         48000,
                         format="WAV",
                         subtype="FLOAT",
@@ -208,6 +234,19 @@ class NativeGeometryTests(unittest.TestCase):
                     )
                 )
                 prepared = prepare_conditioning(request)
+                aligned_frames = (target_frames + 1919) // 1920 * 1920
+                self.assertEqual(prepared.samples.shape, (aligned_frames, 2))
+                self.assertEqual(prepared.padding_frames, aligned_frames - target_frames)
+                np.testing.assert_array_equal(
+                    prepared.samples[:source_frames],
+                    np.full(
+                        (source_frames, 2), 0.0 if silent else 0.125, dtype=np.float32
+                    ),
+                )
+                np.testing.assert_array_equal(
+                    prepared.samples[source_frames:],
+                    np.zeros((aligned_frames - source_frames, 2), dtype=np.float32),
+                )
                 context = root / "conditioning.wav"
                 conditioning = write_conditioning(context, prepared.samples)
                 processed = handler.process_src_audio(str(context))
@@ -225,8 +264,7 @@ class NativeGeometryTests(unittest.TestCase):
                     wavs, latents, masks, maximum, _ = prepare_targets(
                         1, processed.unsqueeze(0), [None]
                     )
-                    self.assertEqual(maximum, 128)
-                    self.assertLessEqual(int(masks.sum().item()), 128)
+                    self.assertLessEqual(int(masks.sum().item()), maximum)
                     pred, costs = prepare_decode(
                         {
                             "target_latents": latents + 0.1,
@@ -238,21 +276,30 @@ class NativeGeometryTests(unittest.TestCase):
                         0.0,
                         1.0,
                     )
-                    decoded, _, _ = decode_waveforms(pred, None, False, costs)
+                    decoded, _, _ = decode_waveforms(
+                        pred,
+                        None,
+                        target_frames > 15 * 48000 and operation == "continue",
+                        costs,
+                    )
                 spliced = splice(
                     decoded,
                     wavs,
                     [request.region_start_frame / 48000],
                     [target_frames / 48000],
                 )
-                self.assertEqual(spliced.shape[-1], 245760)
+                expected_latents = max(128, (target_frames + 1919) // 1920)
+                expected_decoded_frames = expected_latents * 1920
+                self.assertEqual(spliced.shape[-1], expected_decoded_frames)
+                self.assertEqual(maximum, expected_latents)
                 rendered = result_samples(
                     TensorResult([{"tensor": spliced[0], "sample_rate": 48000}]),
                     request,
                 )
                 self.assertEqual(rendered.samples.shape, (target_frames, 2))
                 self.assertEqual(
-                    rendered.padding_frames_removed, 245760 - target_frames
+                    rendered.padding_frames_removed,
+                    expected_decoded_frames - target_frames,
                 )
                 np.testing.assert_array_equal(
                     rendered.samples, tensor_samples(spliced[0]).T[:target_frames]
@@ -267,6 +314,7 @@ class NativeGeometryTests(unittest.TestCase):
                     source_sha256=source.sha256,
                     conditioning_sha256=conditioning.sha256,
                     conditioning_gain=prepared.gain,
+                    conditioning_padding_frames=prepared.padding_frames,
                     padding_frames_removed=rendered.padding_frames_removed,
                     execution=check_support.execution(),
                     output=output,

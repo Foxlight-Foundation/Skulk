@@ -19,7 +19,11 @@ from .audio_separation import (
     source_from_wav,
 )
 from .bindings import polyphase, soundfile
-from .contracts import NativeMusicRequest, NativeMusicWav
+from .contracts import (
+    NativeMusicRequest,
+    NativeMusicWav,
+    native_music_conditioning_frames,
+)
 
 
 def read_original(path: Path, expected: SeparationSource) -> npt.NDArray[np.float32]:
@@ -51,6 +55,7 @@ class PreparedConditioning:
     samples: npt.NDArray[np.float32]
     source: SeparationSource
     gain: float
+    padding_frames: int
 
 
 def prepare_conditioning(request: NativeMusicRequest) -> PreparedConditioning:
@@ -58,7 +63,9 @@ def prepare_conditioning(request: NativeMusicRequest) -> PreparedConditioning:
 
     Resampling uses a bounded FIR and the same ceiling frame map as the private
     request contract. No source-rate conversion happens when the source is
-    already 48 kHz. Every transformation remains separate from the original.
+    already 48 kHz. Explicit zero-tail padding prevents the pinned codec from
+    dropping fractional latent frames. Every transformation remains separate
+    from the original and the requested edit region.
     """
     source = request.source
     if source is None or request.source_path is None:
@@ -87,11 +94,17 @@ def prepare_conditioning(request: NativeMusicRequest) -> PreparedConditioning:
     gain = (1.0 - 2.0**-22) / peak if peak > 1.0 else 1.0
     if gain != 1.0:
         stereo = stereo * gain
-    if request.operation == "continue":
-        padded = np.zeros((request.target_frames, 2), dtype=np.float32)
+    conditioning_frames = native_music_conditioning_frames(request.target_frames)
+    padding_frames = conditioning_frames - request.target_frames
+    if request.operation == "continue" or padding_frames:
+        padded = np.zeros((conditioning_frames, 2), dtype=np.float32)
         padded[:frames] = stereo
-        return PreparedConditioning(samples=padded, source=source, gain=gain)
-    return PreparedConditioning(samples=stereo, source=source, gain=gain)
+        return PreparedConditioning(
+            samples=padded, source=source, gain=gain, padding_frames=padding_frames
+        )
+    return PreparedConditioning(
+        samples=stereo, source=source, gain=gain, padding_frames=0
+    )
 
 
 def write_conditioning(

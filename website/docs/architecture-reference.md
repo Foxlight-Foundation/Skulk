@@ -2693,8 +2693,11 @@ Skulk; existing PMF kit/recovery and model/registry/code authority stay separate
   observed per-component loaded precision, exact canonical source-tensor equality,
   one active request, contiguous sequence/correlation checks, 0600 PCM24/result
   files and fsynced completion. Continue repaints only the zero-padded tail.
-- Short edits: exact 128-latent/245,760-sample decoder minimum padding only;
-  validate the entire tensor before removal, record `padding_frames_removed`,
+- Edit geometry: zero-tail conditioning alignment to the pinned 1,920-sample
+  codec grid, with `conditioning_padding_frames` separate from Continue's
+  requested extension; original samples and edit ranges remain unchanged.
+  Validate the entire decoder tensor before removing only the exact aligned
+  tail or 128-latent/245,760-sample minimum. Record `padding_frames_removed`,
   preserve the requested frame count, reject all other mismatches.
 - Native failure: permanent model retirement, bounded terminal frame, dedicated
   group kill even after BrokenPipe, parent-death guardian, cleanup only after

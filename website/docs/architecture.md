@@ -4026,9 +4026,12 @@ headroom attenuation; the real upstream source tensor must equal the complete
 canonical samples. Generation, LEGO addition, repaint and padded-tail Continue
 use a closed adapter. PCM24 WAV/result metadata are exclusively written and
 synced before completion. Media remains in private files, never control frames.
-For edits shorter than the pinned decoder's 128-latent minimum, only the excess
-tail from that exact 5.12-second decoded extent is removed after validating the
-entire tensor. Metadata records the removed frames; other length mismatches fail.
+Conditioning adds only a zero tail to the pinned codec's 1,920-sample grid and
+records `conditioning_padding_frames`, separate from Continue's intentional
+extension. Original samples and requested edit ranges remain unchanged. Only
+the tail from that exact aligned extent or the decoder's 128-latent minimum
+(5.12 seconds) is removed after validating the whole tensor. Metadata records
+the removed frames; other length mismatches fail.
 
 Any native request/protocol failure retires the model. A cooperative upstream
 timeout can leave an inference thread active, so the CLI terminates its dedicated
