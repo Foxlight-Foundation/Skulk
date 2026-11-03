@@ -15,6 +15,7 @@ import {
   selectTranscriptionCaptureMode,
 } from '../../audio/realtimeTranscription';
 import { MAX_REFERENCE_AUDIO_BYTES } from '../../audio/speechSynthesisRequest';
+import { chatDocumentKind, MAX_CHAT_DOCUMENTS, removeChatDocuments, storeChatDocuments, validateChatDocument } from '../../store/chatDocuments';
 
 export interface ChatFormProps {
   /** Fabric conversation uses the reference amber composer treatment. */
@@ -48,6 +49,12 @@ export interface ChatFormProps {
   onToggleThinking?: () => void;
   /** Whether the selected model accepts image attachments. */
   supportsImageAttachments?: boolean;
+  /** Whether the selected serving path accepts inline UTF-8 text documents. */
+  supportsTextAttachments?: boolean;
+  /** Whether the selected serving path accepts inline PDF documents. */
+  supportsPdfAttachments?: boolean;
+  /** Conversation/model identity used to abandon preparation when the user switches. */
+  attachmentContext?: string;
   /** Whether the text chat send action is currently available. */
   canSendMessages?: boolean;
   /** Mounted STT models available for browser microphone transcription. */
@@ -428,6 +435,9 @@ export function ChatForm({
   thinkingEnabled = false,
   onToggleThinking,
   supportsImageAttachments = false,
+  supportsTextAttachments = false,
+  supportsPdfAttachments = false,
+  attachmentContext,
   canSendMessages = true,
   transcriptionModels = [],
   realtimeTranscriptionAvailable = false,
@@ -474,6 +484,12 @@ export function ChatForm({
   }, [onDraftChange]);
   const [files, setFiles] = useState<ChatUploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [isPreparingAttachments, setIsPreparingAttachments] = useState(false);
+  const preparingAttachments = useRef(false);
+  const attachmentContextRef = useRef(attachmentContext);
+  attachmentContextRef.current = attachmentContext;
+  const mounted = useRef(true);
   const [isStartingRecording, setIsStartingRecording] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -499,7 +515,12 @@ export function ChatForm({
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | null>(null);
 
-  const canSend = canSendMessages && (message.trim().length > 0 || files.length > 0);
+  const supportsAttachments = supportsImageAttachments || supportsTextAttachments || supportsPdfAttachments;
+  const unsupportedAttachments = files.some(file => file.type.startsWith('image/')
+    ? !supportsImageAttachments : chatDocumentKind(file.name) === 'text' ? !supportsTextAttachments : !supportsPdfAttachments);
+  const canSend = canSendMessages && !isPreparingAttachments && !unsupportedAttachments && (message.trim().length > 0 || files.length > 0);
+  const submissionAvailable = useRef(false);
+  submissionAvailable.current = canSendMessages && !isLoading && !unsupportedAttachments;
   const inputPlaceholder = placeholder ?? t('chat.form.placeholder', 'Type a message...');
   const selectedTranscriptionId = selectedTranscriptionModelId ?? transcriptionModels[0]?.modelId ?? null;
   const selectedTranscriptionModel = transcriptionModels.find(
@@ -1012,16 +1033,20 @@ export function ChatForm({
   }, []);
 
   useEffect(() => {
-    if (!supportsImageAttachments) {
+    if (!supportsAttachments) {
       setIsDragOver(false);
     }
-    if (!supportsImageAttachments && files.length > 0) {
-      clearFiles();
-    }
-  }, [supportsImageAttachments, files.length, clearFiles]);
+  }, [supportsAttachments]);
 
   useEffect(() => {
+    clearFiles();
+    setAttachmentError(null);
+  }, [attachmentContext, clearFiles]);
+
+  useEffect(() => {
+    mounted.current = true;
     return () => {
+      mounted.current = false;
       filesRef.current.forEach((file) => {
         if (file.preview) URL.revokeObjectURL(file.preview);
       });
@@ -1031,17 +1056,51 @@ export function ChatForm({
   const handleSubmit = useCallback(
     (e?: React.FormEvent) => {
       e?.preventDefault();
-      if (isLoading || !canSend) return;
-      realtimeConversationRef.current?.setInputPaused(true);
-      realtimeCaptureRef.current?.setEnabled(false);
-      onSend(message.trim(), files);
-      setMessage('');
-      clearFiles();
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
+      if (isLoading || !canSend || preparingAttachments.current) return;
+      const context = attachmentContext;
+      const draft = message;
+      preparingAttachments.current = true;
+      setIsPreparingAttachments(true);
+      setAttachmentError(null);
+      void (async () => {
+        let prepared: ChatUploadedFile[] = [];
+        let submitted = false;
+        let cleanupFailed = false;
+        const discardPrepared = async () => {
+          try { await removeChatDocuments(prepared.flatMap(file => file.documentId ? [file.documentId] : [])); }
+          catch {
+            cleanupFailed = true;
+            console.warn('Prepared chat document cleanup is unavailable.');
+          }
+        };
+        try {
+          prepared = await storeChatDocuments(files);
+          if (!mounted.current || context !== attachmentContextRef.current) {
+            await discardPrepared();
+            if (cleanupFailed && mounted.current) setAttachmentError('Prepared documents could not be removed from local browser storage.');
+            return;
+          }
+          if (!submissionAvailable.current) {
+            throw new Error('The conversation is no longer ready to send. Your draft and selected files were retained.');
+          }
+          realtimeConversationRef.current?.setInputPaused(true);
+          realtimeCaptureRef.current?.setEnabled(false);
+          onSend(draft.trim(), prepared);
+          submitted = true;
+          if (messageRef.current === draft) setMessage('');
+          clearFiles();
+          if (textareaRef.current) textareaRef.current.style.height = 'auto';
+        } catch (error) {
+          if (!submitted) await discardPrepared();
+          if (mounted.current) setAttachmentError((error instanceof Error ? error.message : 'Could not prepare attachments.')
+            + (cleanupFailed ? ' Prepared documents could not be removed from local browser storage.' : ''));
+        } finally {
+          preparingAttachments.current = false;
+          if (mounted.current) setIsPreparingAttachments(false);
+        }
+      })();
     },
-    [isLoading, canSend, message, files, onSend, clearFiles, setMessage],
+    [isLoading, canSend, message, files, onSend, clearFiles, setMessage, attachmentContext],
   );
 
   useEffect(() => {
@@ -1061,11 +1120,25 @@ export function ChatForm({
   );
 
   const addFiles = useCallback((fileList: File[]) => {
-    const imageFiles = fileList.filter((file) => file.type.startsWith('image/'));
-    if (imageFiles.length === 0) {
+    if (preparingAttachments.current) return;
+    try {
+      for (const file of fileList) {
+        if (file.type.startsWith('image/') && supportsImageAttachments) continue;
+        const kind = chatDocumentKind(file.name);
+        if (!kind || !(kind === 'text' ? supportsTextAttachments : supportsPdfAttachments)) {
+          throw new Error('The selected model does not support this attachment type.');
+        }
+        validateChatDocument(file);
+      }
+      if ([...files, ...fileList].filter(file => !file.type.startsWith('image/')).length > MAX_CHAT_DOCUMENTS) {
+        throw new Error('Attach at most eight documents per message.');
+      }
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : 'Invalid attachment.');
       return;
     }
-    const newFiles: ChatUploadedFile[] = imageFiles.map((f) => ({
+    setAttachmentError(null);
+    const newFiles: ChatUploadedFile[] = fileList.map((f) => ({
       id: `file-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       name: f.name,
       type: f.type,
@@ -1074,26 +1147,28 @@ export function ChatForm({
       preview: f.type.startsWith('image/') ? URL.createObjectURL(f) : undefined,
     }));
     setFiles((prev) => [...prev, ...newFiles]);
-  }, []);
+  }, [files, supportsImageAttachments, supportsTextAttachments, supportsPdfAttachments]);
 
   // Drag and drop
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-    if (!supportsImageAttachments) return;
+    if (!supportsAttachments) return;
     setIsDragOver(true);
-  }, [supportsImageAttachments]);
+  }, [supportsAttachments]);
 
   const handleDragLeave = useCallback(() => setIsDragOver(false), []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    if (!supportsImageAttachments) return;
+    if (!supportsAttachments) return;
     const dropped = Array.from(e.dataTransfer.files);
     addFiles(dropped);
-  }, [addFiles, supportsImageAttachments]);
+  }, [addFiles, supportsAttachments]);
 
   const removeFile = useCallback((id: string) => {
+    if (preparingAttachments.current) return;
+    setAttachmentError(null);
     setFiles((prev) => {
       const file = prev.find((f) => f.id === id);
       if (file?.preview) URL.revokeObjectURL(file.preview);
@@ -1401,6 +1476,10 @@ export function ChatForm({
       )}
 
       {/* Attachments */}
+      {isPreparingAttachments && <VoiceStatus role="status">{t('chat.form.preparingAttachments', 'Preparing attachments…')}</VoiceStatus>}
+      {(attachmentError || unsupportedAttachments) && <VoiceStatus role="alert" $error>
+        {unsupportedAttachments ? t('chat.form.unsupportedAttachment', 'The selected model does not support these attachments. Choose a compatible model or remove them.') : attachmentError}
+      </VoiceStatus>}
       {files.length > 0 && (
         <div style={{ padding: '0 12px' }}>
           <ChatAttachments files={files} onRemove={removeFile} />
@@ -1409,13 +1488,13 @@ export function ChatForm({
 
       {/* Input row */}
       <InputRow>
-        {(!compact || supportsImageAttachments) && <AttachBtn
+        {(!compact || supportsAttachments) && <AttachBtn
           variant="ghost"
           size="sm"
           icon
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={!supportsImageAttachments}
+          disabled={!supportsAttachments || isPreparingAttachments}
           aria-label={t('chat.form.attachFile', 'Attach file')}
         >
           <FiPaperclip size={17} />
@@ -1460,7 +1539,9 @@ export function ChatForm({
       </InputRow>
 
       {!compact && <HelperText>
-        {supportsImageAttachments
+        {supportsTextAttachments || supportsPdfAttachments
+          ? t('chat.form.helperWithDocuments', 'Enter to send - Shift+Enter for new line - Attach supported images, .txt or PDF files')
+          : supportsImageAttachments
           ? t(
               'chat.form.helperWithImages',
               'Enter to send - Shift+Enter for new line - Drag & drop images',
@@ -1473,9 +1554,9 @@ export function ChatForm({
         ref={fileInputRef}
         type="file"
         multiple
-        accept="image/*"
+        accept={[...(supportsImageAttachments ? ['image/*'] : []), ...(supportsTextAttachments ? ['.txt', 'text/plain'] : []), ...(supportsPdfAttachments ? ['.pdf', 'application/pdf'] : [])].join(',')}
         style={{ display: 'none' }}
-        aria-label={t('chat.form.imageAttachmentFile', 'Image attachment file')}
+        aria-label={supportsTextAttachments || supportsPdfAttachments ? t('chat.form.documentAttachmentFile', 'Chat attachment file') : t('chat.form.imageAttachmentFile', 'Image attachment file')}
         onChange={(e) => {
           if (e.target.files) addFiles(Array.from(e.target.files));
           e.target.value = '';

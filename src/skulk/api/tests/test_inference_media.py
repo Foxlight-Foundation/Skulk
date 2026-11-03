@@ -11,7 +11,7 @@ import anyio
 import httpx
 import pytest
 from fastapi import HTTPException
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from skulk.api.adapters.chat_completions import chat_request_to_text_generation
 from skulk.api.inference_gateway import (
@@ -38,6 +38,41 @@ from skulk.extensions.streams import (
 )
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+def test_document_features_require_the_streamed_contract() -> None:
+    """A legacy callable cannot advertise document transport it cannot provide."""
+    value: dict[str, JsonValue] = {
+        "contract": "chat.completions@0.2.0",
+        "target_node": "fixture",
+        "callable_id": "independent.chat",
+        "callable_version": "0.2.0",
+        "descriptor_revision": "a" * 16,
+        "catalog_revision": "b" * 64,
+        "expires_at": 1000.0,
+        "maximum_body_bytes": MAX_CHAT_BODY_BYTES,
+        "models": [
+            {
+                "id": "code",
+                "name": "Coder",
+                "features": ["text_file_input", "pdf_input"],
+            }
+        ],
+        "processing_domain": "local",
+        "usage": "none",
+        "usage_label": "Fixture",
+    }
+    assert ChatCatalog.model_validate_json(json.dumps(value)).models[0].features == (
+        "text_file_input",
+        "pdf_input",
+    )
+    value.update(
+        contract="chat.completions@0.1.0",
+        callable_version="0.1.0",
+        maximum_body_bytes=None,
+    )
+    with pytest.raises(ValidationError, match="document features"):
+        ChatCatalog.model_validate_json(json.dumps(value))
 
 
 class MediaFixture(ChatFixture):
@@ -86,6 +121,13 @@ class MediaFixture(ChatFixture):
                 contract="chat.completions@0.2.0",
                 callable_version="0.2.0",
                 maximum_body_bytes=MAX_CHAT_BODY_BYTES,
+                models=[
+                    {
+                        "id": "code",
+                        "name": "Fixture Code",
+                        "features": ["text_file_input", "pdf_input"],
+                    }
+                ],
             )
         return value
 

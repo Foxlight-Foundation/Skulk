@@ -55,8 +55,15 @@ class ChatModel(BaseModel):
     id: str = Field(min_length=1, max_length=128, pattern=r"^[\w.:@-]+$")
     name: str = Field(min_length=1, max_length=256)
     features: tuple[
-        Literal["image_input", "function_tools", "reasoning_toggle"], ...
-    ] = Field(default=(), max_length=3)
+        Literal[
+            "image_input",
+            "function_tools",
+            "reasoning_toggle",
+            "text_file_input",
+            "pdf_input",
+        ],
+        ...,
+    ] = Field(default=(), max_length=5)
 
 
 class ChatCatalog(BaseModel):
@@ -97,6 +104,12 @@ class ChatCatalog(BaseModel):
             and (self.callable_version != "0.2.0" or self.maximum_body_bytes is None)
         ):
             raise ValueError("inconsistent chat input contract")
+        if self.contract == CONTRACT and any(
+            feature in {"text_file_input", "pdf_input"}
+            for model in self.models
+            for feature in model.features
+        ):
+            raise ValueError("document features require streamed input")
         return self
 
     @field_validator("usage_url")

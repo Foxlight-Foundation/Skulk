@@ -1,5 +1,6 @@
 import { createSlice, nanoid, type PayloadAction } from '@reduxjs/toolkit';
 import { DEFAULT_CONVERSATION_NAME, type ChatMessage, type Conversation } from '../../types/chat';
+import { chatDocumentIds, pruneChatDocuments, removeChatDocuments } from '../chatDocuments';
 
 /* ── Helpers ──────────────────────────────────────────── */
 
@@ -26,6 +27,11 @@ function stripTransientFields(
         const rest = { ...msg };
         delete rest.tokens;
         delete rest.generatedImages;
+        if (rest.attachments) rest.attachments = rest.attachments.map(attachment => {
+          const metadata = { ...attachment };
+          delete metadata.fileData;
+          return metadata;
+        });
         return rest;
       }),
     };
@@ -378,6 +384,10 @@ export function subscribeChatPersistence(
   if (typeof window === 'undefined') return () => {};
   let lastDurableJson: string | null = null;
   let lastSessionJson: string | null = null;
+  let documentReferences = chatDocumentIds(store.getState().chat.conversations);
+  void pruneChatDocuments(documentReferences).catch(() => {
+    console.warn('Abandoned chat document cleanup is unavailable.');
+  });
 
   return store.subscribe(() => {
     const chat = store.getState().chat;
@@ -399,6 +409,12 @@ export function subscribeChatPersistence(
       lastDurableJson = durableJson;
       try {
         window.localStorage.setItem(DURABLE_STORAGE_KEY, durableJson);
+        const current = chatDocumentIds(chat.conversations);
+        const removed = [...documentReferences].filter(id => !current.has(id));
+        documentReferences = current;
+        void removeChatDocuments(removed).catch(() => {
+          console.warn('Deleted chat document cleanup is unavailable.');
+        });
       } catch {
         /* ignore */
       }
