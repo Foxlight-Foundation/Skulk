@@ -1,4 +1,5 @@
 import random
+import re
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from copy import deepcopy
@@ -15,6 +16,7 @@ from skulk.master.placement_utils import (
     get_mlx_ring_hosts_by_node,
     get_shard_assignments,
     get_shard_assignments_for_llama_rpc,
+    get_single_host_separation_shard_assignments,
     get_single_host_video_shard_assignments,
     get_smallest_cycles,
 )
@@ -281,6 +283,24 @@ def add_instance_to_placements(
         shard.model_card.music is not None
         for shard in assignments.runner_to_shard.values()
     )
+    separation_instance = any(
+        shard.model_card.separation is not None
+        for shard in assignments.runner_to_shard.values()
+    )
+    if separation_instance and (
+        len(assignments.node_to_runner) != 1
+        or len(assignments.runner_to_shard) != 1
+        or isinstance(command.instance, LlamaRpcInstance)
+    ):
+        raise PlacementError("Source separation requires one complete single-host model runner")
+    if separation_instance and any(
+        shard.world_size != 1
+        or shard.start_layer != 0
+        or shard.end_layer != shard.model_card.n_layers
+        or shard.n_layers != shard.model_card.n_layers
+        for shard in assignments.runner_to_shard.values()
+    ):
+        raise PlacementError("Source separation cannot load a partial model shard")
     if len(assignments.node_to_runner) != 1 and music_instance:
         raise PlacementError("Music instances require exactly one node")
     if music_instance and isinstance(command.instance, LlamaRpcInstance):
@@ -296,6 +316,23 @@ def add_instance_to_placements(
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = resolved_shards[runner_id]
             resources = (node_resources or {}).get(node_id)
+            if shard.model_card.separation is not None:
+                if resources is None:
+                    raise PlacementInfoPendingError("Verified native separation backend telemetry is required before placement")
+                ready = _card_platform_backends(shard.model_card, resources)
+                backend = shard.resolved_backend or resolve_node_backend(
+                    ready, shard.model_card.placement.backend_preference, resources.backends
+                )
+                if backend is None or backend not in ready:
+                    raise PlacementInfoPendingError("Prepare a compatible native separation package before placement")
+                build = resources.engine_builds.get(backend)
+                assert build is not None
+                if shard.resolved_engine_build is not None and shard.resolved_engine_build != build:
+                    raise PlacementError("Explicit native separation build differs from live verified resources")
+                resolved_shards[runner_id] = shard.model_copy(update={
+                    "resolved_backend": backend, "resolved_engine_build": build,
+                })
+                continue
             if shard.model_card.music is not None:
                 if resources is None:
                     raise PlacementError(
@@ -381,6 +418,7 @@ def add_instance_to_placements(
             update={"runner_to_shard": resolved_shards}
         )
     assignments = _stamp_llama_server_settings(assignments, node_resources or {})
+    assignments = _stamp_separation_policy(assignments)
     fixed_memory_by_node: dict[NodeId, Memory] = {}
     first_shard = next(iter(assignments.runner_to_shard.values()), None)
     if first_shard is not None:
@@ -442,13 +480,17 @@ def add_instance_to_placements(
             shard = assignments.runner_to_shard[runner_id]
             fraction = shard_fraction_of_model(shard)
             uses_vram = backend_offloads_to_vram(shard.resolved_backend)
-            if not uses_vram and not music_instance:
+            if not uses_vram and not music_instance and not separation_instance:
                 continue
             available = (
                 (node_vram or {}).get(node_id)
                 if uses_vram
                 else (
-                    min(memory.ram_available, gpu_working_set_ceiling(memory.ram_total))
+                    (
+                        memory.ram_available
+                        if separation_instance and shard.resolved_backend == "demucs-cpu"
+                        else min(memory.ram_available, gpu_working_set_ceiling(memory.ram_total))
+                    )
                     if (memory := node_memory.get(node_id)) is not None
                     else None
                 )
@@ -476,6 +518,26 @@ def add_instance_to_placements(
                 pool = "GPU memory" if uses_vram else "system memory"
                 raise PlacementError(f"Insufficient {pool} for the exact placement")
     return {**current_instances, instance.instance_id: instance}
+
+
+def _stamp_separation_policy(assignments: ShardAssignments) -> ShardAssignments:
+    """Bind actual native execution policy; explicit stale policy needs replanning."""
+    from skulk.shared.models.separation_runtime import resolve_demucs_policy
+
+    shards = dict(assignments.runner_to_shard)
+    for runner_id, shard in shards.items():
+        if shard.model_card.separation is None:
+            continue
+        if shard.resolved_backend is None:
+            raise PlacementError("Native separation needs an explicit prepared backend")
+        try:
+            policy = resolve_demucs_policy(shard.model_card, shard.resolved_backend)
+        except ValueError as error:
+            raise PlacementError(str(error)) from error
+        if shard.separation_policy is not None and shard.separation_policy != policy:
+            raise PlacementError("Native separation policy changed; replan before loading")
+        shards[runner_id] = shard.model_copy(update={"separation_policy": policy})
+    return assignments.model_copy(update={"runner_to_shard": shards})
 
 
 def _stamp_llama_server_settings(
@@ -655,6 +717,7 @@ def _card_platform_backends(
         card_serves_vision=card.vision is not None,
         card_serves_speech=card_serves_speech(card),
         card_serves_music=card.music is not None,
+        card_serves_separation=card.separation is not None,
         card_serves_embeddings=card_serves_embeddings(card),
         card_has_native_image_profile=card.image is not None,
         card_has_pinned_projector=(
@@ -681,6 +744,15 @@ def _card_platform_backends(
             is None
             or policy.configuration_error is None
         )
+        if card.separation is not None:
+            # Installable package pins are preparation candidates, not ready
+            # engines. Only the node's verified live inventory admits placement.
+            filtered = frozenset(
+                tag for tag in filtered
+                if tag in node_resources.backends
+                and tag not in node_resources.on_demand_backends
+                and re.fullmatch(r"demucs@sha256:[a-f0-9]{64}", node_resources.engine_builds.get(tag, "")) is not None
+            )
     return (
         filtered
         if node_resources is None
@@ -967,6 +1039,10 @@ def place_instance(
         )
     if command.model_card.music is not None and command.min_nodes != 1:
         raise PlacementError("Music instances require exactly one node")
+    if command.model_card.separation is not None and (
+        command.min_nodes != 1 or command.sharding != Sharding.Pipeline
+    ):
+        raise PlacementError("Source separation requires single-host pipeline placement")
     if remote_code_approval_required(
         command.model_card, approved_remote_code_identities
     ):
@@ -974,10 +1050,19 @@ def place_instance(
 
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
-    if command.model_card.music is not None or command.model_card.image is not None:
+    if command.model_card.music is not None or command.model_card.image is not None or command.model_card.separation is not None:
         # audio.cpp runs one complete model on one host; a larger cycle could
         # otherwise be selected when no single node passes memory admission.
         candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
+    if command.model_card.separation is not None:
+        observations = node_resources or {}
+        candidate_cycles = [
+            cycle for cycle in candidate_cycles
+            if (resources := observations.get(cycle.node_ids[0])) is not None
+            and _card_platform_backends(command.model_card, resources)
+        ]
+        if not candidate_cycles:
+            raise PlacementInfoPendingError("Prepare and publish verified native separation resources before placement")
     if not candidate_cycles:
         if command.model_card.music is not None:
             raise PlacementError(
@@ -1549,6 +1634,13 @@ def place_instance(
         shard_assignments = get_shard_assignments_for_llama_rpc(
             command.model_card, selected_cycle, driver_node
         )
+    elif command.model_card.separation is not None:
+        # The cycle filter admitted the complete native workload on the actual
+        # backend's memory pool. Generic text layer allocation would reinterpret
+        # a CPU placement through an unrelated (possibly exhausted) GPU pool.
+        shard_assignments = get_single_host_separation_shard_assignments(
+            command.model_card, selected_cycle.node_ids[0]
+        )
     elif single_node_backend == "mlx_video-metal":
         shard_assignments = get_single_host_video_shard_assignments(
             command.model_card, selected_cycle.node_ids[0]
@@ -1596,6 +1688,7 @@ def place_instance(
             updates: dict[str, str] = {"resolved_backend": resolved_backend}
             if (
                 command.model_card.music is not None
+                or command.model_card.separation is not None
                 or engine_of(resolved_backend) in {"stable_diffusion_cpp", "mlx_video"}
             ):
                 assert resources is not None
@@ -1627,6 +1720,7 @@ def place_instance(
     shard_assignments = _stamp_llama_server_settings(
         shard_assignments, resolved_node_resources
     )
+    shard_assignments = _stamp_separation_policy(shard_assignments)
 
     # Stamp the context-admission ceiling into the placement decision (#279
     # slice 2). Computed once here, so every rank reads the identical value off

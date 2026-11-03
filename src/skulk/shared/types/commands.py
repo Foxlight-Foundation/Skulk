@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, final
 from uuid import UUID
 
 from pydantic import ConfigDict, Field
@@ -17,6 +17,7 @@ from skulk.shared.types.audio import (
     RealtimeAudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
+from skulk.shared.types.audio_separation import AudioSeparationTaskParams
 from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
@@ -91,6 +92,24 @@ class MusicGeneration(BaseCommand):
 
     task_params: MusicGenerationTaskParams
     owner_node: NodeId
+
+
+@final
+class AudioSeparation(BaseCommand):
+    """Separate one verified original on a mounted single-host separator.
+
+    The original is addressed media; only its bounded identity/geometry and
+    declared chunk count enter replicated commands or the event log.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    task_params: AudioSeparationTaskParams = Field(
+        description="Admitted original/model facts."
+    )
+    owner_node: NodeId = Field(
+        description="API node owning source and complete results."
+    )
 
 
 class PrepareAudioCpp(BaseCommand):
@@ -375,6 +394,7 @@ Command = (
     | ImageEdits
     | VideoGeneration
     | MusicGeneration
+    | AudioSeparation
     | PrepareAudioCpp
     | TextEmbedding
     | SpeechSynthesis

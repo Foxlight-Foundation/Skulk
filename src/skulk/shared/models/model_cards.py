@@ -1004,6 +1004,8 @@ def model_engine_requirements(model_card: "ModelCard") -> frozenset[str]:
         return declared
     if model_card.music is not None:
         return frozenset({"audio_cpp"})
+    if model_card.separation is not None:
+        return frozenset({"demucs"})
     if model_card.image is not None:
         return frozenset({"stable_diffusion_cpp"})
     return declared

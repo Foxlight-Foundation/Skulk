@@ -13790,8 +13790,16 @@ class API:
     async def _apply_output_media_packet(self, packet: OutputMediaPacket) -> None:
         """Apply one lifecycle frame to the job's assembly and settlement."""
 
+        purpose = packet.purpose
+        if purpose not in ("video", "thumbnail", "music"):
+            # Native stem streams have their own complete-set owner. They must
+            # never mutate the existing video/music assembly on a reused ID.
+            await self._send_output_media_terminal(
+                packet.transport_failure("output purpose does not belong to this assembly")
+            )
+            return
         command_id = packet.command_id
-        key = (command_id, packet.purpose)
+        key = (command_id, purpose)
         try:
             if packet.kind == "opened":
                 assert packet.total_bytes is not None
@@ -13805,7 +13813,7 @@ class API:
                 )
                 evicted = self._video_store.open_assembly(
                     command_id,
-                    packet.purpose,
+                    purpose,
                     content_type=packet.content_type,
                     total_bytes=packet.total_bytes,
                     total_chunks=packet.total_chunks,
@@ -13829,11 +13837,11 @@ class API:
                     await self._apply_output_media_packet(held)
             elif packet.kind == "chunk":
                 self._video_store.append(
-                    command_id, packet.purpose, packet.sequence, packet.data
+                    command_id, purpose, packet.sequence, packet.data
                 )
                 completion = self._pending_output_completions.get(key)
                 if completion is not None and self._video_store.assembly_complete(
-                    command_id, packet.purpose
+                    command_id, purpose
                 ):
                     self._pending_output_completions.pop(key, None)
                     await self._apply_output_media_packet(completion)
@@ -13841,9 +13849,9 @@ class API:
                 assert packet.sha256 is not None
                 assert packet.total_chunks is not None
                 if self._video_store.has_open_assembly(
-                    command_id, packet.purpose
+                    command_id, purpose
                 ) and not self._video_store.assembly_complete(
-                    command_id, packet.purpose
+                    command_id, purpose
                 ):
                     # The gossipsub fallback can deliver the completion ahead
                     # of a chunk. Hold it until the assembly fills; the media
@@ -13852,7 +13860,7 @@ class API:
                     return
                 stored = self._video_store.commit(
                     command_id,
-                    packet.purpose,
+                    purpose,
                     sha256=packet.sha256,
                     total_chunks=packet.total_chunks,
                 )

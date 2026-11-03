@@ -1473,6 +1473,15 @@ class Worker:
         instance). MLX grows KV lazily (no up-front window), so the budget floor is
         the correct estimate there, capped by a smaller enforced serving window.
         """
+        if shard.model_card.separation is not None:
+            from skulk.shared.models.separation_runtime import resolve_demucs_policy
+
+            try:
+                policy = resolve_demucs_policy(shard.model_card, shard.resolved_backend or "")
+            except ValueError:
+                return "Native separation has no implemented explicit engine policy; replan this configuration"
+            if shard.separation_policy != policy:
+                return "Native separation policy differs from placement; refresh resources and replan this configuration"
         if shard.memory_settings is not None and shard.resolved_backend is not None:
             actual = observe_engine_memory_settings(
                 os.environ,
@@ -1542,9 +1551,19 @@ class Worker:
                     )
         else:
             local = MemoryUsage.from_local_gpu_wireable()
-            usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+            native_cpu = (
+                shard.model_card.separation is not None
+                and shard.resolved_backend == "demucs-cpu"
+            )
+            usable = (
+                local.ram_available
+                if native_cpu
+                else min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+            )
             pool = (
-                f"{local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
+                f"{local.ram_available.in_gb:.1f}GB available system RAM"
+                if native_cpu
+                else f"{local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
                 "the GPU working-set ceiling"
             )
         # Refuse only on a shortfall beyond the tolerance (#383): the footprint

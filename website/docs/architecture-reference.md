@@ -92,7 +92,28 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   One SHA-256-identified safetensors object, ordered stems and native geometry
   must agree with the artifact bundle and transformer depth/width. The model
   catalog projects this metadata separately from speech/music. Reader metadata
-  does not create an execution task or loaded-model readiness.
+  does not establish loaded-model readiness.
+
+- **Separation execution foundation (initiative):** frozen `AudioSeparation`
+  command/task variants carry only model/source metadata. `SeparationChunk`
+  carries one complete four-stem manifest or failure, never WAV bytes.
+  `master/main.py::separation_generation_instances` admits one active job per
+  ready complete single-host model. Master-local reservations survive consecutive
+  command iterations until indexed task creation transfers admission to State.
+  `shared/models/separation_runtime.py` binds exact tensor/constructor identity,
+  explicit CPU/MPS/CUDA/ROCm spelling, FP32, two threads and a 7.8-second window.
+  `BaseShardMetadata.separation_policy` binds that policy to admission; absent or
+  changed policy fails the worker guard. Ordinary/exact placement require live
+  verified backend/build resources and the full 120-second workload reservation,
+  not just tensor size. The CPU lane uses system RAM, not unrelated VRAM; complete native assignment
+  construction bypasses the text-layer allocator after workload admission.
+  `provisioning/demucs_inventory.py` pins separate CPU objects for Mac ARM64,
+  Linux amd64 and Linux ARM64; the Mac package can explicitly probe MPS. GPU
+  dependency and memory profiles remain required. The 3 GiB planning floor is an
+  engine/workload reference, not a model requirement or qualification gate.
+  Installability is not readiness. No preparation/runner/backend activation is
+  registered here. Upgrade every isolated participant before enabling these
+  new replicated variants; older ordered-event readers cannot consume them.
 
 - **Separation job lifecycle component:** `api/separation_jobs.py` persists
   source-bound metadata only, with four active/64 retained jobs and a 1 MiB
@@ -103,12 +124,24 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   locally verified stem receipts, retaining their earliest expiry. `output` is
   absent before completion; content handlers must enforce the same gate.
   Cancellation/failure cannot be revived by late frames. Unexpired complete
-  records are never evicted for admission. HTTP/task/media wiring is still absent.
+  records are never evicted for admission. HTTP/worker/media execution wiring is
+  still absent.
   `shared/types/audio_separation.py::stem_from_wav` independently measures a
   complete bounded PCM24 stereo WAV's digest, geometry and signed-sample peak.
   It shares the input container parser without native dependencies; large scans
   belong off-loop. Native result verification compares every measured stem fact.
   Silence is a valid estimated stem and is not a musical-quality diagnosis.
+  `api/separation_media.py` owns separate private four-role WAV assemblers under
+  a lifetime fence, four active jobs/64 retained sets, 64 MiB per stem and
+  256 MiB per set. Filesystem headroom deducts every role's outstanding unwritten
+  promises, including reordered chunks, without charging written bytes twice.
+  Closed independent facts, synced bytes, job/role directories and newly created
+  storage-root links precede receipts. Failed first-time setup removes only new
+  empty directories under its fence, so retry repeats the ancestor syncs;
+  only a durable completed manifest exposes content. Restart adopts all four
+  exact files or none, and invalid partial sets delete only owned API copies.
+  `OUTPUT_MEDIA` adds `separation_drums/bass/other/vocals`; the existing
+  video/music handler refuses these roles without mutating either job family.
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream

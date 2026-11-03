@@ -846,24 +846,34 @@ def filter_cycles_by_memory(
                 + estimate_music_workspace(model_card, resolved_backend=backend)
                 + fixed_memory_by_node.get(node_id, Memory())
             )
-            native_single_host = backend == "mlx_video-metal" and len(cycle.node_ids) == 1
+            native_single_host = len(cycle.node_ids) == 1 and (
+                backend == "mlx_video-metal" or model_card.separation is not None
+            )
             if native_single_host:
-                # Video stages are not resident layer shards. Use the same
-                # staged reservation the worker and request supervisor enforce.
+                # Native video and separation workloads are not proportional
+                # layer shards. Admission must use the same complete workload
+                # reservation as the worker, rather than the small weight file.
                 required_with_overhead = estimate_shard_footprint(
                     model_card, 1.0, context_budget,
                     resolved_backend=backend,
                     memory_settings=policy,
                 ) + fixed_memory_by_node.get(node_id, Memory())
-            node_vram_usable = node_vram.get(node_id)
-            available = _node_usable_memory(node_memory[node_id], node_vram_usable)
+            native_cpu = model_card.separation is not None and backend == "demucs-cpu"
+            node_vram_usable = None if native_cpu else node_vram.get(node_id)
+            available = (
+                node_memory[node_id].ram_available
+                if native_cpu
+                else _node_usable_memory(node_memory[node_id], node_vram_usable)
+            )
             if required_with_overhead > available:
                 pool = (
                     "usable GPU VRAM"
                     if node_vram_usable is not None
+                    else "available system RAM"
+                    if native_cpu
                     else f"min of available and {GPU_WORKING_SET_FRACTION:.0%} of RAM"
                 )
-                weight_description = "staged video reservation" if native_single_host else f"{share.in_gb:.1f}GB weights"
+                weight_description = "complete native workload reservation" if native_single_host else f"{share.in_gb:.1f}GB weights"
                 overloaded.append(
                     f"node {node_id} needs ~{required_with_overhead.in_gb:.1f}GB "
                     f"({weight_description} + {kv_share.in_gb:.1f}GB "
@@ -1046,6 +1056,32 @@ def _allocate_and_validate_layers(
             )
 
     return layer_allocations
+
+
+def get_single_host_separation_shard_assignments(
+    model_card: ModelCard, node_id: NodeId
+) -> ShardAssignments:
+    """Represent one already admitted complete native separation workload.
+
+    Args:
+        model_card: Exact separation card admitted against its full workload.
+        node_id: Selected single host with verified native runtime resources.
+
+    Returns:
+        A complete rank-zero assignment, without allocating proportional text
+        layers against unrelated VRAM or loading any native model.
+    """
+    if model_card.separation is None:
+        raise ValueError("single-host separation assignments require a separation card")
+    runner_id = RunnerId()
+    return ShardAssignments(
+        model_id=model_card.model_id,
+        node_to_runner={node_id: runner_id},
+        runner_to_shard={runner_id: PipelineShardMetadata(
+            model_card=model_card, device_rank=0, world_size=1,
+            start_layer=0, end_layer=model_card.n_layers, n_layers=model_card.n_layers,
+        )},
+    )
 
 
 def get_single_host_video_shard_assignments(
