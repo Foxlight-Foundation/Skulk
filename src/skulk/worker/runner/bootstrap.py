@@ -604,20 +604,17 @@ def entrypoint(
                     separation_context.source_fence.close()
             return
         if bound_instance.is_music_model:
-            from skulk.shared.backends import engine_of
-            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
-
             resolved = shard.resolved_backend
-            music_engine = (
-                engine_of(resolved)
-                if resolved is not None
-                else _resolve_text_engine(bound_instance)
-            )
+            # Validate the artifact contract for stamped and fallback music
+            # assignments before importing the specialized runner.
+            music_engine = _resolve_text_engine(bound_instance)
             if music_engine != "audio_cpp":
                 raise RuntimeError(
                     "no audio.cpp engine serves this music placement on this node "
                     f"(resolved backend {resolved!r})"
                 )
+            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
+
             runner = AudioCppRunner(
                 bound_instance, event_sender, task_receiver, cancel_receiver
             )

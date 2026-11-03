@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 from typing import cast
 
+import loguru
 import pytest
 from pydantic import ValidationError
 
@@ -18,17 +19,24 @@ from skulk.shared.models.model_cards import (
 )
 from skulk.shared.tests.model_card_fixtures import fixture_card_path
 from skulk.shared.topology import Topology
+from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.commands import PlaceInstance
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.diagnostics import RunnerDiagnosticUpdate
+from skulk.shared.types.events import Event, RunnerStatusUpdated
 from skulk.shared.types.profiling import MemoryUsage, NodeResources
+from skulk.shared.types.tasks import Task, TaskId
 from skulk.shared.types.worker.instances import (
     BoundInstance,
     InstanceId,
     InstanceMeta,
     MlxRingInstance,
 )
-from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
+from skulk.utils.channels import MpReceiver, MpSender, mp_channel
+from skulk.worker.runner import bootstrap
+from skulk.worker.runner.audio_cpp import runner as audio_cpp_runner
 from skulk.worker.runner.bootstrap import (
     _resolve_text_engine,  # pyright: ignore[reportPrivateUsage]
 )
@@ -187,3 +195,95 @@ def test_worker_refuses_native_artifacts_instead_of_falling_back_to_mlx(backend:
     )
     with pytest.raises(RuntimeError, match="native music runner"):
         _resolve_text_engine(BoundInstance(instance=instance, bound_runner_id=runner, bound_node_id=node))
+
+
+def _skip_process_setup(*_arguments: object, **_keywords: object) -> None:
+    """Isolate OS/watchdog/diagnostic effects while exercising actual dispatch."""
+
+
+@pytest.mark.parametrize(("native", "backend"), [
+    (True, None), (True, "audio_cpp-cpu"), (False, "audio_cpp-cpu"),
+])
+def test_actual_entrypoint_refuses_native_before_audio_cpp_dispatch(
+    monkeypatch: pytest.MonkeyPatch, native: bool, backend: str | None,
+) -> None:
+    """Both stamped and fallback paths report failure; an existing GGUF still dispatches."""
+    card = ModelCard.model_validate(_body() if native else tomllib.loads(
+        fixture_card_path("audio-cpp/ACE-Step1.5-Turbo-BF16").read_text()
+    ))
+    node, runner = NodeId("entrypoint-node"), RunnerId("entrypoint-runner")
+    bound = BoundInstance(
+        instance=MlxRingInstance(
+            instance_id=InstanceId("entrypoint-instance"),
+            shard_assignments=ShardAssignments(
+                model_id=card.model_id, node_to_runner={node: runner},
+                runner_to_shard={runner: PipelineShardMetadata(
+                    model_card=card, device_rank=0, world_size=1,
+                    start_layer=0, end_layer=card.n_layers, n_layers=card.n_layers,
+                    resolved_backend=backend,
+                )},
+            ), hosts_by_node={}, ephemeral_port=50000,
+        ), bound_node_id=node, bound_runner_id=runner,
+    )
+    events: list[Event] = []
+    dispatched: list[str] = []
+
+    class ObservedAudioCppRunner:
+        """Observe only the specialized dispatch, without loading a real model."""
+
+        def __init__(
+            self, _bound: BoundInstance, _events: MpSender[Event],
+            _tasks: MpReceiver[Task], _cancellations: MpReceiver[TaskId],
+        ) -> None:
+            dispatched.append("constructed")
+
+        def main(self) -> None:
+            """Record actual runner-loop entry without inference side effects."""
+            dispatched.append("main")
+
+    event_sender, event_receiver = mp_channel[Event]()
+    diagnostic_sender, diagnostic_receiver = mp_channel[RunnerDiagnosticUpdate]()
+    task_sender, task_receiver = mp_channel[Task]()
+    cancel_sender, cancel_receiver = mp_channel[TaskId]()
+    audio_sender, audio_receiver = mp_channel[RealtimeAudioInputFrame]()
+    monkeypatch.setattr(event_sender, "send", events.append)
+    monkeypatch.setattr(audio_cpp_runner, "Runner", ObservedAudioCppRunner)
+    monkeypatch.setattr(bootstrap.signal, "signal", _skip_process_setup)
+    monkeypatch.setattr(bootstrap.resource, "setrlimit", _skip_process_setup)
+    monkeypatch.setenv("MLX_METAL_FAST_SYNCH", "0")
+    monkeypatch.setattr(bootstrap, "logger", bootstrap.logger)
+    for name in (
+        "install_stack_dump_signal", "_install_parent_death_watchdog",
+        "configure_runner_diagnostics", "record_runner_phase", "_release_metal_resources",
+    ):
+        monkeypatch.setattr(bootstrap, name, _skip_process_setup)
+    try:
+        bootstrap.entrypoint(
+            bound, event_sender, diagnostic_sender, task_receiver,
+            cancel_receiver, audio_receiver, loguru.logger,
+        )
+        failures = [event.runner_status for event in events if isinstance(event, RunnerStatusUpdated)]
+        if native:
+            assert dispatched == []
+            assert len(failures) == 1
+            assert isinstance(failures[0], RunnerFailed)
+            assert failures[0].error_message == "Native ACE-Step execution requires the native music runner"
+        else:
+            assert dispatched == ["constructed", "main"]
+            assert failures == []
+    finally:
+        event_sender.close()
+        diagnostic_sender.close()
+        task_sender.close()
+        cancel_sender.close()
+        audio_sender.close()
+        event_receiver.close()
+        diagnostic_receiver.close()
+        task_receiver.close()
+        cancel_receiver.close()
+        audio_receiver.close()
+        event_sender.join()
+        diagnostic_sender.join()
+        task_sender.join()
+        cancel_sender.join()
+        audio_sender.join()
