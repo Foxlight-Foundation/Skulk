@@ -345,6 +345,74 @@ async def test_reordered_media_before_data_stays_private_until_manifest(
 
 
 @pytest.mark.parametrize("metadata_first", [False, True])
+async def test_replayed_completion_requires_verified_manifest_and_settles(
+    tmp_path: Path, metadata_first: bool
+) -> None:
+    """Duplicate role terminals cannot bypass DATA verification or strand a job."""
+    async with fixture(tmp_path) as (harness, client):
+        identifier = await create(client)
+        task = await harness.task(identifier)
+        output = result(tmp_path / "native", task)
+        first_completed = anyio.Event()
+
+        async def duplicate_terminal(packet: OutputMediaPacket) -> None:
+            await harness.api.receive_output(packet)
+            if packet.kind == "completed":
+                await harness.api.receive_output(packet)
+                first_completed.set()
+
+        async def fail(_task: AudioSeparation, message: str) -> None:
+            raise AssertionError(message)
+
+        producer = SeparationOutputProducer(
+            NodeId("node-0"), duplicate_terminal, fail
+        )
+        producer.register(task, tmp_path / "native", output)
+        harness.producer = producer
+        manifest = SeparationChunk(
+            model=ModelId(task.task_params.model), finish_reason="stop", output=output
+        )
+        if metadata_first:
+            await harness.queues[identifier].send(manifest)
+        sending = asyncio.create_task(producer.deliver(identifier))
+        try:
+            with anyio.fail_after(5):
+                await first_completed.wait()
+                # Let independently scheduled reverse controls drain. Neither
+                # receipt bytes nor a repeated terminal establish manifest truth.
+                await anyio.sleep(0)
+                if not metadata_first:
+                    assert not any(
+                        packet.kind == "accepted" for packet in harness.output_frames
+                    )
+                    private = SeparationResource.model_validate_json(
+                        (await client.get(f"/v1/audio/separations/{identifier}")).content
+                    )
+                    assert private.status == "in_progress" and private.output is None
+                    await harness.queues[identifier].send(manifest)
+                await sending
+                while True:
+                    completed = SeparationResource.model_validate_json(
+                        (await client.get(f"/v1/audio/separations/{identifier}")).content
+                    )
+                    if completed.status == "completed":
+                        break
+                    await anyio.sleep(0.01)
+            assert completed.output is not None
+            for stem in completed.output.stems:
+                downloaded = await client.get(
+                    f"/v1/audio/separations/{identifier}/content/{stem.name}"
+                )
+                assert downloaded.status_code == 200
+                assert hashlib.sha256(downloaded.content).hexdigest() == stem.sha256
+        finally:
+            if not sending.done():
+                sending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await sending
+
+
+@pytest.mark.parametrize("metadata_first", [False, True])
 async def test_same_node_four_stem_rendezvous_routes_reverse_acknowledgments(
     tmp_path: Path, metadata_first: bool
 ) -> None:

@@ -608,8 +608,10 @@ cancellation drain per admitted job, four job slots retained through sender
 join); completed output requires admitted role ACKs. The production separation
 sender propagates channel failures and caller deadlines instead of suppressing
 failed admission. This prevents another
-command's forward frame blocking the media consumer's ACK. Output
-subscriptions filter API forward frames and Worker reverse control before their
+command's forward frame blocking the media consumer's ACK. Completion
+replays pass the same DATA-manifest verification before ACK;
+recording receipts retries settlement even if earlier control tasks have drained.
+Output subscriptions filter API forward frames and Worker reverse control before their
 zero-buffer queues; ignored self-echoes cannot block an in-progress ACK sender.
 Sources remain reserved through result settlement and actual reader drain; shutdown
 releases service ownership without deleting potentially live originals. HTTP

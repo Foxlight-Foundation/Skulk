@@ -821,7 +821,13 @@ class SeparationAPI:
         finally:
             await self.finalize(identifier, session)
 
-    async def _record_receipts(self, identifier: CommandId, entry: _Active) -> None:
+    async def _record_receipts(
+        self,
+        identifier: CommandId,
+        entry: _Active,
+        *,
+        replayed_stem: SeparationStemName | None = None,
+    ) -> None:
         assert self.jobs is not None
         job = await self.job(identifier)
         if job.candidate_output is None or entry.producer is None:
@@ -837,8 +843,13 @@ class SeparationAPI:
                 )
             )
             completion = entry.completed.get(name)
-            if completion is not None and name not in entry.acknowledged:
+            if completion is not None and (
+                name not in entry.acknowledged or name == replayed_stem
+            ):
                 self._acknowledge_stem(identifier, entry, name, completion)
+        # DATA can arrive after reverse controls drain. Recording verified
+        # manifests must also retry settlement when no new ACK task is needed.
+        await self._settle_receipts(identifier, entry)
 
     def _acknowledge_stem(
         self,
@@ -975,7 +986,9 @@ class SeparationAPI:
             return
         if name in entry.receipts:
             if packet.kind == "completed" and packet == entry.completed.get(name):
-                self._acknowledge_stem(identifier, entry, name, packet)
+                # A byte receipt alone does not prove agreement with DATA.
+                # Replays share verification while allowing a lost ACK to resend.
+                await self._record_receipts(identifier, entry, replayed_stem=name)
             return
         if packet.kind != "opened" and name not in entry.opened:
             early = entry.early.setdefault(name, [])

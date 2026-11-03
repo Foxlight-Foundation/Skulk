@@ -20,6 +20,10 @@ This project records release notes here and mirrors public-facing notes in
   admission failures so a dropped final acknowledgement cannot report a
   completed job.
 
+- Verify replayed stem completion packets against the result manifest before
+  acknowledging them, and retry settlement when manifest recording finishes.
+  Reordered duplicate terminals cannot strand a fully delivered result.
+
 ### Offline model availability
 
 - Recognize complete installed artifact bundles without a safetensors shard

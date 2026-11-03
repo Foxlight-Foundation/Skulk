@@ -1448,7 +1448,9 @@ Each of four admitted jobs owns at most four role ACKs and one cancellation
 drain; its admission slot remains held until those senders join. Completion
 requires every role ACK to be admitted. The production separation sender
 propagates unavailable or broken channels and caller deadlines to this owner;
-a dropped final ACK fails the job even after all four files verify. These pure predicates
+a dropped final ACK fails the job even after all four files verify. Replayed
+completion terminals share DATA-manifest verification before acknowledgement;
+recording receipts retries settlement after earlier control tasks drain. These pure predicates
 run before their zero-buffer queues, preventing an ignored same-node echo or
 the next role from blocking the receiver that is still sending its ACK.
 Legacy video and generated-music subscriber admission is unchanged.

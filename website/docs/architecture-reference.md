@@ -181,7 +181,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   and completion gated on admitted role ACKs. The API wires separation to
   `_send_separation_output_terminal`: raw sender admission propagates channel
   failures and caller cancellation/deadlines. The legacy best-effort terminal
-  helper remains on video/music paths. Typed subscriber predicates
+  helper remains on video/music paths. Replayed completion terminals require
+  DATA-manifest verification before an ACK can be resent; receipt recording also
+  retries settlement when earlier ACK tasks have drained. Typed subscriber predicates
   admit separation forward packets only to APIs and reverse control only to Workers before
   their rendezvous queues, avoiding same-node ACK reentrancy without buffering
   additional audio.

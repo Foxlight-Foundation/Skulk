@@ -2300,6 +2300,8 @@ rendering, all four verified local files agree with the complete manifest, and
 their return-path acknowledgements have been admitted. An unavailable return
 transport or acknowledgement deadline fails the job, including when every WAV
 has already verified; it cannot silently report completion.
+Repeated completion packets also require manifest verification; arrival of the
+manifest rechecks settlement after any previously admitted acknowledgements.
 
 Uploads have a three-minute deadline; a stalled body returns 408 and its partial
 spooled files are closed. Requests with invalid metadata or WAV data return 422; malformed multipart
