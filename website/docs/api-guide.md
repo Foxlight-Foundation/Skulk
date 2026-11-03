@@ -2198,6 +2198,8 @@ editing endpoint.
 This reader also refuses native-profile downloads, installed-record creation
 and preservation until their complete three-component lifecycle is supported;
 native metadata alone does not establish a usable installation.
+Starting such a download reports `DownloadFailed` with an actionable reason;
+the node and its download command processor remain available for other work.
 
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
