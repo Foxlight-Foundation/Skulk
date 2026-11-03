@@ -532,6 +532,8 @@ def companion_download_specs(
     run-without-speculation (best-effort).
     """
 
+    model_card.require_supported_artifact_operations(context="companion download")
+
     def _bare_shard(
         repo: str,
         source_revision: str | None,
@@ -770,6 +772,10 @@ def model_companions_present_on_disk(
     model complete after ensure_shard returns, so the gate cannot loop
     within a session.
     """
+    # Existing cache shortcuts cannot prove the native encoder/autoencoder
+    # closure yet, even when the caller asks only for required companions.
+    if model_card.music is not None and model_card.music.native is not None:
+        return False
     if model_card.image is not None:
         for component in model_card.image.components:
             identifier, revision = companion_artifact_location(
@@ -1990,6 +1996,8 @@ async def get_weight_map(model_id: ModelId, revision: str = "main") -> dict[str,
 
 
 async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
+    """Select download paths, refusing component layouts not yet supported."""
+    shard.model_card.require_supported_artifact_operations(context="download selection")
     bundle = shard.model_card.artifact_bundle
     if shard.model_card.image is not None:
         # Primary-repository companions belong to the base transaction; the
@@ -2067,6 +2075,12 @@ async def download_shard(
     capacity_preflight: DownloadCapacityPreflight | None = None,
     replacement_identity: str | None = None,
 ) -> tuple[Path, RepoDownloadProgress]:
+    """Download or inspect selected shard bytes and return their progress.
+
+    Unsupported artifact layouts raise before cache mutation or network access,
+    including requests that supply explicit patterns or skip the transfer.
+    """
+    shard.model_card.require_supported_artifact_operations(context="shard download")
     if not skip_download:
         require_remote_code_approval(shard.model_card)
         logger.debug(f"Downloading {shard.model_card.model_id=}")

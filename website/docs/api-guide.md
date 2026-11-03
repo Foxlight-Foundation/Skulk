@@ -2195,6 +2195,9 @@ Native ACE base card metadata can also describe intrinsic editing modes in
 `music.native`. Those safetensors components cannot be loaded by the audio.cpp
 runner; this section documents the existing generation job API, not a native
 editing endpoint.
+This reader also refuses native-profile downloads, installed-record creation
+and preservation until their complete three-component lifecycle is supported;
+native metadata alone does not establish a usable installation.
 
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses

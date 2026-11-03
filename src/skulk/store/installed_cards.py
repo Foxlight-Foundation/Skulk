@@ -569,6 +569,7 @@ def build_installed_card_record(
     peer's record here as a substitute for independent receiving verification.
     """
 
+    model_card.require_supported_artifact_operations(context="installed artifact record")
     files = file_manifest or build_file_manifest(model_directory)
     digest = manifest_sha256(files)
     effective_repository = artifact_repository or str(model_card.artifact_repository)

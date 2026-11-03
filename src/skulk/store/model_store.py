@@ -1625,6 +1625,8 @@ class ModelStore:
         Companion downloads retain that owning card together with their role
         and owning identities instead of synthesizing a bare model card.
         """
+        if model_card is not None:
+            model_card.require_supported_artifact_operations(context="store download")
         requested_repository = source_repository or model_id
         pinned_projector = (
             model_card.vision.projector_file

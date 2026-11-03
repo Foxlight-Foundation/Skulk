@@ -426,6 +426,9 @@ Turbo GGUF. The reader preserves its intrinsic generation and editing truth;
 this metadata does not assert that a native runner or editing endpoint is
 available. Current audio.cpp and MLX runners cannot load this selection.
 Master placement and manual/legacy worker startup refuse that mismatch.
+Downloads, installed-record creation and preservation also explicitly refuse
+native profiles until the full three-component byte lifecycle is implemented;
+a cached primary bundle alone is never considered download-complete.
 
 | Field | Meaning |
 | --- | --- |

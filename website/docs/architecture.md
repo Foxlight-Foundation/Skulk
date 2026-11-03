@@ -4002,3 +4002,7 @@ the audio.cpp GGUF artifact contract. Placement filters these native profiles ou
 of existing runners, and worker startup rejects incompatible legacy/manual
 assignments explicitly. A card reader does not establish native execution or a
 new editing API. Absent native metadata preserves existing signed music bytes.
+Download selection, direct/store transfers and installed records refuse native
+profiles before byte effects until their complete component lifecycle exists.
+Cache completeness is false, and the shared preservation export/recovery mapping
+refuses a primary-only closure.

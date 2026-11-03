@@ -34,6 +34,10 @@ def companion_selections(
     Missing optional bytes are therefore a preparation error, not a silent
     reduction of the selected preservation workload.
     """
+    try:
+        card.require_supported_artifact_operations(context="preservation companions")
+    except ValueError as error:
+        raise PreservationError(str(error)) from error
     card.require_immutable_external_companions(context="preservation companions")
     if card.vision is not None and card.vision.processor_repo:
         # The current vision processor loader still addresses the Hub directly;

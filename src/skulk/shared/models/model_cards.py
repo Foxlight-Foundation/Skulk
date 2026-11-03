@@ -3421,6 +3421,25 @@ class ModelCard(CamelCaseModel):
         self.require_immutable_external_companions(context="signed registry cards")
         return self
 
+    def require_supported_artifact_operations(self, *, context: str) -> None:
+        """Reject byte work whose complete component layout is not implemented.
+
+        Args:
+            context: Artifact boundary included in the diagnostic.
+
+        Raises:
+            ValueError: Native music has metadata support, but its three-component
+                download, installation and preservation mapping is unavailable.
+                Reading or projecting the card does not perform this check.
+        """
+        # Parsing exact metadata must not certify a primary-only installation.
+        # Remove this refusal only with the complete native component lifecycle.
+        if self.music is not None and self.music.native is not None:
+            raise ValueError(
+                f"{context}: native music artifact operations require the complete "
+                "three-component download and store integration, which is not yet supported"
+            )
+
     def require_immutable_external_companions(self, *, context: str) -> None:
         """Reject external companion repositories without immutable revisions.
 

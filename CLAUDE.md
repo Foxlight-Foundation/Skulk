@@ -2644,3 +2644,6 @@ and leaves existing GGUF serialization unchanged. Public model metadata reports
 native variant/edit modes/part classes/geometry. Existing engine placement and
 legacy/manual worker startup reject this distinct artifact contract until a
 native execution implementation exists; no editing endpoint is implied.
+Byte operations likewise refuse native profiles until all three components have
+supported download/store/preservation mappings; primary-only cache presence does
+not count as download completeness.

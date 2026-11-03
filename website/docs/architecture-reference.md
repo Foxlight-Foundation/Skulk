@@ -2670,3 +2670,7 @@ Skulk; existing PMF kit/recovery and model/registry/code authority stay separate
 - `/v1/models.music.native`: intrinsic variant/modes/classes/sample rate/channels;
   does not assert a native runner or HTTP editing endpoint exists.
 - Absent native metadata is excluded from existing card/public serialization.
+- `ModelCard.require_supported_artifact_operations`: refuses native profile
+  download selection, direct/store transfers and installed records before effects.
+  Native cache completeness is false; preservation closure selection also refuses
+  until all three components have a supported byte lifecycle.
