@@ -1,0 +1,15 @@
+{
+  "include": ["build_ace_step.py", "fetch_archives.py", "package_inputs.py", "wheel_inputs.py", "producer_tests"],
+  "typeCheckingMode": "strict",
+  "failOnWarnings": true,
+  "reportAny": "error",
+  "reportUnknownVariableType": "error",
+  "reportUnknownParameterType": "error",
+  "reportMissingParameterType": "error",
+  "reportMissingTypeStubs": "error",
+  "reportInvalidCast": "error",
+  "reportUnnecessaryCast": "error",
+  "reportUnnecessaryTypeIgnoreComment": "error",
+  "pythonVersion": "3.13",
+  "extraPaths": [".", "producer_tests"]
+}

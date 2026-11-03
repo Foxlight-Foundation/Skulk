@@ -2674,3 +2674,39 @@ Skulk; existing PMF kit/recovery and model/registry/code authority stay separate
   download selection, direct/store transfers and installed records before effects.
   Native cache completeness is false; preservation closure selection also refuses
   until all three components have a supported byte lifecycle.
+
+### Native ACE package/process definitions
+
+- `packaging/skulk-ace-step/`: independently installed Python 3.12 native family,
+  with exact three-target CPU archive catalogs and pinned standalone interpreters.
+- `build_ace_step.py`: clean committed sources, closed selected library/adapter
+  inventories, explicit namespace override, runtime-owned model-code identities,
+  streamed/rehashed objects, deterministic regular ZIP members and SHA descriptors.
+  No model weights, publication or machine paths enter the sealed object.
+- `provisioning/demucs_package.py`: shared verification/bootstrap for exactly the
+  built-in Demucs and ACE layouts. Source repository, namespace and metadata root
+  must agree; the existing Demucs cache also enforces its own family ownership.
+- `shared/types/native_music.py`: canonical strict private request/component/
+  precision/result/control contracts; copied into the native package as bytes.
+  Frames are bounded to 256 KiB and carry no audio or public local-file choices.
+- Native resident: complete data/code verification, explicit runtime math probe,
+  observed per-component loaded precision, exact canonical source-tensor equality,
+  one active request, contiguous sequence/correlation checks, 0600 PCM24/result
+  files and fsynced completion. Continue repaints only the zero-padded tail.
+- Edit geometry: zero-tail conditioning alignment to the pinned 1,920-sample
+  codec grid, with `conditioning_padding_frames` separate from Continue's
+  requested extension; original samples and edit ranges remain unchanged.
+  Validate the entire decoder tensor before removing only the exact aligned
+  tail or 128-latent/245,760-sample minimum. Record `padding_frames_removed`,
+  preserve the requested frame count, reject all other mismatches.
+- Native failure: permanent model retirement, bounded terminal frame, dedicated
+  group kill even after BrokenPipe, parent-death guardian, cleanup only after
+  owner drain. Module observations do not establish every operator's precision;
+  native decode can temporarily use CPU and restore original placement.
+- `producer_tests/`: normal Core/build Python 3.13 checks. `runtime_checks/`:
+  explicit native Python 3.12 checks via installed-only `verify_runtime.py`.
+  Three-target CI compares independent builds and performs fresh offline execution;
+  it does not load music models, grant model qualification or register Core capacity.
+- Existing native card placement/download/store/preservation refusal remains until
+  the complete artifact and worker lifecycle is implemented. No editing route is
+  introduced by these package/process definitions.

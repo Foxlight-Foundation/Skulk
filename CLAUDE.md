@@ -2647,3 +2647,37 @@ native execution implementation exists; no editing endpoint is implied.
 Byte operations likewise refuse native profiles until all three components have
 supported download/store/preservation mappings; primary-only cache presence does
 not count as download completeness.
+
+The built-in native ACE package/process family lives in `packaging/skulk-ace-step/`.
+Its Python 3.12 interpreter and exact three-platform CPU archive catalogs stay
+separate from Core/Studio and all model weights. `build_ace_step.py` seals only
+selected pinned source, the explicit inference namespace override, closed owned
+adapter modules and runtime-owned model-code identities. Inputs stream with a
+second digest check; clean Git inputs and deterministic regular members are
+required. `provisioning/demucs_package.py` verifies/bootstrap exactly two built-in
+audio layouts; Demucs runtime preparation retains an independent source-family
+fence. This is not an engine plugin ABI or ready-backend registration.
+
+`shared/types/native_music.py` is the canonical dependency-light private protocol.
+The resident verifies complete data/code before native import, explicitly probes
+the requested lane, observes all component dtypes/devices, and verifies the actual
+native source tensor against canonical FLOAT WAV samples. Context headroom gain
+is explicit; originals are unchanged. One active request and contiguous control
+sequences guard the loaded model. Private 0600 PCM24/result files are synced
+before completion. Native errors permanently retire the handle; the CLI kills
+its dedicated group even if terminal output fails, and its parent guardian kills
+an orphan. Never clean partial native state until that group has drained.
+Conditioning appends a recorded zero tail to the pinned 1,920-sample codec grid,
+preserving original samples and edit ranges. `conditioning_padding_frames`
+excludes Continue's intentional extension. Only that exact aligned extent or the
+128-latent decoder minimum may be removed after full finite-sample validation;
+`padding_frames_removed` retains the removal. Arbitrary length repair and
+generation cropping remain forbidden.
+
+Build-time `producer_tests/` and `pyrightconfig.build.json` run with Core Python
+3.13. Native checks use `runtime_checks/check_*.py`, installed-only
+`verify_runtime.py`, and the separate Python 3.12 typing project. The ACE boundary
+workflow builds twice and executes fresh offline packages on macOS ARM64, Linux
+x86_64 and Linux ARM64. These checks do not load music weights or qualify a model.
+Do not remove native byte-operation/placement refusal, advertise capacity or add
+public editing availability from package evidence alone.

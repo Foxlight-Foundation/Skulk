@@ -14,6 +14,7 @@ import json
 import re
 import subprocess
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -122,7 +123,7 @@ def clean_revision(root: Path) -> str:
 
 
 def validate_dependency_closure(
-    wheels: dict[str, bytes],
+    wheels: Mapping[str, bytes | Path],
     required: dict[str, tuple[Version, frozenset[str]]],
     direct: bytes,
     target: str,
@@ -165,7 +166,9 @@ def validate_dependency_closure(
     }
     for filename, data in wheels.items():
         distribution, version, _, _ = parse_wheel_filename(filename)
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        with zipfile.ZipFile(
+            io.BytesIO(data) if isinstance(data, bytes) else data
+        ) as archive:
             paths = [
                 name
                 for name in archive.namelist()

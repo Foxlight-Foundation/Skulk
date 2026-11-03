@@ -188,12 +188,24 @@ class BuildManifest(BaseModel):
     python_archive: PythonArchivePin
     adapter_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
     source_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
-    source_repository: Literal["https://github.com/adefossez/demucs.git"]
+    source_repository: Literal[
+        "https://github.com/adefossez/demucs.git",
+        "https://github.com/ace-step/ACE-Step-1.5.git",
+    ]
     platform_tag: str
     variant: Literal["cpu"]
     members: dict[str, Digest] = Field(min_length=1, max_length=256)
     features: tuple[str, ...] = Field(max_length=16)
     payload_sha256: Digest
+
+
+def _package_module(manifest: BuildManifest) -> Literal["skulk_demucs", "skulk_ace_step"]:
+    """Select one built-in audio package layout from its verified source identity."""
+    return (
+        "skulk_demucs"
+        if manifest.source_repository == "https://github.com/adefossez/demucs.git"
+        else "skulk_ace_step"
+    )
 
 
 def safe_member(name: str) -> PurePosixPath:
@@ -259,7 +271,13 @@ def _candidate_manifest(archive: zipfile.ZipFile) -> BuildManifest:
         raise ValueError("candidate has excessive or duplicate members")
     if sum(entry.file_size for entry in entries) > MAX_PACKAGE_BYTES:
         raise ValueError("candidate payload exceeds its expanded bound")
-    build = archive.getinfo("skulk_demucs/build.json")
+    build_names = set(names).intersection(
+        {"skulk_demucs/build.json", "skulk_ace_step/build.json"}
+    )
+    if len(build_names) != 1:
+        raise ValueError("candidate needs exactly one supported audio build manifest")
+    build_name = next(iter(build_names))
+    build = archive.getinfo(build_name)
     if build.file_size > 128 * 1024:
         raise ValueError("candidate manifest exceeds its bound")
     manifest = BuildManifest.model_validate_json(archive.read(build))
@@ -267,15 +285,17 @@ def _candidate_manifest(archive: zipfile.ZipFile) -> BuildManifest:
     identity = hashlib.sha256(
         json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    metadata_root = "skulk_demucs_cpu-0.1.0.dist-info"
+    module_name = _package_module(manifest)
+    metadata_root = f"{module_name}_cpu-0.1.0.dist-info"
     expected = set(manifest.members) | {
-        "skulk_demucs/build.json",
+        f"{module_name}/build.json",
         f"{metadata_root}/METADATA",
         f"{metadata_root}/WHEEL",
         f"{metadata_root}/RECORD",
     }
     if (
-        identity != manifest.payload_sha256
+        build_name != f"{module_name}/build.json"
+        or identity != manifest.payload_sha256
         or set(names) != expected
         or manifest.platform_tag not in TARGETS
         or manifest.python_archive.platform_tag != manifest.platform_tag
@@ -635,7 +655,7 @@ def verify_cached_runtime(
     if manifest.payload_sha256 != expected_payload_sha256:
         raise ValueError("cached native runtime belongs to a different build")
     base = verify_python_tree(
-        payload / "skulk_demucs/python" / manifest.python_archive.filename,
+        payload / _package_module(manifest) / "python" / manifest.python_archive.filename,
         root / "interpreter",
         manifest.python_archive,
         checkpoint=checkpoint,
@@ -716,7 +736,7 @@ def verify_cached_runtime(
         or not site.resolve().is_relative_to(runtime.resolve())
     ):
         raise ValueError("cached native import root is missing or redirected")
-    dependencies = tuple(sorted((payload / "skulk_demucs/wheels").glob("*.whl")))
+    dependencies = tuple(sorted((payload / _package_module(manifest) / "wheels").glob("*.whl")))
     verify_site_packages(site, (wheel, *dependencies), checkpoint=checkpoint)
     return native, manifest
 
@@ -775,7 +795,7 @@ def install_fresh_runtime(
     if host_target != manifest.platform_tag:
         raise ValueError("candidate cannot execute on this OS/CPU architecture")
     interpreter = extract_python(
-        payload / "skulk_demucs" / "python" / manifest.python_archive.filename,
+        payload / _package_module(manifest) / "python" / manifest.python_archive.filename,
         output / "interpreter",
         manifest.python_archive,
         checkpoint=checkpoint,
@@ -821,7 +841,7 @@ def install_fresh_runtime(
         or not site.is_relative_to(runtime)
     ):
         raise ValueError("candidate selected the wrong private interpreter")
-    offline = payload / "skulk_demucs"
+    offline = payload / _package_module(manifest)
     lock = (offline / "requirements.lock").read_bytes()
     locked_dependencies(lock)
     pip_wheels = tuple(
