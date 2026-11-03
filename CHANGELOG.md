@@ -13,6 +13,8 @@ This project records release notes here and mirrors public-facing notes in
   index, GGUF file or cached Hub listing, including model aliases that select
   artifacts from a differently named repository. Preserve revision and selected
   file checks; incomplete bundle members remain unavailable offline.
+- Treat retained inventories for a different revision, file selection, size or
+  pinned object as unavailable instead of failing the download status processor.
 
 ### Model preservation
 
