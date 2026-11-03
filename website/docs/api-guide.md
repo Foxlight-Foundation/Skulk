@@ -2191,6 +2191,11 @@ When a dedicated CUDA wheel is already cached, configure
 rehydration otherwise prefers the dedicated build over a primary-only override.
 
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
+Native ACE base card metadata can also describe intrinsic editing modes in
+`music.native`. Those safetensors components cannot be loaded by the audio.cpp
+runner; this section documents the existing generation job API, not a native
+editing endpoint.
+
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
 the existing API authentication policy. Jobs and WAV content belong to the
@@ -2256,6 +2261,108 @@ whose WAV is still being delivered.
 **DELETE** `/v1/music/{music_id}` cancels a live job, removes its WAV, and
 forgets its record. It returns
 `{ "id": "...", "object": "music.deleted", "deleted": true }`.
+
+## Source separation
+
+Source separation creates an asynchronous, **API-node-local** four-stem job for
+an already mounted `AudioSeparation` model. The initial native adapter estimates
+drums, bass, other accompaniment and vocals with HTDemucs. These are model
+estimates; the original is preserved independently and is never overwritten.
+Use the same API node for creation, status, cancellation and downloads. Jobs
+are not forwarded to another API node when it restarts or becomes unavailable.
+These routes use the existing API access policy; the authenticated operator
+gateway requires the existing inference (`chat:write`) scope.
+
+### Create a job
+
+**POST** `/v1/audio/separations` accepts `multipart/form-data` containing exactly:
+
+| Field | Type | Contract |
+| --- | --- | --- |
+| `request` | JSON encoded as a text field, at most 4 KiB | `{"model":"mounted-model-id"}`. Extra fields, native options and server-local paths are rejected. |
+| `file` | One WAV upload | 1–120 seconds, mono or stereo, 8–192 kHz. The complete original is at most 64 MiB and its decoded float32 geometry at most 128 MiB. PCM8/16/24/32 and float32/64 are accepted; samples must be finite and supported WAV structure must be valid. The supplied filename is ignored. |
+
+The body has a streaming limit of 64 MiB plus 32 KiB multipart overhead, even
+without `Content-Length`. At most four upload handlers and four active jobs are
+admitted on an API node. A slot remains reserved while its bounded reverse
+acknowledgements or cancellation terminals drain, including after cancellation.
+A model selection or ordinary mount prepares its engine
+separately; creating a separation does not install or mount a model implicitly.
+
+```bash
+curl -X POST http://localhost:52415/v1/audio/separations \
+  -F 'request={"model":"adefossez/HTDemucs"}' \
+  -F 'file=@original.wav;type=audio/wav'
+```
+
+Success returns **202** with an `audio.separation` object containing `id`,
+`model`, independently measured `source`, `status`, `created_at`, nullable
+`completed_at`, `expires_at`, `error` and `output`. Status is `queued`,
+`in_progress`, `completed`, `failed` or `cancelled`. `source` contains the complete
+encoded SHA-256 and size, sample rate, channels, frames, encoding and bit depth;
+it contains no file path or samples. `output` remains null until successful
+rendering, all four verified local files agree with the complete manifest, and
+their return-path acknowledgements have been admitted. An unavailable return
+transport or acknowledgement deadline fails the job, including when every WAV
+has already verified; it cannot silently report completion.
+Repeated completion packets also require manifest verification; arrival of the
+manifest rechecks settlement after any previously admitted acknowledgements.
+
+Uploads have a three-minute deadline; a stalled body returns 408 and its partial
+spooled files are closed. Requests with invalid metadata or WAV data return 422; malformed multipart
+returns 400, an unsupported request content type 415, and byte-limit violations
+413. Capacity or unavailable storage returns 503. An unavailable model or a
+later placement/execution failure is recorded as an actionable terminal error.
+Submission occurs once: after an interrupted response, inspect the retained job
+before retrying. The API never automatically replays an uncertain edit.
+
+### Inspect and retrieve content
+
+**GET** `/v1/audio/separations` lists newest-first jobs. `limit` is 1–63
+(default 20); `after` is a retained last-ID cursor. The response has `object:
+"list"`, `data`, `first_id`, `last_id` and `has_more`. An unknown cursor returns
+400. At most 64 job records are retained; unexpired complete results are not
+silently evicted to admit another job.
+
+**GET** `/v1/audio/separations/{separation_id}` returns committed metadata or
+404 when this API node does not retain that ID. A completed `output` has the
+original `source`, ordered `stems`, shared `common_gain` and `pre_gain_peak`.
+Each stem reports its name, MIME type, size, SHA-256, sample rate, complete frame
+count, channels, bit depth and measured peak. All four stems share the original
+timebase, including any explicit resampling to the model's native 44.1 kHz.
+
+**GET** `/v1/audio/separations/{separation_id}/content/{stem}` downloads
+`drums`, `bass`, `other` or `vocals` as **PCM24 stereo WAV at 44.1 kHz**.
+There is no per-stem automatic normalization: one shared attenuation avoids
+clipping while preserving relationships between the stems. Increasing export
+precision does not recover details absent from the source. Each complete WAV is
+capped at 64 MiB, and the four-file set at 256 MiB. `ETag` is the quoted complete
+WAV SHA-256. Partial sets return 409; absent or expired content returns 404.
+An already opened download holds its file descriptor, so deleting the job cannot
+truncate that download. At most eight downloads run concurrently per API node.
+
+Verified content is retained for 24 hours, under a 2 GiB aggregate API media
+budget. Capacity exhaustion requires deletion or content expiry; results are
+never truncated. Complete retained sets are independently verified on API
+restart. Interrupted jobs become failed, partial files remain unservable, and
+no native generation is replayed automatically.
+
+### Cancel and delete
+
+**POST** `/v1/audio/separations/{separation_id}/cancel` requests native-task and
+media cancellation, removes partial API content and retains terminal metadata.
+An already terminal job is unchanged. The response is the current job object;
+unknown IDs return 404. Native readers and active file senders drain before
+their Worker-owned copies are reclaimed.
+
+**DELETE** `/v1/audio/separations/{separation_id}` cancels active work, removes
+owned content and forgets the record. It returns `id`, `object:
+"audio.separation.deleted"` and `deleted: true`, or 404 for an unknown ID.
+Neither route deletes the creator's original Studio asset. Admission waits at
+most 45 seconds for placement, the full placed job has a 40-minute ceiling, and
+completed-output delivery has a five-minute budget. Source transfer is bounded
+to three minutes. Bytes and local paths never enter replicated State or event
+logs.
 
 ## Benchmark Endpoints
 
@@ -2359,6 +2466,11 @@ cards retain final override precedence.
 
 Each entry also separates discovery truth from runtime truth:
 
+- `separation`, when present, describes an explicit `AudioSeparation` model's
+  `family`, ordered `stems`, `sample_rate`, `audio_channels`, and
+  `trained_segment_seconds`. It is independent of speech's
+  `audio` and text-to-music's `music` metadata. This optional object describes
+  model truth and does not imply a mounted separator or grant execution.
 - `registry_architecture` is the trusted open architecture identifier retained
   from the signed catalog.
 - `capability_claims` reports signed model/artifact capabilities even when no
@@ -3902,7 +4014,7 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or the earlier Skulk release that shipped an installed card, for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
-| `music` | object or null | Text-to-music family, lyric requirement, declared duration bounds, and WAV output format; null for non-music cards |
+| `music` | object or null | Intrinsic music family, lyric requirement, declared duration bounds and WAV output format; native ACE base additionally has `native` variant, `editing_modes`, `part_classes`, `sample_rate`, and `audio_channels`. Metadata does not imply ready execution capacity. Null for non-music cards. |
 | `image` | object or null | Native image family, immutable `components`, optional SDXL `unetStructure`, default canvas/steps/guidance, dimension and area limits, reference-image limit, alpha support and optional fixed sigma schedule; null for legacy or non-image cards |
 | `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, and the `video_shift`/`audio_shift` a render with the adapter uses when the request sets none, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), and every engine setting the job accepts with its default: `samplers` and `default_sampler`, `schedulers` and `default_scheduler`, the card's trained `video_shift`/`audio_shift` (null keeps the model's built-in value) with `shift_bounds`, `reference_fidelities` and `default_reference_fidelity` (empty and null unless the card serves `ref2va`), `codecs` and `default_codec`, `guides` (each guide the card derives from a `control` clip: `kind`, the `modes` it applies to, and the preprocessor `weights` it loads with their `repository` and `license`; empty without a ControlNet), `default_guide` (the guide a `control` clip gives when `control_kind` is omitted), and the ControlNet's own settings: `control_strength_bounds`, `default_control_strength` (the card's ControlNet's strength, else 1; null without a ControlNet), and `default_control_window` (the `control_start`/`control_end` a render takes when omitted). The lists are the engine's own, not a recommendation. Null for non-video cards |
 | `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
@@ -4884,6 +4996,17 @@ for automation, source rotation and advanced lifecycle operations.
 
 
 ### Stable local manager runtime
+
+Managed capability installation accepts runtime envelopes 2 and 3. The release
+inspection, stage and activation routes retain their existing methods, parameters,
+authentication and explicit consent flow. V3's signed metadata adds
+`application_roots`, one to eight unique canonical distribution names contained
+in the exact wheel inventory. Before installation, the host verifies the complete
+dependency graph from those roots and launcher-provider wheels; it refuses missing,
+incompatible, URL/extra-dependent or undeclared packages without contacting an
+index. Existing v2 releases retain their signed shape and behavior. A host outside
+the declared protocol window returns the authenticated update-or-select-another-
+release diagnostic; a compatible reader must be deployed before publishing v3.
 
 The local setup implementation stages a separate service copy through
 `stage_service_runtime(root)` and selects it through

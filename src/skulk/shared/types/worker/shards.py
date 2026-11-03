@@ -6,6 +6,7 @@ from pydantic import Field
 from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.models.separation_runtime import DemucsModelPolicy
 from skulk.utils.pydantic_ext import TaggedModel
 
 
@@ -44,6 +45,10 @@ class BaseShardMetadata(TaggedModel):
     llama_server_settings: LlamaServerSettings | None = Field(
         default=None,
         description="Node serving settings captured by placement for memory admission.",
+    )
+    separation_policy: DemucsModelPolicy | None = Field(
+        default=None,
+        description="Exact native separator device, artifact, FP32, thread and forward-window policy assessed at placement and rechecked before load.",
     )
 
     # Error handling; equivalent to monkey-patch, but we can't monkey-patch runner.py

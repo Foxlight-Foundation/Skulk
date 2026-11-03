@@ -1,6 +1,7 @@
 from enum import Enum
+from typing import final
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from skulk.api.types import (
     ImageEditsTaskParams,
@@ -12,6 +13,7 @@ from skulk.shared.types.audio import (
     RealtimeAudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
+from skulk.shared.types.audio_separation import AudioSeparationTaskParams
 from skulk.shared.types.common import CommandId, Id, NodeId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.music import MusicGenerationTaskParams
@@ -61,8 +63,13 @@ class InstallEngine(BaseTask):  # emitted by Worker
     """
 
     engine: EngineType
-    resolved_backend: str | None = Field(default=None, description="Exact backend requesting this installation; absent for legacy engine tasks.")
-    expected_build: str | None = Field(default=None, description="Immutable executable build selected by placement.")
+    resolved_backend: str | None = Field(
+        default=None,
+        description="Exact backend requesting this installation; absent for legacy engine tasks.",
+    )
+    expected_build: str | None = Field(
+        default=None, description="Immutable executable build selected by placement."
+    )
     approximate_download_bytes: int = Field(
         default=0,
         ge=0,
@@ -105,7 +112,9 @@ class CancelTask(BaseTask):
 
 class ImageGeneration(BaseTask):  # emitted by Master
     command_id: CommandId
-    owner_node: NodeId | None = None  # owning API node (#279 Phase 2; see TextGeneration)
+    owner_node: NodeId | None = (
+        None  # owning API node (#279 Phase 2; see TextGeneration)
+    )
     task_params: ImageGenerationTaskParams
     trace_enabled: bool = False
 
@@ -115,7 +124,9 @@ class ImageGeneration(BaseTask):  # emitted by Master
 
 class ImageEdits(BaseTask):  # emitted by Master
     command_id: CommandId
-    owner_node: NodeId | None = None  # owning API node (#279 Phase 2; see TextGeneration)
+    owner_node: NodeId | None = (
+        None  # owning API node (#279 Phase 2; see TextGeneration)
+    )
     task_params: ImageEditsTaskParams
     trace_enabled: bool = False
 
@@ -146,9 +157,35 @@ class MusicGeneration(BaseTask):
     error_message: str | None = Field(default=None)
 
 
+@final
+class AudioSeparation(BaseTask):
+    """One admitted complete-set separation; raw input uses addressed media."""
+
+    model_config = ConfigDict(frozen=True)
+
+    command_id: CommandId = Field(description="Owning asynchronous separation job.")
+    owner_node: NodeId = Field(
+        description="API node retaining source and four results."
+    )
+    task_params: AudioSeparationTaskParams = Field(
+        description="Exact original/model facts."
+    )
+    trace_enabled: bool = Field(
+        default=False, description="Record bounded execution timing."
+    )
+    error_type: str | None = Field(
+        default=None, max_length=128, description="Terminal machine-readable failure."
+    )
+    error_message: str | None = Field(
+        default=None, max_length=1024, description="Bounded operator failure detail."
+    )
+
+
 class TextEmbedding(BaseTask):  # emitted by Master
     command_id: CommandId
-    owner_node: NodeId | None = None  # owning API node (#279 Phase 2; see TextGeneration)
+    owner_node: NodeId | None = (
+        None  # owning API node (#279 Phase 2; see TextGeneration)
+    )
     task_params: TextEmbeddingTaskParams
     trace_enabled: bool = False
 
@@ -209,6 +246,7 @@ Task = (
     | ImageEdits
     | VideoGeneration
     | MusicGeneration
+    | AudioSeparation
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription

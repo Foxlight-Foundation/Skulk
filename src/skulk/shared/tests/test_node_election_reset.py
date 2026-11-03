@@ -2,6 +2,7 @@
 
 # pyright: reportAny=false, reportPrivateUsage=false
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -14,7 +15,9 @@ from skulk.api.main import API
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.main import Node
 from skulk.routing.event_router import EventRouter
+from skulk.routing.output_media import OutputMediaPacket, output_media_for_worker
 from skulk.routing.router import Router
+from skulk.routing.topics import OUTPUT_MEDIA
 from skulk.shared.election import Election, ElectionResult
 from skulk.shared.types.common import NodeId, SessionId
 from skulk.shared.types.state import State
@@ -39,13 +42,26 @@ class _FakeTaskGroup:
 
 
 class _FakeRouter:
+    def __init__(self) -> None:
+        """Track the subscription roles installed during worker replacement."""
+        self.output_media_receivers: list[Callable[[OutputMediaPacket], bool]] = []
+
     def sender(self, _topic: object) -> object:
         return object()
 
     def telemetry_sender(self) -> object:
         return object()
 
-    def receiver(self, _topic: object) -> object:
+    def receiver(
+        self,
+        _topic: object,
+        *,
+        accept: Callable[[OutputMediaPacket], bool] | None = None,
+    ) -> object:
+        """Record output admission while retaining the fixture's channel identities."""
+        if accept is not None:
+            assert _topic is OUTPUT_MEDIA
+            self.output_media_receivers.append(accept)
         return object()
 
     def receiver_with_origin(self, _topic: object) -> object:
@@ -172,8 +188,9 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
     monkeypatch.setattr(Node, "_request_cluster_config", _fake_request_cluster_config)
 
     election_sender, election_receiver = channel[ElectionResult]()
+    router = _FakeRouter()
     node = Node(
-        router=cast(Router, cast(object, _FakeRouter())),
+        router=cast(Router, cast(object, router)),
         event_router=cast(EventRouter, cast(object, _OldEventRouter(order_events))),
         download_coordinator=None,
         worker=cast(Worker, cast(object, _OldWorker(order_events))),
@@ -201,6 +218,7 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
     election_sender.close()
 
     await node._elect_loop()
+    assert router.output_media_receivers == [output_media_for_worker]
 
     assert order_events.index("new_event_router.receiver") < order_events.index(
         "api.reset"

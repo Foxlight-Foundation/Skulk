@@ -80,6 +80,7 @@ from skulk.shared.models.model_cards import (
 from skulk.shared.models.video_support import video_request_supported
 from skulk.shared.types.commands import (
     AddCustomModelCard,
+    AudioSeparation,
     AudioTranscription,
     CancelDownload,
     CreateInstance,
@@ -95,6 +96,7 @@ from skulk.shared.types.commands import (
     MusicGeneration,
     PlaceInstance,
     PrepareAudioCpp,
+    PrepareDemucs,
     ProposeStewardAction,
     RealtimeAudioTranscription,
     RefuseInstancePlacement,
@@ -117,6 +119,8 @@ from skulk.shared.types.events import (
     AudioCppPreparationRequested,
     CustomModelCardAdded,
     CustomModelCardDeleted,
+    DemucsPreparationCompleted,
+    DemucsPreparationRequested,
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
@@ -153,6 +157,9 @@ from skulk.shared.types.steward_actions import (
     StewardRestartInstanceAction,
     StewardStopInstanceAction,
     steward_action_proposal_is_prunable,
+)
+from skulk.shared.types.tasks import (
+    AudioSeparation as AudioSeparationTask,
 )
 from skulk.shared.types.tasks import (
     AudioTranscription as AudioTranscriptionTask,
@@ -345,6 +352,7 @@ _COMMAND_TASK_TYPES = (
     AudioTranscriptionTask,
     RealtimeAudioTranscriptionTask,
     MusicGenerationTask,
+    AudioSeparationTask,
 )
 
 
@@ -844,6 +852,7 @@ def retire_download_failure_lineages(
         present.add(instance_id)
     return kept, present
 
+
 def text_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
     """Rank viable text placements by readiness, ordinary role and active load.
 
@@ -973,6 +982,86 @@ def music_generation_instances(state: State, model_id: ModelId) -> list[Instance
     return [identifier for _, _, _, identifier in sorted(ranked)]
 
 
+def separation_generation_instances(
+    state: State, model_id: ModelId, pending_events: Sequence[Event] = ()
+) -> list[InstanceId]:
+    """Find idle, actually ready native separators, including same-batch admission.
+
+    Requests in one master batch see the same State snapshot. Counting only
+    that snapshot admits several tasks to a single nominally idle model. Pending
+    created tasks are therefore reservations until the ordered events apply.
+    No qualification/hardware permission list participates in this selection.
+    """
+    occupied = {
+        task.instance_id
+        for task in (
+            *state.tasks.values(),
+            *(event.task for event in pending_events if isinstance(event, TaskCreated)),
+        )
+        if isinstance(task, AudioSeparationTask)
+        and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+    }
+    eligible: list[InstanceId] = []
+    for instance in state.instances.values():
+        assignments = instance.shard_assignments
+        if (
+            assignments.model_id != model_id
+            or instance.instance_id in occupied
+            or len(assignments.runner_to_shard) != 1
+            or len(assignments.node_to_runner) != 1
+        ):
+            continue
+        runner_id, shard = next(iter(assignments.runner_to_shard.items()))
+        if (
+            shard.model_card.separation is None
+            or shard.world_size != 1
+            or shard.device_rank != 0
+            or shard.start_layer != 0
+            or shard.end_layer != shard.model_card.n_layers
+            or shard.n_layers != shard.model_card.n_layers
+            or shard.resolved_backend not in {
+                "demucs-cpu", "demucs-metal", "demucs-cuda", "demucs-rocm"
+            }
+            or shard.resolved_engine_build is None
+            or shard.separation_policy is None
+            or not isinstance(state.runners.get(runner_id), RunnerReady)
+        ):
+            continue
+        eligible.append(instance.instance_id)
+    return sorted(eligible, key=str)
+
+
+def separation_generation_events(
+    state: State,
+    command: AudioSeparation,
+    pending_events: Sequence[Event] = (),
+) -> tuple[list[Event], TaskId]:
+    """Reserve one idle separator or publish a correlated terminal refusal."""
+    eligible = separation_generation_instances(
+        state, ModelId(command.task_params.model), pending_events
+    )
+    identifier = TaskId()
+    result: list[Event] = [TaskCreated(
+        task_id=identifier,
+        task=AudioSeparationTask(
+            task_id=identifier,
+            command_id=command.command_id,
+            owner_node=command.owner_node,
+            instance_id=eligible[0] if eligible else InstanceId(str(command.command_id)),
+            task_status=TaskStatus.Pending if eligible else TaskStatus.Failed,
+            task_params=command.task_params,
+            trace_enabled=state.tracing_enabled,
+        ),
+    )]
+    if not eligible:
+        result.append(TaskFailed(
+            task_id=identifier,
+            error_type="audio_separation_unavailable",
+            error_message="No idle ready single-host source-separation instance serves the selected model",
+        ))
+    return result, identifier
+
+
 def _image_generation_events(state: State, command: ImageGeneration) -> tuple[list[Event], TaskId]:
     """Admit one image task or emit a correlated terminal failure without fallback."""
     eligible = image_generation_instances(state, ModelId(command.task_params.model))
@@ -1077,6 +1166,10 @@ class Master:
         # their GPU capacity before queuing the event so consecutive decisions
         # cannot spend the same memory while that echo is outstanding.
         self._pending_instance_reservations: dict[InstanceId, Instance] = {}
+        # Task events use the same asynchronous indexed path as placements.
+        # Reserve serial native capacity across command iterations until State
+        # contains the admission, rather than relying on one command's list.
+        self._pending_separation_reservations: dict[TaskId, TaskCreated] = {}
         self._runner_loaded_at: dict[RunnerId, float] = {}
         # Restart recovery (initiative/restart-recovery). A cold start, with no
         # prior replicated view, is a single-node reboot or a whole-cluster
@@ -1338,7 +1431,22 @@ class Master:
             self._pending_instance_reservations.pop(indexed.event.instance.instance_id, None)
         elif isinstance(indexed.event, InstanceDeleted):
             self._pending_instance_reservations.pop(indexed.event.instance_id, None)
+        if isinstance(indexed.event, TaskCreated):
+            self._pending_separation_reservations.pop(indexed.event.task_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
+        if isinstance(indexed.event, DemucsPreparationCompleted):
+            result = indexed.event
+            resources = result.resources
+            if (
+                result.success
+                and resources is not None
+                and result.target_node in self.state.topology.list_nodes()
+                and any(
+                    lane.startswith("demucs-") and lane in resources.engine_builds
+                    for lane in resources.backends
+                )
+            ):
+                self._telemetry_view.node_resources[result.target_node] = resources
         if isinstance(indexed.event, AudioCppPreparationCompleted):
             self._record_audio_cpp_preparation(indexed.event)
 
@@ -1368,9 +1476,10 @@ class Master:
         self._telemetry_view.node_resources[event.target_node] = resources
 
     def _placement_resources_for_command(
-        self, command: PlaceInstance | CreateInstance,
+        self,
+        command: PlaceInstance | CreateInstance,
     ) -> Mapping[NodeId, NodeResources]:
-        """Overlay one verified music preparation for this placement only.
+        """Overlay one verified engine preparation for this placement only.
 
         Telemetry can deliver an older resource packet after the indexed
         preparation event. Carrying its worker-verified snapshot on the
@@ -1386,21 +1495,29 @@ class Master:
             else command.instance.shard_assignments.model_id
         )
         card = self._ordered_placement_model_card(model_id)
-        if card is None or ModelTask.TextToMusic not in card.tasks or len(prepared) != 1:
-            raise ValueError("Prepared audio.cpp resources require one music node")
+        if (
+            card is None
+            or not {ModelTask.TextToMusic, ModelTask.AudioSeparation}.intersection(
+                card.tasks
+            )
+            or len(prepared) != 1
+        ):
+            raise ValueError(
+                "Prepared engine resources require one single-host media node"
+            )
+        prefix = "demucs-" if ModelTask.AudioSeparation in card.tasks else "audio_cpp-"
         node_id, resources = next(iter(prepared.items()))
         if node_id not in self.state.topology.list_nodes():
-            raise ValueError("Prepared audio.cpp node is no longer a cluster member")
+            raise ValueError("Prepared engine node is no longer a cluster member")
         if isinstance(command, CreateInstance) and (
             node_id not in command.instance.shard_assignments.node_to_runner
         ):
-            raise ValueError("Prepared audio.cpp node does not match exact placement")
+            raise ValueError("Prepared engine node does not match exact placement")
         if not any(
-            backend.startswith("audio_cpp-")
-            and backend in resources.engine_builds
+            backend.startswith(prefix) and backend in resources.engine_builds
             for backend in resources.backends
         ):
-            raise ValueError("Prepared audio.cpp resources contain no ready build")
+            raise ValueError("Prepared engine resources contain no ready build")
         return {**self._telemetry_view.node_resources, node_id: resources}
 
     def _place_requested_instance(
@@ -1690,9 +1807,15 @@ class Master:
         return credit
 
     async def _queue_control_event(self, event: Event) -> None:
-        """Reserve a new placement before its asynchronous indexed echo returns."""
+        """Reserve placement and serial native work before the indexed echo returns."""
         if isinstance(event, InstanceCreated):
             self._pending_instance_reservations[event.instance.instance_id] = event.instance
+        if (
+            isinstance(event, TaskCreated)
+            and isinstance(event.task, AudioSeparationTask)
+            and event.task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+        ):
+            self._pending_separation_reservations[event.task_id] = event
         await self.event_sender.send(event)
 
     def _placement_reservations(
@@ -3080,22 +3203,54 @@ class Master:
                         case TestCommand():
                             pass
                         case PrepareAudioCpp():
-                            if command.target_node not in self.state.topology.list_nodes():
-                                generated_events.append(AudioCppPreparationCompleted(
-                                    request_id=command.command_id,
-                                    target_node=command.target_node,
-                                    owner_node=command.owner_node,
-                                    success=False,
-                                    error="target node is not a live cluster member",
-                                ))
+                            if (
+                                command.target_node
+                                not in self.state.topology.list_nodes()
+                            ):
+                                generated_events.append(
+                                    AudioCppPreparationCompleted(
+                                        request_id=command.command_id,
+                                        target_node=command.target_node,
+                                        owner_node=command.owner_node,
+                                        success=False,
+                                        error="target node is not a live cluster member",
+                                    )
+                                )
                             else:
-                                generated_events.append(AudioCppPreparationRequested(
-                                    request_id=command.command_id,
-                                    target_node=command.target_node,
-                                    owner_node=command.owner_node,
-                                    variant=command.variant,
-                                    expires_at=time.time() + 300,
-                                ))
+                                generated_events.append(
+                                    AudioCppPreparationRequested(
+                                        request_id=command.command_id,
+                                        target_node=command.target_node,
+                                        owner_node=command.owner_node,
+                                        variant=command.variant,
+                                        expires_at=time.time() + 300,
+                                    )
+                                )
+                        case PrepareDemucs():
+                            if (
+                                command.target_node
+                                not in self.state.topology.list_nodes()
+                            ):
+                                generated_events.append(
+                                    DemucsPreparationCompleted(
+                                        request_id=command.command_id,
+                                        target_node=command.target_node,
+                                        owner_node=command.owner_node,
+                                        success=False,
+                                        error="target worker is not a live cluster member",
+                                    )
+                                )
+                            else:
+                                generated_events.append(
+                                    DemucsPreparationRequested(
+                                        request_id=command.command_id,
+                                        target_node=command.target_node,
+                                        owner_node=command.owner_node,
+                                        package_sha256=command.package_sha256,
+                                        device=command.device,
+                                        expires_at=time.time() + 30 * 60,
+                                    )
+                                )
                         case TextGeneration():
                             eligible = text_generation_instances(
                                 self.state, command.task_params.model
@@ -3161,7 +3316,9 @@ class Master:
                                     )
                                 )
                         case ImageGeneration():
-                            image_events, task_id = _image_generation_events(self.state, command)
+                            image_events, task_id = _image_generation_events(
+                                self.state, command
+                            )
                             generated_events.extend(image_events)
                             self.command_task_mapping[command.command_id] = task_id
                         case VideoGeneration():
@@ -3225,6 +3382,17 @@ class Master:
                                         ),
                                     )
                                 )
+                        case AudioSeparation():
+                            admitted, task_id = separation_generation_events(
+                                self.state,
+                                command,
+                                (
+                                    *self._pending_separation_reservations.values(),
+                                    *generated_events,
+                                ),
+                            )
+                            generated_events.extend(admitted)
+                            self.command_task_mapping[command.command_id] = task_id
                         case MusicGeneration():
                             candidates = music_generation_instances(
                                 self.state, ModelId(command.task_params.model)
@@ -3245,7 +3413,9 @@ class Master:
                                         owner_node=command.owner_node,
                                         instance_id=selected_instance_id,
                                         task_status=(
-                                            TaskStatus.Failed if unavailable else TaskStatus.Pending
+                                            TaskStatus.Failed
+                                            if unavailable
+                                            else TaskStatus.Pending
                                         ),
                                         task_params=command.task_params,
                                         trace_enabled=self.state.tracing_enabled,
@@ -3678,10 +3848,12 @@ class Master:
                                 )
                             else:
                                 try:
-                                    action_events, action_command_id, action_status = (
-                                        await self._execute_approved_steward_action(
-                                            proposal
-                                        )
+                                    (
+                                        action_events,
+                                        action_command_id,
+                                        action_status,
+                                    ) = await self._execute_approved_steward_action(
+                                        proposal
                                     )
                                 except (PlacementError, ValueError) as error:
                                     decided = proposal.model_copy(
@@ -3720,9 +3892,9 @@ class Master:
                                         }
                                     )
                                     generated_events.extend(action_events)
-                            self._ordered_steward_proposals[
-                                command.proposal_id
-                            ] = decided
+                            self._ordered_steward_proposals[command.proposal_id] = (
+                                decided
+                            )
                             self._prune_ordered_steward_action_proposals()
                             generated_events.insert(
                                 0, StewardActionProposalChanged(proposal=decided)
@@ -3882,9 +4054,11 @@ class Master:
                                     command.instance_id, frozenset()
                                 )
                                 try:
-                                    repair_memory, repair_vram = self._reserved_placement_inputs(
-                                        self._telemetry_view.node_memory,
-                                        self._placement_reservations(after_delete),
+                                    repair_memory, repair_vram = (
+                                        self._reserved_placement_inputs(
+                                            self._telemetry_view.node_memory,
+                                            self._placement_reservations(after_delete),
+                                        )
                                     )
                                     final_placement = place_instance(
                                         replace_command,
@@ -3944,9 +4118,13 @@ class Master:
                                         refused, command.node_id
                                     )
                                     try:
-                                        repair_memory, repair_vram = self._reserved_placement_inputs(
-                                            self._telemetry_view.node_memory,
-                                            self._placement_reservations(after_delete),
+                                        repair_memory, repair_vram = (
+                                            self._reserved_placement_inputs(
+                                                self._telemetry_view.node_memory,
+                                                self._placement_reservations(
+                                                    after_delete
+                                                ),
+                                            )
                                         )
                                         final_placement = place_instance(
                                             fallback,

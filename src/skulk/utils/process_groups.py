@@ -10,7 +10,9 @@ import time
 import psutil
 
 
-def observe_process_exit(process: subprocess.Popen[str]) -> os.waitid_result | None:
+def observe_process_exit[Output: (str, bytes)](
+    process: subprocess.Popen[Output],
+) -> os.waitid_result | None:
     """Observe an owned child's exit without reaping it or releasing its PID.
 
     Return None while running, otherwise its exit status. Callers must not
@@ -19,7 +21,9 @@ def observe_process_exit(process: subprocess.Popen[str]) -> os.waitid_result | N
     return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
 
 
-def _signal_group(process: subprocess.Popen[str], sent: signal.Signals) -> None:
+def _signal_group[Output: (str, bytes)](
+    process: subprocess.Popen[Output], sent: signal.Signals
+) -> None:
     try:
         os.killpg(process.pid, sent)
     except ProcessLookupError:
@@ -53,8 +57,8 @@ def _group_is_running(identity: int) -> bool:
     return False
 
 
-def terminate_process_group(
-    process: subprocess.Popen[str],
+def terminate_process_group[Output: (str, bytes)](
+    process: subprocess.Popen[Output],
     *,
     grace_seconds: float = 1.0,
     confirm_members: bool = False,

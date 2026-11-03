@@ -26,6 +26,7 @@ from skulk.shared.types.chunks import (
     ErrorChunk,
     GenerationChunk,
     MusicChunk,
+    SeparationChunk,
     VideoChunk,
 )
 from skulk.shared.types.common import CommandId, NodeId
@@ -52,6 +53,7 @@ from skulk.shared.types.events import (
 from skulk.shared.types.streaming import StreamFrameKind, is_terminal_stream_frame_kind
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
+    AudioSeparation,
     AudioTranscription,
     ImageEdits,
     ImageGeneration,
@@ -84,6 +86,7 @@ from skulk.worker.runner.bootstrap import (
     WEDGE_FAILURE_MARKER,
     entrypoint,
 )
+from skulk.worker.runner.demucs.context import SeparationRunnerContext
 from skulk.worker.runner.image_models.output import is_primary_image_output_node
 
 _TRACE_ROUTE_CAPACITY = 256
@@ -153,6 +156,8 @@ class RunnerSupervisor:
     _data_sender: "Sender[DataChunk] | None" = None
     _on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None
     _on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None
+    _on_separation_output: "Callable[[CommandId, NodeId | None, SeparationChunk], None] | None" = None
+    _separation_context: SeparationRunnerContext | None = None
     _trace_sender: "Sender[TraceDataPacket] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
@@ -253,6 +258,8 @@ class RunnerSupervisor:
         trace_sender: "Sender[TraceDataPacket] | None" = None,
         on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None,
         on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None,
+        on_separation_output: "Callable[[CommandId, NodeId | None, SeparationChunk], None] | None" = None,
+        separation_context: SeparationRunnerContext | None = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -283,7 +290,8 @@ class RunnerSupervisor:
                 realtime_audio_recv,
                 logger,
                 context_token_limit,
-            ),
+            )
+            + ((separation_context,) if separation_context is not None else ()),
             daemon=True,
         )
 
@@ -304,6 +312,8 @@ class RunnerSupervisor:
             _trace_sender=trace_sender,
             _on_video_output=on_video_output,
             _on_music_output=on_music_output,
+            _on_separation_output=on_separation_output,
+            _separation_context=separation_context,
         )
 
         return self
@@ -368,6 +378,16 @@ class RunnerSupervisor:
                     self._command_owner.get(event.command_id),
                     event.chunk,
                 )
+            if (
+                isinstance(event.chunk, SeparationChunk)
+                and event.chunk.output is not None
+                and self._on_separation_output is not None
+            ):
+                self._on_separation_output(
+                    event.command_id,
+                    self._command_owner.get(event.command_id),
+                    event.chunk,
+                )
             await self._send_data_frame(
                 event.command_id,
                 _stream_frame_kind(event.chunk),
@@ -415,6 +435,7 @@ class RunnerSupervisor:
                     ImageEdits,
                     VideoGeneration,
                     MusicGeneration,
+                    AudioSeparation,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -472,7 +493,12 @@ class RunnerSupervisor:
 
     async def run(self):
         self._record_milestone("process_start_requested")
-        self.runner_process.start()
+        try:
+            self.runner_process.start()
+        except BaseException:
+            if self._separation_context is not None:
+                self._separation_context.source_fence.close()
+            raise
         self._record_milestone(
             "process_started",
             f"pid={self.runner_process.pid}",
@@ -552,6 +578,10 @@ class RunnerSupervisor:
                     )
                 else:
                     self.runner_process.close()
+                    if self._separation_context is not None:
+                        # Native descendants retain their own duplicate until
+                        # actual exit, even if this runner was forcibly killed.
+                        self._separation_context.source_fence.close()
 
     def shutdown(self):
         self._record_milestone("shutdown_requested")
@@ -600,6 +630,7 @@ class RunnerSupervisor:
                     ImageEdits,
                     VideoGeneration,
                     MusicGeneration,
+                    AudioSeparation,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -618,6 +649,7 @@ class RunnerSupervisor:
                 ImageEdits,
                 VideoGeneration,
                 MusicGeneration,
+                AudioSeparation,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
@@ -764,6 +796,7 @@ class RunnerSupervisor:
                                 ImageEdits,
                                 VideoGeneration,
                                 MusicGeneration,
+                                AudioSeparation,
                                 TextEmbedding,
                                 SpeechSynthesis,
                                 AudioTranscription,
@@ -872,6 +905,7 @@ class RunnerSupervisor:
                     ImageEdits,
                     VideoGeneration,
                     MusicGeneration,
+                    AudioSeparation,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -1022,6 +1056,7 @@ class RunnerSupervisor:
                 ImageEdits,
                 VideoGeneration,
                 MusicGeneration,
+                AudioSeparation,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,

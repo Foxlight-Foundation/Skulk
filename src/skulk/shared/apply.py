@@ -11,6 +11,8 @@ from skulk.shared.types.events import (
     ChunkGenerated,
     CustomModelCardAdded,
     CustomModelCardDeleted,
+    DemucsPreparationCompleted,
+    DemucsPreparationRequested,
     Event,
     IndexedEvent,
     InputChunkReceived,
@@ -90,6 +92,8 @@ def event_apply(event: Event, state: State) -> State:
             TestEvent()
             | AudioCppPreparationRequested()
             | AudioCppPreparationCompleted()
+            | DemucsPreparationRequested()
+            | DemucsPreparationCompleted()
             | ChunkGenerated()
             | TaskAcknowledged()
             | InputChunkReceived()
@@ -165,7 +169,9 @@ def event_apply(event: Event, state: State) -> State:
                     proposals.pop(proposal.proposal_id, None)
             return state.model_copy(update={"steward_action_proposals": proposals})
         case RestartRecoveryStarted():
-            update: dict[str, object] = {"restart_recovery_placements": event.placements}
+            update: dict[str, object] = {
+                "restart_recovery_placements": event.placements
+            }
             if event.intents is not None:
                 update["restart_recovery_intents"] = event.intents
             return state.model_copy(update=update)

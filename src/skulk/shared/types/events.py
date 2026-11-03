@@ -114,6 +114,58 @@ class AudioCppPreparationCompleted(BaseEvent):
         return self
 
 
+@final
+class DemucsPreparationRequested(BaseEvent):
+    """Ordered exact-package preparation request; no installable lane is ready yet."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    request_id: CommandId = Field(description="Correlated preparation request.")
+    target_node: NodeId = Field(description="Selected live worker.")
+    owner_node: NodeId = Field(description="Accepting API node.")
+    package_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="Fixed whole-package digest.",
+    )
+    device: Literal["cpu", "mps"] = Field(description="Explicit native compute lane.")
+    expires_at: float = Field(
+        description="Absolute Unix deadline including queued work."
+    )
+
+
+@final
+class DemucsPreparationCompleted(BaseEvent):
+    """Ordered verified-library snapshot; loaded-model readiness remains separate."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    request_id: CommandId = Field(description="Correlated preparation request.")
+    target_node: NodeId = Field(description="Worker that verified this package/device.")
+    owner_node: NodeId = Field(description="Accepting API node.")
+    success: bool = Field(
+        description="Whether exact package/device verification succeeded."
+    )
+    error: str | None = Field(
+        default=None, max_length=1024, description="Bounded preparation failure."
+    )
+    resources: NodeResources | None = Field(
+        default=None, description="Fresh worker-owned resource snapshot on success."
+    )
+
+    @model_validator(mode="after")
+    def require_verified_resources(self) -> "DemucsPreparationCompleted":
+        """Require a resource snapshot exactly when verification succeeded."""
+        if self.success and self.resources is None:
+            raise ValueError(
+                "successful native preparation requires verified resources"
+            )
+        if not self.success and self.resources is not None:
+            raise ValueError(
+                "failed native preparation cannot publish resource evidence"
+            )
+        return self
+
+
 class InstanceCreated(BaseEvent):
     instance: Instance
 
@@ -352,6 +404,8 @@ Event = (
     | TaskFailed
     | AudioCppPreparationRequested
     | AudioCppPreparationCompleted
+    | DemucsPreparationRequested
+    | DemucsPreparationCompleted
     | TaskDeleted
     | TaskAcknowledged
     | InstanceCreated
@@ -383,6 +437,8 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TestEvent,
     AudioCppPreparationRequested,
     AudioCppPreparationCompleted,
+    DemucsPreparationRequested,
+    DemucsPreparationCompleted,
     TaskCreated,
     TaskStatusUpdated,
     TaskFailed,

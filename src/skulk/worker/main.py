@@ -14,6 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import anyio
 from anyio import (
@@ -24,6 +25,7 @@ from anyio import (
     to_thread,
 )
 from loguru import logger
+from packaging.tags import platform_tags
 from PIL import Image
 
 from skulk.download.download_utils import (
@@ -32,6 +34,9 @@ from skulk.download.download_utils import (
     companion_download_specs,
     installed_artifact_in_path,
 )
+from skulk.provisioning.demucs_inventory import DEMUCS_PACKAGES, select_demucs_package
+from skulk.provisioning.demucs_manager import DemucsRuntimeManager
+from skulk.provisioning.demucs_runtime import DemucsBuildMismatchError
 from skulk.routing.connection_message import ConnectionMessage
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
@@ -47,9 +52,12 @@ from skulk.shared.backends import (
     engine_of,
 )
 from skulk.shared.constants import (
+    SKULK_ENGINES_DIR,
     SKULK_IMAGE_TRANSPORT_DEBUG,
     SKULK_MAX_CHUNK_SIZE,
     SKULK_MUSIC_OUTPUT_DIR,
+    SKULK_SEPARATION_INPUT_DIR,
+    SKULK_SEPARATION_OUTPUT_DIR,
     SKULK_VIDEO_INPUT_DIR,
     SKULK_VIDEO_OUTPUT_DIR,
 )
@@ -84,7 +92,13 @@ from skulk.shared.models.remote_code_approval import (
 )
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.capability_nodes import CapabilityNodeSummary
-from skulk.shared.types.chunks import DataChunk, InputImageChunk, MusicChunk, VideoChunk
+from skulk.shared.types.chunks import (
+    DataChunk,
+    InputImageChunk,
+    MusicChunk,
+    SeparationChunk,
+    VideoChunk,
+)
 from skulk.shared.types.commands import (
     FailInstance,
     ForwarderCommand,
@@ -104,6 +118,8 @@ from skulk.shared.types.events import (
     AudioCppPreparationRequested,
     CustomModelCardAdded,
     CustomModelCardDeleted,
+    DemucsPreparationCompleted,
+    DemucsPreparationRequested,
     Event,
     IndexedEvent,
     ModelTrustApprovalChanged,
@@ -125,6 +141,7 @@ from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import MemoryUsage, NodeDataTransport, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
+    AudioSeparation,
     AudioTranscription,
     CancelTask,
     CreateRunner,
@@ -166,7 +183,12 @@ from skulk.shared.types.worker.instances import (
     InstanceId,
     LlamaRpcInstance,
 )
-from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
+from skulk.shared.types.worker.runners import (
+    RunnerFailed,
+    RunnerId,
+    RunnerReady,
+    RunnerStatus,
+)
 from skulk.shared.types.worker.shards import (
     RpcDonorShardMetadata,
     ShardMetadata,
@@ -199,12 +221,30 @@ from skulk.utils.info_gatherer.info_gatherer import (
 )
 from skulk.utils.info_gatherer.net_profile import check_reachable
 from skulk.utils.keyed_backoff import KeyedBackoff
+from skulk.utils.runtime_files import RuntimeLock
 from skulk.utils.task_group import TaskGroup
+from skulk.worker.demucs_preparation import DemucsPreparationController
 from skulk.worker.plan import plan
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 from skulk.worker.runner.comfy.orphan_sweep import sweep_orphaned_comfy_servers
+from skulk.worker.runner.demucs.context import SeparationRunnerContext
+from skulk.worker.runner.demucs.source_fence import (
+    SourceReadFence,
+    acquire_source_read_fence,
+)
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
+from skulk.worker.separation_custody import (
+    SeparationSourceCustody,
+    separation_reader_key,
+)
+from skulk.worker.separation_input import (
+    SeparationInputReceiver,
+    local_separation_input_task,
+    separation_file_effect,
+)
+from skulk.worker.separation_output import SeparationOutputProducer
+from skulk.worker.separation_sources import SeparationSourceStore
 
 _STALE_RESET_MAX_WAIT_TICKS = 300
 """How many ~100ms planning ticks to hold planning while stale download
@@ -1209,6 +1249,15 @@ class Worker:
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
         self._offline = offline
+        self._demucs_platforms = frozenset(platform_tags())
+        self._demucs_manager = DemucsRuntimeManager(
+            SKULK_ENGINES_DIR / "demucs",
+            DEMUCS_PACKAGES,
+            self._demucs_platforms,
+        )
+        self._demucs_preparation = DemucsPreparationController(
+            self._demucs_manager, offline=offline
+        )
         self._api_available = api_available
         self._data_transport: NodeDataTransport = data_transport
         # Data-plane connectivity sampler threaded into the InfoGatherer so
@@ -1346,8 +1395,127 @@ class Worker:
         # task each waiting instance was given, and one shared job per engine.
         self._on_demand_backends: frozenset[str] = frozenset()
         self._engine_install_tasks: dict[InstanceId, TaskId] = {}
+        self._demucs_creations: dict[InstanceId, CreateRunner] = {}
+        self._separation_sources: SeparationSourceStore | None = None
+        self._separation_inputs: SeparationInputReceiver | None = None
+        self._separation_init_lock = anyio.Lock()
+        self._separation_readers: dict[CommandId, tuple[RunnerId, Path]] = {}
+        self._separation_rendered: set[CommandId] = set()
+        self._separation_outputs = SeparationOutputProducer(
+            self.node_id,
+            self._send_separation_output_packet,
+            self._fail_separation,
+        )
         self._engine_install_jobs: dict[EngineType | tuple[EngineType, str | None, str | None], _EngineInstallJob] = {}
         self._stopped: anyio.Event = anyio.Event()
+
+    async def _gather_node_resources(self) -> NodeResources:
+        """Compose current facts with this worker's verified native observations.
+
+        Preparation and periodic telemetry use the same owner. An installable
+        package is candidate metadata only and never becomes a ready backend.
+        """
+        peers = (
+            await self._zenoh_peer_sampler.advertised_count()
+            if self._zenoh_peer_sampler is not None
+            else None
+        )
+        resources = await NodeResources.gather(
+            api_available=self._api_available,
+            data_transport=self._data_transport,
+            zenoh_connected_peers=peers,
+        )
+        ready = self._demucs_preparation.engine_builds()
+        installable: dict[str, str] = {}
+        devices: tuple[Literal["cpu", "mps"], ...] = ("cpu", "mps")
+        for device in devices:
+            lane = "demucs-metal" if device == "mps" else "demucs-cpu"
+            try:
+                package = select_demucs_package(self._demucs_platforms, device=device)
+            except ValueError:
+                continue
+            installable[lane] = package.build_identity
+        return resources.model_copy(
+            update={
+                "backends": frozenset(
+                    lane for lane in resources.backends if not lane.startswith("demucs")
+                )
+                | frozenset(ready),
+                "on_demand_backends": frozenset(
+                    lane
+                    for lane in resources.on_demand_backends
+                    if not lane.startswith("demucs")
+                ),
+                "engine_builds": {
+                    **{
+                        lane: build
+                        for lane, build in resources.engine_builds.items()
+                        if not lane.startswith("demucs")
+                    },
+                    **ready,
+                },
+                "installable_engine_builds": {
+                    **{
+                        lane: build
+                        for lane, build in resources.installable_engine_builds.items()
+                        if not lane.startswith("demucs")
+                    },
+                    **installable,
+                },
+            }
+        )
+
+    async def _prepare_demucs_engine(self, request: DemucsPreparationRequested) -> None:
+        """Verify exact package/device off-loop before publishing an ordered barrier."""
+        resources: NodeResources | None = None
+        error: str | None = None
+        try:
+            package = select_demucs_package(
+                self._demucs_platforms, device=request.device
+            )
+            if package.sha256 != request.package_sha256:
+                raise ValueError(
+                    "requested package differs from this host's fixed inventory"
+                )
+            await self._demucs_preparation.prepare(
+                request.request_id,
+                package,
+                device=request.device,
+                expires_at=request.expires_at,
+                progress=lambda phase: logger.debug(
+                    "native separation preparation: {}", phase
+                ),
+            )
+            resources = await self._gather_node_resources()
+            lane = "demucs-metal" if request.device == "mps" else "demucs-cpu"
+            if (
+                lane not in resources.backends
+                or resources.engine_builds.get(lane) != package.build_identity
+            ):
+                raise RuntimeError(
+                    "native verification returned no exact prepared library observation"
+                )
+            if self._telemetry_sender is None:
+                raise RuntimeError("node resource telemetry is unavailable")
+            await self._telemetry_sender.send(
+                NodeTelemetry(node_id=self.node_id, info=resources)
+            )
+        except Exception as failure:  # noqa: BLE001 - settle this explicit preparation
+            resources = None
+            error = "Native separator package/device preparation failed; inspect worker diagnostics, cached package availability and offline policy."
+            logger.opt(exception=failure).warning(
+                "native separation preparation failed"
+            )
+        await self.event_sender.send(
+            DemucsPreparationCompleted(
+                request_id=request.request_id,
+                target_node=self.node_id,
+                owner_node=request.owner_node,
+                success=resources is not None,
+                error=error,
+                resources=resources,
+            )
+        )
 
     async def _prepare_audio_cpp_engine(
         self, request: AudioCppPreparationRequested
@@ -1369,18 +1537,10 @@ class Worker:
                 )
             )
             await to_thread.run_sync(refresh_node_facts)
-            peers = (
-                await self._zenoh_peer_sampler.advertised_count()
-                if self._zenoh_peer_sampler is not None
-                else None
-            )
-            resources = await NodeResources.gather(
-                api_available=self._api_available,
-                data_transport=self._data_transport,
-                zenoh_connected_peers=peers,
-            )
+            resources = await self._gather_node_resources()
             ready_lanes = {
-                backend for backend in resources.backends
+                backend
+                for backend in resources.backends
                 if backend.startswith("audio_cpp-")
                 and backend in resources.engine_builds
             }
@@ -1388,8 +1548,10 @@ class Worker:
                 ready_lanes
                 & {
                     "cpu": {
-                        "audio_cpp-cpu", "audio_cpp-metal",
-                        "audio_cpp-cuda", "audio_cpp-rocm",
+                        "audio_cpp-cpu",
+                        "audio_cpp-metal",
+                        "audio_cpp-cuda",
+                        "audio_cpp-rocm",
                     },
                     "vulkan": {"audio_cpp-vulkan"},
                     "cuda": {"audio_cpp-cuda"},
@@ -1397,11 +1559,13 @@ class Worker:
             )
             if not requested_ready:
                 details = "; ".join(
-                    conflict.message for conflict in resources.capability_conflicts
+                    conflict.message
+                    for conflict in resources.capability_conflicts
                     if "audio.cpp" in conflict.message.lower()
                 )
                 raise RuntimeError(
-                    details or f"prepared audio.cpp {request.variant} has no verified ready backend and build"
+                    details
+                    or f"prepared audio.cpp {request.variant} has no verified ready backend and build"
                 )
             if self._telemetry_sender is None:
                 raise RuntimeError("node resources telemetry is unavailable")
@@ -1473,6 +1637,15 @@ class Worker:
         instance). MLX grows KV lazily (no up-front window), so the budget floor is
         the correct estimate there, capped by a smaller enforced serving window.
         """
+        if shard.model_card.separation is not None:
+            from skulk.shared.models.separation_runtime import resolve_demucs_policy
+
+            try:
+                policy = resolve_demucs_policy(shard.model_card, shard.resolved_backend or "")
+            except ValueError:
+                return "Native separation has no implemented explicit engine policy; replan this configuration"
+            if shard.separation_policy != policy:
+                return "Native separation policy differs from placement; refresh resources and replan this configuration"
         if shard.memory_settings is not None and shard.resolved_backend is not None:
             actual = observe_engine_memory_settings(
                 os.environ,
@@ -1542,9 +1715,19 @@ class Worker:
                     )
         else:
             local = MemoryUsage.from_local_gpu_wireable()
-            usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+            native_cpu = (
+                shard.model_card.separation is not None
+                and shard.resolved_backend == "demucs-cpu"
+            )
+            usable = (
+                local.ram_available
+                if native_cpu
+                else min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+            )
             pool = (
-                f"{local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
+                f"{local.ram_available.in_gb:.1f}GB available system RAM"
+                if native_cpu
+                else f"{local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
                 "the GPU working-set ceiling"
             )
         # Refuse only on a shortfall beyond the tolerance (#383): the footprint
@@ -1691,6 +1874,7 @@ class Worker:
             info_send,
             api_available=self._api_available,
             data_transport=self._data_transport,
+            node_resources_provider=self._gather_node_resources,
             # Fabric-citizenship: the gatherer publishes whatever the API-side
             # extension surface has advertised on the shared TelemetryView. The
             # provider snapshots the outbound set each poll (empty -> nothing
@@ -1728,6 +1912,7 @@ class Worker:
                     tg.start_soon(self._vision_media_packet_ingress)
                     tg.start_soon(self._vision_media_janitor)
                     tg.start_soon(self._reference_media_janitor)
+                    tg.start_soon(self._separation_janitor)
                 if self._output_media_packet_receiver is not None:
                     tg.start_soon(self._output_media_packet_ingress)
                     tg.start_soon(self._output_media_janitor)
@@ -1739,12 +1924,21 @@ class Worker:
         finally:
             # Actual shutdown code - waits for all tasks to complete before executing.
             logger.info("Stopping Worker")
-            self.event_sender.close()
-            self.command_sender.close()
-            self.download_command_sender.close()
-            for runner in self.runners.values():
-                runner.shutdown()
-            self._stopped.set()
+            try:
+                with anyio.CancelScope(shield=True):
+                    # The task group has joined receiver/transfer file effects.
+                    # Do not delete originals merely because parent shutdown
+                    # finished: a native descendant may still hold its fence.
+                    if self._separation_sources is not None:
+                        await separation_file_effect(self._separation_sources.detach)
+                    await self._demucs_preparation.close()
+            finally:
+                self.event_sender.close()
+                self.command_sender.close()
+                self.download_command_sender.close()
+                for runner in self.runners.values():
+                    runner.shutdown()
+                self._stopped.set()
 
     async def _realtime_audio_ingress(self) -> None:
         """Route bounded non-event PCM frames to the selected local runner."""
@@ -1854,6 +2048,15 @@ class Worker:
         assert self._vision_media_packet_receiver is not None
         with self._vision_media_packet_receiver as packets:
             async for packet in packets:
+                # Native originals have their own authoritative task handshake;
+                # never reinterpret their raw WAV bytes as image/reference input.
+                if packet.payload == "separation_source":
+                    receiver: SeparationInputReceiver | None = getattr(
+                        self, "_separation_inputs", None
+                    )
+                    if receiver is not None:
+                        await receiver.receive(packet)
+                    continue
                 if packet.target_node != self.node_id or packet.kind in (
                     "accepted",
                     "transport_failed",
@@ -2400,6 +2603,201 @@ class Worker:
             self._reference_media_ready.discard(command_id)
             shutil.rmtree(SKULK_VIDEO_INPUT_DIR / str(command_id), ignore_errors=True)
 
+    async def _fail_separation(self, task: AudioSeparation, message: str) -> None:
+        """Report a path-free task failure without affecting other model instances."""
+        await self.event_sender.send(
+            TaskFailed(
+                task_id=task.task_id,
+                error_type="separation_failed",
+                error_message=message,
+            )
+        )
+
+    def _separation_reader_key(self, task: AudioSeparation) -> str:
+        """Resolve the captured authoritative reader, never packet-supplied paths."""
+        captured = self._separation_readers.get(task.command_id)
+        if captured is None:
+            raise ValueError("separation source has no admitted reader")
+        return captured[1].name
+
+    def _open_separation_sources(self) -> None:
+        # Called as an owned joined file effect. Retain the constructed owner on
+        # this Worker even if its awaiting coroutine is cancelled immediately.
+        if self._separation_sources is None:
+            custody = SeparationSourceCustody(
+                SKULK_SEPARATION_INPUT_DIR,
+                SKULK_SEPARATION_OUTPUT_DIR,
+                self._separation_reader_key,
+            )
+            self._separation_sources = SeparationSourceStore(
+                SKULK_SEPARATION_INPUT_DIR, custody=custody
+            )
+
+    async def _begin_separation_input(self, command: CommandId) -> None:
+        """Attach source custody only after authoritative complete local placement."""
+        task = local_separation_input_task(self.state, self.node_id, command)
+        if task is None or task.task_status != TaskStatus.Pending:
+            return
+        if (
+            self._vision_media_packet_sender is None
+            or self._output_media_packet_sender is None
+        ):
+            await self._fail_separation(
+                task, "Separation requires addressed input and output media transport."
+            )
+            return
+        try:
+            async with self._separation_init_lock:
+                if self._separation_inputs is None:
+                    await separation_file_effect(self._open_separation_sources)
+                    assert self._separation_sources is not None
+                    self._separation_inputs = SeparationInputReceiver(
+                        self.node_id,
+                        lambda: self.state,
+                        self._separation_sources,
+                        self._vision_media_packet_sender.send,
+                        self._fail_separation,
+                    )
+            receiver = self._separation_inputs
+            if any(owned.command_id == command for owned in receiver.tracked_tasks()):
+                return
+            instance = self.state.instances.get(task.instance_id)
+            if (
+                instance is None
+                or local_separation_input_task(self.state, self.node_id, command)
+                != task
+            ):
+                return
+            runner_id = instance.shard_assignments.node_to_runner[self.node_id]
+            self._separation_readers[command] = (
+                runner_id,
+                SKULK_SEPARATION_OUTPUT_DIR
+                / separation_reader_key(task.instance_id, runner_id),
+            )
+            try:
+                await receiver.begin(command)
+            finally:
+                if not any(
+                    owned.command_id == command for owned in receiver.tracked_tasks()
+                ):
+                    self._separation_readers.pop(command, None)
+        except (OSError, ValueError) as error:
+            logger.opt(exception=error).warning("Separation source admission failed")
+            await self._fail_separation(
+                task,
+                "Separation source storage is unavailable or still held by a prior reader; inspect diagnostics and retry.",
+            )
+
+    async def _send_separation_output_packet(self, packet: OutputMediaPacket) -> None:
+        """Use the existing node-addressed binary output plane."""
+        sender = self._output_media_packet_sender
+        if sender is None:
+            raise ClosedResourceError
+        await sender.send(packet)
+
+    def _schedule_separation_output_transfer(
+        self,
+        command: CommandId,
+        owner: NodeId | None,
+        chunk: SeparationChunk,
+    ) -> None:
+        """Bind a native completion to its admitted source and private reader root."""
+        receiver = self._separation_inputs
+        task = (
+            next(
+                (
+                    task
+                    for task in receiver.tracked_tasks()
+                    if task.command_id == command
+                ),
+                None,
+            )
+            if receiver is not None
+            else None
+        )
+        reader = self._separation_readers.get(command)
+        if (
+            task is None
+            or reader is None
+            or chunk.output is None
+            or owner != task.owner_node
+            or chunk.model != task.task_params.model
+        ):
+            logger.error("Separation completion has no matching admitted source owner")
+            return
+        if self._separation_outputs.register(task, reader[1], chunk.output):
+            # A verified native completion proves this command finished reading,
+            # even if restoring the model for the next request subsequently fails.
+            self._separation_rendered.add(command)
+            self._tg.start_soon(self._separation_outputs.deliver, command)
+
+    def _separation_reader_drained(self, task: AudioSeparation) -> bool:
+        captured = self._separation_readers.get(task.command_id)
+        if captured is None:
+            return False
+        runner_id, root = captured
+        supervisor = self.runners.get(runner_id)
+        if supervisor is not None:
+            if (
+                task.task_id in supervisor.in_progress
+                or task.task_id in supervisor.pending
+            ):
+                return False
+            if isinstance(supervisor.status, RunnerReady):
+                return True
+        # A dead parent/PID alone is insufficient. The inherited kernel fence
+        # remains busy while any native descendant still owns source reads.
+        try:
+            owner = RuntimeLock(root, name="attachment.lock")
+        except BlockingIOError:
+            return False
+        owner.close()
+        return True
+
+    async def _reconcile_separation_media(self) -> None:
+        receiver = self._separation_inputs
+        if receiver is None:
+            return
+        await receiver.tick()
+        await self._separation_outputs.tick()
+        for task in receiver.tracked_tasks():
+            live = self.state.tasks.get(task.task_id)
+            terminal = live is None or live.task_status not in (
+                TaskStatus.Pending,
+                TaskStatus.Running,
+            )
+            if (
+                terminal
+                and live is not None
+                and live.task_status != TaskStatus.Complete
+            ):
+                self._separation_outputs.cancel(task.command_id)
+            if not terminal or self._separation_outputs.pending(task.command_id):
+                continue
+            drained = (
+                task.command_id in self._separation_rendered
+                or await separation_file_effect(
+                    lambda task=task: self._separation_reader_drained(task)
+                )
+            )
+            if drained:
+                await receiver.release_after_drain(task.command_id)
+                self._separation_readers.pop(task.command_id, None)
+                self._separation_rendered.discard(task.command_id)
+        if self._separation_sources is not None:
+            await separation_file_effect(self._separation_sources.recover_stale)
+
+    async def _separation_janitor(self) -> None:
+        """Expire source transfers and release only drained, settled native copies."""
+        while True:
+            await anyio.sleep(0.5)
+            try:
+                await self._reconcile_separation_media()
+            except (OSError, ValueError) as error:
+                logger.opt(exception=error).warning(
+                    "Separation media cleanup remains reserved for retry"
+                )
+
     def _schedule_video_output_transfer(
         self, command_id: CommandId, owner_node: NodeId | None, chunk: VideoChunk
     ) -> None:
@@ -2670,6 +3068,9 @@ class Worker:
         with self._output_media_packet_receiver as packets:
             async for packet in packets:
                 if packet.target_node != self.node_id:
+                    continue
+                if packet.purpose.startswith("separation_"):
+                    self._separation_outputs.receive(packet)
                     continue
                 pending = self._output_media_pending.get(packet.command_id)
                 if pending is None or pending[0] != packet.source_node:
@@ -3054,6 +3455,13 @@ class Worker:
                 ):
                     self._tg.start_soon(self._prepare_audio_cpp_engine, event)
 
+                if (
+                    isinstance(event, DemucsPreparationRequested)
+                    and event.target_node == self.node_id
+                    and event.expires_at > time.time()
+                ):
+                    self._tg.start_soon(self._prepare_demucs_engine, event)
+
                 if isinstance(
                     event, (ModelTrustApprovalChanged, StateSnapshotHydrated)
                 ):
@@ -3116,6 +3524,41 @@ class Worker:
                             self._acknowledge_vision_media_if_admitted,
                             event.task.command_id,
                         )
+
+                if isinstance(event, TaskCreated) and isinstance(
+                    event.task, AudioSeparation
+                ):
+                    self._tg.start_soon(
+                        self._begin_separation_input, event.task.command_id
+                    )
+                elif isinstance(event, StateSnapshotHydrated):
+                    known: set[TaskId] = (
+                        {
+                            task.task_id
+                            for task in self._separation_inputs.tracked_tasks()
+                        }
+                        if self._separation_inputs is not None
+                        else set()
+                    )
+                    # A process restart must never silently replay an uncertain
+                    # native edit. Existing live owners survive election replay.
+                    for task in self.state.tasks.values():
+                        if (
+                            isinstance(task, AudioSeparation)
+                            and task.task_id not in known
+                            # Snapshots are cluster-wide. A new follower owns no
+                            # input records for healthy work placed elsewhere.
+                            and local_separation_input_task(
+                                self.state, self.node_id, task.command_id
+                            ) == task
+                            and task.task_status
+                            in (TaskStatus.Pending, TaskStatus.Running)
+                        ):
+                            self._tg.start_soon(
+                                self._fail_separation,
+                                task,
+                                "Separation was interrupted before this worker recovered; retry the operation.",
+                            )
 
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, AudioTranscription
@@ -3909,16 +4352,7 @@ class Worker:
         """Advertise this node's resources now rather than at the next poll."""
         if self._telemetry_sender is None:
             return
-        peers = (
-            await self._zenoh_peer_sampler.advertised_count()
-            if self._zenoh_peer_sampler is not None
-            else None
-        )
-        resources = await NodeResources.gather(
-            api_available=self._api_available,
-            data_transport=self._data_transport,
-            zenoh_connected_peers=peers,
-        )
+        resources = await self._gather_node_resources()
         await self._telemetry_sender.send(
             NodeTelemetry(node_id=self.node_id, info=resources)
         )
@@ -3968,6 +4402,10 @@ class Worker:
                 self._speech_media_ready,
                 self._reference_media_ready,
                 on_demand_backends=self._on_demand_backends,
+                runner_creation_pending=frozenset(self._demucs_creations),
+                separation_media_ready=self._separation_inputs.ready_commands()
+                if self._separation_inputs is not None
+                else frozenset(),
                 engine_install_requested=frozenset(self._engine_install_tasks),
                 engine_install_ready=frozenset(
                     instance_id
@@ -4036,10 +4474,122 @@ class Worker:
                 await self._refuse_instance_placement(task.instance_id, fit_error)
             return
 
+        if task.bound_instance.is_separation_model:
+            self._demucs_creations[task.instance_id] = task
+            self._tg.start_soon(self._complete_demucs_runner_creation, task)
+            return
         self._create_supervisor(task)
         await self.event_sender.send(
             TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Complete)
         )
+
+    async def _prepare_separation_reader(self, root: Path) -> SourceReadFence:
+        """Reconcile old sources/results before the new model holds its reader fence.
+
+        Keep the exclusive source-service owner across both acquisitions. It
+        prevents another Worker from activating source readers in the gap, while
+        stale cleanup independently takes each kernel reader fence. The new
+        model must not hold that fence yet or it would block its own recovery.
+        """
+        deadline = time.monotonic() + 30
+        async with self._separation_init_lock:
+            await separation_file_effect(self._open_separation_sources)
+        observed = await acquire_source_read_fence(root)
+        observed.close()
+        assert self._separation_sources is not None
+        await separation_file_effect(self._separation_sources.recover_stale)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("native source reconciliation exceeded its complete budget")
+        return await acquire_source_read_fence(root, timeout_seconds=remaining)
+
+    async def _complete_demucs_runner_creation(self, task: CreateRunner) -> None:
+        """Prepare a restored placement off-loop without blocking other planning.
+
+        A restarted worker has no trusted in-memory library observation. Verify
+        its cached exact runtime before spawn, then recheck current placement,
+        trust and memory. First mounts still download weights through the normal
+        idle-runner lifecycle; the child resolves them only at LoadModel.
+        """
+        context: SeparationRunnerContext | None = None
+        try:
+            bound = task.bound_instance
+            shard = bound.bound_shard
+            backend, build = shard.resolved_backend, shard.resolved_engine_build
+            if backend not in {"demucs-cpu", "demucs-metal"} or build is None:
+                raise ValueError(
+                    "native placement has no implemented explicit package/device"
+                )
+            device = "mps" if backend == "demucs-metal" else "cpu"
+            package = select_demucs_package(self._demucs_platforms, device=device)
+            if package.build_identity != build:
+                raise ValueError(
+                    "native placement build differs from this host's fixed inventory"
+                )
+            try:
+                runtime = self._demucs_manager.prepared_runtime(backend, build)
+            except DemucsBuildMismatchError:
+                runtime = await self._demucs_preparation.prepare(
+                    CommandId(),
+                    package,
+                    device=device,
+                    expires_at=time.time() + 30 * 60,
+                    progress=lambda phase: logger.debug(
+                        "restored native separation preparation: {}", phase
+                    ),
+                )
+                await self._publish_fresh_node_resources()
+            root = SKULK_SEPARATION_OUTPUT_DIR / separation_reader_key(
+                task.instance_id, bound.bound_runner_id
+            )
+            fence = await self._prepare_separation_reader(root)
+            context = SeparationRunnerContext(
+                runtime, root, SKULK_SEPARATION_INPUT_DIR, fence
+            )
+            async with self._staging_runner_transition_lock:
+                if self.state.instances.get(task.instance_id) != bound.instance:
+                    await self.event_sender.send(
+                        TaskStatusUpdated(
+                            task_id=task.task_id, task_status=TaskStatus.Cancelled
+                        )
+                    )
+                    return
+                _require_worker_model_execution_identity(shard.model_card, self.state)
+                fit = self._local_shard_fit_error(
+                    shard, bound.instance.context_token_limit
+                )
+                if fit is not None:
+                    raise ValueError(
+                        "native placement no longer fits current available memory"
+                    )
+                self._create_supervisor(task, separation_context=context)
+                context = None  # The supervisor owns the parent descriptor now.
+            await self.event_sender.send(
+                TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Complete)
+            )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as error:  # noqa: BLE001 - settle this instance without failing the worker
+            logger.opt(exception=error).warning(
+                "Native separation runner preparation failed"
+            )
+            await self.event_sender.send(
+                TaskFailed(
+                    task_id=task.task_id,
+                    error_type="native_separation_unavailable",
+                    error_message="Native separator package/device verification or reader ownership failed; inspect worker diagnostics and retry.",
+                )
+            )
+            if task.instance_id in self.state.instances:
+                await self._give_up_on_instance(
+                    task.instance_id,
+                    "Native separator preparation failed; inspect worker diagnostics and retry this configuration.",
+                    error_code="engine_install_failed",
+                )
+        finally:
+            if context is not None:
+                context.source_fence.close()
+            self._demucs_creations.pop(task.instance_id, None)
 
     async def shutdown(self):
         self._tg.cancel_tasks()
@@ -4161,7 +4711,12 @@ class Worker:
                 return
             await runner.start_task(task)
 
-    def _create_supervisor(self, task: CreateRunner) -> RunnerSupervisor:
+    def _create_supervisor(
+        self,
+        task: CreateRunner,
+        *,
+        separation_context: SeparationRunnerContext | None = None,
+    ) -> RunnerSupervisor:
         """Creates and stores a new AssignedRunner with initial downloading status."""
         shard = task.bound_instance.bound_shard
         logger.info(
@@ -4187,6 +4742,7 @@ class Worker:
         runner = RunnerSupervisor.create(
             bound_instance=task.bound_instance,
             event_sender=self.event_sender.clone(),
+            separation_context=separation_context,
             context_token_limit=context_token_limit,
             data_sender=self._data_sender.clone()
             if self._data_sender is not None
@@ -4196,6 +4752,7 @@ class Worker:
             else None,
             on_video_output=self._schedule_video_output_transfer,
             on_music_output=self._schedule_music_output_transfer,
+            on_separation_output=self._schedule_separation_output_transfer,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)
