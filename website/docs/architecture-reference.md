@@ -175,6 +175,19 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   four result sets are retained through sender drain, exact reverse ACKs and
   cleanup success. Total delivery/ACK deadline is five minutes; sends are capped
   at five seconds. Original slots remain reserved through result settlement.
+  A role's ACK precedes emission of the next role. API reverse control drains
+  independently of the media consumer: four jobs, at most four role ACKs plus
+  one cancellation drain per job, with admission retained until sender join
+  and completion gated on admitted role ACKs. The API wires separation to
+  `_send_separation_output_terminal`: raw sender admission propagates channel
+  failures and caller cancellation/deadlines. The legacy best-effort terminal
+  helper remains on video/music paths. Replayed completion terminals require
+  DATA-manifest verification before an ACK can be resent; receipt recording also
+  retries settlement when earlier ACK tasks have drained. Typed subscriber predicates
+  admit separation forward packets only to APIs and reverse control only to Workers before
+  their rendezvous queues, avoiding same-node ACK reentrancy without buffering
+  additional audio.
+  Legacy video/music subscriber admission is unchanged.
   Foreign content and failed deletion remain owned; no recursive deletion or
   packet-provided file paths. Native `result_custody.py` persists a private
   directory inode receipt before inference; stale source recovery requires reader

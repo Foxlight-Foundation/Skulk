@@ -7,6 +7,23 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Separation result delivery
+
+- Prevent same-node stem transfers from blocking on their own reverse
+  acknowledgments. Each role is acknowledged before the next begins; separation
+  subscriber predicates preserve zero-buffer bounds and existing video/music
+  admission.
+
+- Keep separation acknowledgements and cancellation terminals independent of
+  the media consumer across concurrent jobs, with bounded control ownership
+  and admission held until senders drain. Propagate separation control
+  admission failures so a dropped final acknowledgement cannot report a
+  completed job.
+
+- Verify replayed stem completion packets against the result manifest before
+  acknowledging them, and retry settlement when manifest recording finishes.
+  Reordered duplicate terminals cannot strand a fully delivered result.
+
 ### Offline model availability
 
 - Recognize complete installed artifact bundles without a safetensors shard

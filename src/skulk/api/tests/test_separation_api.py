@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
-from typing import cast
+from typing import Literal, cast
 
 import anyio
 import httpx
@@ -24,11 +24,18 @@ from starlette import formparsers
 from starlette.types import Message
 
 from skulk.api import separation_api as separation_module
+from skulk.api.main import API
 from skulk.api.separation_api import SeparationAPI
 from skulk.api.types.separation import SeparationListResponse, SeparationResource
 from skulk.master.main import separation_generation_events
 from skulk.master.tests.test_separation_admission import state
-from skulk.routing.output_media import OutputMediaPacket
+from skulk.routing.output_media import (
+    OutputMediaPacket,
+    output_media_for_api,
+    output_media_for_worker,
+)
+from skulk.routing.router import OutboundPacket, TopicRouter
+from skulk.routing.topics import OUTPUT_MEDIA
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.types.audio_separation import MAX_SEPARATION_SOURCE_BYTES
@@ -38,7 +45,7 @@ from skulk.shared.types.commands import Command, TaskCancelled
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.events import TaskCreated
 from skulk.shared.types.state import State
-from skulk.shared.types.tasks import AudioSeparation
+from skulk.shared.types.tasks import AudioSeparation, TaskStatus
 from skulk.shared.types.worker.runners import RunnerReady
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.task_group import TaskGroup
@@ -280,15 +287,19 @@ async def test_multipart_to_placed_worker_four_stems_and_download(
 async def test_reordered_media_before_data_stays_private_until_manifest(
     tmp_path: Path,
 ) -> None:
-    """OUTPUT_MEDIA may outrun DATA, without exposing partially matched files."""
+    """The first role may outrun DATA; its ACK admits the remaining roles."""
     async with fixture(tmp_path) as (harness, client):
         identifier = await create(client)
         task = await harness.task(identifier)
         output = result(tmp_path / "native", task)
         held: list[OutputMediaPacket] = []
+        holding = True
 
         async def collect(packet: OutputMediaPacket) -> None:
-            held.append(packet)
+            if holding:
+                held.append(packet)
+            else:
+                await harness.api.receive_output(packet)
 
         async def fail(_task: AudioSeparation, message: str) -> None:
             raise AssertionError(message)
@@ -299,7 +310,7 @@ async def test_reordered_media_before_data_stays_private_until_manifest(
         sending = asyncio.create_task(producer.deliver(identifier))
         try:
             with anyio.fail_after(5):
-                while sum(packet.kind == "completed" for packet in held) != 4:
+                while sum(packet.kind == "completed" for packet in held) != 1:
                     await anyio.sleep(0.01)
             # Complete, chunk and open deliberately arrive in reverse order.
             for packet in reversed(held):
@@ -311,6 +322,7 @@ async def test_reordered_media_before_data_stays_private_until_manifest(
             assert (
                 await client.get(f"/v1/audio/separations/{identifier}/content/drums")
             ).status_code == 409
+            holding = False
             await harness.queues[identifier].send(
                 SeparationChunk(
                     model=ModelId(task.task_params.model),
@@ -330,6 +342,382 @@ async def test_reordered_media_before_data_stays_private_until_manifest(
                 sending.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await sending
+
+
+@pytest.mark.parametrize("metadata_first", [False, True])
+async def test_replayed_completion_requires_verified_manifest_and_settles(
+    tmp_path: Path, metadata_first: bool
+) -> None:
+    """Duplicate role terminals cannot bypass DATA verification or strand a job."""
+    async with fixture(tmp_path) as (harness, client):
+        identifier = await create(client)
+        task = await harness.task(identifier)
+        output = result(tmp_path / "native", task)
+        first_completed = anyio.Event()
+
+        async def duplicate_terminal(packet: OutputMediaPacket) -> None:
+            await harness.api.receive_output(packet)
+            if packet.kind == "completed":
+                await harness.api.receive_output(packet)
+                first_completed.set()
+
+        async def fail(_task: AudioSeparation, message: str) -> None:
+            raise AssertionError(message)
+
+        producer = SeparationOutputProducer(
+            NodeId("node-0"), duplicate_terminal, fail
+        )
+        producer.register(task, tmp_path / "native", output)
+        harness.producer = producer
+        manifest = SeparationChunk(
+            model=ModelId(task.task_params.model), finish_reason="stop", output=output
+        )
+        if metadata_first:
+            await harness.queues[identifier].send(manifest)
+        sending = asyncio.create_task(producer.deliver(identifier))
+        try:
+            with anyio.fail_after(5):
+                await first_completed.wait()
+                # Let independently scheduled reverse controls drain. Neither
+                # receipt bytes nor a repeated terminal establish manifest truth.
+                await anyio.sleep(0)
+                if not metadata_first:
+                    assert not any(
+                        packet.kind == "accepted" for packet in harness.output_frames
+                    )
+                    private = SeparationResource.model_validate_json(
+                        (await client.get(f"/v1/audio/separations/{identifier}")).content
+                    )
+                    assert private.status == "in_progress" and private.output is None
+                    await harness.queues[identifier].send(manifest)
+                await sending
+                while True:
+                    completed = SeparationResource.model_validate_json(
+                        (await client.get(f"/v1/audio/separations/{identifier}")).content
+                    )
+                    if completed.status == "completed":
+                        break
+                    await anyio.sleep(0.01)
+            assert completed.output is not None
+            for stem in completed.output.stems:
+                downloaded = await client.get(
+                    f"/v1/audio/separations/{identifier}/content/{stem.name}"
+                )
+                assert downloaded.status_code == 200
+                assert hashlib.sha256(downloaded.content).hexdigest() == stem.sha256
+        finally:
+            if not sending.done():
+                sending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await sending
+
+
+@pytest.mark.parametrize("metadata_first", [False, True])
+async def test_same_node_four_stem_rendezvous_routes_reverse_acknowledgments(
+    tmp_path: Path, metadata_first: bool
+) -> None:
+    """Real zero-buffer routing must carry all four roles and reverse ACKs."""
+    async with fixture(tmp_path) as (harness, client):
+        harness.api.node_id = NodeId("node-0")
+        network_send, network_receive = channel[OutboundPacket](1)
+        router = TopicRouter(OUTPUT_MEDIA, network_send, local_routing_key="node-0")
+        api_receive = router.new_receiver(accept=output_media_for_api)
+        worker_receive = router.new_receiver(accept=output_media_for_worker)
+        harness.api.send_output = router.new_sender().send
+        api_frames: list[OutputMediaPacket] = []
+        worker_frames: list[OutputMediaPacket] = []
+        failures: list[str] = []
+
+        async def api_ingress() -> None:
+            with api_receive:
+                async for packet in api_receive:
+                    api_frames.append(packet)
+                    await harness.api.receive_output(packet)
+
+        async def worker_ingress() -> None:
+            with worker_receive:
+                async for packet in worker_receive:
+                    worker_frames.append(packet)
+                    assert harness.producer is not None
+                    harness.producer.receive(packet)
+
+        async def fail(_task: AudioSeparation, message: str) -> None:
+            failures.append(message)
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(router.run)
+            group.start_soon(api_ingress)
+            group.start_soon(worker_ingress)
+            try:
+                identifier = await create(client)
+                task = await harness.task(identifier)
+                output = result(tmp_path / "native", task)
+                harness.producer = SeparationOutputProducer(
+                    NodeId("node-0"), router.new_sender().send, fail, timeout_seconds=5
+                )
+                harness.producer.register(task, tmp_path / "native", output)
+                chunk = SeparationChunk(model=ModelId(task.task_params.model), finish_reason="stop", output=output)
+                if metadata_first:
+                    await harness.queues[identifier].send(chunk)
+                sending = asyncio.create_task(harness.producer.deliver(identifier))
+                try:
+                    if not metadata_first:
+                        with anyio.fail_after(2):
+                            while not any(packet.kind == "completed" for packet in api_frames):
+                                await anyio.sleep(0.01)
+                        before = SeparationResource.model_validate_json((await client.get(f"/v1/audio/separations/{identifier}")).content)
+                        assert before.status == "in_progress" and before.output is None
+                        await harness.queues[identifier].send(chunk)
+                    await asyncio.wait_for(sending, 5)
+                    assert not failures
+                    complete = SeparationResource.model_validate_json((await client.get(f"/v1/audio/separations/{identifier}")).content)
+                    assert complete.status == "completed" and complete.output is not None
+                    for stem in complete.output.stems:
+                        content = await client.get(f"/v1/audio/separations/{identifier}/content/{stem.name}")
+                        assert content.status_code == 200
+                        assert hashlib.sha256(content.content).hexdigest() == stem.sha256
+                    assert all(packet.kind not in ("accepted", "cancelled") for packet in api_frames)
+                    assert all(packet.kind in ("accepted", "cancelled", "transport_failed") for packet in worker_frames)
+                    assert {packet.purpose for packet in worker_frames if packet.kind == "accepted"} == {packet.purpose for packet in api_frames if packet.kind == "completed"}
+                    with pytest.raises(anyio.WouldBlock):
+                        network_receive.receive_nowait()
+                finally:
+                    if not sending.done():
+                        sending.cancel()
+                        with pytest.raises(asyncio.CancelledError):
+                            await sending
+            finally:
+                await router.shutdown()
+                group.cancel_scope.cancel()
+
+
+@pytest.mark.parametrize("commands", [2, 4])
+async def test_concurrent_same_node_delivery_cannot_block_reverse_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: int
+) -> None:
+    """A second command enters the real router while the API verifies the first."""
+    async with fixture(tmp_path) as (harness, client):
+        harness.api.node_id = NodeId("node-0")
+        network_send, network_receive = channel[OutboundPacket](1)
+        router = TopicRouter(OUTPUT_MEDIA, network_send, local_routing_key="node-0")
+        api_receive = router.new_receiver(accept=output_media_for_api)
+        worker_receive = router.new_receiver(accept=output_media_for_worker)
+        harness.api.send_output = router.new_sender().send
+        identifiers: list[CommandId] = []
+        failures: list[str] = []
+        first_completed, second_publishing = anyio.Event(), anyio.Event()
+        original_publish = router.publish
+
+        async def publish(packet: OutputMediaPacket, origin: str | None = None) -> None:
+            if len(identifiers) > 1 and packet.command_id != identifiers[0] and packet.kind == "opened":
+                second_publishing.set()
+            await original_publish(packet, origin)
+
+        monkeypatch.setattr(router, "publish", publish)
+
+        async def api_ingress() -> None:
+            with api_receive:
+                async for packet in api_receive:
+                    if packet.command_id == identifiers[0] and packet.kind == "completed" and not first_completed.is_set():
+                        first_completed.set()
+                        await second_publishing.wait()
+                    await harness.api.receive_output(packet)
+
+        async def worker_ingress() -> None:
+            with worker_receive:
+                async for packet in worker_receive:
+                    assert harness.producer is not None
+                    harness.producer.receive(packet)
+
+        async def fail(_task: AudioSeparation, message: str) -> None:
+            failures.append(message)
+
+        producer = SeparationOutputProducer(NodeId("node-0"), router.new_sender().send, fail, timeout_seconds=5)
+        harness.producer = producer
+        for _ in range(commands):
+            identifier = await create(client)
+            identifiers.append(identifier)
+            task = await harness.task(identifier)
+            output = result(tmp_path / "native", task)
+            producer.register(task, tmp_path / "native", output)
+            await harness.queues[identifier].send(SeparationChunk(model=ModelId(task.task_params.model), finish_reason="stop", output=output))
+            # Native execution may finish before its result delivery. Ordinary
+            # placement can reuse that ready instance while earlier bytes drain.
+            harness.snapshot = harness.snapshot.model_copy(update={"tasks": dict(harness.snapshot.tasks) | {task.task_id: task.model_copy(update={"task_status": TaskStatus.Complete})}})
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(router.run)
+            group.start_soon(api_ingress)
+            group.start_soon(worker_ingress)
+            try:
+                with anyio.fail_after(4):
+                    group.start_soon(producer.deliver, identifiers[0])
+                    await first_completed.wait()
+                    for identifier in identifiers[1:]:
+                        group.start_soon(producer.deliver, identifier)
+                    while any(producer.pending(identifier) for identifier in identifiers):
+                        await anyio.sleep(0.01)
+                    assert not failures
+                    for identifier in identifiers:
+                        complete = SeparationResource.model_validate_json((await client.get(f"/v1/audio/separations/{identifier}")).content)
+                        assert complete.status == "completed" and complete.output is not None
+                        for stem in complete.output.stems:
+                            content = await client.get(f"/v1/audio/separations/{identifier}/content/{stem.name}")
+                            assert content.status_code == 200 and hashlib.sha256(content.content).hexdigest() == stem.sha256
+                    with pytest.raises(anyio.WouldBlock):
+                        network_receive.receive_nowait()
+            finally:
+                group.cancel_scope.cancel()
+                await router.shutdown()
+
+
+async def test_cancelled_jobs_hold_admission_until_reverse_controls_drain(
+    tmp_path: Path,
+) -> None:
+    """Rapid cancellation cannot detach more control owners than four job slots."""
+    async with fixture(tmp_path) as (harness, client):
+        identifiers: list[CommandId] = []
+        for _ in range(4):
+            identifier = await create(client)
+            identifiers.append(identifier)
+            task = await harness.task(identifier)
+            harness.snapshot = harness.snapshot.model_copy(update={"tasks": dict(harness.snapshot.tasks) | {task.task_id: task.model_copy(update={"task_status": TaskStatus.Complete})}})
+        released = anyio.Event()
+        started: set[CommandId] = set()
+
+        async def hold_control(packet: OutputMediaPacket) -> None:
+            started.add(packet.command_id)
+            await released.wait()
+
+        harness.api.send_output = hold_control
+        with anyio.fail_after(2):
+            for identifier in identifiers:
+                response = await client.post(f"/v1/audio/separations/{identifier}/cancel")
+                assert response.status_code == 200
+                assert SeparationResource.model_validate_json(response.content).status == "cancelled"
+            while len(started) != 4:
+                await anyio.sleep(0.01)
+        assert not harness.api.active
+        assert len(harness.api._output_control_counts) == 4
+        response = await client.post("/v1/audio/separations", data={"request": json.dumps({"model": "adefossez/HTDemucs"})}, files={"file": ("original.wav", original(), "audio/wav")})
+        assert response.status_code == 503
+        released.set()
+        with anyio.fail_after(2):
+            while harness.api._output_control_counts:
+                await anyio.sleep(0.01)
+        assert harness.worker is not None
+        for identifier in identifiers:
+            await harness.worker.release_after_drain(identifier)
+        assert await create(client) not in identifiers
+
+
+async def test_failed_acknowledgement_fails_job_and_releases_control_ownership(
+    tmp_path: Path,
+) -> None:
+    """A failed reverse send cannot expose a completed set or retain its slot."""
+    async with fixture(tmp_path) as (harness, client):
+        identifier = await create(client)
+
+        async def reject_acknowledgement(packet: OutputMediaPacket) -> None:
+            if packet.kind == "accepted":
+                raise anyio.BrokenResourceError
+            await harness.send_output(packet)
+
+        harness.api.send_output = reject_acknowledgement
+        with pytest.raises(AssertionError, match="Separation result delivery failed"):
+            await harness.render(identifier)
+        with anyio.fail_after(2):
+            while harness.api._output_control_counts:
+                await anyio.sleep(0.01)
+        job = SeparationResource.model_validate_json((await client.get(f"/v1/audio/separations/{identifier}")).content)
+        assert job.status == "failed" and job.output is None
+        assert not harness.api.active and harness.api.media.reserved_bytes() == 0
+
+
+async def test_production_control_sender_cannot_complete_after_dropping_final_ack(
+    tmp_path: Path,
+) -> None:
+    """Use the API callback and a real channel broken after three admitted ACKs."""
+    async with fixture(tmp_path) as (harness, client):
+        control_send, control_receive = channel[OutputMediaPacket](0)
+        host = object.__new__(API)
+        host._output_media_packet_sender = control_send
+        harness.api.send_output = host._send_separation_output_terminal
+        identifier = await create(client)
+        task = await harness.task(identifier)
+        output = result(tmp_path / "native", task)
+        completed: set[str] = set()
+        failures: list[str] = []
+
+        async def forward(packet: OutputMediaPacket) -> None:
+            if packet.kind == "completed":
+                completed.add(packet.purpose)
+            await harness.api.receive_output(packet)
+
+        async def fail(_task: AudioSeparation, message: str) -> None:
+            failures.append(message)
+
+        producer = SeparationOutputProducer(NodeId("node-0"), forward, fail, timeout_seconds=10)
+        harness.producer = producer
+        producer.register(task, tmp_path / "native", output)
+        await harness.queues[identifier].send(SeparationChunk(model=ModelId(task.task_params.model), finish_reason="stop", output=output))
+
+        async def admit_three_acks() -> None:
+            accepted: set[str] = set()
+            with control_receive:
+                async for packet in control_receive:
+                    producer.receive(packet)
+                    if packet.kind == "accepted":
+                        accepted.add(packet.purpose)
+                        if len(accepted) == 3:
+                            return
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(admit_three_acks)
+            sending = asyncio.create_task(producer.deliver(identifier))
+            try:
+                with anyio.fail_after(4):
+                    while True:
+                        job = SeparationResource.model_validate_json((await client.get(f"/v1/audio/separations/{identifier}")).content)
+                        if job.status in ("failed", "completed", "cancelled"):
+                            break
+                        await anyio.sleep(0.01)
+                    assert len(completed) == 4
+                    assert job.status == "failed" and job.output is None
+                    while harness.api._output_control_counts:
+                        await anyio.sleep(0.01)
+                    assert not harness.api.active
+                    assert harness.api.media.reserved_bytes() == 0
+            finally:
+                if not sending.done():
+                    sending.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await sending
+                control_send.close()
+                group.cancel_scope.cancel()
+
+
+@pytest.mark.parametrize("transport", ["missing", "broken", "blocked"])
+async def test_strict_production_control_sender_propagates_admission_failure(
+    transport: Literal["missing", "broken", "blocked"],
+) -> None:
+    """Real transport absence, closure and caller deadlines remain failures."""
+    send, receive = channel[OutputMediaPacket](0)
+    host = object.__new__(API)
+    host._output_media_packet_sender = None if transport == "missing" else send
+    packet = OutputMediaPacket(source_node=NodeId("api"), target_node=NodeId("worker"), command_id=CommandId("strict-control"), model=ModelId("model"), purpose="separation_drums", kind="accepted", sequence=2)
+    try:
+        if transport == "blocked":
+            with pytest.raises(TimeoutError), anyio.fail_after(0.05):
+                await host._send_separation_output_terminal(packet)
+        else:
+            if transport == "broken":
+                receive.close()
+            with pytest.raises((anyio.ClosedResourceError, anyio.BrokenResourceError)):
+                await host._send_separation_output_terminal(packet)
+    finally:
+        send.close()
+        receive.close()
 
 
 @pytest.mark.parametrize(

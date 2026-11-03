@@ -280,6 +280,15 @@ class SeparationOutputProducer:
             with anyio.fail_after(self.timeout_seconds):
                 for stem in entry.output.stems:
                     await self._stem(entry, stem)
+                    # Keep only one unacknowledged role per command. The API
+                    # drains reverse control independently across commands so
+                    # another producer's forward frame cannot block this ACK.
+                    purpose = separation_purpose(stem.name)
+                    while purpose not in entry.accepted:
+                        if entry.aborted:
+                            raise ValueError("separation output delivery was cancelled")
+                        entry.changed = anyio.Event()
+                        await entry.changed.wait()
                 while len(entry.accepted) != len(SEPARATION_STEMS):
                     if entry.aborted:
                         raise ValueError("separation output delivery was cancelled")

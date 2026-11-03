@@ -2279,7 +2279,9 @@ gateway requires the existing inference (`chat:write`) scope.
 
 The body has a streaming limit of 64 MiB plus 32 KiB multipart overhead, even
 without `Content-Length`. At most four upload handlers and four active jobs are
-admitted on an API node. A model selection or ordinary mount prepares its engine
+admitted on an API node. A slot remains reserved while its bounded reverse
+acknowledgements or cancellation terminals drain, including after cancellation.
+A model selection or ordinary mount prepares its engine
 separately; creating a separation does not install or mount a model implicitly.
 
 ```bash
@@ -2294,7 +2296,12 @@ Success returns **202** with an `audio.separation` object containing `id`,
 `in_progress`, `completed`, `failed` or `cancelled`. `source` contains the complete
 encoded SHA-256 and size, sample rate, channels, frames, encoding and bit depth;
 it contains no file path or samples. `output` remains null until successful
-rendering and all four verified local files agree with the complete manifest.
+rendering, all four verified local files agree with the complete manifest, and
+their return-path acknowledgements have been admitted. An unavailable return
+transport or acknowledgement deadline fails the job, including when every WAV
+has already verified; it cannot silently report completion.
+Repeated completion packets also require manifest verification; arrival of the
+manifest rechecks settlement after any previously admitted acknowledgements.
 
 Uploads have a three-minute deadline; a stalled body returns 408 and its partial
 spooled files are closed. Requests with invalid metadata or WAV data return 422; malformed multipart

@@ -47,6 +47,7 @@ from skulk.operator.pairing import OperatorPairingService
 from skulk.recovery.record import ClusterIntentRecord, read_record
 from skulk.recovery.recorder import RECOVERY_RECORD_PATH, ClusterIntentRecorder
 from skulk.routing.event_router import EventRouter
+from skulk.routing.output_media import output_media_for_api, output_media_for_worker
 from skulk.routing.router import Router, TelemetrySender, get_node_id_keypair
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.constants import (
@@ -1071,7 +1072,9 @@ class Node:
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
                 output_media_packet_sender=router.sender(topics.OUTPUT_MEDIA),
-                output_media_packet_receiver=router.receiver(topics.OUTPUT_MEDIA),
+                output_media_packet_receiver=router.receiver(
+                    topics.OUTPUT_MEDIA, accept=output_media_for_api
+                ),
                 realtime_audio_sender=(
                     None if args.no_worker else realtime_audio_sender
                 ),
@@ -1138,7 +1141,9 @@ class Node:
                 vision_media_packet_sender=router.sender(topics.VISION_MEDIA),
                 vision_media_packet_receiver=router.receiver(topics.VISION_MEDIA),
                 output_media_packet_sender=router.sender(topics.OUTPUT_MEDIA),
-                output_media_packet_receiver=router.receiver(topics.OUTPUT_MEDIA),
+                output_media_packet_receiver=router.receiver(
+                    topics.OUTPUT_MEDIA, accept=output_media_for_worker
+                ),
                 connection_message_receiver=router.receiver(topics.CONNECTION_MESSAGES),
                 session_connection_snapshot=router.current_session_connections,
                 store_client=worker_store_client,
@@ -2087,7 +2092,7 @@ class Node:
                                 topics.OUTPUT_MEDIA
                             ),
                             output_media_packet_receiver=self.router.receiver(
-                                topics.OUTPUT_MEDIA
+                                topics.OUTPUT_MEDIA, accept=output_media_for_worker
                             ),
                         )
                         if self.download_coordinator is not None and isinstance(

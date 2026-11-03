@@ -2209,7 +2209,7 @@ class API:
         self._separation_service = SeparationAPI(
             self.node_id, SKULK_SEPARATION_STORE_DIR, lambda: self.state, self._tg,
             self._load_authorized_model_card, self._send_separation_command,
-            lambda: self._system_id, self._send_separation_source, self._send_output_media_terminal,
+            lambda: self._system_id, self._send_separation_source, self._send_separation_output_terminal,
             self._open_separation_queue, self._finalize_separation_command, self._close_command_queue,
         )
         self._setup_routes()
@@ -13989,6 +13989,18 @@ class API:
         """Return the single node the master placed a video command on."""
 
         return self._video_output_sources.get(command_id)
+
+    async def _send_separation_output_terminal(self, packet: OutputMediaPacket) -> None:
+        """Admit separation control or propagate failure to its bounded owner.
+
+        Separation completion and quota release depend on ACK admission. Its
+        control task owns the deadline, so neither channel errors nor caller
+        cancellation may become a successful best-effort return here.
+        """
+        sender = self._output_media_packet_sender
+        if sender is None:
+            raise ClosedResourceError
+        await sender.send(packet)
 
     async def _send_output_media_terminal(self, packet: OutputMediaPacket) -> None:
         """Send one reverse terminal without letting a stuck peer pin the loop."""

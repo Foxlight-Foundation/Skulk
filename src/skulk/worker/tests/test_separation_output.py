@@ -146,7 +146,9 @@ async def test_missing_ack_expires_and_drops_only_drained_private_results(
     )
     producer.register(current.task, root, output)
     await producer.deliver(current.task.command_id)
-    assert sum(packet.kind == "completed" for packet in sent) == 4
+    # A lost ACK must stop before another role occupies the same rendezvous.
+    assert sum(packet.kind == "completed" for packet in sent) == 1
+    assert {packet.purpose for packet in sent} == {"separation_drums"}
     assert failed == [current.task] and not producer.pending(current.task.command_id)
     assert not separation_result_directory(root, current.task.command_id).exists()
 
