@@ -195,6 +195,10 @@ class ChatFixture:
 class InferenceTestAPI(API):
     """Exercise the ordinary provider workers without starting unrelated services."""
 
+    def active_provider_streams(self) -> int:
+        """Expose owned receiver count for lifecycle leak assertions."""
+        return len(self._provider_stream_receivers)
+
     async def read_chat_catalogs(self) -> list[ChatCatalog]:
         """Expose discovery for deterministic concurrent-reader lifecycle tests."""
         return await self._capability_chat_catalogs()

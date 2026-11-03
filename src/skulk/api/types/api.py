@@ -1399,7 +1399,38 @@ class ChatCompletionMessageImageUrl(BaseModel):
     image_url: dict[str, str]  # {"url": "data:image/png;base64,..."}
 
 
-ChatCompletionContentPart = ChatCompletionMessageText | ChatCompletionMessageImageUrl
+class ChatCompletionFile(BaseModel):
+    """Inline document bytes; interpretation and permission remain provider-owned."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    filename: str = Field(
+        min_length=1, max_length=128, description="Display filename, not a local path."
+    )
+    file_data: str = Field(
+        min_length=1,
+        max_length=16777216,
+        description="Inline base64 data URL accepted by the selected capability.",
+    )
+
+
+class ChatCompletionMessageFile(BaseModel):
+    """A capability document attachment; native text/vision adapters refuse it."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    type: Literal["file"] = Field(
+        default="file", description="Document content discriminator."
+    )
+    file: ChatCompletionFile = Field(
+        description="Inline file metadata and encoded bytes."
+    )
+
+
+ChatCompletionContentPart = (
+    ChatCompletionMessageText
+    | ChatCompletionMessageImageUrl
+    | ChatCompletionMessageFile
+)
+
 
 
 class ToolCallItem(BaseModel):

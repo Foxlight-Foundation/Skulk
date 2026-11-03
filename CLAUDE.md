@@ -12,6 +12,10 @@ Capability model IDs do not fabricate mounted model instances. Never add a
 provider credential or provider-specific client to this generic path. Cached
 catalog reads run concurrently with bounded deadlines; response cleanup owns
 provider cancellation and receiver retirement before its first SSE yield.
+Version 0.2 signs bounded request-body references and transfers the bytes through
+existing bidirectional provider media. Upload failure/disconnect owns cleanup
+before response iteration. Keep attachment interpretation in the capability;
+native text/vision execution refuses document parts before normalization.
 
 Native installed preservation lives in `store/preservation_export.py`; complete
 card-selected mappings live in `store/preservation_closure.py`. Offline recovery

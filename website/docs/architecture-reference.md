@@ -13,12 +13,18 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 ## Components
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
-  adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream
+  adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
   precedes signing; capability-owned policy independently admits the request.
   Gateway keys stay host-local. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
+  V2 catalog validation binds the duplex callable and gateway authorization
+  version. `GatewaySigner.prepare` returns a signed size/digest reference and
+  bounded UTF-8 media body; `send_chat_body` sends 1 MiB packets and half-closes
+  input inside the whole-call deadline, owning cleanup on upload failure.
+  The generic request maximum is 16 MiB; providers may advertise a smaller bound.
+  Native text/vision normalization rejects `ChatCompletionMessageFile` inputs.
   Up to eight cached catalogs are read concurrently under five-second individual
   and six-second aggregate deadlines, including managed-owner validation overhead
   and retaining completed results. Overlapping callers share that read, including
