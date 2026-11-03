@@ -6512,7 +6512,24 @@ Unsupported controls are refused by that provider rather than silently ignored.
 The optional `inference_policy` accepts `allow_external`, `local_only`, or
 `included_only`; local-only rejects nonlocal catalogs, and included-only rejects
 usage outside `none`/`included_only`, with 403. Unknown request fields return 400
-and signed inputs larger than 48 KiB return 413 before provider submission.
+Legacy `chat.completions@0.1.0` providers retain a 48 KiB signed-input bound.
+For `chat.completions@0.2.0`, the gateway signs the exact UTF-8 request-body length,
+digest and media type, then sends those bytes over the existing Fabric media
+channel in packets of at most 1 MiB. Encoded HTTP input is limited to 16 MiB;
+the selected provider can advertise a smaller bound. Oversize input returns 413
+before provider submission. When both versions are available for one callable,
+discovery prefers 0.2 without duplicating its model IDs. Requests are never
+automatically downgraded or replayed after admission.
+
+For supporting capabilities, user-message content may include
+`{"type":"file","file":{"filename":"notes.txt","file_data":"data:text/plain;base64,..."}}`.
+These inline attachments are interpreted and independently validated by the
+capability. No gateway file upload service, local-path resolution or remote-file
+fetching is provided. Native text/vision execution refuses document parts with 400
+before normalization. Catalog availability alone does not establish that every
+model accepts every document type. Input transfer has a 30-second phase deadline
+inside the existing whole-call deadline; disconnect or upload failure cancels
+the provider and retires the receiver before a response iterator is created.
 Both wire modes cap accumulated serialized delta characters at 262,144; overflow
 closes the provider stream and returns an `output_limit` error before forwarding
 the exceeding delta.

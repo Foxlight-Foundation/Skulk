@@ -3645,12 +3645,16 @@ their supported scope. See the API guide for exact request and lifecycle fields.
 ## Delegated capability inference
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
-  adapts the provider-neutral `chat.completions@0.1.0` catalog/signature/stream
+  adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
   precedes signing; capability-owned policy independently admits the request.
   Gateway keys stay host-local. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
+  Version 0.2 keeps a signed body digest/length in control messages and transfers
+  bounded UTF-8 request bytes through the existing bidirectional provider media
+  path. It preserves model IDs and independently authorized provider admission;
+  native text/vision adapters refuse document parts before normalization.
   Up to eight cached catalogs are read concurrently under five-second individual
   and six-second aggregate deadlines, including managed-owner validation overhead
   and retaining completed results. Overlapping callers share that read, including

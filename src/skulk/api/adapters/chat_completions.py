@@ -13,6 +13,7 @@ from skulk.api.types import (
     ChatCompletionChoice,
     ChatCompletionChunkResponse,
     ChatCompletionMessage,
+    ChatCompletionMessageFile,
     ChatCompletionMessageImageUrl,
     ChatCompletionMessageText,
     ChatCompletionRequest,
@@ -198,11 +199,48 @@ def resolve_tool_choice(
     return named, tool_choice
 
 
+def reject_native_document_attachments(request: ChatCompletionRequest) -> None:
+    """Reject document parts before native history normalization or other I/O.
+
+    Args:
+        request: A native chat or Steward request, with any supported history shape.
+
+    Raises:
+        HTTPException: A document attachment requires a supporting capability.
+    """
+    for message in request.messages:
+        if isinstance(message.content, ChatCompletionMessageFile) or (
+            isinstance(message.content, list)
+            and any(
+                isinstance(part, ChatCompletionMessageFile) for part in message.content
+            )
+        ):
+            raise HTTPException(
+                400, "This native inference path does not accept document attachments"
+            )
+
+
 async def chat_request_to_text_generation(
     request: ChatCompletionRequest,
     *,
     model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
+    """Normalize native chat history, tools and images into task parameters.
+
+    Args:
+        request: The chat request; document attachments are refused.
+        model_card: Optional model truth used to resolve reasoning controls.
+
+    Returns:
+        Text/vision task parameters preserving message and tool history.
+
+    Raises:
+        HTTPException: Documents or invalid tool choices cannot be served.
+
+    Remote image URLs may be fetched after unsupported input is rejected.
+    """
+    # Reject files before normalization can fetch an earlier remote image.
+    reject_native_document_attachments(request)
     # Resolved before message normalization on purpose: normalization may
     # fetch HTTP images, and a request whose forced tool choice is invalid
     # must get its documented 400 without first paying (or failing on) that
@@ -235,12 +273,16 @@ async def chat_request_to_text_generation(
                     images.append(extract_base64_from_data_url(url))
                 has_images = True
             content = ""
+        elif isinstance(msg.content, ChatCompletionMessageFile):
+            raise HTTPException(
+                400, "This native inference path does not accept document attachments"
+            )
         else:
             text_parts: list[str] = []
             for part in msg.content:
                 if isinstance(part, ChatCompletionMessageText):
                     text_parts.append(part.text)
-                else:
+                elif isinstance(part, ChatCompletionMessageImageUrl):
                     url = part.image_url.get("url", "")
                     if url:
                         if url.startswith(("http://", "https://")):
@@ -248,6 +290,11 @@ async def chat_request_to_text_generation(
                         else:
                             images.append(extract_base64_from_data_url(url))
                         has_images = True
+                else:
+                    raise HTTPException(
+                        400,
+                        "This native inference path does not accept document attachments",
+                    )
             content = "\n".join(text_parts)
 
         # Extract system message as instructions
