@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+from typing import Never
 
 import pytest
 
@@ -145,6 +146,68 @@ async def test_offline_bundle_status_refuses_incomplete_or_other_revision(
         n_layers=1,
     )
     progress = await ResumableShardDownloader(offline=True).get_shard_download_status_for_shard(shard)
+    assert progress.status != "complete"
+
+
+@pytest.mark.parametrize("change", ["path", "size", "digest"])
+@pytest.mark.parametrize("revision", [REVISION, "b" * 40])
+@pytest.mark.parametrize("offline", [False, True])
+async def test_offline_status_handles_changed_bundle_selection_without_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    revision: str,
+    offline: bool,
+) -> None:
+    """A previous generation's inventory is not the newly requested artifact."""
+    previous = _card().model_copy(update={"source_repository": None})
+    artifact = _install(tmp_path, previous)
+    bundle = previous.artifact_bundle
+    assert bundle is not None
+    files = list(bundle.files)
+    first = files[0]
+    if change == "path":
+        files[0] = first.model_copy(update={"path": "other-transformer.safetensors"})
+        (artifact / "other-transformer.safetensors").write_bytes(bytes(first.size_bytes))
+    elif change == "size":
+        files[0] = first.model_copy(update={"size_bytes": first.size_bytes + 1})
+    else:
+        files[0] = first.model_copy(update={"object_id": "sha256:" + "f" * 64})
+    size = sum(item.size_bytes for item in files)
+    selected = previous.model_copy(
+        update={
+            "source_revision": revision,
+            "storage_size": Memory.from_bytes(size),
+            "artifact_bundle": bundle.model_copy(
+                update={
+                    "bundle_id": _bundle_id([
+                        {"path": item.path, "size_bytes": item.size_bytes, "object_id": item.object_id or ""}
+                        for item in files
+                    ]),
+                    "download_size": size,
+                    "files": tuple(files),
+                }
+            ),
+        }
+    )
+    selected = ModelCard.model_validate_json(selected.model_dump_json())
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", None)
+
+    async def unavailable(*_args: object, **_kwargs: object) -> Never:
+        raise ConnectionError("upstream metadata is unavailable")
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_retry", unavailable)
+    shard = PipelineShardMetadata(
+        model_card=selected,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+    progress = await ResumableShardDownloader(offline=offline).get_shard_download_status_for_shard(shard)
     assert progress.status != "complete"
 
 
