@@ -21,6 +21,7 @@ from skulk.api.inference_gateway import (
     GatewaySigner,
     send_chat_body,
 )
+from skulk.api.steward import STEWARD_VIRTUAL_MODEL_ID
 from skulk.api.tests.test_inference_gateway import ChatFixture, build_api
 from skulk.api.types import ChatCompletionRequest, ModelList
 from skulk.extensions import (
@@ -215,6 +216,32 @@ async def test_native_adapter_refuses_files(content: str) -> None:
     with pytest.raises(HTTPException) as failure:
         await chat_request_to_text_generation(request)
     assert failure.value.status_code == 400
+
+
+@pytest.mark.parametrize("content", ["single", "list"])
+async def test_steward_refuses_documents_before_history_normalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
+) -> None:
+    """The reserved native model cannot silently discard newly accepted file parts."""
+    monkeypatch.setattr("skulk.api.main.SKULK_DATA_HOME", tmp_path)
+    signer = GatewaySigner(tmp_path / "inference" / "gateway.key")
+    fixture = MediaFixture(signer.public_key())
+    api = build_api(fixture)
+    body = request_body(stream=False)
+    body["model"] = STEWARD_VIRTUAL_MODEL_ID
+    messages = body["messages"]
+    assert isinstance(messages, list)
+    if content == "single":
+        messages[0]["content"] = messages[0]["content"][0]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api.app, client=("127.0.0.1", 5000)),
+        base_url="http://localhost:52415",
+        headers={"Origin": "http://localhost:52415", "X-Skulk-Dashboard": "pairing-v1"},
+    ) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 400
+    assert "document attachments" in response.text
+    assert fixture.calls == 0
 
 
 def test_signer_enforces_advertised_input_bound_and_exact_media_digest(

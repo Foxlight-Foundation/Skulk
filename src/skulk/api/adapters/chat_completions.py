@@ -199,6 +199,27 @@ def resolve_tool_choice(
     return named, tool_choice
 
 
+def reject_native_document_attachments(request: ChatCompletionRequest) -> None:
+    """Reject document parts before native history normalization or other I/O.
+
+    Args:
+        request: A native chat or Steward request, with any supported history shape.
+
+    Raises:
+        HTTPException: A document attachment requires a supporting capability.
+    """
+    for message in request.messages:
+        if isinstance(message.content, ChatCompletionMessageFile) or (
+            isinstance(message.content, list)
+            and any(
+                isinstance(part, ChatCompletionMessageFile) for part in message.content
+            )
+        ):
+            raise HTTPException(
+                400, "This native inference path does not accept document attachments"
+            )
+
+
 async def chat_request_to_text_generation(
     request: ChatCompletionRequest,
     *,
@@ -219,16 +240,7 @@ async def chat_request_to_text_generation(
     Remote image URLs may be fetched after unsupported input is rejected.
     """
     # Reject files before normalization can fetch an earlier remote image.
-    for message in request.messages:
-        if isinstance(message.content, ChatCompletionMessageFile) or (
-            isinstance(message.content, list)
-            and any(
-                isinstance(part, ChatCompletionMessageFile) for part in message.content
-            )
-        ):
-            raise HTTPException(
-                400, "This native inference path does not accept document attachments"
-            )
+    reject_native_document_attachments(request)
     # Resolved before message normalization on purpose: normalization may
     # fetch HTTP images, and a request whose forced tool choice is invalid
     # must get its documented 400 without first paying (or failing on) that

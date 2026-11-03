@@ -80,6 +80,7 @@ from skulk.api.adapters.chat_completions import (
     collect_chat_response,
     fetch_image_url,
     generate_chat_stream,
+    reject_native_document_attachments,
     resolve_tool_choice,
 )
 from skulk.api.adapters.claude import (
@@ -4948,7 +4949,8 @@ class API:
         over the harness's chunk stream.
 
         Refusals happen before the response begins, in this order: 400 for
-        client tool definitions, 400 for a tool_choice forcing a function
+        document attachments, 400 for client tool definitions, 400 for a
+        tool_choice forcing a function
         (the steward accepts no client tools, so a forced choice can never
         be honored), 404 when intelligent-fabric mode is off, 400 for a
         conversation with no question to answer, then 503 with the steward
@@ -4961,6 +4963,7 @@ class API:
             The streaming (SSE) or collected (JSON) chat-completions
             response for one steward turn.
         """
+        reject_native_document_attachments(payload)
         if payload.tools:
             raise HTTPException(
                 status_code=400,
