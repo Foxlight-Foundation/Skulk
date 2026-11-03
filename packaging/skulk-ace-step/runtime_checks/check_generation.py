@@ -190,7 +190,9 @@ class NativeGenerationTests(unittest.TestCase):
                 {"tensor": tensor, "sample_rate": 48000, "path": "/never/open/this.wav"}
             ]
         )
-        samples = result_samples(result, self.request())
+        rendered = result_samples(result, self.request())
+        samples = rendered.samples
+        self.assertEqual(rendered.padding_frames_removed, 0)
         self.assertEqual(samples.shape, (96000, 2))
         self.assertEqual(samples.dtype, np.float32)
         np.testing.assert_array_equal(
@@ -237,3 +239,44 @@ class NativeGenerationTests(unittest.TestCase):
         ):
             with self.subTest(result=result), self.assertRaises(ValueError):
                 result_samples(result, self.request())
+
+    def test_short_edit_padding_cannot_hide_nonfinite_or_arbitrary_overruns(
+        self,
+    ) -> None:
+        """Validate the full decoder tensor, even samples that would be removed."""
+        edit = self.request(
+            operation="repaint",
+            source=self.source.model_dump(mode="json"),
+            source_path="/private/source.wav",
+            target_frames=48000,
+            region_end_frame=48000,
+        )
+        for frames in (48001, 245759, 245761):
+            with self.subTest(frames=frames), self.assertRaises(ValueError):
+                result_samples(
+                    TensorResult(
+                        audios=[
+                            {"tensor": torch.zeros((2, frames)), "sample_rate": 48000}
+                        ]
+                    ),
+                    edit,
+                )
+        for invalid in (float("nan"), float("inf")):
+            tensor = torch.zeros((2, 245760))
+            tensor[0, -1] = invalid
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(ValueError, "nonfinite"),
+            ):
+                result_samples(
+                    TensorResult(audios=[{"tensor": tensor, "sample_rate": 48000}]),
+                    edit,
+                )
+        generated = result_samples(
+            TensorResult(
+                audios=[{"tensor": torch.zeros((2, 245760)), "sample_rate": 48000}]
+            ),
+            self.request(),
+        )
+        self.assertEqual(generated.samples.shape[0], 245760)
+        self.assertEqual(generated.padding_frames_removed, 0)

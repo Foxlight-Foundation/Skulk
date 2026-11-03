@@ -9,7 +9,11 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from .contracts import NATIVE_MUSIC_MAX_FRAMES, NativeMusicRequest
+from .contracts import (
+    NATIVE_MUSIC_MAX_FRAMES,
+    NATIVE_MUSIC_MIN_DECODE_FRAMES,
+    NativeMusicRequest,
+)
 from .upstream_bindings import (
     NativeConstructors,
     NativeHandler,
@@ -24,6 +28,14 @@ class NativeCall:
 
     parameters: object
     configuration: object
+
+
+@dataclass(frozen=True)
+class RenderedAudio:
+    """Finite native samples with explicit removal of the known decoder tail."""
+
+    samples: npt.NDArray[np.float32]
+    padding_frames_removed: int = 0
 
 
 def prepare_call(
@@ -82,15 +94,15 @@ def prepare_call(
     return NativeCall(parameters=parameters, configuration=configuration)
 
 
-def result_samples(
-    result: NativeResult, request: NativeMusicRequest
-) -> npt.NDArray[np.float32]:
+def result_samples(result: NativeResult, request: NativeMusicRequest) -> RenderedAudio:
     """Require one complete finite native tensor before any output allocation.
 
     Read no upstream local output paths. The pinned upstream promises CPU float32
     channel-major audio; a different device, precision, geometry or sample rate
     is an actionable engine mismatch rather than an implicit conversion. Edited
-    audio must retain the exact requested timeline geometry, without truncation.
+    audio retains the requested timeline geometry. Only the pinned 128-latent
+    minimum's extra tail may be removed from a shorter edit; every other length
+    mismatch fails. Validate the entire decoded tensor before removing padding.
     """
     if not result.success or len(result.audios) != 1:
         raise ValueError("native music inference did not return one successful result")
@@ -106,11 +118,21 @@ def result_samples(
         or not 48000 <= tensor.shape[1] <= NATIVE_MUSIC_MAX_FRAMES
     ):
         raise ValueError("native music result exceeds bounded stereo geometry")
-    if request.operation != "generate" and tensor.shape[1] != request.target_frames:
-        raise ValueError(
-            "native music edit result is not aligned to its requested timeline"
-        )
     samples = tensor_samples(tensor).T
     if not np.isfinite(samples).all():
         raise ValueError("native music result contains nonfinite samples")
-    return samples
+    padding = 0
+    if request.operation != "generate" and tensor.shape[1] != request.target_frames:
+        # Target conditioning pads to at least 128 latent frames. Decode emits
+        # 1,920 samples per frame, and waveform splice retains the padded tail.
+        # This exact pinned extent is not evidence for trimming other overruns.
+        if (
+            request.target_frames >= NATIVE_MUSIC_MIN_DECODE_FRAMES
+            or tensor.shape[1] != NATIVE_MUSIC_MIN_DECODE_FRAMES
+        ):
+            raise ValueError(
+                "native music edit result is not aligned to its requested timeline"
+            )
+        padding = NATIVE_MUSIC_MIN_DECODE_FRAMES - request.target_frames
+        samples = samples[: request.target_frames]
+    return RenderedAudio(samples=samples, padding_frames_removed=padding)

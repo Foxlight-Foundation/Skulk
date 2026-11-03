@@ -15,6 +15,7 @@ from skulk.shared.types.native_music import (
     NativeMusicFile,
     NativeMusicPart,
     NativeMusicRequest,
+    NativeMusicResult,
     NativeMusicServeConfig,
     NativeMusicServeRequest,
     NativeMusicWeights,
@@ -202,3 +203,58 @@ def test_native_control_sequence_is_strict_positive_and_bounded(
         NativeMusicServeRequest.model_validate_json(
             json.dumps({"sequence": sequence, "request": _request("generate")})
         )
+
+
+@pytest.mark.parametrize(
+    ("operation", "padding", "accepted"),
+    [
+        ("repaint", 197760, True),
+        ("add_part", 197760, True),
+        ("continue", 197760, True),
+        ("generate", 0, True),
+        ("repaint", 0, True),
+        ("repaint", 1, False),
+        ("generate", 197760, False),
+        ("repaint", -1, False),
+        ("repaint", 197761, False),
+        ("repaint", True, False),
+        ("repaint", 1.0, False),
+    ],
+)
+def test_native_result_padding_is_exact_bounded_and_edit_only(
+    operation: str, padding: object, accepted: bool
+) -> None:
+    """A receipt cannot justify arbitrary cropping or generation length changes."""
+    body = dict(
+        request_id="take-1",
+        model_identity="a" * 64,
+        payload_sha256="b" * 64,
+        operation=operation,
+        seed=12025,
+        source_sha256="c" * 64 if operation != "generate" else None,
+        conditioning_sha256="d" * 64 if operation != "generate" else None,
+        conditioning_gain=1.0 if operation != "generate" else None,
+        padding_frames_removed=padding,
+        execution=dict(
+            device="cpu",
+            precision="float32",
+            text_encoder_device="cpu",
+            text_encoder_precision="float32",
+            autoencoder_device="cpu",
+            autoencoder_precision="float32",
+        ),
+        output=dict(
+            sha256="e" * 64,
+            size_bytes=44 + 48000 * 6,
+            frames=48000,
+            peak=0.25,
+            gain=1.0,
+        ),
+        generation_seconds=1.0,
+    )
+    if accepted:
+        result = NativeMusicResult.model_validate_json(json.dumps(body))
+        assert result.padding_frames_removed == padding
+    else:
+        with pytest.raises(ValidationError):
+            NativeMusicResult.model_validate_json(json.dumps(body))

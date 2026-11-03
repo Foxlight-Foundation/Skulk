@@ -62,6 +62,7 @@ class NativeEngineTests(unittest.TestCase):
         self.calls = 0
         self.skip_source = False
         self.simulate_timeout = False
+        self.native_padding = False
         self.wait: threading.Event | None = None
         self.entered = threading.Event()
         self.ready = NativeMusicReady(
@@ -112,6 +113,8 @@ class NativeEngineTests(unittest.TestCase):
             raise TimeoutError("controlled native timeout")
         if tensor is None:
             tensor = torch.ones((2, 48000), dtype=torch.float32) * 0.25
+        if self.native_padding:
+            tensor = torch.nn.functional.pad(tensor, (0, 245760 - tensor.shape[1]))
         return TensorResult(audios=[{"tensor": tensor, "sample_rate": 48000}])
 
     def edit(self, continuation: bool = False) -> NativeMusicRequest:
@@ -249,6 +252,26 @@ class NativeEngineTests(unittest.TestCase):
             self.engine.run(request, lambda _: None)
         self.assertEqual(self.calls, 0)
         self.assertFalse((self.root / "elsewhere").exists())
+
+    def test_known_decoder_padding_is_retained_as_metadata_without_retiring_model(
+        self,
+    ) -> None:
+        """A valid short edit retains exact output, lineage and subsequent admission."""
+        request = self.edit()
+        self.native_padding = True
+        completed = self.engine.run(request, lambda _: None)
+        self.assertEqual(completed.output.frames, 48000)
+        self.assertEqual(completed.padding_frames_removed, 197760)
+        retained = NativeMusicResult.model_validate_json(
+            (Path(request.output_directory) / "result.json").read_bytes()
+        )
+        self.assertEqual(retained, completed)
+        self.native_padding = False
+        second = self.engine.run(
+            check_support.request(self.configuration, "take-2"), lambda _: None
+        )
+        self.assertEqual(second.padding_frames_removed, 0)
+        self.assertEqual(self.calls, 2)
 
     def test_actual_native_initializer_calls_the_typed_offline_guard_before_loading(
         self,

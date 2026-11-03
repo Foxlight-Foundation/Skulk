@@ -194,7 +194,7 @@ class ResidentMusic:
                 NativeMusicProgress(request_id=request.request_id, stage="writing")
             )
             output = directory / "result.wav"
-            facts = export_result(output, rendered, request)
+            facts = export_result(output, rendered.samples, request)
             with output.open("rb") as stream:
                 os.fsync(stream.fileno())
             completed = NativeMusicResult(
@@ -208,6 +208,7 @@ class ResidentMusic:
                 if conditioning is not None
                 else None,
                 conditioning_gain=gain,
+                padding_frames_removed=rendered.padding_frames_removed,
                 execution=execution,
                 output=facts,
                 generation_seconds=elapsed,

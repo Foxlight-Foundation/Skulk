@@ -34,6 +34,8 @@ NativeMusicPart = Literal[
 ]
 NATIVE_MUSIC_SAMPLE_RATE = 48_000
 NATIVE_MUSIC_MAX_FRAMES = 120 * NATIVE_MUSIC_SAMPLE_RATE
+NATIVE_MUSIC_MIN_DECODE_FRAMES = 128 * 1920
+"""Pinned ACE minimum of 128 latent frames, each decoding to 1,920 samples."""
 MAX_NATIVE_MUSIC_RECORD_BYTES = 256 * 1024
 
 
@@ -448,6 +450,12 @@ class NativeMusicResult(NativeMusicContract):
         allow_inf_nan=False,
         description="Explicit shared context attenuation, when needed to avoid upstream input clipping; original bytes remain unchanged.",
     )
+    padding_frames_removed: int = Field(
+        default=0,
+        ge=0,
+        le=NATIVE_MUSIC_MIN_DECODE_FRAMES - NATIVE_MUSIC_SAMPLE_RATE,
+        description="Only the pinned decoder's minimum-latent tail removed from a shorter edit; never an arbitrary length repair.",
+    )
     execution: NativeMusicExecution = Field(
         description="Observed loaded component placement/precision after this request."
     )
@@ -468,6 +476,14 @@ class NativeMusicResult(NativeMusicContract):
         ):
             raise ValueError(
                 "native music result lineage must match generation or editing"
+            )
+        if self.padding_frames_removed and (
+            self.operation == "generate"
+            or self.output.frames + self.padding_frames_removed
+            != NATIVE_MUSIC_MIN_DECODE_FRAMES
+        ):
+            raise ValueError(
+                "native music may remove only its minimum-latent edit padding"
             )
         return self
 

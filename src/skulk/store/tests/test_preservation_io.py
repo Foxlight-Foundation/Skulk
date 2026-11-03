@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -26,6 +28,17 @@ from skulk.store.tests.test_preservation_sharing import (
     import_copy,
     public_kit,
 )
+
+
+def test_completed_effect_retirement_cannot_starve_close() -> None:
+    """A completed gather must yield to the callback that retires its effect."""
+    completed = subprocess.run(
+        [sys.executable, "-m", "skulk.store.tests.preservation_io_close_probe"],
+        capture_output=True,
+        check=True,
+        timeout=15,
+    )
+    assert completed.stdout == b"retirement callback drained\n"
 
 
 async def begun(event: threading.Event) -> None:
