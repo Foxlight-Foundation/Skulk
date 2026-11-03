@@ -159,6 +159,9 @@ class PreservationIO:
                         *(asyncio.shield(future) for future in tuple(self._pending)),
                         return_exceptions=True,
                     )
+                    # Already-done futures let gather return without yielding,
+                    # but their callbacks may still own slots and pending state.
+                    await asyncio.sleep(0)
                 elif self._leases:
                     await asyncio.sleep(0.01)
             except asyncio.CancelledError:
