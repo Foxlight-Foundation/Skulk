@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import shutil
@@ -289,6 +290,53 @@ def test_required_runtime_features_are_checked_before_execution(
             "size_bytes": variant.stat().st_size,
         }
     )
+    root = tmp_path / "cache"
+    seed_package(root, controlled)
+    with pytest.raises(runtime.DemucsBuildMismatchError):
+        prepare(runtime.DemucsRuntimeCache(root), controlled, offline=True)
+    assert (controlled.downloads, controlled.installs, controlled.probes) == (0, 0, 0)
+
+
+def test_other_audio_family_is_rejected_before_native_execution(
+    tmp_path: Path, controlled: ControlledNativeInstall
+) -> None:
+    """Shared package custody does not let ACE feature labels authorize Demucs."""
+    variant = tmp_path / "other-family.whl"
+
+    def renamed(name: str) -> str:
+        return name.replace("skulk_demucs/", "skulk_ace_step/").replace(
+            "skulk_demucs_cpu-0.1.0.dist-info/", "skulk_ace_step_cpu-0.1.0.dist-info/"
+        )
+
+    with (
+        zipfile.ZipFile(controlled.source) as source,
+        zipfile.ZipFile(variant, "w") as target,
+    ):
+        manifest = runtime.BuildManifest.model_validate_json(
+            source.read("skulk_demucs/build.json")
+        )
+        content = manifest.model_copy(update={
+            "source_repository": "https://github.com/ace-step/ACE-Step-1.5.git",
+            "members": {renamed(name): digest for name, digest in manifest.members.items()},
+        }).model_dump(mode="json", exclude={"payload_sha256"})
+        payload = hashlib.sha256(
+            json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        for entry in source.infolist():
+            member = copy.copy(entry)
+            member.filename = renamed(entry.filename)
+            target.writestr(
+                member,
+                json.dumps(content | {"payload_sha256": payload}).encode()
+                if entry.filename == "skulk_demucs/build.json"
+                else source.read(entry),
+            )
+    controlled.source = variant
+    controlled.wheel = controlled.wheel.model_copy(update={
+        "sha256": hashlib.sha256(variant.read_bytes()).hexdigest(),
+        "payload_sha256": payload,
+        "size_bytes": variant.stat().st_size,
+    })
     root = tmp_path / "cache"
     seed_package(root, controlled)
     with pytest.raises(runtime.DemucsBuildMismatchError):

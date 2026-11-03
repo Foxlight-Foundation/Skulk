@@ -1,0 +1,204 @@
+"""Native generation/editing contracts retain exact source and policy boundaries."""
+
+import json
+import tomllib
+from pathlib import Path
+from typing import get_args
+
+import pytest
+from pydantic import JsonValue, TypeAdapter, ValidationError
+
+from skulk.shared.models.model_cards import ModelCard, MusicPartClass
+from skulk.shared.types.audio_separation import SeparationSource
+from skulk.shared.types.native_music import (
+    NativeMusicComponent,
+    NativeMusicFile,
+    NativeMusicPart,
+    NativeMusicRequest,
+    NativeMusicServeConfig,
+    NativeMusicServeRequest,
+    NativeMusicWeights,
+)
+
+
+def _weights() -> NativeMusicWeights:
+    path = Path(__file__).parents[2] / "models/tests/ace-native-card.toml"
+    card = ModelCard.model_validate(tomllib.loads(path.read_text()))
+    assert card.music is not None and card.music.native is not None
+    assert card.artifact_bundle is not None
+    native = card.music.native
+    return NativeMusicWeights(
+        base=NativeMusicComponent(
+            kind="base",
+            directory="/private/base",
+            root=card.artifact_bundle.root,
+            files=tuple(
+                NativeMusicFile(
+                    path=f.path, size_bytes=f.size_bytes, object_id=f.object_id or ""
+                )
+                for f in card.artifact_bundle.files
+            ),
+        ),
+        text_encoder=NativeMusicComponent(
+            kind="text_encoder",
+            directory="/private/components",
+            root=native.text_encoder.artifact_bundle.root,
+            files=tuple(
+                NativeMusicFile(
+                    path=f.path, size_bytes=f.size_bytes, object_id=f.object_id or ""
+                )
+                for f in native.text_encoder.artifact_bundle.files
+            ),
+        ),
+        autoencoder=NativeMusicComponent(
+            kind="autoencoder",
+            directory="/private/components",
+            root=native.autoencoder.artifact_bundle.root,
+            files=tuple(
+                NativeMusicFile(
+                    path=f.path, size_bytes=f.size_bytes, object_id=f.object_id or ""
+                )
+                for f in native.autoencoder.artifact_bundle.files
+            ),
+        ),
+    )
+
+
+def _source() -> SeparationSource:
+    return SeparationSource(
+        sha256="a" * 64,
+        size_bytes=44 + 20 * 44100 * 4,
+        sample_rate=44100,
+        channels=2,
+        frames=20 * 44100,
+        encoding="pcm",
+        bit_depth=16,
+    )
+
+
+def _request(operation: str) -> dict[str, object]:
+    body: dict[str, object] = dict(
+        request_id="native-request",
+        operation=operation,
+        prompt="A warm folk arrangement",
+        seed=12025,
+        target_frames=20 * 48000,
+        output_directory="/private/jobs/request",
+    )
+    if operation != "generate":
+        body.update(
+            source=_source().model_dump(mode="json"),
+            source_path="/private/source.wav",
+            region_end_frame=20 * 48000,
+        )
+    if operation == "add_part":
+        body["part_class"] = "strings"
+    if operation == "repaint":
+        body["region_start_frame"] = 10 * 48000
+    if operation == "continue":
+        body.update(
+            region_start_frame=20 * 48000,
+            region_end_frame=30 * 48000,
+            target_frames=30 * 48000,
+        )
+    return body
+
+
+def test_native_component_inventory_matches_actual_card_and_closed_parts() -> None:
+    """Package-bound components accept the exact registry/Core artifact selection."""
+    weights = _weights()
+    assert (
+        sum(
+            len(c.files)
+            for c in (weights.base, weights.text_encoder, weights.autoencoder)
+        )
+        == 14
+    )
+    assert NativeMusicWeights.model_validate_json(weights.model_dump_json()) == weights
+    assert set(get_args(NativeMusicPart)) == set(get_args(MusicPartClass))
+
+
+@pytest.mark.parametrize("role", ["base", "text_encoder", "autoencoder"])
+def test_component_closure_cannot_be_shortened_or_duplicated(role: str) -> None:
+    """Even a digest-bound selection must include exactly its loader's full role."""
+    body = TypeAdapter[dict[str, JsonValue]](dict[str, JsonValue]).validate_json(
+        _weights().model_dump_json()
+    )
+    component = body[role]
+    assert isinstance(component, dict)
+    files = component["files"]
+    assert isinstance(files, list)
+    files[-1] = files[0]
+    with pytest.raises(ValidationError, match="exact complete file set"):
+        NativeMusicWeights.model_validate_json(json.dumps(body))
+
+
+@pytest.mark.parametrize("operation", ["generate", "add_part", "repaint", "continue"])
+def test_native_operations_bind_original_and_native_frame_geometry(
+    operation: str,
+) -> None:
+    """The 44.1 kHz original and mapped 48 kHz region remain distinct facts."""
+    request = NativeMusicRequest.model_validate_json(json.dumps(_request(operation)))
+    assert NativeMusicRequest.model_validate_json(request.model_dump_json()) == request
+    if request.source is not None:
+        assert request.source.sample_rate == 44100
+        assert request.region_end_frame == request.target_frames
+
+
+@pytest.mark.parametrize(
+    ("operation", "field", "value"),
+    [
+        ("generate", "source_path", "/private/source.wav"),
+        ("generate", "part_class", "strings"),
+        ("generate", "seed", -1),
+        ("generate", "target_frames", 121 * 48000),
+        ("generate", "native_options", {"thinking": True}),
+        ("add_part", "part_class", None),
+        ("add_part", "part_class", "cello"),
+        ("repaint", "source_path", None),
+        ("repaint", "source_path", "relative.wav"),
+        ("repaint", "region_end_frame", 21 * 48000),
+        ("repaint", "region_start_frame", 20 * 48000),
+        ("repaint", "target_frames", 19 * 48000),
+        ("continue", "target_frames", 20 * 48000),
+        ("continue", "region_start_frame", 19 * 48000),
+        ("continue", "region_end_frame", 31 * 48000),
+        ("continue", "part_class", "drums"),
+    ],
+)
+def test_native_request_rejects_mismatched_or_unbounded_controls(
+    operation: str, field: str, value: object
+) -> None:
+    """No arbitrary options, ambiguous source paths or mismatched region/length pass."""
+    body = _request(operation)
+    body[field] = value
+    with pytest.raises(ValidationError):
+        NativeMusicRequest.model_validate_json(json.dumps(body))
+
+
+@pytest.mark.parametrize("device", ["cpu", "mps", "rocm"])
+@pytest.mark.parametrize("precision", ["bfloat16", "float16"])
+def test_non_cuda_precision_must_not_inherit_checkpoint_bfloat16(
+    device: str, precision: str
+) -> None:
+    """Admission's FP32 working set cannot be silently replaced by source dtype."""
+    body = dict(
+        model_identity="b" * 64,
+        weights=_weights().model_dump(mode="json"),
+        directory="/private/lifetime",
+        device=device,
+        precision=precision,
+    )
+    with pytest.raises(ValidationError, match="requires float32"):
+        NativeMusicServeConfig.model_validate_json(json.dumps(body))
+
+
+@pytest.mark.parametrize("sequence", [0, -1, 2**63, True, "1"])
+def test_native_control_sequence_is_strict_positive_and_bounded(
+    sequence: object,
+) -> None:
+    """Process-local replay protection cannot accept boolean/coerced/unbounded IDs."""
+    with pytest.raises(ValidationError):
+        NativeMusicServeRequest.model_validate_json(
+            json.dumps({"sequence": sequence, "request": _request("generate")})
+        )

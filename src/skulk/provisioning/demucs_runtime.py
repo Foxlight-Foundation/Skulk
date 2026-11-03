@@ -243,7 +243,8 @@ def _inspect_package(
         )
     manifest = inspect_candidate(package, wheel.sha256, checkpoint=checkpoint)
     if (
-        manifest.payload_sha256 != wheel.payload_sha256
+        manifest.source_repository != "https://github.com/adefossez/demucs.git"
+        or manifest.payload_sha256 != wheel.payload_sha256
         or manifest.platform_tag != wheel.platform_tag
         or manifest.variant != "cpu"
         or not _REQUIRED_FEATURES.issubset(manifest.features)

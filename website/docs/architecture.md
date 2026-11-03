@@ -4006,3 +4006,31 @@ Download selection, direct/store transfers and installed records refuse native
 profiles before byte effects until their complete component lifecycle exists.
 Cache completeness is false, and the shared preservation export/recovery mapping
 refuses a primary-only closure.
+
+### Native ACE package and process boundary
+
+`packaging/skulk-ace-step/` defines a separate Python 3.12 package family; Core
+and capability applications retain their own Python environments. The sealed
+format includes exact interpreter/dependency archives, a selected pinned library
+source inventory and explicit owned source-override provenance. Three reviewed
+implementation modules belong to that runtime, not the model repository. The
+shared `provisioning/demucs_package.py` verifier/bootstrap recognizes the two
+built-in audio layouts and checks their source/namespace ownership. Demucs cache
+preparation independently refuses an ACE package even when feature names match.
+
+The native CLI owns one loaded model and accepts bounded contiguous private
+requests. It verifies all three data components before importing constructors,
+probes the explicit compute lane, and observes each component's loaded device and
+precision. Canonical conditioning preserves the original WAV and records any
+headroom attenuation; the real upstream source tensor must equal the complete
+canonical samples. Generation, LEGO addition, repaint and padded-tail Continue
+use a closed adapter. PCM24 WAV/result metadata are exclusively written and
+synced before completion. Media remains in private files, never control frames.
+
+Any native request/protocol failure retires the model. A cooperative upstream
+timeout can leave an inference thread active, so the CLI terminates its dedicated
+process group even when the control pipe has closed. Parent loss also terminates
+that group. The supervisor must drain it before cleaning partial files. Package
+builds and library/process checks do not register a ready Core engine, remove the
+native artifact-operation guard, or add an HTTP editing route. Complete native
+store/preparation/runner integration remains a separate boundary from this format.

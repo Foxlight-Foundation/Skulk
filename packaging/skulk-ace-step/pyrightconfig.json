@@ -1,0 +1,14 @@
+{
+  "include": ["skulk_ace_step", "verify_runtime.py"],
+  "typeCheckingMode": "strict",
+  "failOnWarnings": true,
+  "reportAny": "error",
+  "reportUnknownVariableType": "error",
+  "reportUnknownParameterType": "error",
+  "reportMissingParameterType": "error",
+  "reportMissingTypeStubs": "error",
+  "reportInvalidCast": "error",
+  "reportUnnecessaryCast": "error",
+  "reportUnnecessaryTypeIgnoreComment": "error",
+  "pythonVersion": "3.12"
+}
