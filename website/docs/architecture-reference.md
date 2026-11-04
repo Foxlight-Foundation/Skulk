@@ -2703,7 +2703,11 @@ verification drains its file thread before releasing that fence. Pinned existing
 files are checked against their original object identity during download reuse:
 online retries replace corrupt bytes; offline reuse refuses them.
 Capacity admission verifies selected immutable pins before treating a same-size
-target as complete. Repairs cannot credit blocks retained by other hardlinks.
+target as complete. Zero-byte members require an existing regular file before
+hash verification; absent empty members are created by the normal downloader.
+HTTP metadata must explicitly declare a nonnegative length; zero-byte Git/SHA
+objects are valid, while missing or invalid size headers remain rejected.
+Repairs cannot credit blocks retained by other hardlinks.
 Cancelled capacity checks drain before the transfer fence is released. Verified
 shared native cache reuse restores missing adjacent installed-card records from
 the original indexed owner, including companions reached through a cached base.
