@@ -136,7 +136,9 @@ def _remaining_store_download_bytes(
         partial = target_directory / f"{file_entry.path}.partial"
         target_stat = target.stat() if target.is_file() else None
         target_bytes = target_stat.st_size if target_stat is not None else 0
-        if target_bytes == expected_size:
+        # Missing zero-byte members still need the downloader to create them.
+        # Equal byte counts alone must not trigger a hash read of no file.
+        if target_stat is not None and target_bytes == expected_size:
             selected = expected_files.get(file_entry.path) if expected_files else None
             object_id = selected[1] if selected is not None else None
             if object_id is None:

@@ -4037,7 +4037,11 @@ verification drains its file thread before releasing that fence. Pinned existing
 files are checked against their original object identity during download reuse:
 online retries replace corrupt bytes; offline reuse refuses them.
 Capacity admission verifies selected immutable pins before treating a same-size
-target as complete. Repairs cannot credit blocks retained by other hardlinks.
+target as complete. Zero-byte members require an existing regular file before
+hash verification; absent empty members are created by the normal downloader.
+HTTP metadata must explicitly declare a nonnegative length; zero-byte Git/SHA
+objects are valid, while missing or invalid size headers remain rejected.
+Repairs cannot credit blocks retained by other hardlinks.
 Cancelled capacity checks drain before the transfer fence is released. Verified
 shared native cache reuse restores missing adjacent installed-card records from
 the original indexed owner, including companions reached through a cached base.
@@ -4092,6 +4096,14 @@ Cancellation submits its bounded `TaskCancelled` attempt before stream
 finalization can publish `TaskFinished`. A durable-index uncertainty fence
 cancels accepted work from retained identities, stops that service's sweeper and
 returns actionable HTTP 503 responses; unrelated host API tasks remain running.
+A separate bounded cleanup actor retains accepted identities and admission until
+original and partial-result stores both drain. It does not read the job index,
+so filesystem retries continue after an index fence retires the job sweeper.
+Terminal metadata and repeated cancellation cannot discard that ownership or
+resubmit native cancellation. Original-only cleanup preserves completed WAVs;
+delete returns 503 and keeps metadata while physical removal remains pending.
+The media owner also retries known content orphaned by metadata eviction and
+refuses startup readiness if best-effort orphan deletion left unaccounted bytes.
 
 ### Native ACE package and process boundary
 

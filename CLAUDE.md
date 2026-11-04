@@ -2730,7 +2730,12 @@ requires native metadata, render finish, independently verified synced WAV and
 drained return ACK. `api/music_edit_media.py` checks all encoded PCM24/stereo/
 48 kHz facts/peak and retains failed-cleanup capacity. Source custody reuses
 read-only audio-task protocols and actual strict task instances; result cleanup
-is injected for the engine's exact owned layout. `MusicEditAPI` registers six
+is injected for the engine's exact owned layout. A bounded index-independent
+cleanup actor retains source/result ownership and admission after terminal
+metadata until both stores drain, including after a storage-fenced sweeper
+retires. Original-only cleanup preserves completed WAVs; incomplete DELETE
+returns 503 without forgetting metadata, and unresolved orphan purge blocks edit
+storage readiness. `MusicEditAPI` registers six
 `/v1/music/edits` routes before legacy dynamic music IDs, under existing auth
 and operator inference scope. Multipart OpenAPI embeds the closed task schemas.
 Shared upload/source-sender helpers and `AudioInputReceiver` keep original

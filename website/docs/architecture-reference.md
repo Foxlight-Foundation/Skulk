@@ -2703,7 +2703,11 @@ verification drains its file thread before releasing that fence. Pinned existing
 files are checked against their original object identity during download reuse:
 online retries replace corrupt bytes; offline reuse refuses them.
 Capacity admission verifies selected immutable pins before treating a same-size
-target as complete. Repairs cannot credit blocks retained by other hardlinks.
+target as complete. Zero-byte members require an existing regular file before
+hash verification; absent empty members are created by the normal downloader.
+HTTP metadata must explicitly declare a nonnegative length; zero-byte Git/SHA
+objects are valid, while missing or invalid size headers remain rejected.
+Repairs cannot credit blocks retained by other hardlinks.
 Cancelled capacity checks drain before the transfer fence is released. Verified
 shared native cache reuse restores missing adjacent installed-card records from
 the original indexed owner, including companions reached through a cached base.
@@ -2747,6 +2751,12 @@ the original indexed owner, including companions reached through a cached base.
   Cancellation submission precedes stream finalization. Uncertain index writes
   fence reads, abort accepted native work and retire only the edit sweeper;
   requests return actionable 503 responses while unrelated host tasks continue.
+  A separate bounded cleanup actor owns pending source/result removal and keeps
+  admission until both stores drain, independent of terminal/deleted job state.
+  It performs no index reads and can retry after a job-storage fence. Completed
+  WAVs survive original-only cleanup; incomplete delete keeps metadata with 503.
+  Known orphan media keeps its byte promise after registry eviction, and failed
+  startup orphan purge cannot advertise a fresh uncharged media owner as ready.
 - Execution activation: resident/worker, live native placement and Studio edits
   still require complete native/installed acceptance.
 

@@ -60,7 +60,11 @@ class MusicEditMediaStore:
 
     def __init__(self, root: Path, *, max_total_bytes: int = 2 * 1024**3) -> None:
         """Open protected result storage; no existing file is implicitly adopted."""
-        if not 44 <= max_total_bytes <= MAX_RETAINED_MUSIC_EDITS * MAX_SEPARATION_SOURCE_BYTES:
+        if (
+            not 44
+            <= max_total_bytes
+            <= MAX_RETAINED_MUSIC_EDITS * MAX_SEPARATION_SOURCE_BYTES
+        ):
             raise ValueError("Music edit media budget is outside its bounded policy")
         missing: list[Path] = []
         ancestor = root
@@ -103,11 +107,23 @@ class MusicEditMediaStore:
                 receipt.facts.size_bytes for receipt in self._completed.values()
             )
 
-    def open_assembly(self, identifier: CommandId, *, total_bytes: int, total_chunks: int) -> None:
+    def owned_identifiers(self) -> frozenset[CommandId]:
+        """Return bounded known ownership, including content awaiting failed cleanup."""
+        with self._mutex:
+            if self._ownership is None:
+                raise RuntimeError("Music edit media owner is closed")
+            return frozenset(self._known)
+
+    def open_assembly(
+        self, identifier: CommandId, *, total_bytes: int, total_chunks: int
+    ) -> None:
         """Reserve one exact WAV using the common ordered/reordered bounded assembler."""
         with self._mutex:
             self._check(identifier)
-            if not 44 <= total_bytes <= MAX_SEPARATION_SOURCE_BYTES or not 1 <= total_chunks <= min(total_bytes, 4096):
+            if (
+                not 44 <= total_bytes <= MAX_SEPARATION_SOURCE_BYTES
+                or not 1 <= total_chunks <= min(total_bytes, 4096)
+            ):
                 raise ValueError("Music edit output exceeds its encoded transfer bound")
             if identifier in self._completed:
                 raise ValueError("Music edit output is already retained")
@@ -118,7 +134,10 @@ class MusicEditMediaStore:
                 return
             if len(self._opened) >= MAX_ACTIVE_MUSIC_EDITS:
                 raise ValueError("Music edit active assembly capacity is full")
-            if identifier not in self._known and len(self._known) >= MAX_RETAINED_MUSIC_EDITS:
+            if (
+                identifier not in self._known
+                and len(self._known) >= MAX_RETAINED_MUSIC_EDITS
+            ):
                 raise ValueError("Music edit retained content capacity is full")
             if self.reserved_bytes() + total_bytes > self.max_total_bytes:
                 raise ValueError("Music edit media byte capacity is full")
@@ -130,11 +149,17 @@ class MusicEditMediaStore:
             self._opened[identifier] = (total_bytes, total_chunks)
             try:
                 evicted = self._store.open_assembly(
-                    identifier, "music", content_type="audio/wav", total_bytes=total_bytes,
-                    total_chunks=total_chunks, keep=self._known | {identifier},
+                    identifier,
+                    "music",
+                    content_type="audio/wav",
+                    total_bytes=total_bytes,
+                    total_chunks=total_chunks,
+                    keep=self._known | {identifier},
                 )
                 if evicted:
-                    raise RuntimeError("Protected music edit content was unexpectedly evicted")
+                    raise RuntimeError(
+                        "Protected music edit content was unexpectedly evicted"
+                    )
                 (directory / "output.wav.part").chmod(0o600)
             except BaseException:
                 self.delete(identifier)
@@ -160,34 +185,57 @@ class MusicEditMediaStore:
         with os.fdopen(descriptor, "rb") as source:
             info = os.fstat(source.fileno())
             if (
-                not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                or info.st_mode & 0o077 or info.st_nlink != 1
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+                or info.st_nlink != 1
                 or info.st_size > MAX_SEPARATION_SOURCE_BYTES
             ):
                 raise ValueError("Music edit result is not a bounded private WAV")
             facts, peak = pcm24_from_wav(source.read(MAX_SEPARATION_SOURCE_BYTES + 1))
             if (
-                facts.sha256, facts.size_bytes, facts.frames, facts.sample_rate,
-                facts.channels, facts.bit_depth, facts.encoding, peak,
+                facts.sha256,
+                facts.size_bytes,
+                facts.frames,
+                facts.sample_rate,
+                facts.channels,
+                facts.bit_depth,
+                facts.encoding,
+                peak,
             ) != (
-                expected.sha256, expected.size_bytes, expected.frames, expected.sample_rate,
-                expected.channels, expected.bit_depth, "pcm", expected.peak,
+                expected.sha256,
+                expected.size_bytes,
+                expected.frames,
+                expected.sample_rate,
+                expected.channels,
+                expected.bit_depth,
+                "pcm",
+                expected.peak,
             ):
-                raise ValueError("Music edit WAV differs from its complete native manifest")
+                raise ValueError(
+                    "Music edit WAV differs from its complete native manifest"
+                )
             # The encoded facts are measured independently. Gain is native
             # provenance; it cannot be inferred from the finished WAV alone.
             os.fsync(source.fileno())
         _sync_directory(path.parent)
         _sync_directory(path.parent.parent)
 
-    def commit(self, identifier: CommandId, expected: NativeMusicWav, *, total_chunks: int) -> StoredMusicEdit:
+    def commit(
+        self, identifier: CommandId, expected: NativeMusicWav, *, total_chunks: int
+    ) -> StoredMusicEdit:
         """Sync and independently verify one complete file before returning custody."""
         with self._mutex:
             self._check(identifier)
             if identifier not in self._opened:
                 raise ValueError("Music edit result was not opened")
             try:
-                stored = self._store.commit(identifier, "music", sha256=expected.sha256, total_chunks=total_chunks)
+                stored = self._store.commit(
+                    identifier,
+                    "music",
+                    sha256=expected.sha256,
+                    total_chunks=total_chunks,
+                )
                 self._measure(stored.file_path, expected)
                 if stored.size_bytes != expected.size_bytes:
                     raise ValueError("Music edit WAV differs from its transfer receipt")
@@ -204,15 +252,26 @@ class MusicEditMediaStore:
         with self._mutex:
             self._check(job.id)
             output = job.output
-            if output is None or job.expires_at is None or time.time() >= job.expires_at:
+            if (
+                output is None
+                or job.expires_at is None
+                or time.time() >= job.expires_at
+            ):
                 return False
-            if job.id not in self._known and len(self._known) >= MAX_RETAINED_MUSIC_EDITS:
+            if (
+                job.id not in self._known
+                and len(self._known) >= MAX_RETAINED_MUSIC_EDITS
+            ):
                 raise ValueError("Music edit retained content capacity is full")
             expected = output.result.output
             try:
                 if not self._store.adopt(
-                    job.id, "music", content_type="audio/wav", size_bytes=expected.size_bytes,
-                    sha256=expected.sha256, expires_at=float(job.expires_at),
+                    job.id,
+                    "music",
+                    content_type="audio/wav",
+                    size_bytes=expected.size_bytes,
+                    sha256=expected.sha256,
+                    expires_at=float(job.expires_at),
                 ):
                     self.delete(job.id)
                     return False
@@ -222,7 +281,9 @@ class MusicEditMediaStore:
                     return False
                 self._measure(stored.file_path, expected)
                 self._known.add(job.id)
-                self._completed[job.id] = StoredMusicEdit(expected, stored.file_path, stored.expires_at)
+                self._completed[job.id] = StoredMusicEdit(
+                    expected, stored.file_path, stored.expires_at
+                )
                 return True
             except (OSError, ValueError):
                 self.delete(job.id)
@@ -235,8 +296,11 @@ class MusicEditMediaStore:
             output = job.output
             actual = self._completed.get(job.id)
             if (
-                output is None or actual is None or actual.facts != output.result.output
-                or job.expires_at is None or time.time() >= min(actual.expires_at, job.expires_at)
+                output is None
+                or actual is None
+                or actual.facts != output.result.output
+                or job.expires_at is None
+                or time.time() >= min(actual.expires_at, job.expires_at)
             ):
                 return None
             try:
@@ -244,8 +308,10 @@ class MusicEditMediaStore:
             except FileNotFoundError:
                 return None
             if (
-                not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                or info.st_mode & 0o077 or info.st_size != actual.facts.size_bytes
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+                or info.st_size != actual.facts.size_bytes
                 or info.st_nlink != 1
             ):
                 return None
@@ -268,7 +334,18 @@ class MusicEditMediaStore:
         with self._mutex:
             if self._ownership is None:
                 raise RuntimeError("Music edit media owner is closed")
-            return self._store.purge_unknown(set(keep) | self._known)
+            protected = set(keep) | self._known
+            removed = self._store.purge_unknown(protected)
+            # The shared video cache deliberately uses best-effort removal.
+            # A new music owner must not become ready with leftover bytes that
+            # its fresh in-memory reservation table does not account for.
+            if any(
+                (path.is_dir() or path.is_symlink())
+                and CommandId(path.name) not in protected
+                for path in (self.root / "wav").iterdir()
+            ):
+                raise OSError("Music edit orphan cleanup is incomplete")
+            return removed
 
     def close(self) -> None:
         """Abort partial assemblies, retain complete files and release the OS fence."""

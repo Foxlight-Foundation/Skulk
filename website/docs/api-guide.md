@@ -2369,12 +2369,19 @@ later sweeps retry cleanup without interrupting unrelated API work.
 work and source/result delivery, and removes partial copies. Terminal jobs are
 unchanged. **POST** `/v1/cancel/{edit_id}` also cancels an active edit. Late native
 frames cannot revive cancelled work.
+Terminal status does not release a cleanup reservation: original copies,
+partial results and their admission slot remain owned until both stores drain.
+Filesystem failures are retried in the background without stopping unrelated
+API work. Completed WAVs remain available while an original-only cleanup drains.
 
 **DELETE** `/v1/music/edits/{edit_id}` cancels active work, removes only API-owned
 content and forgets the record. It returns
 `{"id":"...","object":"music.edit.deleted","deleted":true}`. Missing jobs
 return **404**. Creator originals and Studio project assets remain independently
 owned. WAV output is never silently truncated or transcoded.
+Incomplete physical cleanup returns **503** and retains the job record; retry
+delete after cleanup completes. Startup likewise refuses edit storage readiness
+while an orphan cleanup failure leaves unaccounted content behind.
 
 ## Source separation
 

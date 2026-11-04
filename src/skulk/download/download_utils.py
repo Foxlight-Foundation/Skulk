@@ -1735,9 +1735,29 @@ async def calc_hash(path: Path, hash_type: Literal["sha1", "sha256"] = "sha1") -
     return hasher.hexdigest()
 
 
+def _file_metadata_length(value: str | None, url: str) -> int:
+    """Distinguish an explicit empty object from absent or invalid HTTP metadata."""
+    if value is None:
+        raise ValueError(f"No content length for {url}")
+    try:
+        length = int(value)
+    except ValueError:
+        raise ValueError(f"Invalid content length for {url}") from None
+    if length < 0:
+        raise ValueError(f"Invalid content length for {url}")
+    return length
+
+
 async def file_meta(
     model_id: ModelId, revision: str, path: str, redirected_location: str | None = None
 ) -> tuple[int, str]:
+    """Fetch an explicit nonnegative byte length and immutable object hash.
+
+    Read HEAD metadata for the repository/revision/path, preferring Hub linked
+    headers and following its relative redirect when needed. Zero is a valid
+    declared object length. Missing/invalid size metadata and missing hashes
+    fail before a caller can accept or download the selected object.
+    """
     url = (
         urljoin(f"{get_hf_endpoint()}/{model_id}/resolve/{revision}/", path)
         if redirected_location is None
@@ -1753,7 +1773,7 @@ async def file_meta(
             x_linked_size = r.headers.get("x-linked-size")
             x_linked_etag = r.headers.get("x-linked-etag")
             if x_linked_size and x_linked_etag:
-                content_length = int(x_linked_size)
+                content_length = _file_metadata_length(x_linked_size, url)
                 etag = trim_etag(x_linked_etag)
                 return content_length, etag
             # Otherwise, follow the redirect to get authoritative size/hash
@@ -1762,11 +1782,10 @@ async def file_meta(
         if r.status in [401, 403]:
             msg = await build_auth_error_message(r.status, model_id)
             raise HuggingFaceAuthenticationError(msg)
-        content_length = int(
-            r.headers.get("x-linked-size") or r.headers.get("content-length") or 0
+        content_length = _file_metadata_length(
+            r.headers.get("x-linked-size") or r.headers.get("content-length"), url
         )
         etag = r.headers.get("x-linked-etag") or r.headers.get("etag")
-        assert content_length > 0, f"No content length for {url}"
         assert etag is not None, f"No remote hash for {url}"
         etag = trim_etag(etag)
         return content_length, etag
