@@ -12,7 +12,9 @@ from urllib.request import Request
 
 import fetch_archives
 from build_ace_step import ArchiveInventory
-from fetch_archives import fetch_object, fetch_profile
+from fetch_archives import fetch_metapackage_inputs, fetch_object, fetch_profile
+from package_inputs import read_python_catalog
+from pydantic import JsonValue, TypeAdapter
 from test_ace_step_producer import fixture
 
 
@@ -149,3 +151,44 @@ class ArchiveFetchTests(unittest.TestCase):
             (output / "python" / inputs.interpreter.name).read_bytes(),
             inputs.interpreter.read_bytes(),
         )
+
+    def test_source_built_wheel_has_no_invented_download_url(self) -> None:
+        """Missing source-built bytes fail; exact cached originals remain reusable."""
+        with self.assertRaisesRegex(ValueError, "must be reproduced"):
+            fetch_object(None, self.destination, len(self.content), self.digest)
+        self.assertFalse(self.destination.exists())
+        self.destination.write_bytes(self.content)
+        fetch_object(None, self.destination, len(self.content), self.digest)
+        self.destination.write_bytes(b"x" * len(self.content))
+        with self.assertRaisesRegex(ValueError, "cached native archive differs"):
+            fetch_object(None, self.destination, len(self.content), self.digest)
+
+    def test_rocm_build_tools_are_independent_from_runtime_dependencies(self) -> None:
+        """The actual ROCm source build must collect its own tool, not Triton's."""
+        source = Path(__file__).parents[1]
+        inventory = ArchiveInventory.model_validate_json(
+            (source / "archives/linux-amd64-rocm-py312.json").read_bytes()
+        )
+        package = next(item for item in inventory.objects if item.source_build is not None)
+        build = package.source_build
+        assert build is not None
+        python = read_python_catalog(source).for_target("macosx_14_0_arm64")
+        observed: list[tuple[str | None, str, int, str]] = []
+
+        def fetch(url: str | None, path: Path, size: int, digest: str) -> None:
+            observed.append((url, path.name, size, digest))
+
+        output = self.root / "source-build-intake"
+        with patch.object(fetch_archives, "fetch_object", fetch):
+            fetch_metapackage_inputs(source, "macos-arm64", output)
+        tool_name = f"setuptools-{build.setuptools}-py3-none-any.whl"
+        self.assertEqual(set(observed), {
+            (build.source_url, f"rocm-{package.version}.tar.gz", build.source_size_bytes, build.source_sha256),
+            (build.setuptools_source_url, tool_name, build.setuptools_size_bytes, build.setuptools_archive_sha256),
+            (python.url, python.filename, python.size_bytes, python.sha256),
+        })
+        record = TypeAdapter[dict[str, JsonValue]](dict[str, JsonValue]).validate_json(
+            (output / "build-inputs.json").read_bytes()
+        )
+        self.assertEqual(record["setuptools_wheel"], tool_name)
+        self.assertEqual(record["setuptools_sha256"], build.setuptools_archive_sha256)

@@ -19,7 +19,12 @@ import httpx
 import pytest
 
 from skulk.provisioning import demucs_runtime as runtime
-from skulk.provisioning.demucs_package import Checkpoint, CommandRunner
+from skulk.provisioning.demucs_package import (
+    CPU_PACKAGE_LIMITS,
+    Checkpoint,
+    CommandRunner,
+    NativePackageLimits,
+)
 from skulk.provisioning.native_install_process import NativeInstallCommandRunner
 from skulk.provisioning.tests import test_demucs_package as package_fixtures
 from skulk.utils.runtime_files import RuntimeLock, private_directory
@@ -76,9 +81,10 @@ class ControlledNativeInstall:
         *,
         run: CommandRunner,
         checkpoint: Checkpoint | None = None,
+        limits: NativePackageLimits = CPU_PACKAGE_LIMITS,
     ) -> Path:
         """Copy verified synthetic trees to their final path, never run their code."""
-        assert run is not None
+        assert run is not None and limits == CPU_PACKAGE_LIMITS
         assert hashlib.sha256(package.read_bytes()).hexdigest() == expected_sha256
         self.installs += 1
         shutil.copytree(self.original, output, symlinks=True)

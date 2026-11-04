@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib
 import importlib.metadata
 import json
 import sys
 import unittest
 from pathlib import Path
+from typing import Literal
 
 import skulk_ace_step
 
 
+class Arguments(argparse.Namespace):
+    """Expected installed package profile; never an accelerator qualification."""
+
+    variant: Literal["cpu", "cuda", "rocm"]
+
+
 def main() -> None:
     """Require private installed dependencies, then run the dedicated Python3.12 checks."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--variant", choices=("cpu", "cuda", "rocm"), default="cpu")
+    arguments = Arguments()
+    parser.parse_args(namespace=arguments)
     prefix = Path(sys.prefix).resolve()
     if sys.version_info[:2] != (3, 12):
         raise ValueError(
@@ -33,13 +45,13 @@ def main() -> None:
             raise ValueError(
                 "native ACE verification imported outside its private installation"
             )
-    if importlib.metadata.version("skulk-ace-step-cpu") != "0.1.0":
+    if importlib.metadata.version(f"skulk-ace-step-{arguments.variant}") != "0.1.0":
         raise ValueError("native ACE verification loaded the wrong installed adapter")
     suite = unittest.defaultTestLoader.discover(
         str(Path(__file__).parent / "runtime_checks"), pattern="check_*.py"
     )
     count = suite.countTestCases()
-    if count < 41:
+    if count < 56:
         raise ValueError(
             "native ACE verification collected an incomplete wrapper suite"
         )
@@ -52,6 +64,7 @@ def main() -> None:
                 "status": "pass",
                 "scope": "installed native dependency/wrapper/process boundary only; no music model loading or generation",
                 "checks": count,
+                "variant": arguments.variant,
                 "source_revision": skulk_ace_step.SOURCE_REVISION,
                 "torch": importlib.metadata.version("torch"),
                 "python": sys.version.split()[0],

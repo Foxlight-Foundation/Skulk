@@ -8,6 +8,11 @@ on:
       - 'packaging/skulk-ace-step/**'
       - 'packaging/skulk-demucs/build_wheel.py'
       - 'src/skulk/provisioning/demucs_package.py'
+      - 'src/skulk/provisioning/ace_step_runtime.py'
+      - 'src/skulk/provisioning/ace_step_manager.py'
+      - 'src/skulk/provisioning/native_runtime_manager.py'
+      - 'src/skulk/provisioning/demucs_runtime.py'
+      - 'src/skulk/provisioning/demucs_manager.py'
       - 'src/skulk/provisioning/native_install_process.py'
       - 'src/skulk/provisioning/_native_install_guard.py'
       - 'src/skulk/utils/process_groups.py'
@@ -25,20 +30,35 @@ concurrency:
 
 jobs:
   native:
-    name: Offline ACE package execution (${{ matrix.platform }})
+    name: Offline ACE package execution (${{ matrix.platform }}, ${{ matrix.variant }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macos-arm64
+            variant: cpu
             target: macosx_14_0_arm64
             runner: macos-15
           - platform: linux-amd64
+            variant: cpu
             target: manylinux_2_28_x86_64
             runner: ubuntu-24.04
           - platform: linux-arm64
+            variant: cpu
             target: manylinux_2_28_aarch64
             runner: ubuntu-24.04-arm
+          - platform: linux-amd64
+            variant: cuda
+            target: manylinux_2_28_x86_64
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            variant: cuda
+            target: manylinux_2_28_aarch64
+            runner: ubuntu-24.04-arm
+          - platform: linux-amd64
+            variant: rocm
+            target: linux_x86_64
+            runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -48,6 +68,16 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Select an output workspace outside the clean source checkout
         run: printf 'PACKAGE_ROOT=%s/ace-music-package\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Reserve space for the measured GPU archive and expanded-library closure
+        if: matrix.variant != 'cpu'
+        env:
+          ACE_CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACE_CI_RUNNER_ENVIRONMENT" = github-hosted
+          # These SDKs are unused by this standalone Python-wheel job and belong
+          # only to the ephemeral hosted runner. Keep self-hosted machines intact.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
+          python3 -c 'import os,shutil; assert shutil.disk_usage(os.environ["RUNNER_TEMP"]).free >= 30*1024**3, "GPU package closure needs 30 GiB free staging space"'
       - name: Prepare independent Core build and bootstrap tools
         run: |
           uv venv --managed-python --python 3.13.13 "$PACKAGE_ROOT/tools"
@@ -67,22 +97,41 @@ jobs:
           git -C "$PACKAGE_ROOT/source" fetch --depth 1 "$source_repository" "$source_revision"
           git -C "$PACKAGE_ROOT/source" checkout --detach FETCH_HEAD
           test "$(git -C "$PACKAGE_ROOT/source" rev-parse HEAD)" = "$source_revision"
+      - name: Fetch exact ROCm pure-metapackage source and build-tool prerequisites
+        if: matrix.variant == 'rocm'
+        run: |
+          "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-ace-step/fetch_archives.py '${{ matrix.platform }}' --variant rocm --metapackage-inputs --output "$PACKAGE_ROOT/metapackage-intake"
+      - name: Reproduce the pinned pure ROCm metapackage twice offline
+        if: matrix.variant == 'rocm'
+        run: |
+          python_archive=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads((pathlib.Path(os.environ["PACKAGE_ROOT"])/"metapackage-intake/build-inputs.json").read_text())["python_archive"])')
+          source_archive=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads((pathlib.Path(os.environ["PACKAGE_ROOT"])/"metapackage-intake/build-inputs.json").read_text())["source_archive"])')
+          setuptools_wheel=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads((pathlib.Path(os.environ["PACKAGE_ROOT"])/"metapackage-intake/build-inputs.json").read_text())["setuptools_wheel"])')
+          "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-ace-step/build_rocm_metapackage.py --repository "$PWD" --builder-profile '${{ matrix.platform }}' --python-archive "$PACKAGE_ROOT/metapackage-intake/$python_archive" --source-archive "$PACKAGE_ROOT/metapackage-intake/$source_archive" --setuptools-wheel "$PACKAGE_ROOT/metapackage-intake/$setuptools_wheel" --output "$PACKAGE_ROOT/metapackage-build"
+          mkdir -p "$PACKAGE_ROOT/intake/wheels"
+          cp "$PACKAGE_ROOT/metapackage-build/wheels/"*.whl "$PACKAGE_ROOT/intake/wheels/"
+          rm -rf "$PACKAGE_ROOT/metapackage-build/tools" "$PACKAGE_ROOT/metapackage-build/interpreter"
       - name: Fetch only exact committed wheel and interpreter objects
         run: |
-          "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-ace-step/fetch_archives.py '${{ matrix.platform }}' --output "$PACKAGE_ROOT/intake"
+          "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-ace-step/fetch_archives.py '${{ matrix.platform }}' --variant '${{ matrix.variant }}' --output "$PACKAGE_ROOT/intake"
       - name: Build twice and compare complete sealed bytes
         run: |
           python_archive=$(find "$PACKAGE_ROOT/intake/python" -name '*.tar.gz' -type f)
           for build in first second; do
-            "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-ace-step/build_ace_step.py --repository "$PWD" --source "$PACKAGE_ROOT/source" --wrapper "$PWD/packaging/skulk-ace-step/skulk_ace_step" --wheelhouse "$PACKAGE_ROOT/intake/wheels" --python-archive "$python_archive" --lock "$PWD/packaging/skulk-ace-step/locks/${{ matrix.platform }}-cpu-py312.lock" --target '${{ matrix.target }}' --output "$PACKAGE_ROOT/$build"
+            "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-ace-step/build_ace_step.py --repository "$PWD" --source "$PACKAGE_ROOT/source" --wrapper "$PWD/packaging/skulk-ace-step/skulk_ace_step" --wheelhouse "$PACKAGE_ROOT/intake/wheels" --python-archive "$python_archive" --lock "$PWD/packaging/skulk-ace-step/locks/${{ matrix.platform }}-${{ matrix.variant }}-py312.lock" --target '${{ matrix.target }}' --variant '${{ matrix.variant }}' --output "$PACKAGE_ROOT/$build"
           done
-          cmp "$PACKAGE_ROOT/first/skulk_ace_step_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" "$PACKAGE_ROOT/second/skulk_ace_step_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl"
+          cmp "$PACKAGE_ROOT/first/skulk_ace_step_${{ matrix.variant }}-0.1.0-cp312-cp312-${{ matrix.target }}.whl" "$PACKAGE_ROOT/second/skulk_ace_step_${{ matrix.variant }}-0.1.0-cp312-cp312-${{ matrix.target }}.whl"
+          cp "$PACKAGE_ROOT/second/"*.json "$PACKAGE_ROOT/second-build.json"
+          rm -rf "$PACKAGE_ROOT/second"
+          # The sealed first object already contains every rehashed dependency.
+          # Do not keep a third archive copy during the expanded install check.
+          rm -rf "$PACKAGE_ROOT/intake/wheels"
       - name: Install fresh offline using Core's actual process supervisor
         env:
           PYTHONPATH: src
         run: |
           package_sha=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["sha256"])')
-          "$PACKAGE_ROOT/tools/bin/python" -B scripts/stage_ace_step_candidate.py --wheel "$PACKAGE_ROOT/first/skulk_ace_step_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" --sha256 "$package_sha" --output "$PACKAGE_ROOT/installed"
+          "$PACKAGE_ROOT/tools/bin/python" -B scripts/stage_ace_step_candidate.py --wheel "$PACKAGE_ROOT/first/skulk_ace_step_${{ matrix.variant }}-0.1.0-cp312-cp312-${{ matrix.target }}.whl" --sha256 "$package_sha" --variant '${{ matrix.variant }}' --output "$PACKAGE_ROOT/installed"
       - name: Check native typing and execute installed boundary suite
         env:
           HF_HUB_OFFLINE: '1'
@@ -91,7 +140,7 @@ jobs:
           PYTORCH_ENABLE_MPS_FALLBACK: '0'
         run: |
           "$PACKAGE_ROOT/tools/bin/basedpyright" --project packaging/skulk-ace-step/pyrightconfig.json --pythonpath "$PACKAGE_ROOT/installed/runtime/bin/python"
-          "$PACKAGE_ROOT/installed/runtime/bin/python" -I -B packaging/skulk-ace-step/verify_runtime.py > "$PACKAGE_ROOT/native-verification.json"
+          "$PACKAGE_ROOT/installed/runtime/bin/python" -I -B packaging/skulk-ace-step/verify_runtime.py --variant '${{ matrix.variant }}' > "$PACKAGE_ROOT/native-verification.json"
       - name: Retain exact installed dependency observations
         if: always()
         run: |
@@ -101,8 +150,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-ace-candidate-${{ matrix.platform }}
+          name: native-ace-candidate-${{ matrix.platform }}-${{ matrix.variant }}
           compression-level: 0
+          retention-days: 3
           path: |
             ${{ env.PACKAGE_ROOT }}/first/*.whl
             ${{ env.PACKAGE_ROOT }}/first/*.json
@@ -111,3 +161,5 @@ jobs:
             ${{ env.PACKAGE_ROOT }}/installer-diagnostics/**/*.log
             ${{ env.PACKAGE_ROOT }}/native-dependencies.txt
             ${{ env.PACKAGE_ROOT }}/native-verification.json
+            ${{ env.PACKAGE_ROOT }}/second-build.json
+            ${{ env.PACKAGE_ROOT }}/metapackage-build/provenance.json

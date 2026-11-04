@@ -2717,6 +2717,32 @@ online retries replace corrupt bytes; offline reuse refuses them.
 - `shared/types/native_music.py`: canonical strict private request/component/
   precision/result/control contracts; copied into the native package as bytes.
   Frames are bounded to 256 KiB and carry no audio or public local-file choices.
+- Private CLI `--probe <lane>` is mutually exclusive with `--serve <config>`;
+  both require a dedicated session and actual parent PID. `NativeMusicLibraryProbe`
+  is a weights-free payload/device/precision observation, not loaded-model
+  readiness. CPU/ROCm use FP32, MPS additionally probes its FP16 VAE policy,
+  CUDA uses native BF16 from SM8 and FP16 before it, independent of BF16 emulation.
+  Explicit library/device mismatches fail without model acquisition.
+- Preparation: `provisioning/ace_step_runtime.py` / `ace_step_manager.py` bind
+  complete/payload pins, full interpreter/import-byte verification and an actual
+  weights-free device/precision probe. Probe uses the install guardian's session,
+  not a nested resident CLI. Verified observations alone enter manager resources.
+- Shared ownership: `demucs_runtime.py::SealedRuntimeCache` and
+  `native_runtime_manager.py`; short observation publication, serialized cache
+  reservation, queue-inclusive deadlines, cancellation withdrawal, retained drain
+  retry and immutable published generations. Demucs CPU/Metal semantics remain.
+- Trusted storage profiles (package/installed GiB): CPU 1/4, CUDA 4/8, ROCm 3/10.
+  GPU archive member limit 768 MiB; expanded member limit 1 GiB. Installed totals
+  include nested archives plus expanded imports. Manifest cannot expand limits.
+  Raw Linux ROCm target states no invented GPU-library libc floor; known Python
+  2.28 ABI still applies. Closed GPU inventories cover CUDA x86_64/ARM64 and ROCm
+  x86_64. The pure ROCm metapackage records source/tool/epoch/target pins and its
+  producer rebuilds twice against the exact expected binary and metadata digests.
+  Its build-tool pin is independent of runtime Setuptools. Six native CI jobs
+  build/compare/install/verify the three CPU, two CUDA and one ROCm profiles with
+  matching explicit variant selection. Hosted GPU-package jobs run CPU boundary
+  checks, not accelerator/model qualification.
+  Package/model/loader/GPU qualification, publication and activation remain distinct.
 - Native resident: complete data/code verification, explicit runtime math probe,
   observed per-component loaded precision, exact canonical source-tensor equality,
   one active request, contiguous sequence/correlation checks, 0600 PCM24/result

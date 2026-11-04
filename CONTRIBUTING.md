@@ -142,7 +142,7 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/skulk/provisioning/native_install_process.py` and `_native_install_guard.py`: owned native bootstrap command execution, bounded private output, cancellation and parent-loss supervision. Run `uv run pytest src/skulk/provisioning/tests/test_native_install_process.py` for actual process-group and inherited-lock regressions; native CI repeats them on all three architectures. `scripts/stage_demucs_candidate.py` then installs the exact candidate through this supervisor with its verified bundled Python as guardian. Frozen Core must supply that independent Python and retain the guardian's source through the freezer hook/spec. Never reap the group leader or remove installation files before descendant drain; retain the original handle and retry `drain()` after cleanup failure.
 - `src/skulk/provisioning/demucs_runtime.py`: owned CPU/MPS library cache preparation, offline recovery and atomic selection; no worker/ready-backend registration yet. Run its data-only refusal/reuse tests in `provisioning/tests/test_demucs_runtime.py`, then actual sealed-package preparation separately. `utils/runtime_files.py` is the common filesystem/fence implementation; `extensions/runtime_files.py` retains compatibility exports. Keep device/build probes and generation cleanup bound to the original owner, never a mutable receipt or a reused PID.
 - `packaging/skulk-audio-cpp-cpu/`: separately installed audio.cpp music server wheel; `.github/workflows/audio-cpp-engine-wheel.yml` builds CPU-capable packages for the three supported OS/CPU architectures from the pinned upstream source
-- `packaging/skulk-ace-step/`: independent native ACE package/process source. `fetch_archives.py` uses committed object URLs/sizes/digests without index resolution; `build_ace_step.py` requires clean committed source, selected architecture locks and the complete wheelhouse/interpreter. Source curation and its explicit inference namespace override are versioned inputs; model-repository Python is excluded. Canonical private music/WAV contracts are links in the repository and regular bytes in sealed wheels. Build-time tests run with `uv run pytest packaging/skulk-ace-step/producer_tests`; build typing uses `pyrightconfig.build.json` with Core Python 3.13. Native checks are named `runtime_checks/check_*.py` and run only in the separate installed Python 3.12 through `verify_runtime.py`; its native typing project is `pyrightconfig.json`. `scripts/stage_ace_step_candidate.py` uses Core's actual owned bootstrap supervisor. The native boundary workflow builds twice and executes fresh offline packages on all three OS/CPU targets. No model load/generation qualification or ready Core backend is implied; keep outputs outside clean source and complete full Core gates before committing changes.
+- `packaging/skulk-ace-step/`: independent native ACE package/process source. `fetch_archives.py` uses committed object URLs/sizes/digests without index resolution; `build_ace_step.py` requires clean committed source, selected architecture locks and the complete wheelhouse/interpreter. Source curation and its explicit inference namespace override are versioned inputs; model-repository Python is excluded. Canonical private music/WAV contracts are links in the repository and regular bytes in sealed wheels. Build-time tests run with `uv run pytest packaging/skulk-ace-step/producer_tests`; build typing uses `pyrightconfig.build.json` with Core Python 3.13. Native checks are named `runtime_checks/check_*.py` and run only in the separate installed Python 3.12 through `verify_runtime.py`; its native typing project is `pyrightconfig.json`. `scripts/stage_ace_step_candidate.py` uses Core's actual owned bootstrap supervisor; stager and verifier select the same explicit package variant. The native boundary workflow builds twice and executes fresh offline packages for three CPU targets, Linux x86_64/ARM64 CUDA and Linux x86_64 ROCm. ROCm's pure metapackage is reproduced twice offline with separately pinned source/build tools. Hosted GPU-package checks exercise CPU boundaries, not real GPU execution. No model load/generation qualification or ready Core backend is implied; keep outputs outside clean source and complete full Core gates before committing changes.
 - `scripts/verify_audio_cpp_promotion.py`: verifies previously tested audio.cpp wheels before workflow publication; CPU/Metal promotion takes a JSON filename-to-SHA-256 map covering all three platforms at one version, while GPU promotion takes a one-entry map selecting the qualified platform filename. A plain digest is accepted only for a source run containing one GPU wheel. Supply it as `publish_sha256` together with `publish_run_id`; every selected wheel must also pass attestation verification, and only verified paths are published. Package publication does not establish a model support claim.
 - `packaging/skulk-audio-cpp-vulkan/`: separate Linux amd64 Vulkan music server wheel, built by the same pinned workflow; its cache and executable digest remain distinct from the CPU package
 - `packaging/skulk-audio-cpp-cuda/`: separate native Linux amd64 (SM 8.9) and arm64 (GB10 SM 12.1) CUDA music server wheels; each platform artifact and exact hardware/model claim requires its own qualification
@@ -387,6 +387,15 @@ Skulk supports multiple API formats through an adapter pattern. Adapters convert
 For detailed API documentation, see [docs/api.md](docs/api.md).
 
 ## Testing
+
+Native ACE preparation checks live in
+`packaging/skulk-ace-step/runtime_checks/check_probe.py` and run in the separately
+installed Python 3.12 suite through `verify_runtime.py`. They exercise real CPU
+library math and the private supervised CLI without model weights. CUDA policy
+cases use controlled CPU math; physical accelerator/model qualification remains
+separate. The native strict typing project includes these checks. Probe receipts
+establish package/device availability, while loaded-model receipts bind the exact
+model and observed component policy.
 
 Skulk relies heavily on manual testing at this point in the project, but this is evolving. Before submitting a change, test both before and after to demonstrate how your change improves behavior. Do the best you can with the hardware you have available — if you need help testing, ask and we'll do our best to assist. Add automated tests where possible.
 
@@ -675,3 +684,11 @@ reference-only dependency. Run pyramid tests in that oracle environment or the
 managed Comfy environment, which already provides Kornia. No new workflow may
 be advertised until its complete runner contract and issued wheel are ready;
 these tensor checks alone do not qualify a hardware class or model render.
+
+Native music preparation regressions use the original sealed-byte verifier with
+synthetic non-executable interpreters and controlled execution observations:
+`uv run pytest src/skulk/provisioning/tests/test_ace_step_runtime.py
+src/skulk/provisioning/tests/test_ace_step_manager.py`. Their GPU cases verify
+profile/custody/lifetime policy, not accelerator or full-model qualification.
+Keep the existing Demucs cache/manager tests in the same focused gate when
+changing their shared native preparation substrate.

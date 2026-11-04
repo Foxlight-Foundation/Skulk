@@ -10,6 +10,7 @@ from torch.version import hip
 from .contracts import (
     NativeMusicDevice,
     NativeMusicExecution,
+    NativeMusicLibraryProbe,
     NativeMusicPrecision,
     NativeMusicServeConfig,
     NativeMusicTensorPrecision,
@@ -17,16 +18,12 @@ from .contracts import (
 from .upstream_bindings import LoadedHandler
 
 
-def probe_device(configuration: NativeMusicServeConfig) -> str:
-    """Execute math on the requested lane and reject upstream silent fallback.
-
-    The pinned initializer uses FP32 on CPU/MPS/ROCm, BF16 on capable CUDA and
-    FP16 on earlier CUDA. Compatibility is based on the installed runtime and
-    actual device functionality, not a list of previously tested GPU models.
-    """
-    lane = configuration.device
-    native = "cpu"
+def _library_policy(
+    lane: NativeMusicDevice,
+) -> tuple[NativeMusicPrecision, tuple[int, int] | None]:
+    """Resolve the pinned initializer's policy from available native libraries."""
     precision: NativeMusicPrecision = "float32"
+    capability: tuple[int, int] | None = None
     if lane == "mps":
         if (
             os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") != "0"
@@ -35,24 +32,24 @@ def probe_device(configuration: NativeMusicServeConfig) -> str:
             raise ValueError(
                 "native music Metal requires available MPS and disabled implicit CPU fallback"
             )
-        native = "mps"
     elif lane in ("cuda", "rocm"):
         if not torch.cuda.is_available() or (hip is not None) != (lane == "rocm"):
             raise ValueError(
                 "explicit native music accelerator is unavailable in this runtime"
             )
-        native = "cuda"
-        precision = (
-            ("bfloat16" if torch.cuda.is_bf16_supported() else "float16")
-            if lane == "cuda"
-            else "float32"
-        )
+        if lane == "cuda":
+            capability = torch.cuda.get_device_capability()
+            # Torch may report emulated BF16 on SM7. The pinned initializer
+            # selects native BF16 only from SM8; match it before model loading.
+            precision = "bfloat16" if capability[0] >= 8 else "float16"
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
-    if configuration.precision != precision:
-        raise ValueError(
-            "explicit native music precision differs from the pinned initializer policy"
-        )
+    return precision, capability
+
+
+def _probe_math(lane: NativeMusicDevice, precision: NativeMusicPrecision) -> None:
+    """Finish tiny native math before reporting a library execution observation."""
+    native = "cuda" if lane == "rocm" else lane
     dtype = {
         "float32": torch.float32,
         "bfloat16": torch.bfloat16,
@@ -64,7 +61,47 @@ def probe_device(configuration: NativeMusicServeConfig) -> str:
         raise ValueError(
             "native music device failed its requested-precision execution probe"
         )
-    return native
+
+
+def probe_libraries(
+    lane: NativeMusicDevice, payload_sha256: str
+) -> NativeMusicLibraryProbe:
+    """Execute a weights-free lane probe inside the verified private runtime.
+
+    No model path, configuration, download or ACE loader is needed. Successful
+    native math establishes package/device availability; loading a particular
+    model remains a separate supervised operation with an identity receipt.
+    """
+    precision, capability = _library_policy(lane)
+    _probe_math(lane, precision)
+    autoencoder_precision: NativeMusicTensorPrecision = (
+        "float16" if lane == "mps" else precision
+    )
+    if autoencoder_precision != precision:
+        _probe_math(lane, autoencoder_precision)
+    return NativeMusicLibraryProbe(
+        payload_sha256=payload_sha256,
+        device=lane,
+        precision=precision,
+        autoencoder_precision=autoencoder_precision,
+        cuda_compute_capability=capability,
+        torch_version=str(torch.__version__),
+    )
+
+
+def probe_device(configuration: NativeMusicServeConfig) -> str:
+    """Execute and bind the requested loaded-model precision to native capability.
+
+    The pinned initializer uses FP32 on CPU/MPS/ROCm, native BF16 on SM8+ CUDA,
+    and FP16 on earlier CUDA. Missing physical qualification is not a refusal.
+    """
+    precision, _ = _library_policy(configuration.device)
+    if configuration.precision != precision:
+        raise ValueError(
+            "explicit native music precision differs from the pinned initializer policy"
+        )
+    _probe_math(configuration.device, precision)
+    return "cuda" if configuration.device == "rocm" else configuration.device
 
 
 def _component_policy(

@@ -2676,6 +2676,11 @@ files are checked against their original object identity during download reuse:
 online retries replace corrupt bytes; offline reuse refuses them.
 
 The built-in native ACE package/process family lives in `packaging/skulk-ace-step/`.
+Its mutually exclusive private `--probe` mode executes verified libraries without
+weights/configuration and returns `NativeMusicLibraryProbe`, separately from
+loaded-model readiness. CUDA precision follows native compute capability
+(SM8+ BF16, earlier FP16) rather than Torch BF16 emulation; MPS probes its separate
+FP16 autoencoder policy. Both CLI modes require the actual parent/dedicated group.
 Its Python 3.12 interpreter and exact three-platform CPU archive catalogs stay
 separate from Core/Studio and all model weights. `build_ace_step.py` seals only
 selected pinned source, the explicit inference namespace override, closed owned
@@ -2684,6 +2689,32 @@ second digest check; clean Git inputs and deterministic regular members are
 required. `provisioning/demucs_package.py` verifies/bootstrap exactly two built-in
 audio layouts; Demucs runtime preparation retains an independent source-family
 fence. This is not an engine plugin ABI or ready-backend registration.
+
+Native library preparation uses `provisioning/ace_step_runtime.py` and
+`ace_step_manager.py`. They retain exact package/payload pins, verify the complete
+cached interpreter and import tree before execution, and run the same weights-free
+probe under the install guardian's existing session/fence. The resident CLI is
+not nested inside that guardian. `demucs_runtime.py::SealedRuntimeCache` and
+`native_runtime_manager.py` share publication, cancellation, retained cleanup and
+observation lifetime with Demucs, whose CPU/Metal policy stays unchanged.
+Candidate availability does not appear in `engine_builds`; only successful actual
+preparation does, and loaded-model readiness remains independent.
+
+Trusted storage profiles bound complete packages/installed trees to CPU 1/4 GiB,
+CUDA 4/8 GiB and ROCm 3/10 GiB. GPU dependency archive members are capped at
+768 MiB and expanded members at 1 GiB. Installed accounting includes both retained
+nested archives and expanded imports. Manifests cannot raise these Core-selected
+bounds. The ROCm raw Linux target makes no inferred complete GPU-library libc
+claim; its independently known Python 2.28 requirement is still enforced.
+The producer has separate exact CPU, Linux x86_64/ARM64 CUDA and Linux x86_64 ROCm
+inputs. The pure ROCm metapackage records original source/tool/epoch/target pins
+and is reproduced twice by `build_rocm_metapackage.py`; runtime installs only its
+sealed wheel. Its producer tool is independent of runtime dependencies. The six
+native CI jobs cover three CPU targets, two Linux CUDA targets and Linux x86_64
+ROCm, with matching variant selection in the producer, stager and verifier.
+Hosted GPU-package jobs run CPU boundary checks; real accelerator probing and
+model qualification remain separate. Actual ABI/loader/device qualification remains required. These
+definitions do not yet register native worker placement or published inventory.
 
 `shared/types/native_music.py` is the canonical dependency-light private protocol.
 The resident verifies complete data/code before native import, explicitly probes

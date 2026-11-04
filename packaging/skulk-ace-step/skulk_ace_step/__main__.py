@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .contracts import (
     MAX_NATIVE_MUSIC_RECORD_BYTES,
+    NativeMusicDevice,
     NativeMusicFailed,
     NativeMusicFrame,
     NativeMusicServeConfig,
@@ -20,16 +21,19 @@ from .lifetime import start_parent_guardian, terminate_owned_group
 
 
 class Arguments(argparse.Namespace):
-    """Only a worker-private configuration and the real supervising process."""
+    """One explicit probe or private model intent and its actual supervisor."""
 
-    serve: Path
+    serve: Path | None = None
+    probe: NativeMusicDevice | None = None
     parent_pid: int
 
 
 def main() -> None:
-    """Serve one fixed model and terminate the complete session after any failure."""
+    """Probe libraries or serve one model; retire the group after any failure."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--serve", type=Path, required=True)
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--serve", type=Path)
+    modes.add_argument("--probe", choices=("cpu", "mps", "cuda", "rocm"))
     parser.add_argument("--parent-pid", type=int, required=True)
     arguments = Arguments()
     parser.parse_args(namespace=arguments)
@@ -58,6 +62,18 @@ def main() -> None:
         print(encoded, file=protocol, flush=True)
 
     try:
+        if arguments.probe is not None:
+            with contextlib.redirect_stdout(sys.stderr):
+                from .policy import probe_libraries
+                from .server import installed_payload_identity
+
+                receipt = probe_libraries(arguments.probe, installed_payload_identity())
+            encoded = receipt.model_dump_json()
+            if len(encoded.encode("utf-8")) + 1 > MAX_NATIVE_MUSIC_RECORD_BYTES:
+                raise ValueError("native library probe exceeds its control bound")
+            print(encoded, file=protocol, flush=True)
+            return
+        assert arguments.serve is not None
         descriptor = os.open(
             arguments.serve, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         )

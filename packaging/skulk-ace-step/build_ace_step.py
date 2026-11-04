@@ -6,6 +6,7 @@ import argparse
 import base64
 import hashlib
 import json
+import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,24 +14,27 @@ from typing import Literal, Self
 from urllib.parse import urlsplit
 
 from package_inputs import (
-    MAX_PACKAGE_BYTES,
     PYTHON_VERSION,
     TARGETS,
+    NativePackageVariant,
     PythonArchivePin,
     file_digest,
     locked_dependencies,
+    native_package_limits,
     read_python_catalog,
     safe_member,
     verify_python_archive,
 )
+from packaging.tags import compatible_tags, cpython_tags
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from skulk_ace_step.weights import ModelCodeFile
-from wheel_inputs import clean_revision, dependency_matches, validate_dependency_closure
+from wheel_inputs import clean_revision, validate_dependency_closure
+from wheel_inputs import dependency_matches as _cpu_dependency_matches
 
 VERSION = "0.1.0"
-MAX_OBJECT_BYTES = 512 * 1024**2
+MAX_OBJECT_BYTES = 768 * 1024**2
 ADAPTER_MODULES = frozenset(
     {
         "__init__.py",
@@ -168,6 +172,46 @@ class SourceInventory(SourcePin):
         return self
 
 
+class RocmMetapackageBuild(BuildInput):
+    """Original source/tool identities of the reproduced pure ROCm metapackage.
+
+    This is attribution of an exact independently pinned wheel, not an install
+    command or permission to build arbitrary downloaded source at runtime.
+    """
+
+    source_url: str = Field(description="Original official immutable source URL.")
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_size_bytes: int = Field(gt=0, le=2 * 1024**2)
+    python: Literal["3.12.13"]
+    setuptools: str = Field(min_length=1, max_length=128)
+    setuptools_source_url: str = Field(
+        max_length=2048, description="Independent original build-tool wheel URL."
+    )
+    setuptools_size_bytes: int = Field(
+        gt=0, le=32 * 1024**2, description="Exact build-tool archive length."
+    )
+    setuptools_archive_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_date_epoch: int = Field(
+        gt=0, description="Fixed UTC epoch used for reproducible wheel timestamps."
+    )
+    target_family: Literal["gfx1151"]
+    metadata_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def validate_build_tool(self) -> Self:
+        """Keep pure source-build tools distinct from native runtime dependencies."""
+        Version(self.setuptools)
+        url = urlsplit(self.setuptools_source_url)
+        if (
+            url.scheme != "https" or url.netloc != "files.pythonhosted.org"
+            or url.username is not None or url.password is not None
+            or url.query or url.fragment
+            or Path(url.path).name != f"setuptools-{self.setuptools}-py3-none-any.whl"
+        ):
+            raise ValueError("ROCm source build needs exact independent build-tool provenance")
+        return self
+
+
 class ArchiveObject(BuildInput):
     """One selected immutable public wheel object, without runtime downloading."""
 
@@ -177,7 +221,7 @@ class ArchiveObject(BuildInput):
     version: str = Field(
         min_length=1,
         max_length=128,
-        description="Exact version including local CPU build suffix.",
+        description="Exact version including the selected CPU/CUDA/ROCm build suffix.",
     )
     filename: str = Field(
         min_length=1, max_length=256, description="Exact compatible wheel basename."
@@ -188,10 +232,14 @@ class ArchiveObject(BuildInput):
     sha256: str = Field(
         pattern=r"^[a-f0-9]{64}$", description="SHA-256 from immutable intake."
     )
-    source_url: str = Field(
-        min_length=1,
+    source_url: str | None = Field(
+        default=None,
         max_length=2048,
         description="Original public object URL retained as provenance only.",
+    )
+    source_build: RocmMetapackageBuild | None = Field(
+        default=None,
+        description="Original source/tool pins for the reproduced ROCm metapackage only.",
     )
 
     @model_validator(mode="after")
@@ -200,26 +248,35 @@ class ArchiveObject(BuildInput):
         if Path(self.filename).name != self.filename or "\\" in self.filename:
             raise ValueError("native dependency filename must be a basename")
         name, version, _, _ = parse_wheel_filename(self.filename)
-        url = urlsplit(self.source_url)
         if (
             name != self.distribution
             or canonicalize_name(self.distribution) != self.distribution
             or version != Version(self.version)
-            or url.scheme != "https"
-            or url.netloc
-            not in {
-                "files.pythonhosted.org",
-                "download.pytorch.org",
-                "download-r2.pytorch.org",
-            }
-            or url.username is not None
-            or url.password is not None
-            or url.query
-            or url.fragment
         ):
             raise ValueError(
                 "native dependency intake identity or public provenance is invalid"
             )
+        if self.source_url is None:
+            build = self.source_build
+            if (
+                self.distribution != "rocm" or build is None
+                or build.source_url
+                != f"https://rocm.nightlies.amd.com/v2/gfx1151/rocm-{self.version}.tar.gz"
+            ):
+                raise ValueError("source-built native object requires exact ROCm provenance")
+        else:
+            url = urlsplit(self.source_url)
+            if (
+                self.source_build is not None
+                or url.scheme != "https"
+                or url.netloc not in {
+                    "files.pythonhosted.org", "download.pytorch.org",
+                    "download-r2.pytorch.org", "rocm.nightlies.amd.com",
+                }
+                or url.username is not None or url.password is not None
+                or url.query or url.fragment
+            ):
+                raise ValueError("native object needs one exact public provenance origin")
         return self
 
 
@@ -231,6 +288,9 @@ class ArchiveInventory(BuildInput):
         description="Exact committed dependency lock identity.",
     )
     target: str = Field(description="Selected OS/CPU/CPython wheel target.")
+    variant: NativePackageVariant = Field(
+        default="cpu", description="Explicit built-in dependency closure."
+    )
     objects: tuple[ArchiveObject, ...] = Field(
         min_length=1, max_length=128, description="One object per locked distribution."
     )
@@ -244,12 +304,44 @@ class ArchiveInventory(BuildInput):
         if (
             len({item.distribution for item in self.objects}) != len(self.objects)
             or len({item.filename for item in self.objects}) != len(self.objects)
-            or self.target != self.python_archive.platform_tag
+            or _interpreter_target(self.target) != self.python_archive.platform_tag
+            or not _profile_target_matches(self.variant, self.target)
+            or any(
+                item.size_bytes > native_package_limits(self.variant).object_bytes
+                for item in self.objects
+            )
+            or self.variant != "rocm" and any(item.source_build is not None for item in self.objects)
         ):
             raise ValueError(
                 "native archive inventory is duplicated or targets another interpreter"
             )
         return self
+
+
+def _interpreter_target(target: str) -> str:
+    return "manylinux_2_28_x86_64" if target == "linux_x86_64" else target
+
+
+def _profile_target_matches(variant: NativePackageVariant, target: str) -> bool:
+    if variant == "rocm":
+        return target == "linux_x86_64"
+    return target in TARGETS and (variant == "cpu" or target.startswith("manylinux_"))
+
+
+def _dependency_matches(filename: str, target: str) -> bool:
+    if target != "linux_x86_64":
+        return _cpu_dependency_matches(filename, target)
+    # Raw Linux describes the actual ROCm wheel family without inventing a
+    # libc minimum. Only CPython-compatible glibc/Linux x86_64 tags enter it;
+    # hardware/ELF/loader qualification must establish execution separately.
+    selected = parse_wheel_filename(filename)[3]
+    platforms = sorted({
+        tag.platform for tag in selected
+        if re.fullmatch(r"(?:linux|manylinux(?:_[a-zA-Z0-9_]+|1|2010|2014))_x86_64", tag.platform)
+    })
+    compatible = set(cpython_tags((3, 12), abis=["cp312"], platforms=platforms))
+    compatible.update(compatible_tags((3, 12), interpreter="cp312", platforms=platforms))
+    return bool(selected & compatible)
 
 
 @dataclass(frozen=True)
@@ -309,15 +401,16 @@ def assemble_wheel(
     *,
     target: str,
     python_archive: Path,
+    variant: NativePackageVariant = "cpu",
 ) -> Path:
-    """Build deterministic, fully offline CPU package bytes from clean committed inputs.
+    """Build one deterministic offline profile from clean committed inputs.
 
     Large archives stream through bounded buffers, retaining selected object
     identities throughout the final copy. Model weights, machine paths and
     environment values never enter the package. No network/publish action exists.
     """
     if (
-        target not in TARGETS
+        not _profile_target_matches(variant, target)
         or wrapper.resolve()
         != (repository / "packaging/skulk-ace-step/skulk_ace_step").resolve()
     ):
@@ -343,18 +436,20 @@ def assemble_wheel(
             "native music source differs from its reviewed source pin/inventory"
         )
     catalog = read_python_catalog(inputs)
-    python_pin = catalog.for_target(target)
+    limits = native_package_limits(variant)
+    python_pin = catalog.for_target(_interpreter_target(target))
     profile = python_pin.profile
-    if lock_path.resolve() != (inputs / f"locks/{profile}-cpu-py312.lock").resolve():
+    if lock_path.resolve() != (inputs / f"locks/{profile}-{variant}-py312.lock").resolve():
         raise ValueError(
             "native music must use the selected committed architecture lock"
         )
     lock = _small(lock_path, repository)
     objects = ArchiveInventory.model_validate_json(
-        _small(inputs / f"archives/{profile}-cpu-py312.json", repository)
+        _small(inputs / f"archives/{profile}-{variant}-py312.json", repository)
     )
     if (
         objects.target != target
+        or objects.variant != variant
         or objects.lock_sha256 != hashlib.sha256(lock).hexdigest()
         or objects.python_archive != python_pin
     ):
@@ -415,7 +510,7 @@ def assemble_wheel(
             path.is_symlink()
             or not path.is_file()
             or path.stat().st_size != item.size_bytes
-            or not dependency_matches(path.name, target)
+            or not _dependency_matches(path.name, target)
             or file_digest(path, limit=item.size_bytes) != item.sha256
         ):
             raise ValueError(
@@ -431,12 +526,25 @@ def assemble_wheel(
                 "native music archive is not selected by its exact dependency lock"
             )
         dependencies[path.name] = path
+        if item.source_build is not None:
+            with zipfile.ZipFile(path) as archive:
+                metadata = [
+                    entry for entry in archive.infolist()
+                    if entry.filename.count("/") == 1
+                    and entry.filename.endswith(".dist-info/METADATA")
+                ]
+                if (
+                    len(metadata) != 1 or metadata[0].file_size > 2 * 1024**2
+                    or hashlib.sha256(archive.read(metadata[0])).hexdigest()
+                    != item.source_build.metadata_sha256
+                ):
+                    raise ValueError("source-built native metadata differs from its provenance")
         payload[f"skulk_ace_step/wheels/{path.name}"] = Member(
             path, item.size_bytes, item.sha256
         )
     if {item.distribution for item in objects.objects} != required.keys():
         raise ValueError("native music archive inventory omits a locked distribution")
-    validate_dependency_closure(dependencies, required, direct, target)
+    validate_dependency_closure(dependencies, required, direct, _interpreter_target(target))
     for name, data in {
         "requirements.in": direct,
         "requirements.lock": lock,
@@ -467,7 +575,7 @@ def assemble_wheel(
         "source_revision": upstream_revision,
         "source_repository": pin.repository,
         "platform_tag": target,
-        "variant": "cpu",
+        "variant": variant,
         "members": {name: item.sha256 for name, item in sorted(payload.items())},
         "features": [
             "music.generate",
@@ -477,6 +585,7 @@ def assemble_wheel(
             "offline_loader",
             "bundled_python",
             "resident_model",
+            "library_probe",
         ],
     }
     identity = hashlib.sha256(
@@ -488,11 +597,11 @@ def assemble_wheel(
         ).encode()
         + b"\n"
     )
-    distribution = "skulk_ace_step_cpu"
+    distribution = f"skulk_ace_step_{variant}"
     metadata = f"{distribution}-{VERSION}.dist-info"
     filename = f"{distribution}-{VERSION}-cp312-cp312-{target}.whl"
     payload[f"{metadata}/METADATA"] = _bytes(
-        f"Metadata-Version: 2.4\nName: skulk-ace-step-cpu\nVersion: {VERSION}\nRequires-Python: >=3.12,<3.13\nSummary: Isolated native ACE music runtime for Skulk\nLicense: See bundled component notices\n\n".encode()
+        f"Metadata-Version: 2.4\nName: skulk-ace-step-{variant}\nVersion: {VERSION}\nRequires-Python: >=3.12,<3.13\nSummary: Isolated native ACE music runtime for Skulk\nLicense: See bundled component notices\n\n".encode()
     )
     payload[f"{metadata}/WHEEL"] = _bytes(
         f"Wheel-Version: 1.0\nGenerator: foxlight-native-ace\nRoot-Is-Purelib: false\nTag: cp312-cp312-{target}\n".encode()
@@ -506,7 +615,7 @@ def assemble_wheel(
     )
     if (
         len(payload) > 256
-        or sum(item.size for item in payload.values()) > MAX_PACKAGE_BYTES - 1024**2
+        or sum(item.size for item in payload.values()) > limits.package_bytes - 1024**2
     ):
         raise ValueError(
             "native music payload exceeds its bounded sealed package layout"
@@ -531,12 +640,12 @@ def assemble_wheel(
         descriptor = {
             "filename": filename,
             "size_bytes": destination.stat().st_size,
-            "sha256": file_digest(destination, limit=MAX_PACKAGE_BYTES),
+            "sha256": file_digest(destination, limit=limits.package_bytes),
             "payload_sha256": identity,
             "adapter_revision": revision,
             "source_revision": upstream_revision,
             "platform_tag": target,
-            "variant": "cpu",
+            "variant": variant,
             "python": PYTHON_VERSION,
             "python_archive_sha256": python_pin.sha256,
         }
@@ -559,6 +668,7 @@ class Arguments(argparse.Namespace):
     output: Path
     target: str
     python_archive: Path
+    variant: NativePackageVariant
 
 
 def main() -> None:
@@ -574,7 +684,8 @@ def main() -> None:
         "python-archive",
     ):
         parser.add_argument(f"--{name}", type=Path, required=True)
-    parser.add_argument("--target", choices=TARGETS, required=True)
+    parser.add_argument("--target", choices=(*TARGETS, "linux_x86_64"), required=True)
+    parser.add_argument("--variant", choices=("cpu", "cuda", "rocm"), default="cpu")
     arguments = Arguments()
     parser.parse_args(namespace=arguments)
     print(
@@ -587,6 +698,7 @@ def main() -> None:
             arguments.output,
             target=arguments.target,
             python_archive=arguments.python_archive,
+            variant=arguments.variant,
         )
     )
 
