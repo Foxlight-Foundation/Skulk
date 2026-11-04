@@ -20,18 +20,19 @@ from typing import Protocol, final
 import anyio
 from anyio import to_thread
 
-from skulk.routing.vision_media import VisionMediaPacket
+from skulk.routing.vision_media import AudioSourcePayload, VisionMediaPacket
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.state import State
-from skulk.shared.types.tasks import AudioSeparation, TaskStatus
+from skulk.shared.types.tasks import AudioSeparation, MusicEditing, TaskStatus
 from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.worker.audio_source_types import AudioSourceTask
 
 
-class SourceCopies(Protocol):
+class SourceCopies[SourceTask: AudioSourceTask = AudioSeparation](Protocol):
     """Private bounded file effects; the worker supplies its exclusive source store."""
 
-    def admit(self, task: AudioSeparation) -> None:
+    def admit(self, task: SourceTask) -> None:
         """Reserve one original for this authoritative nonterminal task."""
         ...
 
@@ -124,8 +125,8 @@ def local_separation_input_task(
 
 
 @dataclass
-class _Input:
-    task: AudioSeparation
+class _Input[SourceTask: AudioSourceTask]:
+    task: SourceTask
     deadline: float
     requested_at: float = float("-inf")
     opened: bool = False
@@ -134,8 +135,7 @@ class _Input:
     failed: bool = False
 
 
-@final
-class SeparationInputReceiver:
+class AudioInputReceiver[SourceTask: AudioSourceTask]:
     """Request, verify and acknowledge four bounded originals before execution.
 
     The owner calls begin after authoritative task creation, receive for directed
@@ -149,24 +149,26 @@ class SeparationInputReceiver:
         self,
         node_id: NodeId,
         state: Callable[[], State],
-        copies: SourceCopies,
+        copies: SourceCopies[SourceTask],
         send: Callable[[VisionMediaPacket], Awaitable[None]],
-        fail: Callable[[AudioSeparation, str], Awaitable[None]],
+        fail: Callable[[SourceTask, str], Awaitable[None]],
         *,
+        local_task: Callable[[State, NodeId, CommandId], SourceTask | None],
+        payload: AudioSourcePayload,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Bind existing owners and effects without files, downloads or execution."""
         self.node_id, self.state, self.copies = node_id, state, copies
         self.send, self.fail, self.clock = send, fail, clock
-        self._entries: dict[CommandId, _Input] = {}
+        self.local_task = local_task
+        self.payload: AudioSourcePayload = payload
+        self._entries: dict[CommandId, _Input[SourceTask]] = {}
         self._recent: OrderedDict[CommandId, None] = OrderedDict()
         self._lock = anyio.Lock()
         self._closed = False
 
-    def _live(self, entry: _Input) -> bool:
-        task = local_separation_input_task(
-            self.state(), self.node_id, entry.task.command_id
-        )
+    def _live(self, entry: _Input[SourceTask]) -> bool:
+        task = self.local_task(self.state(), self.node_id, entry.task.command_id)
         return task is not None and (
             task.task_id == entry.task.task_id
             and task.instance_id == entry.task.instance_id
@@ -174,7 +176,7 @@ class SeparationInputReceiver:
             and task.task_params == entry.task.task_params
         )
 
-    async def _failed(self, entry: _Input, detail: str) -> None:
+    async def _failed(self, entry: _Input[SourceTask], detail: str) -> None:
         if entry.failed:
             return
         entry.failed = True
@@ -183,7 +185,7 @@ class SeparationInputReceiver:
             with anyio.fail_after(5):
                 await self.fail(entry.task, detail)
 
-    async def _send(self, entry: _Input, packet: VisionMediaPacket) -> bool:
+    async def _send(self, entry: _Input[SourceTask], packet: VisionMediaPacket) -> bool:
         try:
             with anyio.fail_after(5):
                 await self.send(packet)
@@ -192,7 +194,7 @@ class SeparationInputReceiver:
             return False
         return True
 
-    async def _request(self, entry: _Input) -> None:
+    async def _request(self, entry: _Input[SourceTask]) -> None:
         if self._closed:
             return
         entry.requested_at = self.clock()
@@ -203,7 +205,7 @@ class SeparationInputReceiver:
                 target_node=entry.task.owner_node,
                 command_id=entry.task.command_id,
                 model=ModelId(entry.task.task_params.model),
-                payload="separation_source",
+                payload=self.payload,
                 kind="requested",
                 sequence=0,
                 image_count=1,
@@ -219,7 +221,7 @@ class SeparationInputReceiver:
             current = self._entries.get(command_id)
             if current is not None:
                 return not current.failed and self._live(current)
-            task = local_separation_input_task(self.state(), self.node_id, command_id)
+            task = self.local_task(self.state(), self.node_id, command_id)
             if task is None or task.task_status is not TaskStatus.Pending:
                 return False
             if len(self._entries) >= 4:
@@ -245,7 +247,7 @@ class SeparationInputReceiver:
         owner. Valid opened/chunk/completed packets may reorder. Once accepted,
         duplicate frames cannot delete a source a resident might be reading.
         """
-        if packet.payload != "separation_source" or packet.target_node != self.node_id:
+        if packet.payload != self.payload or packet.target_node != self.node_id:
             return False
         async with self._lock:
             entry = self._entries.get(packet.command_id)
@@ -310,7 +312,7 @@ class SeparationInputReceiver:
                 )
             return entry.accepted
 
-    async def _acknowledge(self, entry: _Input) -> None:
+    async def _acknowledge(self, entry: _Input[SourceTask]) -> None:
         if self._closed or not self._live(entry):
             return
         if not entry.accepted and self.clock() >= entry.deadline:
@@ -321,7 +323,7 @@ class SeparationInputReceiver:
             target_node=entry.task.owner_node,
             command_id=entry.task.command_id,
             model=ModelId(entry.task.task_params.model),
-            payload="separation_source",
+            payload=self.payload,
             kind="accepted",
             sequence=entry.task.task_params.total_input_chunks + 1,
         )
@@ -339,7 +341,7 @@ class SeparationInputReceiver:
             and self._live(entry)
         )
 
-    def tracked_tasks(self) -> tuple[AudioSeparation, ...]:
+    def tracked_tasks(self) -> tuple[SourceTask, ...]:
         """Return bounded admitted identities, including terminal undrained copies."""
         return tuple(entry.task for entry in self._entries.values())
 
@@ -380,3 +382,63 @@ class SeparationInputReceiver:
         self._closed = True
         for command_id in tuple(self._entries):
             await self.release_after_drain(command_id)
+
+
+
+def local_music_edit_input_task(
+    state: State, node_id: NodeId, command_id: CommandId,
+) -> MusicEditing | None:
+    """Resolve one admitted native edit from complete authoritative local State."""
+    matches = (
+        task for task in state.tasks.values()
+        if isinstance(task, MusicEditing) and task.command_id == command_id
+    )
+    task = next(matches, None)
+    if task is None or next(matches, None) is not None or task.task_status not in {TaskStatus.Pending, TaskStatus.Running}:
+        return None
+    instance = state.instances.get(task.instance_id)
+    if instance is None:
+        return None
+    assignments = instance.shard_assignments
+    runner = assignments.node_to_runner.get(node_id)
+    if runner is None or len(assignments.node_to_runner) != 1 or len(assignments.runner_to_shard) != 1:
+        return None
+    shard = assignments.runner_to_shard.get(runner)
+    if (
+        shard is None or shard.model_card.model_id != task.task_params.model
+        or shard.model_card.music is None or shard.model_card.music.native is None
+        or shard.world_size != 1 or shard.device_rank != 0 or shard.start_layer != 0
+        or shard.end_layer != shard.model_card.n_layers or shard.n_layers != shard.model_card.n_layers
+        or shard.resolved_backend not in {"ace_step-cpu", "ace_step-metal", "ace_step-cuda", "ace_step-rocm"}
+        or shard.resolved_engine_build is None
+    ):
+        return None
+    return task
+
+
+@final
+class SeparationInputReceiver(AudioInputReceiver[AudioSeparation]):
+    """Existing separation policy over the shared bounded original handshake."""
+
+    def __init__(
+        self, node_id: NodeId, state: Callable[[], State], copies: SourceCopies[AudioSeparation],
+        send: Callable[[VisionMediaPacket], Awaitable[None]],
+        fail: Callable[[AudioSeparation, str], Awaitable[None]], *, clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Retain separation's exact source/rank/policy admission and payload."""
+        super().__init__(node_id, state, copies, send, fail,
+            local_task=local_separation_input_task, payload="separation_source", clock=clock)
+
+
+@final
+class MusicEditInputReceiver(AudioInputReceiver[MusicEditing]):
+    """Native edit policy over the shared bounded original handshake."""
+
+    def __init__(
+        self, node_id: NodeId, state: Callable[[], State], copies: SourceCopies[MusicEditing],
+        send: Callable[[VisionMediaPacket], Awaitable[None]],
+        fail: Callable[[MusicEditing, str], Awaitable[None]], *, clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Bind native edit identity and an isolated source payload to real custody."""
+        super().__init__(node_id, state, copies, send, fail,
+            local_task=local_music_edit_input_task, payload="music_edit_source", clock=clock)

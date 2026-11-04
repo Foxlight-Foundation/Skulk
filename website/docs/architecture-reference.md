@@ -2708,6 +2708,48 @@ Cancelled capacity checks drain before the transfer fence is released. Verified
 shared native cache reuse restores missing adjacent installed-card records from
 the original indexed owner, including companions reached through a cached base.
 
+### Native music edit contracts and custody
+
+- `shared/types/music_edits.py`: task-discriminated `MusicEditRequest` with
+  separate Add a part/Repaint/Continue controls, measured source-clock ranges,
+  integer floor/ceil conversion to 48 kHz, immutable once-resolved seed, card
+  modes/part/lyrics/duration validation, and path-free `MusicEditingOutput`.
+- `MusicEditing` command/task: source identity/geometry and bounded chunk count,
+  model, caption, lyrics, fixed seed and native extent; no audio or local paths.
+- Master native admission: complete one-host rank-zero shard, idle loaded runner,
+  exact current backend/build match; generation/edit pending reservations remain
+  occupied until indexed State echoes. Mere installability is insufficient.
+- `api/media_job_storage.py::PrivateMediaJobFile`: shared separation/edit file
+  lifetime lock, bounded private reads and durable replacement. Uncertain writes
+  fence further reads/writes until reopening.
+- `api/music_edit_jobs.py`: four active/64 retained records, exact source/seed/
+  operation/result correlation, render + synced WAV + drained return ACK gate,
+  restart interruption without replay; completed unexpired history stays retained.
+- `api/music_edit_media.py`: private shared WAV assembler, 64 MiB/result,
+  24-hour retention, independent PCM24/stereo/48 kHz encoded-fact/peak checks,
+  completed-only adoption, no implicit eviction, failed-delete capacity retention.
+- `worker/audio_source_types.py`: read-only source task/params protocols for
+  `SeparationSourceStore` and `SeparationSourceCustody`; strict actual tasks remain
+  in State. Four-original admission and inherited native reader fences stay
+  shared. Inject result cleanup for ACE's exact owned layout.
+- `api/music_edit_api.py`: six `/v1/music/edits` routes before dynamic music IDs,
+  existing authentication plus operator inference scope, 256 KiB closed JSON
+  multipart metadata/64 MiB source/180-second upload bounds, persisted seed,
+  placement/render/return deadlines, session interruption without replay.
+- `audio_uploads.py` / `audio_source_delivery.py`: shared native audio multipart
+  closure and joined bounded addressed original delivery. `AudioInputReceiver`
+  shares the handshake with separate concrete task selectors and payload roles.
+- `MusicEditingChunk`: DATA metadata only; `VISION_MEDIA.music_edit_source` /
+  `OUTPUT_MEDIA.music_edit`: directed binary original/result transfer. API queue,
+  failure/cancellation/session paths include edits. Reverse controls send outside
+  the actor lock; source/control drains retain admission. Router subscription
+  filters prevent same-node ACK echo deadlocks while preserving legacy traffic.
+  Cancellation submission precedes stream finalization. Uncertain index writes
+  fence reads, abort accepted native work and retire only the edit sweeper;
+  requests return actionable 503 responses while unrelated host tasks continue.
+- Execution activation: resident/worker, live native placement and Studio edits
+  still require complete native/installed acceptance.
+
 ### Native ACE package/process definitions
 
 - `packaging/skulk-ace-step/`: independently installed Python 3.12 native family,

@@ -2193,8 +2193,8 @@ rehydration otherwise prefers the dedicated build over a primary-only override.
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
 Native ACE base card metadata can also describe intrinsic editing modes in
 `music.native`. Those safetensors components cannot be loaded by the audio.cpp
-runner; this section documents the existing generation job API, not a native
-editing endpoint.
+runner. This section documents generation; native editing has its separate
+contract below.
 Native-profile Download requests retain all selected primary, text-encoder and
 autoencoder files at their pinned revisions, grouping shared sources into one
 required transfer. Missing components fail the download with an actionable reason;
@@ -2267,6 +2267,112 @@ whose WAV is still being delivered.
 **DELETE** `/v1/music/{music_id}` cancels a live job, removes its WAV, and
 forgets its record. It returns
 `{ "id": "...", "object": "music.deleted", "deleted": true }`.
+
+## Native music editing
+
+These routes describe the native edit service under the Music Studio initiative.
+Native ACE model mounting and execution remain gated on resident-runner and
+installed-platform acceptance. Downloading a native card or engine package alone
+does not create an executable editing instance. Existing audio.cpp generation
+continues to use the music API above.
+
+Edits are asynchronous and local to the accepting API node. Use that same node
+for polling, cancellation and content. The existing API authentication policy
+applies; operator gateway access requires the inference (`chat:write`) scope.
+Raw source/result audio uses directed media transport and stays outside
+replicated State and event logs.
+
+### Create an edit
+
+**POST** `/v1/music/edits` accepts `multipart/form-data` with exactly two fields:
+
+- `request`: one closed JSON object, at most 256 KiB.
+- `file`: the original encoded WAV, at most 64 MiB, one to 120 seconds, mono or
+  stereo, finite PCM/float samples, 8–192 kHz. The original is never overwritten.
+
+The response is **202** with a `music.edit` resource. Four edits, including
+unfinished source/return drains, may be active on one API node. One native model
+instance admits one generation or edit at a time. A prepared package alone does
+not satisfy model readiness.
+
+| Common field | Type | Contract |
+| --- | --- | --- |
+| `task` | string, required | `add_part`, `repaint`, or `continue` |
+| `model` | string, required | Selected native card alias |
+| `prompt` | string, required | Original nonblank caption, up to 8,000 characters |
+| `lyrics` | string, optional | Original nonblank lyrics, up to 20,000 characters; obeys the card's lyric rule. Omission resolves to `[Instrumental]` |
+| `source_sample_rate` | integer, required | Clock for all request frame coordinates; must equal the measured WAV sample rate |
+| `seed` | integer, optional | 0–4294967295, including zero. The API selects a missing seed once and durably records it before dispatch |
+
+Operation-specific fields are closed:
+
+| Task | Additional controls |
+| --- | --- |
+| `add_part` | Required `part_class`, limited to the card's declared classes. Optional `region_start_frame` (default 0) and `region_end_frame` (default complete source) |
+| `repaint` | Required `region_end_frame`; optional `region_start_frame` (default 0). The nonempty half-open region must be inside the original |
+| `continue` | Required `target_frames`: total extent including the complete original, strictly larger than it. Only the appended tail is reworked; region/part fields are rejected |
+
+Inputs use the source clock. The API maps starts down and ends up to the native
+48 kHz frame grid using integer arithmetic. The resource explicitly returns
+`frame_sample_rate: 48000`, resolved `target_frames`, `region_start_frame`, and
+`region_end_frame`. In-place edits preserve the original extent after that
+mapping. Continue includes the original and the extension. The selected card's
+duration maximum and the global 120-second ceiling both apply.
+
+Unknown or task-inappropriate fields, caller paths, arbitrary native options,
+blank text, invalid clocks/ranges and disallowed card controls return **422**.
+Malformed multipart requests return **400**, wrong content type **415**, a
+bounded upload exceeding its declared/streamed limit **413**, and an upload
+exceeding 180 seconds **408**. Capacity/storage admission failure returns **503**.
+An interrupted or ambiguous submission is never automatically resubmitted;
+inspect the accepting node's retained jobs before choosing to try again.
+
+```bash
+curl -X POST "$SKULK_URL/v1/music/edits" \
+  -F 'request={"task":"repaint","model":"native-model-id","prompt":"A gentle cello response","source_sample_rate":48000,"region_start_frame":480000,"region_end_frame":960000,"seed":0}' \
+  -F 'file=@context.wav;type=audio/wav'
+```
+
+### List and retrieve edits
+
+**GET** `/v1/music/edits` accepts `limit` (1–63, default 20) and optional `after`
+(the previous page's retained `last_id`). The response has `object: "list"`,
+`data`, `first_id`, `last_id`, and `has_more`, newest first. Invalid/stale cursors
+return **400**. Up to 64 records are retained; completed unexpired results are
+protected from implicit eviction to admit more work.
+
+**GET** `/v1/music/edits/{edit_id}` returns the accepted caption, lyrics, fixed
+seed, measured original, resolved native extent, status and terminal times.
+`output` remains null until native render completion, independently verified and
+synced WAV custody, and drained reverse acceptance all agree. Completed output
+records exact source lineage, runtime/model identities, observed device/precision,
+conditioning gain/padding, render latency and WAV geometry/size/SHA-256/peak.
+Paths and raw audio bytes are excluded. A missing node-local job returns **404**.
+
+Placement waits are bounded to 45 seconds, admitted inference to 40 minutes, and
+post-render return delivery to five minutes, checked by a one-second sweeper.
+Restart or cluster-session replacement fails interrupted work without replay or
+seed changes. Previously completed results are reverified before serving.
+
+### Download, cancel and delete edits
+
+**GET** `/v1/music/edits/{edit_id}/content` returns the completed **PCM24 stereo
+48 kHz WAV**, at most 64 MiB, with `Content-Length`, attachment filename and a
+quoted SHA-256 `ETag`. Content is retained for 24 hours. Unsettled/failed/cancelled
+jobs return **409**; absent/expired content returns **404**. Eight downloads are
+admitted per API node; excess readers return **503**. Deleting a job does not
+truncate a download whose descriptor was already leased.
+
+**POST** `/v1/music/edits/{edit_id}/cancel` records cancellation, stops native
+work and source/result delivery, and removes partial copies. Terminal jobs are
+unchanged. **POST** `/v1/cancel/{edit_id}` also cancels an active edit. Late native
+frames cannot revive cancelled work.
+
+**DELETE** `/v1/music/edits/{edit_id}` cancels active work, removes only API-owned
+content and forgets the record. It returns
+`{"id":"...","object":"music.edit.deleted","deleted":true}`. Missing jobs
+return **404**. Creator originals and Studio project assets remain independently
+owned. WAV output is never silently truncated or transcoded.
 
 ## Source separation
 

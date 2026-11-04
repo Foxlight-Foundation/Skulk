@@ -223,7 +223,7 @@ async def test_processor_reserves_across_commands_until_indexed_application(repl
                     admitted.append(event)
                 assert not master.state.tasks
                 assert len({item.task.instance_id for item in admitted}) == replicas
-                assert len(master._pending_separation_reservations) == replicas
+                assert len(master._pending_native_audio_reservations) == replicas
                 await commands.send(ForwarderCommand(origin=SystemId("API"), command=command()))
                 refused = await output.receive()
                 assert isinstance(refused, TaskCreated) and refused.task.task_status == TaskStatus.Failed
@@ -232,7 +232,7 @@ async def test_processor_reserves_across_commands_until_indexed_application(repl
                 # Applied pending work still consumes it; terminal history does not.
                 for index, event in enumerate(admitted):
                     master._apply_indexed_event(IndexedEvent(idx=index, event=event))
-                assert not master._pending_separation_reservations
+                assert not master._pending_native_audio_reservations
                 await commands.send(ForwarderCommand(origin=SystemId("API"), command=command()))
                 persisted_refusal = await output.receive()
                 assert isinstance(persisted_refusal, TaskCreated)

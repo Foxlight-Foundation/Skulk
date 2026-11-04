@@ -315,32 +315,41 @@ def _source_and_samples(data: bytes) -> tuple[SeparationSource, memoryview]:
     return source, sample_chunk
 
 
-def stem_from_wav(name: SeparationStemName, data: bytes) -> SeparatedStem:
-    """Measure one bounded PCM24 stereo result independently of its producer.
+def pcm24_from_wav(data: bytes) -> tuple[SeparationSource, float]:
+    """Measure bounded PCM24 stereo geometry/digest and encoded peak without a role.
 
     Hash every encoded byte and scan actual signed PCM samples for the peak.
-    This shares source container/geometry validation and makes no file, network
-    or native-library calls. The caller still compares the returned facts with
-    the authoritative manifest, checks complete-set identity and gates content
-    visibility. Bound reads before constructing ``data`` and run large scans
-    outside the API event loop.
+    Music editing and separation share the same container validator. This makes
+    no file, network or native-library calls. Bound reads before constructing
+    ``data`` and run large scans outside the API event loop.
     """
     source, samples = _source_and_samples(data)
     if (source.encoding, source.bit_depth, source.channels) != ("pcm", 24, 2):
-        raise ValueError("separated output requires PCM24 stereo WAV")
+        raise ValueError("output requires PCM24 stereo WAV")
     peak_integer = 0
     for offset in range(0, len(samples), 3):
         peak_integer = max(
             peak_integer,
             abs(int.from_bytes(samples[offset : offset + 3], "little", signed=True)),
         )
+    return source, peak_integer / 8388608
+
+
+def stem_from_wav(name: SeparationStemName, data: bytes) -> SeparatedStem:
+    """Measure one role's complete PCM24 stereo WAV independently of its producer.
+
+    The caller compares all returned facts with the authoritative manifest and
+    gates complete-set content visibility. The encoded sample peak uses the
+    same role-independent WAV inspection as native music editing.
+    """
+    source, peak = pcm24_from_wav(data)
     return SeparatedStem(
         name=name,
         size_bytes=source.size_bytes,
         sha256=source.sha256,
         sample_rate=source.sample_rate,
         frames=source.frames,
-        peak=peak_integer / 8388608,
+        peak=peak,
     )
 
 

@@ -16,6 +16,7 @@ from skulk.shared.types.common import CommandId, ModelId, NodeId
 
 @pytest.mark.parametrize("purpose", [
     "separation_drums", "separation_bass", "separation_other", "separation_vocals",
+    "music_edit",
 ])
 async def test_stem_open_is_refused_before_touching_video_music_state(
     monkeypatch: pytest.MonkeyPatch, purpose: OutputMediaPurpose,
