@@ -93,6 +93,7 @@ from skulk.shared.types.commands import (
     ForwarderDownloadCommand,
     ImageEdits,
     ImageGeneration,
+    MusicEditing,
     MusicGeneration,
     PlaceInstance,
     PrepareAudioCpp,
@@ -146,6 +147,7 @@ from skulk.shared.types.events import (
     is_persistable_control_event,
 )
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.music_edits import MusicEditingTaskParams
 from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
@@ -169,6 +171,9 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.tasks import (
     ImageGeneration as ImageGenerationTask,
+)
+from skulk.shared.types.tasks import (
+    MusicEditing as MusicEditingTask,
 )
 from skulk.shared.types.tasks import (
     MusicGeneration as MusicGenerationTask,
@@ -352,6 +357,7 @@ _COMMAND_TASK_TYPES = (
     AudioTranscriptionTask,
     RealtimeAudioTranscriptionTask,
     MusicGenerationTask,
+    MusicEditingTask,
     AudioSeparationTask,
 )
 
@@ -950,7 +956,7 @@ def video_generation_instances(
     return [identifier for _, _, _, identifier in sorted(ranked)]
 
 
-def music_generation_instances(state: State, model_id: ModelId) -> list[InstanceId]:
+def music_generation_instances(state: State, model_id: ModelId, pending_events: Sequence[Event] = (), *, node_resources: Mapping[NodeId, NodeResources] | None = None) -> list[InstanceId]:
     """Rank healthy single-host music instances by readiness and active load."""
     ranked: list[tuple[bool, int, str, InstanceId]] = []
     for instance in state.instances.values():
@@ -964,6 +970,9 @@ def music_generation_instances(state: State, model_id: ModelId) -> list[Instance
         shard = next(iter(assignments.runner_to_shard.values()))
         if shard.model_card.music is None:
             continue
+        native = shard.model_card.music.native
+        if native is not None and not _native_music_ready(state, instance, pending_events, node_resources or {}):
+            continue
         statuses = [state.runners.get(runner) for runner in assignments.runner_to_shard]
         if any(
             status is None
@@ -973,13 +982,127 @@ def music_generation_instances(state: State, model_id: ModelId) -> list[Instance
             continue
         ready = all(isinstance(status, (RunnerReady, RunnerRunning)) for status in statuses)
         active = sum(
-            isinstance(task, MusicGenerationTask)
+            isinstance(task, (MusicGenerationTask, MusicEditingTask))
             and task.instance_id == instance.instance_id
             and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
             for task in state.tasks.values()
         )
         ranked.append((not ready, active, str(instance.instance_id), instance.instance_id))
     return [identifier for _, _, _, identifier in sorted(ranked)]
+
+
+def music_generation_events(
+    state: State,
+    command: MusicGeneration,
+    pending_events: Sequence[Event] = (),
+    *,
+    node_resources: Mapping[NodeId, NodeResources],
+) -> tuple[list[Event], TaskId]:
+    """Create generation events with the same native serial gate as edits.
+
+    Legacy audio.cpp ranking is unchanged. Native execution additionally needs
+    the placed runner's current verified build and an unreserved model slot.
+    """
+    candidates = music_generation_instances(
+        state, ModelId(command.task_params.model), pending_events,
+        node_resources=node_resources,
+    )
+    identifier = TaskId()
+    result: list[Event] = [TaskCreated(
+        task_id=identifier,
+        task=MusicGenerationTask(
+            task_id=identifier, command_id=command.command_id,
+            owner_node=command.owner_node,
+            instance_id=candidates[0] if candidates else InstanceId(str(command.command_id)),
+            task_status=TaskStatus.Pending if candidates else TaskStatus.Failed,
+            task_params=command.task_params, trace_enabled=state.tracing_enabled,
+        ),
+    )]
+    if not candidates:
+        result.append(TaskFailed(
+            task_id=identifier, error_type="music_model_unavailable",
+            error_message=f"No healthy single-host music instance serves {command.task_params.model}",
+        ))
+    return result, identifier
+
+
+def _native_music_ready(state: State, instance: Instance, pending_events: Sequence[Event], node_resources: Mapping[NodeId, NodeResources]) -> bool:
+    """Require current complete mounted native execution and serial admission.
+
+    Library/package availability alone cannot create this readiness. The placed
+    runner must have loaded successfully, its live node must still advertise the
+    exact verified build, and no generation/edit may already own this instance.
+    """
+    assignments = instance.shard_assignments
+    if len(assignments.node_to_runner) != 1 or len(assignments.runner_to_shard) != 1:
+        return False
+    node, runner = next(iter(assignments.node_to_runner.items()))
+    shard = assignments.runner_to_shard.get(runner)
+    resources = node_resources.get(node)
+    if (
+        shard is None or resources is None
+        or shard.model_card.model_id != assignments.model_id
+        or shard.model_card.music is None or shard.model_card.music.native is None
+        or shard.world_size != 1 or shard.device_rank != 0 or shard.start_layer != 0
+        or shard.end_layer != shard.model_card.n_layers or shard.n_layers != shard.model_card.n_layers
+        or shard.resolved_backend not in {"ace_step-cpu", "ace_step-metal", "ace_step-cuda", "ace_step-rocm"}
+        or shard.resolved_engine_build is None
+        or not shard.resolved_engine_build.startswith("ace_step@sha256:")
+        or shard.resolved_backend not in resources.backends
+        or resources.engine_builds.get(shard.resolved_backend) != shard.resolved_engine_build
+        or not isinstance(state.runners.get(runner), RunnerReady)
+    ):
+        return False
+    return not any(
+        isinstance(task, (MusicEditingTask, MusicGenerationTask))
+        and task.instance_id == instance.instance_id
+        and task.task_status in (TaskStatus.Pending, TaskStatus.Running)
+        for task in (
+            *state.tasks.values(),
+            *(event.task for event in pending_events if isinstance(event, TaskCreated)),
+        )
+    )
+
+
+def music_editing_instances(state: State, params: MusicEditingTaskParams, pending_events: Sequence[Event] = (), *, node_resources: Mapping[NodeId, NodeResources]) -> list[InstanceId]:
+    """Select ready native models implementing this exact operation and part class."""
+    eligible: list[InstanceId] = []
+    for instance in state.instances.values():
+        if instance.shard_assignments.model_id != params.model or not _native_music_ready(state, instance, pending_events, node_resources):
+            continue
+        shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+        profile = shard.model_card.music
+        native = profile.native if profile is not None else None
+        if (
+            profile is None or native is None
+            or ModelTask.MusicEditing not in shard.model_card.tasks
+            or params.task not in native.editing_modes
+            or params.part_class is not None and params.part_class not in native.part_classes
+            or params.target_frames > profile.max_seconds * 48000
+            or profile.lyrics.value == "required" and params.lyrics == "[Instrumental]"
+            or profile.lyrics.value == "unsupported" and params.lyrics != "[Instrumental]"
+        ):
+            continue
+        eligible.append(instance.instance_id)
+    return sorted(eligible, key=str)
+
+
+def music_editing_events(state: State, command: MusicEditing, pending_events: Sequence[Event] = (), *, node_resources: Mapping[NodeId, NodeResources]) -> tuple[list[Event], TaskId]:
+    """Reserve one ready native instance or emit a correlated terminal refusal."""
+    eligible = music_editing_instances(state, command.task_params, pending_events, node_resources=node_resources)
+    identifier = TaskId()
+    result: list[Event] = [TaskCreated(task_id=identifier, task=MusicEditingTask(
+        task_id=identifier, command_id=command.command_id, owner_node=command.owner_node,
+        instance_id=eligible[0] if eligible else InstanceId(str(command.command_id)),
+        task_status=TaskStatus.Pending if eligible else TaskStatus.Failed,
+        task_params=command.task_params, trace_enabled=state.tracing_enabled,
+    ))]
+    if not eligible:
+        result.append(TaskFailed(
+            task_id=identifier, error_type="music_edit_unavailable",
+            error_message="No idle ready native music instance serves this operation with the current verified engine build.",
+        ))
+    return result, identifier
 
 
 def separation_generation_instances(
@@ -1169,7 +1292,7 @@ class Master:
         # Task events use the same asynchronous indexed path as placements.
         # Reserve serial native capacity across command iterations until State
         # contains the admission, rather than relying on one command's list.
-        self._pending_separation_reservations: dict[TaskId, TaskCreated] = {}
+        self._pending_native_audio_reservations: dict[TaskId, TaskCreated] = {}
         self._runner_loaded_at: dict[RunnerId, float] = {}
         # Restart recovery (initiative/restart-recovery). A cold start, with no
         # prior replicated view, is a single-node reboot or a whole-cluster
@@ -1432,7 +1555,7 @@ class Master:
         elif isinstance(indexed.event, InstanceDeleted):
             self._pending_instance_reservations.pop(indexed.event.instance_id, None)
         if isinstance(indexed.event, TaskCreated):
-            self._pending_separation_reservations.pop(indexed.event.task_id, None)
+            self._pending_native_audio_reservations.pop(indexed.event.task_id, None)
         record_membership_from_event(self._telemetry_view, indexed.event)
         if isinstance(indexed.event, DemucsPreparationCompleted):
             result = indexed.event
@@ -1812,10 +1935,10 @@ class Master:
             self._pending_instance_reservations[event.instance.instance_id] = event.instance
         if (
             isinstance(event, TaskCreated)
-            and isinstance(event.task, AudioSeparationTask)
+            and isinstance(event.task, (AudioSeparationTask, MusicEditingTask, MusicGenerationTask))
             and event.task.task_status in (TaskStatus.Pending, TaskStatus.Running)
         ):
-            self._pending_separation_reservations[event.task_id] = event
+            self._pending_native_audio_reservations[event.task_id] = event
         await self.event_sender.send(event)
 
     def _placement_reservations(
@@ -3387,53 +3510,28 @@ class Master:
                                 self.state,
                                 command,
                                 (
-                                    *self._pending_separation_reservations.values(),
+                                    *self._pending_native_audio_reservations.values(),
                                     *generated_events,
                                 ),
                             )
                             generated_events.extend(admitted)
                             self.command_task_mapping[command.command_id] = task_id
-                        case MusicGeneration():
-                            candidates = music_generation_instances(
-                                self.state, ModelId(command.task_params.model)
+                        case MusicEditing():
+                            admitted, task_id = music_editing_events(
+                                self.state, command,
+                                (*self._pending_native_audio_reservations.values(), *generated_events),
+                                node_resources=self._telemetry_view.node_resources,
                             )
-                            task_id = TaskId()
-                            unavailable = not candidates
-                            selected_instance_id = (
-                                candidates[0]
-                                if candidates
-                                else InstanceId(str(command.command_id))
-                            )
-                            generated_events.append(
-                                TaskCreated(
-                                    task_id=task_id,
-                                    task=MusicGenerationTask(
-                                        task_id=task_id,
-                                        command_id=command.command_id,
-                                        owner_node=command.owner_node,
-                                        instance_id=selected_instance_id,
-                                        task_status=(
-                                            TaskStatus.Failed
-                                            if unavailable
-                                            else TaskStatus.Pending
-                                        ),
-                                        task_params=command.task_params,
-                                        trace_enabled=self.state.tracing_enabled,
-                                    ),
-                                )
-                            )
+                            generated_events.extend(admitted)
                             self.command_task_mapping[command.command_id] = task_id
-                            if unavailable:
-                                generated_events.append(
-                                    TaskFailed(
-                                        task_id=task_id,
-                                        error_type="music_model_unavailable",
-                                        error_message=(
-                                            "No healthy single-host music instance serves "
-                                            f"{command.task_params.model}"
-                                        ),
-                                    )
-                                )
+                        case MusicGeneration():
+                            admitted, task_id = music_generation_events(
+                                self.state, command,
+                                (*self._pending_native_audio_reservations.values(), *generated_events),
+                                node_resources=self._telemetry_view.node_resources,
+                            )
+                            generated_events.extend(admitted)
+                            self.command_task_mapping[command.command_id] = task_id
                         case ImageEdits():
                             for instance in self.state.instances.values():
                                 if (

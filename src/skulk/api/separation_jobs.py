@@ -15,6 +15,7 @@ from typing import Literal, final
 
 from pydantic import Field, model_validator
 
+from skulk.api.media_job_storage import PrivateMediaJobFile
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.audio_separation import (
     SEPARATION_STEMS,
@@ -25,7 +26,7 @@ from skulk.shared.types.audio_separation import (
     SeparationStemName,
 )
 from skulk.shared.types.common import CommandId, NodeId
-from skulk.utils.runtime_files import RuntimeLock, read_private, write_private
+from skulk.utils.runtime_files import write_private
 
 MAX_ACTIVE_SEPARATION_JOBS = 4
 MAX_RETAINED_SEPARATION_JOBS = 64
@@ -181,16 +182,15 @@ class SeparationJobRegistry:
         self._path = index_path
         self._clock = clock
         self._mutex = threading.RLock()
-        self._fenced = False
-        self._closed = False
-        self._lock = RuntimeLock(index_path.parent, name="service.lock")
+        self._file = PrivateMediaJobFile(
+            index_path, limit=MAX_SEPARATION_INDEX_BYTES, kind="separation",
+            capacity_error=SeparationJobCapacityError,
+            storage_error=SeparationJobStorageError,
+            write=lambda path, data: write_private(path, data),
+        )
         try:
-            try:
-                index = _Index.model_validate_json(
-                    read_private(index_path, MAX_SEPARATION_INDEX_BYTES)
-                )
-            except FileNotFoundError:
-                index = _Index(jobs=())
+            retained = self._file.read()
+            index = _Index(jobs=()) if retained is None else _Index.model_validate_json(retained)
             self._jobs = {job.id: job for job in index.jobs}
             recovered = {
                 identifier: job
@@ -201,37 +201,21 @@ class SeparationJobRegistry:
             if recovered != self._jobs:
                 self._commit(recovered)
         except BaseException:
-            self._lock.close()
+            self._file.close()
             raise
 
     def close(self) -> None:
         """Release ownership after the API has stopped its job and media handlers."""
         with self._mutex:
-            self._closed = True
-            self._lock.close()
+            self._file.close()
 
     def _check(self) -> None:
-        if self._closed or self._fenced:
-            raise SeparationJobStorageError(
-                "separation index must be reopened before use"
-            )
+        self._file.check()
 
     def _commit(self, jobs: dict[CommandId, SeparationJob]) -> None:
         self._check()
         record = _Index(jobs=tuple(jobs.values())).model_dump_json().encode()
-        if len(record) > MAX_SEPARATION_INDEX_BYTES:
-            raise SeparationJobCapacityError(
-                "separation metadata exceeds its bounded index"
-            )
-        try:
-            write_private(self._path, record)
-        except OSError as error:
-            # Directory fsync can fail after replacement. Never continue from
-            # potentially older in-memory state after an uncertain durable write.
-            self._fenced = True
-            raise SeparationJobStorageError(
-                "could not durably retain separation state; reopen its index"
-            ) from error
+        self._file.replace(record)
         self._jobs = jobs
 
     def _replace(self, job: SeparationJob, **changes: object) -> SeparationJob:

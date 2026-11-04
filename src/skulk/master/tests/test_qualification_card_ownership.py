@@ -84,6 +84,9 @@ def _hide_signed_registry(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(master_main, "get_current_registry_card", no_registry_card)
+    # Placement also reads the effective installed generation. A signed card
+    # cached by another test must not replace this unit's explicit ordered card.
+    monkeypatch.setattr(master_main, "get_card", no_registry_card)
 
 
 def test_service_cannot_shadow_signed_card_at_authoritative_order(

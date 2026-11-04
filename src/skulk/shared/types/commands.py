@@ -22,6 +22,7 @@ from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.music import MusicGenerationTaskParams
+from skulk.shared.types.music_edits import MusicEditingTaskParams
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
@@ -92,6 +93,20 @@ class MusicGeneration(BaseCommand):
 
     task_params: MusicGenerationTaskParams
     owner_node: NodeId
+
+
+@final
+class MusicEditing(BaseCommand):
+    """Edit one verified original with adapter-owned native music controls.
+
+    Only immutable input facts enter replicated commands. Original and result
+    WAV bytes use acknowledged node-addressed media owned by the accepting API.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    task_params: MusicEditingTaskParams = Field(description="Frozen source, caption, lyrics, seed and edit extent.")
+    owner_node: NodeId = Field(description="API retaining the context and completed result.")
 
 
 @final
@@ -411,6 +426,7 @@ Command = (
     | ImageEdits
     | VideoGeneration
     | MusicGeneration
+    | MusicEditing
     | AudioSeparation
     | PrepareAudioCpp
     | PrepareDemucs

@@ -14,6 +14,7 @@ from skulk.api.types import (
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
 from skulk.shared.types.audio_separation import AudioSeparationOutput
 from skulk.shared.types.music import MusicOutputManifest
+from skulk.shared.types.music_edits import MusicEditingOutput
 from skulk.shared.types.video import (
     VideoGenerationStats,
     VideoOutputManifest,
@@ -258,6 +259,26 @@ class SeparationChunk(BaseChunk):
         return self
 
 
+@final
+class MusicEditingChunk(BaseChunk):
+    """Correlated native edit completion; raw WAV bytes use addressed media."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    output: MusicEditingOutput | None = Field(default=None, description="Complete native edit/source provenance.")
+    finish_reason: Literal["stop", "error"] = Field(description="Successful native completion or terminal failure.")
+    error_message: str | None = Field(default=None, max_length=1024, description="Bounded failure detail.")
+
+    @model_validator(mode="after")
+    def validate_result(self) -> "MusicEditingChunk":
+        """Require exactly one complete success manifest; failed edits expose none."""
+        if (self.finish_reason == "stop") != (self.output is not None):
+            raise ValueError("Native music edit success requires a complete manifest")
+        if self.finish_reason == "stop" and self.error_message is not None:
+            raise ValueError("Successful native music edit cannot contain a failure")
+        return self
+
+
 GenerationChunk = (
     TokenChunk
     | ImageChunk
@@ -270,6 +291,7 @@ GenerationChunk = (
     | VideoChunk
     | MusicChunk
     | SeparationChunk
+    | MusicEditingChunk
 )
 
 

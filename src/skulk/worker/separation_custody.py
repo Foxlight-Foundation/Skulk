@@ -24,10 +24,15 @@ from skulk.shared.types.worker.instances import InstanceId
 from skulk.shared.types.worker.runners import RunnerId
 from skulk.utils.pydantic_ext import FrozenModel
 from skulk.utils.runtime_files import RuntimeLock, read_private, write_private
+from skulk.worker.audio_source_types import AudioSourceTask
 from skulk.worker.runner.demucs.model import separation_result_directory
 from skulk.worker.runner.demucs.result_custody import reclaim_result_directory
 
 SOURCE_OWNERSHIP_FILE = "source-ownership.json"
+
+
+def _reclaim_separation_result(root: Path, command: CommandId) -> bool:
+    return reclaim_result_directory(separation_result_directory(root, command))
 
 
 def separation_reader_key(instance_id: InstanceId, runner_id: RunnerId) -> str:
@@ -67,17 +72,19 @@ class _Journal(FrozenModel):
 
 
 @final
-class SeparationSourceCustody:
+class SeparationSourceCustody[SourceTask: AudioSourceTask = AudioSeparation]:
     """Record at most four source owners and reclaim only drained, owned copies."""
 
     def __init__(
         self,
         root: Path,
         readers_root: Path,
-        reader_key: Callable[[AudioSeparation], str],
+        reader_key: Callable[[SourceTask], str],
+        *, reclaim_result: Callable[[Path, CommandId], bool] = _reclaim_separation_result,
     ) -> None:
         """Bind private paths and authoritative placement resolution without effects."""
         self.root, self.readers_root, self.reader_key = root, readers_root, reader_key
+        self._reclaim_result = reclaim_result
         self._records: dict[CommandId, _Ownership] = {}
 
     def load(self) -> None:
@@ -97,7 +104,7 @@ class SeparationSourceCustody:
             self.root / SOURCE_OWNERSHIP_FILE, journal.model_dump_json().encode()
         )
 
-    def claim(self, task: AudioSeparation) -> None:
+    def claim(self, task: SourceTask) -> None:
         """Persist ownership intent before creating any source directory or writer."""
         key = self.reader_key(task)
         if re.fullmatch(r"[a-f0-9]{64}", key) is None:
@@ -141,10 +148,7 @@ class SeparationSourceCustody:
         record = self._records.get(command)
         if record is None:
             return True
-        directory = separation_result_directory(
-            self.readers_root / record.reader_key, command
-        )
-        return reclaim_result_directory(directory)
+        return self._reclaim_result(self.readers_root / record.reader_key, command)
 
     def recover(self, active: Collection[CommandId] = ()) -> int:
         """Reclaim stale owned copies only after an actual exclusive reader fence.

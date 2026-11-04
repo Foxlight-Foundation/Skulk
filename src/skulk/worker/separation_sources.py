@@ -23,6 +23,7 @@ from skulk.shared.types.audio_separation import (
 from skulk.shared.types.common import CommandId
 from skulk.shared.types.tasks import AudioSeparation, TaskStatus
 from skulk.utils.runtime_files import RuntimeLock, read_private
+from skulk.worker.audio_source_types import AudioSourceTask
 from skulk.worker.separation_custody import (
     SOURCE_OWNERSHIP_FILE,
     SeparationSourceCustody,
@@ -30,7 +31,7 @@ from skulk.worker.separation_custody import (
 
 
 @final
-class SeparationSourceStore:
+class SeparationSourceStore[SourceTask: AudioSourceTask = AudioSeparation]:
     """Own up to four encoded originals, including verified waiting inputs.
 
     File I/O belongs off the worker loop. Copies are ephemeral: worker/API restart
@@ -40,7 +41,7 @@ class SeparationSourceStore:
     """
 
     def __init__(
-        self, root: Path, *, custody: SeparationSourceCustody | None = None
+        self, root: Path, *, custody: SeparationSourceCustody[SourceTask] | None = None
     ) -> None:
         """Take an exclusive private input root without starting native execution."""
         self.root = root
@@ -49,7 +50,7 @@ class SeparationSourceStore:
             raise ValueError("source custody journal belongs to a different root")
         self._custody = custody
         self._ownership: RuntimeLock | None = RuntimeLock(root, name="service.lock")
-        self._tasks: dict[CommandId, AudioSeparation] = {}
+        self._tasks: dict[CommandId, SourceTask] = {}
         self._ready: dict[CommandId, Path] = {}
         try:
             if custody is not None:
@@ -113,7 +114,7 @@ class SeparationSourceStore:
             self._unresolved_count = self._count_unresolved()
             return recovered
 
-    def admit(self, task: AudioSeparation) -> None:
+    def admit(self, task: SourceTask) -> None:
         """Reserve bytes for an authoritative local task, preserving identical opens.
 
         The receiver must correlate current State, target instance and source

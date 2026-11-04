@@ -2718,6 +2718,37 @@ Hosted GPU-package jobs run CPU boundary checks; real accelerator probing and
 model qualification remain separate. Actual ABI/loader/device qualification remains required. These
 definitions do not yet register native worker placement or published inventory.
 
+Native editing job contracts live in `shared/types/music_edits.py`: closed
+task-discriminated inputs, source-clock integer floor/ceil conversion to 48 kHz,
+card-bound edit modes/classes/lyrics/duration and a seed resolved exactly once
+before dispatch. `MusicEditing` command/task metadata contains no PCM or paths.
+Master native generation/editing admission shares pending reservations across
+commands and requires a complete idle loaded instance with current exact live
+backend/build resources. `api/music_edit_jobs.py` and separation share exclusive,
+uncertain-write-fenced index I/O in `api/media_job_storage.py`. Edit completion
+requires native metadata, render finish, independently verified synced WAV and
+drained return ACK. `api/music_edit_media.py` checks all encoded PCM24/stereo/
+48 kHz facts/peak and retains failed-cleanup capacity. Source custody reuses
+read-only audio-task protocols and actual strict task instances; result cleanup
+is injected for the engine's exact owned layout. A bounded index-independent
+cleanup actor retains source/result ownership and admission after terminal
+metadata until both stores drain, including after a storage-fenced sweeper
+retires. Original-only cleanup preserves completed WAVs; incomplete DELETE
+returns 503 without forgetting metadata, and unresolved orphan purge blocks edit
+storage readiness. `MusicEditAPI` registers six
+`/v1/music/edits` routes before legacy dynamic music IDs, under existing auth
+and operator inference scope. Multipart OpenAPI embeds the closed task schemas.
+Shared upload/source-sender helpers and `AudioInputReceiver` keep original
+verification and cancellation joined. `MusicEditingChunk` carries path-free DATA
+provenance; `music_edit_source` and `music_edit` are addressed input/output media
+roles. API queues, cancellation, failure and session reset include edits. Reverse
+controls send outside the actor lock, retain admission until drained and filter
+same-node ACK echoes. Native worker/Studio activation remains gated on complete
+execution and installed acceptance.
+Edit cancellation submission precedes TaskFinished stream finalization. A
+durable-index uncertainty fence aborts accepted native work, retires only this
+service's sweeper and returns actionable HTTP 503 without crashing host tasks.
+
 `shared/types/native_music.py` is the canonical dependency-light private protocol.
 The resident verifies complete data/code before native import, explicitly probes
 the requested lane, observes all component dtypes/devices, and verifies the actual

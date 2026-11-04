@@ -4046,6 +4046,65 @@ Cancelled capacity checks drain before the transfer fence is released. Verified
 shared native cache reuse restores missing adjacent installed-card records from
 the original indexed owner, including companions reached through a cached base.
 
+### Native music editing job contract
+
+`shared/types/music_edits.py` defines closed, discriminated Add a part, Repaint
+and Continue inputs. Requests describe ranges in the measured original WAV's
+sample clock. Starts floor and ends ceil onto the native 48 kHz grid using
+integer arithmetic. Continue extends beyond the complete source; in-place edits
+retain its exact duration. Model-card modes, part classes, lyrics rules and the
+120-second ceiling constrain resolution. The accepting API owner supplies and
+persists one seed before dispatch; a restart never rerandomizes accepted work.
+
+`MusicEditing` commands/tasks carry immutable source geometry and digest, model,
+caption, lyrics, seed and resolved native extent. Original/result bytes and local
+paths stay outside replicated State. Master admission shares pending reservations
+between native generation and editing until indexed events apply. It requires a
+complete single-host model, idle `RunnerReady`, and the placed backend/build in
+current node resources. An installable package cannot satisfy that gate.
+
+`api/music_edit_jobs.py` owns a bounded durable edit index. Both it and separation
+use `api/media_job_storage.py` for exclusive lifetime ownership and durable file
+replacement. Uncertain writes fence reads until reopening. Completion requires
+the correlated native manifest, render finish, independently verified and synced
+local WAV, and a drained return acknowledgement. Restart fails interrupted jobs
+without replay. `api/music_edit_media.py` uses the existing WAV assembler in a
+separate private root, checks PCM24/stereo/48 kHz geometry, size, digest and peak,
+and rechecks completed content on adoption. Results retain the 64 MiB/24-hour
+bounds; failed deletion retains its capacity charge.
+
+The encoded source owner and crash journal accept read-only audio-task protocols
+so actual strict music tasks reuse separation's four-source bound and reader
+fences. Native result reclamation is injected per owner; ACE must supply its own
+ownership-aware result cleanup. `AudioInputReceiver` shares the admitted-source
+handshake while concrete separation/edit receivers keep their own task selectors
+and payload roles. `api/audio_uploads.py` and `audio_source_delivery.py` share
+bounded multipart parsing, spool closure and joined, hashed original delivery.
+
+`api/music_edit_api.py` registers six `/v1/music/edits` routes before the legacy
+dynamic music-ID route. The host applies its existing authentication boundary;
+the operator gateway requires inference scope for this route family. Closed
+request schemas are embedded in multipart OpenAPI metadata. A path-free
+`MusicEditingChunk` carries native provenance on DATA; `music_edit_source` on
+VISION_MEDIA and `music_edit` on OUTPUT_MEDIA carry addressed original/result
+bytes. API queues, generic cancellation, task failure and session replacement
+all include edits. Reverse ACK/cancellation sends run outside the result actor
+lock, and source/control drains retain admission until joined. Local routing
+filters reverse ACK echoes to prevent same-node rendezvous deadlock. Native
+resident/worker activation and Studio integration remain acceptance-gated.
+Cancellation submits its bounded `TaskCancelled` attempt before stream
+finalization can publish `TaskFinished`. A durable-index uncertainty fence
+cancels accepted work from retained identities, stops that service's sweeper and
+returns actionable HTTP 503 responses; unrelated host API tasks remain running.
+A separate bounded cleanup actor retains accepted identities and admission until
+original and partial-result stores both drain. It does not read the job index,
+so filesystem retries continue after an index fence retires the job sweeper.
+Terminal metadata and repeated cancellation cannot discard that ownership or
+resubmit native cancellation. Original-only cleanup preserves completed WAVs;
+delete returns 503 and keeps metadata while physical removal remains pending.
+The media owner also retries known content orphaned by metadata eviction and
+refuses startup readiness if best-effort orphan deletion left unaccounted bytes.
+
 ### Native ACE package and process boundary
 
 `packaging/skulk-ace-step/` defines a separate Python 3.12 package family; Core

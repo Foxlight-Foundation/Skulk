@@ -17,6 +17,7 @@ from skulk.shared.types.audio_separation import AudioSeparationTaskParams
 from skulk.shared.types.common import CommandId, Id, NodeId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.music import MusicGenerationTaskParams
+from skulk.shared.types.music_edits import MusicEditingTaskParams
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.video import VideoGenerationTaskParams
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
@@ -158,6 +159,20 @@ class MusicGeneration(BaseTask):
 
 
 @final
+class MusicEditing(BaseTask):
+    """One admitted source-conditioned edit; encoded audio uses addressed media."""
+
+    model_config = ConfigDict(frozen=True)
+
+    command_id: CommandId = Field(description="Owning asynchronous music edit job.")
+    owner_node: NodeId = Field(description="API retaining the original context and final WAV.")
+    task_params: MusicEditingTaskParams = Field(description="Exact source, seed, task and native-grid extent.")
+    trace_enabled: bool = Field(default=False, description="Record bounded execution timing.")
+    error_type: str | None = Field(default=None, max_length=128, description="Terminal machine-readable failure.")
+    error_message: str | None = Field(default=None, max_length=1024, description="Bounded operator failure detail.")
+
+
+@final
 class AudioSeparation(BaseTask):
     """One admitted complete-set separation; raw input uses addressed media."""
 
@@ -246,6 +261,7 @@ Task = (
     | ImageEdits
     | VideoGeneration
     | MusicGeneration
+    | MusicEditing
     | AudioSeparation
     | TextEmbedding
     | SpeechSynthesis

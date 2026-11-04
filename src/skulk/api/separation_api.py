@@ -11,7 +11,7 @@ import contextlib
 import hashlib
 import os
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -21,11 +21,10 @@ import anyio
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from pydantic import ValidationError
-from starlette.datastructures import FormData, UploadFile
-from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.types import Receive, Scope, Send
 
+from skulk.api.audio_source_delivery import send_original_wav
+from skulk.api.audio_uploads import read_wav_upload
 from skulk.api.separation_jobs import (
     MAX_ACTIVE_SEPARATION_JOBS,
     MAX_RETAINED_SEPARATION_JOBS,
@@ -46,7 +45,6 @@ from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.constants import SKULK_MAX_CHUNK_SIZE
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.audio_separation import (
-    MAX_SEPARATION_SOURCE_BYTES,
     SEPARATION_STEMS,
     AudioSeparationRequest,
     AudioSeparationTaskParams,
@@ -74,25 +72,6 @@ from skulk.worker.separation_output import separation_purpose
 from skulk.worker.separation_sources import SeparationSourceStore
 
 _UPLOAD_SECONDS = 180.0
-
-
-@final
-class _ClosingMultipartParser(MultiPartParser):
-    """Close spooled files on disconnect/cancellation as well as parser errors.
-
-    Starlette closes its error-file collection for MultiPartException only.
-    An interrupted request must not retain partially spooled originals after it
-    releases upload admission. Keep this cleanup inside the parser subclass.
-    """
-
-    async def parse(self) -> FormData:
-        """Return parsed form data, or close every file this parser created."""
-        try:
-            return await super().parse()
-        except BaseException:
-            for uploaded in self._files_to_close_on_error:
-                uploaded.close()
-            raise
 
 
 def _stem_name(purpose: str) -> SeparationStemName | None:
@@ -405,82 +384,10 @@ class SeparationAPI:
         return job
 
     async def _upload(self, request: Request) -> tuple[AudioSeparationRequest, bytes]:
-        maximum = MAX_SEPARATION_SOURCE_BYTES + 32 * 1024
-        length = request.headers.get("content-length")
-        if length is not None:
-            try:
-                declared = int(length)
-            except ValueError:
-                raise HTTPException(400, "invalid content-length") from None
-            if not 0 <= declared <= maximum:
-                raise HTTPException(
-                    413,
-                    "separation upload exceeds 64 MiB plus bounded multipart metadata",
-                )
-        if (
-            not request.headers.get("content-type", "")
-            .lower()
-            .startswith("multipart/form-data;")
-        ):
-            raise HTTPException(415, "use multipart/form-data with request and file")
-        overflow, timed_out = False, False
-
-        async def bounded() -> AsyncGenerator[bytes, None]:
-            nonlocal overflow, timed_out
-            total = 0
-            stream = request.stream()
-            deadline = time.monotonic() + _UPLOAD_SECONDS
-            while True:
-                try:
-                    with anyio.fail_after(max(0.0, deadline - time.monotonic())):
-                        data = await anext(stream)
-                except StopAsyncIteration:
-                    return
-                except TimeoutError:
-                    timed_out = True
-                    raise MultiPartException(
-                        "separation upload deadline expired"
-                    ) from None
-                total += len(data)
-                if total > maximum:
-                    overflow = True
-                    raise MultiPartException("separation upload exceeds its byte limit")
-                yield data
-
-        try:
-            form = await _ClosingMultipartParser(
-                request.headers,
-                bounded(),
-                max_files=1,
-                max_fields=1,
-                max_part_size=4096,
-            ).parse()
-        except MultiPartException:
-            raise HTTPException(
-                413 if overflow else 408 if timed_out else 400,
-                "invalid or over-limit separation multipart upload",
-            ) from None
-        try:
-            if (
-                sorted(form.keys()) != ["file", "request"]
-                or len(form.multi_items()) != 2
-            ):
-                raise HTTPException(400, "require exactly request JSON and one file")
-            metadata, upload = form.get("request"), form.get("file")
-            if not isinstance(metadata, str) or not isinstance(upload, UploadFile):
-                raise HTTPException(400, "require request JSON and one file")
-            try:
-                params = AudioSeparationRequest.model_validate_json(metadata)
-            except ValidationError:
-                raise HTTPException(
-                    422, "invalid separation request metadata"
-                ) from None
-            data = await upload.read(MAX_SEPARATION_SOURCE_BYTES + 1)
-            if len(data) > MAX_SEPARATION_SOURCE_BYTES:
-                raise HTTPException(413, "original WAV exceeds 64 MiB")
-            return params, data
-        finally:
-            await form.close()
+        return await read_wav_upload(
+            request, AudioSeparationRequest.model_validate_json,
+            metadata_bytes=4096, deadline_seconds=_UPLOAD_SECONDS,
+        )
 
     async def create(self, request: Request) -> SeparationResource:
         """Bound/verify an original, persist intent, then submit one command once."""
@@ -669,76 +576,10 @@ class SeparationAPI:
             path = self.sources.ready_path(identifier)
             if path is None:
                 raise ValueError("original source is no longer retained")
-            source = entry.upload.task_params.source
-            chunks = entry.upload.task_params.total_input_chunks
-            with anyio.fail_after(180):
-                with anyio.fail_after(5):
-                    await self.send_source(
-                        VisionMediaPacket(
-                            source_node=self.node_id,
-                            target_node=entry.producer,
-                            command_id=identifier,
-                            model=ModelId(entry.upload.task_params.model),
-                            payload="separation_source",
-                            kind="opened",
-                            sequence=0,
-                            image_count=1,
-                            total_chunks=chunks,
-                        )
-                    )
-                digest = hashlib.sha256()
-                for sequence in range(1, chunks + 1):
-                    if self.active.get(identifier) is not entry or entry.accepted:
-                        return
-                    offset = (sequence - 1) * SKULK_MAX_CHUNK_SIZE
-
-                    def read_frame(offset: int = offset) -> bytes:
-                        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-                        try:
-                            return os.pread(
-                                descriptor,
-                                min(SKULK_MAX_CHUNK_SIZE, source.size_bytes - offset),
-                                offset,
-                            )
-                        finally:
-                            os.close(descriptor)
-
-                    data = await separation_file_effect(read_frame)
-                    if not data:
-                        raise ValueError("retained original is incomplete")
-                    digest.update(data)
-                    with anyio.fail_after(5):
-                        await self.send_source(
-                            VisionMediaPacket(
-                                source_node=self.node_id,
-                                target_node=entry.producer,
-                                command_id=identifier,
-                                model=ModelId(entry.upload.task_params.model),
-                                payload="separation_source",
-                                kind="chunk",
-                                sequence=sequence,
-                                total_chunks=chunks,
-                                image_index=0,
-                                data=data,
-                            )
-                        )
-                if digest.hexdigest() != source.sha256:
-                    raise ValueError("retained original changed")
-                with anyio.fail_after(5):
-                    await self.send_source(
-                        VisionMediaPacket(
-                            source_node=self.node_id,
-                            target_node=entry.producer,
-                            command_id=identifier,
-                            model=ModelId(entry.upload.task_params.model),
-                            payload="separation_source",
-                            kind="completed",
-                            sequence=chunks + 1,
-                            total_chunks=chunks,
-                            image_count=1,
-                            sha256=source.sha256,
-                        )
-                    )
+            await send_original_wav(
+                path, entry.upload, entry.producer, "separation_source", self.send_source,
+                lambda: self.active.get(identifier) is entry and not entry.accepted,
+            )
         except Exception as error:  # noqa: BLE001 - settle this owned source sender
             logger.opt(exception=error).warning("Separation original delivery failed")
             await self.fail(
