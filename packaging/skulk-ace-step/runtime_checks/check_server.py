@@ -73,7 +73,6 @@ class ModelFixture:
         )
         if not self.missing:
             directory = Path(request.output_directory)
-            directory.mkdir(parents=True)
             with os.fdopen(
                 os.open(
                     directory / "result.json",

@@ -4037,7 +4037,11 @@ verification drains its file thread before releasing that fence. Pinned existing
 files are checked against their original object identity during download reuse:
 online retries replace corrupt bytes; offline reuse refuses them.
 Capacity admission verifies selected immutable pins before treating a same-size
-target as complete. Repairs cannot credit blocks retained by other hardlinks.
+target as complete. Zero-byte members require an existing regular file before
+hash verification; absent empty members are created by the normal downloader.
+HTTP metadata must explicitly declare a nonnegative length; zero-byte Git/SHA
+objects are valid, while missing or invalid size headers remain rejected.
+Repairs cannot credit blocks retained by other hardlinks.
 Cancelled capacity checks drain before the transfer fence is released. Verified
 shared native cache reuse restores missing adjacent installed-card records from
 the original indexed owner, including companions reached through a cached base.
@@ -4092,6 +4096,14 @@ Cancellation submits its bounded `TaskCancelled` attempt before stream
 finalization can publish `TaskFinished`. A durable-index uncertainty fence
 cancels accepted work from retained identities, stops that service's sweeper and
 returns actionable HTTP 503 responses; unrelated host API tasks remain running.
+A separate bounded cleanup actor retains accepted identities and admission until
+original and partial-result stores both drain. It does not read the job index,
+so filesystem retries continue after an index fence retires the job sweeper.
+Terminal metadata and repeated cancellation cannot discard that ownership or
+resubmit native cancellation. Original-only cleanup preserves completed WAVs;
+delete returns 503 and keeps metadata while physical removal remains pending.
+The media owner also retries known content orphaned by metadata eviction and
+refuses startup readiness if best-effort orphan deletion left unaccounted bytes.
 
 ### Native ACE package and process boundary
 
@@ -4139,6 +4151,45 @@ ROCm, with matching variant selection in the producer, stager and verifier.
 Hosted GPU-package jobs run CPU boundary checks; real accelerator probing and
 model qualification remain separate. Actual ABI/loader/device qualification remains required. These
 definitions do not yet register native worker placement or published inventory.
+
+Core observes and journals the private workspace, requests and loader inodes
+before admitting native writes. The model view is `workspace/loader`; results
+remain under `workspace/requests` with independent per-request receipts. The
+child requires the exact owned directories, an empty loader at initialization
+and an empty Core-created result inode at request admission. It never infers
+ownership from a plausible pathname or from completion after the writes.
+
+`worker/runner/ace_step/workspace.py` retains an inherited service fence across
+native execution. Only actual process-group drain or successful exclusive fence
+acquisition permits loader recovery. It validates the complete bounded view
+before deleting known partial model copies and private cache files; unexpected
+names, replaced inodes, links and incomplete removal refuse recovery. Results
+awaiting transport are neither walked nor removed by loader cleanup. Additional
+loader disk reservation accounts for all fourteen selected model files, three
+reviewed code copies capped at 2 MiB each and 256 MiB of dynamic caches; these
+disk bounds do not estimate resident or peak inference memory.
+
+The separate Core `ace_step/process.py` verifier checks private file ownership,
+bounded complete metadata, request/model/build/seed/execution lineage, actual
+PCM24 WAV digest/geometry/peak, the original WAV and aligned FLOAT conditioning.
+It does not repair or truncate files. Native attenuation is recorded provenance,
+not a property inferred from the finished waveform. These owned components
+remain distinct from complete Worker/bootstrap activation and installed acceptance.
+
+The Core resident supervisor in `ace_step/resident.py` takes the prepared workspace
+and starts one dedicated native session with inherited service/source-reader
+fences. It verifies model/payload/component readiness before exposing its ready
+receipt, admits one call at a time with contiguous sequence/correlation, and
+separates coalesced progress from bounded non-dropping terminal capacity. Its
+control writes are nonblocking and obey an absolute deadline; bounded private
+stderr is retained independently. Calls and idle supervision recheck actual
+process liveness, while an injected resource guard can retire loading/inference.
+Cancellation or failure drains the actual group and joins both pipe readers
+before removing the current partial result and temporary loader copies. Failed
+drain/deletion retains the owner for retry. Prior completed output and receipts
+survive cancellation, model close and subsequent loading; only independent
+delivery/custody owns their eventual removal. This process owner still needs the
+Worker/model preparation, memory and Studio execution integration.
 
 The native CLI owns one loaded model and accepts bounded contiguous private
 requests. It verifies all three data components before importing constructors,

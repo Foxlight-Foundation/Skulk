@@ -42,6 +42,7 @@ ADAPTER_MODULES = frozenset(
         "audio_separation.py",
         "bindings.py",
         "contracts.py",
+        "custody.py",
         "engine.py",
         "generation.py",
         "lifetime.py",

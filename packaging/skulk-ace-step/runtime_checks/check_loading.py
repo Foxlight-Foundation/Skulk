@@ -36,12 +36,15 @@ class NativeLoadingTests(unittest.TestCase):
     def import_boundary(self) -> NativeAPI:
         """Inspect complete verified custody at the first possible model import."""
         self.imports += 1
-        view = Path(self.config.directory) / "checkpoints"
+        view = Path(self.config.directory) / "loader" / "checkpoints"
         self.assertEqual(len([p for p in view.rglob("*") if p.is_file()]), 17)
         self.assertEqual(os.environ["HF_HUB_OFFLINE"], "1")
         self.assertEqual(os.environ["ACESTEP_GENERATION_TIMEOUT"], "3600")
         self.assertEqual(os.environ["ACESTEP_CHECKPOINTS_DIR"], str(view))
-        self.assertEqual(os.environ["ACESTEP_PROJECT_ROOT"], self.config.directory)
+        self.assertEqual(
+            os.environ["ACESTEP_PROJECT_ROOT"],
+            str(Path(self.config.directory) / "loader"),
+        )
         self.assertEqual(os.environ["ACESTEP_VAE_ON_CPU"], "0")
         self.assertEqual(os.environ["ACESTEP_MPS_DECODE_OFFLOAD"], "0")
         self.assertNotIn("ACESTEP_VAE_DECODE_CHUNK_SIZE", os.environ)

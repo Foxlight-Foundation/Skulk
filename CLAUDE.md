@@ -2718,6 +2718,33 @@ Hosted GPU-package jobs run CPU boundary checks; real accelerator probing and
 model qualification remain separate. Actual ABI/loader/device qualification remains required. These
 definitions do not yet register native worker placement or published inventory.
 
+Native pre-write custody separates `workspace/loader` from retained
+`workspace/requests`. Core's `worker/runner/ace_step/workspace.py` acquires an
+inheritable service fence and journals all three directory inodes before native
+admission. The child checks those identities and an empty loader before loading;
+it also requires a Core-created, journaled empty result inode before each call.
+After actual process-group drain, loader recovery removes only its complete known
+fourteen-file data/three-file code closure and bounded private caches. Foreign
+entries, replaced inodes, links or failed deletion retain cleanup ownership.
+Loader disk reservation includes the selected copies, three 2 MiB code upper
+bounds and 256 MiB of dynamic cache; it is not an inference memory estimate.
+Request results have independent receipts and survive loader cleanup/restart.
+`ace_step/process.py` independently binds private result JSON, PCM24 peak/digest/
+geometry, original WAV and aligned float conditioning to the admitted request and
+ready model. These components do not themselves activate Worker execution.
+
+The Core `ace_step/resident.py` supervisor owns that prepared workspace and
+inherits its service/source fences into one dedicated native session. It checks
+exact model/payload/component readiness, bounded 256 KiB correlated control,
+contiguous request sequence, serial admission, coalesced progress and separately
+bounded terminal/diagnostic storage. Control writes are nonblocking under a hard
+deadline. It polls actual process/resource state during calls and idle readiness.
+Cancellation/error drains the complete process group and joins pipe readers
+before reclaiming the active partial result or loader view. Failed drain/cleanup
+retains ownership for explicit retry. Successful output keeps its independent
+receipt across model close/restart; native completion is not a delivery ACK.
+Worker/bootstrap and memory-policy integration remain separate from this owner.
+
 Native editing job contracts live in `shared/types/music_edits.py`: closed
 task-discriminated inputs, source-clock integer floor/ceil conversion to 48 kHz,
 card-bound edit modes/classes/lyrics/duration and a seed resolved exactly once
@@ -2730,7 +2757,12 @@ requires native metadata, render finish, independently verified synced WAV and
 drained return ACK. `api/music_edit_media.py` checks all encoded PCM24/stereo/
 48 kHz facts/peak and retains failed-cleanup capacity. Source custody reuses
 read-only audio-task protocols and actual strict task instances; result cleanup
-is injected for the engine's exact owned layout. `MusicEditAPI` registers six
+is injected for the engine's exact owned layout. A bounded index-independent
+cleanup actor retains source/result ownership and admission after terminal
+metadata until both stores drain, including after a storage-fenced sweeper
+retires. Original-only cleanup preserves completed WAVs; incomplete DELETE
+returns 503 without forgetting metadata, and unresolved orphan purge blocks edit
+storage readiness. `MusicEditAPI` registers six
 `/v1/music/edits` routes before legacy dynamic music IDs, under existing auth
 and operator inference scope. Multipart OpenAPI embeds the closed task schemas.
 Shared upload/source-sender helpers and `AudioInputReceiver` keep original

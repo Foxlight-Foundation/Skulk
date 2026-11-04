@@ -12,6 +12,7 @@ from skulk.shared.models.model_cards import ModelCard, MusicPartClass
 from skulk.shared.types.audio_separation import SeparationSource
 from skulk.shared.types.native_music import (
     NativeMusicComponent,
+    NativeMusicDirectoryIdentity,
     NativeMusicFile,
     NativeMusicPart,
     NativeMusicRequest,
@@ -86,6 +87,7 @@ def _request(operation: str) -> dict[str, object]:
         seed=12025,
         target_frames=20 * 48000,
         output_directory="/private/jobs/request",
+        output_directory_identity={"device": 1, "inode": 2},
     )
     if operation != "generate":
         body.update(
@@ -118,6 +120,38 @@ def test_native_component_inventory_matches_actual_card_and_closed_parts() -> No
     )
     assert NativeMusicWeights.model_validate_json(weights.model_dump_json()) == weights
     assert set(get_args(NativeMusicPart)) == set(get_args(MusicPartClass))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("device", -1),
+        ("device", 2**64),
+        ("device", True),
+        ("device", "1"),
+        ("inode", 0),
+        ("inode", -1),
+        ("inode", 2**64),
+        ("inode", True),
+        ("inode", "2"),
+    ],
+)
+def test_native_directory_identity_cannot_coerce_or_overflow(
+    field: str, value: object
+) -> None:
+    """Private cleanup ownership uses strict real filesystem identity values."""
+    body: dict[str, object] = {"device": 1, "inode": 2}
+    body[field] = value
+    with pytest.raises(ValidationError):
+        NativeMusicDirectoryIdentity.model_validate_json(json.dumps(body))
+
+
+def test_native_output_path_alone_cannot_establish_directory_ownership() -> None:
+    """An old path-only request cannot silently bypass pre-write result custody."""
+    body = _request("generate")
+    del body["output_directory_identity"]
+    with pytest.raises(ValidationError, match="output_directory_identity"):
+        NativeMusicRequest.model_validate_json(json.dumps(body))
 
 
 @pytest.mark.parametrize("role", ["base", "text_encoder", "autoencoder"])
@@ -188,6 +222,9 @@ def test_non_cuda_precision_must_not_inherit_checkpoint_bfloat16(
         model_identity="b" * 64,
         weights=_weights().model_dump(mode="json"),
         directory="/private/lifetime",
+        directory_identity={"device": 1, "inode": 2},
+        requests_identity={"device": 1, "inode": 3},
+        loader_identity={"device": 1, "inode": 4},
         device=device,
         precision=precision,
     )
@@ -318,7 +355,13 @@ def test_native_generation_cannot_claim_conditioning_padding(
 
 @pytest.mark.parametrize(
     ("frames", "expected"),
-    [(48000, 48000), (48001, 49920), (245759, 245760), (288001, 289920), (5760000, 5760000)],
+    [
+        (48000, 48000),
+        (48001, 49920),
+        (245759, 245760),
+        (288001, 289920),
+        (5760000, 5760000),
+    ],
 )
 def test_native_conditioning_rounds_up_within_the_global_frame_ceiling(
     frames: int, expected: int

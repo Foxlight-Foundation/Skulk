@@ -23,6 +23,7 @@ from .contracts import (
     NativeMusicResult,
     NativeMusicServeConfig,
 )
+from .custody import verify_lifetime, verify_request_directory
 from .generation import prepare_call, result_samples
 from .media import (
     export_result,
@@ -134,19 +135,9 @@ class ResidentMusic:
                 raise RuntimeError(
                     "native music model must restart after its previous failure"
                 )
-            directory = Path(request.output_directory)
-            expected = (
-                Path(self.configuration.directory) / "requests" / request.request_id
+            directory = verify_request_directory(
+                self.configuration, request, empty=True
             )
-            if (
-                directory != expected
-                or expected.parent.is_symlink()
-                or Path(self.configuration.directory).is_symlink()
-            ):
-                raise ValueError(
-                    "native music output must use its exclusive lifetime request directory"
-                )
-            directory.mkdir(mode=0o700)
             context: Path | None = None
             conditioning: SeparationSource | None = None
             source: SeparationSource | None = None
@@ -196,6 +187,7 @@ class ResidentMusic:
                 NativeMusicProgress(request_id=request.request_id, stage="writing")
             )
             output = directory / "result.wav"
+            verify_request_directory(self.configuration, request, empty=False)
             facts = export_result(output, rendered.samples, request)
             with output.open("rb") as stream:
                 os.fsync(stream.fileno())
@@ -229,9 +221,10 @@ class ResidentMusic:
 
 
 def _environment(configuration: NativeMusicServeConfig) -> Path:
-    root = Path(configuration.directory)
-    root.mkdir(mode=0o700)
-    (root / "requests").mkdir(mode=0o700)
+    verify_lifetime(configuration, initial=True)
+    # Model loading/cache files have a separate owned inode. A model restart
+    # can retire this view without deleting WAVs still awaiting output custody.
+    root = Path(configuration.directory) / "loader"
     # Ambient UI/debug settings can otherwise override this admitted process's
     # VAE, memory policy or progress-file locations. Native source is imported
     # only after this closed policy replaces the entire ACE environment family.

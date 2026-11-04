@@ -9,6 +9,7 @@ import unittest
 import wave
 from pathlib import Path
 
+import check_support
 import numpy as np
 from skulk_ace_step.audio_separation import source_from_wav
 from skulk_ace_step.bindings import soundfile
@@ -58,6 +59,8 @@ class NativeMediaTests(unittest.TestCase):
         source = source_from_wav(path.read_bytes())
         mapped = (frames * 48000 + rate - 1) // rate
         target = mapped + 48000 if continuation else mapped
+        directory = self.root / "result"
+        directory.mkdir(mode=0o700, exist_ok=True)
         return NativeMusicRequest(
             request_id="media-test",
             operation="continue" if continuation else "repaint",
@@ -68,7 +71,8 @@ class NativeMediaTests(unittest.TestCase):
             source_path=str(path),
             region_start_frame=mapped if continuation else 0,
             region_end_frame=target,
-            output_directory=str(self.root / "result"),
+            output_directory=str(directory),
+            output_directory_identity=check_support.directory_identity(directory),
         )
 
     def test_native_rate_context_preserves_samples_and_original_bytes(self) -> None:
@@ -91,8 +95,10 @@ class NativeMediaTests(unittest.TestCase):
         samples = prepared.samples
         aligned_frames = (request.target_frames + 1919) // 1920 * 1920
         self.assertEqual(samples.shape, (aligned_frames, 2))
-        self.assertEqual(prepared.padding_frames, aligned_frames - request.target_frames)
-        self.assertTrue(np.all(samples[request.target_frames:] == 0))
+        self.assertEqual(
+            prepared.padding_frames, aligned_frames - request.target_frames
+        )
+        self.assertTrue(np.all(samples[request.target_frames :] == 0))
         self.assertTrue(np.isfinite(samples).all())
         self.assertTrue(np.array_equal(samples[:, 0], samples[:, 1]))
         original_extent = samples[: request.target_frames, 0]

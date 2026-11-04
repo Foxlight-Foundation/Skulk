@@ -25,6 +25,7 @@ from .contracts import (
     NativeMusicServeConfig,
     NativeMusicServeRequest,
 )
+from .custody import verify_lifetime, verify_request_directory
 
 Progress = Callable[[NativeMusicProgress], None]
 
@@ -80,13 +81,7 @@ def _retained_result(
     result: NativeMusicResult,
     configuration: NativeMusicServeConfig,
 ) -> None:
-    directory = Path(configuration.directory) / "requests" / request.request_id
-    if (
-        Path(request.output_directory) != directory
-        or directory.is_symlink()
-        or directory.parent.is_symlink()
-    ):
-        raise ValueError("native music result escaped its private request lifetime")
+    directory = verify_request_directory(configuration, request, empty=False)
     descriptor = os.open(
         directory / "result.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     )
@@ -131,6 +126,7 @@ def serve(
                 raise ValueError("native music initialization emitted foreign progress")
             emit(record)
 
+        verify_lifetime(configuration, initial=True)
         model = load(configuration, payload_sha256, initialization_progress)
         ready = model.ready
         expected_execution = NativeMusicExecution(
@@ -174,6 +170,7 @@ def serve(
                     raise ValueError("native music request emitted foreign progress")
                 emit(record)
 
+            verify_request_directory(configuration, request, empty=True)
             result = model.run(request, progress)
             if (
                 result.request_id,

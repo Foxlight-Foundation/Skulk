@@ -2362,17 +2362,30 @@ quoted SHA-256 `ETag`. Content is retained for 24 hours. Unsettled/failed/cancel
 jobs return **409**; absent/expired content returns **404**. Eight downloads are
 admitted per API node; excess readers return **503**. Deleting a job does not
 truncate a download whose descriptor was already leased.
+If removing expired content fails, its storage reservation remains in place and
+later sweeps retry cleanup without interrupting unrelated API work.
 
 **POST** `/v1/music/edits/{edit_id}/cancel` records cancellation, stops native
 work and source/result delivery, and removes partial copies. Terminal jobs are
 unchanged. **POST** `/v1/cancel/{edit_id}` also cancels an active edit. Late native
 frames cannot revive cancelled work.
+Terminal status does not release a cleanup reservation: original copies,
+partial results and their admission slot remain owned until both stores drain.
+Filesystem failures are retried in the background without stopping unrelated
+API work. Completed WAVs remain available while an original-only cleanup drains.
 
 **DELETE** `/v1/music/edits/{edit_id}` cancels active work, removes only API-owned
 content and forgets the record. It returns
 `{"id":"...","object":"music.edit.deleted","deleted":true}`. Missing jobs
 return **404**. Creator originals and Studio project assets remain independently
 owned. WAV output is never silently truncated or transcoded.
+Incomplete physical cleanup returns **503** and retains the job record; retry
+delete after cleanup completes. Startup likewise refuses edit storage readiness
+while an orphan cleanup failure leaves unaccounted content behind.
+If recording a source/result transport failure encounters an uncertain index
+write, the edit service cancels its retained work and returns **503** until its
+index is reopened. Unrelated API serving continues; an unwritten terminal outcome
+is never reported as durably committed.
 
 ## Source separation
 

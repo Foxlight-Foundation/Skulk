@@ -111,6 +111,17 @@ control record is bounded to 256 KiB; stdout is reserved for those records while
 native diagnostics go to stderr. No media or caller-selected native options
 travel through this protocol. There is one active generation per loaded model.
 
+Core creates and journals the workspace, `requests` and `loader` directory
+inodes before spawning the child. The private configuration includes all three
+identities. The child verifies them without following final symlinks and requires
+an empty loader before initialization. Each call also requires an empty result
+directory already created and journaled by Core; native completion does not grant
+cleanup ownership retroactively. Model/cache writes stay in `loader`, separately
+from request WAVs that may still be in addressed delivery after the model stops.
+Core's inherited service fence prevents recovery while an orphan child still
+holds it. Known partial loader copies and bounded caches are reclaimed only
+after actual writer drain; retained request results have separate cleanup.
+
 Before importing model constructors, the wrapper copies and verifies the full
 three-component model inventory and its three runtime-owned implementation
 files into an exclusive private view. Its typed acquisition hook prevents the

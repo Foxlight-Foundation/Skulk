@@ -3,7 +3,9 @@
 
 import json
 import os
+import shutil
 import stat
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -16,6 +18,7 @@ import pytest
 from fastapi import FastAPI
 
 from skulk.api.music_edit_api import MusicEditAPI
+from skulk.api.music_edit_media import MusicEditMediaStore
 from skulk.api.operator_gateway import OperatorGatewayAuthorization, _required_scopes
 from skulk.api.tests.test_operator_gateway import paired_service
 from skulk.api.types.music_edits import MusicEditListResponse, MusicEditResource
@@ -646,6 +649,342 @@ async def test_background_storage_failure_cancels_native_work_and_keeps_host_ali
         assert (await client.get(f"/v1/music/edits/{accepted.id}")).status_code == 503
         assert (await client.get("/v1/music/unrelated-song")).status_code == 200
         monkeypatch.undo()
+        with anyio.fail_after(5):
+            while harness.api._cleanup:
+                await anyio.sleep(0.01)
+        assert harness.api.media.reserved_bytes() == 0
+        assert (await client.get(f"/v1/music/edits/{accepted.id}")).status_code == 503
+
+
+@pytest.mark.parametrize("transport", ["source", "output", "invalid_output"])
+async def test_transport_failure_with_uncertain_index_write_fences_only_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    """A nested failure handler must not let journal uncertainty kill the host."""
+    sync = os.fsync
+
+    def refuse_metadata(descriptor: int) -> None:
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("injected failed-transfer index sync failure")
+        sync(descriptor)
+
+    async with fixture(tmp_path) as (harness, client):
+        accepted = [await create(client)]
+        await harness.task(CommandId(accepted[0].id))
+        # A second accepted job is still waiting for authoritative placement;
+        # the single loaded instance cannot run two native edits concurrently.
+        harness.place = False
+        accepted.append(await create(client))
+        identifiers = [CommandId(job.id) for job in accepted]
+        with anyio.fail_after(5):
+            while harness.api._source_senders:
+                await anyio.sleep(0.01)
+        async with harness.api.lock:
+            for identifier in identifiers:
+                harness.api.media.open_assembly(
+                    identifier, total_bytes=100, total_chunks=1
+                )
+        finished = anyio.Event()
+
+        async def receive() -> None:
+            if transport == "source":
+                await harness.api.receive_source(
+                    VisionMediaPacket(
+                        source_node=NodeId("node-0"),
+                        target_node=NodeId("owner"),
+                        command_id=identifiers[0],
+                        model=ModelId("test/native-music"),
+                        payload="music_edit_source",
+                        kind="transport_failed",
+                        sequence=0,
+                        error_message="fixture source transfer failed",
+                    )
+                )
+            elif transport == "output":
+                await harness.api.receive_output(
+                    OutputMediaPacket(
+                        source_node=NodeId("node-0"),
+                        target_node=NodeId("owner"),
+                        command_id=identifiers[0],
+                        model=ModelId("test/native-music"),
+                        purpose="music_edit",
+                        kind="transport_failed",
+                        sequence=0,
+                        error_message="fixture output transfer failed",
+                    )
+                )
+            else:
+                await harness.api.receive_output(
+                    OutputMediaPacket(
+                        source_node=NodeId("node-0"),
+                        target_node=NodeId("owner"),
+                        command_id=identifiers[0],
+                        model=ModelId("test/native-music"),
+                        purpose="music_edit",
+                        kind="opened",
+                        sequence=0,
+                        total_bytes=100,
+                        total_chunks=1,
+                        content_type="audio/mpeg",
+                    )
+                )
+            finished.set()
+
+        monkeypatch.setattr(os, "fsync", refuse_metadata)
+        try:
+            harness.api.tasks.start_soon(receive)
+            with anyio.fail_after(5):
+                await finished.wait()
+                while len(harness.finalized) != 2:
+                    await anyio.sleep(0.01)
+            assert not harness.api.active
+            assert (
+                sum(isinstance(command, TaskCancelled) for command in harness.commands)
+                == 2
+            )
+            assert harness.api.media.reserved_bytes() == 0
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+            for job in accepted:
+                assert (
+                    await client.get(f"/v1/music/edits/{job.id}")
+                ).status_code == 503
+        finally:
+            monkeypatch.undo()
+        with anyio.fail_after(5):
+            while harness.api._cleanup:
+                await anyio.sleep(0.01)
+        assert all(
+            harness.api.sources.ready_path(identifier) is None
+            for identifier in identifiers
+        )
+
+
+async def test_expiry_cleanup_failure_keeps_host_alive_and_retries_retained_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The actual shared-group sweeper retains a failed unlink and retries it."""
+    async with fixture(tmp_path) as (harness, client):
+        accepted = await create(client)
+        identifier = CommandId(accepted.id)
+        data = await harness.render(identifier, media_first=True)
+        completed = await terminal(client, accepted.id)
+        assert completed.expires_at is not None
+        expiry = completed.expires_at
+        directory = harness.api.media.root / "wav" / accepted.id
+        original = shutil.rmtree
+        refused, allow_cleanup = threading.Event(), threading.Event()
+
+        def remove(path: Path, *, ignore_errors: bool = False) -> None:
+            if path == directory and not allow_cleanup.is_set():
+                refused.set()
+                return
+            original(path, ignore_errors=ignore_errors)
+
+        monkeypatch.setattr(shutil, "rmtree", remove)
+        monkeypatch.setattr("skulk.api.music_edit_api.time.time", lambda: expiry)
+        try:
+            harness.api.tasks.start_soon(harness.api.sweep)
+            with anyio.fail_after(5):
+                while not refused.is_set():
+                    await anyio.sleep(0.01)
+            # Observe the event-loop task after its joined filesystem effect.
+            # The reservation cannot disappear when deletion left files behind.
+            async with harness.api.lock:
+                assert identifier not in harness.api._expired
+                assert harness.api.media.reserved_bytes() == len(data)
+                assert directory.is_dir()
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+            assert (
+                await client.get(f"/v1/music/edits/{accepted.id}")
+            ).status_code == 200
+            allow_cleanup.set()
+            with anyio.fail_after(5):
+                while identifier not in harness.api._expired:
+                    await anyio.sleep(0.01)
+            assert harness.api.media.reserved_bytes() == 0
+            assert not directory.exists()
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+        finally:
+            monkeypatch.undo()
+
+
+@pytest.mark.parametrize("failed_store", ["media", "source", "both"])
+@pytest.mark.parametrize("trigger", ["cancel", "timeout"])
+async def test_terminal_partial_cleanup_retains_admission_until_both_stores_drain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_store: str,
+    trigger: str,
+) -> None:
+    """Real partial copies survive cleanup errors without ending the API host."""
+    async with fixture(tmp_path) as (harness, client):
+        harness.place = False
+        accepted = [await create(client) for _ in range(4)]
+        identifiers = tuple(CommandId(job.id) for job in accepted)
+        media_paths = frozenset(
+            harness.api.media.root / "wav" / job.id for job in accepted
+        )
+        source_paths = frozenset(harness.api.sources.root / job.id for job in accepted)
+        blocked = media_paths if failed_store == "media" else source_paths
+        if failed_store == "both":
+            blocked = media_paths | source_paths
+        async with harness.api.lock:
+            for identifier in identifiers:
+                harness.api.media.open_assembly(
+                    identifier, total_bytes=100, total_chunks=1
+                )
+                if trigger == "timeout":
+                    harness.api.active[identifier].deadline = 0
+        original = shutil.rmtree
+        allow_cleanup = threading.Event()
+
+        def remove(path: Path, *, ignore_errors: bool = False) -> None:
+            if path in blocked and not allow_cleanup.is_set():
+                return
+            original(path, ignore_errors=ignore_errors)
+
+        monkeypatch.setattr(shutil, "rmtree", remove)
+        try:
+            if trigger == "timeout":
+                harness.api.tasks.start_soon(harness.api.sweep)
+            else:
+                for job in accepted:
+                    response = await client.post(f"/v1/music/edits/{job.id}/cancel")
+                    assert response.status_code == 200, response.text
+            for job in accepted:
+                ended = await terminal(client, job.id)
+                assert ended.status == (
+                    "failed" if trigger == "timeout" else "cancelled"
+                )
+            with anyio.fail_after(5):
+                while len(harness.finalized) < 4:
+                    await anyio.sleep(0.01)
+            assert not harness.api.active
+            assert len(harness.api._cleanup) == 4
+            assert harness.api.media.reserved_bytes() == (
+                0 if failed_store == "source" else 400
+            )
+            assert sum(
+                harness.api.sources.ready_path(identifier) is not None
+                for identifier in identifiers
+            ) == (0 if failed_store == "media" else 4)
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+            rejected = await client.post(
+                "/v1/music/edits",
+                data={"request": json.dumps(request())},
+                files={"file": ("original.wav", music_edit_fixture()[2], "audio/wav")},
+            )
+            assert rejected.status_code == 503
+            assert (
+                sum(
+                    isinstance(command, MusicEditCommand)
+                    for command in harness.commands
+                )
+                == 4
+            )
+            assert (
+                await client.post(f"/v1/music/edits/{accepted[0].id}/cancel")
+            ).status_code == 200
+            assert (
+                sum(isinstance(command, TaskCancelled) for command in harness.commands)
+                == 4
+            )
+            allow_cleanup.set()
+            with anyio.fail_after(5):
+                while harness.api._cleanup:
+                    await anyio.sleep(0.01)
+            assert harness.api.media.reserved_bytes() == 0
+            assert all(
+                harness.api.sources.ready_path(identifier) is None
+                for identifier in identifiers
+            )
+            assert all(not path.exists() for path in media_paths | source_paths)
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+        finally:
+            monkeypatch.undo()
+
+
+async def test_completed_result_survives_deferred_original_cleanup_and_delete_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input cleanup failure cannot discard completed audio or stop its API host."""
+    original = shutil.rmtree
+    allow_cleanup = threading.Event()
+    async with fixture(tmp_path) as (harness, client):
+
+        def remove(path: Path, *, ignore_errors: bool = False) -> None:
+            if (
+                path.parent == harness.api.root / "inputs"
+                and not allow_cleanup.is_set()
+            ):
+                return
+            original(path, ignore_errors=ignore_errors)
+
+        monkeypatch.setattr(shutil, "rmtree", remove)
+        try:
+            accepted = await create(client)
+            identifier = CommandId(accepted.id)
+            data = await harness.render(identifier, media_first=False)
+            assert (await terminal(client, accepted.id)).status == "completed"
+            assert identifier in harness.api._cleanup
+            assert harness.api.sources.ready_path(identifier) is not None
+            content = await client.get(f"/v1/music/edits/{accepted.id}/content")
+            assert content.status_code == 200 and content.content == data
+            refused = await client.delete(f"/v1/music/edits/{accepted.id}")
+            assert refused.status_code == 503
+            assert (
+                await client.get(f"/v1/music/edits/{accepted.id}")
+            ).status_code == 200
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+            allow_cleanup.set()
+            with anyio.fail_after(5):
+                while identifier in harness.api._cleanup:
+                    await anyio.sleep(0.01)
+            assert harness.api.sources.ready_path(identifier) is None
+            content = await client.get(f"/v1/music/edits/{accepted.id}/content")
+            assert content.status_code == 200 and content.content == data
+            assert (
+                await client.delete(f"/v1/music/edits/{accepted.id}")
+            ).status_code == 200
+            assert (
+                await client.get(f"/v1/music/edits/{accepted.id}")
+            ).status_code == 404
+        finally:
+            monkeypatch.undo()
+
+
+async def test_failed_restart_orphan_cleanup_refuses_edit_readiness_not_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh reservation tables cannot omit bytes that orphan cleanup left behind."""
+    old = MusicEditMediaStore(tmp_path / "api/media")
+    _, output, _, data = music_edit_fixture("orphan")
+    identifier = CommandId("orphan")
+    old.open_assembly(identifier, total_bytes=len(data), total_chunks=1)
+    old.append(identifier, 1, data)
+    stored = old.commit(identifier, output.result.output, total_chunks=1)
+    old.close()
+
+    def retain(_path: Path, *, ignore_errors: bool = False) -> None:
+        """Represent a refused physical deletion in the shared assembler."""
+
+    monkeypatch.setattr(shutil, "rmtree", retain)
+    async with fixture(tmp_path) as (harness, client):
+        try:
+            response = await client.get("/v1/music/edits")
+            assert response.status_code == 503
+            assert harness.api._jobs is None and harness.api._media is None
+            assert stored.file_path.read_bytes() == data
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+            monkeypatch.undo()
+            response = await client.get("/v1/music/edits")
+            assert response.status_code == 200
+            assert (
+                MusicEditListResponse.model_validate_json(response.content).data == ()
+            )
+            assert not stored.file_path.exists()
+        finally:
+            monkeypatch.undo()
 
 
 @pytest.mark.parametrize("media_first", [False, True])

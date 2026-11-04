@@ -125,6 +125,14 @@ class _Active:
     cancel_submitted: anyio.Event = field(default_factory=anyio.Event)
 
 
+@dataclass
+class _Cleanup:
+    entry: _Active | None
+    delete_result: bool
+    result_released: bool = False
+    source_released: bool = False
+
+
 class _ContentResponse(StreamingResponse):
     """Lease a verified descriptor before headers and retain it across deletion."""
 
@@ -240,6 +248,8 @@ class MusicEditAPI:
         self._controls: dict[CommandId, int] = {}
         self._source_senders: set[CommandId] = set()
         self._expired: set[CommandId] = set()
+        self._cleanup: dict[CommandId, _Cleanup] = {}
+        self._cleanup_running = False
 
     @property
     def jobs(self) -> MusicEditJobRegistry:
@@ -344,7 +354,7 @@ class MusicEditAPI:
             response_model=MusicEditDeletedResponse,
             tags=["Music Editing"],
             summary="Delete a music edit",
-            description="Cancel active work, remove API-owned content and forget local metadata. Creator originals remain unchanged. A missing job returns 404.",
+            description="Cancel active work, remove API-owned content and forget local metadata. Incomplete physical cleanup returns 503, retains metadata/admission and retries in the background; retry delete after storage recovers. Creator originals remain unchanged. A missing job returns 404.",
         )(self.delete)
 
     def _initialize(self) -> None:
@@ -377,13 +387,17 @@ class MusicEditAPI:
                         )
             media.purge_unknown(frozenset(adopted))
             self._jobs, self._media, self._sources = jobs, media, sources
-        except BaseException:
+        except BaseException as error:
             if sources is not None:
                 sources.close()
             if media is not None:
                 media.close()
             if jobs is not None:
                 jobs.close()
+            if isinstance(error, OSError):
+                raise MusicEditStorageError(
+                    "Music edit storage recovery did not finish; repair storage before retrying."
+                ) from error
             raise
 
     async def ensure(self) -> None:
@@ -444,6 +458,7 @@ class MusicEditAPI:
                         self.active.keys()
                         | self._controls.keys()
                         | self._source_senders
+                        | self._cleanup.keys()
                     )
                     >= MAX_ACTIVE_MUSIC_EDITS
                 ):
@@ -668,14 +683,93 @@ class MusicEditAPI:
 
     async def _release_source_locked(
         self, identifier: CommandId, entry: _Active
-    ) -> None:
+    ) -> bool:
         if (
             not entry.source_released
             and not entry.sending
             and (entry.source_accepted or self.active.get(identifier) is not entry)
         ):
-            await separation_file_effect(lambda: self.sources.delete(identifier))
+            try:
+                await separation_file_effect(lambda: self.sources.delete(identifier))
+            except OSError as error:
+                logger.opt(exception=error).warning(
+                    "Music edit original cleanup remains reserved for retry"
+                )
+                self._queue_cleanup_locked(identifier, entry, delete_result=False)
+                return False
             entry.source_released = True
+        return entry.source_released
+
+    def _queue_cleanup_locked(
+        self, identifier: CommandId, entry: _Active | None, *, delete_result: bool
+    ) -> None:
+        # Terminal metadata cannot carry physical cleanup ownership: it may be
+        # deleted while a sender or failed unlink still retains bytes. Keep the
+        # accepted identity independently and charge it against admission.
+        pending = self._cleanup.get(identifier)
+        if pending is None:
+            self._cleanup[identifier] = _Cleanup(
+                entry, delete_result, result_released=not delete_result
+            )
+        else:
+            if pending.entry is None:
+                pending.entry = entry
+            if delete_result and not pending.delete_result:
+                pending.delete_result = True
+                pending.result_released = False
+        if not self._cleanup_running:
+            self._cleanup_running = True
+            try:
+                self.tasks.start_soon(self._cleanup_loop)
+            except BaseException:
+                self._cleanup_running = False
+                raise
+
+    async def _retry_cleanup_locked(self, identifier: CommandId) -> None:
+        pending = self._cleanup.get(identifier)
+        if pending is None:
+            return
+        if not pending.result_released:
+            try:
+                await separation_file_effect(lambda: self.media.delete(identifier))
+            except OSError as error:
+                logger.opt(exception=error).warning(
+                    "Music edit partial result cleanup remains reserved for retry"
+                )
+            else:
+                pending.result_released = True
+        if not pending.source_released:
+            if pending.entry is not None:
+                pending.source_released = await self._release_source_locked(
+                    identifier, pending.entry
+                )
+            else:
+                try:
+                    await separation_file_effect(
+                        lambda: self.sources.delete(identifier)
+                    )
+                except OSError as error:
+                    logger.opt(exception=error).warning(
+                        "Music edit undispatched original cleanup remains reserved for retry"
+                    )
+                else:
+                    pending.source_released = True
+        if pending.result_released and pending.source_released:
+            self._cleanup.pop(identifier)
+
+    async def _cleanup_loop(self) -> None:
+        # Cleanup has no journal reads and outlives a storage-fenced job sweeper.
+        # One actor retries at most the bounded admitted/retained identities.
+        try:
+            while True:
+                await anyio.sleep(1)
+                async with self.lock:
+                    for identifier in tuple(self._cleanup):
+                        await self._retry_cleanup_locked(identifier)
+                    if not self._cleanup:
+                        return
+        finally:
+            self._cleanup_running = False
 
     async def _drain(
         self,
@@ -989,21 +1083,32 @@ class MusicEditAPI:
     ) -> None:
         if self._jobs is None:
             return
-        job = await separation_file_effect(lambda: self.jobs.get(identifier))
-        if job is None or job.is_terminal:
+        try:
+            job = await separation_file_effect(lambda: self.jobs.get(identifier))
+            if job is None or job.is_terminal:
+                await self._retry_cleanup_locked(identifier)
+                return
+            await separation_file_effect(
+                lambda: self.jobs.fail(identifier, message, cancelled=cancelled)
+            )
+        except MusicEditStorageError as error:
+            # Failure can itself be entered from a transport validation handler.
+            # Such nested exceptions bypass that handler's sibling except blocks;
+            # fence centrally before uncertainty can escape the host task group.
+            logger.opt(exception=error).warning(
+                "Music edit failure transition is storage-fenced"
+            )
+            await self._fence_storage_locked()
             return
-        await separation_file_effect(
-            lambda: self.jobs.fail(identifier, message, cancelled=cancelled)
-        )
         await self._abort_entry_locked(identifier)
 
     async def _abort_entry_locked(self, identifier: CommandId) -> None:
-        entry = self.active.pop(identifier, None)
+        entry = self.active.get(identifier)
+        self._queue_cleanup_locked(identifier, entry, delete_result=True)
+        self.active.pop(identifier, None)
         if entry is not None:
             self._start_control(identifier, entry)
-        await separation_file_effect(lambda: self.media.delete(identifier))
-        if entry is not None:
-            await self._release_source_locked(identifier, entry)
+        await self._retry_cleanup_locked(identifier)
 
     async def _fence_storage_locked(self) -> None:
         # The durable owner already refuses reads/writes. Cancel accepted native
@@ -1081,7 +1186,20 @@ class MusicEditAPI:
             await self._fail_locked(
                 job.id, "The music edit was deleted.", cancelled=True
             )
-            await separation_file_effect(lambda: self.media.delete(job.id))
+            if job.id in self._cleanup:
+                raise HTTPException(
+                    503, "music edit cleanup is still draining; retry delete"
+                )
+            try:
+                await separation_file_effect(lambda: self.media.delete(job.id))
+            except OSError as error:
+                logger.opt(exception=error).warning(
+                    "Music edit deletion remains reserved for retry"
+                )
+                self._queue_cleanup_locked(job.id, None, delete_result=True)
+                raise HTTPException(
+                    503, "music edit cleanup is still draining; retry delete"
+                ) from None
             await separation_file_effect(lambda: self.jobs.delete(job.id))
             return MusicEditDeletedResponse(id=edit_id)
 
@@ -1101,10 +1219,33 @@ class MusicEditAPI:
                     and job.expires_at <= now
                     and job.id not in self._expired
                 ):
-                    await separation_file_effect(
-                        lambda job=job: self.media.delete(job.id)
-                    )
+                    try:
+                        await separation_file_effect(
+                            lambda job=job: self.media.delete(job.id)
+                        )
+                    except OSError as error:
+                        # The media owner retains its byte reservation when
+                        # removal is incomplete. Retry this job next sweep;
+                        # one filesystem failure must not cancel the host.
+                        logger.opt(exception=error).warning(
+                            "Music edit expiry cleanup remains reserved for retry"
+                        )
+                        continue
                     self._expired.add(job.id)
+            # Registry retention may evict old terminal metadata before an
+            # unsuccessful unlink finishes. The media owner still remembers
+            # those byte promises; retry them without inventing job metadata.
+            owned = await separation_file_effect(self.media.owned_identifiers)
+            retained = frozenset(job.id for job in jobs)
+            for identifier in owned - retained:
+                try:
+                    await separation_file_effect(
+                        lambda identifier=identifier: self.media.delete(identifier)
+                    )
+                except OSError as error:
+                    logger.opt(exception=error).warning(
+                        "Music edit orphan cleanup remains reserved for retry"
+                    )
 
     async def sweep(self) -> None:
         """Bound placement/render/return waits and expire content without replay."""
