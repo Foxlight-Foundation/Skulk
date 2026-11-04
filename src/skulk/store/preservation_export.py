@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.models.registry import EMBEDDED_REGISTRY_ROOT
+from skulk.store.installed_cards import PRESERVATION_CAPTURE_NOTICE as CAPTURE_NOTICE
 from skulk.store.installed_cards import (
     InstalledCardRecord,
     companion_owner_matches,
@@ -69,9 +70,6 @@ class PreservePlan(BaseModel):
     retains_registry_proof: bool = Field(
         description="Whether explicit original registry evidence was supplied."
     )
-
-
-CAPTURE_NOTICE = b"Private owner capture. Original license/attribution may be incomplete. No redistribution rights, upstream authorship or runtime qualification are granted.\n"
 
 
 @dataclass(frozen=True)

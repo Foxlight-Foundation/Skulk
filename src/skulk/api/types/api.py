@@ -2124,7 +2124,7 @@ class StoreDownloadRequest(BaseModel):
     )
     artifact_role: InstalledArtifactRole = Field(
         default="base",
-        description="Base or declared companion role retained in installed truth.",
+        description="Base or declared companion role retained in installed truth; music_component selects one native encoder/autoencoder repository group.",
     )
 
 

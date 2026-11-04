@@ -55,6 +55,67 @@ def _section(body: dict[str, object], *keys: str) -> dict[str, object]:
     return result
 
 
+def test_native_sources_group_shared_repository_without_losing_component_roots() -> None:
+    """One pinned companion transaction retains all encoder and VAE data files."""
+    card = ModelCard.model_validate(_body())
+    sources = card.native_music_artifact_sources()
+    assert sorted(len(source.files) for source in sources) == [3, 11]
+    assert sum(item.size_bytes for source in sources for item in source.files) == card.storage_size.in_bytes
+    for source in sources:
+        assert tuple(item.path for item in source.files) == tuple(sorted(item.path for item in source.files))
+        bundle = source.download_bundle()
+        assert bundle.root is None
+        assert bundle.files == source.files
+        assert bundle == source.download_bundle()
+        assert card.native_music_files_for_source(source.repository, source.revision) == source.files
+        assert not card.native_music_files_for_source(source.repository, "f" * 40)
+    assert card.music is not None and card.music.native is not None
+    assert card.music.native.text_encoder.artifact_bundle.root == "Qwen3-Embedding-0.6B"
+    assert card.music.native.autoencoder.artifact_bundle.root == "vae"
+
+
+def test_native_sources_can_share_the_primary_repository() -> None:
+    """A mirror may keep all roles at one immutable source without widening files."""
+    body = _body()
+    for role in ("text_encoder", "autoencoder"):
+        component = _section(body, "music", "native", role)
+        component["repo"] = body["source_repository"]
+        component["revision"] = body["source_revision"]
+    card = ModelCard.model_validate(body)
+    sources = card.native_music_artifact_sources()
+    assert len(sources) == 1 and len(sources[0].files) == 14
+    assert card.artifact_bundle is not None
+    assert len(card.artifact_bundle.files) == 3
+
+
+def test_native_sources_reject_overlapping_role_paths() -> None:
+    """Even equal pins must not let separate loader roles alias one configuration."""
+    body = _body()
+    encoder_root = _section(body, "music", "native", "text_encoder", "artifact_bundle")["root"]
+    bundle = _section(body, "music", "native", "autoencoder", "artifact_bundle")
+    old_prefix = str(bundle["root"]) + "/"
+    bundle["root"] = encoder_root
+    for item in cast("list[dict[str, object]]", bundle["files"]):
+        item["path"] = str(encoder_root) + "/" + str(item["path"]).removeprefix(old_prefix)
+    with pytest.raises(ValidationError, match="roles must not overlap"):
+        ModelCard.model_validate(body)
+
+
+def test_native_source_role_root_cannot_descend_through_another_selected_file() -> None:
+    """A structurally named component directory cannot overwrite the base configuration."""
+    body = _body()
+    component = _section(body, "music", "native", "text_encoder")
+    component["repo"] = body["source_repository"]
+    component["revision"] = body["source_revision"]
+    bundle = _section(component, "artifact_bundle")
+    prefix = str(bundle["root"]) + "/"
+    bundle["root"] = "config.json"
+    for item in cast("list[dict[str, object]]", bundle["files"]):
+        item["path"] = "config.json/" + str(item["path"]).removeprefix(prefix)
+    with pytest.raises(ValidationError, match="roles must not overlap"):
+        ModelCard.model_validate(body)
+
+
 def test_native_card_retains_generation_editing_and_public_metadata() -> None:
     """All three component roots and both intrinsic tasks survive public projection."""
     card = ModelCard.model_validate(_body())

@@ -499,6 +499,11 @@ def _declared_companion_files(
     no additional manifest files.
     """
     image_card = owner_card or shard.model_card
+    native_files = image_card.native_music_files_for_source(
+        str(shard.model_card.artifact_repository), shard.model_card.source_revision
+    )
+    if native_files and artifact_role in ("base", "music_component"):
+        return tuple((item.path, item.size_bytes) for item in native_files)
     if image_card.image is not None and artifact_role in ("base", "image_component"):
         return tuple((item.path, item.size_bytes) for item in image_card.image.files_for_source(str(shard.model_card.artifact_repository), shard.model_card.source_revision))
     if (

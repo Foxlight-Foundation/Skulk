@@ -4002,10 +4002,15 @@ the audio.cpp GGUF artifact contract. Placement filters these native profiles ou
 of existing runners, and worker startup rejects incompatible legacy/manual
 assignments explicitly. A card reader does not establish native execution or a
 new editing API. Absent native metadata preserves existing signed music bytes.
-Download selection, direct/store transfers and installed records refuse native
-profiles before byte effects until their complete component lifecycle exists.
-Cache completeness is false, and the shared preservation export/recovery mapping
-refuses a primary-only closure.
+`ModelCard.native_music_artifact_sources()` groups the complete data closure by
+exact repository/revision. Shared encoder/VAE sources transfer once as a required
+`music_component`; primary-source roles join the base transfer without replacing
+their loader roots. A base store Download completes only after every required
+source is verified. Installed sidecars, offline cache checks and preservation
+export/recovery use the same exact selection; missing components fail the request
+without stopping the download coordinator. A fixed receiver-owned preservation
+notice may accompany these data files; arbitrary repository files remain excluded.
+Byte custody does not advertise native runner readiness or remove placement guards.
 
 ### Native ACE package and process boundary
 
@@ -4037,6 +4042,7 @@ Any native request/protocol failure retires the model. A cooperative upstream
 timeout can leave an inference thread active, so the CLI terminates its dedicated
 process group even when the control pipe has closed. Parent loss also terminates
 that group. The supervisor must drain it before cleaning partial files. Package
-builds and library/process checks do not register a ready Core engine, remove the
-native artifact-operation guard, or add an HTTP editing route. Complete native
-store/preparation/runner integration remains a separate boundary from this format.
+builds and library/process checks do not register a ready Core engine, remove
+native placement/startup guards, or add an HTTP editing route. Native model-byte
+custody has the separate source-group lifecycle above; engine preparation and
+runner integration remain separate boundaries from this package format.

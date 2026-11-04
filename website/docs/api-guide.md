@@ -2195,11 +2195,12 @@ Native ACE base card metadata can also describe intrinsic editing modes in
 `music.native`. Those safetensors components cannot be loaded by the audio.cpp
 runner; this section documents the existing generation job API, not a native
 editing endpoint.
-This reader also refuses native-profile downloads, installed-record creation
-and preservation until their complete three-component lifecycle is supported;
-native metadata alone does not establish a usable installation.
-Starting such a download reports `DownloadFailed` with an actionable reason;
+Native-profile Download requests retain all selected primary, text-encoder and
+autoencoder files at their pinned revisions, grouping shared sources into one
+required transfer. Missing components fail the download with an actionable reason;
 the node and its download command processor remain available for other work.
+Offline reuse and preservation require the complete recorded data closure.
+Downloaded native bytes alone do not establish a mounted or ready engine.
 
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
@@ -3743,8 +3744,10 @@ The optional JSON body accepts the following fields:
   Omit it only for installed or custom owner cards without a registry identity.
 - `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
   `served_draft`, `vllm_draft`, `video_companion` (a video card's externally
-  hosted companion, such as guide preprocessor weights), or `image_component`
-  (an image card's external component repository/revision group); defaults to
+  hosted companion, such as guide preprocessor weights), `image_component`
+  (an image card's external component repository/revision group), or
+  `music_component` (a native music card's external encoder/autoencoder source
+  group); defaults to
   `base`.
 
 A complete companion request names the companion repository and immutable
@@ -3796,6 +3799,17 @@ the component transfer; an undeclared source revision returns 409. Missing files
 listing-size conflicts, or failed object verification fail the transaction;
 unrelated quants and projectors are excluded. A cached base GGUF alone does not
 mark the group complete: missing components trigger recovery.
+
+For a native music card, a base Download also acquires every required external
+source before returning a complete transfer state. A `music_component` request
+names its owner and exact source revision, omits `gguf_file`, and selects all
+declared encoder/autoencoder files at that source. The store verifies both the
+role and revision against the owning card; mismatches return 409. Shared sources
+transfer once. Missing files, incorrect sizes or object pins fail the request.
+Completed source groups remain reusable after cancellation of the base request;
+an incomplete base is never reported complete. Offline reuse requires all source
+records and files. This operation downloads model data, not an engine package,
+and does not mount or advertise native music execution capacity.
 
 The response reports `modelId`, nullable `sourceRevision`, `status`, and
 `progress`; transport or store rejection additionally reports `error`. The
