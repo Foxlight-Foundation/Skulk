@@ -45,6 +45,9 @@ CAPABILITY_STORE_CATALOG_URL: Final = "https://skulkapps.foxlight.ai/catalog/"
 CAPABILITY_STORE_CATALOG_DOCUMENT: Final = "catalog.json"
 """Basename of the built-in store's signed catalog."""
 
+CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT: Final = "catalog-v3.json"
+"""Separate signed catalog carrying expanded declarations; the old address stays readable."""
+
 CAPABILITY_STORE_TRUST_TARGET: Final = "v1/publisher-trust.json"
 """The one TUF target the store signs: its publisher trust document."""
 

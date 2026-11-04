@@ -21,6 +21,7 @@ from skulk.extensions import service_snapshot
 from skulk.extensions.capability_store import (
     CAPABILITY_STORE_CATALOG_DOCUMENT,
     CAPABILITY_STORE_CATALOG_URL,
+    CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT,
     EMBEDDED_CAPABILITY_STORE_ROOT,
     StoreTrustClient,
     StoreTrustUnavailableError,
@@ -148,7 +149,10 @@ async def test_first_use_lists_the_store_with_nothing_to_configure(
     verified = await store.catalog.fetch()
     assert verified.claims.publisher == "fixture"
     assert [entry.bundle_id for entry in verified.entries] == ["example.studio"]
-    assert [str(request.url) for request in store.catalog_requests] == [STORE_CATALOG]
+    assert [str(request.url) for request in store.catalog_requests] == [
+        CAPABILITY_STORE_CATALOG_URL + CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT,
+        STORE_CATALOG,
+    ]
     assert "authorization" not in store.catalog_requests[0].headers
     status = store.catalog.source_status()
     assert status.builtin_store and status.configured
@@ -930,3 +934,196 @@ async def test_the_host_assigns_the_next_revision_of_an_address(tmp_path: Path) 
     )
     with pytest.raises(ValueError, match="requires the trust"):
         CatalogSourceUpdate(expected_revision=4, assign_trust_revision=True)
+
+
+def _extended_catalog(key: Ed25519PrivateKey, *, revision: int = 1) -> bytes:
+    """Sign the full sixteen-identifier listing using the explicit new protocol."""
+    document = TypeAdapter(dict[str, JsonValue]).validate_json(
+        _catalog(key, revision=revision)
+    )
+    claims = document["catalog"]
+    assert isinstance(claims, dict)
+    claims["protocol"] = 3
+    entries = claims["entries"]
+    assert isinstance(entries, list) and isinstance(entries[0], dict)
+    entries[0]["descriptors"] = [f"example.op{i}@1.0.0" for i in range(16)]
+    entries[0]["skulk_requires"] = ">=2.0.3,<3"
+    return json.dumps(
+        {"catalog": claims, "signature": key.sign(canonical_json(claims)).hex()}
+    ).encode()
+
+
+async def test_store_upgrade_preserves_legacy_floor_and_never_falls_back_after_acceptance(
+    tmp_path: Path,
+) -> None:
+    """A genuine initial 404 is safe; an accepted v3 catalog cannot disappear silently."""
+    store = _Store(tmp_path)
+    store.publish(1)
+    store.served[0] = _catalog(store.publisher, revision=3)
+    await store.catalog.fetch()
+    assert store.catalog.source().document_filename == CAPABILITY_STORE_CATALOG_DOCUMENT
+    extended_url = (
+        CAPABILITY_STORE_CATALOG_URL + CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT
+    )
+    served = [_extended_catalog(store.publisher, revision=2)]
+    status = [200]
+    calls: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if str(request.url) == extended_url:
+            return httpx.Response(status[0], content=served[0])
+        return httpx.Response(200, content=store.served[0])
+
+    root = tmp_path / "manager"
+    catalog = HostCatalog(
+        root, store=store.client, transport=httpx.MockTransport(respond)
+    )
+    with pytest.raises(CatalogRefusedError, match="rollback"):
+        await catalog.fetch()
+    assert catalog.source().document_filename == CAPABILITY_STORE_CATALOG_DOCUMENT
+    served[0] = _extended_catalog(store.publisher, revision=3)
+    verified = await catalog.fetch()
+    assert (
+        catalog.source().document_filename == CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT
+    )
+    assert catalog.source_status().builtin_store
+    assert len(verified.entries[0].descriptors) == 16
+    assert (
+        catalog.accepted(verified.sha256, now=int(time.time())).sha256
+        == verified.sha256
+    )
+    state = (root / "catalog-state.json").read_bytes()
+    assert b"catalog.json" in state and b"catalog-v3.json" in state
+    status[0] = 404
+    calls.clear()
+    reopened = HostCatalog(
+        root, store=store.client, transport=httpx.MockTransport(respond)
+    )
+    with pytest.raises(CatalogRefusedError) as refused:
+        await reopened.fetch()
+    assert refused.value.status == 404 and calls == [extended_url]
+    assert (root / "catalog-state.json").read_bytes() == state
+
+
+@pytest.mark.parametrize(
+    "fault", ["signature", "malformed", "forbidden", "redirect", "protocol"]
+)
+async def test_store_upgrade_never_downgrades_an_invalid_extended_listing(
+    tmp_path: Path, fault: str
+) -> None:
+    """Only genuine absence may use the older document; trust failures stay failures."""
+    store = _Store(tmp_path)
+    store.publish(1)
+    await store.catalog.fetch()
+    before = (tmp_path / "manager/catalog-state.json").read_bytes()
+    calls: list[str] = []
+    raw = _extended_catalog(store.publisher)
+    code = 200
+    if fault == "signature":
+        raw = raw.replace(b'"signature": "', b'"signature": "00', 1)
+    elif fault == "malformed":
+        raw = b"{"
+    elif fault == "forbidden":
+        code = 403
+    elif fault == "redirect":
+        code = 302
+    elif fault == "protocol":
+        raw = _catalog(store.publisher)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(code, content=raw)
+
+    catalog = HostCatalog(
+        tmp_path / "manager", store=store.client, transport=httpx.MockTransport(respond)
+    )
+    with pytest.raises(ValueError):
+        await catalog.fetch()
+    assert calls == [
+        CAPABILITY_STORE_CATALOG_URL + CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT
+    ]
+    assert (tmp_path / "manager/catalog-state.json").read_bytes() == before
+
+
+async def test_store_upgrade_does_not_reset_after_switching_to_a_private_catalog(
+    tmp_path: Path,
+) -> None:
+    """Returning to Store keeps the accepted version and its own trust history."""
+    store = _Store(tmp_path)
+    store.publish(1)
+    extended_url = (
+        CAPABILITY_STORE_CATALOG_URL + CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == extended_url:
+            return httpx.Response(200, content=_extended_catalog(store.publisher))
+        return httpx.Response(404)
+
+    catalog = HostCatalog(
+        tmp_path / "manager", store=store.client, transport=httpx.MockTransport(respond)
+    )
+    await catalog.fetch()
+    revision = catalog.source_status().revision
+    trust = catalog.trust()
+    await catalog.configure(
+        CatalogSourceUpdate(
+            expected_revision=revision,
+            base_url="https://private.example.test/",
+            document_filename="catalog.json",
+            trust=trust,
+        )
+    )
+    await catalog.use_builtin_store(revision + 1)
+    assert (
+        catalog.source().document_filename == CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT
+    )
+    assert catalog.source_status().builtin_store
+    await catalog.fetch()
+
+
+async def test_store_upgrade_keeps_version_and_floor_when_retaining_bytes_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash between accepting v3 and retaining its bytes cannot restore v2."""
+    from skulk.extensions import runtime_catalog
+
+    store = _Store(tmp_path)
+    store.publish(1)
+    root = tmp_path / "manager"
+    raw = _extended_catalog(store.publisher)
+    status = [200]
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(status[0], content=raw)
+
+    transport = httpx.MockTransport(respond)
+    catalog = HostCatalog(root, store=store.client, transport=transport)
+    write = runtime_catalog.write_private
+
+    def fail_saved_document(path: Path, content: bytes) -> None:
+        if path.parent == root / "catalog":
+            raise OSError("synthetic retained-document failure")
+        write(path, content)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_catalog, "write_private", fail_saved_document)
+        with pytest.raises(OSError, match="retained-document"):
+            await catalog.fetch()
+    reopened = HostCatalog(root, store=store.client, transport=transport)
+    assert (
+        reopened.source().document_filename
+        == CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT
+    )
+    status[0] = 404
+    requests.clear()
+    with pytest.raises(CatalogRefusedError) as refused:
+        await reopened.fetch()
+    assert refused.value.status == 404
+    assert requests == ["/catalog/catalog-v3.json"]
+    status[0] = 200
+    verified = await reopened.fetch()
+    assert reopened.accepted(verified.sha256, now=int(time.time())).document == raw

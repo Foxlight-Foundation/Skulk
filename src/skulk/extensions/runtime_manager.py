@@ -28,6 +28,11 @@ from skulk.extensions.capability_store import (
     EMBEDDED_CAPABILITY_STORE_ROOT,
     StoreTrustClient,
 )
+from skulk.extensions.managed_limits import (
+    MAX_MANAGED_DESCRIPTOR_BYTES,
+    MAX_MANAGED_DISCOVERY_BYTES,
+    MAX_RUNTIME_METADATA_BYTES,
+)
 from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
     QualifiedHost,
@@ -156,7 +161,7 @@ class InstalledRelease(BaseModel):
     )
 
 
-_STAGED_METADATA_BYTES: Final = 131072
+_STAGED_METADATA_BYTES: Final = MAX_RUNTIME_METADATA_BYTES
 """Signed runtime metadata is refused above this size, so staged copies fit it."""
 
 
@@ -602,7 +607,8 @@ def _listing_matches(
     a runtime-bearing record, which is the only kind this host installs.
     """
     metadata = read_private(
-        downloads.directory / "reviews" / (review.runtime_digest + ".json"), 131072
+        downloads.directory / "reviews" / (review.runtime_digest + ".json"),
+        MAX_RUNTIME_METADATA_BYTES,
     )
     signed = _OBJECT.validate_json(metadata)
     runtime = _OBJECT.validate_python(signed["runtime"])
@@ -978,7 +984,12 @@ class RuntimeManager:
                 # reply (a catalog's permissions, say) past the bound.
                 payload = json.dumps({"result": result}, ensure_ascii=False).encode()
                 payload += b"\n"
-                if len(payload) > 262144:
+                limit = (
+                    MAX_MANAGED_DISCOVERY_BYTES
+                    if isinstance(request, InstalledContractRequest)
+                    else 262144
+                )
+                if len(payload) > limit:
                     raise ValueError("manager response exceeds bound")
                 writer.write(payload)
                 await writer.drain()
@@ -1271,7 +1282,7 @@ class RuntimeManager:
             ):
                 raise ValueError("installed contract changed or unavailable")
             raw = matching[0].model_dump_json()
-            if len(raw.encode()) > 65536:
+            if len(raw.encode()) > MAX_MANAGED_DESCRIPTOR_BYTES:
                 raise ValueError("installed contract exceeds read bound")
             return {
                 "plugin_id": identifier,
@@ -1743,8 +1754,13 @@ async def manager_request(root: Path, request: ManagerRequest) -> dict[str, Json
         or info.st_mode & 0o077
     ):
         raise ValueError("manager socket is not protected")
+    limit = (
+        MAX_MANAGED_DISCOVERY_BYTES
+        if isinstance(request, InstalledContractRequest)
+        else 262144
+    )
     async with asyncio.timeout(35):
-        reader, writer = await asyncio.open_unix_connection(path, limit=262145)
+        reader, writer = await asyncio.open_unix_connection(path, limit=limit + 1)
         try:
             payload = request.model_dump(mode="json")
             if (
@@ -1757,7 +1773,7 @@ async def manager_request(root: Path, request: ManagerRequest) -> dict[str, Json
             writer.write(json.dumps(payload).encode() + b"\n")
             await writer.drain()
             payload = await reader.readline()
-            if len(payload) > 262144:
+            if len(payload) > limit:
                 raise ValueError("manager response exceeds bound")
             return _OBJECT.validate_json(payload)
         finally:

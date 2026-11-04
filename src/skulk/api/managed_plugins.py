@@ -256,7 +256,7 @@ def create_managed_plugins_router(
         "/{plugin_id}/capabilities/{qualified_id}",
         response_model=InstalledContract,
         summary="Read one installed capability contract",
-        description="Read the full selected descriptor and input/output/media schemas for an exact installed id@version and required revision. Reads are bounded to 64 KiB per descriptor and do not require the child to be enabled or reachable. A changed or unavailable declaration is refused. Requires plugins:read or direct owner authority; declaration grants no execution permission.",
+        description="Read the full selected descriptor and input/output/media schemas for an exact installed id@version and required revision. Reads are bounded to 256 KiB per descriptor and do not require the child to be enabled or reachable. A changed or unavailable declaration is refused. Requires plugins:read or direct owner authority; declaration grants no execution permission.",
     )
     async def installed_contract(
         plugin_id: InstallationIdentifier,
