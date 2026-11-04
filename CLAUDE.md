@@ -2445,6 +2445,12 @@ recovery and installed inventory. Catalog and registration summaries accept
 sixteen declared operations. Ordinary invocation frames, settings, credentials,
 manager requests and binary media retain their own existing limits.
 
+One owner may report at most sixteen application nodes and 128 total capability
+contracts, within the discovery byte bound. Refresh refuses an oversized
+aggregate before reporting availability and withdraws readiness until a valid
+inventory returns. Discovery, dynamic dispatch and host callbacks share this
+aggregate bound, preventing a ready owner whose contracts cannot be dispatched.
+
 Expanded SDK manifests require a compatible Skulk 2.0.3 reader. Deploy readers
 before publishing larger signed records; declared contracts and successful
 metadata verification do not establish live provider readiness or authorize

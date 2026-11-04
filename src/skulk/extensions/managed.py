@@ -37,6 +37,7 @@ from skulk.extensions.managed_host import HostCallbacks, HostCapability
 from skulk.extensions.managed_limits import (
     MAX_MANAGED_DESCRIPTORS,
     MAX_MANAGED_DISCOVERY_BYTES,
+    MAX_MANAGED_OWNER_DESCRIPTORS,
 )
 from skulk.extensions.managed_streams import (
     ManagedStreamEnd,
@@ -465,6 +466,10 @@ class ManagedOwner:
                 contracts = [
                     d.qualified_id for node in snapshot.nodes for d in node.descriptors
                 ]
+                # Per-application metadata expansion must not admit an owner
+                # whose complete inventory dispatch and callbacks would drop.
+                if len(contracts) > MAX_MANAGED_OWNER_DESCRIPTORS:
+                    raise ValueError("too many managed owner capabilities")
                 if (
                     len(set(identities)) != len(identities)
                     or len(set(bundles)) != len(bundles)

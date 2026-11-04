@@ -9,6 +9,9 @@ from typing import Final
 MAX_MANAGED_DESCRIPTORS: Final = 16
 """Largest declared capability set in one managed application."""
 
+MAX_MANAGED_OWNER_DESCRIPTORS: Final = 128
+"""Aggregate owner admission bound shared by discovery, dispatch and callbacks."""
+
 MAX_MANAGED_DESCRIPTOR_BYTES: Final = 262144
 """Largest exact selected descriptor read, within the manifest's own byte cap."""
 

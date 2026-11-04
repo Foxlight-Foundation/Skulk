@@ -13,6 +13,7 @@ import pytest
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from skulk.extensions.capabilities import CapabilityDescriptor
+from skulk.extensions.loader import LoadedExtensions
 from skulk.extensions.managed import ManagedConnection, ManagedNode, ManagedOwner
 from skulk.extensions.managed_limits import (
     MAX_MANAGED_DISCOVERY_BYTES,
@@ -70,6 +71,89 @@ def test_managed_node_accepts_sixteen_and_refuses_a_seventeenth() -> None:
                 }
             ).model_dump_json()
         )
+
+
+@pytest.mark.parametrize("extra_descriptors", [1, 16])
+async def test_owner_aggregate_bound_refuses_before_readiness_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra_descriptors: int
+) -> None:
+    """Real discovery cannot claim ready after exceeding dispatch's aggregate cap."""
+    owner = ManagedOwner(
+        ManagedConnection(plugin_id="managed.fixture", state_root=str(tmp_path))
+    )
+    host_context = context()
+    owner.context = host_context
+    loaded = LoadedExtensions([owner])
+    node_count = 8
+
+    async def handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            await reader.readline()
+            nodes = [
+                ManagedNode(
+                    node_id=f"node{node}",
+                    bundle_id=f"fixture{node}",
+                    version="1.0.0",
+                    status="ready",
+                    configurable=True,
+                    descriptors=tuple(
+                        CapabilityDescriptor(
+                            id=f"fixture{node}.read{index}",
+                            version="1.0.0",
+                            title="Read fixture",
+                            description="Bounded aggregate fixture.",
+                            input_schema={"type": "object"},
+                            output_schema={"type": "object"},
+                        )
+                        for index in range(extra_descriptors if node == 8 else 16)
+                    ),
+                ).model_dump(mode="json")
+                for node in range(node_count)
+            ]
+            raw = json.dumps(
+                {
+                    "result": {
+                        "transport_node_id": str(host_context.node_id),
+                        "protocol": 4,
+                        "nodes": nodes,
+                    }
+                }
+            ).encode() + b"\n"
+            assert len(raw) < MAX_MANAGED_DISCOVERY_BYTES
+            writer.write(raw)
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    with tempfile.TemporaryDirectory(prefix="skulk-aggregate-", dir="/tmp") as directory:
+        socket = Path(directory) / "control.sock"
+        server = await asyncio.start_unix_server(handle, path=socket)
+        socket.chmod(0o600)
+        def fixture_socket(_name: str) -> Path:
+            return socket
+
+        monkeypatch.setattr(owner, "_socket_path", fixture_socket)
+        try:
+            await owner.refresh()
+            assert owner.available and len(loaded.capability_descriptors) == 128
+            retained = owner.dynamic_capabilities()
+            assert all(owner.capability_ready(item.qualified_id) for item in retained)
+            node_count = 9
+            with pytest.raises(RuntimeError, match="too many managed owner capabilities"):
+                await owner.refresh()
+            assert not owner.available
+            assert not loaded.capability_descriptors
+            assert not any(owner.capability_ready(item.qualified_id) for item in retained)
+            node_count = 8
+            await owner.refresh()
+            assert owner.available and len(loaded.capability_descriptors) == 128
+        finally:
+            await owner.on_stop()
+            server.close()
+            await server.wait_closed()
 
 
 async def test_large_discovery_keeps_ordinary_settings_bound_and_withdraws_overflow(

@@ -4796,6 +4796,12 @@ revision and preserves prior trust and catalog revision floors atomically.
 Restart or a later missing v3 document does not restore fallback. Private
 catalog addresses and explicit filenames retain their configured behavior.
 
+Managed discovery permits sixteen contracts per application node and 128 total
+contracts across one owner's at most sixteen nodes, within its 512 KiB response
+bound. An aggregate overflow makes that owner unavailable and withdraws ready
+capabilities; it cannot report ready while silently omitting dispatchable
+contracts. A later valid discovery restores ordinary readiness.
+
 Installation states are `accepted`, `downloading`, `staging`, `staged` and
 `recovery_required`. Failure codes distinguish `download_failed`,
 `installation_failed` and `installation_interrupted`. Accepted work outlives an
