@@ -4189,7 +4189,55 @@ before removing the current partial result and temporary loader copies. Failed
 drain/deletion retains the owner for retry. Prior completed output and receipts
 survive cancellation, model close and subsequent loading; only independent
 delivery/custody owns their eventual removal. This process owner still needs the
-Worker/model preparation, memory and Studio execution integration.
+Worker preparation, shared peak-memory admission and Studio execution integration.
+
+`shared/models/native_music_layout.py` reads the optional all-three-role
+`music.native.tensor_layouts` contract. Counts and prefix digests describe exact
+serialized objects, not a universal memory requirement. The bounded projection
+retains scalar/empty tensors and refuses malformed shapes, duplicate keys,
+overflow, holes, overlaps and unindexed trailers. Absent metadata is omitted from
+serialization, preserving existing card identities. The data identity in
+`native_music_runtime.py` binds all three selected repositories, revisions,
+loader roots and file pins, independently of aliases, attribution corrections,
+header metadata, runtime build or tested hardware. Its execution policy binds
+the actual library probe and component dtype/device settings, two CPU threads
+and the card/global duration ceiling. Floating tensor state is projected at
+those effective precisions; unknown buffer/packed semantics stay unknown.
+Neither that projection nor the policy is a complete peak-memory estimate.
+
+The Core `ace_step/artifacts.py` observer rehashes every selected data file with
+bounded reads and cancellation checkpoints, including Git blob framing for
+metadata pins. Relative ancestors and final files are opened without symlink
+following; normal store hard links remain eligible. Header projection follows
+complete-file integrity and must agree with card/admitted facts. It neither
+imports Torch nor mutates model-store files. The native loader independently
+verifies its fresh copies before reading them.
+
+`ace_step/model.py::NativeMusicModel` binds one complete rank-zero single-host
+assignment, exact prepared runtime/build and `native_music_policy` captured on
+the shard. File/header/precision drift fails before loader creation or spawn.
+Absent optional header facts may be refined by verified observations without
+changing the admitted execution policy; declared geometry still must match.
+Loaded readiness must still match actual model/payload/component execution.
+One model actor covers inspection, result pre-write ownership and inference;
+concurrent close requests stop inspection and wait for that actor, preventing
+late spawn after shutdown. A separate short readiness handover joins an existing
+idle poll before submission; polls during inference use the last observed
+readiness instead of competing for the resident's request actor.
+Only closed `MusicGeneration`/`MusicEditing` fields
+reach the native protocol. Generation requires an already resolved seed; edits
+reverify the worker-private original and retain exact resolved native frame
+coordinates. Completed results remain in independent delivery custody; failed
+unsubmitted cleanup and native drain retain handles for retry. Failed pre-write
+preparation reclaims only its new empty directory and matching receipt.
+Failed rollback fences the
+model and retains the original parent/child identities for close retry;
+replacement directories or new content are preserved. This adapter is
+responsible for retaining that empty-result fallback until successful resident
+completion; early resident refusal cannot leave a handover gap. Close drains the
+resident before attempting fallback reclamation. This adapter is not yet
+registered with Worker/bootstrap. Native placement guards remain until
+shared peak-memory admission, resource publication and media execution are wired.
 
 The native CLI arms a detached custody guardian before importing Torch or
 starting native threads. It retains the inherited service/source locks even if

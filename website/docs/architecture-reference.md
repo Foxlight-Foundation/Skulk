@@ -2670,6 +2670,11 @@ Skulk; existing PMF kit/recovery and model/registry/code authority stay separate
 - `/v1/models.music.native`: intrinsic variant/modes/classes/sample rate/channels;
   does not assert a native runner or HTTP editing endpoint exists.
 - Absent native metadata is excluded from existing card/public serialization.
+- `music.native.tensor_layouts`: optional all-three-role exact prefix length/SHA
+  and complete unique dtype/tensor/logical-element groups. Header plus scalar
+  storage equals each selected safetensors object's size; no runtime memory or
+  tested-hardware permissions. `native_music_layout.py` performs bounded strict
+  projection; omitted defaults preserve old serialized identities.
 - `ModelCard.native_music_artifact_sources()` / `native_music_files_for_source()`:
   exact sorted source groups across all three roles; overlapping role paths fail.
   Shared external sources use one required `music_component` transfer. Same-source
@@ -2836,6 +2841,31 @@ the original indexed owner, including companions reached through a cached base.
   the original numeric group identity. Core waits for private drain-pipe EOF
   before recovery; timeout retains the pipe, locks and loading for close retry,
   including a retry after the original leader was already reaped.
+- `shared/models/native_music_runtime.py`: pure complete three-role data identity
+  excluding aliases/metadata/runtime/hardware; actual library-probed component
+  device/dtype policy, payload, two threads and duration ceiling. Floating state
+  projection is not peak memory; unknown buffer/packed semantics remain unknown.
+- `ace_step/artifacts.py`: exact source-root map; bounded complete SHA-256/Git-blob
+  hashing, no-follow relative ancestors/final files, regular-file/stat checks,
+  cancellation/deadline checkpoints, then independent bounded tensor projection.
+  Preserve ordinary store hard links; do not copy or import native dependencies.
+- `ace_step/model.py::NativeMusicModel`: complete single-host rank-zero binding;
+  `BaseShardMetadata.native_music_policy` compared against prepared build/probe,
+  actual complete objects/headers and loaded model receipt. One actor serializes
+  inspection/pre-write result custody/inference; close stops and drains it so no
+  late child can escape shutdown. Verified headers may refine optional unknown
+  geometry without changing admission; declared facts still must match. A short
+  readiness handover joins idle polling before submission; active polls return
+  cached observations without competing with the resident request actor.
+  Closed generation/edit translation preserves
+  fixed seed, creator text, measured source and exact native frame coordinates.
+  Independent completed output survives close; failed unsubmitted cleanup retains
+  exact parent/child retry ownership, fences admission and preserves replacement
+  directories/content. Failed pre-write preparation reclaims only its own empty
+  result/receipt. This is not Worker activation or shared peak-memory admission.
+  Retain empty-result fallback custody until successful resident completion;
+  early resident refusal cannot orphan a prepared directory/receipt. Drain the
+  resident before reclaiming that fallback.
 - Native resident: complete data/code verification, explicit runtime math probe,
   observed per-component loaded precision, exact canonical source-tensor equality,
   one active request, contiguous sequence/correlation checks, 0600 PCM24/result

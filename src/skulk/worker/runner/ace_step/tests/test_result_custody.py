@@ -140,7 +140,7 @@ def test_unresolved_receipt_is_retained_until_explicit_recovery(tmp_path: Path) 
 def test_receipt_sync_failure_never_returns_admission_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Failed durable metadata leaves an empty reclaimable gap, without native work."""
+    """Failed durable metadata rolls back its empty result without native work."""
     parent = parents(tmp_path)
     directory = music_result_directory(tmp_path, CommandId("take-1"))
     sync = os.fsync
@@ -154,7 +154,7 @@ def test_receipt_sync_failure_never_returns_admission_authority(
     with pytest.raises(OSError, match="ownership sync failure"):
         prepare_result_directory(directory, parent)
     monkeypatch.undo()
-    assert directory.is_dir() and not tuple(directory.iterdir())
+    assert not directory.exists() and not receipt(directory).exists()
     assert reclaim_result_directory(directory)
 
 

@@ -6,6 +6,7 @@ from pydantic import Field
 from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.models.native_music_runtime import NativeMusicModelPolicy
 from skulk.shared.models.separation_runtime import DemucsModelPolicy
 from skulk.utils.pydantic_ext import TaggedModel
 
@@ -49,6 +50,10 @@ class BaseShardMetadata(TaggedModel):
     separation_policy: DemucsModelPolicy | None = Field(
         default=None,
         description="Exact native separator device, artifact, FP32, thread and forward-window policy assessed at placement and rechecked before load.",
+    )
+    native_music_policy: NativeMusicModelPolicy | None = Field(
+        default=None,
+        description="Exact native music data, runtime payload, component precision and target-workload ceiling assessed at placement and reverified against observed selected files before load.",
     )
 
     # Error handling; equivalent to monkey-patch, but we can't monkey-patch runner.py

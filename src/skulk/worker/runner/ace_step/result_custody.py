@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, final
 
@@ -102,6 +103,32 @@ def _read_receipt(directory: Path) -> _ResultOwnership | None:
         os.close(descriptor)
 
 
+@final
+@dataclass(frozen=True)
+class PendingMusicResult:
+    """Retained pre-submit cleanup identity after an uncertain filesystem effect.
+
+    A writer must never have been admitted, or must already be drained. A known
+    inode must still match; without
+    an observed inode only an empty private directory without a receipt can be
+    reclaimed under the original parent. Existing completed results are never
+    transferred into this ownership by a failed exclusive mkdir.
+    """
+
+    directory: Path
+    parent_identity: NativeMusicDirectoryIdentity
+    identity: NativeMusicDirectoryIdentity | None
+
+
+class MusicResultPreparationError(RuntimeError):
+    """Failed pre-write preparation whose exact cleanup must remain retryable."""
+
+    def __init__(self, pending: PendingMusicResult) -> None:
+        """Retain private ownership facts without exposing paths in public errors."""
+        super().__init__("native music result preparation cleanup remains pending")
+        self.pending = pending
+
+
 def prepare_result_directory(
     directory: Path, parent_identity: NativeMusicDirectoryIdentity
 ) -> NativeMusicDirectoryIdentity:
@@ -123,14 +150,27 @@ def prepare_result_directory(
             pass
         else:
             raise ValueError("native music result has an unresolved ownership receipt")
-        os.mkdir(directory.name, mode=0o700, dir_fd=parent)
-        identity = _private_directory(
-            os.stat(directory.name, dir_fd=parent, follow_symlinks=False)
-        )
-        os.fsync(parent)
-        record = _ResultOwnership(directory=directory.name, identity=identity)
-        write_private(receipt, record.model_dump_json().encode())
-        return identity
+        identity: NativeMusicDirectoryIdentity | None = None
+        created = False
+        try:
+            os.mkdir(directory.name, mode=0o700, dir_fd=parent)
+            created = True
+            identity = _private_directory(
+                os.stat(directory.name, dir_fd=parent, follow_symlinks=False)
+            )
+            os.fsync(parent)
+            record = _ResultOwnership(directory=directory.name, identity=identity)
+            write_private(receipt, record.model_dump_json().encode())
+            return identity
+        except BaseException as error:
+            if isinstance(error, FileExistsError) and not created:
+                # Exclusive creation did not own the existing directory. In
+                # particular, never roll back a retained completed result.
+                raise
+            pending = PendingMusicResult(directory, parent_identity, identity)
+            if reclaim_unsubmitted_result(pending):
+                raise
+            raise MusicResultPreparationError(pending) from error
     finally:
         os.close(parent)
 
@@ -167,13 +207,32 @@ def verify_prepared_result_directory(
         os.close(parent)
 
 
-def _reclaim_result_directory(directory: Path) -> bool:
+def _reclaim_result_directory(
+    directory: Path,
+    *,
+    expected_identity: NativeMusicDirectoryIdentity | None = None,
+    expected_parent: NativeMusicDirectoryIdentity | None = None,
+    unsubmitted: bool = False,
+) -> bool:
     record = _read_receipt(directory)
+    if unsubmitted and (
+        expected_identity is None
+        and record is not None
+        or expected_identity is not None
+        and record is not None
+        and record.identity != expected_identity
+    ):
+        return False
     try:
         parent = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except FileNotFoundError:
-        return record is None
+        return record is None and expected_parent is None
     try:
+        if (
+            expected_parent is not None
+            and _private_directory(os.fstat(parent)) != expected_parent
+        ):
+            return False
         _private_directory(os.fstat(parent))
         try:
             descriptor = os.open(
@@ -187,11 +246,15 @@ def _reclaim_result_directory(directory: Path) -> bool:
             return True
         try:
             identity = _private_directory(os.fstat(descriptor))
+            if expected_identity is not None and identity != expected_identity:
+                return False
             if record is not None and record.identity != identity:
                 return False
             owned: list[tuple[str, os.stat_result]] = []
             with os.scandir(descriptor) as entries:
                 for entry in entries:
+                    if unsubmitted:
+                        return False
                     info = entry.stat(follow_symlinks=False)
                     if (
                         record is None
@@ -239,6 +302,28 @@ def reclaim_result_directory(directory: Path) -> bool:
     """
     try:
         return _reclaim_result_directory(directory)
+    except (OSError, ValueError):
+        return False
+
+
+def reclaim_unsubmitted_result(pending: PendingMusicResult) -> bool:
+    """Reclaim only this pre-submit empty inode/receipt, preserving failed custody.
+
+    The owning model serializes creation and proves no native writer can run:
+    either submission never began or the resident has actually drained. Retain
+    this fallback until successful completion because the resident may refuse
+    before recording its own writer custody. It can reclaim only empty output.
+    Expected parent and observed child identities survive a receipt-sync failure;
+    any replacement, new content, foreign receipt or incomplete removal refuses
+    cleanup. A False result must keep the model fenced and owner retained.
+    """
+    try:
+        return _reclaim_result_directory(
+            pending.directory,
+            expected_identity=pending.identity,
+            expected_parent=pending.parent_identity,
+            unsubmitted=True,
+        )
     except (OSError, ValueError):
         return False
 

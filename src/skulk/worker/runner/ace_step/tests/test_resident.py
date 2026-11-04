@@ -38,7 +38,11 @@ from skulk.worker.runner.ace_step.workspace import NativeMusicWorkspace
 @pytest.fixture(scope="module")
 def interpreter(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Install a stdlib-only synthetic CLI in a private disposable interpreter."""
-    root = tmp_path_factory.mktemp("native-music-resident")
+    return create_resident_interpreter(tmp_path_factory.mktemp("native-music-resident"))
+
+
+def create_resident_interpreter(root: Path) -> Path:
+    """Share the real synthetic CLI with adapter tests without importing its fixture."""
     venv.EnvBuilder(with_pip=False, system_site_packages=True, symlinks=True).create(
         root
     )

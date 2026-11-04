@@ -64,6 +64,7 @@ from skulk.shared.constants import (
 )
 from skulk.shared.models.gguf_memory import GgufCacheGeometry, qwen35_cache_geometry
 from skulk.shared.models.image import ImageCardConfig
+from skulk.shared.models.native_music_layout import NativeMusicTensorLayouts
 from skulk.shared.models.registry import (
     EMBEDDED_REGISTRY_ROOT,
     RegistryAdvisory,
@@ -2307,6 +2308,10 @@ class NativeAceMusicConfig(FrozenModel):
     part_classes: tuple[MusicPartClass, ...] = Field(min_length=1, max_length=12, description="Closed native track classes accepted for Add a part.")
     text_encoder: NativeMusicArtifactConfig = Field(description="Pinned Qwen text encoder and tokenizer closure.")
     autoencoder: NativeMusicArtifactConfig = Field(description="Pinned audio autoencoder configuration and weights.")
+    tensor_layouts: NativeMusicTensorLayouts | None = Field(
+        default=None, exclude_if=native_music_is_absent,
+        description="Optional complete intrinsic header/tensor facts for the three selected objects; independent of effective runtime precision and peak memory.",
+    )
 
     @field_validator("editing_modes", "part_classes", mode="before")
     @classmethod
@@ -3762,6 +3767,15 @@ class ModelCard(CamelCaseModel):
         total = bundle.download_size + native.text_encoder.artifact_bundle.download_size + native.autoencoder.artifact_bundle.download_size
         if self.storage_size.in_bytes != total:
             raise ValueError("native music storage must equal the complete three-component selection")
+        if native.tensor_layouts is not None:
+            for selected, layout in (
+                (bundle, native.tensor_layouts.base),
+                (native.text_encoder.artifact_bundle, native.tensor_layouts.text_encoder),
+                (native.autoencoder.artifact_bundle, native.tensor_layouts.autoencoder),
+            ):
+                tensors = tuple(item for item in selected.files if item.path.endswith(".safetensors"))
+                if len(tensors) != 1 or tensors[0].size_bytes != layout.header_bytes + layout.stored_tensor_bytes:
+                    raise ValueError("native music tensor layout disagrees with selected object size")
 
     @model_validator(mode="after")
     def _validate_gguf_cache_geometry(self) -> "ModelCard":

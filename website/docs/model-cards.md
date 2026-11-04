@@ -442,6 +442,34 @@ root. Downloaded bytes do not advertise a ready engine or enable placement.
 | `editing_modes` | Unique closed values `add_part`, `repaint`, `continue`. Continue means temporal outpainting, not native track completion. |
 | `part_classes` | Unique native track classes: `woodwinds`, `brass`, `fx`, `synth`, `strings`, `percussion`, `keyboard`, `guitar`, `bass`, `drums`, `backing_vocals`, `vocals`. Finer instrumentation belongs in the prompt. |
 | `text_encoder` / `autoencoder` | Each has its own `repo`, immutable 40-character `revision`, `license`, and complete `artifact_bundle`. |
+| `tensor_layouts` | Optional all-three-role serialized tensor facts. Does not prescribe loaded precision, peak RAM or hardware qualification. |
+
+When `tensor_layouts` is present, it contains exactly `base`, `text_encoder` and
+`autoencoder`. Each role describes its one selected safetensors object:
+
+| Role field | Contract |
+| --- | --- |
+| `header_bytes` | Complete prefix size, including its eight-byte little-endian length word; 10 bytes through 8 MiB. |
+| `header_sha256` | Lowercase SHA-256 of that exact prefix, including original JSON whitespace/padding. |
+| `dtypes` | One through twenty unique scalar groups, each with `dtype`, positive `tensor_count`, and nonnegative logical `element_count`. |
+
+Scalar names follow the pinned Safetensors format: `BOOL`, `F4`, `F6_E2M3`,
+`F6_E3M2`, `U8`, `I8`, `F8_E5M2`, `F8_E4M3`, `F8_E8M0`, `I16`, `U16`,
+`F16`, `BF16`, `I32`, `U32`, `F32`, `C64`, `F64`, `I64`, `U64`.
+Complete groups must be byte-aligned and their serialized bytes plus the header
+must equal the exact selected object's size. Header projection rejects duplicate
+keys, invalid shapes, unindexed tails, holes and overlaps; it does not checksum
+the tensor body. The worker separately verifies every complete selected object
+and compares its actual header facts before loading.
+
+Omitting the section preserves historical card serialization and identities.
+Adding it changes declarative metadata without changing model files or granting
+an engine/hardware support permission. Runtime policy binds actual library-probed
+component precision independently. For example, BF16 checkpoint state expands
+when the selected loader uses FP32. Integer, packed and complex buffer/casting
+semantics remain explicit memory-estimation unknowns. Even a complete floating
+state projection excludes initialized buffers, libraries, loading copies and
+inference workspace; it is not a peak-memory admission threshold.
 
 The primary bundle contains only `config.json`, `model.safetensors` and
 `silence_latent.pt`. The 24-layer / 2048-wide base geometry must match the

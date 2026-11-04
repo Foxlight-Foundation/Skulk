@@ -9,6 +9,7 @@ from pathlib import Path
 
 from skulk.shared.types.audio_separation import (
     MAX_SEPARATION_SOURCE_BYTES,
+    SeparationSource,
     pcm24_from_wav,
     source_from_wav,
 )
@@ -82,6 +83,25 @@ def _read_private(path: Path, limit: int, checkpoint: Callable[[], None]) -> byt
             raise ValueError("native music result changed during verification")
     checkpoint()
     return bytes(blocks)
+
+
+def verify_music_source(
+    path: Path,
+    expected: SeparationSource,
+    *,
+    checkpoint: Callable[[], None] = lambda: None,
+) -> None:
+    """Verify a bounded private original against its admitted complete WAV manifest.
+
+    The caller derives the path from owned roots and retains the reader fence.
+    This checks actual bytes, geometry and in-flight identity without resampling
+    or modifying the original. Cancellation/deadlines run between bounded reads.
+    """
+    measured = source_from_wav(
+        _read_private(path, MAX_SEPARATION_SOURCE_BYTES, checkpoint)
+    )
+    if measured != expected:
+        raise ValueError("native music original differs from its admitted source")
 
 
 def verify_music_result(
