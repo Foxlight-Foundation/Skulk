@@ -504,6 +504,9 @@ def companion_artifact_location(
     """Resolve a companion repo to its staged identity and immutable revision."""
     if repository == str(model_card.artifact_repository):
         return model_card.model_id, model_card.source_revision
+    for source in model_card.native_music_artifact_sources():
+        if (source.repository, source.revision) == (repository, companion_revision):
+            return source.model_id(), source.revision
     return ModelId(repository), companion_revision
 
 
@@ -943,23 +946,35 @@ def resolve_native_music_source_directory(
     # interrupted earlier copy has all names but lacks an installed record.
     # Enumerate locations independently of individual files, then verify each
     # complete source. A store index is only a bounded-path location hint.
+    identifiers = (identifier,) if identifier == model_card.model_id else tuple(dict.fromkeys((identifier, ModelId(repository))))
     for search_root in dict.fromkeys([*(_constants.SKULK_MODELS_PATH or ()), SKULK_MODELS_DIR]):
-        candidates = _artifact_candidates(search_root, identifier, effective_revision)
+        try:
+            deleted = read_reconciliation_tombstones(search_root)
+        except (OSError, ValueError):
+            # A damaged store cannot override deletion intent. Other roots
+            # remain independent candidates and the shared coordinator lives.
+            continue
+        if str(identifier) in deleted or str(model_card.model_id) in deleted:
+            continue
+        candidates = [candidate for alias in identifiers
+            if str(alias) not in deleted
+            for candidate in _artifact_candidates(search_root, alias, effective_revision)]
         try:
             index = StoreRegistryIndex.model_validate_json((search_root / "registry.json").read_bytes())
-            entry = index.entries.get(str(identifier))
-            deleted = read_reconciliation_tombstones(search_root)
-            if entry is not None and (
-                entry.model_id == str(identifier)
-                and (entry.source_repository or entry.model_id) == repository
-                and entry.source_revision == revision
-                and str(identifier) not in deleted
-                and str(model_card.model_id) not in deleted
-            ):
-                candidate = (search_root / entry.store_path).resolve()
-                resolved_root = search_root.resolve()
-                if candidate != resolved_root and candidate.is_relative_to(resolved_root):
-                    candidates.insert(0, candidate)
+            for alias in identifiers:
+                entry = index.entries.get(str(alias))
+                if entry is not None and (
+                    entry.model_id == str(alias)
+                    and (entry.source_repository or entry.model_id) == repository
+                    and entry.source_revision == revision
+                    and str(alias) not in deleted
+                    and str(identifier) not in deleted
+                    and str(model_card.model_id) not in deleted
+                ):
+                    candidate = (search_root / entry.store_path).resolve()
+                    resolved_root = search_root.resolve()
+                    if candidate != resolved_root and candidate.is_relative_to(resolved_root):
+                        candidates.insert(0, candidate)
         except (OSError, ValueError):
             pass
         directories.extend(candidates)
@@ -2261,7 +2276,7 @@ async def download_shard(
         filter_repo_objects(
             file_list,
             allow_patterns=allow_patterns,
-            ignore_patterns=[] if shard.model_card.image is not None or shard.model_card.native_music_artifact_sources() else ["original/*", "metal/*"],
+            ignore_patterns=[] if shard.model_card.artifact_bundle is not None or shard.model_card.image is not None or shard.model_card.native_music_artifact_sources() else ["original/*", "metal/*"],
             key=lambda x: x.path,
         )
     )

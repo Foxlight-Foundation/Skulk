@@ -4012,6 +4012,20 @@ without stopping the download coordinator. A fixed receiver-owned preservation
 notice may accompany these data files; arbitrary repository files remain excluded.
 Byte custody does not advertise native runner readiness or remove placement guards.
 
+Each external native source has a data-only alias hashing its repository,
+immutable revision and complete grouped bundle identity. This key is shared by
+in-flight deduplication, store/staging paths, peer admission and preservation
+mapping. Exact data-equivalent owners can reuse it without rewriting the retained
+owner's card; each primary card independently supplies trust, loader roots and
+licenses. Different selections cannot share a task or mix files in one generation.
+Native primary transaction directories also bind their complete source group.
+Verified matching files can be linked into independent generations after original
+object-pin checks; deleting one alias does not delete another's directory.
+Legacy repository aliases remain exact-data read candidates and are blocked by
+deletion tombstones. Source resolution runs outside the coordinator event loop,
+including cached completion checks. Missing required files invalidate success;
+failed/cancelled replacements leave the previous canonical generation registered.
+
 ### Native ACE package and process boundary
 
 `packaging/skulk-ace-step/` defines a separate Python 3.12 package family; Core

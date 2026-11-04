@@ -2284,6 +2284,17 @@ class NativeMusicArtifactSource(FrozenModel):
             download_size=sum(item.size_bytes for item in self.files),
         )
 
+    def model_id(self) -> ModelId:
+        """Return a data-only alias bound to the complete immutable source.
+
+        Owners, licenses and loader roots stay on their own model cards. Equal
+        sources share transfers; differing selections cannot replace each
+        other's in-flight task or independently deletable cache directory.
+        """
+        selection = (self.repository, self.revision, self.download_bundle().bundle_id)
+        digest = hashlib.sha256(json.dumps(selection, separators=(",", ":")).encode()).digest()
+        return ModelId("skulk-native/" + base64.b32encode(digest).decode().rstrip("=").lower())
+
 
 @final
 class NativeAceMusicConfig(FrozenModel):

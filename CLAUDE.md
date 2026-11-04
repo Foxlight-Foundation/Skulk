@@ -2653,6 +2653,18 @@ notice is the only extra native file allowed during recovery. Primary-only cache
 presence does not count as download completeness. This byte lifecycle leaves the
 native placement/startup guard in place until runner integration exists.
 
+Native external sources use deterministic `skulk-native/<digest>` data aliases,
+binding repository, immutable revision and complete grouped bundle identity.
+Store/staging, active-task deduplication, peer validation and preservation use
+that key; primary transaction directories bind the entire source group. Equal
+data selections can serve multiple owners without rewriting their cards or
+sharing execution authority. Original-pinned files may be linked into independent
+generations. Legacy repository aliases require exact selections and respect
+deletion tombstones. Native metadata reads and cached-completion revalidation run
+outside the coordinator loop; missing required sources invalidate success.
+Exact bundle paths override legacy layout exclusions; failed/cancelled replacement
+retains the previous canonical generation.
+
 The built-in native ACE package/process family lives in `packaging/skulk-ace-step/`.
 Its Python 3.12 interpreter and exact three-platform CPU archive catalogs stay
 separate from Core/Studio and all model weights. `build_ace_step.py` seals only

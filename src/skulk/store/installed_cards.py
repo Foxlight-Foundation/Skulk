@@ -1005,6 +1005,13 @@ def companion_owner_matches(record: InstalledCardRecord, owner_card: ModelCard) 
             record.artifact_repository,
             record.artifact_revision,
         ) in owner_card.external_video_companions()
+    if record.artifact_role == "music_component":
+        expected = owner_card.native_music_files_for_source(record.artifact_repository, record.artifact_revision)
+        return (
+            bool(expected)
+            and record.artifact_repository != str(owner_card.artifact_repository)
+            and expected == record.model_card.native_music_files_for_source(record.artifact_repository, record.artifact_revision)
+        )
     if owner_card.registry_card_id is not None:
         return record.owner_card_id == owner_card.registry_card_id
     return record.model_card == owner_card
@@ -1059,6 +1066,12 @@ def verify_installed_card(
     if record.model_card.native_music_artifact_sources():
         expected_role = "base" if record.artifact_repository == str(record.model_card.artifact_repository) else "music_component"
         if record.artifact_role != expected_role:
+            return False
+        aliases = {str(record.model_card.model_id)} if expected_role == "base" else {
+            record.artifact_repository, *(str(source.model_id()) for source in record.model_card.native_music_artifact_sources()
+                if (source.repository, source.revision) == (record.artifact_repository, record.artifact_revision))
+        }
+        if record.artifact_model_id not in aliases:
             return False
     resolved_root = model_directory.resolve()
     for entry in record.files:

@@ -2679,6 +2679,18 @@ Skulk; existing PMF kit/recovery and model/registry/code authority stay separate
   Preservation maps the entire closure with no repository Python; recovery may
   add only the exact receiver-owned capture notice. Byte availability is distinct
   from engine readiness; native placement/startup guards remain.
+- External native alias: `skulk-native/` plus base32 SHA-256 of repository,
+  immutable revision and grouped transfer bundle ID. This exact key is used in
+  active-task deduplication, store/staging, peer validation and preservation.
+  Primary transfer directory identity uses the complete native source bundle.
+- `music_component` cross-owner reuse requires equal complete source selections;
+  it does not rewrite retained owner policy. Original object pins are checked
+  before linking reusable data into independently deletable generations.
+  Legacy aliases are exact-selection fallbacks, subject to deletion tombstones.
+- Coordinator native lookup and completion revalidation use worker threads for
+  filesystem reads. A cached completion cannot hide a lost required source.
+  Replacement failure/cancellation retains the previous registered generation.
+  Exact bundles take precedence over legacy `original/*` and `metal/*` exclusions.
 
 ### Native ACE package/process definitions
 

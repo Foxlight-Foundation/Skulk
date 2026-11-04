@@ -3811,6 +3811,19 @@ an incomplete base is never reported complete. Offline reuse requires all source
 records and files. This operation downloads model data, not an engine package,
 and does not mount or advertise native music execution capacity.
 
+Native `music_component` path aliases are `skulk-native/<digest>`, derived from
+the exact repository, immutable revision and complete grouped bundle identity;
+`source_repository` still names the upstream repository. A mismatched alias is
+rejected with 409. Existing repository-only aliases remain accepted for legacy
+caches, with the same complete-selection checks. Shared data reuse does not
+replace another owner's installed card or transfer its execution permissions.
+Different selections have independent active transfers and cache generations.
+An already completed native Download rechecks the exact owning card and every
+required source before repeating success; lost files cause repair online or an
+actionable offline failure. A deleted source alias is not resurrected through a
+legacy-cache fallback. Failed or cancelled replacements retain the previously
+registered complete generation.
+
 The response reports `modelId`, nullable `sourceRevision`, `status`, and
 `progress`; transport or store rejection additionally reports `error`. The
 generated `StoreDownloadResponse` schema describes this wire contract.

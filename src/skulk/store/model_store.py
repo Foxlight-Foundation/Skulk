@@ -90,6 +90,7 @@ from skulk.store.installed_cards import (
     InstalledCardRecord,
     build_file_manifest,
     build_installed_card_record,
+    companion_owner_matches,
     manifest_sha256,
     read_installed_card,
     unlink_relative_artifact_path_without_following,
@@ -144,6 +145,16 @@ def _remaining_store_download_bytes(
             expected_size - reclaimable_target_bytes - resumable_bytes,
         )
     return remaining_bytes
+
+
+def _git_object_id(path: Path, size_bytes: int) -> str:
+    """Read one Git-pinned bundle member without importing repository code."""
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {size_bytes}\0".encode())
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return "git-sha1:" + digest.hexdigest()
 
 
 def _sha256_path(path: Path) -> str:
@@ -264,17 +275,21 @@ def select_store_gguf_download_files(
 
 
 def transfer_bundle(
-    model_card: ModelCard | None, artifact_role: InstalledArtifactRole
+    model_card: ModelCard | None, artifact_role: InstalledArtifactRole,
+    repository: str | None = None, revision: str | None = None,
 ) -> ArtifactBundleConfig | None:
-    """The signed bundle that selects a transfer's files, for a base artifact only.
+    """Select the exact files of this immutable repository transaction.
 
-    A companion transfer carries its owning card for trust and ownership, but
-    the owner's bundle lists the owner's files, which the companion's
-    repository does not hold; applying it there would refuse every companion.
+    Native groups include every role held by the requested source. Other
+    companions must not inherit the owner's base bundle, whose files do not
+    belong to their repository. Loader roots stay on the owning card.
     """
-    if model_card is None or artifact_role != "base":
+    if model_card is None:
         return None
-    return model_card.artifact_bundle
+    for source in model_card.native_music_artifact_sources():
+        if (source.repository, source.revision) == (repository, revision):
+            return source.download_bundle()
+    return model_card.artifact_bundle if artifact_role == "base" else None
 
 
 def video_companion_selection(
@@ -768,9 +783,10 @@ class ModelStore:
             ):
                 return False
             if artifact_role == "base":
-                return all(self.entry_matches_artifact(
-                    source.repository, source.revision, source.repository, model_card, "music_component"
-                ) for source in model_card.native_music_artifact_sources()
+                deleted = read_reconciliation_tombstones(self._store_path)
+                return all(str(source.model_id()) not in deleted and any(self.entry_matches_artifact(
+                    alias, source.revision, source.repository, model_card, "music_component"
+                ) for alias in (str(source.model_id()), source.repository)) for source in model_card.native_music_artifact_sources()
                     if source.repository != str(model_card.artifact_repository))
             return artifact_role == "music_component"
         if artifact_role == "video_companion" and model_card is not None:
@@ -1550,6 +1566,10 @@ class ModelStore:
         cards sharing preprocessors then share one transfer instead of the
         second being refused. Every other artifact belongs to one owner.
         """
+        if existing.artifact_role == "music_component":
+            repository = existing.source_repository or existing.model_id
+            expected = model_card.native_music_files_for_source(repository, existing.source_revision) if model_card is not None else ()
+            return bool(expected) and existing.model_card is not None and expected == existing.model_card.native_music_files_for_source(repository, existing.source_revision)
         if existing.artifact_role == "video_companion":
             repository = existing.source_repository or existing.model_id
             requested = video_companion_selection(
@@ -1599,6 +1619,13 @@ class ModelStore:
             raise ValueError(
                 f"cannot attach a card to unavailable store model {model_id}"
             )
+        if artifact_role == "music_component" and entry.installed_card is not None and (
+            companion_owner_matches(entry.installed_card, model_card)
+            and verify_installed_card(model_path, entry.installed_card)
+        ):
+            # Sharing authenticated data never rewrites another owner's card
+            # or grants that owner's execution policy to the requesting model.
+            return
         record = build_installed_card_record(
             model_path,
             model_card,
@@ -1666,6 +1693,12 @@ class ModelStore:
             expected_role = "base" if requested_repository == str(model_card.artifact_repository) else "music_component"
             if artifact_role != expected_role or not model_card.native_music_files_for_source(requested_repository, source_revision):
                 raise ValueError("native music request disagrees with its complete pinned source selection")
+            expected_alias = str(model_card.model_id) if artifact_role == "base" else next(
+                str(source.model_id()) for source in model_card.native_music_artifact_sources()
+                if (source.repository, source.revision) == (requested_repository, source_revision)
+            )
+            if model_id not in {expected_alias, requested_repository} or (artifact_role == "base" and model_id != expected_alias):
+                raise ValueError("native music request disagrees with its exact source alias")
         pinned_projector = (
             model_card.vision.projector_file
             if model_card is not None and model_card.vision is not None
@@ -2136,17 +2169,18 @@ class ModelStore:
         for source in card.native_music_artifact_sources():
             if source.repository == str(card.artifact_repository):
                 continue
+            alias = str(source.model_id())
             status = await self.request_download(
-                source.repository, source_revision=source.revision,
+                alias, source_revision=source.revision,
                 source_repository=source.repository, model_card=card,
                 artifact_role="music_component", owner_model_id=str(card.model_id),
                 owner_card_id=card.registry_card_id,
             )
-            task = self._download_tasks_by_model.get(source.repository)
+            task = self._download_tasks_by_model.get(alias)
             if task is not None:
                 await asyncio.shield(task)
             if status.status != "complete" or not self.entry_matches_artifact(
-                source.repository, source.revision, source.repository, card, "music_component"
+                alias, source.revision, source.repository, card, "music_component"
             ):
                 raise RuntimeError(f"Required native music source {source.repository} did not complete: {status.error or status.status}")
 
@@ -2154,19 +2188,22 @@ class ModelStore:
         self,
         target_directory: Path,
         model_card: ModelCard,
+        *, bundle: ArtifactBundleConfig | None = None,
+        repository: str | None = None, revision: str | None = None,
     ) -> frozenset[str]:
-        """Hardlink exact signed members from registered immutable artifacts.
+        """Hardlink original-pinned members from registered immutable artifacts.
 
         The caller holds the canonical transfer lock through reuse, capacity
         admission and registration. Hashing only reads in a thread; linking
         happens after the await so cancellation cannot leave a background writer
         running after that lock is released.
         """
-        bundle = model_card.artifact_bundle
-        revision = model_card.source_revision
-        if bundle is None or revision is None or model_card.registry_card_id is None:
+        bundle = bundle or model_card.artifact_bundle
+        revision = revision or model_card.source_revision
+        native = bool(model_card.native_music_artifact_sources())
+        if bundle is None or revision is None or (model_card.registry_card_id is None and not native):
             return frozenset()
-        repository = str(model_card.artifact_repository)
+        repository = repository or str(model_card.artifact_repository)
         target_root = target_directory.resolve()
         store_root = self._store_path.resolve()
         if target_root == store_root or not target_root.is_relative_to(store_root):
@@ -2179,7 +2216,7 @@ class ModelStore:
         )
         reused: set[str] = set()
         for member in bundle.files:
-            if member.object_id is None or not member.object_id.startswith("sha256:"):
+            if member.object_id is None or not member.object_id.startswith(("sha256:", "git-sha1:") if native else ("sha256:",)):
                 continue
             destination = target_root / member.path
             if destination.exists() or destination.is_symlink():
@@ -2198,13 +2235,16 @@ class ModelStore:
                 try:
                     if source.stat().st_size != member.size_bytes:
                         continue
-                    digest = await asyncio.to_thread(_sha256_path, source)
+                    if member.object_id.startswith("sha256:"):
+                        observed = "sha256:" + await asyncio.to_thread(_sha256_path, source)
+                    else:
+                        observed = await asyncio.to_thread(_git_object_id, source, member.size_bytes)
                 except OSError as error:
                     logger.debug(
                         f"ModelStore: cannot verify reusable {member.path}: {error}"
                     )
                     continue
-                if f"sha256:{digest}" != member.object_id:
+                if observed != member.object_id:
                     continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if not destination.parent.resolve().is_relative_to(target_root):
@@ -2268,7 +2308,7 @@ class ModelStore:
                 :12
             ]
             sanitized = f"{sanitized}--source-{repository_digest}"
-        bundle = transfer_bundle(model_card, artifact_role)
+        bundle = transfer_bundle(model_card, artifact_role, artifact_repository, source_revision)
         if bundle is not None:
             sanitized = (
                 f"{sanitized}--bundle-{bundle.bundle_id.removeprefix('bundle_')[:16]}"
@@ -2379,11 +2419,14 @@ class ModelStore:
             # after lock acquisition makes that status truthful.
             status.status = "downloading"
             reused_files = (
-                await self._reuse_verified_bundle_files(target_dir, model_card)
+                await self._reuse_verified_bundle_files(target_dir, model_card,
+                    bundle=bundle, repository=artifact_repository, revision=source_revision)
                 if model_card is not None
                 and bundle is not None
-                and model_card.source_revision == source_revision
-                and str(model_card.artifact_repository) == artifact_repository
+                and (model_card.native_music_artifact_sources() or (
+                    model_card.source_revision == source_revision
+                    and str(model_card.artifact_repository) == artifact_repository
+                ))
                 else frozenset()
             )
             additional_bytes = await asyncio.to_thread(
