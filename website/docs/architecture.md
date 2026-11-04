@@ -4075,8 +4075,10 @@ claim; its independently known Python 2.28 requirement is still enforced.
 The producer has separate exact CPU, Linux x86_64/ARM64 CUDA and Linux x86_64 ROCm
 inputs. The pure ROCm metapackage records original source/tool/epoch/target pins
 and is reproduced twice by `build_rocm_metapackage.py`; runtime installs only its
-sealed wheel. Its producer tool is independent of runtime dependencies. The six
-native CI jobs cover three CPU targets, two Linux CUDA targets and Linux x86_64
+sealed wheel. Its producer tool is independent of runtime dependencies.
+Only the fixed ROCm producer traverses declared dependency extras; each active
+extra must have a complete exact wheel closure. CPU/CUDA still refuse extras.
+The six native CI jobs cover three CPU targets, two Linux CUDA targets and Linux x86_64
 ROCm, with matching variant selection in the producer, stager and verifier.
 Hosted GPU-package jobs run CPU boundary checks; real accelerator probing and
 model qualification remain separate. Actual ABI/loader/device qualification remains required. These

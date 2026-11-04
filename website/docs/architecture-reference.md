@@ -2738,8 +2738,10 @@ online retries replace corrupt bytes; offline reuse refuses them.
   2.28 ABI still applies. Closed GPU inventories cover CUDA x86_64/ARM64 and ROCm
   x86_64. The pure ROCm metapackage records source/tool/epoch/target pins and its
   producer rebuilds twice against the exact expected binary and metadata digests.
-  Its build-tool pin is independent of runtime Setuptools. Six native CI jobs
-  build/compare/install/verify the three CPU, two CUDA and one ROCm profiles with
+  Its build-tool pin is independent of runtime Setuptools.
+  Only the fixed ROCm producer traverses declared extras; every active child is
+  verified against selected exact wheels. CPU/CUDA keep their refusal policy.
+  Six native CI jobs build/compare/install/verify the three CPU, two CUDA and one ROCm profiles with
   matching explicit variant selection. Hosted GPU-package jobs run CPU boundary
   checks, not accelerator/model qualification.
   Package/model/loader/GPU qualification, publication and activation remain distinct.

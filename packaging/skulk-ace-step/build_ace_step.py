@@ -203,12 +203,17 @@ class RocmMetapackageBuild(BuildInput):
         Version(self.setuptools)
         url = urlsplit(self.setuptools_source_url)
         if (
-            url.scheme != "https" or url.netloc != "files.pythonhosted.org"
-            or url.username is not None or url.password is not None
-            or url.query or url.fragment
+            url.scheme != "https"
+            or url.netloc != "files.pythonhosted.org"
+            or url.username is not None
+            or url.password is not None
+            or url.query
+            or url.fragment
             or Path(url.path).name != f"setuptools-{self.setuptools}-py3-none-any.whl"
         ):
-            raise ValueError("ROCm source build needs exact independent build-tool provenance")
+            raise ValueError(
+                "ROCm source build needs exact independent build-tool provenance"
+            )
         return self
 
 
@@ -259,24 +264,34 @@ class ArchiveObject(BuildInput):
         if self.source_url is None:
             build = self.source_build
             if (
-                self.distribution != "rocm" or build is None
+                self.distribution != "rocm"
+                or build is None
                 or build.source_url
                 != f"https://rocm.nightlies.amd.com/v2/gfx1151/rocm-{self.version}.tar.gz"
             ):
-                raise ValueError("source-built native object requires exact ROCm provenance")
+                raise ValueError(
+                    "source-built native object requires exact ROCm provenance"
+                )
         else:
             url = urlsplit(self.source_url)
             if (
                 self.source_build is not None
                 or url.scheme != "https"
-                or url.netloc not in {
-                    "files.pythonhosted.org", "download.pytorch.org",
-                    "download-r2.pytorch.org", "rocm.nightlies.amd.com",
+                or url.netloc
+                not in {
+                    "files.pythonhosted.org",
+                    "download.pytorch.org",
+                    "download-r2.pytorch.org",
+                    "rocm.nightlies.amd.com",
                 }
-                or url.username is not None or url.password is not None
-                or url.query or url.fragment
+                or url.username is not None
+                or url.password is not None
+                or url.query
+                or url.fragment
             ):
-                raise ValueError("native object needs one exact public provenance origin")
+                raise ValueError(
+                    "native object needs one exact public provenance origin"
+                )
         return self
 
 
@@ -310,7 +325,8 @@ class ArchiveInventory(BuildInput):
                 item.size_bytes > native_package_limits(self.variant).object_bytes
                 for item in self.objects
             )
-            or self.variant != "rocm" and any(item.source_build is not None for item in self.objects)
+            or self.variant != "rocm"
+            and any(item.source_build is not None for item in self.objects)
         ):
             raise ValueError(
                 "native archive inventory is duplicated or targets another interpreter"
@@ -335,12 +351,20 @@ def _dependency_matches(filename: str, target: str) -> bool:
     # libc minimum. Only CPython-compatible glibc/Linux x86_64 tags enter it;
     # hardware/ELF/loader qualification must establish execution separately.
     selected = parse_wheel_filename(filename)[3]
-    platforms = sorted({
-        tag.platform for tag in selected
-        if re.fullmatch(r"(?:linux|manylinux(?:_[a-zA-Z0-9_]+|1|2010|2014))_x86_64", tag.platform)
-    })
+    platforms = sorted(
+        {
+            tag.platform
+            for tag in selected
+            if re.fullmatch(
+                r"(?:linux|manylinux(?:_[a-zA-Z0-9_]+|1|2010|2014))_x86_64",
+                tag.platform,
+            )
+        }
+    )
     compatible = set(cpython_tags((3, 12), abis=["cp312"], platforms=platforms))
-    compatible.update(compatible_tags((3, 12), interpreter="cp312", platforms=platforms))
+    compatible.update(
+        compatible_tags((3, 12), interpreter="cp312", platforms=platforms)
+    )
     return bool(selected & compatible)
 
 
@@ -439,7 +463,10 @@ def assemble_wheel(
     limits = native_package_limits(variant)
     python_pin = catalog.for_target(_interpreter_target(target))
     profile = python_pin.profile
-    if lock_path.resolve() != (inputs / f"locks/{profile}-{variant}-py312.lock").resolve():
+    if (
+        lock_path.resolve()
+        != (inputs / f"locks/{profile}-{variant}-py312.lock").resolve()
+    ):
         raise ValueError(
             "native music must use the selected committed architecture lock"
         )
@@ -529,22 +556,32 @@ def assemble_wheel(
         if item.source_build is not None:
             with zipfile.ZipFile(path) as archive:
                 metadata = [
-                    entry for entry in archive.infolist()
+                    entry
+                    for entry in archive.infolist()
                     if entry.filename.count("/") == 1
                     and entry.filename.endswith(".dist-info/METADATA")
                 ]
                 if (
-                    len(metadata) != 1 or metadata[0].file_size > 2 * 1024**2
+                    len(metadata) != 1
+                    or metadata[0].file_size > 2 * 1024**2
                     or hashlib.sha256(archive.read(metadata[0])).hexdigest()
                     != item.source_build.metadata_sha256
                 ):
-                    raise ValueError("source-built native metadata differs from its provenance")
+                    raise ValueError(
+                        "source-built native metadata differs from its provenance"
+                    )
         payload[f"skulk_ace_step/wheels/{path.name}"] = Member(
             path, item.size_bytes, item.sha256
         )
     if {item.distribution for item in objects.objects} != required.keys():
         raise ValueError("native music archive inventory omits a locked distribution")
-    validate_dependency_closure(dependencies, required, direct, _interpreter_target(target))
+    validate_dependency_closure(
+        dependencies,
+        required,
+        direct,
+        _interpreter_target(target),
+        allow_dependency_extras=variant == "rocm",
+    )
     for name, data in {
         "requirements.in": direct,
         "requirements.lock": lock,

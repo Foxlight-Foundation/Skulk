@@ -72,6 +72,17 @@ of any Setuptools version required inside the runtime. The producer builds twice
 and accepts only the selected identical wheel bytes. Copy that wheel into the intake's `wheels/`
 before collecting the remaining ROCm originals. The collector refuses to invent
 a binary URL for it. Runtime installation never executes this source build.
+The fixed ROCm producer follows each declared dependency extra through its real
+wheel metadata, including extra-specific and platform-specific requirements.
+Undeclared extras, missing or incompatible children and URL requirements fail
+closure validation. CPU and CUDA profiles retain the default refusal of
+dependency extras; no source-root extras or network resolver are enabled.
+Dependency compatibility includes older valid x86_64 manylinux baselines and
+their historical aliases, as specified by
+[PyPA's platform tag contract](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/#manylinux).
+The sealed package and interpreter keep their glibc 2.28 host requirement;
+foreign architectures, newer glibc requirements and incompatible Python ABIs
+remain refused.
 
 ## Native lifetime and contracts
 
