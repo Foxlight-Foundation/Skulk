@@ -19,6 +19,7 @@ from packaging.version import InvalidVersion, Version
 
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.configuration import NodeConfigurationProvider
+from skulk.extensions.managed_limits import MAX_MANAGED_OWNER_DESCRIPTORS
 from skulk.extensions.steward import (
     StewardToolBinding,
     StewardToolProvider,
@@ -361,7 +362,7 @@ class LoadedExtensions:
                 if not isinstance(provider, DynamicCapabilityProvider):
                     continue
                 descriptors = provider.dynamic_capabilities()
-                if len(descriptors) > 128:
+                if len(descriptors) > MAX_MANAGED_OWNER_DESCRIPTORS:
                     continue
                 for descriptor in descriptors:
                     qualified_id = descriptor.qualified_id

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions.capabilities import CapabilityDescriptor, descriptor_revision
 from skulk.extensions.configuration import ConfigurationNodeId
+from skulk.extensions.managed_limits import MAX_MANAGED_OWNER_DESCRIPTORS
 from skulk.extensions.types import ExtensionContext
 
 
@@ -67,7 +68,7 @@ class HostCallbacks:
         if request.operation == "actions":
             return self.context.steward_actions_allowed()
         owned = self.capabilities()
-        if len(owned) > 128:
+        if len(owned) > MAX_MANAGED_OWNER_DESCRIPTORS:
             raise ValueError("too many installed callback capabilities")
         if request.operation == "revisions":
             described = await self.context.describe_node(self.context.node_id)

@@ -34,6 +34,11 @@ from skulk.extensions.configuration import (
 from skulk.extensions.credentials import CredentialMutation, NodeCredentials
 from skulk.extensions.managed_attachment import ManagedAttachment
 from skulk.extensions.managed_host import HostCallbacks, HostCapability
+from skulk.extensions.managed_limits import (
+    MAX_MANAGED_DESCRIPTORS,
+    MAX_MANAGED_DISCOVERY_BYTES,
+    MAX_MANAGED_OWNER_DESCRIPTORS,
+)
 from skulk.extensions.managed_streams import (
     ManagedStreamEnd,
     read_managed_frame,
@@ -234,7 +239,8 @@ class ManagedNode(_WireModel):
         default=False, description="Whether proposals can be decided here."
     )
     descriptors: tuple[CapabilityDescriptor, ...] = Field(
-        max_length=8, description="Capability contracts this node serves."
+        max_length=MAX_MANAGED_DESCRIPTORS,
+        description="Capability contracts this node serves.",
     )
 
     def public(self) -> ConfigurableNode:
@@ -412,13 +418,18 @@ class ManagedOwner:
         if len(raw) > (65536 if message.get("operation") == "invoke" else 16384):
             raise ValueError("managed request exceeds bound")
         socket = self._socket_path("control.sock")
+        limit = (
+            MAX_MANAGED_DISCOVERY_BYTES
+            if message.get("operation") in ("describe", "describe-extended")
+            else 131072
+        )
         async with asyncio.timeout(timeout):
-            reader, writer = await asyncio.open_unix_connection(socket, limit=131073)
+            reader, writer = await asyncio.open_unix_connection(socket, limit=limit + 1)
             try:
                 writer.write(raw)
                 await writer.drain()
                 response = await reader.readline()
-                if not response.endswith(b"\n") or len(response) > 131072:
+                if not response.endswith(b"\n") or len(response) > limit:
                     raise ValueError("invalid managed response frame")
                 result = _OBJECT.validate_json(response)
                 if set(result) == {"error"}:
@@ -455,6 +466,10 @@ class ManagedOwner:
                 contracts = [
                     d.qualified_id for node in snapshot.nodes for d in node.descriptors
                 ]
+                # Per-application metadata expansion must not admit an owner
+                # whose complete inventory dispatch and callbacks would drop.
+                if len(contracts) > MAX_MANAGED_OWNER_DESCRIPTORS:
+                    raise ValueError("too many managed owner capabilities")
                 if (
                     len(set(identities)) != len(identities)
                     or len(set(bundles)) != len(bundles)

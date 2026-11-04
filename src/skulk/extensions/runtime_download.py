@@ -22,6 +22,7 @@ from pydantic import (
     model_validator,
 )
 
+from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.runtime_artifacts import (
     Digest,
     RuntimePlatform,
@@ -819,7 +820,7 @@ class RuntimeDownloads:
                     self._response(response)
                     raw = bytearray()
                     async for chunk in response.aiter_bytes(chunk_size=65536):
-                        if len(raw) + len(chunk) > 131072:
+                        if len(raw) + len(chunk) > MAX_RUNTIME_METADATA_BYTES:
                             raise ValueError("release metadata exceeds bound")
                         raw.extend(chunk)
                 runtime = await self.installer.inspect_metadata(bytes(raw))
@@ -912,7 +913,8 @@ class RuntimeDownloads:
             if source.revision != request.expected_source_revision:
                 raise ValueError("release source revision conflict")
             metadata = read_private(
-                self.directory / "reviews" / (request.runtime_digest + ".json")
+                self.directory / "reviews" / (request.runtime_digest + ".json"),
+                MAX_RUNTIME_METADATA_BYTES,
             )
             runtime = await self.installer.inspect_metadata(metadata)
             if runtime.digest != request.runtime_digest:
@@ -1058,7 +1060,8 @@ class RuntimeDownloads:
                 read_private(
                     self.directory
                     / "reviews"
-                    / (prior.request.runtime_digest + ".json")
+                    / (prior.request.runtime_digest + ".json"),
+                    MAX_RUNTIME_METADATA_BYTES,
                 )
             )
             if runtime.digest != prior.request.runtime_digest:

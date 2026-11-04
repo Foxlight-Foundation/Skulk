@@ -44,6 +44,7 @@ from skulk.extensions.capability_store import (
     StoreTrustClient,
     StoreTrustUnavailableError,
 )
+from skulk.extensions.managed_limits import MAX_MANAGED_DESCRIPTORS
 from skulk.extensions.runtime_artifacts import (
     Digest,
     Identifier,
@@ -61,10 +62,11 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 
-ACCEPTED_CATALOG_PROTOCOLS: tuple[int, ...] = (1, 2)
+ACCEPTED_CATALOG_PROTOCOLS: tuple[int, ...] = (1, 2, 3)
 """Catalog record protocols this host reads: the current and the previous.
 
-Protocol 2 listings carry the Skulk version range of the release they name,
+Protocol 3 permits sixteen descriptor identifiers; earlier protocols retain
+their original eight-identifier bound. Protocol 2 listings carry the Skulk version range of the release they name,
 so a host judges fit by its version. Protocol 1 listings predate that and
 were published for one exact Skulk build, so they keep that rule."""
 
@@ -302,7 +304,7 @@ class _CatalogEntryClaims(_Contract):
     skulk_requires: str | None = Field(default=None, max_length=128)
     permissions: tuple[_Text, ...] = Field(min_length=1, max_length=16)
     descriptors: tuple[Annotated[str, Field(max_length=200)], ...] = Field(
-        min_length=1, max_length=8
+        min_length=1, max_length=MAX_MANAGED_DESCRIPTORS
     )
     surfaces: tuple[Annotated[str, Field(max_length=64)], ...] = Field(
         default=(), max_length=4
@@ -320,7 +322,9 @@ class _CatalogEntryClaims(_Contract):
             try:
                 SpecifierSet(self.skulk_requires)
             except InvalidSpecifier:
-                raise ValueError("catalog entry Skulk range is not a version range") from None
+                raise ValueError(
+                    "catalog entry Skulk range is not a version range"
+                ) from None
         if self.transfer_bytes < self.artifact_size:
             raise ValueError("catalog entry transfer size cannot be below its artifact")
         parsed = urlsplit(self.feed_url)
@@ -351,6 +355,10 @@ class _CatalogClaims(_Contract):
         """The listing is the signer's own and names a bundle sequence once."""
         if not self.created_at < self.expires_at:
             raise ValueError("catalog expiry must follow creation")
+        if self.protocol < 3 and any(
+            len(entry.descriptors) > 8 for entry in self.entries
+        ):
+            raise ValueError("more than eight catalog descriptors requires protocol 3")
         # A protocol 2 listing always states its Skulk range; protocol 1 never
         # did, so a range in one would be a document no protocol describes.
         if any(
@@ -853,7 +861,9 @@ def _carry_revocations(
             "revoked_publishers": tuple(
                 sorted(publishers | set(trust.revoked_publishers))
             ),
-            "revoked_artifacts": tuple(sorted(artifacts | set(trust.revoked_artifacts))),
+            "revoked_artifacts": tuple(
+                sorted(artifacts | set(trust.revoked_artifacts))
+            ),
         }
     )
 
@@ -1040,8 +1050,22 @@ class HostCatalog:
             and self.store.available
             and source is not None
             and source.base_url == self.store.catalog_url
-            and source.document_filename == self.store.catalog_document
+            and source.document_filename in self._store_documents()
         )
+
+    def _store_documents(self) -> tuple[str, ...]:
+        """Built-in catalog versions, leaving explicitly customized names unchanged."""
+        from skulk.extensions.capability_store import (
+            CAPABILITY_STORE_CATALOG_DOCUMENT,
+            CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT,
+        )
+
+        store = self.store
+        if store is None:
+            return ()
+        if store.catalog_document != CAPABILITY_STORE_CATALOG_DOCUMENT:
+            return (store.catalog_document,)
+        return (store.catalog_document, CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT)
 
     def _uses_store(self, state: "_CatalogState") -> bool:
         """Whether reads come from the built-in store, seeded or not yet."""
@@ -1131,10 +1155,18 @@ class HostCatalog:
     def _store_source(self, revision: int) -> CatalogSource:
         """The built-in store's catalog address at ``revision``, read anonymously."""
         assert self.store is not None
+        documents = self._store_documents()
+        filename = self.store.catalog_document
+        if len(documents) == 2:
+            prefix = self.store.catalog_url + "\n" + documents[1] + "\n"
+            if any(key.startswith(prefix) for key in self._state().floors):
+                # Returning from a private catalog must not reset the accepted
+                # version and permit a missing v3 document to hide releases.
+                filename = documents[1]
         return CatalogSource(
             revision=revision,
             base_url=self.store.catalog_url,
-            document_filename=self.store.catalog_document,
+            document_filename=filename,
         )
 
     async def _renewed_store_state(
@@ -1345,8 +1377,7 @@ class HostCatalog:
                     # of this address's history.
                     next_trust = next_trust.model_copy(
                         update={
-                            "revision": (floor.revision if floor is not None else 0)
-                            + 1
+                            "revision": (floor.revision if floor is not None else 0) + 1
                         }
                     )
                 if next_trust.expires_at <= time.time():
@@ -1570,38 +1601,52 @@ class HostCatalog:
                     "catalog_unconfigured", "catalog source unconfigured"
                 )
             source, trust = state.source, state.trust
+            candidate = source
+            documents = self._store_documents()
+            if (
+                self._is_store(source)
+                and len(documents) == 2
+                and (source.document_filename == documents[0])
+            ):
+                candidate = source.model_copy(
+                    update={
+                        "document_filename": documents[1],
+                        "revision": source.revision + 1,
+                    }
+                )
+            # One deadline includes the optional initial 404 probe. Failure to
+            # authenticate v3 never downgrades; only genuine absence before its
+            # first acceptance can retain the legacy address.
             try:
-                async with (
-                    asyncio.timeout(20),
-                    self._client(source) as client,
-                    client.stream(
-                        "GET", source.base_url + quote(source.document_filename)
-                    ) as response,
-                ):
-                    if response.status_code != 200:
-                        raise CatalogRefusedError(
-                            "catalog_download_refused",
-                            "catalog download refused",
-                            status=response.status_code,
-                        )
-                    if response.headers.get("content-encoding", "identity") != (
-                        "identity"
-                    ):
-                        raise CatalogRefusedError(
-                            "catalog_download_refused", "catalog download refused"
-                        )
-                    raw = bytearray()
-                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                        if len(raw) + len(chunk) > 262144:
-                            raise CatalogRefusedError(
-                                "catalog_invalid", "catalog document exceeds bound"
+                async with asyncio.timeout(20):
+                    try:
+                        raw = await self._download(candidate)
+                    except CatalogRefusedError as error:
+                        if (
+                            candidate == source
+                            or error.status != 404
+                            or any(
+                                key.startswith(_floor_key(candidate, ""))
+                                for key in state.floors
                             )
-                        raw.extend(chunk)
-            except (httpx.HTTPError, TimeoutError):
+                        ):
+                            raise
+                        candidate = source
+                        raw = await self._download(source)
+            except TimeoutError:
                 raise CatalogRefusedError(
                     "catalog_unreachable", "catalog unavailable"
                 ) from None
-            verified = verify_catalog(bytes(raw), trust, now=current_time)
+            verified = verify_catalog(raw, trust, now=current_time)
+            if (
+                self._is_store(candidate)
+                and len(documents) == 2
+                and (candidate.document_filename == documents[1])
+                and verified.claims.protocol != 3
+            ):
+                raise CatalogRefusedError(
+                    "catalog_invalid", "extended catalog requires protocol 3"
+                )
             current = self._state()
             if current.source != source:
                 # A source change landed during the read: the same remedy as a
@@ -1611,7 +1656,19 @@ class HostCatalog:
             # accepted revision, could hide newer releases or re-present
             # withdrawn ones; the accepted revision only moves forward, per
             # catalog address and publisher.
-            key = _floor_key(source, verified.claims.publisher)
+            if candidate != source:
+                legacy_floor = current.floors.get(
+                    _floor_key(source, verified.claims.publisher)
+                )
+                if (
+                    legacy_floor is not None
+                    and verified.claims.revision < legacy_floor.revision
+                ):
+                    raise CatalogRefusedError(
+                        "catalog_rollback_refused", "catalog revision rollback refused"
+                    )
+                current = _with_trust(current, candidate, trust, keep_revocations=False)
+            key = _floor_key(candidate, verified.claims.publisher)
             floor = current.floors.get(key)
             if floor is not None and (
                 verified.claims.revision < floor.revision
@@ -1629,7 +1686,7 @@ class HostCatalog:
             floors[key] = AcceptedFloor(
                 revision=verified.claims.revision, sha256=verified.sha256
             )
-            floors = bounded_floors(floors, key, _floor_key(source, ""))
+            floors = bounded_floors(floors, key, _floor_key(candidate, ""))
             if not destination.exists():
                 self._prune(floors, keep=8)
             # The floor moves before the document lands: a crash in between
@@ -1638,6 +1695,38 @@ class HostCatalog:
             self._save(current.model_copy(update={"floors": floors}))
             write_private(destination, verified.document)
             return verified
+
+    async def _download(self, source: CatalogSource) -> bytes:
+        """Read one bounded signed document; never follow redirects or decompress."""
+        try:
+            async with (
+                self._client(source) as client,
+                client.stream(
+                    "GET", source.base_url + quote(source.document_filename)
+                ) as response,
+            ):
+                if response.status_code != 200:
+                    raise CatalogRefusedError(
+                        "catalog_download_refused",
+                        "catalog download refused",
+                        status=response.status_code,
+                    )
+                if response.headers.get("content-encoding", "identity") != "identity":
+                    raise CatalogRefusedError(
+                        "catalog_download_refused", "catalog download refused"
+                    )
+                raw = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=65536):
+                    if len(raw) + len(chunk) > 262144:
+                        raise CatalogRefusedError(
+                            "catalog_invalid", "catalog document exceeds bound"
+                        )
+                    raw.extend(chunk)
+                return bytes(raw)
+        except httpx.HTTPError:
+            raise CatalogRefusedError(
+                "catalog_unreachable", "catalog unavailable"
+            ) from None
 
     def _prune(self, floors: dict[str, "AcceptedFloor"], *, keep: int) -> None:
         """Drop retained documents beyond the newest ``keep``, never an accepted floor.

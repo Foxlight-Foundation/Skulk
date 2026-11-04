@@ -58,8 +58,11 @@ def declared_operation(
     )
 
 
+@pytest.mark.parametrize("schema_description_bytes", [0, 180000])
 async def test_disabled_registered_contract_http_read_is_scoped_and_inert(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schema_description_bytes: int,
 ) -> None:
     """A real manager serves selected schemas without attachment or child startup."""
     manager = manager_fixture(tmp_path / "manager", monkeypatch)
@@ -69,6 +72,15 @@ async def test_disabled_registered_contract_http_read_is_scoped_and_inert(
     connect(path, manager.root)
     services = ManagedServices(path)
     descriptor = declared_operation()
+    if schema_description_bytes:
+        descriptor = descriptor.model_copy(
+            update={
+                "input_schema": {
+                    **descriptor.input_schema,
+                    "description": "x" * schema_description_bytes,
+                }
+            }
+        )
     try:
         await manager.dispatch(
             InstallationRequest(action="register", plugin_id=identifier)

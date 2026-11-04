@@ -3677,3 +3677,39 @@ their supported scope. See the API guide for exact request and lifecycle fields.
   authorization remain enforced.
   Stream cleanup owns cancellation and
   local receiver retirement before the first assistant-role event is yielded.
+
+
+### Managed declaration metadata bounds
+
+`extensions/managed_limits.py` separates rich declaration metadata from ordinary
+calls: one managed application may declare sixteen capabilities, descriptions
+and exact selected contract reads use 512 KiB response envelopes, and an
+individual selected descriptor is bounded to 256 KiB. Signed runtime metadata
+uses a separate 512 KiB bound consistently through download, review, staging,
+recovery and installed inventory. Catalog and registration summaries accept
+sixteen declared operations. Ordinary invocation frames, settings, credentials,
+manager requests and binary media retain their own existing limits.
+
+One owner may report at most sixteen application nodes and 128 total capability
+contracts, within the discovery byte bound. Refresh refuses an oversized
+aggregate before reporting availability and withdraws readiness until a valid
+inventory returns. Discovery, dynamic dispatch and host callbacks share this
+aggregate bound, preventing a ready owner whose contracts cannot be dispatched.
+
+Expanded SDK manifests require a compatible Skulk 2.0.3 reader. Deploy readers
+before publishing larger signed records; declared contracts and successful
+metadata verification do not establish live provider readiness or authorize
+execution. Legacy descriptor revisions and signed identities remain unchanged.
+
+Catalog protocol 3 carries the expanded identifier count at the separate
+`catalog/catalog-v3.json` address. Protocols 1 and 2 keep their original eight
+identifiers, and the publisher maintains a signed legacy `catalog/catalog.json`
+projection. Version filtering follows whole-catalog validation, so a release's
+version requirement cannot protect an older catalog parser. Updated built-in
+Store readers prefer v3 and fall back only on an initial 404 before accepting
+it. Invalid signatures, malformed data and other failures never downgrade.
+Acceptance atomically switches the source and retains both histories; a v3
+revision below the accepted legacy revision is refused. Restart, a failed
+retained-document write or returning from a private catalog cannot restore
+legacy fallback. Introduce both catalogs using existing releases, deploy the
+reader, then publish expanded releases.
