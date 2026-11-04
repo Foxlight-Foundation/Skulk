@@ -656,6 +656,109 @@ async def test_background_storage_failure_cancels_native_work_and_keeps_host_ali
         assert (await client.get(f"/v1/music/edits/{accepted.id}")).status_code == 503
 
 
+@pytest.mark.parametrize("transport", ["source", "output", "invalid_output"])
+async def test_transport_failure_with_uncertain_index_write_fences_only_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    """A nested failure handler must not let journal uncertainty kill the host."""
+    sync = os.fsync
+
+    def refuse_metadata(descriptor: int) -> None:
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("injected failed-transfer index sync failure")
+        sync(descriptor)
+
+    async with fixture(tmp_path) as (harness, client):
+        accepted = [await create(client)]
+        await harness.task(CommandId(accepted[0].id))
+        # A second accepted job is still waiting for authoritative placement;
+        # the single loaded instance cannot run two native edits concurrently.
+        harness.place = False
+        accepted.append(await create(client))
+        identifiers = [CommandId(job.id) for job in accepted]
+        with anyio.fail_after(5):
+            while harness.api._source_senders:
+                await anyio.sleep(0.01)
+        async with harness.api.lock:
+            for identifier in identifiers:
+                harness.api.media.open_assembly(
+                    identifier, total_bytes=100, total_chunks=1
+                )
+        finished = anyio.Event()
+
+        async def receive() -> None:
+            if transport == "source":
+                await harness.api.receive_source(
+                    VisionMediaPacket(
+                        source_node=NodeId("node-0"),
+                        target_node=NodeId("owner"),
+                        command_id=identifiers[0],
+                        model=ModelId("test/native-music"),
+                        payload="music_edit_source",
+                        kind="transport_failed",
+                        sequence=0,
+                        error_message="fixture source transfer failed",
+                    )
+                )
+            elif transport == "output":
+                await harness.api.receive_output(
+                    OutputMediaPacket(
+                        source_node=NodeId("node-0"),
+                        target_node=NodeId("owner"),
+                        command_id=identifiers[0],
+                        model=ModelId("test/native-music"),
+                        purpose="music_edit",
+                        kind="transport_failed",
+                        sequence=0,
+                        error_message="fixture output transfer failed",
+                    )
+                )
+            else:
+                await harness.api.receive_output(
+                    OutputMediaPacket(
+                        source_node=NodeId("node-0"),
+                        target_node=NodeId("owner"),
+                        command_id=identifiers[0],
+                        model=ModelId("test/native-music"),
+                        purpose="music_edit",
+                        kind="opened",
+                        sequence=0,
+                        total_bytes=100,
+                        total_chunks=1,
+                        content_type="audio/mpeg",
+                    )
+                )
+            finished.set()
+
+        monkeypatch.setattr(os, "fsync", refuse_metadata)
+        try:
+            harness.api.tasks.start_soon(receive)
+            with anyio.fail_after(5):
+                await finished.wait()
+                while len(harness.finalized) != 2:
+                    await anyio.sleep(0.01)
+            assert not harness.api.active
+            assert (
+                sum(isinstance(command, TaskCancelled) for command in harness.commands)
+                == 2
+            )
+            assert harness.api.media.reserved_bytes() == 0
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+            for job in accepted:
+                assert (
+                    await client.get(f"/v1/music/edits/{job.id}")
+                ).status_code == 503
+        finally:
+            monkeypatch.undo()
+        with anyio.fail_after(5):
+            while harness.api._cleanup:
+                await anyio.sleep(0.01)
+        assert all(
+            harness.api.sources.ready_path(identifier) is None
+            for identifier in identifiers
+        )
+
+
 async def test_expiry_cleanup_failure_keeps_host_alive_and_retries_retained_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

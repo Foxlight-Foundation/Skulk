@@ -2382,6 +2382,10 @@ owned. WAV output is never silently truncated or transcoded.
 Incomplete physical cleanup returns **503** and retains the job record; retry
 delete after cleanup completes. Startup likewise refuses edit storage readiness
 while an orphan cleanup failure leaves unaccounted content behind.
+If recording a source/result transport failure encounters an uncertain index
+write, the edit service cancels its retained work and returns **503** until its
+index is reopened. Unrelated API serving continues; an unwritten terminal outcome
+is never reported as durably committed.
 
 ## Source separation
 

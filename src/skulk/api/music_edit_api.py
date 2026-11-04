@@ -1083,13 +1083,23 @@ class MusicEditAPI:
     ) -> None:
         if self._jobs is None:
             return
-        job = await separation_file_effect(lambda: self.jobs.get(identifier))
-        if job is None or job.is_terminal:
-            await self._retry_cleanup_locked(identifier)
+        try:
+            job = await separation_file_effect(lambda: self.jobs.get(identifier))
+            if job is None or job.is_terminal:
+                await self._retry_cleanup_locked(identifier)
+                return
+            await separation_file_effect(
+                lambda: self.jobs.fail(identifier, message, cancelled=cancelled)
+            )
+        except MusicEditStorageError as error:
+            # Failure can itself be entered from a transport validation handler.
+            # Such nested exceptions bypass that handler's sibling except blocks;
+            # fence centrally before uncertainty can escape the host task group.
+            logger.opt(exception=error).warning(
+                "Music edit failure transition is storage-fenced"
+            )
+            await self._fence_storage_locked()
             return
-        await separation_file_effect(
-            lambda: self.jobs.fail(identifier, message, cancelled=cancelled)
-        )
         await self._abort_entry_locked(identifier)
 
     async def _abort_entry_locked(self, identifier: CommandId) -> None:
