@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -2257,6 +2258,34 @@ class NativeMusicArtifactConfig(FrozenModel):
 
 
 @final
+class NativeMusicArtifactSource(FrozenModel):
+    """One exact native music repository transaction, possibly holding two roles.
+
+    Loader roots and licenses remain on the owning card's component sections;
+    this grouping only selects bytes and never grants execution readiness.
+    """
+
+    repository: str = Field(description="Repository containing the selected data files.")
+    revision: str = Field(description="Immutable commit shared by this transaction.")
+    files: tuple[ArtifactBundleFile, ...] = Field(description="Complete sorted file selection, with sizes and object identities.")
+
+    def download_bundle(self) -> ArtifactBundleConfig:
+        """Derive the grouped transfer identity without replacing role loader roots."""
+        manifest = [
+            {"relative_path": item.path, "size_bytes": item.size_bytes, "object_id": item.object_id}
+            for item in self.files
+        ]
+        digest = hashlib.sha256(json.dumps(
+            manifest, allow_nan=False, sort_keys=True, separators=(",", ":")
+        ).encode()).digest()
+        return ArtifactBundleConfig(
+            bundle_id="bundle_" + base64.b32encode(digest).decode().rstrip("=").lower(),
+            files=self.files,
+            download_size=sum(item.size_bytes for item in self.files),
+        )
+
+
+@final
 class NativeAceMusicConfig(FrozenModel):
     """Native ACE base model truth; does not advertise ready execution capacity."""
 
@@ -3421,24 +3450,49 @@ class ModelCard(CamelCaseModel):
         self.require_immutable_external_companions(context="signed registry cards")
         return self
 
-    def require_supported_artifact_operations(self, *, context: str) -> None:
-        """Reject byte work whose complete component layout is not implemented.
+    def native_music_artifact_sources(self) -> tuple[NativeMusicArtifactSource, ...]:
+        """Group all native music data by exact repository/revision, without I/O.
 
-        Args:
-            context: Artifact boundary included in the diagnostic.
-
-        Raises:
-            ValueError: Native music has metadata support, but its three-component
-                download, installation and preservation mapping is unavailable.
-                Reading or projecting the card does not perform this check.
+        Returns an empty tuple for other models. A shared encoder/VAE repository
+        is one transaction; duplicate paths across roles are rejected rather
+        than silently aliasing components or weakening a required object pin.
         """
-        # Parsing exact metadata must not certify a primary-only installation.
-        # Remove this refusal only with the complete native component lifecycle.
-        if self.music is not None and self.music.native is not None:
-            raise ValueError(
-                f"{context}: native music artifact operations require the complete "
-                "three-component download and store integration, which is not yet supported"
+        native = self.music.native if self.music is not None else None
+        if native is None:
+            return ()
+        if self.artifact_bundle is None or self.source_revision is None:
+            raise ValueError("native music requires its pinned base artifact bundle")
+        selections = (
+            (str(self.artifact_repository), self.source_revision, self.artifact_bundle),
+            (native.text_encoder.repo, native.text_encoder.revision, native.text_encoder.artifact_bundle),
+            (native.autoencoder.repo, native.autoencoder.revision, native.autoencoder.artifact_bundle),
+        )
+        groups: dict[tuple[str, str], dict[str, ArtifactBundleFile]] = {}
+        for repository, revision, bundle in selections:
+            files = groups.setdefault((repository, revision), {})
+            for item in bundle.files:
+                candidate = PurePosixPath(item.path.casefold())
+                if any(
+                    candidate == (existing := PurePosixPath(path.casefold()))
+                    or candidate in existing.parents or existing in candidate.parents
+                    for path in files
+                ):
+                    raise ValueError("native music component roles must not overlap repository paths")
+                files[item.path] = item
+        return tuple(
+            NativeMusicArtifactSource(
+                repository=repository, revision=revision,
+                files=tuple(files[path] for path in sorted(files)),
             )
+            for (repository, revision), files in sorted(groups.items())
+        )
+
+    def native_music_files_for_source(
+        self, repository: str, revision: str | None
+    ) -> tuple[ArtifactBundleFile, ...]:
+        """Return exact native files for an authorized source, or no selection."""
+        return next((source.files for source in self.native_music_artifact_sources()
+            if source.repository == repository and source.revision == revision), ())
 
     def require_immutable_external_companions(self, *, context: str) -> None:
         """Reject external companion repositories without immutable revisions.
@@ -3691,6 +3745,7 @@ class ModelCard(CamelCaseModel):
         for component in (native.text_encoder, native.autoencoder):
             if component.repo == self.artifact_repository and component.revision != self.source_revision:
                 raise ValueError("native music components from one repository must pin one revision")
+        self.native_music_artifact_sources()
         if self.n_layers != 24 or self.hidden_size != 2048:
             raise ValueError("native ACE base geometry must match its 24-layer 2048-wide backbone")
         total = bundle.download_size + native.text_encoder.artifact_bundle.download_size + native.autoencoder.artifact_bundle.download_size

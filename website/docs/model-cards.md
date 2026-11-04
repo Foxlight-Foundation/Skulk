@@ -426,9 +426,14 @@ Turbo GGUF. The reader preserves its intrinsic generation and editing truth;
 this metadata does not assert that a native runner or editing endpoint is
 available. Current audio.cpp and MLX runners cannot load this selection.
 Master placement and manual/legacy worker startup refuse that mismatch.
-Downloads, installed-record creation and preservation also explicitly refuse
-native profiles until the full three-component byte lifecycle is implemented;
-a cached primary bundle alone is never considered download-complete.
+Downloads group all selected files by immutable repository/revision. A shared
+text-encoder/autoencoder source is one required `music_component` transaction;
+components mirrored into the primary source are included in its base transfer.
+Installed records bind each complete source to its sizes and object pins. Offline
+completeness requires every source, its revision marker and installed record;
+a cached primary bundle alone is never considered download-complete. Preservation
+exports and restores this complete closure while retaining each role's loader
+root. Downloaded bytes do not advertise a ready engine or enable placement.
 
 | Field | Meaning |
 | --- | --- |

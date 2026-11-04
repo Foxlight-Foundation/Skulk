@@ -207,6 +207,10 @@ async def _require_trusted_registry_peer_record(
         expected_file = None
         if record.artifact_role == "vision_weights" and trusted_card.vision is not None:
             expected_revision = trusted_card.vision.weights_revision
+        elif record.artifact_role == "music_component":
+            if not trusted_card.native_music_files_for_source(expected_repository, record.artifact_revision):
+                raise web.HTTPConflict(reason="music component revision is not declared by its owner")
+            expected_revision = record.artifact_revision
         elif (
             record.artifact_role == "image_component" and trusted_card.image is not None
         ):
@@ -263,6 +267,7 @@ _ARTIFACT_ROLES: frozenset[str] = frozenset(
         "vllm_draft",
         "video_companion",
         "image_component",
+        "music_component",
     }
 )
 
@@ -809,6 +814,10 @@ class ModelStoreServer:
             expected_file: str | None = None
             if artifact_role == "vision_weights" and card.vision is not None:
                 expected_revision = card.vision.weights_revision
+            elif artifact_role == "music_component":
+                if not card.native_music_files_for_source(repository, source_revision):
+                    raise web.HTTPConflict(reason="music component revision is not declared by its owner")
+                expected_revision = source_revision
             elif artifact_role == "image_component" and card.image is not None:
                 if not card.image.files_for_source(repository, source_revision):
                     raise web.HTTPConflict(

@@ -2670,10 +2670,15 @@ Skulk; existing PMF kit/recovery and model/registry/code authority stay separate
 - `/v1/models.music.native`: intrinsic variant/modes/classes/sample rate/channels;
   does not assert a native runner or HTTP editing endpoint exists.
 - Absent native metadata is excluded from existing card/public serialization.
-- `ModelCard.require_supported_artifact_operations`: refuses native profile
-  download selection, direct/store transfers and installed records before effects.
-  Native cache completeness is false; preservation closure selection also refuses
-  until all three components have a supported byte lifecycle.
+- `ModelCard.native_music_artifact_sources()` / `native_music_files_for_source()`:
+  exact sorted source groups across all three roles; overlapping role paths fail.
+  Shared external sources use one required `music_component` transfer. Same-source
+  primary components join the base selection; loader roots stay on the owner.
+- Store base completion waits for every source. Direct/store staging, installed
+  records and offline completeness bind all selected files and immutable pins.
+  Preservation maps the entire closure with no repository Python; recovery may
+  add only the exact receiver-owned capture notice. Byte availability is distinct
+  from engine readiness; native placement/startup guards remain.
 
 ### Native ACE package/process definitions
 
@@ -2707,6 +2712,6 @@ Skulk; existing PMF kit/recovery and model/registry/code authority stay separate
   explicit native Python 3.12 checks via installed-only `verify_runtime.py`.
   Three-target CI compares independent builds and performs fresh offline execution;
   it does not load music models, grant model qualification or register Core capacity.
-- Existing native card placement/download/store/preservation refusal remains until
-  the complete artifact and worker lifecycle is implemented. No editing route is
-  introduced by these package/process definitions.
+- Native placement/startup guards remain until worker integration exists. Model
+  byte custody follows the complete source-group lifecycle above. No editing
+  route is introduced by these package/process definitions.

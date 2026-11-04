@@ -290,7 +290,6 @@ class ResumableShardDownloader(ShardDownloader):
         self, shard: ShardMetadata, config_only: bool = False
     ) -> Path:
         """Ensure supported shard artifacts, refusing unsupported layouts before effects."""
-        shard.model_card.require_supported_artifact_operations(context="ensure shard")
         bundle_root = (
             shard.model_card.artifact_bundle.root
             if shard.model_card.artifact_bundle is not None
@@ -300,6 +299,11 @@ class ResumableShardDownloader(ShardDownloader):
             f"{bundle_root}/config.json" if bundle_root is not None else "config.json"
         )
         allow_patterns = [config_path] if config_only else None
+        if self.offline and not config_only and shard.model_card.native_music_artifact_sources():
+            from skulk.download.download_utils import model_companions_present_on_disk
+
+            if not await asyncio.to_thread(model_companions_present_on_disk, shard.model_card, True):
+                raise FileNotFoundError("Offline native music model requires every pinned base, text encoder and autoencoder file in the local cache")
 
         # Companions download before the base so required sidecar failures
         # surface before spending bandwidth on the base. ensure_shard must

@@ -329,6 +329,25 @@ def select_store_image_files(
     return selected
 
 
+def select_store_native_music_files(
+    file_list: list[FileListEntry], model_card: ModelCard, repository: str, revision: str
+) -> list[FileListEntry]:
+    """Select the complete native source group, refusing absent or stale objects."""
+    expected = model_card.native_music_files_for_source(repository, revision)
+    if not expected:
+        raise ValueError("native music source is not declared by its owning card")
+    listed = {item.path: item for item in file_list}
+    selected: list[FileListEntry] = []
+    for item in expected:
+        observed = listed.get(item.path)
+        if observed is None:
+            raise FileNotFoundError(f"Native music component file is absent: {item.path}")
+        if observed.size != item.size_bytes:
+            raise ValueError(f"Native music component size mismatch: {item.path}")
+        selected.append(observed)
+    return selected
+
+
 def select_store_video_companion_files(
     file_list: list[FileListEntry],
     owner_card: ModelCard,
@@ -737,6 +756,23 @@ class ModelStore:
         requested_repository = source_repository or model_id
         if registered_repository != requested_repository:
             return False
+        if model_card is not None and model_card.native_music_artifact_sources():
+            expected = model_card.native_music_files_for_source(requested_repository, source_revision)
+            installed = entry.installed_card
+            model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+            if not expected or installed is None or model_path is None or installed.artifact_role != artifact_role:
+                return False
+            if (
+                expected != installed.model_card.native_music_files_for_source(requested_repository, source_revision)
+                or not verify_installed_card(model_path, installed)
+            ):
+                return False
+            if artifact_role == "base":
+                return all(self.entry_matches_artifact(
+                    source.repository, source.revision, source.repository, model_card, "music_component"
+                ) for source in model_card.native_music_artifact_sources()
+                    if source.repository != str(model_card.artifact_repository))
+            return artifact_role == "music_component"
         if artifact_role == "video_companion" and model_card is not None:
             return self._entry_holds_companion_files(
                 entry, model_card, requested_repository, source_revision
@@ -1625,9 +1661,11 @@ class ModelStore:
         Companion downloads retain that owning card together with their role
         and owning identities instead of synthesizing a bare model card.
         """
-        if model_card is not None:
-            model_card.require_supported_artifact_operations(context="store download")
         requested_repository = source_repository or model_id
+        if model_card is not None and model_card.native_music_artifact_sources():
+            expected_role = "base" if requested_repository == str(model_card.artifact_repository) else "music_component"
+            if artifact_role != expected_role or not model_card.native_music_files_for_source(requested_repository, source_revision):
+                raise ValueError("native music request disagrees with its complete pinned source selection")
         pinned_projector = (
             model_card.vision.projector_file
             if model_card is not None and model_card.vision is not None
@@ -1665,6 +1703,11 @@ class ModelStore:
             self.entry_file_requires_recovery(model_id, item.path, item.size_bytes)
             for item in image_files
         )
+        if model_card is not None:
+            missing_companion = missing_companion or any(
+                self.entry_file_requires_recovery(model_id, item.path, item.size_bytes)
+                for item in model_card.native_music_files_for_source(requested_repository, source_revision)
+            )
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
@@ -1920,6 +1963,7 @@ class ModelStore:
         parsed = urlsplit(source_base_url)
         if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
             raise ValueError("source_base_url must be an HTTP(S) node API")
+        native_source = bool(record.model_card.native_music_artifact_sources())
         async with self._download_transfer_lock:
             tombstones = read_reconciliation_tombstones(self._store_path)
             if record.artifact_model_id in tombstones or (
@@ -1936,6 +1980,8 @@ class ModelStore:
                 if existing is not None
                 else None
             )
+            # Older indexed replicas can predate original Git-pin checks;
+            # reuse must verify the received trusted selection too.
             if (
                 existing is not None
                 and existing.installed_card is not None
@@ -1943,7 +1989,10 @@ class ModelStore:
                 == record.installed_identity
                 and existing.installed_card.manifest_sha256 == record.manifest_sha256
                 and existing_path is not None
-                and verify_installed_card(existing_path, existing.installed_card)
+                and await asyncio.to_thread(
+                    verify_installed_card, existing_path, record,
+                    verify_hashes=native_source,
+                )
             ):
                 return existing
             import_root = self._store_path / ".imports"
@@ -2036,9 +2085,16 @@ class ModelStore:
                             f"peer export size mismatch for {manifest_entry.path}"
                         )
                     partial.replace(destination)
-            imported_files = build_file_manifest(temporary)
+            imported_files = await asyncio.to_thread(build_file_manifest, temporary)
             if manifest_sha256(imported_files) != record.manifest_sha256:
                 raise RuntimeError("peer export manifest digest mismatch")
+            # The peer controls its transfer manifest. Native Git-pinned
+            # metadata must also match the original owning card before any
+            # canonical generation is replaced or marked registry-verified.
+            if native_source and not await asyncio.to_thread(
+                verify_installed_card, temporary, record, verify_hashes=True,
+            ):
+                raise ValueError("native music peer artifact differs from its complete pinned source")
             final_name = (
                 record.artifact_model_id.replace("/", "--")
                 + "--installed-"
@@ -2069,6 +2125,30 @@ class ModelStore:
             if imported is None:
                 raise RuntimeError("peer import committed without a registry entry")
             return imported
+
+    async def _ensure_native_music_companions(self, card: ModelCard) -> None:
+        """Await every required native source before completing its base download.
+
+        This runs before taking the transfer lock. Child downloads use ordinary
+        store admission and may be shared by another request; cancelling the
+        parent leaves their verified cache usable but never completes the base.
+        """
+        for source in card.native_music_artifact_sources():
+            if source.repository == str(card.artifact_repository):
+                continue
+            status = await self.request_download(
+                source.repository, source_revision=source.revision,
+                source_repository=source.repository, model_card=card,
+                artifact_role="music_component", owner_model_id=str(card.model_id),
+                owner_card_id=card.registry_card_id,
+            )
+            task = self._download_tasks_by_model.get(source.repository)
+            if task is not None:
+                await asyncio.shield(task)
+            if status.status != "complete" or not self.entry_matches_artifact(
+                source.repository, source.revision, source.repository, card, "music_component"
+            ):
+                raise RuntimeError(f"Required native music source {source.repository} did not complete: {status.error or status.status}")
 
     async def _reuse_verified_bundle_files(
         self,
@@ -2202,6 +2282,8 @@ class ModelStore:
         )
 
         try:
+            if artifact_role == "base" and model_card is not None:
+                await self._ensure_native_music_companions(model_card)
             if source_revision is None and (
                 (target_dir / _SOURCE_REVISION_MARKER).exists()
                 or (target_dir / _SOURCE_REVISION_STAGING_MARKER).exists()
@@ -2235,6 +2317,9 @@ class ModelStore:
             # glob is retained by ``gguf_allow_patterns``, so a vision GGUF keeps
             # its ``*mmproj*.gguf``.
             selected_files = (
+                select_store_native_music_files(repo_file_list, model_card, artifact_repository, revision)
+                if model_card is not None and model_card.native_music_artifact_sources()
+                else
                 select_store_image_files(
                     repo_file_list, model_card, artifact_repository, revision
                 )
@@ -2339,6 +2424,11 @@ class ModelStore:
                     and str(item.repo) == artifact_repository
                 }
             )
+            if model_card is not None:
+                expected_files.update(
+                    (item.path, (item.size_bytes, item.object_id))
+                    for item in model_card.native_music_files_for_source(artifact_repository, revision)
+                )
 
             if model_card is not None and model_card.image is not None:
                 expected_files.update(

@@ -2644,9 +2644,14 @@ and leaves existing GGUF serialization unchanged. Public model metadata reports
 native variant/edit modes/part classes/geometry. Existing engine placement and
 legacy/manual worker startup reject this distinct artifact contract until a
 native execution implementation exists; no editing endpoint is implied.
-Byte operations likewise refuse native profiles until all three components have
-supported download/store/preservation mappings; primary-only cache presence does
-not count as download completeness.
+`native_music_artifact_sources()` groups the three roles by exact source. Shared
+external encoder/VAE files use one required `music_component` transaction, while
+same-primary-source roles join the base selection. Store base completion waits
+for every source; installed records, offline checks and preservation retain the
+complete selected closure and role loader roots. The fixed receiver-owned capture
+notice is the only extra native file allowed during recovery. Primary-only cache
+presence does not count as download completeness. This byte lifecycle leaves the
+native placement/startup guard in place until runner integration exists.
 
 The built-in native ACE package/process family lives in `packaging/skulk-ace-step/`.
 Its Python 3.12 interpreter and exact three-platform CPU archive catalogs stay
@@ -2679,5 +2684,6 @@ Build-time `producer_tests/` and `pyrightconfig.build.json` run with Core Python
 `verify_runtime.py`, and the separate Python 3.12 typing project. The ACE boundary
 workflow builds twice and executes fresh offline packages on macOS ARM64, Linux
 x86_64 and Linux ARM64. These checks do not load music weights or qualify a model.
-Do not remove native byte-operation/placement refusal, advertise capacity or add
-public editing availability from package evidence alone.
+Package evidence alone must not remove native placement/startup guards,
+advertise capacity or establish public editing availability. Model-byte custody
+has its separate complete download/store/preservation contract above.

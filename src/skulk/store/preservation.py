@@ -354,6 +354,14 @@ def validate_recovery_layout(
                 "capture lacks the normal runtime's complete weight layout"
             )
     if item.role == "base":
+        captured_native = {file.path: file for file in item.member.files}
+        for expected in owner.native_music_files_for_source(item.member.origin_repository, item.member.origin_revision):
+            actual = captured_native.get(expected.path)
+            if actual is None or actual.size != expected.size_bytes or (
+                expected.object_id is not None and expected.object_id.startswith("sha256:")
+                and expected.object_id != "sha256:" + actual.sha256
+            ):
+                raise PreservationError("capture lacks a required primary native music component")
         if owner.image is not None:
             captured = {file.path: file for file in item.member.files}
             for component in owner.image.components:
