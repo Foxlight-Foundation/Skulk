@@ -1963,6 +1963,7 @@ class ModelStore:
         parsed = urlsplit(source_base_url)
         if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
             raise ValueError("source_base_url must be an HTTP(S) node API")
+        native_source = bool(record.model_card.native_music_artifact_sources())
         async with self._download_transfer_lock:
             tombstones = read_reconciliation_tombstones(self._store_path)
             if record.artifact_model_id in tombstones or (
@@ -1979,6 +1980,8 @@ class ModelStore:
                 if existing is not None
                 else None
             )
+            # Older indexed replicas can predate original Git-pin checks;
+            # reuse must verify the received trusted selection too.
             if (
                 existing is not None
                 and existing.installed_card is not None
@@ -1986,7 +1989,10 @@ class ModelStore:
                 == record.installed_identity
                 and existing.installed_card.manifest_sha256 == record.manifest_sha256
                 and existing_path is not None
-                and verify_installed_card(existing_path, existing.installed_card)
+                and await asyncio.to_thread(
+                    verify_installed_card, existing_path, record,
+                    verify_hashes=native_source,
+                )
             ):
                 return existing
             import_root = self._store_path / ".imports"
@@ -2079,9 +2085,16 @@ class ModelStore:
                             f"peer export size mismatch for {manifest_entry.path}"
                         )
                     partial.replace(destination)
-            imported_files = build_file_manifest(temporary)
+            imported_files = await asyncio.to_thread(build_file_manifest, temporary)
             if manifest_sha256(imported_files) != record.manifest_sha256:
                 raise RuntimeError("peer export manifest digest mismatch")
+            # The peer controls its transfer manifest. Native Git-pinned
+            # metadata must also match the original owning card before any
+            # canonical generation is replaced or marked registry-verified.
+            if native_source and not await asyncio.to_thread(
+                verify_installed_card, temporary, record, verify_hashes=True,
+            ):
+                raise ValueError("native music peer artifact differs from its complete pinned source")
             final_name = (
                 record.artifact_model_id.replace("/", "--")
                 + "--installed-"

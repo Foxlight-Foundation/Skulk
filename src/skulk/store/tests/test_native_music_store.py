@@ -2,6 +2,7 @@
 """Native music byte custody through real store admission and offline preservation."""
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -20,7 +21,11 @@ from skulk.shared.types.common import ModelId
 from skulk.shared.types.worker.downloads import FileListEntry
 from skulk.store import model_store_server as server_module
 from skulk.store.installed_cards import (
+    InstalledCardRecord,
+    InstalledFileManifestEntry,
+    build_file_manifest,
     build_installed_card_record,
+    manifest_sha256,
     read_installed_card,
     verify_installed_card,
     write_installed_card,
@@ -344,6 +349,147 @@ async def test_native_peer_record_verifies_its_grouped_source_against_signed_own
         {"owner_card_id": "card_" + "b" * 52}):
         with pytest.raises(web.HTTPConflict):
             await server_module._require_trusted_registry_peer_record(record.model_copy(update=update))
+
+
+@pytest.mark.parametrize("component", [False, True])
+@pytest.mark.parametrize("existing_copy", ["none", "intact", "tampered"])
+async def test_native_peer_import_rejects_self_consistent_changed_git_metadata(
+    component: bool, existing_copy: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer's matching transfer digest cannot replace original immutable object pins."""
+    card, objects = native_music_fixture()
+    card = card.model_copy(update={"is_custom": False, "registry_card_id": "card_" + "a" * 52})
+    primary = _install(tmp_path / "source", card, objects)
+    source = primary.parent / "test--native-components" if component else primary
+    original = read_installed_card(source)
+    assert original is not None and original.verification == "registry_verified"
+    payloads = {entry.path: (source / entry.path).read_bytes() for entry in original.files}
+    metadata = next(path for path in payloads if path.endswith("config.json"))
+    good_metadata = payloads[metadata]
+
+    async def lookup(_card_id: str, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(server_module, "get_registry_card_by_id", lookup)
+    monkeypatch.setattr(server_module, "get_current_registry_cards", lambda: [card])
+
+    async def export(request: web.Request) -> web.Response:
+        assert request.headers["X-Skulk-Store-Node"] == "native-peer-target"
+        assert request.match_info["token"] == "fixture-export"
+        return web.Response(body=payloads[request.match_info["path"]])
+
+    app = web.Application()
+    app.router.add_get("/store/internal/exports/{token}/{path:.*}", export)
+    root = tmp_path / "store"
+    store = ModelStore(root, recover_installed_cards=False)
+    async with TestServer(app) as server:
+        async def receive(record: InstalledCardRecord) -> None:
+            await server_module._require_trusted_registry_peer_record(record)
+            await store.import_peer_artifact(record, source_base_url=str(server.make_url("")),
+                capability_token="fixture-export", target_node_id="native-peer-target")
+
+        if existing_copy == "intact":
+            await receive(original)
+        changed = good_metadata.replace(b"true", b"null")
+        assert changed != good_metadata and len(changed) == len(good_metadata)
+        payloads[metadata] = changed
+        files = tuple(entry.model_copy(update={"sha256": hashlib.sha256(changed).hexdigest()})
+            if entry.path == metadata else entry for entry in original.files)
+        forged = InstalledCardRecord.model_validate(original.model_copy(update={
+            "files": files, "manifest_sha256": manifest_sha256(files),
+        }).model_dump())
+        # This passes identity admission: only original byte-pin verification
+        # distinguishes the peer's self-consistent substituted metadata.
+        await server_module._require_trusted_registry_peer_record(forged)
+        if existing_copy == "tampered":
+            legacy = root / "older-import"
+            for path, data in payloads.items():
+                target = legacy / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            store.register_model(forged.artifact_model_id, legacy,
+                [entry.path for entry in files], sum(entry.size_bytes for entry in files),
+                source_revision=forged.artifact_revision,
+                source_repository=forged.artifact_repository, installed_card=forged)
+            assert verify_installed_card(legacy, forged)
+            assert not verify_installed_card(legacy, forged, verify_hashes=True)
+        before = store.get_entry(original.artifact_model_id)
+        before_path = store.get_store_path(original.artifact_model_id)
+        with pytest.raises(ValueError, match="pinned source"):
+            await receive(forged)
+        assert store.get_entry(original.artifact_model_id) == before
+        assert store.get_store_path(original.artifact_model_id) == before_path
+        if existing_copy == "intact":
+            assert before_path is not None and verify_installed_card(before_path, original, verify_hashes=True)
+            assert (before_path / metadata).read_bytes() == good_metadata
+        elif existing_copy == "none":
+            assert not store.list_models()
+
+
+@pytest.mark.parametrize("phase", ["manifest", "pins"])
+async def test_native_peer_hashing_keeps_unrelated_http_responsive(
+    phase: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocked integrity read must not publish early or stall unrelated node requests."""
+    from threading import Event
+
+    from aiohttp import ClientSession
+
+    import skulk.store.model_store as store_module
+
+    card, objects = native_music_fixture()
+    primary = _install(tmp_path / "source", card, objects)
+    record = read_installed_card(primary)
+    assert record is not None
+    started, release = Event(), Event()
+
+    def hold() -> None:
+        started.set()
+        if not release.wait(5):
+            raise RuntimeError("integrity read stalled the node event loop")
+
+    def held_manifest(directory: Path) -> tuple[InstalledFileManifestEntry, ...]:
+        hold()
+        return build_file_manifest(directory)
+
+    def held_pins(directory: Path, candidate: InstalledCardRecord, *, verify_hashes: bool = False) -> bool:
+        hold()
+        return verify_installed_card(directory, candidate, verify_hashes=verify_hashes)
+
+    if phase == "manifest":
+        monkeypatch.setattr(store_module, "build_file_manifest", held_manifest)
+    else:
+        monkeypatch.setattr(store_module, "verify_installed_card", held_pins)
+
+    async def export(request: web.Request) -> web.Response:
+        return web.Response(body=(primary / request.match_info["path"]).read_bytes())
+
+    async def health(_request: web.Request) -> web.Response:
+        return web.Response(text="ready")
+
+    app = web.Application()
+    app.router.add_get("/store/internal/exports/{token}/{path:.*}", export)
+    app.router.add_get("/health", health)
+    store = ModelStore(tmp_path / "store", recover_installed_cards=False)
+    async with TestServer(app) as server:
+        task = asyncio.create_task(store.import_peer_artifact(record,
+            source_base_url=str(server.make_url("")), capability_token="fixture-export",
+            target_node_id="native-peer-target"))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            assert not task.done() and store.get_entry(str(card.model_id)) is None
+            with anyio.fail_after(5):
+                async with ClientSession() as client:
+                    async with client.get(server.make_url("/health")) as response:
+                        assert response.status == 200 and await response.text() == "ready"
+            assert not task.done() and store.get_entry(str(card.model_id)) is None
+        finally:
+            release.set()
+            with anyio.fail_after(5):
+                await task
+        entry = task.result()
+        installed = store.get_store_path(entry.model_id)
+        assert installed is not None and verify_installed_card(installed, record, verify_hashes=True)
 
 
 @pytest.mark.parametrize("shared_primary", [False, True])
