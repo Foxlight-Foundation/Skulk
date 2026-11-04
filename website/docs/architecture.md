@@ -4191,6 +4191,14 @@ survive cancellation, model close and subsequent loading; only independent
 delivery/custody owns their eventual removal. This process owner still needs the
 Worker/model preparation, memory and Studio execution integration.
 
+The native CLI arms a detached custody guardian before importing Torch or
+starting native threads. It retains the inherited service/source locks even if
+Core and the native leader both die; descendants need not preserve descriptors.
+An unreaped anchor in the original group prevents numeric group identity reuse.
+The guardian drains actual live members before releasing ownership. Core also
+waits for EOF on its private drain pipe before recovery; an uncertain or stalled
+drain retains files and locks for retry, including after the leader was reaped.
+
 The native CLI owns one loaded model and accepts bounded contiguous private
 requests. It verifies all three data components before importing constructors,
 probes the explicit compute lane, and observes each component's loaded device and

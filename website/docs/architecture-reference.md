@@ -2830,6 +2830,12 @@ the original indexed owner, including companions reached through a cached base.
   partial output or loader data; retain ownership after failed drain/cleanup.
   Completed output/receipts survive close/restart and remain independent of
   model readiness or native completion. Worker/model/memory activation remains.
+- Independent native custody guardian: fork before Torch/thread startup, detach
+  from the model group, retain inherited service/source locks and drain actual
+  live group members after Core or native-leader loss. An unreaped anchor pins
+  the original numeric group identity. Core waits for private drain-pipe EOF
+  before recovery; timeout retains the pipe, locks and loading for close retry,
+  including a retry after the original leader was already reaped.
 - Native resident: complete data/code verification, explicit runtime math probe,
   observed per-component loaded precision, exact canonical source-tensor equality,
   one active request, contiguous sequence/correlation checks, 0600 PCM24/result

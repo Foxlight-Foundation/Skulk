@@ -2676,6 +2676,11 @@ files are checked against their original object identity during download reuse:
 online retries replace corrupt bytes; offline reuse refuses them.
 
 The built-in native ACE package/process family lives in `packaging/skulk-ace-step/`.
+Its resident CLI forks a detached custody guardian before Torch/thread startup.
+That process retains inherited service/source fences after Core or native-leader
+death. An unreaped group anchor protects the original group identity; only actual
+member drain permits guardian exit. Core waits for the guardian's private drain
+pipe before file recovery; timeout retains ownership and is retryable.
 Its mutually exclusive private `--probe` mode executes verified libraries without
 weights/configuration and returns `NativeMusicLibraryProbe`, separately from
 loaded-model readiness. CUDA precision follows native compute capability

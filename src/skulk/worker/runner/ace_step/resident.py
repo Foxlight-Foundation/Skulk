@@ -48,6 +48,73 @@ from skulk.worker.runner.demucs.process import separation_environment
 _FRAME = TypeAdapter[NativeMusicFrame](NativeMusicFrame)
 
 
+@final
+class MusicResidentProcess(subprocess.Popen[bytes]):
+    """Actual native leader plus an EOF receipt from its independent lock owner."""
+
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        descriptor: int,
+        source_fence: int | None,
+        environment: dict[str, str],
+    ) -> None:
+        """Create the custody pipe before any native process can create children."""
+        read, write = os.pipe()
+        self._custody_descriptor: int | None = read
+        inherited = (
+            (descriptor,) if source_fence is None else (descriptor, source_fence)
+        )
+        try:
+            super().__init__(
+                [*command, "--drain-fd", str(write)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+                start_new_session=True,
+                umask=0o077,
+                pass_fds=(*inherited, write),
+            )
+        except BaseException:
+            os.close(read)
+            self._custody_descriptor = None
+            raise
+        finally:
+            os.close(write)
+
+    def wait_for_custody(self) -> None:
+        """Confirm independent group drain before releasing Core's file ownership.
+
+        A timeout preserves the pipe and owner for retry. The native leader
+        closes its copy before loading; only the detached guardian can retain
+        the write end after that leader exits.
+        """
+        descriptor = self._custody_descriptor
+        if descriptor is None:
+            return
+        os.set_blocking(descriptor, False)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                data = os.read(descriptor, 1)
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "native music guardian custody remains pending"
+                    ) from None
+                time.sleep(0.025)
+                continue
+            if data:
+                raise ValueError(
+                    "native music guardian emitted unexpected custody data"
+                )
+            os.close(descriptor)
+            self._custody_descriptor = None
+            return
+
+
 class MusicResidentSpawn(Protocol):
     """Inject only native process creation, retaining the existing service fence."""
 
@@ -57,7 +124,7 @@ class MusicResidentSpawn(Protocol):
         configuration: Path,
         descriptor: int,
         environment: dict[str, str],
-    ) -> subprocess.Popen[bytes]:
+    ) -> MusicResidentProcess:
         """Create a dedicated private session with bounded binary control pipes."""
         ...
 
@@ -69,7 +136,7 @@ def spawn_music_resident(
     environment: dict[str, str],
     *,
     source_fence: int | None = None,
-) -> subprocess.Popen[bytes]:
+) -> MusicResidentProcess:
     """Start verified native code, inheriting service and optional source-read locks.
 
     The parent verifies the exact installed interpreter/import bytes before this
@@ -77,7 +144,7 @@ def spawn_music_resident(
     group after any native/protocol failure or parent loss. Owner-only umask
     applies to the child without mutating the multithreaded Core process.
     """
-    return subprocess.Popen(
+    return MusicResidentProcess(
         [
             str(interpreter),
             "-I",
@@ -89,13 +156,9 @@ def spawn_music_resident(
             "--parent-pid",
             str(os.getpid()),
         ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-        start_new_session=True,
-        umask=0o077,
-        pass_fds=(descriptor,) if source_fence is None else (descriptor, source_fence),
+        descriptor=descriptor,
+        source_fence=source_fence,
+        environment=environment,
     )
 
 
@@ -152,7 +215,7 @@ class ResidentMusic:
         self.payload_sha256 = payload_sha256
         self.spawn, self.resource_guard = spawn, resource_guard
         self.ready: NativeMusicReady | None = None
-        self._process: subprocess.Popen[bytes] | None = None
+        self._process: MusicResidentProcess | None = None
         self._actor = threading.Lock()
         self._observations = threading.Lock()
         self._stop_requested = threading.Event()
@@ -411,9 +474,11 @@ class ResidentMusic:
         self._stop_requested.set()
         self.ready = None
         if self._process is not None:
-            terminate_process_group(
-                self._process, grace_seconds=1.0, confirm_members=True
-            )
+            if self._process.returncode is None:
+                terminate_process_group(
+                    self._process, grace_seconds=1.0, confirm_members=True
+                )
+            self._process.wait_for_custody()
             process, self._process = self._process, None
             if process.stdin is not None:
                 with suppress(BrokenPipeError):

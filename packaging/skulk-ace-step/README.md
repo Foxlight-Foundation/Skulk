@@ -111,6 +111,13 @@ control record is bounded to 256 KiB; stdout is reserved for those records while
 native diagnostics go to stderr. No media or caller-selected native options
 travel through this protocol. There is one active generation per loaded model.
 
+Before importing Torch or starting threads, the CLI forks a detached custody
+guardian. It retains the inherited service/source locks independently of both
+Core and the native leader. Its unreaped anchor pins the original process group
+until actual members drain, including close-fds descendants. Core's private
+`--drain-fd` pipe confirms that custody lifetime; a drain timeout preserves the
+owner and permits a later retry. No file cleanup follows elapsed time alone.
+
 Core creates and journals the workspace, `requests` and `loader` directory
 inodes before spawning the child. The private configuration includes all three
 identities. The child verifies them without following final symlinks and requires

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -47,17 +50,22 @@ def interpreter(tmp_path_factory: pytest.TempPathFactory) -> Path:
     )
     package.mkdir()
     (package / "__init__.py").touch()
+    (package / "lifetime.py").write_bytes(
+        (
+            Path(__file__).resolve().parents[6]
+            / "packaging/skulk-ace-step/skulk_ace_step/lifetime.py"
+        ).read_bytes()
+    )
+    (package.parent / "psutil").symlink_to(Path(psutil.__file__).resolve().parent)
     (package / "__main__.py").write_text("""
 import argparse,hashlib,json,os,signal,subprocess,sys,threading,time,wave
 from pathlib import Path
-parser=argparse.ArgumentParser();parser.add_argument('--serve',type=Path);parser.add_argument('--parent-pid',type=int)
+parser=argparse.ArgumentParser();parser.add_argument('--serve',type=Path);parser.add_argument('--parent-pid',type=int);parser.add_argument('--drain-fd',type=int)
 args=parser.parse_args();cfg=json.loads(args.serve.read_text());root=args.serve.parent
+from skulk_ace_step.lifetime import start_parent_guardian
+start_parent_guardian(args.parent_pid,args.drain_fd)
 mode=Path(cfg['weights']['base']['directory']).name
 (root/'native.pid').write_text(str(os.getpid()))
-def watch():
-    while os.getppid()==args.parent_pid: time.sleep(.05)
-    os.killpg(os.getpgrp(),signal.SIGKILL)
-threading.Thread(target=watch,daemon=True).start()
 def emit(record):print(json.dumps(record),flush=True)
 def loading_copy():
     path=Path(cfg['directory'])/'loader/checkpoints/acestep-v15-base'
@@ -188,6 +196,117 @@ def process_alive(pid: int) -> bool:
         return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
         return False
+
+
+def test_leader_and_core_loss_retain_fences_until_surviving_descendant_drains(
+    tmp_path: Path, interpreter: Path
+) -> None:
+    """A close-fds descendant cannot outlive the last real source/service owner."""
+    code = """
+import sys
+from pathlib import Path
+from skulk.utils.runtime_files import RuntimeLock
+from skulk.worker.runner.ace_step.tests.test_resident import resident,request
+root=Path(sys.argv[1]);fence=RuntimeLock(root,name='attachment.lock')
+owner=resident(root,Path(sys.argv[2]),mode='slow',source_fence=fence.descriptor)
+owner.start(is_cancelled=lambda:False)
+owner.run(request(owner),progress=lambda _:None,is_cancelled=lambda:False)
+"""
+    parent = subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path), str(interpreter)],
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[5])),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    guardian: psutil.Process | None = None
+    leader: psutil.Process | None = None
+    descendant: psutil.Process | None = None
+    try:
+        wait_file(tmp_path / "child.pid")
+        leader = psutil.Process(int((tmp_path / "native.pid").read_text()))
+        descendant = psutil.Process(int((tmp_path / "child.pid").read_text()))
+        detached = [
+            child for child in leader.children() if os.getpgid(child.pid) == child.pid
+        ]
+        assert len(detached) <= 1
+        guardian = detached[0] if detached else None
+        # Freeze recovery, then remove every original owner. A guardian must
+        # still hold the locks while the close-fds inference child is alive.
+        if guardian is not None:
+            guardian.suspend()
+            for anchor in guardian.children():
+                anchor.kill()
+        os.kill(parent.pid, signal.SIGSTOP)
+        leader.kill()
+        parent.kill()
+        parent.wait(timeout=5)
+        assert process_alive(descendant.pid)
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(tmp_path, name="service.lock")
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(tmp_path, name="attachment.lock")
+        assert (
+            tmp_path / "workspace/loader/checkpoints/acestep-v15-base/config.json"
+        ).read_bytes() == b"partial"
+        assert guardian is not None
+        guardian.resume()
+        deadline = time.monotonic() + 10
+        while process_alive(descendant.pid) or process_alive(guardian.pid):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        service = RuntimeLock(tmp_path, name="service.lock")
+        service.close()
+        source = RuntimeLock(tmp_path, name="attachment.lock")
+        source.close()
+    finally:
+        if guardian is not None and process_alive(guardian.pid):
+            guardian.resume()
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
+        for process in (leader, descendant):
+            if process is not None and process_alive(process.pid):
+                process.kill()
+
+
+def test_guardian_drain_timeout_retains_custody_and_retries_after_leader_reap(
+    tmp_path: Path, interpreter: Path
+) -> None:
+    """Unconfirmed independent drain preserves loading and permits a later close."""
+    fence = RuntimeLock(tmp_path, name="attachment.lock")
+    owner = resident(tmp_path, interpreter, source_fence=fence.descriptor)
+    guardian: psutil.Process | None = None
+    try:
+        owner.start(is_cancelled=lambda: False)
+        fence.close()
+        leader = psutil.Process(int((tmp_path / "native.pid").read_text()))
+        guardians = [
+            child for child in leader.children() if os.getpgid(child.pid) == child.pid
+        ]
+        assert len(guardians) == 1
+        guardian = guardians[0]
+        guardian.suspend()
+        with pytest.raises(TimeoutError, match="guardian custody remains pending"):
+            owner.close()
+        assert not process_alive(leader.pid)
+        assert (
+            tmp_path / "workspace/loader/checkpoints/acestep-v15-base/config.json"
+        ).read_bytes() == b"partial"
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(tmp_path, name="service.lock")
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(tmp_path, name="attachment.lock")
+        guardian.resume()
+        owner.close()
+        for name in ("service.lock", "attachment.lock"):
+            acquired = RuntimeLock(tmp_path, name=name)
+            acquired.close()
+        assert not tuple((tmp_path / "workspace/loader").iterdir())
+    finally:
+        if guardian is not None and process_alive(guardian.pid):
+            guardian.resume()
+        fence.close()
+        owner.close()
 
 
 def test_one_loaded_model_serves_two_contiguous_calls_and_retains_outputs(
