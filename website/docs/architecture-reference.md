@@ -2696,6 +2696,12 @@ Skulk; existing PMF kit/recovery and model/registry/code authority stay separate
   A historical native source owner's deletion does not remove independent data
   custody, including index recovery and peer reconciliation. Source-alias deletion
   remains authoritative; non-native companion deletion semantics are preserved.
+Cache verification waits for the publication fence and hashes outside the short
+download-admission lock, then rechecks the selected status before returning.
+Unrelated admission and active-transfer cancellation remain available. Cancelled
+verification drains its file thread before releasing that fence. Pinned existing
+files are checked against their original object identity during download reuse:
+online retries replace corrupt bytes; offline reuse refuses them.
 
 ### Native ACE package/process definitions
 

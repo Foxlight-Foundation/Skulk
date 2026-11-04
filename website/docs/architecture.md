@@ -4030,6 +4030,12 @@ pins in a worker thread under the canonical publication fence. In-progress
 requests still deduplicate by exact selection. A shared source's retained owner
 is provenance: deleting that model preserves surviving owners' source discovery
 and preservation; deleting the source alias itself blocks automatic resurrection.
+Cache verification waits for the publication fence and hashes outside the short
+download-admission lock, then rechecks the selected status before returning.
+Unrelated admission and active-transfer cancellation remain available. Cancelled
+verification drains its file thread before releasing that fence. Pinned existing
+files are checked against their original object identity during download reuse:
+online retries replace corrupt bytes; offline reuse refuses them.
 
 ### Native ACE package and process boundary
 

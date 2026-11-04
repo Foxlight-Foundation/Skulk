@@ -3828,6 +3828,13 @@ pins before accepting success. A native source's retained `owner_model_id` is
 historical provenance: deleting that base model preserves other models' shared
 source discovery and preservation. Deleting the source alias itself still
 suppresses automatic recovery and peer import.
+Cache verification waits for the publication fence and hashes outside the short
+download-admission lock, then rechecks the selected status before returning.
+Unrelated admission and active-transfer cancellation remain available. Cancelled
+verification drains its file thread before releasing that fence. Pinned existing
+files are checked against their original object identity during download reuse:
+online retries replace corrupt bytes; offline reuse refuses them.
+Cancellation settles queued downloads even before their transfer coroutine starts.
 
 The response reports `modelId`, nullable `sourceRevision`, `status`, and
 `progress`; transport or store rejection additionally reports `error`. The

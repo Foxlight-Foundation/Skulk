@@ -6,6 +6,7 @@ import hashlib
 import shutil
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import anyio
 import pytest
@@ -904,6 +905,253 @@ async def test_native_cached_integrity_reads_do_not_block_http_or_publish_early(
         finally:
             release.set()
             await pending
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+async def test_native_cache_wait_does_not_block_transfer_cancel_or_fresh_admission(
+    reopen: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real transfer owner stays cancellable while another cache request waits."""
+    card, objects = native_music_fixture(shared_primary=True)
+    transfer = _other_selection(card, objects, prefix="held", other_model=True)
+    fresh = _other_selection(card, objects, prefix="fresh", other_model=True).model_copy(
+        update={"model_id": ModelId("test/native-fresh")}
+    )
+    _network_fixture(monkeypatch, objects)
+    store = ModelStore(tmp_path, recover_installed_cards=False)
+    await _request(store, card)
+    if reopen:
+        store = ModelStore(tmp_path)
+    original = download_utils.download_file_with_retry
+    entered, release = asyncio.Event(), asyncio.Event()
+    waiting = asyncio.Event()
+
+    class ObservedTransferLock(asyncio.Lock):
+        """Observe real contention without reading asyncio's private waiter list."""
+
+        async def acquire(self) -> Literal[True]:
+            if self.locked():
+                waiting.set()
+            return await super().acquire()
+
+    store._download_transfer_lock = ObservedTransferLock()
+
+    async def held(
+        model_id: ModelId, revision: str, path: str, target_dir: Path,
+        on_progress: Callable[[int, int, bool], None],
+        *, expected_size: int | None = None, expected_object_id: str | None = None,
+    ) -> Path:
+        if path.startswith("held/"):
+            entered.set()
+            await release.wait()
+        return await original(
+            model_id, revision, path, target_dir, on_progress,
+            expected_size=expected_size, expected_object_id=expected_object_id,
+        )
+
+    monkeypatch.setattr(download_utils, "download_file_with_retry", held)
+    status = await store.request_download(
+        str(transfer.model_id), model_card=transfer,
+        source_repository=str(transfer.artifact_repository),
+        source_revision=transfer.source_revision,
+    )
+    cached: asyncio.Task[Path] | None = None
+    try:
+        with anyio.fail_after(5):
+            await entered.wait()
+        cached = asyncio.create_task(_request(store, card))
+        # Observe actual transfer-fence contention rather than a timed sleep.
+        with anyio.fail_after(5):
+            await waiting.wait()
+        with anyio.fail_after(1):
+            queued = await store.request_download(
+                str(fresh.model_id), model_card=fresh,
+                source_repository=str(fresh.artifact_repository),
+                source_revision=fresh.source_revision,
+            )
+            assert queued.status == "pending"
+            cancelled = await store.cancel_download(str(transfer.model_id))
+        assert cancelled is status and status.status == "cancelled"
+        await cached
+        assert await store.cancel_download(str(fresh.model_id)) is not None or queued.status == "complete"
+    finally:
+        release.set()
+        for pending in tuple(store._download_tasks):
+            pending.cancel()
+        await asyncio.gather(*store._download_tasks, return_exceptions=True)
+        if cached is not None:
+            if not cached.done():
+                cached.cancel()
+            await asyncio.gather(cached, return_exceptions=True)
+
+
+@pytest.mark.parametrize("shared_primary", [False, True])
+@pytest.mark.parametrize("reopen", [False, True])
+@pytest.mark.parametrize("tensor", [False, True])
+async def test_native_corrupt_cache_recovers_through_real_file_download(
+    shared_primary: bool, reopen: bool, tensor: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real HEAD/GET/resume/hash logic must replace a same-size damaged object."""
+    card, objects = native_music_fixture(shared_primary=shared_primary)
+    real_download = download_utils.download_file_with_retry
+    _network_fixture(monkeypatch, objects)
+    monkeypatch.setattr(download_utils, "download_file_with_retry", real_download)
+    gets: list[tuple[str, str, str]] = []
+
+    async def headers() -> dict[str, str]:
+        return {}
+
+    async def object_response(request: web.Request) -> web.Response:
+        repository = request.match_info["owner"] + "/" + request.match_info["name"]
+        key = repository, request.match_info["revision"], request.match_info["path"]
+        data = objects.get(key)
+        if data is None:
+            return web.Response(status=404)
+        digest = (
+            hashlib.sha256(data).hexdigest()
+            if key[2].endswith((".safetensors", ".pt"))
+            else hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
+        )
+        if request.method == "GET":
+            gets.append(key)
+        return web.Response(body=data, headers={"ETag": digest})
+
+    application = web.Application()
+    application.router.add_route(
+        "*", "/{owner}/{name}/resolve/{revision}/{path:.*}", object_response
+    )
+    monkeypatch.setattr(download_utils, "get_download_headers", headers)
+    async with TestServer(application) as hub:
+        endpoint = str(hub.make_url("/")).rstrip("/")
+        monkeypatch.setattr(download_utils, "get_hf_endpoint", lambda: endpoint)
+        store = ModelStore(tmp_path, recover_installed_cards=False)
+        await _request(store, card)
+        assert len(gets) == len(objects)
+        source = card.native_music_artifact_sources()[-1]
+        item = next(
+            file for file in source.files
+            if (file.path.endswith(".safetensors") if tensor else file.path.endswith("config.json"))
+        )
+        alias, _ = download_utils.companion_artifact_location(
+            card, source.repository, source.revision
+        )
+        directory = store.get_store_path(str(alias))
+        assert directory is not None
+        target = directory / item.path
+        original = objects[source.repository, source.revision, item.path]
+        target.write_bytes(bytes((original[0] ^ 1,)) + original[1:])
+        gets.clear()
+        if reopen:
+            store = ModelStore(tmp_path)
+        await _request(store, card)
+        assert target.read_bytes() == original
+        assert gets == [(source.repository, source.revision, item.path)]
+        record = read_installed_card(directory)
+        assert record is not None and verify_installed_card(
+            directory, record, verify_hashes=True
+        )
+
+
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("tensor", [False, True])
+@pytest.mark.parametrize("damage", [None, "same_size", "short"])
+async def test_pinned_file_offline_reuse_keeps_original_identity_authoritative(
+    offline: bool, tensor: bool, damage: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit offline and network-fallback paths cannot bless corrupted pins."""
+    original = b"original pinned object"
+    target = tmp_path / "object"
+    data = (
+        original if damage is None else original[:-1] if damage == "short"
+        else bytes((original[0] ^ 1,)) + original[1:]
+    )
+    target.write_bytes(data)
+    digest = (
+        "sha256:" + hashlib.sha256(original).hexdigest() if tensor else
+        "git-sha1:" + hashlib.sha1(f"blob {len(original)}\0".encode() + original).hexdigest()
+    )
+
+    async def missing_metadata(
+        _model: ModelId, _revision: str, _path: str
+    ) -> tuple[int, str]:
+        raise ConnectionError("controlled unavailable Hub")
+
+    monkeypatch.setattr(download_utils, "file_meta", missing_metadata)
+    if damage is None:
+        assert await download_utils._download_file(
+            ModelId("test/pinned"), "a" * 40, "object", tmp_path,
+            skip_internet=offline, expected_size=len(original), expected_object_id=digest,
+        ) == target
+    else:
+        with pytest.raises(ValueError, match="object mismatch"):
+            await download_utils._download_file(
+                ModelId("test/pinned"), "a" * 40, "object", tmp_path,
+                skip_internet=offline, expected_size=len(original), expected_object_id=digest,
+            )
+    assert target.read_bytes() == data
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+async def test_cancelled_native_cache_check_keeps_its_fence_until_thread_drain(
+    reopen: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated cancellation cannot release a live sidecar reader/writer's fence."""
+    from threading import Event
+
+    from skulk.store import model_store as store_module
+    from skulk.store.installed_cards import InstalledCardRecord
+
+    card, objects = native_music_fixture(shared_primary=True)
+    fresh = _other_selection(card, objects, other_model=True)
+    _network_fixture(monkeypatch, objects)
+    store = ModelStore(tmp_path, recover_installed_cards=False)
+    await _request(store, card)
+    if reopen:
+        store = ModelStore(tmp_path)
+    entered, release = Event(), Event()
+    original = store_module.verify_installed_card
+
+    def held(
+        directory: Path, record: InstalledCardRecord, *, verify_hashes: bool = False
+    ) -> bool:
+        if verify_hashes:
+            entered.set()
+            assert release.wait(5), "native cache reader was not released"
+        return original(directory, record, verify_hashes=verify_hashes)
+
+    monkeypatch.setattr(store_module, "verify_installed_card", held)
+    pending = asyncio.create_task(_request(store, card))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        assert pending.cancel()
+        await asyncio.sleep(0)
+        assert not pending.done() and store._download_transfer_lock.locked()
+        assert pending.cancel()
+        await asyncio.sleep(0)
+        assert not pending.done() and store._download_transfer_lock.locked()
+        with anyio.fail_after(1):
+            queued = await store.request_download(
+                str(fresh.model_id), model_card=fresh,
+                source_repository=str(fresh.artifact_repository),
+                source_revision=fresh.source_revision,
+            )
+            assert queued.status == "pending"
+            assert await store.cancel_download(str(fresh.model_id)) is queued
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert not store._download_transfer_lock.locked()
+        assert store.entry_matches_artifact(
+            str(card.model_id), card.source_revision, str(card.artifact_repository),
+            card, verify_hashes=True,
+        )
+    finally:
+        release.set()
+        if not pending.done():
+            pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
 
 
 async def test_native_peer_recovery_keeps_data_but_honors_actual_alias_deletion(

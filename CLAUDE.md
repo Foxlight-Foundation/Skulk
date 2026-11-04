@@ -2668,6 +2668,12 @@ Native completed store-cache reuse checks retained hashes and original pins in
 a background thread under the publication fence. Shared source records retain
 historical-owner provenance without letting that owner's deletion revoke other
 models' data custody; explicit source deletion still suppresses reconciliation.
+Cache verification waits for the publication fence and hashes outside the short
+download-admission lock, then rechecks the selected status before returning.
+Unrelated admission and active-transfer cancellation remain available. Cancelled
+verification drains its file thread before releasing that fence. Pinned existing
+files are checked against their original object identity during download reuse:
+online retries replace corrupt bytes; offline reuse refuses them.
 
 The built-in native ACE package/process family lives in `packaging/skulk-ace-step/`.
 Its Python 3.12 interpreter and exact three-platform CPU archive catalogs stay

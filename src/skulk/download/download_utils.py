@@ -1890,10 +1890,13 @@ async def _download_file(
     target_path = target_dir / path
 
     if await aios.path.exists(target_path):
-        if skip_internet:
-            return target_path
-
         local_size = (await aios.stat(target_path)).st_size
+        if skip_internet:
+            if not await _cached_file_matches_pin(
+                target_path, local_size, expected_size, expected_object_id
+            ):
+                raise ValueError(f"Cached file {path} object mismatch in offline mode")
+            return target_path
 
         # Transport failure may use a complete cached file for offline operation.
         # A successful metadata lookup followed by a signed identity mismatch is
@@ -1902,7 +1905,14 @@ async def _download_file(
         try:
             remote_size, remote_etag = await file_meta(model_id, revision, path)
         except Exception as e:
-            # Offline or network error - trust local file
+            # Original signed pins remain available even when the Hub is not.
+            # An unpinned legacy request keeps its existing offline behavior.
+            if not await _cached_file_matches_pin(
+                target_path, local_size, expected_size, expected_object_id
+            ):
+                raise ValueError(
+                    f"Cached file {path} object mismatch while remote metadata is unavailable"
+                ) from e
             logger.debug(
                 f"Could not verify {path} against remote (offline?): {e}, using local file"
             )
@@ -1914,9 +1924,11 @@ async def _download_file(
             expected_size=expected_size,
             expected_object_id=expected_object_id,
         )
-        if local_size != remote_size:
+        if local_size != remote_size or not await _cached_file_matches_pin(
+            target_path, local_size, expected_size, expected_object_id
+        ):
             logger.info(
-                f"File {path} size mismatch (local={local_size}, remote={remote_size}), re-downloading"
+                f"File {path} size or pinned identity mismatch, re-downloading"
             )
             await aios.remove(target_path)
         else:
@@ -1994,6 +2006,27 @@ async def _download_file(
     await aios.rename(partial_path, target_dir / path)
     on_progress(length, length, True)
     return target_dir / path
+
+
+async def _cached_file_matches_pin(
+    path: Path, size: int, expected_size: int | None, expected_object_id: str | None
+) -> bool:
+    """Verify original immutable truth before accepting existing pinned bytes.
+
+    Do not hash unpinned legacy files or turn their old offline fallback into a
+    new contract. A signed Git blob uses its length-prefixed object identity;
+    tensors use their full SHA-256. Size alone never authorizes pinned reuse.
+    """
+    if expected_size is not None and size != expected_size:
+        return False
+    if expected_object_id is None:
+        return True
+    algorithm, separator, digest = expected_object_id.partition(":")
+    if not separator or algorithm not in {"sha256", "git-sha1"}:
+        raise ValueError("Cached file object mismatch: invalid immutable identity")
+    return await calc_hash(
+        path, hash_type="sha256" if algorithm == "sha256" else "sha1"
+    ) == digest
 
 
 def _require_expected_remote_identity(

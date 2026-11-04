@@ -672,6 +672,62 @@ class ModelStore:
         finally:
             self._download_transfer_lock.release()
 
+    @asynccontextmanager
+    async def _download_admission(
+        self, model_id: str, verify_native_cache: Callable[[], bool] | None
+    ) -> AsyncIterator[bool]:
+        """Verify reusable native bytes without blocking transfer cancellation.
+
+        Pending requests and new aliases need only the short admission lock.
+        Cache readers wait for the publication fence without that lock, then
+        recheck the exact status before admitting a result. Keep the fence while
+        using the verified bytes. An off-thread sidecar refresh must also drain
+        before cancellation releases this fence.
+        """
+        if verify_native_cache is None:
+            async with self._download_lock:
+                yield True
+            return
+        while True:
+            async with self._download_lock:
+                observed = self._active_downloads.get(model_id)
+                observed_status = observed.status if observed is not None else None
+                if observed_status in {"pending", "downloading"} or (
+                    observed_status != "complete" and not self.is_in_store(model_id)
+                ):
+                    yield False
+                    return
+            async with self._download_transfer_lock:
+                verification = asyncio.create_task(asyncio.to_thread(verify_native_cache))
+                try:
+                    verified = await asyncio.shield(verification)
+                except asyncio.CancelledError:
+                    # Cancelling the await does not stop its filesystem thread.
+                    # Preserve write ownership even under repeated cancellation.
+                    while not verification.done():
+                        try:
+                            await asyncio.shield(verification)
+                        except asyncio.CancelledError:
+                            continue
+                        except Exception:
+                            break
+                    if not verification.cancelled():
+                        failure = verification.exception()
+                        if failure is not None:
+                            logger.debug(
+                                "Native cache check finished after cancellation: {}",
+                                type(failure).__name__,
+                            )
+                    raise
+                async with self._download_lock:
+                    current = self._active_downloads.get(model_id)
+                    if current is not observed or (
+                        current is not None and current.status != observed_status
+                    ):
+                        continue
+                    yield verified
+                    return
+
     def get_store_path(self, model_id: str) -> Path | None:
         """Return the absolute path to *model_id*'s directory, or ``None``.
 
@@ -1745,7 +1801,21 @@ class ModelStore:
                 self.entry_file_requires_recovery(model_id, item.path, item.size_bytes)
                 for item in model_card.native_music_files_for_source(requested_repository, source_revision)
             )
-        async with self._download_lock:
+        def verify_native_cache() -> bool:
+            complete = self.entry_matches_artifact(
+                model_id, source_revision, requested_repository, model_card,
+                artifact_role, verify_hashes=True,
+            )
+            if complete and model_card is not None:
+                self._ensure_installed_card(
+                    model_id, model_card, artifact_role, owner_model_id,
+                    owner_card_id, pinned_gguf,
+                )
+            return complete
+
+        async with self._download_admission(
+            model_id, verify_native_cache if native_sources else None
+        ) as native_cache_verified:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
                 existing_repository = existing.source_repository or model_id
@@ -1764,14 +1834,6 @@ class ModelStore:
                         f"selection from {existing_repository}@"
                         f"{existing.source_revision or 'main'}"
                     )
-                native_cache_verified = True
-                if existing.status == "complete" and native_sources:
-                    async with self._download_transfer_lock:
-                        native_cache_verified = await asyncio.to_thread(
-                            self.entry_matches_artifact, model_id, source_revision,
-                            requested_repository, model_card, artifact_role,
-                            verify_hashes=True,
-                        )
                 # A failed entry retries. A cached-complete entry is stale when:
                 #  - it is missing a newly-requested companion (or projector) --
                 #    a prior base-only download in this process left a "complete"
@@ -1834,25 +1896,19 @@ class ModelStore:
                 and not missing_pinned_gguf
                 and not missing_companion
                 and not artifact_mismatch
+                and native_cache_verified
             ):
-                async with (self._download_transfer_lock if native_sources else contextlib.nullcontext()):
-                    complete = not native_sources or await asyncio.to_thread(
-                        self.entry_matches_artifact, model_id, source_revision,
-                        requested_repository, model_card, artifact_role,
-                        verify_hashes=True,
+                if model_card is not None and not native_sources:
+                    await asyncio.to_thread(
+                        self._ensure_installed_card, model_id, model_card,
+                        artifact_role, owner_model_id, owner_card_id, pinned_gguf,
                     )
-                    if complete:
-                        if model_card is not None:
-                            await asyncio.to_thread(
-                                self._ensure_installed_card, model_id, model_card,
-                                artifact_role, owner_model_id, owner_card_id, pinned_gguf,
-                            )
-                        return StoreDownloadStatus(
-                            model_id=model_id, source_revision=source_revision,
-                            source_repository=requested_repository, status="complete",
-                            progress=1.0, model_card=model_card, artifact_role=artifact_role,
-                            owner_model_id=owner_model_id, owner_card_id=owner_card_id,
-                        )
+                return StoreDownloadStatus(
+                    model_id=model_id, source_revision=source_revision,
+                    source_repository=requested_repository, status="complete",
+                    progress=1.0, model_card=model_card, artifact_role=artifact_role,
+                    owner_model_id=owner_model_id, owner_card_id=owner_card_id,
+                )
             if missing_projector:
                 logger.warning(
                     f"ModelStore: {model_id} is in the store but its entry is "
@@ -1946,6 +2002,19 @@ class ModelStore:
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        async with self._download_lock:
+            # A task cancelled before its coroutine starts never reaches the
+            # downloader's cancellation handler/finally block. Settle only this
+            # exact admission; a newer retry must retain its own status/owner.
+            if (
+                task.cancelled()
+                and self._download_tasks_by_model.get(model_id) is task
+                and self._active_downloads.get(model_id) is status
+                and status.status in {"pending", "downloading"}
+            ):
+                status.status = "cancelled"
+                status.error = None
+                del self._download_tasks_by_model[model_id]
         final_status = self.get_download_status(model_id)
         return (
             final_status
