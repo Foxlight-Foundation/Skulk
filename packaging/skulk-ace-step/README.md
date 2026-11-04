@@ -34,14 +34,74 @@ Keep model weights as separate, explicitly selected immutable downloads. The
 runtime must own its reviewed model implementation; repository Python, UI,
 auto-download and language-model planner startup are outside its execution path.
 
+## Core preparation definitions
+
+`provisioning/ace_step_runtime.py` verifies original package and payload pins,
+complete interpreter/import bytes and an actual device probe before returning a
+private preparation receipt. `ace_step_manager.py` exposes only completed verified
+library observations. The cache and observation lifetime share the built-in
+Demucs ownership path; published generations remain intact across repair.
+
+Core selects storage bounds before opening the candidate: CPU packages/installed
+trees are bounded to 1/4 GiB, CUDA to 4/8 GiB and ROCm to 3/10 GiB. GPU dependency
+objects are at most 768 MiB and expanded members at most 1 GiB. Installed totals
+include nested archives as well as expanded libraries. These limits accommodate
+separate GPU closures; they do not establish loader or hardware qualification.
+The producer supports three CPU targets, CUDA on Linux x86_64/ARM64, and the
+selected Linux x86_64 ROCm family. Each has a separate exact lock and archive
+inventory. These describe candidate production, not published engine readiness.
+New sealed candidate installation and actual ABI/loader/device/model execution
+must precede qualification/publication. The raw Linux ROCm target does not infer
+a complete GPU-library libc floor from its interpreter; the known standalone
+Python manylinux 2.28 prerequisite is nevertheless checked before installation.
+
+Use `fetch_archives.py <profile> --variant <cpu|cuda|rocm> --output <intake>`
+for original pinned binary objects, then select the same variant in
+`build_ace_step.py`. CPU remains the default. ROCm uses `--target linux_x86_64`;
+CUDA uses its explicit `manylinux_2_28_x86_64` or `manylinux_2_28_aarch64` target.
+
+The selected ROCm metapackage is a reproduced pure wheel. Its inventory retains
+the official source archive digest/length, Python and Setuptools pins, explicit
+`gfx1151` dependency family, reproducibility epoch and metadata digest. Run
+`build_rocm_metapackage.py` with the clean repository, a matching builder profile,
+its verified standalone Python archive, the pinned ROCm source archive, the pinned
+Setuptools wheel and a fresh external output. Collect these prerequisites with
+`fetch_archives.py <builder-profile> --variant rocm --metapackage-inputs
+--output <build-inputs>`. The build tool's exact URL, size and hash are independent
+of any Setuptools version required inside the runtime. The producer builds twice
+and accepts only the selected identical wheel bytes. Copy that wheel into the intake's `wheels/`
+before collecting the remaining ROCm originals. The collector refuses to invent
+a binary URL for it. Runtime installation never executes this source build.
+The fixed ROCm producer follows each declared dependency extra through its real
+wheel metadata, including extra-specific and platform-specific requirements.
+Undeclared extras, missing or incompatible children and URL requirements fail
+closure validation. CPU and CUDA profiles retain the default refusal of
+dependency extras; no source-root extras or network resolver are enabled.
+Dependency compatibility includes older valid x86_64 manylinux baselines and
+their historical aliases, as specified by
+[PyPA's platform tag contract](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/#manylinux).
+The sealed package and interpreter keep their glibc 2.28 host requirement;
+foreign architectures, newer glibc requirements and incompatible Python ABIs
+remain refused.
+
 ## Native lifetime and contracts
 
-The private CLI accepts `--serve <configuration.json> --parent-pid <owner>`.
+The private CLI accepts either `--probe <cpu|mps|cuda|rocm>` or
+`--serve <configuration.json>`, together with `--parent-pid <owner>`.
 The worker must start it in a dedicated session with the actual supervising PID.
 Parent death, a protocol error or any inference failure retires the entire native
 process group. An upstream timeout can leave a daemon inference thread active;
 the process must never admit another request or delete that thread's partial
 files. The owner drains the process before cleaning its private lifetime.
+
+The weights-free probe imports verified native libraries and executes small
+matrix operations at the requested device's real precision. Its strict
+`kind = "library_probe"` receipt contains the installed payload identity, compute
+lane, base/encoder precision, autoencoder precision, CUDA capability when
+applicable, and imported Torch version. It accepts no model configuration or
+paths and cannot emit loaded-model readiness. The normal private serve path
+separately verifies model identity and observes all loaded components. Neither
+probe mode downloads weights or starts a planner.
 
 Core's canonical `shared/types/native_music.py` is linked into this source tree
 and copied as ordinary bytes into the eventual package. It defines strict
@@ -60,8 +120,9 @@ alternate MLX implementations and language-model planning are disabled.
 
 The requested device executes a small math probe. Readiness then inspects all
 three loaded components rather than echoing configuration. The pinned source
-uses FP32 on CPU, MPS and ROCm for its diffusion model; CUDA uses BF16 when
-available and FP16 otherwise. The MPS autoencoder independently uses FP16.
+uses FP32 on CPU, MPS and ROCm for its diffusion model; CUDA uses native BF16
+from SM8 and FP16 on earlier capability, matching the pinned initializer rather
+than Torch's emulated-BF16 report. The MPS autoencoder independently uses FP16.
 Readiness and completed results retain each component's observed policy. These
 are module observations, not claims about every operator's accumulation type.
 
@@ -129,16 +190,21 @@ imports model libraries through the wrong interpreter. After fresh offline
 installation with `scripts/stage_ace_step_candidate.py`, run:
 
 ```sh
-<installed-native-python> -I -B packaging/skulk-ace-step/verify_runtime.py
+<installed-native-python> -I -B packaging/skulk-ace-step/verify_runtime.py --variant <cpu|cuda|rocm>
 uv run basedpyright --project packaging/skulk-ace-step/pyrightconfig.json --pythonpath <installed-native-python>
 ```
 
 The verifier requires dependencies and the native adapter to resolve inside that
 private installation. Its child-process checks use that same installed package,
-not a repository wrapper. `.github/workflows/ace-step-native-boundary.yml` builds
-twice, compares complete bytes and executes fresh offline packages on all three
-OS/CPU targets. This workflow does not download music weights or qualify music
-generation, accelerator performance or installed Core admission.
+not a repository wrapper. Pass the same `--variant` to the stager and verifier.
+`.github/workflows/ace-step-native-boundary.yml` defines six independent jobs:
+CPU on all three OS/CPU targets, CUDA on Linux x86_64 and ARM64, and ROCm on Linux
+x86_64. Each builds twice, compares complete bytes and executes a fresh offline
+package. GPU packages execute their CPU boundary checks on hosted runners;
+those checks do not substitute for real accelerator probes or model runs.
+The ROCm job independently reproduces its pure metapackage before collection.
+The workflow does not download music weights or qualify music generation,
+accelerator performance or installed Core admission.
 
 The disabled `enable_normalization` option is the optional native postprocessor.
 Pinned native decode still attenuates peaks above one before returning its tensor.

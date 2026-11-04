@@ -59,6 +59,72 @@ class NativeMusicContract(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
 
+@final
+class NativeMusicLibraryProbe(NativeMusicContract):
+    """Measured package/device execution without weights or model readiness.
+
+    Core verifies the installed payload before running this private probe. The
+    separate loaded-model receipt additionally binds actual component placement
+    and model identity; this record cannot stand in for that receipt.
+    """
+
+    kind: Literal["library_probe"] = Field(
+        default="library_probe", description="Weights-free native probe discriminator."
+    )
+    protocol_version: Literal[1] = Field(
+        default=1, description="Native probe protocol."
+    )
+    payload_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="Actual installed runtime payload identity.",
+    )
+    device: NativeMusicDevice = Field(
+        description="Explicit successfully executed compute lane."
+    )
+    precision: NativeMusicPrecision = Field(
+        description="Executed diffusion/text-encoder precision policy."
+    )
+    autoencoder_precision: NativeMusicTensorPrecision = Field(
+        description="Executed autoencoder precision, including Metal FP16."
+    )
+    cuda_compute_capability: (
+        tuple[Annotated[int, Field(ge=0, le=255)], Annotated[int, Field(ge=0, le=255)]]
+        | None
+    ) = Field(
+        default=None,
+        description="Observed CUDA major/minor; absent on CPU, Metal and ROCm.",
+    )
+    torch_version: str = Field(
+        min_length=1,
+        max_length=128,
+        description="Imported Torch build version, not a driver compatibility claim.",
+    )
+
+    @model_validator(mode="after")
+    def validate_policy(self) -> Self:
+        """Keep the executed device, native precision and capability consistent."""
+        if self.device == "cuda":
+            if self.cuda_compute_capability is None:
+                raise ValueError(
+                    "native CUDA library probe requires its actual compute capability"
+                )
+            expected: NativeMusicPrecision = (
+                "bfloat16" if self.cuda_compute_capability[0] >= 8 else "float16"
+            )
+        else:
+            if self.cuda_compute_capability is not None:
+                raise ValueError(
+                    "non-CUDA library probes cannot assert CUDA capability"
+                )
+            expected = "float32"
+        autoencoder = "float16" if self.device == "mps" else expected
+        if self.precision != expected or self.autoencoder_precision != autoencoder:
+            raise ValueError(
+                "native library probe precision differs from its compute policy"
+            )
+        return self
+
+
 def _relative(value: str) -> PurePosixPath:
     path = PurePosixPath(value)
     if (
@@ -504,7 +570,9 @@ class NativeMusicResult(NativeMusicContract):
             else 0
         )
         if self.conditioning_padding_frames != expected_conditioning_padding:
-            raise ValueError("native music conditioning padding must match its codec grid")
+            raise ValueError(
+                "native music conditioning padding must match its codec grid"
+            )
         if self.padding_frames_removed and (
             self.operation == "generate"
             or self.output.frames + self.padding_frames_removed

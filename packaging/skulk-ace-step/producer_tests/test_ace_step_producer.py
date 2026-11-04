@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 import unittest
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,7 +22,14 @@ from build_ace_step import (
     SourceInventory,
     assemble_wheel,
 )
-from package_inputs import locked_dependencies, read_python_catalog, unpack_candidate
+from package_inputs import (
+    NativePackageVariant,
+    inspect_candidate,
+    locked_dependencies,
+    native_package_limits,
+    read_python_catalog,
+    unpack_candidate,
+)
 from pydantic import JsonValue, TypeAdapter
 from wheel_inputs import validate_dependency_closure
 
@@ -230,7 +237,10 @@ class NativeProducerTests(unittest.TestCase):
         """Remove only this test's owned source/output trees."""
         self.temporary.cleanup()
 
-    def build(self, name: str = "output") -> Path:
+    def build(
+        self, name: str = "output", *, variant: NativePackageVariant = "cpu",
+        target: str = "macosx_14_0_arm64",
+    ) -> Path:
         """Seal the actual fixture bytes through the production entry point."""
         value = self.inputs
         return assemble_wheel(
@@ -240,8 +250,9 @@ class NativeProducerTests(unittest.TestCase):
             value.wheelhouse,
             value.lock,
             value.root / name,
-            target="macosx_14_0_arm64",
+            target=target,
             python_archive=value.interpreter,
+            variant=variant,
         )
 
     def repin_wheel(self) -> None:
@@ -462,7 +473,7 @@ class NativeProducerTests(unittest.TestCase):
         )
         self.assertTrue(any(item.size_bytes == 0 for item in source.files))
         targets: set[str] = set()
-        for path in (root / "archives").glob("*.json"):
+        for path in (root / "archives").glob("*-cpu-py312.json"):
             inventory = ArchiveInventory.model_validate_json(path.read_bytes())
             targets.add(inventory.target)
             self.assertEqual(len(inventory.objects), 53)
@@ -470,3 +481,89 @@ class NativeProducerTests(unittest.TestCase):
             targets,
             {"macosx_14_0_arm64", "manylinux_2_28_x86_64", "manylinux_2_28_aarch64"},
         )
+
+    def test_gpu_profiles_seal_and_verify_actual_candidate_bytes(self) -> None:
+        """Tiny real packages exercise all GPU layouts without native execution."""
+        profiles: tuple[tuple[NativePackageVariant, str], ...] = (
+            ("cuda", "manylinux_2_28_x86_64"),
+            ("cuda", "manylinux_2_28_aarch64"),
+            ("rocm", "linux_x86_64"),
+        )
+        for variant, target in profiles:
+            with self.subTest(variant=variant, target=target):
+                owned = self.inputs.wrapper.parent
+                catalog = read_python_catalog(owned)
+                interpreter_target = (
+                    "manylinux_2_28_x86_64" if target == "linux_x86_64" else target
+                )
+                pin = catalog.for_target(interpreter_target).model_copy(update={
+                    "sha256": hashlib.sha256(self.inputs.interpreter.read_bytes()).hexdigest(),
+                    "size_bytes": self.inputs.interpreter.stat().st_size,
+                })
+                interpreter = self.inputs.root / pin.filename
+                interpreter.write_bytes(self.inputs.interpreter.read_bytes())
+                updated = catalog.model_copy(update={
+                    "archives": tuple(
+                        pin if item.profile == pin.profile else item
+                        for item in catalog.archives
+                    )
+                })
+                (owned / "python.json").write_text(updated.model_dump_json())
+                inventory = document(owned / "archives/macos-arm64-cpu-py312.json")
+                lock = owned / f"locks/{pin.profile}-{variant}-py312.lock"
+                lock.write_bytes(self.inputs.lock.read_bytes())
+                inventory.update(
+                    variant=variant, target=target,
+                    python_archive=pin.model_dump(mode="json"),
+                    lock_sha256=hashlib.sha256(lock.read_bytes()).hexdigest(),
+                )
+                (owned / f"archives/{pin.profile}-{variant}-py312.json").write_text(
+                    json.dumps(inventory)
+                )
+                commit(self.inputs.repository)
+                self.inputs = replace(self.inputs, lock=lock, interpreter=interpreter)
+                wheel = self.build(f"{variant}-{target}", variant=variant, target=target)
+                digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+                manifest = inspect_candidate(
+                    wheel, digest, limits=native_package_limits(variant)
+                )
+                self.assertEqual((manifest.variant, manifest.platform_tag), (variant, target))
+                self.assertEqual(manifest.python_archive.platform_tag, interpreter_target)
+                self.assertIn("library_probe", manifest.features)
+                with self.assertRaises(ValueError):
+                    inspect_candidate(wheel, digest)
+
+    def test_cuda_profile_cannot_be_mislabeled_as_an_apple_package(self) -> None:
+        """A variant switch cannot invent a CPU architecture or accelerator ABI."""
+        with self.assertRaisesRegex(ValueError, "target"):
+            self.build(variant="cuda", target="macosx_14_0_arm64")
+
+    def test_actual_gpu_inputs_bind_all_archives_and_complete_selected_locks(self) -> None:
+        """The real GPU inventories must satisfy the same source schema as fixtures."""
+        root = Path(__file__).parents[1]
+        profiles: tuple[tuple[str, NativePackageVariant, str, int], ...] = (
+            ("linux-amd64", "cuda", "manylinux_2_28_x86_64", 71),
+            ("linux-arm64", "cuda", "manylinux_2_28_aarch64", 71),
+            ("linux-amd64", "rocm", "linux_x86_64", 57),
+        )
+        for profile, variant, target, count in profiles:
+            name = f"{profile}-{variant}-py312"
+            inventory = ArchiveInventory.model_validate_json(
+                (root / f"archives/{name}.json").read_bytes()
+            )
+            lock = (root / f"locks/{name}.lock").read_bytes()
+            required = locked_dependencies(lock)
+            self.assertEqual((inventory.variant, inventory.target), (variant, target))
+            self.assertEqual(len(inventory.objects), count)
+            self.assertEqual(inventory.lock_sha256, hashlib.sha256(lock).hexdigest())
+            self.assertEqual(set(required), {item.distribution for item in inventory.objects})
+            limits = native_package_limits(variant)
+            for item in inventory.objects:
+                version, hashes = required[item.distribution]
+                self.assertEqual(str(version), item.version)
+                self.assertIn(item.sha256, hashes)
+                self.assertLessEqual(item.size_bytes, limits.object_bytes)
+            self.assertEqual(
+                sum(item.source_build is not None for item in inventory.objects),
+                1 if variant == "rocm" else 0,
+            )

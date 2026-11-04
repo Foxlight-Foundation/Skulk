@@ -14,6 +14,7 @@ import json
 import re
 import subprocess
 import zipfile
+from collections import deque
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
@@ -92,10 +93,17 @@ def target_tags(target: str) -> list[Tag]:
         platforms = list(mac_platforms(version=(14, 0), arch="arm64"))
     else:
         architecture = target.removeprefix("manylinux_2_28_")
+        # PEP 600 baselines are forward compatible. x86_64 also has the older
+        # manylinux1/2010 aliases; AArch64's first baseline is manylinux2014.
+        # The package and standalone interpreter still require glibc 2.28.
+        oldest_minor = 5 if architecture == "x86_64" else 17
         platforms = [
-            f"manylinux_2_{minor}_{architecture}" for minor in range(28, 16, -1)
+            f"manylinux_2_{minor}_{architecture}"
+            for minor in range(28, oldest_minor - 1, -1)
         ]
         platforms.append(f"manylinux2014_{architecture}")
+        if architecture == "x86_64":
+            platforms.extend(("manylinux2010_x86_64", "manylinux1_x86_64"))
     return list(cpython_tags((3, 12), abis=["cp312"], platforms=platforms)) + list(
         compatible_tags((3, 12), interpreter="cp312", platforms=platforms)
     )
@@ -127,8 +135,16 @@ def validate_dependency_closure(
     required: dict[str, tuple[Version, frozenset[str]]],
     direct: bytes,
     target: str,
+    *,
+    allow_dependency_extras: bool = False,
 ) -> None:
-    """Check actual wheel metadata against the source and every transitive need."""
+    """Check exact source roots and every active wheel dependency.
+
+    CPU producers keep refusing dependency extras. The fixed native ROCm profile
+    enables their traversal because its upstream selects a libraries extra;
+    every requested extra must be declared and its full active closure pinned.
+    No source-root extras, URLs or dependency resolution are admitted.
+    """
     for line in direct.decode().splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
@@ -164,6 +180,7 @@ def validate_dependency_closure(
         "sys_platform": "darwin" if target.startswith("macosx_") else "linux",
         "extra": "",
     }
+    metadata_by_distribution: dict[str, Metadata] = {}
     for filename, data in wheels.items():
         distribution, version, _, _ = parse_wheel_filename(filename)
         with zipfile.ZipFile(
@@ -185,6 +202,7 @@ def validate_dependency_closure(
                 "version",
                 "requires-python",
                 "requires-dist",
+                "provides-extra",
             }:
                 raise ValueError(
                     "native dependency identity or requirements are malformed"
@@ -204,6 +222,8 @@ def validate_dependency_closure(
                 projected["requires_python"] = raw["requires_python"]
             if "requires_dist" in raw:
                 projected["requires_dist"] = raw["requires_dist"]
+            if "provides_extra" in raw:
+                projected["provides_extra"] = raw["provides_extra"]
             metadata = Metadata.from_raw(projected, validate=True)
             if (
                 canonicalize_name(metadata.name) != distribution
@@ -219,23 +239,7 @@ def validate_dependency_closure(
                 raise ValueError(
                     "dependency does not support the pinned native interpreter"
                 )
-            for dependency in metadata.requires_dist or ():
-                if dependency.marker is not None and not dependency.marker.evaluate(
-                    environment
-                ):
-                    continue
-                name = canonicalize_name(dependency.name)
-                if (
-                    dependency.url is not None
-                    or dependency.extras
-                    or name not in required
-                    or not dependency.specifier.contains(
-                        required[name][0], prereleases=True
-                    )
-                ):
-                    raise ValueError(
-                        "offline dependency metadata closure is incomplete"
-                    )
+            metadata_by_distribution[distribution] = metadata
             if distribution == "soundfile":
                 suffix = ".dylib" if target.startswith("macosx_") else ".so"
                 if not any(
@@ -244,6 +248,43 @@ def validate_dependency_closure(
                     for name in archive.namelist()
                 ):
                     raise ValueError("SoundFile must bundle its target audio library")
+
+    # Extras propagate through another distribution's metadata, not the
+    # requesting wheel's empty-extra environment. Revisit a distribution for
+    # each newly requested context; a visited set also bounds dependency cycles.
+    pending = deque((name, "") for name in metadata_by_distribution)
+    visited: set[tuple[str, str]] = set()
+    while pending:
+        distribution, extra = pending.popleft()
+        if (distribution, extra) in visited:
+            continue
+        visited.add((distribution, extra))
+        metadata = metadata_by_distribution[distribution]
+        for dependency in metadata.requires_dist or ():
+            if dependency.marker is not None and not dependency.marker.evaluate(
+                environment | {"extra": extra}
+            ):
+                continue
+            name = canonicalize_name(dependency.name)
+            if (
+                dependency.url is not None
+                or dependency.extras
+                and not allow_dependency_extras
+                or name not in required
+                or name not in metadata_by_distribution
+                or not dependency.specifier.contains(
+                    required[name][0], prereleases=True
+                )
+            ):
+                raise ValueError("offline dependency metadata closure is incomplete")
+            requested = {canonicalize_name(item) for item in dependency.extras}
+            declared = {
+                canonicalize_name(item)
+                for item in metadata_by_distribution[name].provides_extra or ()
+            }
+            if not requested <= declared:
+                raise ValueError("offline dependency requests an unknown extra")
+            pending.extend((name, context) for context in sorted(requested))
 
 
 def assemble_wheel(

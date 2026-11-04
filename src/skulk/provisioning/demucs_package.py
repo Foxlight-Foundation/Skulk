@@ -10,16 +10,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import platform
 import re
 import stat
 import tarfile
 import zipfile
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
+from packaging.tags import platform_tags
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -44,6 +45,49 @@ TARGETS = tuple(PROFILE_TARGETS.values())
 MAX_PACKAGE_BYTES = 1024 * 1024 * 1024
 MAX_EXPANDED_PYTHON_BYTES = 512 * 1024 * 1024
 MAX_INSTALLED_BYTES = 4 * 1024 * 1024 * 1024
+NativePackageVariant = Literal["cpu", "cuda", "rocm"]
+
+
+@dataclass(frozen=True)
+class NativePackageLimits:
+    """Trusted Core/producer expansion policy, never supplied by a manifest.
+
+    Installed bytes include the adapter's retained nested wheel archives as well
+    as their expanded distributions. GPU closures need both copies accounted for.
+    These are storage limits, not model-memory estimates or hardware claims.
+    """
+
+    variant: NativePackageVariant
+    package_bytes: int
+    object_bytes: int
+    installed_bytes: int
+    expanded_member_bytes: int
+
+
+CPU_PACKAGE_LIMITS = NativePackageLimits(
+    "cpu", MAX_PACKAGE_BYTES, 512 * 1024**2, MAX_INSTALLED_BYTES, MAX_INSTALLED_BYTES
+)
+CUDA_PACKAGE_LIMITS = NativePackageLimits(
+    "cuda", 4 * 1024**3, 768 * 1024**2, 8 * 1024**3, 1024**3
+)
+ROCM_PACKAGE_LIMITS = NativePackageLimits(
+    "rocm", 3 * 1024**3, 768 * 1024**2, 10 * 1024**3, 1024**3
+)
+
+
+def native_package_limits(variant: NativePackageVariant) -> NativePackageLimits:
+    """Select a built-in bound from the independently pinned package profile.
+
+    Do not call this with an unverified manifest's desired limits. Preparation
+    selects its own profile before reading or executing candidate bytes.
+    """
+    return {
+        "cpu": CPU_PACKAGE_LIMITS,
+        "cuda": CUDA_PACKAGE_LIMITS,
+        "rocm": ROCM_PACKAGE_LIMITS,
+    }[variant]
+
+
 Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 Checkpoint = Callable[[], None]
 
@@ -193,7 +237,7 @@ class BuildManifest(BaseModel):
         "https://github.com/ace-step/ACE-Step-1.5.git",
     ]
     platform_tag: str
-    variant: Literal["cpu"]
+    variant: NativePackageVariant
     members: dict[str, Digest] = Field(min_length=1, max_length=256)
     features: tuple[str, ...] = Field(max_length=16)
     payload_sha256: Digest
@@ -264,12 +308,17 @@ def extract_python(
     return executable
 
 
-def _candidate_manifest(archive: zipfile.ZipFile) -> BuildManifest:
+def _candidate_manifest(
+    archive: zipfile.ZipFile, limits: NativePackageLimits
+) -> BuildManifest:
     entries = archive.infolist()
     names = [entry.filename for entry in entries]
     if len(names) > 256 or len(set(names)) != len(names):
         raise ValueError("candidate has excessive or duplicate members")
-    if sum(entry.file_size for entry in entries) > MAX_PACKAGE_BYTES:
+    if (
+        sum(entry.file_size for entry in entries) > limits.package_bytes
+        or any(entry.file_size > limits.object_bytes for entry in entries)
+    ):
         raise ValueError("candidate payload exceeds its expanded bound")
     build_names = set(names).intersection(
         {"skulk_demucs/build.json", "skulk_ace_step/build.json"}
@@ -286,7 +335,7 @@ def _candidate_manifest(archive: zipfile.ZipFile) -> BuildManifest:
         json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     module_name = _package_module(manifest)
-    metadata_root = f"{module_name}_cpu-0.1.0.dist-info"
+    metadata_root = f"{module_name}_{limits.variant}-0.1.0.dist-info"
     expected = set(manifest.members) | {
         f"{module_name}/build.json",
         f"{metadata_root}/METADATA",
@@ -297,8 +346,17 @@ def _candidate_manifest(archive: zipfile.ZipFile) -> BuildManifest:
         build_name != f"{module_name}/build.json"
         or identity != manifest.payload_sha256
         or set(names) != expected
-        or manifest.platform_tag not in TARGETS
-        or manifest.python_archive.platform_tag != manifest.platform_tag
+        or manifest.variant != limits.variant
+        or module_name == "skulk_demucs" and limits.variant != "cpu"
+        or manifest.platform_tag not in (*TARGETS, "linux_x86_64")
+        or manifest.python_archive.platform_tag
+        != (
+            "manylinux_2_28_x86_64"
+            if manifest.platform_tag == "linux_x86_64"
+            else manifest.platform_tag
+        )
+        or manifest.platform_tag == "linux_x86_64" and limits.variant != "rocm"
+        or limits.variant != "cpu" and manifest.platform_tag.startswith("macosx_")
     ):
         raise ValueError("candidate manifest identity or member inventory disagrees")
     for entry in entries:
@@ -313,6 +371,7 @@ def inspect_candidate(
     expected_sha256: str,
     *,
     checkpoint: Checkpoint | None = None,
+    limits: NativePackageLimits = CPU_PACKAGE_LIMITS,
 ) -> BuildManifest:
     """Check sealed object/manifest identities without extracting or executing.
 
@@ -321,12 +380,12 @@ def inspect_candidate(
     the manifest; payload members are additionally verified during extraction.
     """
     if (
-        file_digest(wheel, limit=MAX_PACKAGE_BYTES, checkpoint=checkpoint)
+        file_digest(wheel, limit=limits.package_bytes, checkpoint=checkpoint)
         != expected_sha256
     ):
         raise ValueError("candidate package differs from its expected digest")
     with zipfile.ZipFile(wheel) as archive:
-        return _candidate_manifest(archive)
+        return _candidate_manifest(archive, limits)
 
 
 def unpack_candidate(
@@ -335,16 +394,17 @@ def unpack_candidate(
     expected_sha256: str,
     *,
     checkpoint: Checkpoint | None = None,
+    limits: NativePackageLimits = CPU_PACKAGE_LIMITS,
 ) -> BuildManifest:
     """Verify the complete object and every payload member before extracting it."""
     if (
-        file_digest(wheel, limit=MAX_PACKAGE_BYTES, checkpoint=checkpoint)
+        file_digest(wheel, limit=limits.package_bytes, checkpoint=checkpoint)
         != expected_sha256
     ):
         raise ValueError("candidate package differs from its expected digest")
     destination.mkdir(parents=True, exist_ok=False)
     with zipfile.ZipFile(wheel) as archive:
-        manifest = _candidate_manifest(archive)
+        manifest = _candidate_manifest(archive, limits)
         entries = archive.infolist()
         for entry in entries:
             relative = safe_member(entry.filename)
@@ -371,6 +431,7 @@ def verify_site_packages(
     wheels: tuple[Path, ...],
     *,
     checkpoint: Checkpoint | None = None,
+    limits: NativePackageLimits = CPU_PACKAGE_LIMITS,
 ) -> None:
     """Check expanded code/data against trusted wheels, never installed RECORDs.
 
@@ -412,7 +473,11 @@ def verify_site_packages(
                     )
                     continue
                 expanded += entry.file_size
-                if expanded > MAX_INSTALLED_BYTES or len(expected) > 65536:
+                if (
+                    expanded > limits.installed_bytes
+                    or entry.file_size > limits.expanded_member_bytes
+                    or len(expected) > 65536
+                ):
                     raise ValueError("installed dependency set exceeds its bound")
                 with archive.open(entry) as stream:
                     hasher = hashlib.sha256()
@@ -438,7 +503,7 @@ def verify_site_packages(
             raise ValueError("installed native tree exceeds its member bound")
         if name not in generated and (
             name not in expected
-            or file_digest(path, limit=MAX_INSTALLED_BYTES, checkpoint=checkpoint)
+            or file_digest(path, limit=limits.installed_bytes, checkpoint=checkpoint)
             != expected[name]
         ):
             raise ValueError(
@@ -560,6 +625,7 @@ def verify_cached_payload(
     expected_sha256: str,
     *,
     checkpoint: Checkpoint | None = None,
+    limits: NativePackageLimits = CPU_PACKAGE_LIMITS,
 ) -> BuildManifest:
     """Check cached source files against a complete independently pinned package.
 
@@ -567,7 +633,7 @@ def verify_cached_payload(
     their own authorities. No file from this tree is executed by this function.
     """
     if (
-        file_digest(wheel, limit=MAX_PACKAGE_BYTES, checkpoint=checkpoint)
+        file_digest(wheel, limit=limits.package_bytes, checkpoint=checkpoint)
         != expected_sha256
     ):
         raise ValueError("candidate package differs from its expected digest")
@@ -576,7 +642,7 @@ def verify_cached_payload(
     root = destination.resolve()
     expected: set[str] = set()
     with zipfile.ZipFile(wheel) as archive:
-        manifest = _candidate_manifest(archive)
+        manifest = _candidate_manifest(archive, limits)
         for entry in archive.infolist():
             _checkpoint(checkpoint)
             relative = safe_member(entry.filename)
@@ -639,6 +705,7 @@ def verify_cached_runtime(
     expected_payload_sha256: str,
     *,
     checkpoint: Checkpoint | None = None,
+    limits: NativePackageLimits = CPU_PACKAGE_LIMITS,
 ) -> tuple[Path, BuildManifest]:
     """Verify a stable cached environment before any of its Python code runs.
 
@@ -650,7 +717,7 @@ def verify_cached_runtime(
         raise ValueError("cached native runtime generation is missing or redirected")
     payload = root / "payload"
     manifest = verify_cached_payload(
-        wheel, payload, expected_sha256, checkpoint=checkpoint
+        wheel, payload, expected_sha256, checkpoint=checkpoint, limits=limits
     )
     if manifest.payload_sha256 != expected_payload_sha256:
         raise ValueError("cached native runtime belongs to a different build")
@@ -737,7 +804,7 @@ def verify_cached_runtime(
     ):
         raise ValueError("cached native import root is missing or redirected")
     dependencies = tuple(sorted((payload / _package_module(manifest) / "wheels").glob("*.whl")))
-    verify_site_packages(site, (wheel, *dependencies), checkpoint=checkpoint)
+    verify_site_packages(site, (wheel, *dependencies), checkpoint=checkpoint, limits=limits)
     return native, manifest
 
 
@@ -774,6 +841,7 @@ def install_fresh_runtime(
     *,
     run: CommandRunner,
     checkpoint: Checkpoint | None = None,
+    limits: NativePackageLimits = CPU_PACKAGE_LIMITS,
 ) -> Path:
     """Bootstrap one fresh stable generation from sealed offline package bytes.
 
@@ -786,13 +854,14 @@ def install_fresh_runtime(
     _checkpoint(checkpoint)
     output.mkdir(parents=True, exist_ok=False)
     payload = output / "payload"
-    manifest = unpack_candidate(wheel, payload, expected_sha256, checkpoint=checkpoint)
-    host_target = {
-        ("Darwin", "arm64"): "macosx_14_0_arm64",
-        ("Linux", "x86_64"): "manylinux_2_28_x86_64",
-        ("Linux", "aarch64"): "manylinux_2_28_aarch64",
-    }.get((platform.system(), platform.machine()))
-    if host_target != manifest.platform_tag:
+    manifest = unpack_candidate(
+        wheel, payload, expected_sha256, checkpoint=checkpoint, limits=limits
+    )
+    host_platforms = set(platform_tags())
+    if (
+        manifest.platform_tag not in host_platforms
+        or manifest.python_archive.platform_tag not in host_platforms
+    ):
         raise ValueError("candidate cannot execute on this OS/CPU architecture")
     interpreter = extract_python(
         payload / _package_module(manifest) / "python" / manifest.python_archive.filename,
@@ -894,7 +963,8 @@ def install_fresh_runtime(
             capture=False,
         )
     verified, verified_manifest = verify_cached_runtime(
-        wheel, output, expected_sha256, manifest.payload_sha256, checkpoint=checkpoint
+        wheel, output, expected_sha256, manifest.payload_sha256,
+        checkpoint=checkpoint, limits=limits
     )
     if verified != native or verified_manifest != manifest:
         raise ValueError("native installation changed its source identity")

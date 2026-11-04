@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from itertools import islice
 from pathlib import Path
-from typing import Literal, final
+from typing import Literal, Protocol, final
 from uuid import uuid4
 
 import httpx
@@ -25,12 +25,13 @@ from packaging.tags import platform_tags
 from pydantic import Field, model_validator
 
 from skulk.provisioning.demucs_package import (
+    CPU_PACKAGE_LIMITS,
     MAX_EXPANDED_PYTHON_BYTES,
-    MAX_INSTALLED_BYTES,
     MAX_PACKAGE_BYTES,
     BuildManifest,
     Checkpoint,
     Digest,
+    NativePackageLimits,
     inspect_candidate,
     install_fresh_runtime,
     verify_cached_runtime,
@@ -174,7 +175,7 @@ def _owned_lock(root: Path, checkpoint: Checkpoint) -> Iterator[RuntimeLock]:
 
 
 def download_demucs_package(
-    wheel: DemucsWheel,
+    wheel: RuntimePackage,
     destination: Path,
     checkpoint: Checkpoint,
     *,
@@ -255,7 +256,99 @@ def _inspect_package(
     return manifest
 
 
-def _selection(root: Path, wheel: DemucsWheel) -> str | None:
+class RuntimePackage(Protocol):
+    """Immutable object identity shared by the two built-in native audio caches."""
+
+    @property
+    def platform_tag(self) -> str:
+        """Return the actual bundled interpreter and library ABI target."""
+        ...
+
+    @property
+    def build_identity(self) -> str:
+        """Return the selected immutable library identity for node resources."""
+        ...
+
+    @property
+    def filename(self) -> str:
+        """Return the exact engine-channel object basename."""
+        ...
+
+    @property
+    def sha256(self) -> str:
+        """Return the independently selected complete package digest."""
+        ...
+
+    @property
+    def payload_sha256(self) -> str:
+        """Return the independently selected inner payload identity."""
+        ...
+
+    @property
+    def size_bytes(self) -> int:
+        """Return the complete pinned object length."""
+        ...
+
+    @property
+    def url(self) -> str:
+        """Return the fixed immutable engine-channel URL."""
+        ...
+
+
+class RuntimePreparationPolicy[
+    Package: RuntimePackage, Device: str, Prepared, Observation
+](Protocol):
+    """Built-in typed engine effects over one shared cache and ownership policy.
+
+    This is an internal source interface, not a downloadable engine entry point.
+    Only reviewed Core code supplies the package validation and device probe.
+    """
+
+    @property
+    def label(self) -> str:
+        """Return the engine's diagnostic name."""
+        ...
+
+    @property
+    def limits(self) -> NativePackageLimits:
+        """Return Core's trusted expansion profile, independent of candidate bytes."""
+        ...
+
+    def validate(self, package: Package, device: Device) -> None:
+        """Refuse a genuine package/host/lane mismatch before touching the cache."""
+        ...
+
+    def inspect(
+        self, path: Path, package: Package, checkpoint: Checkpoint
+    ) -> BuildManifest:
+        """Bind original sealed bytes to this engine's exact source and features."""
+        ...
+
+    def probe(
+        self,
+        interpreter: Path,
+        package: Package,
+        device: Device,
+        runner: NativeInstallCommandRunner,
+    ) -> Observation:
+        """Execute the engine's bounded weights-free library/device probe."""
+        ...
+
+    def prepared(
+        self, package: Package, generation: Path, interpreter: Path, device: Device,
+        observation: Observation,
+    ) -> Prepared:
+        """Bind the verified installation and probe to its private typed receipt."""
+        ...
+
+    def download(
+        self, package: Package, destination: Path, checkpoint: Checkpoint
+    ) -> None:
+        """Stream only the independently pinned engine object."""
+        ...
+
+
+def _selection(root: Path, wheel: RuntimePackage) -> str | None:
     try:
         record = _CompletedGeneration.model_validate_json(
             read_private(root / "selected.json", 4096)
@@ -311,8 +404,9 @@ def _probe(
         raise ValueError("native separation probe selected a different build or device")
 
 
-@final
-class DemucsRuntimeCache:
+class SealedRuntimeCache[
+    Package: RuntimePackage, Device: str, Prepared, Observation
+]:
     """Own serialized preparation and retained cleanup handles for one cache.
 
     Keep this controller for the worker lifetime. A failed process or file drain
@@ -320,9 +414,12 @@ class DemucsRuntimeCache:
     handle. No local PID record can substitute for that unreaped ownership.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self, root: Path, policy: RuntimePreparationPolicy[Package, Device, Prepared, Observation]
+    ) -> None:
         """Select the private cache without creating it or preparing any package."""
         self.root = root.absolute()
+        self._policy = policy
         self._guard = threading.Lock()
         self._pending: tuple[NativeInstallCommandRunner, Path | None, bool] | None = (
             None
@@ -398,17 +495,15 @@ class DemucsRuntimeCache:
 
     def prepare(
         self,
-        wheel: DemucsWheel,
+        wheel: Package,
         *,
-        device: DemucsDevice,
+        device: Device,
         offline: bool,
         is_cancelled: Callable[[], bool],
         progress: Callable[[PreparationPhase], None],
         timeout_seconds: float = 30 * 60,
-        download: Callable[
-            [DemucsWheel, Path, Checkpoint], None
-        ] = download_demucs_package,
-    ) -> PreparedDemucsRuntime:
+        download: Callable[[Package, Path, Checkpoint], None] | None = None,
+    ) -> Prepared:
         """Verify, recover or bootstrap a pinned runtime with bounded ownership.
 
         Wait for this controller's prior call within the same cancellation and
@@ -417,28 +512,28 @@ class DemucsRuntimeCache:
         """
         if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 2 * 60 * 60:
             raise ValueError(
-                "separation preparation deadline must be finite and within two hours"
+                f"{self._policy.label} preparation deadline must be finite and within two hours"
             )
         deadline = time.monotonic() + timeout_seconds
 
         def checkpoint() -> None:
             if is_cancelled():
                 raise DemucsPreparationCancelledError(
-                    "native separation preparation cancelled"
+                    f"{self._policy.label} preparation cancelled"
                 )
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    "native separation preparation exceeded its deadline"
+                    f"{self._policy.label} preparation exceeded its deadline"
                 )
 
         while True:
             if is_cancelled():
                 raise DemucsPreparationCancelledError(
-                    "native separation preparation cancelled"
+                    f"{self._policy.label} preparation cancelled"
                 )
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    "native separation preparation exceeded its deadline"
+                    f"{self._policy.label} preparation exceeded its deadline"
                 )
             if self._guard.acquire(timeout=0.05):
                 break
@@ -447,7 +542,7 @@ class DemucsRuntimeCache:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
-                    "native separation preparation exceeded its deadline"
+                    f"{self._policy.label} preparation exceeded its deadline"
                 )
             return self._prepare(
                 wheel,
@@ -463,17 +558,15 @@ class DemucsRuntimeCache:
 
     def _prepare(
         self,
-        wheel: DemucsWheel,
+        wheel: Package,
         *,
-        device: DemucsDevice,
+        device: Device,
         offline: bool,
         is_cancelled: Callable[[], bool],
         progress: Callable[[PreparationPhase], None],
         timeout_seconds: float = 30 * 60,
-        download: Callable[
-            [DemucsWheel, Path, Checkpoint], None
-        ] = download_demucs_package,
-    ) -> PreparedDemucsRuntime:
+        download: Callable[[Package, Path, Checkpoint], None] | None = None,
+    ) -> Prepared:
         """Prepare an exact native runtime without replacing any mounted generation.
 
         Reuse and interrupted-generation recovery verify sealed source, the complete
@@ -484,19 +577,10 @@ class DemucsRuntimeCache:
         only after complete process drain; previously retained generations survive.
         Preparation does not download weights, load a model or advertise readiness.
         """
-        if wheel.platform_tag not in set(platform_tags()):
-            raise ValueError(
-                "separation package is incompatible with this host OS/CPU ABI"
-            )
-        if device not in ("cpu", "mps") or (
-            device == "mps" and not wheel.platform_tag.startswith("macosx_")
-        ):
-            raise ValueError(
-                "this separation package cannot provide the requested device"
-            )
+        self._policy.validate(wheel, device)
         if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 2 * 60 * 60:
             raise ValueError(
-                "separation preparation deadline must be finite and within two hours"
+                f"{self._policy.label} preparation deadline must be finite and within two hours"
             )
         root = self.root
         private_directory(root)
@@ -507,18 +591,18 @@ class DemucsRuntimeCache:
             nonlocal last_disk_check
             if is_cancelled():
                 raise DemucsPreparationCancelledError(
-                    "native separation preparation cancelled"
+                    f"{self._policy.label} preparation cancelled"
                 )
             now = time.monotonic()
             if now >= deadline:
                 raise TimeoutError(
-                    "native separation preparation exceeded its deadline"
+                    f"{self._policy.label} preparation exceeded its deadline"
                 )
             if force_disk or now - last_disk_check >= 0.5:
                 last_disk_check = now
                 if shutil.disk_usage(root).free < _RESERVE_BYTES:
                     raise DemucsStorageError(
-                        "native separation cache needs at least 10 GiB free for the host reserve"
+                        f"{self._policy.label} cache needs at least 10 GiB free for the host reserve"
                     )
 
         progress("locking")
@@ -538,21 +622,21 @@ class DemucsRuntimeCache:
                 package = objects / wheel.filename
                 progress("verifying")
                 try:
-                    manifest = _inspect_package(package, wheel, checkpoint)
+                    manifest = self._policy.inspect(package, wheel, checkpoint)
                 except (FileNotFoundError, ValueError):
                     if offline:
                         raise ValueError(
-                            "offline separation preparation needs the intact pinned package in its cache"
+                            f"offline {self._policy.label} preparation needs the intact pinned package in its cache"
                         ) from None
                     if shutil.disk_usage(root).free < _RESERVE_BYTES + wheel.size_bytes:
                         raise DemucsStorageError(
-                            "insufficient disk space to download the separation package"
+                            f"insufficient disk space to download the {self._policy.label} package"
                         ) from None
                     progress("downloading")
                     temporary = objects / (".download-" + uuid4().hex)
                     try:
-                        download(wheel, temporary, checkpoint)
-                        manifest = _inspect_package(temporary, wheel, checkpoint)
+                        (download or self._policy.download)(wheel, temporary, checkpoint)
+                        manifest = self._policy.inspect(temporary, wheel, checkpoint)
                         checkpoint()
                         os.replace(temporary, package)
                         descriptor = os.open(objects, os.O_RDONLY | os.O_DIRECTORY)
@@ -568,7 +652,7 @@ class DemucsRuntimeCache:
                 entries = tuple(islice(generations.iterdir(), _GENERATION_LIMIT + 1))
                 if len(entries) > _GENERATION_LIMIT:
                     raise ValueError(
-                        "separation cache has too many retained generations; review inactive cache entries"
+                        f"{self._policy.label} cache has too many retained generations; review inactive cache entries"
                     )
                 # A complete but unpublished installation can survive interruption.
                 # Recover it only after full independent verification, never from a
@@ -590,6 +674,7 @@ class DemucsRuntimeCache:
                             wheel.sha256,
                             wheel.payload_sha256,
                             checkpoint=checkpoint,
+                            limits=self._policy.limits,
                         )
                     except (FileNotFoundError, ValueError):
                         continue
@@ -603,7 +688,7 @@ class DemucsRuntimeCache:
                     )
                     try:
                         progress("probing")
-                        _probe(interpreter, wheel, device, runner)
+                        observation = self._policy.probe(interpreter, wheel, device, runner)
                         checkpoint(force_disk=True)
                         # Mark potential publication before replacing selection.
                         # A former installer's deferred cleanup must preserve
@@ -620,29 +705,26 @@ class DemucsRuntimeCache:
                             .encode(),
                         )
                         progress("prepared")
-                        return PreparedDemucsRuntime(
-                            wheel=wheel,
-                            generation=generation,
-                            interpreter=interpreter,
-                            device=device,
+                        return self._policy.prepared(
+                            wheel, generation, interpreter, device, observation
                         )
                     finally:
                         self._finish(runner, None, True)
 
                 if len(entries) >= _GENERATION_LIMIT:
                     raise ValueError(
-                        "separation cache reached its retained generation bound; review inactive entries"
+                        f"{self._policy.label} cache reached its retained generation bound; review inactive entries"
                     )
                 required = (
                     _RESERVE_BYTES
-                    + MAX_PACKAGE_BYTES
+                    + self._policy.limits.package_bytes
                     + MAX_EXPANDED_PYTHON_BYTES
-                    + MAX_INSTALLED_BYTES
+                    + self._policy.limits.installed_bytes
                     + 256 * 1024**2
                 )
                 if shutil.disk_usage(root).free < required:
                     raise DemucsStorageError(
-                        "insufficient disk space for a fresh isolated separation runtime and host reserve"
+                        f"insufficient disk space for a fresh isolated {self._policy.label} runtime and host reserve"
                     )
                 generation = generations / uuid4().hex
                 runner = NativeInstallCommandRunner(
@@ -662,6 +744,7 @@ class DemucsRuntimeCache:
                         wheel.sha256,
                         run=runner,
                         checkpoint=checkpoint,
+                        limits=self._policy.limits,
                     )
                     # The independently supplied payload identity remains required
                     # after bootstrap, as well as in the pre-execution inspection.
@@ -671,9 +754,10 @@ class DemucsRuntimeCache:
                         wheel.sha256,
                         wheel.payload_sha256,
                         checkpoint=checkpoint,
+                        limits=self._policy.limits,
                     )
                     progress("probing")
-                    _probe(interpreter, wheel, device, runner)
+                    observation = self._policy.probe(interpreter, wheel, device, runner)
                     checkpoint(force_disk=True)
                     # A directory fsync can fail after atomic replacement. Retain
                     # the generation once activation is attempted; never delete a
@@ -691,11 +775,71 @@ class DemucsRuntimeCache:
                         .encode(),
                     )
                     progress("prepared")
-                    return PreparedDemucsRuntime(
-                        wheel=wheel,
-                        generation=generation,
-                        interpreter=interpreter,
-                        device=device,
+                    return self._policy.prepared(
+                        wheel, generation, interpreter, device, observation
                     )
                 finally:
                     self._finish(runner, generation, activation_attempted)
+
+
+@final
+class _DemucsPreparationPolicy:
+    """Keep separation's fixed CPU-package and FP32 lane contract unchanged."""
+
+    label = "separation"
+    limits = CPU_PACKAGE_LIMITS
+
+    def validate(self, package: DemucsWheel, device: DemucsDevice) -> None:
+        """Refuse an incompatible host ABI or a lane absent from this package."""
+        if package.platform_tag not in set(platform_tags()):
+            raise ValueError("separation package is incompatible with this host OS/CPU ABI")
+        if device not in ("cpu", "mps") or (
+            device == "mps" and not package.platform_tag.startswith("macosx_")
+        ):
+            raise ValueError("this separation package cannot provide the requested device")
+
+    def inspect(
+        self, path: Path, package: DemucsWheel, checkpoint: Checkpoint
+    ) -> BuildManifest:
+        """Apply the original separation source/features/payload checks."""
+        return _inspect_package(path, package, checkpoint)
+
+    def probe(
+        self,
+        interpreter: Path,
+        package: DemucsWheel,
+        device: DemucsDevice,
+        runner: NativeInstallCommandRunner,
+    ) -> None:
+        """Keep separation's exact FP32 CPU/MPS probe and bounded execution."""
+        _probe(interpreter, package, device, runner)
+
+    def prepared(
+        self,
+        package: DemucsWheel,
+        generation: Path,
+        interpreter: Path,
+        device: DemucsDevice,
+        observation: None,
+    ) -> PreparedDemucsRuntime:
+        """Return separation's existing private library observation."""
+        return PreparedDemucsRuntime(
+            wheel=package, generation=generation, interpreter=interpreter, device=device
+        )
+
+    def download(
+        self, package: DemucsWheel, destination: Path, checkpoint: Checkpoint
+    ) -> None:
+        """Retain the existing exact-object network effect."""
+        download_demucs_package(package, destination, checkpoint)
+
+
+@final
+class DemucsRuntimeCache(
+    SealedRuntimeCache[DemucsWheel, DemucsDevice, PreparedDemucsRuntime, None]
+):
+    """Prepare separation through the shared sealed native runtime ownership path."""
+
+    def __init__(self, root: Path) -> None:
+        """Select a private cache with the built-in separation package policy."""
+        super().__init__(root, _DemucsPreparationPolicy())

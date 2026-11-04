@@ -10,7 +10,12 @@ import argparse
 import time
 from pathlib import Path
 
-from skulk.provisioning.demucs_package import inspect_candidate, install_fresh_runtime
+from skulk.provisioning.demucs_package import (
+    NativePackageVariant,
+    inspect_candidate,
+    install_fresh_runtime,
+    native_package_limits,
+)
 from skulk.provisioning.native_install_process import NativeInstallCommandRunner
 
 
@@ -20,6 +25,7 @@ class Arguments(argparse.Namespace):
     wheel: Path
     sha256: str
     output: Path
+    variant: NativePackageVariant
 
 
 def main() -> None:
@@ -28,6 +34,7 @@ def main() -> None:
     parser.add_argument("--wheel", type=Path, required=True)
     parser.add_argument("--sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--variant", choices=("cpu", "cuda", "rocm"), default="cpu")
     arguments = Arguments()
     parser.parse_args(namespace=arguments)
     output, wheel = arguments.output.resolve(), arguments.wheel.resolve()
@@ -37,7 +44,10 @@ def main() -> None:
         if time.monotonic() >= deadline:
             raise TimeoutError("native music bootstrap exceeded its total deadline")
 
-    manifest = inspect_candidate(wheel, arguments.sha256, checkpoint=checkpoint)
+    limits = native_package_limits(arguments.variant)
+    manifest = inspect_candidate(
+        wheel, arguments.sha256, checkpoint=checkpoint, limits=limits
+    )
     if manifest.source_repository != "https://github.com/ace-step/ACE-Step-1.5.git":
         raise ValueError("native music validation requires an ACE candidate")
     runner = NativeInstallCommandRunner(
@@ -48,7 +58,8 @@ def main() -> None:
     try:
         print(
             install_fresh_runtime(
-                wheel, output, arguments.sha256, run=runner, checkpoint=checkpoint
+                wheel, output, arguments.sha256, run=runner, checkpoint=checkpoint,
+                limits=limits,
             )
         )
     finally:
