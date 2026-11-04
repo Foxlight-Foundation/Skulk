@@ -2,11 +2,14 @@
 """Native source generations preserve independent owners and exact selections."""
 
 import asyncio
+import hashlib
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 import anyio
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from foxlight_model_preservation.signing import create_key, load_key
 
@@ -16,7 +19,12 @@ from skulk.shared.models.model_cards import ModelCard, NativeMusicArtifactSource
 from skulk.shared.tests.native_music_fixtures import native_music_fixture
 from skulk.shared.types.common import ModelId
 from skulk.store import model_store_server as server_module
-from skulk.store.installed_cards import read_installed_card, verify_installed_card
+from skulk.store.installed_cards import (
+    manifest_sha256,
+    read_installed_card,
+    verify_installed_card,
+    write_installed_card,
+)
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_server import ModelStoreServer
 from skulk.store.preservation import recover_home
@@ -729,3 +737,227 @@ async def test_native_direct_reuse_preserves_shared_component_record(
             assert observed == old
     for card in (first, second):
         assert plan_preservation(tmp_path / card.model_id.normalize()).source_bytes > 0
+
+
+@pytest.mark.parametrize("shared_primary", [False, True])
+@pytest.mark.parametrize("reopen", [False, True])
+@pytest.mark.parametrize("corruption", ["git_blob", "forged_git_manifest", "tensor"])
+async def test_native_cache_admission_repairs_same_size_corrupted_objects(
+    shared_primary: bool,
+    reopen: bool,
+    corruption: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither completed-status nor reopened-index reuse can certify wrong bytes."""
+    card, objects = native_music_fixture(shared_primary=shared_primary)
+    card = card.model_copy(
+        update={"is_custom": False, "registry_card_id": "card_" + "a" * 52}
+    )
+    _network_fixture(monkeypatch, objects)
+    store = ModelStore(tmp_path, recover_installed_cards=False)
+    await _request(store, card)
+    source = card.native_music_artifact_sources()[-1]
+    alias, _ = download_utils.companion_artifact_location(
+        card, source.repository, source.revision
+    )
+    directory = store.get_store_path(str(alias))
+    entry = store.get_entry(str(alias))
+    assert (
+        directory is not None and entry is not None and entry.installed_card is not None
+    )
+    expected = next(
+        item
+        for item in source.files
+        if (
+            item.path.endswith(".safetensors")
+            if corruption == "tensor"
+            else item.path.endswith("config.json")
+        )
+    )
+    original = objects[source.repository, source.revision, expected.path]
+    changed = (
+        b"!" * len(original)
+        if corruption == "tensor"
+        else original.replace(b"true", b"null")
+    )
+    assert changed != original and len(changed) == len(original)
+    target = directory / expected.path
+    target.write_bytes(changed)
+    if corruption == "forged_git_manifest":
+        files = tuple(
+            item.model_copy(update={"sha256": hashlib.sha256(changed).hexdigest()})
+            if item.path == expected.path
+            else item
+            for item in entry.installed_card.files
+        )
+        forged = entry.installed_card.model_copy(
+            update={"files": files, "manifest_sha256": manifest_sha256(files)}
+        )
+        write_installed_card(directory, forged)
+        store.register_model(
+            str(alias),
+            directory,
+            entry.files,
+            entry.total_bytes,
+            source_repository=source.repository,
+            source_revision=source.revision,
+            installed_card=forged,
+        )
+    if reopen:
+        store = ModelStore(tmp_path)
+    await _request(store, card)
+    assert target.read_bytes() == original
+    repaired = read_installed_card(directory)
+    assert repaired is not None and verify_installed_card(
+        directory, repaired, verify_hashes=True
+    )
+
+
+@pytest.mark.parametrize("signed", [False, True])
+@pytest.mark.parametrize("lose_index", [False, True])
+async def test_removing_historical_native_owner_preserves_surviving_model(
+    signed: bool,
+    lose_index: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting the first owner does not revoke independent shared data custody."""
+    first, objects = native_music_fixture()
+    second = first.model_copy(update={"model_id": ModelId("test/native-other")})
+    if signed:
+        first = first.model_copy(
+            update={"is_custom": False, "registry_card_id": "card_" + "a" * 52}
+        )
+        second = second.model_copy(
+            update={"is_custom": False, "registry_card_id": "card_" + "b" * 52}
+        )
+    fetched = _network_fixture(monkeypatch, objects)
+    store = ModelStore(tmp_path, recover_installed_cards=False)
+    await _request(store, first)
+    survivor = await _request(store, second)
+    before = len(fetched)
+    source = next(
+        item
+        for item in first.native_music_artifact_sources()
+        if item.repository != str(first.artifact_repository)
+    )
+    alias = str(source.model_id())
+    shared = store.get_store_path(alias)
+    assert shared is not None
+    original_record = read_installed_card(shared)
+    assert original_record is not None and original_record.owner_model_id == str(
+        first.model_id
+    )
+    assert await store.delete_model_serialized(str(first.model_id))
+    if lose_index:
+        (tmp_path / "registry.json").unlink()
+    reopened = ModelStore(tmp_path)
+    assert reopened.get_entry(str(first.model_id)) is None
+    assert reopened.get_entry(alias) is not None
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path / "empty")
+    assert download_utils.model_companions_present_on_disk(second)
+    assert plan_preservation(survivor).source_bytes > 0
+    await _request(reopened, second)
+    assert len(fetched) == before
+    assert read_installed_card(shared) == original_record
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+async def test_native_cached_integrity_reads_do_not_block_http_or_publish_early(
+    reopen: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both cache-admission paths await real integrity reads outside the loop."""
+    from threading import Event
+
+    from skulk.store import model_store as store_module
+    from skulk.store.installed_cards import InstalledCardRecord
+
+    card, objects = native_music_fixture()
+    _network_fixture(monkeypatch, objects)
+    store = ModelStore(tmp_path, recover_installed_cards=False)
+    await _request(store, card)
+    if reopen:
+        store = ModelStore(tmp_path)
+    entered, release = Event(), Event()
+    original = store_module.verify_installed_card
+
+    def held(
+        directory: Path, record: InstalledCardRecord, *, verify_hashes: bool = False
+    ) -> bool:
+        if verify_hashes:
+            entered.set()
+            assert release.wait(5), "native source integrity read was not released"
+        return original(directory, record, verify_hashes=verify_hashes)
+
+    monkeypatch.setattr(store_module, "verify_installed_card", held)
+    server = ModelStoreServer(store, host="127.0.0.1", port=0)
+    async with TestClient(TestServer(server._app)) as client:
+        pending = asyncio.create_task(_request(store, card))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            response = await client.get("/health")
+            assert response.status == 200 and not pending.done()
+        finally:
+            release.set()
+            await pending
+
+
+async def test_native_peer_recovery_keeps_data_but_honors_actual_alias_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A surviving owner can recover bytes without restoring a deleted model."""
+    card, objects = native_music_fixture()
+    other = card.model_copy(update={"model_id": ModelId("test/native-other")})
+    _network_fixture(monkeypatch, objects)
+    source_store = ModelStore(tmp_path / "source", recover_installed_cards=False)
+    source_primary = await _request(source_store, card)
+    source = next(
+        item
+        for item in card.native_music_artifact_sources()
+        if item.repository != str(card.artifact_repository)
+    )
+    alias = str(source.model_id())
+    directory = source_store.get_store_path(alias)
+    assert directory is not None
+    record = read_installed_card(directory)
+    base = read_installed_card(source_primary)
+    assert record is not None and base is not None
+    store = ModelStore(tmp_path / "target", recover_installed_cards=False)
+    for owner in (card, other):
+        await _request(store, owner)
+    assert await store.delete_model_serialized(str(card.model_id))
+    missing = store.get_store_path(alias)
+    assert missing is not None
+    shutil.rmtree(missing)
+
+    async def export(request: web.Request) -> web.Response:
+        assert request.headers["X-Skulk-Store-Node"] == "native-data-target"
+        return web.Response(body=(directory / request.match_info["path"]).read_bytes())
+
+    app = web.Application()
+    app.router.add_get("/store/internal/exports/{token}/{path:.*}", export)
+    async with TestServer(app) as server:
+        options = dict(
+            source_base_url=str(server.make_url("")),
+            capability_token="native-data",
+            target_node_id="native-data-target",
+        )
+        await store.import_peer_artifact(record, **options)
+        recovered = ModelStore(tmp_path / "target")
+        assert recovered.get_entry(str(card.model_id)) is None
+        assert recovered.entry_matches_artifact(
+            str(other.model_id),
+            other.source_revision,
+            str(other.artifact_repository),
+            other,
+        )
+        with pytest.raises(ValueError, match="suppressed"):
+            await store.import_peer_artifact(base, **options)
+        assert await store.delete_model_serialized(alias)
+        with pytest.raises(ValueError, match="suppressed"):
+            await store.import_peer_artifact(record, **options)

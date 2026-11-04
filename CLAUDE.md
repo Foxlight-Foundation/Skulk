@@ -2664,6 +2664,10 @@ deletion tombstones. Native metadata reads and cached-completion revalidation ru
 outside the coordinator loop; missing required sources invalidate success.
 Exact bundle paths override legacy layout exclusions; failed/cancelled replacement
 retains the previous canonical generation.
+Native completed store-cache reuse checks retained hashes and original pins in
+a background thread under the publication fence. Shared source records retain
+historical-owner provenance without letting that owner's deletion revoke other
+models' data custody; explicit source deletion still suppresses reconciliation.
 
 The built-in native ACE package/process family lives in `packaging/skulk-ace-step/`.
 Its Python 3.12 interpreter and exact three-platform CPU archive catalogs stay

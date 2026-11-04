@@ -167,6 +167,23 @@ def test_reconciliation_suppresses_deleted_alias_and_owned_companions() -> None:
     )
 
 
+@pytest.mark.parametrize("alias", ["org/native-source", "skulk-native/" + "a" * 52])
+def test_native_shared_source_candidates_survive_historical_owner_deletion(
+    alias: str,
+) -> None:
+    """Discovery permits native data, while direct and other-owner intent holds."""
+    item: dict[str, object] = {
+        "modelId": alias,
+        "ownerModelId": "org/base",
+        "artifactRole": "music_component",
+    }
+    assert not _artifact_inventory_is_tombstoned(item, frozenset({"org/base"}))
+    assert _artifact_inventory_is_tombstoned(item, frozenset({alias}))
+    assert _artifact_inventory_is_tombstoned(
+        item | {"artifactRole": "mtp_sidecar"}, frozenset({"org/base"})
+    )
+
+
 def test_advisories_cover_installed_and_current_generations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

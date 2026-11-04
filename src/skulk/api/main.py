@@ -1000,8 +1000,9 @@ def _artifact_inventory_is_tombstoned(
 ) -> bool:
     """Return whether an inventory item belongs to an operator-deleted alias.
 
-    Companion artifacts inherit suppression from their owning base-card alias,
-    while independently deleted artifact aliases are suppressed directly.
+    Native music sources are independent data candidates. Their historical
+    owner's deletion does not suppress them; actual import still verifies the
+    complete native record. Other companions inherit base-owner suppression.
 
     Args:
         item: Camel-case node inventory entry.
@@ -1015,6 +1016,7 @@ def _artifact_inventory_is_tombstoned(
     owner_model_id = item.get("ownerModelId")
     return (isinstance(model_id, str) and model_id in tombstones) or (
         isinstance(owner_model_id, str) and owner_model_id in tombstones
+        and item.get("artifactRole") != "music_component"
     )
 
 

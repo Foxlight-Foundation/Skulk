@@ -2691,6 +2691,11 @@ Skulk; existing PMF kit/recovery and model/registry/code authority stay separate
   filesystem reads. A cached completion cannot hide a lost required source.
   Replacement failure/cancellation retains the previous registered generation.
   Exact bundles take precedence over legacy `original/*` and `metal/*` exclusions.
+- Completed native store-cache admission verifies hashes and original pins off
+  loop under the publication fence; in-progress deduplication stays selection-only.
+  A historical native source owner's deletion does not remove independent data
+  custody, including index recovery and peer reconciliation. Source-alias deletion
+  remains authoritative; non-native companion deletion semantics are preserved.
 
 ### Native ACE package/process definitions
 

@@ -91,6 +91,7 @@ from skulk.store.installed_cards import (
     build_file_manifest,
     build_installed_card_record,
     companion_owner_matches,
+    installed_artifact_deleted,
     manifest_sha256,
     read_installed_card,
     unlink_relative_artifact_path_without_following,
@@ -758,11 +759,16 @@ class ModelStore:
         source_repository: str | None,
         model_card: ModelCard | None = None,
         artifact_role: InstalledArtifactRole = "base",
+        *, verify_hashes: bool = False,
     ) -> bool:
         """Return whether the canonical entry matches the complete byte source.
 
         A companion is matched by repository and revision: ``model_card`` is its
         owner then, whose bundle describes the owner's bytes, not the companion's.
+        ``verify_hashes`` additionally checks retained digests and original
+        native object pins. Cache admission calls that mode in a background
+        thread while holding the canonical publication fence; inventory probes
+        retain the metadata-only default.
         """
         entry = self.get_entry(model_id)
         if entry is None or entry.source_revision != source_revision:
@@ -779,13 +785,13 @@ class ModelStore:
                 return False
             if (
                 expected != installed.model_card.native_music_files_for_source(requested_repository, source_revision)
-                or not verify_installed_card(model_path, installed)
+                or not verify_installed_card(model_path, installed, verify_hashes=verify_hashes)
             ):
                 return False
             if artifact_role == "base":
                 deleted = read_reconciliation_tombstones(self._store_path)
                 return all(str(source.model_id()) not in deleted and any(self.entry_matches_artifact(
-                    alias, source.revision, source.repository, model_card, "music_component"
+                    alias, source.revision, source.repository, model_card, "music_component", verify_hashes=verify_hashes
                 ) for alias in (str(source.model_id()), source.repository)) for source in model_card.native_music_artifact_sources()
                     if source.repository != str(model_card.artifact_repository))
             return artifact_role == "music_component"
@@ -800,7 +806,7 @@ class ModelStore:
         if installed is None or installed.artifact_bundle_id != bundle.bundle_id:
             return False
         model_path = _resolve_store_child_path(self._store_path, entry.store_path)
-        if model_path is None or not verify_installed_card(model_path, installed):
+        if model_path is None or not verify_installed_card(model_path, installed, verify_hashes=verify_hashes):
             return False
         installed_sizes = {item.path: item.size_bytes for item in installed.files}
         requested_sizes = {item.path: item.size_bytes for item in bundle.files}
@@ -1277,7 +1283,7 @@ class ModelStore:
         for model_id, entry in tuple(registry.items()):
             retained = entry.installed_card
             if model_id in tombstoned_aliases or (
-                retained is not None and retained.owner_model_id in tombstoned_aliases
+                retained is not None and installed_artifact_deleted(retained, tombstoned_aliases)
             ):
                 del registry[model_id]
                 changed = True
@@ -1320,10 +1326,7 @@ class ModelStore:
                 continue
             if record is None:
                 continue
-            if record.artifact_model_id in tombstoned_aliases or (
-                record.owner_model_id is not None
-                and record.owner_model_id in tombstoned_aliases
-            ):
+            if installed_artifact_deleted(record, tombstoned_aliases):
                 logger.info(
                     "ModelStore: suppressing sidecar recovery for "
                     f"operator-deleted alias {record.artifact_model_id}"
@@ -1621,7 +1624,7 @@ class ModelStore:
             )
         if artifact_role == "music_component" and entry.installed_card is not None and (
             companion_owner_matches(entry.installed_card, model_card)
-            and verify_installed_card(model_path, entry.installed_card)
+            and verify_installed_card(model_path, entry.installed_card, verify_hashes=True)
         ):
             # Sharing authenticated data never rewrites another owner's card
             # or grants that owner's execution policy to the requesting model.
@@ -1689,7 +1692,8 @@ class ModelStore:
         and owning identities instead of synthesizing a bare model card.
         """
         requested_repository = source_repository or model_id
-        if model_card is not None and model_card.native_music_artifact_sources():
+        native_sources = model_card.native_music_artifact_sources() if model_card is not None else ()
+        if model_card is not None and native_sources:
             expected_role = "base" if requested_repository == str(model_card.artifact_repository) else "music_component"
             if artifact_role != expected_role or not model_card.native_music_files_for_source(requested_repository, source_revision):
                 raise ValueError("native music request disagrees with its complete pinned source selection")
@@ -1760,6 +1764,14 @@ class ModelStore:
                         f"selection from {existing_repository}@"
                         f"{existing.source_revision or 'main'}"
                     )
+                native_cache_verified = True
+                if existing.status == "complete" and native_sources:
+                    async with self._download_transfer_lock:
+                        native_cache_verified = await asyncio.to_thread(
+                            self.entry_matches_artifact, model_id, source_revision,
+                            requested_repository, model_card, artifact_role,
+                            verify_hashes=True,
+                        )
                 # A failed entry retries. A cached-complete entry is stale when:
                 #  - it is missing a newly-requested companion (or projector) --
                 #    a prior base-only download in this process left a "complete"
@@ -1778,6 +1790,7 @@ class ModelStore:
                 # concurrent requests.
                 stale_complete = existing.status == "complete" and (
                     missing_projector
+                    or not native_cache_verified
                     or missing_pinned_gguf
                     or missing_companion
                     or existing.source_revision != source_revision
@@ -1822,27 +1835,24 @@ class ModelStore:
                 and not missing_companion
                 and not artifact_mismatch
             ):
-                if model_card is not None:
-                    await asyncio.to_thread(
-                        self._ensure_installed_card,
-                        model_id,
-                        model_card,
-                        artifact_role,
-                        owner_model_id,
-                        owner_card_id,
-                        pinned_gguf,
+                async with (self._download_transfer_lock if native_sources else contextlib.nullcontext()):
+                    complete = not native_sources or await asyncio.to_thread(
+                        self.entry_matches_artifact, model_id, source_revision,
+                        requested_repository, model_card, artifact_role,
+                        verify_hashes=True,
                     )
-                return StoreDownloadStatus(
-                    model_id=model_id,
-                    source_revision=source_revision,
-                    source_repository=requested_repository,
-                    status="complete",
-                    progress=1.0,
-                    model_card=model_card,
-                    artifact_role=artifact_role,
-                    owner_model_id=owner_model_id,
-                    owner_card_id=owner_card_id,
-                )
+                    if complete:
+                        if model_card is not None:
+                            await asyncio.to_thread(
+                                self._ensure_installed_card, model_id, model_card,
+                                artifact_role, owner_model_id, owner_card_id, pinned_gguf,
+                            )
+                        return StoreDownloadStatus(
+                            model_id=model_id, source_revision=source_revision,
+                            source_repository=requested_repository, status="complete",
+                            progress=1.0, model_card=model_card, artifact_role=artifact_role,
+                            owner_model_id=owner_model_id, owner_card_id=owner_card_id,
+                        )
             if missing_projector:
                 logger.warning(
                     f"ModelStore: {model_id} is in the store but its entry is "
@@ -1999,10 +2009,7 @@ class ModelStore:
         native_source = bool(record.model_card.native_music_artifact_sources())
         async with self._download_transfer_lock:
             tombstones = read_reconciliation_tombstones(self._store_path)
-            if record.artifact_model_id in tombstones or (
-                record.owner_model_id is not None
-                and record.owner_model_id in tombstones
-            ):
+            if installed_artifact_deleted(record, tombstones):
                 raise ValueError(
                     f"peer import is suppressed by an operator-deletion tombstone "
                     f"for {record.owner_model_id or record.artifact_model_id}"

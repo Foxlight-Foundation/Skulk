@@ -3823,6 +3823,11 @@ required source before repeating success; lost files cause repair online or an
 actionable offline failure. A deleted source alias is not resurrected through a
 legacy-cache fallback. Failed or cancelled replacements retain the previously
 registered complete generation.
+Completed native store-cache reuse verifies retained digests and original object
+pins before accepting success. A native source's retained `owner_model_id` is
+historical provenance: deleting that base model preserves other models' shared
+source discovery and preservation. Deleting the source alias itself still
+suppresses automatic recovery and peer import.
 
 The response reports `modelId`, nullable `sourceRevision`, `status`, and
 `progress`; transport or store rejection additionally reports `error`. The

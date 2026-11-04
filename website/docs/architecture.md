@@ -4025,6 +4025,11 @@ Legacy repository aliases remain exact-data read candidates and are blocked by
 deletion tombstones. Source resolution runs outside the coordinator event loop,
 including cached completion checks. Missing required files invalidate success;
 failed/cancelled replacements leave the previous canonical generation registered.
+Native completed-cache admission verifies retained digests and original object
+pins in a worker thread under the canonical publication fence. In-progress
+requests still deduplicate by exact selection. A shared source's retained owner
+is provenance: deleting that model preserves surviving owners' source discovery
+and preservation; deleting the source alias itself blocks automatic resurrection.
 
 ### Native ACE package and process boundary
 
