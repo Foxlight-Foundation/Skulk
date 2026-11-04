@@ -66,6 +66,7 @@ class NativeGenerationTests(unittest.TestCase):
             "seed": 4294967295,
             "target_frames": 2 * 48000,
             "output_directory": "/private/native/take-1",
+            "output_directory_identity": {"device": 1, "inode": 2},
         }
         stream = io.BytesIO()
         soundfile.write(
@@ -312,8 +313,9 @@ class NativeGenerationTests(unittest.TestCase):
         for invalid in (float("nan"), float("inf")):
             tensor = torch.zeros((2, 289920))
             tensor[1, -1] = invalid
-            with self.subTest(invalid=invalid), self.assertRaisesRegex(
-                ValueError, "nonfinite"
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(ValueError, "nonfinite"),
             ):
                 result_samples(
                     TensorResult(audios=[{"tensor": tensor, "sample_rate": 48000}]),

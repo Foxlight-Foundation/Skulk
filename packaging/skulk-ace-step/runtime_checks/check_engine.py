@@ -53,7 +53,6 @@ class NativeEngineTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="native-music-engine-")
         self.root = Path(self.temporary.name)
         self.configuration = check_support.configuration(self.root)
-        (Path(self.configuration.directory) / "requests").mkdir(parents=True)
         self.api = native_api()
         self.handler = self.api.handler()
         self.handler.model = torch.nn.Linear(1, 1)
@@ -85,6 +84,24 @@ class NativeEngineTests(unittest.TestCase):
     def tearDown(self) -> None:
         """Remove only the test's private files after all work has finished."""
         self.temporary.cleanup()
+
+    def test_replaced_result_directory_is_refused_before_native_inference(self) -> None:
+        """Actual wrapper admission preserves both original and foreign inodes."""
+        request = check_support.request(self.configuration)
+        directory = Path(request.output_directory)
+        retained = directory.with_name("retained-original")
+        directory.rename(retained)
+        directory.mkdir(mode=0o700)
+        foreign = directory / "operator-note.txt"
+        foreign.write_bytes(b"must survive")
+        with self.assertRaisesRegex(ValueError, "Core-owned custody"):
+            self.engine.run(request, lambda _: None)
+        self.assertEqual(self.calls, 0)
+        self.assertEqual(foreign.read_bytes(), b"must survive")
+        self.assertEqual(
+            check_support.directory_identity(retained),
+            request.output_directory_identity,
+        )
 
     def generate(
         self,

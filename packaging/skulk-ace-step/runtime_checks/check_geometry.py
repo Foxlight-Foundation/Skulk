@@ -148,9 +148,7 @@ class NativeGeometryTests(unittest.TestCase):
             )
         )
 
-    def _assert_geometry(
-        self, cases: tuple[tuple[str, int, int, bool], ...]
-    ) -> None:
+    def _assert_geometry(self, cases: tuple[tuple[str, int, int, bool], ...]) -> None:
         """Run actual preprocessing, codec and splice around controlled diffusion."""
         factory = cast(
             CodecFactory,
@@ -214,6 +212,8 @@ class NativeGeometryTests(unittest.TestCase):
                     )
                 original_bytes = original.read_bytes()
                 source = source_from_wav(original_bytes)
+                directory = root / "output"
+                directory.mkdir(mode=0o700)
                 request = NativeMusicRequest.model_validate_json(
                     json.dumps(
                         dict(
@@ -229,14 +229,19 @@ class NativeGeometryTests(unittest.TestCase):
                             part_class="strings" if operation == "add_part" else None,
                             source=source.model_dump(mode="json"),
                             source_path=str(original),
-                            output_directory=str(root / "output"),
+                            output_directory=str(directory),
+                            output_directory_identity=check_support.directory_identity(
+                                directory
+                            ).model_dump(mode="json"),
                         )
                     )
                 )
                 prepared = prepare_conditioning(request)
                 aligned_frames = (target_frames + 1919) // 1920 * 1920
                 self.assertEqual(prepared.samples.shape, (aligned_frames, 2))
-                self.assertEqual(prepared.padding_frames, aligned_frames - target_frames)
+                self.assertEqual(
+                    prepared.padding_frames, aligned_frames - target_frames
+                )
                 np.testing.assert_array_equal(
                     prepared.samples[:source_frames],
                     np.full(

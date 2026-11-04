@@ -4152,6 +4152,53 @@ Hosted GPU-package jobs run CPU boundary checks; real accelerator probing and
 model qualification remain separate. Actual ABI/loader/device qualification remains required. These
 definitions do not yet register native worker placement or published inventory.
 
+Core observes and journals the private workspace, requests and loader inodes
+before admitting native writes. The model view is `workspace/loader`; results
+remain under `workspace/requests` with independent per-request receipts. The
+child requires the exact owned directories, an empty loader at initialization
+and an empty Core-created result inode at request admission. It never infers
+ownership from a plausible pathname or from completion after the writes.
+
+`worker/runner/ace_step/workspace.py` retains an inherited service fence across
+native execution. Only actual process-group drain or successful exclusive fence
+acquisition permits loader recovery. It validates the complete bounded view
+before deleting known partial model copies and private cache files; unexpected
+names, replaced inodes, links and incomplete removal refuse recovery. Results
+awaiting transport are neither walked nor removed by loader cleanup. Additional
+loader disk reservation accounts for all fourteen selected model files, three
+reviewed code copies capped at 2 MiB each and 256 MiB of dynamic caches; these
+disk bounds do not estimate resident or peak inference memory.
+
+The separate Core `ace_step/process.py` verifier checks private file ownership,
+bounded complete metadata, request/model/build/seed/execution lineage, actual
+PCM24 WAV digest/geometry/peak, the original WAV and aligned FLOAT conditioning.
+It does not repair or truncate files. Native attenuation is recorded provenance,
+not a property inferred from the finished waveform. These owned components
+remain distinct from complete Worker/bootstrap activation and installed acceptance.
+
+The Core resident supervisor in `ace_step/resident.py` takes the prepared workspace
+and starts one dedicated native session with inherited service/source-reader
+fences. It verifies model/payload/component readiness before exposing its ready
+receipt, admits one call at a time with contiguous sequence/correlation, and
+separates coalesced progress from bounded non-dropping terminal capacity. Its
+control writes are nonblocking and obey an absolute deadline; bounded private
+stderr is retained independently. Calls and idle supervision recheck actual
+process liveness, while an injected resource guard can retire loading/inference.
+Cancellation or failure drains the actual group and joins both pipe readers
+before removing the current partial result and temporary loader copies. Failed
+drain/deletion retains the owner for retry. Prior completed output and receipts
+survive cancellation, model close and subsequent loading; only independent
+delivery/custody owns their eventual removal. This process owner still needs the
+Worker/model preparation, memory and Studio execution integration.
+
+The native CLI arms a detached custody guardian before importing Torch or
+starting native threads. It retains the inherited service/source locks even if
+Core and the native leader both die; descendants need not preserve descriptors.
+An unreaped anchor in the original group prevents numeric group identity reuse.
+The guardian drains actual live members before releasing ownership. Core also
+waits for EOF on its private drain pipe before recovery; an uncertain or stalled
+drain retains files and locks for retry, including after the leader was reaped.
+
 The native CLI owns one loaded model and accepts bounded contiguous private
 requests. It verifies all three data components before importing constructors,
 probes the explicit compute lane, and observes each component's loaded device and

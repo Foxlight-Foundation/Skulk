@@ -5,11 +5,18 @@ from pathlib import Path
 
 from skulk_ace_step.contracts import (
     NativeMusicComponent,
+    NativeMusicDirectoryIdentity,
     NativeMusicExecution,
     NativeMusicRequest,
     NativeMusicServeConfig,
     NativeMusicWeights,
 )
+
+
+def directory_identity(path: Path) -> NativeMusicDirectoryIdentity:
+    """Observe a fixture-created private inode before the native wrapper writes."""
+    facts = path.stat()
+    return NativeMusicDirectoryIdentity(device=facts.st_dev, inode=facts.st_ino)
 
 
 def configuration(root: Path) -> NativeMusicServeConfig:
@@ -33,9 +40,18 @@ def configuration(root: Path) -> NativeMusicServeConfig:
             )
         )
 
+    lifetime = root / "model"
+    lifetime.mkdir(mode=0o700)
+    requests = lifetime / "requests"
+    requests.mkdir(mode=0o700)
+    loader = lifetime / "loader"
+    loader.mkdir(mode=0o700)
     return NativeMusicServeConfig(
         model_identity="a" * 64,
-        directory=str(root / "model"),
+        directory=str(lifetime),
+        directory_identity=directory_identity(lifetime),
+        requests_identity=directory_identity(requests),
+        loader_identity=directory_identity(loader),
         device="cpu",
         precision="float32",
         weights=NativeMusicWeights(
@@ -79,11 +95,14 @@ def request(
     config: NativeMusicServeConfig, identity: str = "take-1"
 ) -> NativeMusicRequest:
     """Create an exact private output path for a one-second generate request."""
+    directory = Path(config.directory) / "requests" / identity
+    directory.mkdir(mode=0o700, exist_ok=True)
     return NativeMusicRequest(
         request_id=identity,
         operation="generate",
         prompt="Warm folk guitar",
         seed=12025,
         target_frames=48000,
-        output_directory=str(Path(config.directory) / "requests" / identity),
+        output_directory=str(directory),
+        output_directory_identity=directory_identity(directory),
     )

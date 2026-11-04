@@ -2802,6 +2802,40 @@ the original indexed owner, including companions reached through a cached base.
   matching explicit variant selection. Hosted GPU-package jobs run CPU boundary
   checks, not accelerator/model qualification.
   Package/model/loader/GPU qualification, publication and activation remain distinct.
+- Pre-write ownership: `worker/runner/ace_step/workspace.py` journals workspace,
+  requests and loader inodes before spawn under an inheritable service fence.
+  Native configuration carries all three identities; new loading requires an
+  empty `workspace/loader`. Each request additionally supplies its Core-created,
+  independently journaled empty result inode beneath `workspace/requests`.
+  Recover loader copies/caches only after actual group drain or exclusive fence
+  acquisition. Validate all names/modes/inodes and bounds before deletion;
+  preserve foreign entries, replacements, links and failed cleanup for retry.
+  Loader recovery never walks or removes retained request output.
+  Additional loader disk budget: fourteen exact selected files, three reviewed
+  source copies bounded at 2 MiB each, 256 MiB dynamic cache, 4,096 total entries
+  and cache depth 12. These are disk bounds, not peak-memory estimates.
+- Independent result verification: `ace_step/process.py` checks bounded private
+  metadata/WAV files, request/model/payload/seed/execution, measured PCM24
+  digest/geometry/peak, unchanged original and complete aligned FLOAT conditioning.
+  No truncation/repair; gain remains transformation provenance. Component
+  verification does not itself activate Worker placement/execution.
+- Core resident supervisor: `ace_step/resident.py::ResidentMusic` takes the
+  prepared workspace, inherits service/source-reader fences into one private
+  session, checks exact loaded model/payload/component readiness, serializes
+  contiguous correlated requests and bounds frames to 256 KiB. Nonblocking
+  control writes obey an absolute deadline; progress is coalesced, terminal
+  capacity is separate and diagnostic stderr stays bounded/private.
+  Recheck actual process/resource state during calls and idle liveness. Drain
+  the complete native group and join pipe readers before reclaiming active
+  partial output or loader data; retain ownership after failed drain/cleanup.
+  Completed output/receipts survive close/restart and remain independent of
+  model readiness or native completion. Worker/model/memory activation remains.
+- Independent native custody guardian: fork before Torch/thread startup, detach
+  from the model group, retain inherited service/source locks and drain actual
+  live group members after Core or native-leader loss. An unreaped anchor pins
+  the original numeric group identity. Core waits for private drain-pipe EOF
+  before recovery; timeout retains the pipe, locks and loading for close retry,
+  including a retry after the original leader was already reaped.
 - Native resident: complete data/code verification, explicit runtime math probe,
   observed per-component loaded precision, exact canonical source-tensor equality,
   one active request, contiguous sequence/correlation checks, 0600 PCM24/result

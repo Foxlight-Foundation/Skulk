@@ -250,6 +250,23 @@ class NativeMusicWeights(NativeMusicContract):
 
 
 @final
+class NativeMusicDirectoryIdentity(NativeMusicContract):
+    """Core-observed directory inode, recorded before the native process writes.
+
+    A pathname alone cannot distinguish an owned partial result from a replaced
+    directory after a failed process. These facts are private process metadata;
+    they never enter the public request, replicated State or result manifest.
+    """
+
+    device: int = Field(
+        ge=0, le=2**64 - 1, description="Observed directory filesystem device."
+    )
+    inode: int = Field(
+        gt=0, le=2**64 - 1, description="Observed directory inode on that device."
+    )
+
+
+@final
 class NativeMusicServeConfig(NativeMusicContract):
     """Private policy for one supervised loaded model; never a public API payload."""
 
@@ -267,6 +284,15 @@ class NativeMusicServeConfig(NativeMusicContract):
         min_length=1,
         max_length=4096,
         description="Exclusive private native model lifetime root.",
+    )
+    directory_identity: NativeMusicDirectoryIdentity = Field(
+        description="Core-owned lifetime root observed and journaled before spawn."
+    )
+    requests_identity: NativeMusicDirectoryIdentity = Field(
+        description="Core-owned requests subdirectory observed before spawn."
+    )
+    loader_identity: NativeMusicDirectoryIdentity = Field(
+        description="Core-owned empty loader view, separate from retained request output."
     )
     device: NativeMusicDevice = Field(
         description="Explicit requested compute lane, never auto."
@@ -354,6 +380,9 @@ class NativeMusicRequest(NativeMusicContract):
         min_length=1,
         max_length=4096,
         description="Exclusive worker-owned request output root.",
+    )
+    output_directory_identity: NativeMusicDirectoryIdentity = Field(
+        description="Core-owned empty result directory observed before admission."
     )
 
     @model_validator(mode="after")

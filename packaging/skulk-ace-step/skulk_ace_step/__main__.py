@@ -26,6 +26,7 @@ class Arguments(argparse.Namespace):
     serve: Path | None = None
     probe: NativeMusicDevice | None = None
     parent_pid: int
+    drain_fd: int | None = None
 
 
 def main() -> None:
@@ -35,9 +36,10 @@ def main() -> None:
     modes.add_argument("--serve", type=Path)
     modes.add_argument("--probe", choices=("cpu", "mps", "cuda", "rocm"))
     parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--drain-fd", type=int)
     arguments = Arguments()
     parser.parse_args(namespace=arguments)
-    start_parent_guardian(arguments.parent_pid)
+    start_parent_guardian(arguments.parent_pid, arguments.drain_fd)
     os.umask(0o077)
     # Set before the first torch/ACE import. The native environment has no Core
     # imports, ambient user site, planner or server-managed model downloads.
