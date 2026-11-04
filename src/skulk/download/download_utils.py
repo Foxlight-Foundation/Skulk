@@ -908,7 +908,8 @@ def _apply_artifact_root(model_directory: Path, artifact_root: str | None) -> Pa
 
 
 def resolve_native_music_source_directory(
-    model_card: ModelCard, repository: str, revision: str
+    model_card: ModelCard, repository: str, revision: str,
+    *, require_card_identity: bool = False,
 ) -> Path | None:
     """Resolve one complete recorded native source, without downloading bytes.
 
@@ -916,10 +917,16 @@ def resolve_native_music_source_directory(
     only one directory whose installed record covers the entire exact source;
     never assemble an apparent model from unrelated partial cache directories.
     Returns ``None`` for an undeclared, absent or incomplete source.
+    ``require_card_identity`` additionally requires a primary installation of
+    this exact card, including its signed identity when present. This prevents
+    data-equivalent companion records or stale custom policy from becoming a
+    completed model download.
     """
     import skulk.shared.constants as _constants
     from skulk.store.installed_cards import (
+        installed_card_matches,
         read_installed_card_with_fallback,
+        require_registry_installed_artifact,
         verify_installed_card,
     )
     from skulk.store.model_store import (
@@ -966,6 +973,14 @@ def resolve_native_music_source_directory(
                 and record.model_card.native_music_files_for_source(repository, revision) == expected
                 and verify_installed_card(directory, record)
             ):
+                if require_card_identity:
+                    if (
+                        record.artifact_role != "base"
+                        or record.artifact_model_id != str(model_card.model_id)
+                        or not installed_card_matches(directory, model_card)
+                    ):
+                        continue
+                    require_registry_installed_artifact(directory, model_card)
                 return directory
         except (OSError, ValueError):
             continue

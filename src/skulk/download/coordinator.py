@@ -17,6 +17,7 @@ from skulk.download.download_utils import (
     map_repo_download_progress_to_download_progress_data,
     model_companions_present_on_disk,
     resolve_model_in_path,
+    resolve_native_music_source_directory,
 )
 from skulk.download.shard_downloader import ShardDownloader
 from skulk.routing.router import TelemetrySender
@@ -152,6 +153,31 @@ class DownloadCoordinator:
         """
 
         card = shard.model_card
+        if card.native_music_artifact_sources():
+            if card.source_revision is None:
+                return None
+            # Ordinary store generations include source/bundle suffixes that
+            # the legacy model-layout lookup cannot discover. Native readiness
+            # must use recorded complete selections and exact owning policy.
+            native = resolve_native_music_source_directory(
+                card, str(card.artifact_repository), card.source_revision,
+                require_card_identity=True,
+            )
+            if native is not None:
+                return native
+            if card.registry_card_id is not None:
+                retained = resolve_native_music_source_directory(
+                    card, str(card.artifact_repository), card.source_revision,
+                )
+                if retained is not None:
+                    refreshed = await asyncio.to_thread(
+                        refresh_registry_installed_card_if_same_artifact,
+                        retained, card,
+                    )
+                    if refreshed is not None:
+                        register_installed_card_record(refreshed)
+                        return retained
+            return None
         exact = resolve_model_in_path(
             card.model_id,
             card.source_revision,

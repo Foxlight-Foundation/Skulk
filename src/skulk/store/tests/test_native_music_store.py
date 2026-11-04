@@ -129,6 +129,90 @@ async def test_store_download_completes_only_after_all_native_files_and_reopens(
         str(card.artifact_repository), card)
 
 
+@pytest.mark.parametrize("shared_primary", [False, True])
+@pytest.mark.parametrize("signed,refresh", [(False, False), (True, False), (True, True)])
+async def test_offline_download_reopens_indexed_native_store_without_direct_cache(
+    shared_primary: bool, signed: bool, refresh: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ordinary offline Download must reuse the exact complete reopened store."""
+    from skulk.download import coordinator as coordinator_module
+    from skulk.download.coordinator import DownloadCoordinator
+    from skulk.download.impl_shard_downloader import ResumableShardDownloader
+    from skulk.shared.types.commands import ForwarderDownloadCommand
+    from skulk.shared.types.common import NodeId
+    from skulk.shared.types.events import Event
+    from skulk.shared.types.telemetry import NodeTelemetry
+    from skulk.shared.types.worker.downloads import DownloadCompleted
+    from skulk.shared.types.worker.shards import PipelineShardMetadata
+    from skulk.utils.channels import channel
+
+    card, objects = native_music_fixture(shared_primary=shared_primary)
+    if signed:
+        card = card.model_copy(update={"is_custom": False, "registry_card_id": "card_" + "a" * 52})
+    _network_fixture(monkeypatch, objects)
+    root = tmp_path / "store"
+    store = ModelStore(root, recover_installed_cards=False)
+    status = await store.request_download(str(card.model_id), model_card=card,
+        source_repository=str(card.artifact_repository), source_revision=card.source_revision)
+    await _finished(status)
+    assert status.status == "complete", status.error
+    reopened = ModelStore(root)
+    primary = reopened.get_store_path(str(card.model_id))
+    assert primary is not None and primary.name != card.model_id.normalize()
+    if refresh:
+        card = card.model_copy(update={"registry_card_id": "card_" + "b" * 52})
+    direct = tmp_path / "direct"
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (root,))
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", direct)
+    monkeypatch.setattr(coordinator_module, "SKULK_MODELS_DIR", direct)
+
+    async def no_network(*_args: object, **_kwargs: object) -> list[FileListEntry]:
+        raise AssertionError("a complete offline store must not probe the upstream repository")
+
+    monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", no_network)
+    _commands, incoming = channel[ForwarderDownloadCommand]()
+    events, _received = channel[Event]()
+    telemetry, _ = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(NodeId("native-store-reopen"),
+        ResumableShardDownloader(offline=True), incoming, events, telemetry, offline=True)
+    shard = PipelineShardMetadata(model_card=card, device_rank=0, world_size=1,
+        start_layer=0, end_layer=card.n_layers, n_layers=card.n_layers)
+    await coordinator._start_download(shard)
+    completed = coordinator.download_status[card.model_id]
+    assert isinstance(completed, DownloadCompleted)
+    assert completed.model_directory == str(primary) and completed.read_only
+    assert not coordinator.active_downloads and not direct.exists()
+    record = read_installed_card(primary)
+    assert record is not None and record.model_card.registry_card_id == card.registry_card_id
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_native_primary_lookup_skips_data_equivalent_stale_card_policy(
+    signed: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exact primary admission searches past stale policy without borrowing its trust."""
+    card, objects = native_music_fixture()
+    if signed:
+        card = card.model_copy(update={"is_custom": False, "registry_card_id": "card_" + "a" * 52})
+        stale = card.model_copy(update={"registry_card_id": "card_" + "b" * 52})
+    else:
+        assert card.music is not None
+        stale = card.model_copy(update={"music": card.music.model_copy(
+            update={"max_seconds": card.music.max_seconds - 1})})
+    _install(tmp_path / "first", stale, objects)
+    complete = _install(tmp_path / "second", card, objects)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path / "first", tmp_path / "second"))
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path / "unused")
+    assert card.source_revision is not None
+    assert download_utils.resolve_native_music_source_directory(
+        card, str(card.artifact_repository), card.source_revision, require_card_identity=True,
+    ) == complete
+    (complete / ".skulk/installed-card.json").unlink()
+    assert download_utils.resolve_native_music_source_directory(
+        card, str(card.artifact_repository), card.source_revision, require_card_identity=True,
+    ) is None
+
+
 async def test_missing_native_component_fails_only_its_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
