@@ -2750,6 +2750,30 @@ retains ownership for explicit retry. Successful output keeps its independent
 receipt across model close/restart; native completion is not a delivery ACK.
 Worker/bootstrap and memory-policy integration remain separate from this owner.
 
+`music.native.tensor_layouts` optionally carries all three exact safetensors
+prefixes' lengths/SHA-256 and complete dtype/tensor/logical-element counts.
+Omitted defaults preserve old serialized identities. The bounded
+`shared/models/native_music_layout.py` projector checks dense complete extents;
+intrinsic serialization is independent of effective loader precision and peak
+memory. `native_music_runtime.py` binds all three selected source/root/file
+identities, actual prepared library math, payload, two threads and duration
+ceiling without tested-hardware allowlists. Its floating tensor-state projection
+is not a RAM-fit threshold; unknown buffer/packed semantics remain unknown.
+
+`ace_step/artifacts.py` independently hashes all fourteen complete selected
+objects through bounded no-follow reads, checks Git blob framing, ordinary-file
+stat stability and actual tensor prefixes, with cancellation checkpoints. Store
+hard links remain valid. Native loader copies are independently verified again.
+`ace_step/model.py::NativeMusicModel` binds the complete rank-zero placement,
+shard `native_music_policy`, exact prepared build/probe, actual selected bytes
+and loaded component receipt. A model actor includes inspection/result ownership
+as well as inference; concurrent close stops and drains it before returning.
+Closed generation/edit tasks preserve resolved seed/text/source/frame coordinates.
+Results remain in independent delivery custody and failed unsubmitted cleanup
+retains retry ownership. Worker preparation/bootstrap/media activation and shared
+peak-memory admission are still required; keep native placement guards until
+those are connected and accepted.
+
 Native editing job contracts live in `shared/types/music_edits.py`: closed
 task-discriminated inputs, source-clock integer floor/ceil conversion to 48 kHz,
 card-bound edit modes/classes/lyrics/duration and a seed resolved exactly once
