@@ -4,6 +4,7 @@
 import asyncio
 import hashlib
 import shutil
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -19,8 +20,11 @@ from skulk.shared import constants
 from skulk.shared.models.model_cards import ModelCard, NativeMusicArtifactSource
 from skulk.shared.tests.native_music_fixtures import native_music_fixture
 from skulk.shared.types.common import ModelId
+from skulk.shared.types.worker.downloads import FileListEntry
+from skulk.store import model_store as store_module
 from skulk.store import model_store_server as server_module
 from skulk.store.installed_cards import (
+    installed_card_path,
     manifest_sha256,
     read_installed_card,
     verify_installed_card,
@@ -988,8 +992,11 @@ async def test_native_cache_wait_does_not_block_transfer_cancel_or_fresh_admissi
 @pytest.mark.parametrize("shared_primary", [False, True])
 @pytest.mark.parametrize("reopen", [False, True])
 @pytest.mark.parametrize("tensor", [False, True])
+@pytest.mark.parametrize("retained_link", [False, True])
+@pytest.mark.parametrize("replacement_capacity", [False, True])
 async def test_native_corrupt_cache_recovers_through_real_file_download(
     shared_primary: bool, reopen: bool, tensor: bool,
+    retained_link: bool, replacement_capacity: bool,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real HEAD/GET/resume/hash logic must replace a same-size damaged object."""
@@ -1040,10 +1047,37 @@ async def test_native_corrupt_cache_recovers_through_real_file_download(
         assert directory is not None
         target = directory / item.path
         original = objects[source.repository, source.revision, item.path]
-        target.write_bytes(bytes((original[0] ^ 1,)) + original[1:])
+        damaged = bytes((original[0] ^ 1,)) + original[1:]
+        target.write_bytes(damaged)
+        retained = tmp_path / "retained-damaged-object"
+        if retained_link:
+            retained.hardlink_to(target)
         gets.clear()
         if reopen:
             store = ModelStore(tmp_path)
+        class DiskUsage:
+            free = store_module.MINIMUM_STAGING_FREE_DISK_BYTES + (
+                len(original) if replacement_capacity else 0
+            )
+
+        def available_capacity(_path: Path) -> DiskUsage:
+            return DiskUsage()
+
+        monkeypatch.setattr(
+            store_module.shutil, "disk_usage", available_capacity
+        )
+        if retained_link and not replacement_capacity:
+            status = await store.request_download(
+                str(card.model_id), model_card=card,
+                source_repository=str(card.artifact_repository),
+                source_revision=card.source_revision,
+            )
+            await _finished(status)
+            assert status.status == "failed" and status.error is not None
+            assert "Insufficient canonical model-store disk capacity" in status.error
+            assert gets == [] and target.read_bytes() == damaged
+            assert retained.read_bytes() == damaged
+            DiskUsage.free += len(original)
         await _request(store, card)
         assert target.read_bytes() == original
         assert gets == [(source.repository, source.revision, item.path)]
@@ -1051,6 +1085,151 @@ async def test_native_corrupt_cache_recovers_through_real_file_download(
         assert record is not None and verify_installed_card(
             directory, record, verify_hashes=True
         )
+        if retained_link:
+            assert retained.read_bytes() == damaged
+
+
+@pytest.mark.parametrize("signed", [False, True])
+@pytest.mark.parametrize("reopen", [False, True])
+@pytest.mark.parametrize("damage", [False, True])
+async def test_native_reuse_restores_original_shared_sidecar_before_http_staging(
+    signed: bool, reopen: bool, damage: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offline cross-owner cache reuse restores custody, staging and preservation."""
+    from skulk.download.impl_shard_downloader import ResumableShardDownloader
+    from skulk.shared.types.worker.shards import PipelineShardMetadata
+    from skulk.store.config import StagingNodeConfig
+    from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
+
+    first, objects = native_music_fixture()
+    second = first.model_copy(update={"model_id": ModelId("test/native-other")})
+    if signed:
+        first = first.model_copy(update={
+            "is_custom": False, "registry_card_id": "card_" + "a" * 52,
+        })
+        second = second.model_copy(update={
+            "is_custom": False, "registry_card_id": "card_" + "b" * 52,
+        })
+    fetched = _network_fixture(monkeypatch, objects)
+    root = tmp_path / "store"
+    store = ModelStore(root, recover_installed_cards=False)
+    await _request(store, first)
+    await _request(store, second)
+    source = first.native_music_artifact_sources()[-1]
+    directory = store.get_store_path(str(source.model_id()))
+    assert directory is not None
+    record = read_installed_card(directory)
+    assert record is not None and record.model_card == first
+    installed_card_path(directory).unlink()
+    target = directory / source.files[0].path
+    original = target.read_bytes()
+    if damage:
+        target.write_bytes(bytes((original[0] ^ 1,)) + original[1:])
+    if reopen:
+        store = ModelStore(root)
+    initial_fetches = len(fetched)
+
+    async def offline(*_: object, **__: object) -> Path:
+        raise AssertionError("Restoring a verified sidecar cannot download bytes")
+
+    monkeypatch.setattr(download_utils, "download_file_with_retry", offline)
+    if damage:
+        status = await store.request_download(
+            str(second.model_id), model_card=second,
+            source_repository=str(second.artifact_repository),
+            source_revision=second.source_revision,
+        )
+        await _finished(status)
+        assert status.status == "failed"
+        assert read_installed_card(directory) is None
+        assert target.read_bytes() != original
+        return
+    # Ordinary base cache admission must repair the entire source closure,
+    # without a caller knowing which companion sidecar disappeared.
+    await _request(store, second)
+    assert read_installed_card(directory) == record
+
+    assert len(fetched) == initial_fetches
+
+    async def cards() -> list[ModelCard]:
+        return [first, second]
+
+    monkeypatch.setattr(server_module, "get_all_model_cards", cards)
+    server = ModelStoreServer(store, host="127.0.0.1", port=0)
+    async with TestServer(server._app) as running:
+        port = running.make_url("/").port
+        assert isinstance(port, int)
+        downloader = ModelStoreDownloader(
+            ResumableShardDownloader(), ModelStoreClient("127.0.0.1", port),
+            StagingNodeConfig(node_cache_path=str(tmp_path / "staging")),
+            allow_hf_fallback=False,
+        )
+        shard = PipelineShardMetadata(
+            model_card=second, device_rank=0, world_size=1, start_layer=0,
+            end_layer=second.n_layers, n_layers=second.n_layers,
+        )
+        staged = await downloader.ensure_shard(shard)
+        assert plan_preservation(staged).source_bytes > 0
+        staged_record = read_installed_card(staged)
+        assert staged_record is not None and staged_record.model_card == second
+        assert verify_installed_card(staged, staged_record, verify_hashes=True)
+    assert read_installed_card(directory) == record
+
+
+async def test_cancelled_capacity_scan_retains_transfer_fence_until_thread_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled preflight cannot overlap another writer with its live hash read."""
+    card, objects = native_music_fixture()
+    _network_fixture(monkeypatch, objects)
+    store = ModelStore(tmp_path, recover_installed_cards=False)
+    source = card.native_music_artifact_sources()[-1]
+    alias = str(source.model_id())
+    entered, release, writer_entered = (
+        threading.Event(), threading.Event(), asyncio.Event()
+    )
+    original = store_module._remaining_store_download_bytes
+
+    def held(
+        directory: Path, files: list[FileListEntry],
+        expected: dict[str, tuple[int, str | None]] | None = None,
+    ) -> int:
+        entered.set()
+        assert release.wait(5)
+        return original(directory, files, expected)
+
+    async def another_writer() -> None:
+        async with store.preservation_lease():
+            writer_entered.set()
+
+    monkeypatch.setattr(store_module, "_remaining_store_download_bytes", held)
+    status = await store.request_download(
+        alias, model_card=card, source_repository=source.repository,
+        source_revision=source.revision, artifact_role="music_component",
+        owner_model_id=str(card.model_id), owner_card_id=card.registry_card_id,
+    )
+    cancellation: asyncio.Task[object] | None = None
+    writer: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        cancellation = asyncio.create_task(store.cancel_download(alias))
+        writer = asyncio.create_task(another_writer())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not cancellation.done() and not writer_entered.is_set()
+        owned = store._download_tasks_by_model[alias]
+        owned.cancel()
+        await asyncio.sleep(0)
+        assert not owned.done() and store._download_transfer_lock.locked()
+    finally:
+        release.set()
+        if cancellation is not None:
+            await cancellation
+        if writer is not None:
+            await writer
+    assert status.status == "cancelled" and writer_entered.is_set()
+    assert store.get_entry(alias) is None
 
 
 @pytest.mark.parametrize("offline", [False, True])

@@ -114,8 +114,14 @@ _RECONCILIATION_TOMBSTONES_RELATIVE_PATH = (
 def _remaining_store_download_bytes(
     target_directory: Path,
     file_list: list[FileListEntry],
+    expected_files: dict[str, tuple[int, str | None]] | None = None,
 ) -> int:
-    """Return physical file bytes still needed for one canonical transfer."""
+    """Budget replacement bytes, verifying selected immutable pins off-loop.
+
+    The caller holds the transfer fence until this read has settled. A corrupt
+    same-size file is a replacement, not a complete download. Its other links
+    retain their blocks when the canonical name is removed.
+    """
 
     remaining_bytes = 0
     for file_entry in file_list:
@@ -131,7 +137,18 @@ def _remaining_store_download_bytes(
         target_stat = target.stat() if target.is_file() else None
         target_bytes = target_stat.st_size if target_stat is not None else 0
         if target_bytes == expected_size:
-            continue
+            selected = expected_files.get(file_entry.path) if expected_files else None
+            object_id = selected[1] if selected is not None else None
+            if object_id is None:
+                continue
+            if object_id.startswith("sha256:"):
+                observed = "sha256:" + _sha256_path(target)
+            elif object_id.startswith("git-sha1:"):
+                observed = _git_object_id(target, expected_size)
+            else:
+                raise ValueError("Cannot budget an unknown immutable object identity")
+            if observed == object_id:
+                continue
         resumable_bytes = partial.stat().st_size if partial.is_file() else 0
         # A mismatched single-link target is removed before download, returning
         # its current blocks to this filesystem. When staging hardlinked the
@@ -146,6 +163,28 @@ def _remaining_store_download_bytes(
             expected_size - reclaimable_target_bytes - resumable_bytes,
         )
     return remaining_bytes
+
+
+async def _settled_store_io[Value](call: Callable[[], Value]) -> Value:
+    """Join owned filesystem work before cancellation releases its store fence."""
+    task = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            failure = task.exception()
+            if failure is not None:
+                logger.debug(
+                    "Store I/O finished after cancellation: {}", type(failure).__name__
+                )
+        raise
 
 
 def _git_object_id(path: Path, size_bytes: int) -> str:
@@ -698,27 +737,7 @@ class ModelStore:
                     yield False
                     return
             async with self._download_transfer_lock:
-                verification = asyncio.create_task(asyncio.to_thread(verify_native_cache))
-                try:
-                    verified = await asyncio.shield(verification)
-                except asyncio.CancelledError:
-                    # Cancelling the await does not stop its filesystem thread.
-                    # Preserve write ownership even under repeated cancellation.
-                    while not verification.done():
-                        try:
-                            await asyncio.shield(verification)
-                        except asyncio.CancelledError:
-                            continue
-                        except Exception:
-                            break
-                    if not verification.cancelled():
-                        failure = verification.exception()
-                        if failure is not None:
-                            logger.debug(
-                                "Native cache check finished after cancellation: {}",
-                                type(failure).__name__,
-                            )
-                    raise
+                verified = await _settled_store_io(verify_native_cache)
                 async with self._download_lock:
                     current = self._active_downloads.get(model_id)
                     if current is not observed or (
@@ -1358,6 +1377,22 @@ class ModelStore:
             except (OSError, ValueError):
                 adjacent = None
             if (
+                model_directory is not None
+                and adjacent is None
+                and retained.model_card.native_music_artifact_sources()
+                and not (model_directory / INSTALLED_CARD_RELATIVE_PATH).exists()
+                and not (model_directory / INSTALLED_CARD_RELATIVE_PATH).is_symlink()
+                and verify_installed_card(
+                    model_directory, retained, verify_hashes=True
+                )
+            ):
+                # The intact index is another retained copy of this owner's
+                # record. Verify every original object before restoring only
+                # the absent sidecar; otherwise startup would discard the last
+                # metadata needed for an offline repair of healthy bytes.
+                write_installed_card(model_directory, retained)
+                adjacent = retained
+            if (
                 model_directory is None
                 or adjacent != retained
                 or not verify_installed_card(model_directory, retained)
@@ -1684,6 +1719,8 @@ class ModelStore:
         ):
             # Sharing authenticated data never rewrites another owner's card
             # or grants that owner's execution policy to the requesting model.
+            if read_installed_card(model_path) != entry.installed_card:
+                write_installed_card(model_path, entry.installed_card)
             return
         record = build_installed_card_record(
             model_path,
@@ -1807,6 +1844,24 @@ class ModelStore:
                 artifact_role, verify_hashes=True,
             )
             if complete and model_card is not None:
+                if artifact_role == "base":
+                    for source in native_sources:
+                        if source.repository == str(model_card.artifact_repository):
+                            continue
+                        for alias in (str(source.model_id()), source.repository):
+                            if self.entry_matches_artifact(
+                                alias, source.revision, source.repository,
+                                model_card, "music_component",
+                            ):
+                                # The complete hash check above covered this
+                                # source too. Restore its original retained
+                                # owner record before serving cached success.
+                                self._ensure_installed_card(
+                                    alias, model_card, "music_component",
+                                    str(model_card.model_id), model_card.registry_card_id,
+                                    None,
+                                )
+                                break
                 self._ensure_installed_card(
                     model_id, model_card, artifact_role, owner_model_id,
                     owner_card_id, pinned_gguf,
@@ -2505,25 +2560,6 @@ class ModelStore:
                 ))
                 else frozenset()
             )
-            additional_bytes = await asyncio.to_thread(
-                _remaining_store_download_bytes,
-                target_dir,
-                file_list,
-            )
-            if additional_bytes > 0:
-                free_bytes = await asyncio.to_thread(
-                    lambda: shutil.disk_usage(target_dir).free
-                )
-                required_free_bytes = additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
-                if free_bytes < required_free_bytes:
-                    raise ModelStoreCapacityError(
-                        f"Insufficient canonical model-store disk capacity for "
-                        f"{model_id}: need {required_free_bytes / 2**30:.1f} GiB "
-                        "free for the remaining transfer and operating-system "
-                        f"reserve, but only {free_bytes / 2**30:.1f} GiB is "
-                        "available. Free disk space or move the model store."
-                    )
-            downloaded_bytes = 0
             # Exact sizes (and object ids when signed) each selected file must
             # arrive at: the base bundle's, or a video companion's declared sizes.
             expected_files: dict[str, tuple[int, str | None]] = (
@@ -2558,6 +2594,27 @@ class ModelStore:
                         )
                     }
                 )
+
+            additional_bytes = await _settled_store_io(
+                lambda: _remaining_store_download_bytes(
+                    target_dir, file_list, expected_files
+                )
+            )
+            if additional_bytes > 0:
+                free_bytes = await asyncio.to_thread(
+                    lambda: shutil.disk_usage(target_dir).free
+                )
+                required_free_bytes = additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
+                if free_bytes < required_free_bytes:
+                    raise ModelStoreCapacityError(
+                        f"Insufficient canonical model-store disk capacity for "
+                        f"{model_id}: need {required_free_bytes / 2**30:.1f} GiB "
+                        "free for the remaining transfer and operating-system "
+                        f"reserve, but only {free_bytes / 2**30:.1f} GiB is "
+                        "available. Free disk space or move the model store."
+                    )
+            downloaded_bytes = 0
+            if model_card is not None and model_card.image is not None:
                 for item in model_card.image.files_for_source(
                     artifact_repository, revision
                 ):
