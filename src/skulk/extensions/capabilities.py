@@ -30,6 +30,8 @@ from typing import Literal, final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from skulk.extensions.managed_limits import MAX_MANAGED_DESCRIPTORS
+
 CapabilityIoMode = Literal[
     "unary", "server_streaming", "client_streaming", "bidirectional"
 ]
@@ -227,7 +229,7 @@ class InstalledCapabilityRegistration(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     capabilities: tuple[RegisteredCapabilitySummary, ...] = Field(
-        max_length=8,
+        max_length=MAX_MANAGED_DESCRIPTORS,
         description="Installed operation purposes, versions and contract digests. Full schemas require an exact-capability read.",
     )
     skulk_requires: str = Field(

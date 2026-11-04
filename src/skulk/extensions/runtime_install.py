@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
+from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.runtime_artifacts import (
     Digest,
     QualifiedHost,
@@ -313,7 +314,12 @@ class RuntimeInstaller:
                 private_directory(self.root / "generations")
                 private_directory(generation)
                 host = await asyncio.to_thread(measure_host)
-                runtime = self._verify(read_private(generation / "staged.json"), host)
+                runtime = self._verify(
+                    read_private(
+                        generation / "staged.json", MAX_RUNTIME_METADATA_BYTES
+                    ),
+                    host,
+                )
                 if runtime.digest != digest:
                     raise ValueError("staged runtime identity differs")
                 await asyncio.to_thread(
@@ -439,7 +445,12 @@ class RuntimeInstaller:
                 self._verify(metadata, host)
                 if generation.exists():
                     private_directory(generation)
-                    if read_private(generation / "staged.json") != runtime.metadata:
+                    if (
+                        read_private(
+                            generation / "staged.json", MAX_RUNTIME_METADATA_BYTES
+                        )
+                        != runtime.metadata
+                    ):
                         raise ValueError("runtime completion record differs")
                     await asyncio.to_thread(
                         verified_artifacts, runtime, generation / "artifacts"
