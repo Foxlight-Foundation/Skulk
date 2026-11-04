@@ -150,16 +150,23 @@ def test_native_installed_record_rejects_missing_primary_files(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("failure_kind", ["missing_repository", "missing_primary", "wrong_size"])
 async def test_native_download_failure_keeps_coordinator_available(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline: bool, failure_kind: str
 ) -> None:
     """Real queued admission must fail only native work, then complete a cached model."""
+    native = _card()
+    assert native.artifact_bundle is not None
+    selected = native.artifact_bundle.files
     async def missing_source(*_args: object, **_kwargs: object) -> list[FileListEntry]:
-        raise FileNotFoundError("Required native source is absent")
+        if failure_kind == "missing_repository":
+            raise FileNotFoundError("Required native source is absent")
+        return [FileListEntry(type="file", path=item.path,
+            size=item.size_bytes + (1 if failure_kind == "wrong_size" and item.path == "model.safetensors" else 0))
+            for item in selected if failure_kind != "missing_primary" or item.path != "model.safetensors"]
 
     monkeypatch.setattr(download_utils, "fetch_file_list_with_cache", missing_source)
     node = NodeId("native-download-test")
-    native = _card()
     ordinary = ModelCard(
         model_id=ModelId("test/cached-gguf"), storage_size=Memory.from_bytes(7),
         n_layers=1, hidden_size=1, supports_tensor=False,
@@ -206,7 +213,10 @@ async def test_native_download_failure_keeps_coordinator_available(
         ))
         failed = await observe(native.model_id)
         assert isinstance(failed, DownloadFailed)
-        assert "native" in failed.error_message.lower() or "Required companion" in failed.error_message
+        if failure_kind == "missing_repository":
+            assert "native" in failed.error_message.lower() or "Required companion" in failed.error_message
+        else:
+            assert ("file is absent" if failure_kind == "missing_primary" else "size mismatch") in failed.error_message
         assert not (tmp_path / native.model_id.normalize()).exists()
         assert not coordinator.active_downloads
         await commands.send(ForwarderDownloadCommand(

@@ -917,29 +917,52 @@ def resolve_native_music_source_directory(
     never assemble an apparent model from unrelated partial cache directories.
     Returns ``None`` for an undeclared, absent or incomplete source.
     """
+    import skulk.shared.constants as _constants
     from skulk.store.installed_cards import (
         read_installed_card_with_fallback,
         verify_installed_card,
+    )
+    from skulk.store.model_store import (
+        StoreRegistryIndex,
+        read_reconciliation_tombstones,
     )
 
     expected = model_card.native_music_files_for_source(repository, revision)
     if not expected:
         return None
     identifier, effective_revision = companion_artifact_location(model_card, repository, revision)
-    directories: set[Path] = set()
-    for item in expected:
-        path = build_sidecar_path(identifier, item.path, effective_revision)
-        if path is None:
-            return None
-        for _ in PurePosixPath(item.path).parts:
-            path = path.parent
-        directories.add(path)
-    for directory in sorted(directories):
+    directories: list[Path] = []
+    # A first-match file lookup can hide a later verified generation when an
+    # interrupted earlier copy has all names but lacks an installed record.
+    # Enumerate locations independently of individual files, then verify each
+    # complete source. A store index is only a bounded-path location hint.
+    for search_root in dict.fromkeys([*(_constants.SKULK_MODELS_PATH or ()), SKULK_MODELS_DIR]):
+        candidates = _artifact_candidates(search_root, identifier, effective_revision)
+        try:
+            index = StoreRegistryIndex.model_validate_json((search_root / "registry.json").read_bytes())
+            entry = index.entries.get(str(identifier))
+            deleted = read_reconciliation_tombstones(search_root)
+            if entry is not None and (
+                entry.model_id == str(identifier)
+                and (entry.source_repository or entry.model_id) == repository
+                and entry.source_revision == revision
+                and str(identifier) not in deleted
+                and str(model_card.model_id) not in deleted
+            ):
+                candidate = (search_root / entry.store_path).resolve()
+                resolved_root = search_root.resolve()
+                if candidate != resolved_root and candidate.is_relative_to(resolved_root):
+                    candidates.insert(0, candidate)
+        except (OSError, ValueError):
+            pass
+        directories.extend(candidates)
+    for directory in dict.fromkeys(directories):
         try:
             record = read_installed_card_with_fallback(directory)
             if record is not None and (
                 record.artifact_repository == repository
                 and record.artifact_revision == revision
+                and _source_revision_matches(directory, revision)
                 and record.model_card.native_music_files_for_source(repository, revision) == expected
                 and verify_installed_card(directory, record)
             ):

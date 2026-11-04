@@ -25,7 +25,7 @@ from skulk.store.installed_cards import (
     verify_installed_card,
     write_installed_card,
 )
-from skulk.store.model_store import ModelStore, StoreDownloadStatus
+from skulk.store.model_store import ModelStore, StoreDownloadStatus, StoreRegistryIndex
 from skulk.store.model_store_client import (
     _declared_companion_files,
     _staged_directory_looks_complete,
@@ -113,6 +113,8 @@ async def test_store_download_completes_only_after_all_native_files_and_reopens(
     store = ModelStore(tmp_path)
     assert store.entry_matches_artifact(str(card.model_id), card.source_revision,
         str(card.artifact_repository), card)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
+    assert download_utils.model_companions_present_on_disk(card)
     source = card.native_music_artifact_sources()[-1]
     alias = str(card.model_id) if shared_primary else source.repository
     directory = store.get_store_path(alias)
@@ -321,8 +323,9 @@ def test_native_staging_and_installed_manifest_require_every_group_file(tmp_path
     assert not _staged_directory_looks_complete(companion, shard.model_card, expected)
 
 
+@pytest.mark.parametrize("earlier_copy", ["missing_file", "missing_record", "invalid_record", "wrong_revision"])
 def test_native_source_resolver_requires_one_complete_cache_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    earlier_copy: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Prefer an intact later cache, but never combine two complementary partial copies."""
     card, objects = native_music_fixture()
@@ -332,7 +335,15 @@ def test_native_source_resolver_requires_one_complete_cache_generation(
     _install(second, card, objects)
     monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (first, second))
     monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path / "unused")
-    (first / "test--native-components/Qwen3-Embedding-0.6B/config.json").unlink()
+    earlier = first / "test--native-components"
+    if earlier_copy == "missing_file":
+        (earlier / "Qwen3-Embedding-0.6B/config.json").unlink()
+    elif earlier_copy == "missing_record":
+        (earlier / ".skulk/installed-card.json").unlink()
+    elif earlier_copy == "invalid_record":
+        (earlier / ".skulk/installed-card.json").write_text("{}")
+    else:
+        download_utils.write_source_revision_marker(earlier, "c" * 40)
     assert download_utils.resolve_native_music_source_directory(
         card, "test/native-components", "b" * 40
     ) == second / "test--native-components"
@@ -351,6 +362,33 @@ def test_native_installed_record_rejects_same_size_wrong_objects(path: str, tmp_
     target.write_bytes(b"!" * target.stat().st_size)
     with pytest.raises(ValueError, match="complete exact source selection"):
         build_installed_card_record(primary, card)
+
+
+@pytest.mark.parametrize("invalid_hint", ["escaped_path", "wrong_revision"])
+def test_native_source_resolver_rejects_untrusted_store_index_hints(
+    invalid_hint: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An index cannot redirect a native source outside its root or change its pin."""
+    card, objects = native_music_fixture()
+    first = tmp_path / "first"
+    _install(first, card, objects)
+    _install(tmp_path / "second", card, objects)
+    store = ModelStore(first)
+    entry = store.get_entry("test/native-components")
+    assert entry is not None
+    if invalid_hint == "escaped_path":
+        (first / "test--native-components/.skulk/installed-card.json").unlink()
+        update = {"store_path": "../second/test--native-components"}
+    else:
+        (first / "test--native-components").rename(first / "indexed-native-source")
+        update = {"store_path": "indexed-native-source", "source_revision": "c" * 40}
+    modified = entry.model_copy(update=update)
+    (first / "registry.json").write_text(StoreRegistryIndex(entries={entry.model_id: modified}).model_dump_json())
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (first,))
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path / "unused")
+    assert download_utils.resolve_native_music_source_directory(
+        card, "test/native-components", "b" * 40
+    ) is None
 
 
 @pytest.mark.parametrize("extra", ["modeling_remote.py", ".foxlight-capture-notice.txt"])

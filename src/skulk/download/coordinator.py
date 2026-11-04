@@ -722,9 +722,19 @@ class DownloadCoordinator:
         await self._emit_status(progress)
 
         # Check initial status from downloader
-        initial_progress = (
-            await self.shard_downloader.get_shard_download_status_for_shard(shard)
-        )
+        try:
+            initial_progress = (
+                await self.shard_downloader.get_shard_download_status_for_shard(shard)
+            )
+        except (FileNotFoundError, ValueError) as error:
+            # A successful listing can still contradict its exact selection.
+            # This request must fail without retiring the shared command loop.
+            self._reset_progress_throttle(model_id)
+            await self._emit_status(DownloadFailed(
+                shard_metadata=shard, node_id=self.node_id,
+                error_message=str(error), model_directory=self._model_dir(model_id),
+            ))
+            return
 
         completed_path = (
             await self._resolve_or_refresh_complete_artifact(
