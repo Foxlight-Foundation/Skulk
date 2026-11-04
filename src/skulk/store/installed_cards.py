@@ -198,7 +198,7 @@ class InstalledCardRecord(BaseModel):
         default=None,
         min_length=3,
         max_length=512,
-        description="Owning base-model alias for a companion artifact.",
+        description="Owning base-model alias; historical provenance, not exclusive ownership, for a shared native music data source.",
     )
     owner_card_id: str | None = Field(
         default=None,
@@ -990,6 +990,25 @@ def require_registry_installed_artifact(
         )
 
 
+def installed_artifact_deleted(record: InstalledCardRecord, deleted: frozenset[str]) -> bool:
+    """Apply deletion intent without revoking independently shared native data.
+
+    Args:
+        record: Complete retained source/card association.
+        deleted: Durable aliases explicitly removed by the operator.
+
+    Native source records retain a historical owner for provenance. Deleting
+    that model does not delete a data-only source serving other exact owners;
+    deleting the source alias itself still prevents automatic resurrection.
+    """
+    shared_native = record.artifact_role == "music_component" and bool(
+        record.model_card.native_music_files_for_source(record.artifact_repository, record.artifact_revision)
+    )
+    return record.artifact_model_id in deleted or (
+        record.owner_model_id in deleted and not shared_native
+    )
+
+
 def companion_owner_matches(record: InstalledCardRecord, owner_card: ModelCard) -> bool:
     """Whether an installed companion record serves ``owner_card``.
 
@@ -1005,6 +1024,13 @@ def companion_owner_matches(record: InstalledCardRecord, owner_card: ModelCard) 
             record.artifact_repository,
             record.artifact_revision,
         ) in owner_card.external_video_companions()
+    if record.artifact_role == "music_component":
+        expected = owner_card.native_music_files_for_source(record.artifact_repository, record.artifact_revision)
+        return (
+            bool(expected)
+            and record.artifact_repository != str(owner_card.artifact_repository)
+            and expected == record.model_card.native_music_files_for_source(record.artifact_repository, record.artifact_revision)
+        )
     if owner_card.registry_card_id is not None:
         return record.owner_card_id == owner_card.registry_card_id
     return record.model_card == owner_card
@@ -1059,6 +1085,12 @@ def verify_installed_card(
     if record.model_card.native_music_artifact_sources():
         expected_role = "base" if record.artifact_repository == str(record.model_card.artifact_repository) else "music_component"
         if record.artifact_role != expected_role:
+            return False
+        aliases = {str(record.model_card.model_id)} if expected_role == "base" else {
+            record.artifact_repository, *(str(source.model_id()) for source in record.model_card.native_music_artifact_sources()
+                if (source.repository, source.revision) == (record.artifact_repository, record.artifact_revision))
+        }
+        if record.artifact_model_id not in aliases:
             return False
     resolved_root = model_directory.resolve()
     for entry in record.files:
@@ -1254,8 +1286,7 @@ def indexed_recovery_artifact(root: Path, model_id: ModelId) -> Path | None:
         if (
             record.artifact_model_id != str(model_id)
             or record.preservation is None
-            or record.artifact_model_id in deleted
-            or record.owner_model_id in deleted
+            or installed_artifact_deleted(record, deleted)
             or not path.resolve().is_relative_to(root.resolve())
             or read_installed_card(path) != record
             or not verify_installed_card(path, record)
@@ -1308,10 +1339,7 @@ def discover_installed_cards(roots: Iterable[Path]) -> list[InstalledCardRecord]
                 continue
             if record is None or not verify_installed_card(model_directory, record):
                 continue
-            if (
-                record.artifact_model_id in tombstones
-                or record.owner_model_id in tombstones
-            ):
+            if installed_artifact_deleted(record, tombstones):
                 continue
             records_by_identity.setdefault(record.installed_identity, record)
     return list(records_by_identity.values())

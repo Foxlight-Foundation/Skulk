@@ -4012,6 +4012,31 @@ without stopping the download coordinator. A fixed receiver-owned preservation
 notice may accompany these data files; arbitrary repository files remain excluded.
 Byte custody does not advertise native runner readiness or remove placement guards.
 
+Each external native source has a data-only alias hashing its repository,
+immutable revision and complete grouped bundle identity. This key is shared by
+in-flight deduplication, store/staging paths, peer admission and preservation
+mapping. Exact data-equivalent owners can reuse it without rewriting the retained
+owner's card; each primary card independently supplies trust, loader roots and
+licenses. Different selections cannot share a task or mix files in one generation.
+Native primary transaction directories also bind their complete source group.
+Verified matching files can be linked into independent generations after original
+object-pin checks; deleting one alias does not delete another's directory.
+Legacy repository aliases remain exact-data read candidates and are blocked by
+deletion tombstones. Source resolution runs outside the coordinator event loop,
+including cached completion checks. Missing required files invalidate success;
+failed/cancelled replacements leave the previous canonical generation registered.
+Native completed-cache admission verifies retained digests and original object
+pins in a worker thread under the canonical publication fence. In-progress
+requests still deduplicate by exact selection. A shared source's retained owner
+is provenance: deleting that model preserves surviving owners' source discovery
+and preservation; deleting the source alias itself blocks automatic resurrection.
+Cache verification waits for the publication fence and hashes outside the short
+download-admission lock, then rechecks the selected status before returning.
+Unrelated admission and active-transfer cancellation remain available. Cancelled
+verification drains its file thread before releasing that fence. Pinned existing
+files are checked against their original object identity during download reuse:
+online retries replace corrupt bytes; offline reuse refuses them.
+
 ### Native ACE package and process boundary
 
 `packaging/skulk-ace-step/` defines a separate Python 3.12 package family; Core

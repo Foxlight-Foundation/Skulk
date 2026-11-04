@@ -121,8 +121,8 @@ async def test_store_download_completes_only_after_all_native_files_and_reopens(
     monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (tmp_path,))
     assert download_utils.model_companions_present_on_disk(card)
     source = card.native_music_artifact_sources()[-1]
-    alias = str(card.model_id) if shared_primary else source.repository
-    directory = store.get_store_path(alias)
+    alias, _ = download_utils.companion_artifact_location(card, source.repository, source.revision)
+    directory = store.get_store_path(str(alias))
     assert directory is not None
     removed = directory / source.files[-1].path
     removed.unlink()
@@ -263,7 +263,8 @@ async def test_cancelled_native_base_does_not_complete_or_cancel_a_shared_source
         assert status.status == "cancelled" and not fetched
     finally:
         release.set()
-        child = store.get_download_status("test/native-components")
+        child_shard = download_utils.companion_download_specs(card)[0][0]
+        child = store.get_download_status(str(child_shard.model_card.model_id))
         if child is not None:
             await _finished(child)
     assert child is not None and child.status == "complete"
@@ -351,10 +352,10 @@ async def test_native_peer_record_verifies_its_grouped_source_against_signed_own
             await server_module._require_trusted_registry_peer_record(record.model_copy(update=update))
 
 
-@pytest.mark.parametrize("component", [False, True])
+@pytest.mark.parametrize("component,qualified_alias", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("existing_copy", ["none", "intact", "tampered"])
 async def test_native_peer_import_rejects_self_consistent_changed_git_metadata(
-    component: bool, existing_copy: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    component: bool, qualified_alias: bool, existing_copy: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A peer's matching transfer digest cannot replace original immutable object pins."""
     card, objects = native_music_fixture()
@@ -363,6 +364,12 @@ async def test_native_peer_import_rejects_self_consistent_changed_git_metadata(
     source = primary.parent / "test--native-components" if component else primary
     original = read_installed_card(source)
     assert original is not None and original.verification == "registry_verified"
+    if qualified_alias:
+        selection = next(item for item in card.native_music_artifact_sources() if item.repository != str(card.artifact_repository))
+        original = build_installed_card_record(source, card, artifact_role="music_component",
+            artifact_model_id=str(selection.model_id()), artifact_repository=selection.repository,
+            artifact_revision=selection.revision, owner_model_id=str(card.model_id),
+            owner_card_id=card.registry_card_id)
     payloads = {entry.path: (source / entry.path).read_bytes() for entry in original.files}
     metadata = next(path for path in payloads if path.endswith("config.json"))
     good_metadata = payloads[metadata]

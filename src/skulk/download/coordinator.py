@@ -159,14 +159,14 @@ class DownloadCoordinator:
             # Ordinary store generations include source/bundle suffixes that
             # the legacy model-layout lookup cannot discover. Native readiness
             # must use recorded complete selections and exact owning policy.
-            native = resolve_native_music_source_directory(
+            native = await asyncio.to_thread(resolve_native_music_source_directory,
                 card, str(card.artifact_repository), card.source_revision,
                 require_card_identity=True,
             )
             if native is not None:
                 return native
             if card.registry_card_id is not None:
-                retained = resolve_native_music_source_directory(
+                retained = await asyncio.to_thread(resolve_native_music_source_directory,
                     card, str(card.artifact_repository), card.source_revision,
                 )
                 if retained is not None:
@@ -654,7 +654,7 @@ class DownloadCoordinator:
         # Validate grouped native selection before a status probe: malformed
         # selection must fail this request, not the coordinator's task group.
         try:
-            shard.model_card.native_music_artifact_sources()
+            native_sources = shard.model_card.native_music_artifact_sources()
         except ValueError as error:
             self._begin_attempt(model_id)
             self._reset_progress_throttle(model_id)
@@ -677,9 +677,14 @@ class DownloadCoordinator:
             # clear the stale status and re-download from scratch.
             elif isinstance(status, DownloadCompleted) and status.model_directory:
                 model_dir = Path(status.model_directory)
+                native_path = await self._resolve_or_refresh_complete_artifact(shard) if native_sources else None
                 if (
                     not model_dir.is_dir()
                     or not (model_dir / "config.json").exists()
+                    or (native_sources and (
+                        native_path != model_dir
+                        or not await asyncio.to_thread(model_companions_present_on_disk, shard.model_card, self.offline)
+                    ))
                 ):
                     logger.info(
                         f"DownloadCoordinator: {model_id} was DownloadCompleted but "
@@ -716,7 +721,7 @@ class DownloadCoordinator:
         # hiding a loadable base behind a doomed download would produce
         # DownloadFailed for a usable model, but advertising a vision model
         # without its weights would hand out a broken one.
-        if found_path is not None and not model_companions_present_on_disk(
+        if found_path is not None and not await asyncio.to_thread(model_companions_present_on_disk,
             shard.model_card, required_only=self.offline
         ):
             logger.info(

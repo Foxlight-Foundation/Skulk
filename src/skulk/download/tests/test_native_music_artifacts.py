@@ -115,7 +115,7 @@ async def test_native_direct_download_and_verified_offline_reopen(
     assert await ResumableShardDownloader(offline=True).ensure_shard(_shard(card)) == primary
     missing = card.native_music_artifact_sources()[-1].files[-1]
     source = card.native_music_artifact_sources()[-1]
-    alias = card.model_id if source.repository == str(card.artifact_repository) else ModelId(source.repository)
+    alias, _ = download_utils.companion_artifact_location(card, source.repository, source.revision)
     (tmp_path / alias.normalize() / missing.path).unlink()
     assert not download_utils.model_companions_present_on_disk(card)
     with pytest.raises(FileNotFoundError, match="Offline native music"):

@@ -34,6 +34,7 @@ from skulk.store.installed_cards import (
     companion_owner_matches,
     installed_artifact_directory,
     read_installed_card_with_fallback,
+    verify_installed_card,
     write_installed_card,
 )
 from skulk.store.staging_eviction import MINIMUM_STAGING_FREE_DISK_BYTES
@@ -319,13 +320,14 @@ class ResumableShardDownloader(ShardDownloader):
                 shard.model_card
             ):
                 try:
-                    repository = str(companion_shard.model_card.model_id)
+                    alias = str(companion_shard.model_card.model_id)
+                    repository = str(companion_shard.model_card.artifact_repository)
                     role = companion_artifact_role(shard.model_card, repository)
                     replacement_identity = _replacement_identity_for_installed_card(
                         SKULK_MODELS_DIR
                         / companion_shard.model_card.model_id.normalize(),
                         shard.model_card,
-                        artifact_model_id=repository,
+                        artifact_model_id=alias,
                         artifact_role=role,
                     )
                     (
@@ -352,12 +354,25 @@ class ResumableShardDownloader(ShardDownloader):
                             companion_shard.model_card.model_id,
                             companion_path,
                         )
+                        if role == "music_component":
+                            try:
+                                retained = await asyncio.to_thread(read_installed_card_with_fallback, companion_directory)
+                            except (OSError, ValueError):
+                                retained = None
+                            if retained is not None and (
+                                retained.artifact_role == role
+                                and retained.artifact_model_id == alias
+                                and companion_owner_matches(retained, shard.model_card)
+                                and await asyncio.to_thread(verify_installed_card, companion_directory, retained, verify_hashes=True)
+                            ):
+                                register_installed_card_record(retained)
+                                continue
                         record = await asyncio.to_thread(
                             build_installed_card_record,
                             companion_directory,
                             shard.model_card,
                             artifact_role=role,
-                            artifact_model_id=repository,
+                            artifact_model_id=alias,
                             owner_model_id=str(shard.model_card.model_id),
                             owner_card_id=shard.model_card.registry_card_id,
                             artifact_repository=repository,

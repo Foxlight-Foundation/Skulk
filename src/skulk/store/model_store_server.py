@@ -242,7 +242,11 @@ async def _require_trusted_registry_peer_record(
                 expected_revision = runtime.vllm_spec_draft_revision
         identity_matches = (
             declared_role == record.artifact_role
-            and record.artifact_model_id == expected_repository
+            and record.artifact_model_id in (
+                {expected_repository, *(str(source.model_id()) for source in trusted_card.native_music_artifact_sources()
+                    if (source.repository, source.revision) == (expected_repository, expected_revision))}
+                if record.artifact_role == "music_component" else {expected_repository}
+            )
             and record.owner_model_id == str(trusted_card.model_id)
             and record.owner_card_id == registry_card_id
         )
@@ -818,6 +822,9 @@ class ModelStoreServer:
                 if not card.native_music_files_for_source(repository, source_revision):
                     raise web.HTTPConflict(reason="music component revision is not declared by its owner")
                 expected_revision = source_revision
+                if model_id not in {repository, *(str(source.model_id()) for source in card.native_music_artifact_sources()
+                    if (source.repository, source.revision) == (repository, source_revision))}:
+                    raise web.HTTPConflict(reason="music component alias is not its exact source identity")
             elif artifact_role == "image_component" and card.image is not None:
                 if not card.image.files_for_source(repository, source_revision):
                     raise web.HTTPConflict(

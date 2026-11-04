@@ -2653,6 +2653,28 @@ notice is the only extra native file allowed during recovery. Primary-only cache
 presence does not count as download completeness. This byte lifecycle leaves the
 native placement/startup guard in place until runner integration exists.
 
+Native external sources use deterministic `skulk-native/<digest>` data aliases,
+binding repository, immutable revision and complete grouped bundle identity.
+Store/staging, active-task deduplication, peer validation and preservation use
+that key; primary transaction directories bind the entire source group. Equal
+data selections can serve multiple owners without rewriting their cards or
+sharing execution authority. Original-pinned files may be linked into independent
+generations. Legacy repository aliases require exact selections and respect
+deletion tombstones. Native metadata reads and cached-completion revalidation run
+outside the coordinator loop; missing required sources invalidate success.
+Exact bundle paths override legacy layout exclusions; failed/cancelled replacement
+retains the previous canonical generation.
+Native completed store-cache reuse checks retained hashes and original pins in
+a background thread under the publication fence. Shared source records retain
+historical-owner provenance without letting that owner's deletion revoke other
+models' data custody; explicit source deletion still suppresses reconciliation.
+Cache verification waits for the publication fence and hashes outside the short
+download-admission lock, then rechecks the selected status before returning.
+Unrelated admission and active-transfer cancellation remain available. Cancelled
+verification drains its file thread before releasing that fence. Pinned existing
+files are checked against their original object identity during download reuse:
+online retries replace corrupt bytes; offline reuse refuses them.
+
 The built-in native ACE package/process family lives in `packaging/skulk-ace-step/`.
 Its Python 3.12 interpreter and exact three-platform CPU archive catalogs stay
 separate from Core/Studio and all model weights. `build_ace_step.py` seals only

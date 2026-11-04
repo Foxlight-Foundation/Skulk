@@ -453,6 +453,18 @@ its own canonical source-relative loader root. Mirrors may use different
 roots without changing component roles. Components sharing a repository pin
 the same revision. `storage_size` includes all three complete selections.
 
+External native data sources use a deterministic `skulk-native/<digest>` cache
+alias. The digest binds the source repository, immutable revision and complete
+grouped file selection. Identical encoder/VAE data can serve different cards;
+different selections at one commit have independent transfers and directories.
+The alias conveys no model-code trust. Each owning card retains its own signed
+identity, loader roots, licenses and execution policy. Existing repository-only
+caches remain readable only when their recorded complete selection matches.
+For roles sharing the primary repository, the physical transfer generation binds
+the entire source group, while the card's primary bundle and loader root retain
+their original meaning. Explicit bundle members remain selected even under
+legacy `original/` or `metal/` repository prefixes; unrelated files stay excluded.
+
 Repository-supplied Python is excluded from these file sets, and
 `trust_remote_code` must be false: the separately pinned engine package owns
 its reviewed implementation. No language-model planner checkpoint is implied
