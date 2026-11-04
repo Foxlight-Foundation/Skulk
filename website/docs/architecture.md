@@ -4216,14 +4216,23 @@ verifies its fresh copies before reading them.
 `ace_step/model.py::NativeMusicModel` binds one complete rank-zero single-host
 assignment, exact prepared runtime/build and `native_music_policy` captured on
 the shard. File/header/precision drift fails before loader creation or spawn.
+Absent optional header facts may be refined by verified observations without
+changing the admitted execution policy; declared geometry still must match.
 Loaded readiness must still match actual model/payload/component execution.
 One model actor covers inspection, result pre-write ownership and inference;
 concurrent close requests stop inspection and wait for that actor, preventing
-late spawn after shutdown. Only closed `MusicGeneration`/`MusicEditing` fields
+late spawn after shutdown. A separate short readiness handover joins an existing
+idle poll before submission; polls during inference use the last observed
+readiness instead of competing for the resident's request actor.
+Only closed `MusicGeneration`/`MusicEditing` fields
 reach the native protocol. Generation requires an already resolved seed; edits
 reverify the worker-private original and retain exact resolved native frame
 coordinates. Completed results remain in independent delivery custody; failed
-unsubmitted cleanup and native drain retain handles for retry. This adapter is
+unsubmitted cleanup and native drain retain handles for retry. Failed pre-write
+preparation rolls back only the new empty
+directory and matching receipt are reclaimable. Failed rollback fences the
+model and retains the original parent/child identities for close retry;
+replacement directories or new content are preserved. This adapter is
 not yet registered with Worker/bootstrap. Native placement guards remain until
 shared peak-memory admission, resource publication and media execution are wired.
 

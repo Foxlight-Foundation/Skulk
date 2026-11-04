@@ -2853,10 +2853,16 @@ the original indexed owner, including companions reached through a cached base.
   `BaseShardMetadata.native_music_policy` compared against prepared build/probe,
   actual complete objects/headers and loaded model receipt. One actor serializes
   inspection/pre-write result custody/inference; close stops and drains it so no
-  late child can escape shutdown. Closed generation/edit translation preserves
+  late child can escape shutdown. Verified headers may refine optional unknown
+  geometry without changing admission; declared facts still must match. A short
+  readiness handover joins idle polling before submission; active polls return
+  cached observations without competing with the resident request actor.
+  Closed generation/edit translation preserves
   fixed seed, creator text, measured source and exact native frame coordinates.
   Independent completed output survives close; failed unsubmitted cleanup retains
-  retry ownership. This is not Worker activation or shared peak-memory admission.
+  exact parent/child retry ownership, fences admission and preserves replacement
+  directories/content. Failed pre-write preparation reclaims only its own empty
+  result/receipt. This is not Worker activation or shared peak-memory admission.
 - Native resident: complete data/code verification, explicit runtime math probe,
   observed per-component loaded precision, exact canonical source-tensor equality,
   one active request, contiguous sequence/correlation checks, 0600 PCM24/result

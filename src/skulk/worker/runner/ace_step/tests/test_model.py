@@ -5,6 +5,7 @@ import threading
 import wave
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 
 import pytest
@@ -41,12 +42,15 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.runtime_files import write_private
 from skulk.worker.runner.ace_step import artifacts
 from skulk.worker.runner.ace_step import model as model_module
+from skulk.worker.runner.ace_step import result_custody as result_module
 from skulk.worker.runner.ace_step.artifacts import (
     ObservedMusicArtifacts,
     observe_native_music_artifacts,
 )
 from skulk.worker.runner.ace_step.model import NativeMusicModel
+from skulk.worker.runner.ace_step.resident import ResidentMusic
 from skulk.worker.runner.ace_step.result_custody import (
+    PendingMusicResult,
     music_result_directory,
     verify_prepared_result_directory,
 )
@@ -506,19 +510,19 @@ def test_unsubmitted_cancel_cleanup_failure_retains_ownership_for_close_retry(
     model.start(is_cancelled=lambda: False)
     calls = 0
     cleanups = 0
-    reclaim = model_module.reclaim_result_directory
+    reclaim = model_module.reclaim_unsubmitted_result
 
     def cancelled() -> bool:
         nonlocal calls
         calls += 1
         return calls >= 3
 
-    def fail_once(directory: Path) -> bool:
+    def fail_once(pending: PendingMusicResult) -> bool:
         nonlocal cleanups
         cleanups += 1
-        return False if cleanups == 1 else reclaim(directory)
+        return False if cleanups == 1 else reclaim(pending)
 
-    monkeypatch.setattr(model_module, "reclaim_result_directory", fail_once)
+    monkeypatch.setattr(model_module, "reclaim_unsubmitted_result", fail_once)
     with pytest.raises(
         RuntimeError, match="unsubmitted result cleanup remains pending"
     ):
@@ -727,3 +731,217 @@ def test_model_adapter_runs_actual_supervisor_and_preserves_verified_wav(
     finally:
         model.close()
     assert output is not None and output.directory.exists()
+
+
+def test_observation_can_refine_an_admitted_unknown_layout(tmp_path: Path) -> None:
+    """Missing optional geometry is not a loading permission or a policy change."""
+    original, factory, _ = fixture(tmp_path)
+    unknown = original.policy.model_copy(update={"tensor_layouts": None})
+    shard = original.bound.bound_shard.model_copy(
+        update={"native_music_policy": unknown}
+    )
+    assignments = original.bound.instance.shard_assignments.model_copy(
+        update={"runner_to_shard": {original.bound.bound_runner_id: shard}}
+    )
+    bound = original.bound.model_copy(
+        update={
+            "instance": original.bound.instance.model_copy(
+                update={"shard_assignments": assignments}
+            )
+        }
+    )
+    model = NativeMusicModel(
+        bound,
+        original.runtime,
+        original.sources,
+        original.root,
+        original.source_root,
+        create_resident=factory,
+    )
+    try:
+        ready = model.start(is_cancelled=lambda: False)
+        assert ready.model_identity == unknown.model_identity
+        assert ready.execution == unknown.execution and model.is_ready()
+        assert model.policy == unknown and model.policy.tensor_layouts is None
+    finally:
+        model.close()
+
+
+def test_idle_readiness_poll_cannot_race_native_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actual resident actor contention cannot reject or retire a valid generation."""
+    interpreter = create_resident_interpreter(tmp_path / "interpreter")
+    original, _, task = fixture(tmp_path, interpreter_path=interpreter)
+    captured: list[ResidentMusic] = []
+
+    def create(
+        interpreter: Path,
+        workspace: NativeMusicWorkspace,
+        configuration: NativeMusicServeConfig,
+        *,
+        payload_sha256: str,
+        resource_guard: Callable[[int], str | None] | None = None,
+    ) -> ResidentMusic:
+        resident = ResidentMusic(
+            interpreter,
+            workspace,
+            configuration,
+            payload_sha256=payload_sha256,
+            resource_guard=resource_guard,
+        )
+        captured.append(resident)
+        return resident
+
+    model = NativeMusicModel(
+        original.bound,
+        original.runtime,
+        original.sources,
+        original.root,
+        original.source_root,
+        create_resident=create,
+    )
+    entered, release = threading.Event(), threading.Event()
+    try:
+        model.start(is_cancelled=lambda: False, timeout_seconds=10)
+        workspace = captured[0].workspace
+        verify = workspace.verify
+
+        def block_once() -> None:
+            verify()
+            if not entered.is_set():
+                entered.set()
+                assert release.wait(3)
+
+        monkeypatch.setattr(workspace, "verify", block_once)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            polling = executor.submit(model.is_ready)
+            assert entered.wait(3)
+            generation = executor.submit(
+                model.run,
+                task,
+                progress=lambda _: None,
+                is_cancelled=lambda: False,
+                timeout_seconds=10,
+            )
+            try:
+                with pytest.raises(FutureTimeout):
+                    generation.result(timeout=0.1)
+            finally:
+                release.set()
+            assert polling.result(timeout=3)
+            assert generation.result(timeout=3) is not None
+        assert model.is_ready()
+    finally:
+        release.set()
+        model.close()
+
+
+@pytest.mark.parametrize("fault", ["parent_sync", "receipt_write"])
+def test_failed_result_preparation_cannot_leave_an_untracked_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    """A pre-submit failure cleans only its new result; completed takes survive."""
+    model, factory, original = fixture(tmp_path)
+    model.start(is_cancelled=lambda: False)
+    completed = model.run(original, progress=lambda _: None, is_cancelled=lambda: False)
+    assert completed is not None and factory.resident is not None
+    parent_inode = factory.resident.workspace.requests_identity.inode
+    retained = (completed.directory / "result.wav").read_bytes()
+    task = original.model_copy(update={"command_id": CommandId("failed-preparation")})
+    directory = music_result_directory(model.root, task.command_id)
+    failed = False
+    sync = result_module.os.fsync
+    write = result_module.write_private
+
+    def sync_once(descriptor: int) -> None:
+        nonlocal failed
+        if not failed and result_module.os.fstat(descriptor).st_ino == parent_inode:
+            failed = True
+            raise OSError("controlled parent sync failure")
+        sync(descriptor)
+
+    def write_once(path: Path, data: bytes) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("controlled receipt publication failure")
+        write(path, data)
+
+    monkeypatch.setattr(
+        result_module.os, "fsync", sync_once
+    ) if fault == "parent_sync" else monkeypatch.setattr(
+        result_module, "write_private", write_once
+    )
+    try:
+        with pytest.raises(OSError, match="controlled"):
+            model.run(task, progress=lambda _: None, is_cancelled=lambda: False)
+        assert failed and model.is_ready()
+        assert len(factory.resident.requests) == 1
+    finally:
+        model.close()
+    assert not directory.exists()
+    assert (completed.directory / "result.wav").read_bytes() == retained
+
+
+@pytest.mark.parametrize("interference", ["none", "replacement", "content"])
+def test_failed_preparation_rollback_fences_and_retains_exact_retry_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interference: str,
+) -> None:
+    """Failed rollback cannot forget cleanup or remove even an empty replacement."""
+    model, factory, task = fixture(tmp_path)
+    model.start(is_cancelled=lambda: False)
+    task = task.model_copy(update={"command_id": CommandId("failed-preparation")})
+    directory = music_result_directory(model.root, task.command_id)
+    write = result_module.write_private
+    remove = result_module.os.rmdir
+    refuse = True
+
+    def no_receipt(path: Path, data: bytes) -> None:
+        if refuse:
+            raise OSError("controlled receipt failure")
+        write(path, data)
+
+    def no_remove(path: str | bytes | Path, *, dir_fd: int | None = None) -> None:
+        if refuse and path == directory.name:
+            raise OSError("controlled directory removal failure")
+        remove(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(result_module, "write_private", no_receipt)
+    monkeypatch.setattr(result_module.os, "rmdir", no_remove)
+    try:
+        with pytest.raises(RuntimeError, match="preparation cleanup remains pending"):
+            model.run(task, progress=lambda _: None, is_cancelled=lambda: False)
+        assert directory.exists() and not model.is_ready()
+        assert factory.resident is not None and not factory.resident.requests
+        refuse = False
+        if interference == "replacement":
+            moved = directory.with_name("retained-original-inode")
+            directory.rename(moved)
+            directory.mkdir(mode=0o700)
+            replacement = directory.stat().st_ino
+            with pytest.raises(RuntimeError, match="cleanup remains pending"):
+                model.close()
+            assert directory.exists() and directory.stat().st_ino == replacement
+            assert moved.exists()
+            directory.rmdir()
+            moved.rename(directory)
+        elif interference == "content":
+            foreign = directory / "result.wav"
+            foreign.write_bytes(b"No native writer was admitted to create this file")
+            with pytest.raises(RuntimeError, match="cleanup remains pending"):
+                model.close()
+            assert foreign.read_bytes() == (
+                b"No native writer was admitted to create this file"
+            )
+            foreign.unlink()
+        model.close()
+        assert not directory.exists()
+    finally:
+        refuse = False
+        model.close()

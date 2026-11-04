@@ -10,7 +10,8 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, final
@@ -31,9 +32,11 @@ from skulk.worker.runner.ace_step.artifacts import observe_native_music_artifact
 from skulk.worker.runner.ace_step.process import verify_music_source
 from skulk.worker.runner.ace_step.resident import ResidentMusic
 from skulk.worker.runner.ace_step.result_custody import (
+    MusicResultPreparationError,
+    PendingMusicResult,
     music_result_directory,
     prepare_result_directory,
-    reclaim_result_directory,
+    reclaim_unsubmitted_result,
 )
 from skulk.worker.runner.ace_step.workspace import NativeMusicWorkspace
 
@@ -163,9 +166,11 @@ class NativeMusicModel:
         self._resident: MusicModelResident | None = None
         self._workspace: NativeMusicWorkspace | None = None
         self._actor = threading.Lock()
+        self._readiness_actor = threading.Lock()
+        self._ready_observed = threading.Event()
         self._stop_requested = threading.Event()
         self._retired = False
-        self._unsubmitted_output: Path | None = None
+        self._unsubmitted_output: PendingMusicResult | None = None
 
     @staticmethod
     def _deadline(timeout_seconds: float) -> float:
@@ -214,7 +219,15 @@ class NativeMusicModel:
                     self.runtime.probe,
                     observed_layouts=observed.tensor_layouts,
                 )
-                if actual != self.policy:
+                # Optional missing geometry is an assessed unknown, not a
+                # declared fact. New verified observations may refine it while
+                # all admitted data/execution/workload settings stay identical.
+                comparison = (
+                    actual
+                    if self.policy.tensor_layouts is not None
+                    else actual.model_copy(update={"tensor_layouts": None})
+                )
+                if comparison != self.policy:
                     raise ValueError(
                         "observed native music files differ from admitted tensor policy"
                     )
@@ -245,10 +258,12 @@ class NativeMusicModel:
                     self._workspace = None
                     raise
             checkpoint()
-            ready = self._resident.start(
-                is_cancelled=lambda: is_cancelled() or self._stop_requested.is_set(),
-                timeout_seconds=max(0.001, deadline - time.monotonic()),
-            )
+            with self._readiness_handover(deadline):
+                ready = self._resident.start(
+                    is_cancelled=lambda: is_cancelled()
+                    or self._stop_requested.is_set(),
+                    timeout_seconds=max(0.001, deadline - time.monotonic()),
+                )
             if (ready.model_identity, ready.payload_sha256, ready.execution) != (
                 self.policy.model_identity,
                 self.policy.payload_sha256,
@@ -258,9 +273,11 @@ class NativeMusicModel:
                     "native music loaded readiness differs from its admitted model"
                 )
             checkpoint()
+            self._ready_observed.set()
             return ready
         except BaseException:
             self._retired = True
+            self._ready_observed.clear()
             if self._resident is not None:
                 self._resident.close()
             raise
@@ -268,12 +285,53 @@ class NativeMusicModel:
             self._actor.release()
 
     def is_ready(self) -> bool:
-        """Require a live resident model in this actual non-retired lifetime."""
-        return (
-            not self._retired
-            and self._resident is not None
-            and self._resident.is_ready()
-        )
+        """Poll idle liveness without racing native submission or waiting for inference.
+
+        Active operations run their own actual liveness/resource checks. They
+        hand over any in-flight idle poll before calling the resident; later
+        polls return the last observed readiness while the operation owns it.
+        """
+        if self._retired or self._stop_requested.is_set():
+            return False
+        if self._actor.locked() or not self._readiness_actor.acquire(blocking=False):
+            return self._ready_observed.is_set()
+        try:
+            if self._actor.locked():
+                return self._ready_observed.is_set()
+            return self._is_ready()
+        finally:
+            self._readiness_actor.release()
+
+    def _is_ready(self) -> bool:
+        resident = self._resident
+        try:
+            ready = (
+                not self._retired
+                and not self._stop_requested.is_set()
+                and resident is not None
+                and resident.is_ready()
+            )
+        except BaseException:
+            self._ready_observed.clear()
+            raise
+        if ready and not self._retired and not self._stop_requested.is_set():
+            self._ready_observed.set()
+            return True
+        self._ready_observed.clear()
+        return False
+
+    @contextmanager
+    def _readiness_handover(self, deadline: float) -> Iterator[None]:
+        # Readiness uses a separate short-lived gate so a poll can never look
+        # like another generation, nor block a poll behind long inference.
+        if not self._readiness_actor.acquire(
+            timeout=max(0.0, min(20.0, deadline - time.monotonic()))
+        ):
+            raise TimeoutError("native music idle readiness check remains pending")
+        try:
+            yield
+        finally:
+            self._readiness_actor.release()
 
     def _request(
         self, task: MusicGeneration | MusicEditing, checkpoint: Callable[[], None]
@@ -384,22 +442,33 @@ class NativeMusicModel:
         try:
             if is_cancelled():
                 return None
-            if not self.is_ready() or self._resident is None or self._workspace is None:
-                raise RuntimeError("native music model is not ready")
+            with self._readiness_handover(deadline):
+                if (
+                    not self._is_ready()
+                    or self._resident is None
+                    or self._workspace is None
+                ):
+                    raise RuntimeError("native music model is not ready")
             request = self._request(task, checkpoint)
             checkpoint()
             directory = Path(request.output_directory)
-            identity = prepare_result_directory(
-                directory, self._workspace.requests_identity
+            parent_identity = self._workspace.requests_identity
+            try:
+                identity = prepare_result_directory(directory, parent_identity)
+            except MusicResultPreparationError as error:
+                self._unsubmitted_output = error.pending
+                self._retired = True
+                raise
+            self._unsubmitted_output = PendingMusicResult(
+                directory, parent_identity, identity
             )
-            self._unsubmitted_output = directory
             try:
                 request = NativeMusicRequest.model_validate(
                     {**request.model_dump(), "output_directory_identity": identity}
                 )
                 checkpoint()
             except BaseException:
-                if not reclaim_result_directory(directory):
+                if not reclaim_unsubmitted_result(self._unsubmitted_output):
                     self._retired = True
                     raise RuntimeError(
                         "native music unsubmitted result cleanup remains pending"
@@ -433,6 +502,7 @@ class NativeMusicModel:
     def close(self) -> None:
         """Retire and drain; retain failed-cleanup handles until a later close succeeds."""
         self._retired = True
+        self._ready_observed.clear()
         self._stop_requested.set()
         # The model actor covers header inspection and pre-submit filesystem
         # effects as well as inference. Waiting here prevents close from
@@ -445,7 +515,7 @@ class NativeMusicModel:
                 self._resident = None
                 self._workspace = None
             if self._unsubmitted_output is not None:
-                if not reclaim_result_directory(self._unsubmitted_output):
+                if not reclaim_unsubmitted_result(self._unsubmitted_output):
                     raise RuntimeError(
                         "native music unsubmitted result cleanup remains pending"
                     )
