@@ -476,7 +476,9 @@ class NativeMusicModel:
                 self._unsubmitted_output = None
                 raise
             try:
-                self._unsubmitted_output = None
+                # Keep the empty-result fallback until successful completion:
+                # the resident may refuse before recording its writer custody.
+                # Close drains it before attempting this exact empty rollback.
                 result = self._resident.run(
                     request,
                     progress=progress,
@@ -490,6 +492,7 @@ class NativeMusicModel:
             if result is None:
                 self._retired = True
                 return None
+            self._unsubmitted_output = None
             return GeneratedNativeMusic(result, directory)
         except InterruptedError:
             self._retired = True

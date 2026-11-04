@@ -42,6 +42,7 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.runtime_files import write_private
 from skulk.worker.runner.ace_step import artifacts
 from skulk.worker.runner.ace_step import model as model_module
+from skulk.worker.runner.ace_step import resident as resident_module
 from skulk.worker.runner.ace_step import result_custody as result_module
 from skulk.worker.runner.ace_step.artifacts import (
     ObservedMusicArtifacts,
@@ -944,4 +945,91 @@ def test_failed_preparation_rollback_fences_and_retains_exact_retry_identity(
         assert not directory.exists()
     finally:
         refuse = False
+        model.close()
+
+
+@pytest.mark.parametrize("fault", ["workspace", "prepared_result"])
+def test_early_resident_failure_keeps_model_result_cleanup_custody(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    """Failure before the resident owns a writer cannot orphan prepared output."""
+    interpreter = create_resident_interpreter(tmp_path / "interpreter")
+    original, _, task = fixture(tmp_path, interpreter_path=interpreter)
+    workspaces: list[NativeMusicWorkspace] = []
+
+    def create(
+        interpreter: Path,
+        workspace: NativeMusicWorkspace,
+        configuration: NativeMusicServeConfig,
+        *,
+        payload_sha256: str,
+        resource_guard: Callable[[int], str | None] | None = None,
+    ) -> ResidentMusic:
+        workspaces.append(workspace)
+        return ResidentMusic(
+            interpreter,
+            workspace,
+            configuration,
+            payload_sha256=payload_sha256,
+            resource_guard=resource_guard,
+        )
+
+    model = NativeMusicModel(
+        original.bound,
+        original.runtime,
+        original.sources,
+        original.root,
+        original.source_root,
+        create_resident=create,
+    )
+    try:
+        model.start(is_cancelled=lambda: False, timeout_seconds=10)
+        completed = model.run(
+            task,
+            progress=lambda _: None,
+            is_cancelled=lambda: False,
+            timeout_seconds=10,
+        )
+        assert completed is not None
+        preserved = (completed.directory / "result.wav").read_bytes()
+        failed_task = task.model_copy(
+            update={"command_id": CommandId("early-resident-failure")}
+        )
+        directory = music_result_directory(model.root, failed_task.command_id)
+        verify = workspaces[0].verify
+        triggered = False
+
+        def fail_once() -> None:
+            nonlocal triggered
+            if directory.exists() and not triggered:
+                triggered = True
+                raise OSError("controlled early resident verification failure")
+            verify()
+
+        def refuse_prepared(*args: object, **kwargs: object) -> None:
+            nonlocal triggered
+            triggered = True
+            raise OSError("controlled early resident verification failure")
+
+        if fault == "workspace":
+            monkeypatch.setattr(workspaces[0], "verify", fail_once)
+        else:
+            monkeypatch.setattr(
+                resident_module, "verify_prepared_result_directory", refuse_prepared
+            )
+        with pytest.raises(OSError, match="early resident verification"):
+            model.run(
+                failed_task,
+                progress=lambda _: None,
+                is_cancelled=lambda: False,
+                timeout_seconds=10,
+            )
+        assert triggered and not model.is_ready()
+        model.close()
+        assert not directory.exists()
+        assert not directory.with_name("." + directory.name + ".owner.json").exists()
+        assert (completed.directory / "result.wav").read_bytes() == preserved
+    finally:
         model.close()

@@ -2863,6 +2863,9 @@ the original indexed owner, including companions reached through a cached base.
   exact parent/child retry ownership, fences admission and preserves replacement
   directories/content. Failed pre-write preparation reclaims only its own empty
   result/receipt. This is not Worker activation or shared peak-memory admission.
+  Retain empty-result fallback custody until successful resident completion;
+  early resident refusal cannot orphan a prepared directory/receipt. Drain the
+  resident before reclaiming that fallback.
 - Native resident: complete data/code verification, explicit runtime math probe,
   observed per-component loaded precision, exact canonical source-tensor equality,
   one active request, contiguous sequence/correlation checks, 0600 PCM24/result

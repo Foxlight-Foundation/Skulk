@@ -2774,11 +2774,14 @@ handover joins idle polls before native submission; polls during inference use
 the last observation instead of competing for the resident request actor.
 Closed generation/edit tasks preserve resolved seed/text/source/frame coordinates.
 Results remain in independent delivery custody and failed unsubmitted cleanup
-retains retry ownership. Failed pre-write preparation rolls back only its new empty result/receipt;
+retains retry ownership. Failed pre-write preparation rolls back only its new
+empty result/receipt;
 failed rollback fences the model and retains parent/child identity for retry,
-preserving replacement directories and new content. Worker preparation/bootstrap/
-media activation and shared
-peak-memory admission are still required; keep native placement guards until
+preserving replacement directories and new content. The empty-result fallback
+survives early resident refusal and is cleared only after successful resident
+completion; close drains the resident before reclaiming it. Worker preparation,
+bootstrap/media activation and shared peak-memory admission are still required;
+keep native placement guards until
 those are connected and accepted.
 
 Native editing job contracts live in `shared/types/music_edits.py`: closed

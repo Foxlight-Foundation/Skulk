@@ -108,7 +108,8 @@ def _read_receipt(directory: Path) -> _ResultOwnership | None:
 class PendingMusicResult:
     """Retained pre-submit cleanup identity after an uncertain filesystem effect.
 
-    No native writer has been admitted. A known inode must still match; without
+    A writer must never have been admitted, or must already be drained. A known
+    inode must still match; without
     an observed inode only an empty private directory without a receipt can be
     reclaimed under the original parent. Existing completed results are never
     transferred into this ownership by a failed exclusive mkdir.
@@ -308,7 +309,10 @@ def reclaim_result_directory(directory: Path) -> bool:
 def reclaim_unsubmitted_result(pending: PendingMusicResult) -> bool:
     """Reclaim only this pre-submit empty inode/receipt, preserving failed custody.
 
-    The owning model serializes creation and has admitted no native writer.
+    The owning model serializes creation and proves no native writer can run:
+    either submission never began or the resident has actually drained. Retain
+    this fallback until successful completion because the resident may refuse
+    before recording its own writer custody. It can reclaim only empty output.
     Expected parent and observed child identities survive a receipt-sync failure;
     any replacement, new content, foreign receipt or incomplete removal refuses
     cleanup. A False result must keep the model fenced and owner retained.

@@ -4229,11 +4229,14 @@ reach the native protocol. Generation requires an already resolved seed; edits
 reverify the worker-private original and retain exact resolved native frame
 coordinates. Completed results remain in independent delivery custody; failed
 unsubmitted cleanup and native drain retain handles for retry. Failed pre-write
-preparation rolls back only the new empty
-directory and matching receipt are reclaimable. Failed rollback fences the
+preparation reclaims only its new empty directory and matching receipt.
+Failed rollback fences the
 model and retains the original parent/child identities for close retry;
 replacement directories or new content are preserved. This adapter is
-not yet registered with Worker/bootstrap. Native placement guards remain until
+responsible for retaining that empty-result fallback until successful resident
+completion; early resident refusal cannot leave a handover gap. Close drains the
+resident before attempting fallback reclamation. This adapter is not yet
+registered with Worker/bootstrap. Native placement guards remain until
 shared peak-memory admission, resource publication and media execution are wired.
 
 The native CLI arms a detached custody guardian before importing Torch or
