@@ -2362,6 +2362,8 @@ quoted SHA-256 `ETag`. Content is retained for 24 hours. Unsettled/failed/cancel
 jobs return **409**; absent/expired content returns **404**. Eight downloads are
 admitted per API node; excess readers return **503**. Deleting a job does not
 truncate a download whose descriptor was already leased.
+If removing expired content fails, its storage reservation remains in place and
+later sweeps retry cleanup without interrupting unrelated API work.
 
 **POST** `/v1/music/edits/{edit_id}/cancel` records cancellation, stops native
 work and source/result delivery, and removes partial copies. Terminal jobs are

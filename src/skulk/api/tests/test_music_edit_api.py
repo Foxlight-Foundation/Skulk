@@ -3,7 +3,9 @@
 
 import json
 import os
+import shutil
 import stat
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -646,6 +648,55 @@ async def test_background_storage_failure_cancels_native_work_and_keeps_host_ali
         assert (await client.get(f"/v1/music/edits/{accepted.id}")).status_code == 503
         assert (await client.get("/v1/music/unrelated-song")).status_code == 200
         monkeypatch.undo()
+
+
+async def test_expiry_cleanup_failure_keeps_host_alive_and_retries_retained_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The actual shared-group sweeper retains a failed unlink and retries it."""
+    async with fixture(tmp_path) as (harness, client):
+        accepted = await create(client)
+        identifier = CommandId(accepted.id)
+        data = await harness.render(identifier, media_first=True)
+        completed = await terminal(client, accepted.id)
+        assert completed.expires_at is not None
+        expiry = completed.expires_at
+        directory = harness.api.media.root / "wav" / accepted.id
+        original = shutil.rmtree
+        refused, allow_cleanup = threading.Event(), threading.Event()
+
+        def remove(path: Path, *, ignore_errors: bool = False) -> None:
+            if path == directory and not allow_cleanup.is_set():
+                refused.set()
+                return
+            original(path, ignore_errors=ignore_errors)
+
+        monkeypatch.setattr(shutil, "rmtree", remove)
+        monkeypatch.setattr("skulk.api.music_edit_api.time.time", lambda: expiry)
+        try:
+            harness.api.tasks.start_soon(harness.api.sweep)
+            with anyio.fail_after(5):
+                while not refused.is_set():
+                    await anyio.sleep(0.01)
+            # Observe the event-loop task after its joined filesystem effect.
+            # The reservation cannot disappear when deletion left files behind.
+            async with harness.api.lock:
+                assert identifier not in harness.api._expired
+                assert harness.api.media.reserved_bytes() == len(data)
+                assert directory.is_dir()
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+            assert (
+                await client.get(f"/v1/music/edits/{accepted.id}")
+            ).status_code == 200
+            allow_cleanup.set()
+            with anyio.fail_after(5):
+                while identifier not in harness.api._expired:
+                    await anyio.sleep(0.01)
+            assert harness.api.media.reserved_bytes() == 0
+            assert not directory.exists()
+            assert (await client.get("/v1/music/unrelated-song")).status_code == 200
+        finally:
+            monkeypatch.undo()
 
 
 @pytest.mark.parametrize("media_first", [False, True])

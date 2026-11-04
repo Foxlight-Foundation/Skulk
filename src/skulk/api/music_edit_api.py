@@ -1101,9 +1101,18 @@ class MusicEditAPI:
                     and job.expires_at <= now
                     and job.id not in self._expired
                 ):
-                    await separation_file_effect(
-                        lambda job=job: self.media.delete(job.id)
-                    )
+                    try:
+                        await separation_file_effect(
+                            lambda job=job: self.media.delete(job.id)
+                        )
+                    except OSError as error:
+                        # The media owner retains its byte reservation when
+                        # removal is incomplete. Retry this job next sweep;
+                        # one filesystem failure must not cancel the host.
+                        logger.opt(exception=error).warning(
+                            "Music edit expiry cleanup remains reserved for retry"
+                        )
+                        continue
                     self._expired.add(job.id)
 
     async def sweep(self) -> None:
