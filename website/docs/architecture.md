@@ -4520,3 +4520,19 @@ unchanged. RSS and allocator counters never grant allocation credit. A dead,
 stale, foreign or withdrawn owner cannot republish native capacity. Cold or
 expired placement repairs require the mount preparation barrier and return
 actionable pending diagnostics instead of promoting installable packages.
+
+### Native separator fixed-inventory promotion
+
+The separation package workflow distinguishes current-source verification from
+explicit fixed-inventory reproduction and same-source promotion. Only the latter
+builds `DEMUCS_ADAPTER_REVISION`, verifies all three original CPU archive/payload
+pins and emits hosted provenance after the existing offline/cache/model/resident
+checks. Separate producer and current-controller checkouts preserve immutable
+package identity while exercising the current installation and execution seam. A separately dispatched publisher requires successful same-workflow,
+same-repository, same-source candidates from initiative-merged reviewed source.
+The shared bounded archive selector checks every fixed filename, size and digest;
+the Demucs CLI selects three profiles and the ACE CLI retains six. Hosted
+workflow/source attestations precede the serialized append-only engine index
+writer. Publication never rebuilds bytes and still requires complete public
+readback and the private ledger. Model weights stay separate, and package
+availability is not loaded readiness or empirical hardware/music qualification.

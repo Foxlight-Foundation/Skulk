@@ -3085,3 +3085,19 @@ the original indexed owner, including companions reached through a cached base.
   restore resources. Cold/expired repair returns actionable preparation pending;
   installable-only metadata never becomes ready. No sealed adapter or portable
   native protocol change is required for this Core-side observation forwarding.
+
+### Native separator fixed-inventory promotion
+
+The separation package workflow distinguishes current-source verification from
+explicit fixed-inventory reproduction and same-source promotion. Only the latter
+builds `DEMUCS_ADAPTER_REVISION`, verifies all three original CPU archive/payload
+pins and emits hosted provenance after the existing offline/cache/model/resident
+checks. Separate producer and current-controller checkouts preserve immutable
+package identity while exercising the current installation and execution seam. A separately dispatched publisher requires successful same-workflow,
+same-repository, same-source candidates from initiative-merged reviewed source.
+The shared bounded archive selector checks every fixed filename, size and digest;
+the Demucs CLI selects three profiles and the ACE CLI retains six. Hosted
+workflow/source attestations precede the serialized append-only engine index
+writer. Publication never rebuilds bytes and still requires complete public
+readback and the private ledger. Model weights stay separate, and package
+availability is not loaded readiness or empirical hardware/music qualification.

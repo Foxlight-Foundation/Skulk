@@ -2,6 +2,16 @@ name: Native separation packages
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Verify current source, reproduce the fixed inventory, or publish verified inventory bytes
+        type: choice
+        options: [verify-current, build-inventory, publish-inventory]
+        default: verify-current
+      source_run_id:
+        description: Successful build-inventory run to publish without rebuilding
+        type: string
+        default: ''
   pull_request:
     paths:
       - '.github/workflows/demucs-native-boundary.yml'
@@ -26,16 +36,58 @@ on:
       - 'scripts/stage_demucs_candidate.py'
       - 'scripts/qualify_demucs_cache.py'
       - 'scripts/qualify_demucs_resident.py'
+      - 'src/skulk/provisioning/demucs_inventory.py'
+      - 'scripts/verify_ace_step_promotion.py'
+      - 'scripts/verify_demucs_promotion.py'
+      - 'scripts/tests/test_verify_demucs_promotion.py'
 
 permissions:
   contents: read
 
 concurrency:
-  group: demucs-boundary-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: demucs-boundary-${{ github.event.pull_request.number || github.ref }}-${{ inputs.mode || 'verify-current' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs.mode != 'publish-inventory' }}
 
 jobs:
+  inventory:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'publish-inventory'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      adapter_revision: ${{ steps.select.outputs.adapter_revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Read only the fixed inventory from the selected Core source
+        id: select
+        env:
+          PYTHONPATH: src
+        run: |
+          uv venv --managed-python --python 3.13.13 "$RUNNER_TEMP/inventory-tools"
+          uv pip install --python "$RUNNER_TEMP/inventory-tools/bin/python" pydantic==2.12.5 psutil==7.2.1 packaging==26.0 httpx==0.28.1
+          mkdir -m 700 "$RUNNER_TEMP/native-inventory"
+          "$RUNNER_TEMP/inventory-tools/bin/python" -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          from skulk.provisioning.demucs_inventory import DEMUCS_ADAPTER_REVISION, DEMUCS_PACKAGES
+          plan = {"adapter_revision": DEMUCS_ADAPTER_REVISION, "packages": [p.model_dump(mode="json") for p in DEMUCS_PACKAGES]}
+          (Path(os.environ["RUNNER_TEMP"]) / "native-inventory/inventory.json").write_text(json.dumps(plan, sort_keys=True) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("adapter_revision=" + DEMUCS_ADAPTER_REVISION + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-demucs-publication-inventory
+          path: ${{ runner.temp }}/native-inventory/inventory.json
+          if-no-files-found: error
+          retention-days: 14
+
   native:
+    needs: inventory
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'publish-inventory'
     name: Offline package execution (${{ matrix.platform }})
     strategy:
       fail-fast: false
@@ -52,19 +104,43 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: controller
+    env:
+      PRODUCER_ROOT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'build-inventory' && format('{0}/producer', github.workspace) || format('{0}/controller', github.workspace) }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: controller
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'build-inventory'
+        with:
+          # Keep immutable producer bytes separate from current controller checks.
+          ref: ${{ needs.inventory.outputs.adapter_revision }}
+          path: producer
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - name: Select an output workspace outside the source checkout
         run: printf 'PACKAGE_ROOT=%s/demucs-package\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'build-inventory'
+        with:
+          name: native-demucs-publication-inventory
+          path: ${{ env.PACKAGE_ROOT }}/publication-inventory
       - name: Prepare the supported Core controller and build tools
         run: |
           uv venv --managed-python --python 3.13.13 "$PACKAGE_ROOT/tools"
           uv pip install --python "$PACKAGE_ROOT/tools/bin/python" pydantic==2.12.5 psutil==7.2.1 packaging==26.0 basedpyright==1.37.1 pytest==9.1.1 httpx==0.28.1
           "$PACKAGE_ROOT/tools/bin/python" -c 'import os; assert hasattr(os, "waitid"), "Core requires non-reaping process observation"'
       - name: Check producer typing and offline refusal regressions
+        working-directory: ${{ env.PRODUCER_ROOT }}
         env:
           PYTHONPATH: packaging/skulk-demucs
         run: |
@@ -76,6 +152,7 @@ jobs:
         run: |
           "$PACKAGE_ROOT/tools/bin/python" -B -m pytest -q -c /dev/null --noconftest -o cache_dir="$PACKAGE_ROOT/process-test-cache" src/skulk/provisioning/tests/test_native_install_process.py src/skulk/provisioning/tests/test_demucs_runtime.py src/skulk/worker/runner/demucs/tests/test_resident.py --basetemp "$PACKAGE_ROOT/process-tests"
       - name: Stage the exact inference library source outside the checkout
+        working-directory: ${{ env.PRODUCER_ROOT }}
         run: |
           source_revision=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["revision"])')
           source_repository=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json; print(json.load(open("packaging/skulk-demucs/source.json"))["repository"])')
@@ -84,15 +161,34 @@ jobs:
           git -C "$PACKAGE_ROOT/source" checkout --detach FETCH_HEAD
           test "$(git -C "$PACKAGE_ROOT/source" rev-parse HEAD)" = "$source_revision"
       - name: Collect only hash-pinned wheels and standalone Python
+        working-directory: ${{ env.PRODUCER_ROOT }}
         run: |
           "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-demucs/fetch_wheels.py '${{ matrix.platform }}' --output "$PACKAGE_ROOT/intake"
       - name: Build twice from clean committed sources and compare complete bytes
+        working-directory: ${{ env.PRODUCER_ROOT }}
         run: |
           python_archive=$(find "$PACKAGE_ROOT/intake/python" -name '*.tar.gz' -type f)
           for build in first second; do
             "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-demucs/build_wheel.py --repository "$PWD" --source "$PACKAGE_ROOT/source" --wrapper "$PWD/packaging/skulk-demucs/skulk_demucs" --wheelhouse "$PACKAGE_ROOT/intake/wheels" --python-archive "$python_archive" --lock "$PWD/packaging/skulk-demucs/locks/${{ matrix.platform }}-cpu-py312.lock" --target '${{ matrix.target }}' --output "$PACKAGE_ROOT/$build"
           done
           cmp "$PACKAGE_ROOT/first/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl" "$PACKAGE_ROOT/second/skulk_demucs_cpu-0.1.0-cp312-cp312-${{ matrix.target }}.whl"
+      - name: Require exact fixed-inventory bytes before candidate admission
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'build-inventory'
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.target }}
+        run: |
+          "$PACKAGE_ROOT/tools/bin/python" -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ["PACKAGE_ROOT"])
+          plan = json.loads((root / "publication-inventory/inventory.json").read_text())
+          selected = [p for p in plan["packages"] if p["platform_tag"] == os.environ["EXPECTED_PLATFORM"]]
+          assert len(selected) == 1, "the fixed inventory must contain exactly this profile"
+          descriptor = json.loads(next((root / "first").glob("*.json")).read_text())
+          assert descriptor["adapter_revision"] == plan["adapter_revision"], "wrong producer revision"
+          assert descriptor["variant"] == "cpu", "separator inventory contains CPU packages only"
+          assert all(descriptor[key] == value for key, value in selected[0].items()), "candidate bytes differ from the fixed Core inventory"
+          PY
       - name: Install in a fresh private environment with no indexes or developer paths
         env:
           PYTHONPATH: src
@@ -135,11 +231,16 @@ jobs:
           if [[ -x "$PACKAGE_ROOT/installed/runtime/bin/python" ]]; then
             "$PACKAGE_ROOT/installed/runtime/bin/python" -I -B -c 'from importlib.metadata import distributions; print("\n".join(sorted("{}=={}".format(item.metadata["Name"], item.version) for item in distributions())))' > "$PACKAGE_ROOT/native-dependencies.txt"
           fi
+      - uses: actions/attest-build-provenance@v3
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'build-inventory'
+        with:
+          subject-path: ${{ env.PACKAGE_ROOT }}/first/*.whl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: demucs-candidate-${{ matrix.platform }}
           compression-level: 0
+          retention-days: 3
           path: |
             ${{ env.PACKAGE_ROOT }}/first/*.whl
             ${{ env.PACKAGE_ROOT }}/first/*.json
@@ -153,3 +254,77 @@ jobs:
             ${{ env.PACKAGE_ROOT }}/resident-proof/owner-probe.log
             ${{ env.PACKAGE_ROOT }}/cache-proof/qualification.json
             ${{ env.PACKAGE_ROOT }}/cache-proof/cache/**/diagnostics/**/*.log
+
+  publish-index:
+    if: github.repository == 'Foxlight-Foundation/Skulk' && github.event_name == 'workflow_dispatch' && inputs.mode == 'publish-inventory'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    concurrency:
+      group: foxlight-engine-wheel-index-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Require reviewed initiative source and a successful same-source candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]{1,20}$ ]]
+          git fetch --depth=128 origin initiative/music-studio-audio
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$RUNNER_TEMP/native-source-run.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads((Path(os.environ["RUNNER_TEMP"]) / "native-source-run.json").read_text())
+          assert run["conclusion"] == "success" and run["event"] == "workflow_dispatch"
+          assert run["path"] == ".github/workflows/demucs-native-boundary.yml"
+          assert run["head_sha"] == os.environ["GITHUB_SHA"], "candidate and publisher source differ"
+          assert run["repository"]["full_name"] == os.environ["GITHUB_REPOSITORY"]
+          PY
+      - name: Reserve disposable hosted-runner space for the complete archive set
+        env:
+          ACE_CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACE_CI_RUNNER_ENVIRONMENT" = github-hosted
+          python3 -c 'import os,shutil; assert shutil.disk_usage(os.environ["RUNNER_TEMP"]).free >= 4*1024**3'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: demucs-candidate-*
+          merge-multiple: false
+          path: ${{ runner.temp }}/native-demucs-publication
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify all three exact archives and hosted provenance without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: src
+        run: |
+          uv venv --managed-python --python 3.13.13 "$RUNNER_TEMP/publication-tools"
+          uv pip install --python "$RUNNER_TEMP/publication-tools/bin/python" pydantic==2.12.5 psutil==7.2.1 packaging==26.0 httpx==0.28.1
+          "$RUNNER_TEMP/publication-tools/bin/python" -B -m scripts.verify_demucs_promotion "$RUNNER_TEMP/native-demucs-publication" > "$RUNNER_TEMP/verified-native-wheels.txt"
+          test "$(wc -l < "$RUNNER_TEMP/verified-native-wheels.txt")" -eq 3
+          while IFS= read -r wheel; do
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/demucs-native-boundary.yml" \
+              --source-digest "$GITHUB_SHA" --deny-self-hosted-runners > /dev/null
+          done < "$RUNNER_TEMP/verified-native-wheels.txt"
+      - name: Publish only the verified immutable bytes through the shared append-only index
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < "$RUNNER_TEMP/verified-native-wheels.txt"
+          test "${#wheels[@]}" -eq 3
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py "${wheels[@]}"
