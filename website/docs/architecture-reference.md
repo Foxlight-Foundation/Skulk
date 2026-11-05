@@ -12,6 +12,24 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
+- **Client-owned continuation (experimental):** `api/inference_continuation.py`
+  defines strict public proof/receipt data; no caller keys or provider state.
+  `Skulk-Continuation-Proof` on `/v1/chat/completions` binds the exact HTTP body
+  to a fresh client proof. `inference.chat` links the continuation descriptor
+  to an exact v2 chat callable in the same actual provider instance. The
+  capability independently verifies current registered-client authority.
+  `/v1/chat/continuation/receipt` uses a distinct signed lookup domain and empty
+  provider input. Semantic receipts require transport completion before HTTP
+  publication. No inference retry, implicit new context or destination migration.
+  Streaming is bounded per frame; collected JSON alone has an aggregate guard.
+  `dashboard-react/src/store/chatContinuation.ts` owns nonextractable Ed25519
+  browser keys in IndexedDB, canonical client proofs and public fingerprints.
+  `ChatContinuationControls` explicitly imports owner public enrollment and
+  recovers receipts. `Conversation.continuation` contains public scope/receipts
+  and a durable pending fence; `ChatMessage.continuationMessages` retains exact
+  public tool/assistant turns separately from display trimming. Missing receipt,
+  missing history or changed destination never triggers automatic replay/reset.
+
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority

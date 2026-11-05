@@ -21,6 +21,19 @@ stored in browser-local IndexedDB (`store/chatDocuments.ts`) and hydrated into
 one request; localStorage holds conversation references, not document bodies.
 Missing files and unsupported destinations must never be silently omitted.
 
+Explicit client continuation uses `api/inference_continuation.py`: detached
+client proofs bind the exact HTTP body and a same-provider continuation/chat
+descriptor relationship. Core holds no continuation private keys or provider
+checkpoints. Receipt lookup uses its own signed operation domain and cannot
+replay inference. Hold receipts and success until transport completion. Preserve
+early provider refusals when their output closes input during upload. Streaming
+has no aggregate generation cap; collected responses retain a memory guard.
+Dashboard client keys stay nonextractable in origin-local IndexedDB
+(`store/chatContinuation.ts`). Only public grants, receipts and pending attempt
+fences enter conversation metadata. Preserve exact public tool rounds, summaries
+and whitespace separately from display content; verify committed fingerprints.
+Never silently recover missing assistant text or restart an uncertain request.
+
 Native installed preservation lives in `store/preservation_export.py`; complete
 card-selected mappings live in `store/preservation_closure.py`. Offline recovery
 lives in `store/preservation.py` and

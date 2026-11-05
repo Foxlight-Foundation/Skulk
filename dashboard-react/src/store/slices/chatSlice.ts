@@ -1,6 +1,7 @@
 import { createSlice, nanoid, type PayloadAction } from '@reduxjs/toolkit';
 import { DEFAULT_CONVERSATION_NAME, type ChatMessage, type Conversation } from '../../types/chat';
 import { chatDocumentIds, pruneChatDocuments, removeChatDocuments } from '../chatDocuments';
+import type { ChatContinuation } from '../chatContinuation';
 
 /* ── Helpers ──────────────────────────────────────────── */
 
@@ -232,7 +233,10 @@ const slice = createSlice({
       const convo = state.conversations[convoId];
       if (!convo) return;
       const target = convo.messages.find((m) => m.id === action.payload.messageId);
-      if (target) target.content = action.payload.content;
+      if (target) {
+        target.content = action.payload.content;
+        delete target.continuationMessages;
+      }
       convo.updatedAt = Date.now();
     },
 
@@ -299,6 +303,23 @@ const slice = createSlice({
         conversation.name = autoName(action.payload.message.content);
       }
       conversation.updatedAt = Date.now();
+    },
+
+    /** Pin continuation state to the originating chat, never the current selection. */
+    setConversationContinuation(state, action: PayloadAction<{ conversationId: string; continuation?: ChatContinuation }>) {
+      const conversation = state.conversations[action.payload.conversationId];
+      if (conversation) conversation.continuation = action.payload.continuation;
+    },
+
+    /** Publish an acknowledged round and its receipt as one state transition. */
+    saveContinuationMessage(state, action: PayloadAction<{ conversationId: string; continuation: ChatContinuation; message: ChatMessage }>) {
+      const conversation = state.conversations[action.payload.conversationId];
+      if (!conversation) return;
+      const index = conversation.messages.findIndex(message => message.id === action.payload.message.id);
+      if (index < 0) conversation.messages.push(action.payload.message);
+      else conversation.messages[index] = action.payload.message;
+      conversation.continuation = action.payload.continuation;
+      conversation.updatedAt = action.payload.message.timestamp;
     },
 
     /** Rename a saved conversation without replacing its messages or selection. */
@@ -403,6 +424,24 @@ export function persistDocumentMessage(chat: ChatState, conversationId: string, 
     }));
   } catch {
     throw new Error('Could not save conversation history in this browser. Free browser storage and try again.');
+  }
+}
+
+/** Atomically acknowledge continuation state and any associated public history. */
+export function persistChatContinuation(chat: ChatState, conversationId: string, continuation?: ChatContinuation, message?: ChatMessage): void {
+  const conversation = chat.conversations[conversationId];
+  if (!conversation) throw new Error('The conversation is no longer available.');
+  const messages = message
+    ? conversation.messages.some(existing => existing.id === message.id)
+      ? conversation.messages.map(existing => existing.id === message.id ? message : existing)
+      : [...conversation.messages, message]
+    : conversation.messages;
+  try {
+    window.localStorage.setItem(DURABLE_STORAGE_KEY, durableChatJson({ ...chat,
+      conversations: { ...chat.conversations, [conversationId]: { ...conversation, continuation, messages } },
+    }));
+  } catch {
+    throw new Error('Could not save continuation state. Free browser storage before sending.');
   }
 }
 

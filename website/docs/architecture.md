@@ -3644,6 +3644,21 @@ their supported scope. See the API guide for exact request and lifecycle fields.
 
 ## Delegated capability inference
 
+Explicit client-owned continuation uses `api/inference_continuation.py` and the
+same chat/media adapter. Core checks detached proof shape, exact bytes and the
+advertised same-provider relationship; independently registered client authority,
+encrypted checkpoints and upstream execution remain capability-owned. Successful
+receipts are exposed only after clean transport completion. Separate signed
+receipt lookup never replays inference. Streaming has no aggregate generation
+cap; collected JSON retains a documented memory guard. Existing full-history
+gateway clients keep their original contract.
+Dashboard `store/chatContinuation.ts` owns a nonextractable origin-local
+Ed25519 key in IndexedDB and validates public enrollment. Conversation metadata
+retains only public scope, receipts and pending attempts. Chat independently
+checks exact public history, including complete tool rounds and summaries;
+uncertainty requires explicit recovery or abandonment. No management-session
+cookie or private key crosses between Chat and a capability surface.
+
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority

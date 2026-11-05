@@ -57,6 +57,7 @@ from fastapi import (
     FastAPI,
     File,
     Form,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -69,7 +70,7 @@ from fastapi.staticfiles import StaticFiles
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
-from pydantic import UUID4, ValidationError
+from pydantic import UUID4, JsonValue, ValidationError
 from starlette.datastructures import FormData
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.types import Scope
@@ -113,6 +114,14 @@ from skulk.api.field_telemetry import (
     prepare_telemetry_config_update,
     tap_generation_stream,
 )
+from skulk.api.inference_continuation import (
+    CONTINUATION_CONTRACT,
+    ContinuationTarget,
+    ReceiptOutcome,
+    ReceiptProof,
+    check_admission_deadline,
+    read_continuation_proof,
+)
 from skulk.api.inference_gateway import (
     CONTRACT as CHAT_GATEWAY_CONTRACT,
 )
@@ -121,6 +130,7 @@ from skulk.api.inference_gateway import (
     ChatCatalog,
     GatewaySigner,
     chat_response,
+    continuation_receipt_response,
     send_chat_body,
 )
 from skulk.api.inference_gateway import (
@@ -2806,6 +2816,18 @@ class API:
                 "Private key material remains on this API host."
             ),
         )(self.inference_gateway_identity)
+        self.app.post(
+            "/v1/chat/continuation/receipt",
+            tags=["Capabilities"],
+            summary="Recover a committed capability-chat receipt",
+            description=(
+                "Submit a separately signed client receipt proof to its exact local "
+                "continuation destination. Requires direct owner API authority and "
+                "an independently registered client key. Returns content-free commit "
+                "metadata or a fixed refusal after verified transport completion; "
+                "never retries inference or returns stored provider content."
+            ),
+        )(self.capability_continuation_receipt)
         self.app.get(
             "/v1/models",
             tags=["Models"],
@@ -2936,6 +2958,10 @@ class API:
                 "steward is still being placed, staged, or loaded. Steward observation is "
                 "available to ordinary clients, but proposal-creation tools are exposed only "
                 "to requests with operator mutation authority."
+                " Capability continuation is explicit via Skulk-Continuation-Proof: "
+                "an unpadded base64url client proof over the exact HTTP body. Its "
+                "destination must advertise chat.continuation@0.1.0. Ordinary "
+                "requests retain the full-history contract."
             ),
         )(self.chat_completions_route)
         self.app.post(
@@ -6929,13 +6955,19 @@ class API:
         return command
 
     async def chat_completions_route(
-        self, payload: ChatCompletionRequest, request: Request
+        self,
+        payload: ChatCompletionRequest,
+        request: Request,
+        continuation_proof: Annotated[
+            str | None, Header(alias="Skulk-Continuation-Proof", max_length=4096)
+        ] = None,
     ) -> StreamingResponse:
         """Serve chat completions with request-scoped steward proposal authority.
 
         Args:
             payload: OpenAI-compatible chat completion request.
             request: HTTP request used to determine operator mutation authority.
+            continuation_proof: Optional detached proof signed by an approved client.
 
         Returns:
             A streaming or collected chat-completions response.
@@ -6956,7 +6988,15 @@ class API:
                 raise HTTPException(
                     400, "Unsupported or invalid capability chat request"
                 ) from None
-            return await self._capability_chat_completions(payload, request)
+            if len(request.headers.getlist("Skulk-Continuation-Proof")) > 1:
+                raise HTTPException(400, "Ambiguous continuation proof")
+            return await self._capability_chat_completions(
+                payload, request, raw=raw, continuation_header=continuation_proof
+            )
+        if continuation_proof is not None:
+            raise HTTPException(
+                400, "Selected destination does not support capability continuation"
+            )
         installation_reader = None
         if str(payload.model) == STEWARD_VIRTUAL_MODEL_ID:
             try:
@@ -10868,9 +10908,10 @@ class API:
         self, budget_seconds: float
     ) -> list[ChatCatalog]:
         """Read one local discovery cohort within its remaining caller budget."""
-        if self._extensions is None:
+        extensions = self._extensions
+        if extensions is None:
             return []
-        descriptors = self._extensions.capability_descriptors
+        descriptors = extensions.capability_descriptors
         observed: dict[int, ChatCatalog] = {}
 
         async def read_catalog(index: int, descriptor: CapabilityDescriptor) -> None:
@@ -10933,6 +10974,16 @@ class API:
                 for item in descriptors
             ):
                 return
+            metadata_owner = extensions.call_handler(descriptor.qualified_id)
+            chat_owner = extensions.stream_handler(
+                f"{catalog.callable_id}@{catalog.callable_version}"
+            )
+            if (
+                metadata_owner is None
+                or chat_owner is None
+                or id(metadata_owner[1]) != id(chat_owner[1])
+            ):
+                return
             observed[index] = catalog
 
         # At most eight concurrent cached reads prevent ordering behind slow
@@ -10971,7 +11022,12 @@ class API:
         return catalogs
 
     async def _capability_chat_completions(
-        self, payload: ChatCompletionRequest, request: Request
+        self,
+        payload: ChatCompletionRequest,
+        request: Request,
+        *,
+        raw: bytes | None = None,
+        continuation_header: str | None = None,
     ) -> StreamingResponse:
         """Dispatch one direct-owner chat through an independently guarded capability."""
         try:
@@ -11002,21 +11058,59 @@ class API:
             raise HTTPException(403, "Hard inference policy excludes this capability")
         from pydantic import JsonValue, TypeAdapter
 
-        body = TypeAdapter(dict[str, JsonValue]).validate_json(
-            payload.model_dump_json(exclude_none=True, exclude_unset=True)
-        )
-        body.pop("model", None)
-        try:
-            signed, media_body = await asyncio.to_thread(
-                self._inference_signer.prepare, catalog, model.id, body
+        proof = None
+        if continuation_header is not None:
+            if raw is None:
+                raise HTTPException(400, "Missing exact continuation body")
+            try:
+                proof = read_continuation_proof(continuation_header, raw)
+            except ValueError:
+                raise HTTPException(400, "Invalid continuation proof or body") from None
+            descriptor = self._chat_continuation_descriptor(catalog)
+            if descriptor is None:
+                raise HTTPException(
+                    409, "Selected capability has no continuation contract"
+                )
+            expected = ContinuationTarget(
+                target_node=catalog.target_node,
+                callable_id=descriptor.id,
+                descriptor_revision=descriptor_revision(descriptor),
+                model=model.id,
             )
-        except (OSError, ValueError):
-            raise HTTPException(503, "Inference gateway key is unavailable") from None
+            if proof.request.target != expected:
+                raise HTTPException(
+                    409, "Continuation destination changed or does not match"
+                )
+            signed = dict[str, object](proof.model_dump(mode="json"))
+            media_body = raw
+            callable_id, callable_version, revision = (
+                descriptor.id,
+                descriptor.version,
+                descriptor_revision(descriptor),
+            )
+        else:
+            body = TypeAdapter(dict[str, JsonValue]).validate_json(
+                payload.model_dump_json(exclude_none=True, exclude_unset=True)
+            )
+            body.pop("model", None)
+            try:
+                signed, media_body = await asyncio.to_thread(
+                    self._inference_signer.prepare, catalog, model.id, body
+                )
+            except (OSError, ValueError):
+                raise HTTPException(
+                    503, "Inference gateway key is unavailable"
+                ) from None
+            callable_id, callable_version, revision = (
+                catalog.callable_id,
+                catalog.callable_version,
+                catalog.descriptor_revision,
+            )
         session = await self._stream_capability(
             self.node_id,
-            catalog.callable_id,
-            catalog.callable_version,
-            catalog.descriptor_revision,
+            callable_id,
+            callable_version,
+            revision,
             signed,
             timeout_seconds=150,
         )
@@ -11042,10 +11136,111 @@ class API:
                 stream=payload.stream,
                 include_usage=payload.stream_options is not None
                 and payload.stream_options.include_usage,
+                continuation=proof,
             ),
             media_type="text/event-stream" if payload.stream else "application/json",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
+
+    def _chat_continuation_descriptor(
+        self, catalog: ChatCatalog
+    ) -> CapabilityDescriptor | None:
+        """Resolve one explicit same-provider relationship without vendor inference."""
+        if (
+            self._extensions is None
+            or catalog.contract != STREAMED_CHAT_GATEWAY_CONTRACT
+        ):
+            return None
+        chat_id = f"{catalog.callable_id}@{catalog.callable_version}"
+        chat = self._extensions.stream_handler(chat_id)
+        if chat is None or descriptor_revision(chat[2]) != catalog.descriptor_revision:
+            return None
+        matches: list[CapabilityDescriptor] = []
+        for descriptor in self._extensions.capability_descriptors:
+            annotations = descriptor.annotations or {}
+            if (
+                descriptor.io_mode != "bidirectional"
+                or descriptor.version != "0.1.0"
+                or annotations.get("inference.contract") != CONTINUATION_CONTRACT
+                or annotations.get("inference.authorization") != "caller.ed25519@0.1.0"
+                or annotations.get("inference.chat") != chat_id
+            ):
+                continue
+            handler = self._extensions.stream_handler(descriptor.qualified_id)
+            if handler is not None and handler[1] is chat[1]:
+                matches.append(descriptor)
+        return matches[0] if len(matches) == 1 else None
+
+    async def capability_continuation_receipt(
+        self, payload: ReceiptProof, request: Request
+    ) -> ReceiptOutcome:
+        """Authenticate an exact public receipt lookup without generating text.
+
+        Args:
+            payload: Fresh independently signed receipt-domain client proof.
+            request: Current direct-owner API authorization context.
+
+        Returns:
+            A content-free receipt or fixed capability refusal after clean EOF.
+        """
+        await authorize_plugin_owner_request(request)
+        try:
+            check_admission_deadline(payload.request.expires_at)
+        except ValueError:
+            raise HTTPException(400, "Invalid receipt admission deadline") from None
+        target = payload.request.target
+        descriptor = next(
+            (
+                candidate
+                for catalog in await self._capability_chat_catalogs()
+                if catalog.target_node == target.target_node
+                and any(model.id == target.model for model in catalog.models)
+                if (candidate := self._chat_continuation_descriptor(catalog))
+                is not None
+                and candidate.id == target.callable_id
+                and descriptor_revision(candidate) == target.descriptor_revision
+            ),
+            None,
+        )
+        if descriptor is None:
+            raise HTTPException(
+                409, "Continuation destination is unavailable or changed"
+            )
+        session = await self._stream_capability(
+            self.node_id,
+            descriptor.id,
+            descriptor.version,
+            descriptor_revision(descriptor),
+            dict[str, object](payload.model_dump(mode="json")),
+            timeout_seconds=30,
+        )
+        if not session.open_result.ok:
+            raise HTTPException(503, "Continuation receipt lookup could not start")
+        await send_chat_body(session, b"", request.is_disconnected)
+        return await continuation_receipt_response(session, payload)
+
+    def _chat_continuation_metadata(
+        self, catalog: ChatCatalog, model: str
+    ) -> dict[str, JsonValue]:
+        """Expose only an explicit public destination for separately approved clients."""
+        descriptor = self._chat_continuation_descriptor(catalog)
+        if descriptor is None:
+            return {}
+        return {
+            "continuation": {
+                "contract": CONTINUATION_CONTRACT,
+                "authorization": "caller.ed25519@0.1.0",
+                "callable_version": descriptor.version,
+                "proof_header": "Skulk-Continuation-Proof",
+                "receipt_path": "/v1/chat/continuation/receipt",
+                "target": {
+                    "target_node": catalog.target_node,
+                    "callable_id": descriptor.id,
+                    "descriptor_revision": descriptor_revision(descriptor),
+                    "model": model,
+                },
+            }
+        }
 
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
         """Return available models with cluster-authoritative installed state.
@@ -11118,6 +11313,7 @@ class API:
                         tasks=["TextGeneration"],
                         tags=["capability", catalog.processing_domain],
                         inference_capability={
+                            **self._chat_continuation_metadata(catalog, model.id),
                             "contract": catalog.contract,
                             "processing_domain": catalog.processing_domain,
                             "usage": catalog.usage,
