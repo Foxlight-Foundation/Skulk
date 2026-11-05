@@ -2990,4 +2990,28 @@ the original indexed owner, including companions reached through a cached base.
   a sample before ready, and rechecks after blocking dequeue. Freshness at most
   5 seconds; first-sample startup grace 30 seconds. Serialized native control
   egress has a 2-second drain deadline. Old candidates require rebuilding;
-  actual Worker preparation/placement/media activation remains gated.
+  actual Worker package preparation/placement activation remains gated.
+- `worker/native_music_media.py::NativeMusicMediaOwner` is wired to Worker task,
+  snapshot, input/output and shutdown lifecycles. It captures only complete
+  local native assignments with their stamped policy/build. Generation reserves
+  a durable writer intent without inventing an original WAV; editing requires
+  the verified `music_edit_source` handshake. The planner gates both on actual
+  media readiness. Source and result-only jobs share four serialized journal
+  slots. Recovery fails uncertain local work and retains files until the
+  inherited reader fence drains; it does not replay a native edit.
+- `worker/native_music_output.py::NativeMusicOutputProducer`: verify PCM24 stereo
+  48 kHz WAVs against completion facts, stream bounded addressed `music` or
+  `music_edit` frames, correlate exact reverse ACKs only after emitted terminals,
+  and join the sender before ownership-checked reclamation. Failed cleanup keeps
+  its reservation. Native completion, media custody and task state are separate.
+  Existing audio.cpp output, speech and separation paths retain their contracts.
+- `ace_step/resources.py::NativeMusicHostGuard`: immutable, picklable outer
+  process callback; checks its actual child, current host capacity/pressure and
+  RSS without capturing Worker State or importing Torch. The private native
+  observer independently owns device sensing and heartbeat freshness. Core and
+  native use `native_music_host_available_bytes` for consistent macOS Mach
+  wired/anonymous/compressor accounting with bounded one-second `vm_stat`
+  effects and actual psutil fallback. No RSS allocation credit is inferred.
+- These media/guard connections do not open the native platform guard. Fixed
+  current packages, Worker preparation/resource publication, complete placement
+  admission and installed platform/music acceptance remain required.

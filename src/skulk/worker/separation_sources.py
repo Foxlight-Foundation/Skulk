@@ -51,6 +51,7 @@ class SeparationSourceStore[SourceTask: AudioSourceTask = AudioSeparation]:
         self._custody = custody
         self._ownership: RuntimeLock | None = RuntimeLock(root, name="service.lock")
         self._tasks: dict[CommandId, SourceTask] = {}
+        self._result_only: dict[CommandId, str] = {}
         self._ready: dict[CommandId, Path] = {}
         try:
             if custody is not None:
@@ -110,9 +111,42 @@ class SeparationSourceStore[SourceTask: AudioSourceTask = AudioSeparation]:
                 raise RuntimeError("separation source owner is closed")
             if self._custody is None:
                 return 0
-            recovered = self._custody.recover(tuple(self._tasks))
+            recovered = self._custody.recover((*self._tasks, *self._result_only))
             self._unresolved_count = self._count_unresolved()
             return recovered
+
+    def reserve_result(self, command: CommandId, reader_key: str) -> None:
+        """Reserve a journaled native generation without fabricating source audio.
+
+        All source and result-only reservations share this root's serialized
+        four-job budget. A Worker must capture the authoritative reader before
+        calling; packets cannot select the key or create a writer reservation.
+        """
+        with self._guard:
+            self._check(command)
+            if self._custody is None:
+                raise ValueError("native result reservation requires durable custody")
+            previous = self._result_only.get(command)
+            if previous is not None:
+                if previous != reader_key:
+                    raise ValueError("native result reservation changed its reader")
+                return
+            if command in self._tasks or len(self._tasks) + len(self._result_only) + self._unresolved_count >= 4:
+                raise ValueError("native source/result custody is full or already claimed")
+            self._custody.claim_command(command, reader_key)
+            self._result_only[command] = reader_key
+
+    def release_result(self, command: CommandId) -> None:
+        """Release only after the caller proves writer and addressed reader drain."""
+        with self._guard:
+            self._check(command)
+            if command not in self._result_only:
+                return
+            assert self._custody is not None
+            if not self._custody.reclaim_native_results(command):
+                raise ValueError("native generation result cleanup remains owned")
+            self._custody.forget(command)
+            self._result_only.pop(command)
 
     def admit(self, task: SourceTask) -> None:
         """Reserve bytes for an authoritative local task, preserving identical opens.
@@ -137,7 +171,7 @@ class SeparationSourceStore[SourceTask: AudioSourceTask = AudioSeparation]:
                         "separation source admission changed its owner or identity"
                     )
                 return
-            if len(self._tasks) + self._unresolved_count >= 4:
+            if task.command_id in self._result_only or len(self._tasks) + len(self._result_only) + self._unresolved_count >= 4:
                 raise ValueError(
                     "separation source capacity is full; unresolved copies require ownership-checked recovery"
                 )
@@ -254,6 +288,8 @@ class SeparationSourceStore[SourceTask: AudioSourceTask = AudioSeparation]:
                 return
             for command_id in tuple(self._tasks):
                 self.delete(command_id)
+            for command_id in tuple(self._result_only):
+                self.release_result(command_id)
             self._ownership.close()
             self._ownership = None
 

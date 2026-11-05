@@ -257,3 +257,11 @@ Pinned native decode still attenuates peaks above one before returning its tenso
 gain trace from diffusion latents. Qualification must measure actual host/GPU
 working sets, including native decode's temporary CPU fallback, and verify
 fractional-second source/extension geometry with real model weights.
+
+On macOS, native preparation and live sensing use the same reclaimable-cache
+host accounting as Core: physical total minus one consistent Mach wired,
+anonymous and compressor snapshot. The fixed `vm_stat` invocation has a
+one-second deadline and falls back to actual psutil availability if unavailable.
+This prevents file cache from a just-downloaded model being mistaken for its
+resident working set. Device allocations and pressure headroom remain separate;
+this accounting change grants neither model readiness nor measured qualification.

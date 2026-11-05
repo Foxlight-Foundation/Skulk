@@ -64,6 +64,7 @@ class NativeLibraryProbeTests(unittest.TestCase):
                         "skulk_ace_step.policy.psutil.virtual_memory",
                         return_value=SimpleNamespace(total=1000, available=700),
                     ),
+                    patch("skulk_ace_step.policy.subprocess.run", return_value=subprocess.CompletedProcess([], 1)),
                     patch("torch.cuda.is_available", return_value=True),
                     patch("torch.cuda.current_device", return_value=0),
                     patch("torch.cuda.device_count", return_value=2),
@@ -107,6 +108,7 @@ class NativeLibraryProbeTests(unittest.TestCase):
                 "skulk_ace_step.policy.psutil.virtual_memory",
                 return_value=SimpleNamespace(total=1000, available=700),
             ),
+            patch("skulk_ace_step.policy.subprocess.run", return_value=subprocess.CompletedProcess([], 1)),
             patch("torch.backends.mps.is_available", return_value=True),
             patch("torch.mps.recommended_max_memory", return_value=750),
             patch("torch.mps.driver_allocated_memory", return_value=200),
@@ -116,6 +118,36 @@ class NativeLibraryProbeTests(unittest.TestCase):
         self.assertEqual(observed.shared_total_bytes, 1000)
         self.assertEqual(observed.shared_available_bytes, 700)
         self.assertNotEqual(observed.shared_available_bytes, 700 + 550)
+
+    def test_mach_capacity_preserves_reclaimable_file_cache(self) -> None:
+        """Native preload and Core admission agree after a large model download."""
+        total = 16 * 1024**3
+        text = b"""Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages wired down: 300.
+Anonymous pages: 400.
+Pages occupied by compressor: 50.
+File-backed pages: 9000.
+"""
+        with (
+            patch("skulk_ace_step.policy.platform.system", return_value="Darwin"),
+            patch("skulk_ace_step.policy.psutil.virtual_memory", return_value=SimpleNamespace(total=total, available=1024)),
+            patch("skulk_ace_step.policy.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout=text)) as sample,
+        ):
+            observed = sample_memory_capacity("cpu")
+        self.assertEqual(observed.host_available_bytes, total - 750 * 16384)
+        sample.assert_called_once_with(["/usr/bin/vm_stat"], capture_output=True, check=False, timeout=1)
+
+    def test_mach_sensing_failure_uses_the_actual_psutil_fallback(self) -> None:
+        """A blocked or unavailable OS helper cannot remove the native deadline."""
+        for error in (OSError("unavailable"), subprocess.TimeoutExpired("vm_stat", 1)):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch("skulk_ace_step.policy.platform.system", return_value="Darwin"),
+                patch("skulk_ace_step.policy.psutil.virtual_memory", return_value=SimpleNamespace(total=1000, available=700)),
+                patch("skulk_ace_step.policy.subprocess.run", side_effect=error),
+            ):
+                observed = sample_memory_capacity("cpu")
+            self.assertEqual(observed.host_available_bytes, 700)
 
     def test_invalid_driver_reading_is_not_invented_capacity(self) -> None:
         """Negative/over-total free values fail the shared strict observation contract."""

@@ -7,6 +7,7 @@ the bounded WAV contract are copied into the separate Python 3.12 runtime.
 
 from __future__ import annotations
 
+import re
 from pathlib import PurePath, PurePosixPath
 from typing import Annotated, Literal, Self, final
 
@@ -286,6 +287,34 @@ def native_music_admission_capacity(
             else None,
         }
     )
+
+
+def native_music_host_available_bytes(
+    total_bytes: int, fallback_available_bytes: int, mach_snapshot: str | None,
+) -> int:
+    """Use Core's reclaimable-cache Mach accounting in both native owners.
+
+    The caller supplies one bounded ``vm_stat`` snapshot on macOS, or None on
+    other systems/failure. Wired, anonymous and compressor pages are disjoint;
+    file-backed cache remains reclaimable. Missing/changed counters use the
+    actual psutil fallback rather than combining observations from two clocks.
+    No process or system effect occurs in this portable contract function.
+    """
+    if total_bytes <= 0 or not 0 <= fallback_available_bytes <= total_bytes:
+        raise ValueError("native host capacity requires valid physical observations")
+    if mach_snapshot is None:
+        return fallback_available_bytes
+    size = re.search(r"page size of (\d+) bytes", mach_snapshot)
+    if size is None or int(size.group(1)) <= 0:
+        return fallback_available_bytes
+    counters = {
+        match.group(1).strip(): int(match.group(2))
+        for match in re.finditer(r"^(.+?):\s+(\d+)\.?\s*$", mach_snapshot, re.MULTILINE)
+    }
+    names = ("Pages wired down", "Anonymous pages", "Pages occupied by compressor")
+    if not all(name in counters for name in names):
+        return fallback_available_bytes
+    return max(0, total_bytes - sum(counters[name] for name in names) * int(size.group(1)))
 
 
 def native_music_memory_budget_error(

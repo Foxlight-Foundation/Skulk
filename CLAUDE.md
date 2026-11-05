@@ -2955,5 +2955,21 @@ readiness before the first sample and checks five-second freshness after a
 blocking terminal dequeue. Initial sensing has a 30-second startup budget;
 native control writes are serialized and have a two-second drain deadline.
 The independent guardian still owns file locks through actual group drain.
-Older candidate packages need rebuilding; actual Worker/placement/media
-activation remains gated.
+Older candidate packages need rebuilding; actual Worker package preparation and
+placement activation remain gated.
+
+Worker `NativeMusicMediaOwner` connects authoritative native task creation,
+snapshot recovery, addressed source/result ingress and shutdown. The planner
+waits for a durable generation writer intent or verified edit original. Four
+serialized source/result journal slots include generations without input WAVs;
+recovery fails uncertain local work and waits for inherited reader drain.
+`NativeMusicOutputProducer` verifies native PCM24/48 kHz stereo output, streams
+`music`/`music_edit` and retains files through exact terminal ACK and sender join.
+Failed cleanup keeps its slot. Audio.cpp/speech/separation contracts are separate.
+`NativeMusicHostGuard` is an immutable picklable local process callback using
+fresh actual child/host/RSS checks without capturing Worker State or Torch.
+Private native sensing still owns actual device allocation and heartbeat facts.
+Core and native share portable Mach wired/anonymous/compressor accounting with
+a bounded one-second vm_stat snapshot and psutil fallback on macOS. The native
+platform guard remains closed until fixed current packages, preparation/resource
+publication, placement and installed platform/music acceptance are complete.

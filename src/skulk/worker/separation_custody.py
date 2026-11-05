@@ -106,17 +106,25 @@ class SeparationSourceCustody[SourceTask: AudioSourceTask = AudioSeparation]:
 
     def claim(self, task: SourceTask) -> None:
         """Persist ownership intent before creating any source directory or writer."""
-        key = self.reader_key(task)
+        self.claim_command(task.command_id, self.reader_key(task))
+
+    def claim_command(self, command: CommandId, key: str) -> None:
+        """Journal a captured native writer, including generation without an original.
+
+        The service owner must hold its root fence and serialize journal effects.
+        Recovery still requires the actual reader fence and exact result journal;
+        an absent original directory never grants authority to skip those checks.
+        """
         if re.fullmatch(r"[a-f0-9]{64}", key) is None:
             raise ValueError("source owner has no authoritative native reader identity")
-        if len(self._records) >= 4 or task.command_id in self._records:
+        if len(self._records) >= 4 or command in self._records:
             raise ValueError("source ownership journal is full or already claimed")
-        record = _Ownership(command_id=str(task.command_id), reader_key=key)
-        self._records[task.command_id] = record
+        record = _Ownership(command_id=str(command), reader_key=key)
+        self._records[command] = record
         try:
             self._save()
         except BaseException:
-            self._records.pop(task.command_id)
+            self._records.pop(command)
             raise
 
     def remember_directory(self, command: CommandId) -> None:

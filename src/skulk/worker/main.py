@@ -56,6 +56,8 @@ from skulk.shared.constants import (
     SKULK_IMAGE_TRANSPORT_DEBUG,
     SKULK_MAX_CHUNK_SIZE,
     SKULK_MUSIC_OUTPUT_DIR,
+    SKULK_NATIVE_MUSIC_INPUT_DIR,
+    SKULK_NATIVE_MUSIC_OUTPUT_DIR,
     SKULK_SEPARATION_INPUT_DIR,
     SKULK_SEPARATION_OUTPUT_DIR,
     SKULK_VIDEO_INPUT_DIR,
@@ -96,6 +98,7 @@ from skulk.shared.types.chunks import (
     DataChunk,
     InputImageChunk,
     MusicChunk,
+    MusicEditingChunk,
     SeparationChunk,
     VideoChunk,
 )
@@ -138,6 +141,7 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
+from skulk.shared.types.music import MusicOutputManifest
 from skulk.shared.types.profiling import MemoryUsage, NodeDataTransport, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
@@ -149,6 +153,8 @@ from skulk.shared.types.tasks import (
     ImageEdits,
     InstallEngine,
     LoadModel,
+    MusicEditing,
+    MusicGeneration,
     RealtimeAudioTranscription,
     Shutdown,
     SpeechSynthesis,
@@ -224,7 +230,13 @@ from skulk.utils.keyed_backoff import KeyedBackoff
 from skulk.utils.runtime_files import RuntimeLock
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.demucs_preparation import DemucsPreparationController
+from skulk.worker.native_music_media import (
+    NativeMusicMediaOwner,
+    local_native_music_task,
+)
+from skulk.worker.native_music_output import NativeMusicTask
 from skulk.worker.plan import plan
+from skulk.worker.runner.ace_step.context import NativeMusicRunnerContext
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 from skulk.worker.runner.comfy.orphan_sweep import sweep_orphaned_comfy_servers
 from skulk.worker.runner.demucs.context import SeparationRunnerContext
@@ -1406,6 +1418,12 @@ class Worker:
             self._send_separation_output_packet,
             self._fail_separation,
         )
+        self._native_music_media = NativeMusicMediaOwner(
+            self.node_id, lambda: self.state,
+            SKULK_NATIVE_MUSIC_INPUT_DIR, SKULK_NATIVE_MUSIC_OUTPUT_DIR,
+            self._send_native_music_source_packet, self._send_separation_output_packet,
+            self._fail_native_music, self._native_music_reader_drained,
+        )
         self._engine_install_jobs: dict[EngineType | tuple[EngineType, str | None, str | None], _EngineInstallJob] = {}
         self._stopped: anyio.Event = anyio.Event()
 
@@ -1913,6 +1931,7 @@ class Worker:
                     tg.start_soon(self._vision_media_janitor)
                     tg.start_soon(self._reference_media_janitor)
                     tg.start_soon(self._separation_janitor)
+                    tg.start_soon(self._native_music_janitor)
                 if self._output_media_packet_receiver is not None:
                     tg.start_soon(self._output_media_packet_ingress)
                     tg.start_soon(self._output_media_janitor)
@@ -1931,6 +1950,7 @@ class Worker:
                     # finished: a native descendant may still hold its fence.
                     if self._separation_sources is not None:
                         await separation_file_effect(self._separation_sources.detach)
+                    await self._native_music_media.detach()
                     await self._demucs_preparation.close()
             finally:
                 self.event_sender.close()
@@ -2056,6 +2076,9 @@ class Worker:
                     )
                     if receiver is not None:
                         await receiver.receive(packet)
+                    continue
+                if packet.payload == "music_edit_source":
+                    await self._native_music_media.receive_input(packet)
                     continue
                 if packet.target_node != self.node_id or packet.kind in (
                     "accepted",
@@ -2798,6 +2821,82 @@ class Worker:
                     "Separation media cleanup remains reserved for retry"
                 )
 
+    async def _fail_native_music(self, task: NativeMusicTask, message: str) -> None:
+        """Settle one native operation without changing other engines or models."""
+        await self.event_sender.send(TaskFailed(
+            task_id=task.task_id, error_type="native_music_failed", error_message=message,
+        ))
+
+    async def _send_native_music_source_packet(self, packet: VisionMediaPacket) -> None:
+        """Use the existing node-addressed original-media plane."""
+        sender = self._vision_media_packet_sender
+        if sender is None:
+            raise ClosedResourceError
+        await sender.send(packet)
+
+    async def _begin_native_music_task(self, command: CommandId) -> None:
+        """Capture authoritative native custody before allowing the planner to dispatch."""
+        task = local_native_music_task(self.state, self.node_id, command)
+        if task is None:
+            return
+        if self._vision_media_packet_sender is None or self._output_media_packet_sender is None:
+            await self._fail_native_music(task, "Native music requires addressed source and output media transport.")
+            return
+        try:
+            await self._native_music_media.begin(command)
+        except (OSError, ValueError, RuntimeError) as error:
+            logger.opt(exception=error).warning("Native music media admission failed")
+            await self._fail_native_music(task, "Native music media storage is unavailable or held by a prior reader; inspect diagnostics and retry.")
+
+    def _native_music_reader_drained(
+        self, task: NativeMusicTask, runner_id: RunnerId, root: Path,
+    ) -> bool:
+        """Prove actual task drain or acquire the inherited reader fence after a crash."""
+        supervisor = self.runners.get(runner_id)
+        if supervisor is not None:
+            if task.task_id in supervisor.in_progress or task.task_id in supervisor.pending:
+                return False
+            if isinstance(supervisor.status, RunnerReady):
+                return True
+        try:
+            owner = RuntimeLock(root, name="attachment.lock")
+        except BlockingIOError:
+            return False
+        owner.close()
+        return True
+
+    def _schedule_music_edit_output_transfer(
+        self, command: CommandId, owner: NodeId | None, chunk: MusicEditingChunk,
+    ) -> None:
+        """Bind a complete native edit to its admitted source and addressed result owner."""
+        if chunk.output is None:
+            return
+        result = chunk.output.result
+        if result.request_id != str(command):
+            self._tg.start_soon(self._native_music_media.reject_output, command)
+            return
+        output = result.output
+        manifest = MusicOutputManifest(
+            size_bytes=output.size_bytes, sha256=output.sha256,
+            duration_seconds=output.frames / output.sample_rate,
+            sample_rate=output.sample_rate, channels=output.channels,
+        )
+        native = self._native_music_media
+        try:
+            if native.register_output(command, owner, str(chunk.model), manifest):
+                self._tg.start_soon(native.outputs.deliver, command)
+        except ValueError:
+            self._tg.start_soon(native.reject_output, command)
+
+    async def _native_music_janitor(self) -> None:
+        """Keep originals and results reserved until joined native and media drain."""
+        while True:
+            await anyio.sleep(0.5)
+            try:
+                await self._native_music_media.reconcile()
+            except (OSError, ValueError) as error:
+                logger.opt(exception=error).warning("Native music media cleanup remains reserved for retry")
+
     def _schedule_video_output_transfer(
         self, command_id: CommandId, owner_node: NodeId | None, chunk: VideoChunk
     ) -> None:
@@ -2832,6 +2931,14 @@ class Worker:
 
         manifest = chunk.output
         if manifest is None:
+            return
+        native: NativeMusicMediaOwner | None = getattr(self, "_native_music_media", None)
+        if native is not None and native.owns(command_id):
+            try:
+                if native.register_output(command_id, owner_node, str(chunk.model), manifest):
+                    self._tg.start_soon(native.outputs.deliver, command_id)
+            except ValueError:
+                self._tg.start_soon(native.reject_output, command_id)
             return
         if owner_node is None or self._output_media_packet_sender is None:
             logger.error(f"Cannot deliver music output for {command_id}: no owner or transport")
@@ -3071,6 +3178,8 @@ class Worker:
                     continue
                 if packet.purpose.startswith("separation_"):
                     self._separation_outputs.receive(packet)
+                    continue
+                if self._native_music_media.outputs.receive(packet):
                     continue
                 pending = self._output_media_pending.get(packet.command_id)
                 if pending is None or pending[0] != packet.source_node:
@@ -3524,6 +3633,17 @@ class Worker:
                             self._acknowledge_vision_media_if_admitted,
                             event.task.command_id,
                         )
+
+                if isinstance(event, TaskCreated) and isinstance(
+                    event.task, (MusicGeneration, MusicEditing)
+                ) and local_native_music_task(self.state, self.node_id, event.task.command_id) is not None:
+                    self._tg.start_soon(self._begin_native_music_task, event.task.command_id)
+                elif isinstance(event, StateSnapshotHydrated) and any(
+                    isinstance(task, (MusicGeneration, MusicEditing))
+                    and local_native_music_task(self.state, self.node_id, task.command_id) is not None
+                    for task in self.state.tasks.values()
+                ):
+                    self._tg.start_soon(self._native_music_media.fail_recovered)
 
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, AudioSeparation
@@ -4406,6 +4526,7 @@ class Worker:
                 separation_media_ready=self._separation_inputs.ready_commands()
                 if self._separation_inputs is not None
                 else frozenset(),
+                native_music_media_ready=self._native_music_media.ready_commands(),
                 engine_install_requested=frozenset(self._engine_install_tasks),
                 engine_install_ready=frozenset(
                     instance_id
@@ -4716,6 +4837,7 @@ class Worker:
         task: CreateRunner,
         *,
         separation_context: SeparationRunnerContext | None = None,
+        native_music_context: NativeMusicRunnerContext | None = None,
     ) -> RunnerSupervisor:
         """Creates and stores a new AssignedRunner with initial downloading status."""
         shard = task.bound_instance.bound_shard
@@ -4743,6 +4865,7 @@ class Worker:
             bound_instance=task.bound_instance,
             event_sender=self.event_sender.clone(),
             separation_context=separation_context,
+            native_music_context=native_music_context,
             context_token_limit=context_token_limit,
             data_sender=self._data_sender.clone()
             if self._data_sender is not None
@@ -4752,6 +4875,7 @@ class Worker:
             else None,
             on_video_output=self._schedule_video_output_transfer,
             on_music_output=self._schedule_music_output_transfer,
+            on_music_edit_output=self._schedule_music_edit_output_transfer,
             on_separation_output=self._schedule_separation_output_transfer,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner

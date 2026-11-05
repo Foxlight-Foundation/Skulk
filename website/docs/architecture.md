@@ -4413,3 +4413,29 @@ drain within two seconds. Resource frames carry no media and never enter State
 or the event log. Existing guardian custody remains until actual group drain.
 Current pre-guard candidates must be rebuilt before engine inventory activation;
 this process wiring alone does not enable Worker placement or music capacity.
+
+The Worker now connects a separate `NativeMusicMediaOwner` to task creation,
+snapshot recovery, addressed input/output and shutdown. Before native generation
+can dispatch, it reserves a durable writer intent even though there is no
+uploaded original. Edits wait for the verified `music_edit_source` handshake.
+Both use four shared source/result journal slots and captured local reader roots.
+A replacement Worker fails uncertain jobs instead of silently repeating an edit;
+old originals and results remain until their inherited reader fence drains.
+
+The native result producer verifies complete PCM24 stereo 48 kHz WAVs, then sends
+bounded `music` or `music_edit` frames. Reverse acknowledgements must match the
+owner, model, role and an emitted terminal. Even a synchronous same-node ACK
+cannot remove files before the sender returns. Failed cleanup keeps its slot.
+This path preserves the existing audio.cpp, speech and separation contracts.
+
+`NativeMusicHostGuard` is the spawn-safe outer callback: immutable admitted
+ceilings and physical host identity, with fresh child/host/RSS checks on every
+bounded poll. It captures no Worker State and imports no native libraries.
+The private native observer remains responsible for actual GPU allocation and
+heartbeat observations. Both owners use Core's reclaimable file-cache Mach
+semantics on macOS, from a one-second-bounded `vm_stat` snapshot with psutil
+fallback. RSS still earns no exclusive physical allocation credit.
+
+Native backend placement remains closed while the current fixed packages,
+Worker preparation/publication and complete admission path are assembled.
+Installed platform and music acceptance remain separate from these connections.

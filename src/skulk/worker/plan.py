@@ -25,6 +25,7 @@ from skulk.shared.types.tasks import (
     ImageGeneration,
     InstallEngine,
     LoadModel,
+    MusicEditing,
     MusicGeneration,
     RealtimeAudioTranscription,
     Shutdown,
@@ -90,6 +91,7 @@ def plan(
     engine_install_ready: Set[InstanceId] = frozenset(),
     runner_creation_pending: Set[InstanceId] = frozenset(),
     separation_media_ready: Set[CommandId] = frozenset(),
+    native_music_media_ready: Set[CommandId] = frozenset(),
 ) -> Task | None:
     """Select the next local lifecycle task from current runners and cluster state.
 
@@ -126,6 +128,7 @@ def plan(
             speech_media_ready or set(),
             reference_media_ready or set(),
             separation_media_ready,
+            native_music_media_ready,
         )
     )
 
@@ -529,6 +532,7 @@ def _pending_tasks(
     speech_media_ready: Set[CommandId],
     reference_media_ready: Set[CommandId],
     separation_media_ready: Set[CommandId] = frozenset(),
+    native_music_media_ready: Set[CommandId] = frozenset(),
 ) -> Task | None:
     for task in tasks.values():
         # Forward inference tasks to runners
@@ -540,6 +544,7 @@ def _pending_tasks(
                 ImageEdits,
                 VideoGeneration,
                 MusicGeneration,
+                MusicEditing,
                 AudioSeparation,
                 TextEmbedding,
                 SpeechSynthesis,
@@ -590,9 +595,17 @@ def _pending_tasks(
         ):
             continue
 
+        if isinstance(task, MusicEditing) and task.command_id not in native_music_media_ready:
+            continue
+
         for runner in runners.values():
             if task.instance_id != runner.bound_instance.instance.instance_id:
                 continue
+
+            if isinstance(task, MusicGeneration):
+                profile = runner.bound_instance.bound_shard.model_card.music
+                if profile is not None and profile.native is not None and task.command_id not in native_music_media_ready:
+                    continue
 
             # Inference traffic never reaches an RPC donor (#328): the driver
             # is the only rank that serves requests; the donor's process is a
