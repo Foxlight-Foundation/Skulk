@@ -65,7 +65,7 @@ class ContinuationRequest(ContinuationContract):
     contract: Literal["chat.continuation@0.1.0"]
     mode: Literal["start", "continue"]
     conversation_id: Digest
-    handle: Handle | None = None
+    handle: Handle | None
     target: ContinuationTarget
     body: ContinuationBody
     nonce: Digest

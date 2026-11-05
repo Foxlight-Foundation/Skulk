@@ -311,6 +311,17 @@ const slice = createSlice({
       if (conversation) conversation.continuation = action.payload.continuation;
     },
 
+    /** Publish an acknowledged round and its receipt as one state transition. */
+    saveContinuationMessage(state, action: PayloadAction<{ conversationId: string; continuation: ChatContinuation; message: ChatMessage }>) {
+      const conversation = state.conversations[action.payload.conversationId];
+      if (!conversation) return;
+      const index = conversation.messages.findIndex(message => message.id === action.payload.message.id);
+      if (index < 0) conversation.messages.push(action.payload.message);
+      else conversation.messages[index] = action.payload.message;
+      conversation.continuation = action.payload.continuation;
+      conversation.updatedAt = action.payload.message.timestamp;
+    },
+
     /** Rename a saved conversation without replacing its messages or selection. */
     renameConversation(state, action: PayloadAction<{ conversationId: string; name: string }>) {
       const conversation = state.conversations[action.payload.conversationId];
@@ -416,13 +427,18 @@ export function persistDocumentMessage(chat: ChatState, conversationId: string, 
   }
 }
 
-/** Acknowledge continuation attempt custody before any network dispatch or reset. */
-export function persistChatContinuation(chat: ChatState, conversationId: string, continuation?: ChatContinuation): void {
+/** Atomically acknowledge continuation state and any associated public history. */
+export function persistChatContinuation(chat: ChatState, conversationId: string, continuation?: ChatContinuation, message?: ChatMessage): void {
   const conversation = chat.conversations[conversationId];
   if (!conversation) throw new Error('The conversation is no longer available.');
+  const messages = message
+    ? conversation.messages.some(existing => existing.id === message.id)
+      ? conversation.messages.map(existing => existing.id === message.id ? message : existing)
+      : [...conversation.messages, message]
+    : conversation.messages;
   try {
     window.localStorage.setItem(DURABLE_STORAGE_KEY, durableChatJson({ ...chat,
-      conversations: { ...chat.conversations, [conversationId]: { ...conversation, continuation } },
+      conversations: { ...chat.conversations, [conversationId]: { ...conversation, continuation, messages } },
     }));
   } catch {
     throw new Error('Could not save continuation state. Free browser storage before sending.');

@@ -84,6 +84,9 @@ export function ChatContinuationControls({ conversationId, target, disabled }: {
         if (!conversation) return;
         const messages = buildApiMessages(await hydrateChatDocuments(conversation.messages), { text: true, pdf: true });
         await verifyContinuationHistory(recovered, messages);
+        if (store.getState().chat.conversations[conversationId]?.continuation !== state) {
+          throw new Error('The conversation changed during receipt lookup. Its current recovery state was preserved.');
+        }
         save({ ...recovered, phase: 'ready' });
         setMessage(t('chat.continuation.recovered', 'Receipt recovered and public history verified. No inference was retried.'));
       }); }}>{t('chat.continuation.recover', 'Recover receipt')}</Button>

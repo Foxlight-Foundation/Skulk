@@ -361,6 +361,8 @@ async def test_unified_client_proof_exact_bytes_receipt_and_recovery(
         "privacy",
         "origin",
         "relationship",
+        "omitted_handle",
+        "omitted_handle_resigned",
     ],
 )
 async def test_continuation_refuses_before_provider_dispatch(
@@ -388,6 +390,10 @@ async def test_continuation_refuses_before_provider_dispatch(
         proof["caller_id"] = "d" * 32
     if change == "signature":
         proof["signature"] = "0" * 128
+    if change in {"omitted_handle", "omitted_handle_resigned"}:
+        request.pop("handle")
+        if change == "omitted_handle_resigned":
+            proof = sign(key, "b" * 32, request)
     if change == "bytes":
         raw += b" "
     if change == "privacy":
@@ -433,6 +439,8 @@ async def test_continuation_refuses_before_provider_dispatch(
         assert (
             response.status_code in {400, 403, 409} or "scope_mismatch" in response.text
         ), response.text
+        if change in {"omitted_handle", "omitted_handle_resigned"}:
+            assert response.status_code == 400
         assert provider.calls == 0
     assert api.active_provider_streams() == 0
 

@@ -1169,6 +1169,8 @@ export function ChatView({
     let continuation = activeConvo.continuation;
     const continuationDestination = modelCatalogById[selectedModelId]?.inference_capability?.continuation?.target;
     const continuationMessages: ApiMessagePayload[] = [];
+    const continuationAssistantId = uuidv4();
+    let continuationRound: { content: string; summary: string; tools: StreamToolCall[] } | undefined;
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -1288,6 +1290,7 @@ export function ChatView({
         let iterationThinking = '';
         let publicSummary = '';
         const iterationToolCalls: StreamToolCall[] = [];
+        continuationRound = continuation ? { content: '', summary: '', tools: iterationToolCalls } : undefined;
         let receivedReceipt: unknown;
         let receivedDone = false;
         let receivedFinish: string | null = null;
@@ -1304,8 +1307,14 @@ export function ChatView({
         if (continuation && continuationDestination) {
           await verifyContinuationHistory(continuation, apiMessages);
           const prepared = await prepareContinuationRequest(continuation, continuationDestination, requestBody);
-          persistChatContinuation(store.getState().chat, conversationId, prepared.pending);
-          dispatch(chatActions.setConversationContinuation({ conversationId, continuation: prepared.pending }));
+          const priorAssistant = store.getState().chat.conversations[conversationId]?.messages.find(message => message.id === continuationAssistantId);
+          if (continuationMessages.length && !priorAssistant) throw new Error('The committed assistant history is no longer available.');
+          const pendingMessage = priorAssistant ? { ...priorAssistant, continuationMessages: [...continuationMessages] } : undefined;
+          // Client tool results must survive reload before their following model
+          // request can begin. They join the same durable pending-attempt write.
+          persistChatContinuation(store.getState().chat, conversationId, prepared.pending, pendingMessage);
+          if (pendingMessage) dispatch(chatActions.saveContinuationMessage({ conversationId, continuation: prepared.pending, message: pendingMessage }));
+          else dispatch(chatActions.setConversationContinuation({ conversationId, continuation: prepared.pending }));
           continuation = prepared.pending;
           continuationHeader = prepared.header;
         }
@@ -1429,6 +1438,10 @@ export function ChatView({
               if (delta?.tool_calls?.length) {
                 mergeToolCallDeltas(iterationToolCalls, delta.tool_calls);
               }
+              if (continuationRound) {
+                continuationRound.content = iterationRawContent;
+                continuationRound.summary = publicSummary;
+              }
 
               if (hasToken) {
                 tokenCount++;
@@ -1460,10 +1473,21 @@ export function ChatView({
           const receipt = readContinuationReceipt(receivedReceipt, continuation);
           const history = await publicHistoryFingerprint([...apiMessages, publicAssistant]);
           if (history.count !== receipt.history.count || history.sha256 !== receipt.history.sha256) throw new Error('The committed public response does not match its receipt. Continuation is uncertain.');
-          continuation = { ...continuation, phase: 'ready', receipt };
-          persistChatContinuation(store.getState().chat, conversationId, continuation);
-          dispatch(chatActions.setConversationContinuation({ conversationId, continuation }));
+          const committed = { ...continuation, phase: 'ready' as const, receipt };
+          const committedMessage: ChatMessage = { id: continuationAssistantId, role: 'assistant',
+            content: splitReasoningDecoratedContent(iterationRawContent).content.trim(),
+            thinkingContent: mergeThinkingContent(fullThinking, iterationThinking) || undefined,
+            timestamp: Date.now(), continuationMessages: [...continuationMessages, publicAssistant],
+          };
+          // Never acknowledge a receipt independently of its public history.
+          // The next tool round may outlive this page or fail local storage.
+          persistChatContinuation(store.getState().chat, conversationId, committed, committedMessage);
+          continuation = committed;
+          dispatch(chatActions.saveContinuationMessage({ conversationId, continuation, message: committedMessage }));
           continuationMessages.push(publicAssistant);
+          continuationRound = undefined;
+          setStreamingContent(null);
+          setStreamingThinking(null);
         }
 
         const separatedContent = splitReasoningDecoratedContent(iterationRawContent);
@@ -1531,7 +1555,23 @@ export function ChatView({
         );
       }
     } catch (err) {
+      let retainedContinuationOutput = false;
       if (continuation?.phase === 'pending') {
+        if (continuationRound && (continuationRound.content || continuationRound.summary || continuationRound.tools.length)) {
+          // Received output is evidence, even when its terminal was lost. Keep
+          // partial tool data without executing it; recovery must match the
+          // provider's committed fingerprint before another request is allowed.
+          const tools = [...continuationRound.tools]
+            .sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
+            .map(({ index: _index, ...call }) => call);
+          continuationMessages.push({ role: 'assistant', content: continuationRound.content || null,
+            ...(continuationRound.summary ? { reasoning_content: continuationRound.summary } : {}),
+            ...(tools.length ? { tool_calls: tools } : {}),
+          });
+          finalRawContent = continuationRound.content;
+          fullThinking = mergeThinkingContent(fullThinking, continuationRound.summary);
+          retainedContinuationOutput = true;
+        }
         continuation = { ...continuation, phase: 'uncertain' };
         // The pending attempt was acknowledged before dispatch. If this update
         // cannot be persisted, the older pending state also refuses replay.
@@ -1546,7 +1586,7 @@ export function ChatView({
         speechSentenceQueueRef.current = null;
       }
       setIsAutoSpeaking(false);
-      if ((err as Error).name === 'AbortError') {
+      if (!retainedContinuationOutput && (err as Error).name === 'AbortError') {
         // User cancelled
         if (requestTimedOut) {
           finalRawContent = t(
@@ -1555,7 +1595,7 @@ export function ChatView({
             { seconds: Math.round(lastStallTimeoutMs / 1000) },
           );
         }
-      } else {
+      } else if (!retainedContinuationOutput) {
         finalRawContent = finalRawContent || t(
           'chat.view.errors.generic',
           'Error: {message}',
@@ -1577,7 +1617,7 @@ export function ChatView({
 
     if (finalAssistantContent || fullThinking || continuationMessages.length) {
       const assistantMsg: ChatMessage = {
-        id: uuidv4(),
+        id: continuation ? continuationAssistantId : uuidv4(),
         role: 'assistant',
         content: finalAssistantContent,
         timestamp: Date.now(),
@@ -1587,7 +1627,12 @@ export function ChatView({
         ...(continuationMessages.length ? { continuationMessages } : {}),
       };
 
-      dispatch(chatActions.appendConversationMessage({ conversationId, message: assistantMsg }));
+      if (continuation) {
+        // Verified rounds are already durable. Also retain interrupted output
+        // when space permits; a failed write keeps the earlier recovery fence.
+        try { persistChatContinuation(store.getState().chat, conversationId, continuation, assistantMsg); } catch { /* Earlier acknowledged state remains durable. */ }
+        dispatch(chatActions.saveContinuationMessage({ conversationId, continuation, message: assistantMsg }));
+      } else dispatch(chatActions.appendConversationMessage({ conversationId, message: assistantMsg }));
       if (sentenceQueue) {
         // Settle any pending code closer ahead of the trailing prose so the
         // acknowledgement precedes the final explanation.

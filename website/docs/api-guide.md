@@ -6522,7 +6522,7 @@ to avoid an integer/float serialization mismatch. The `request` contains:
 | Field | Meaning |
 | --- | --- |
 | `contract` | Exactly `chat.continuation@0.1.0`. |
-| `mode`, `handle` | `start` with null/absent handle, or `continue` with the exact prior `ct1_` plus 64-hex handle. |
+| `mode`, `handle` | Both fields are required in the signed object: `start` with explicit `handle: null`, or `continue` with the exact prior `ct1_` plus 64-hex handle. An omitted handle is rejected before dispatch, so validation cannot silently insert a signed field. |
 | `conversation_id` | Explicit random 64-hex conversation identity. |
 | `target` | Exact advertised `target_node`, `callable_id`, 16-hex `descriptor_revision`, and provider model slug. Callable version is fixed to `0.1.0`. |
 | `body` | `size_bytes` (2 bytes–16 MiB), lowercase SHA-256 `sha256`, and `media_type: application/vnd.skulk.chat-request+json` of the **original HTTP body**, including its exact public `model` ID. |
@@ -6535,6 +6535,12 @@ The API checks exact body/destination/deadline and hard inference policy; the
 capability independently verifies the registered client signature, current scope,
 revocation, history and storage before any provider request. No normalization,
 fallback, destination migration or automatic retry occurs.
+
+Chat persists each verified public assistant round together with its receipt,
+and saves client tool results with the next pending attempt before dispatch.
+Received output remains available after lost terminal delivery; recovery still
+requires an exact committed-history match. A receipt lookup cannot overwrite a
+newer pending attempt that began while the lookup was in flight.
 
 Successful collected JSON includes `skulk_continuation`. For SSE, that field is
 on the final successful finish chunk before optional usage and `[DONE]`. It
