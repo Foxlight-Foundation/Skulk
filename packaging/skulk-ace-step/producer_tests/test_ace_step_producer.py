@@ -547,6 +547,7 @@ class NativeProducerTests(unittest.TestCase):
                 )
                 self.assertIn("library_probe", manifest.features)
                 self.assertIn("memory_probe", manifest.features)
+                self.assertIn("live_resource_guard", manifest.features)
                 with self.assertRaises(ValueError):
                     inspect_candidate(wheel, digest)
 

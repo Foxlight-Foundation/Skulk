@@ -4385,4 +4385,31 @@ working-set limit and the single physical host pool. Cache preparation requires
 a sampled receipt. Shared admission requires data no more than two minutes old
 and allows at most thirty seconds of forward clock skew. These definitions and
 the model's pre-load check do not yet connect Worker memory sampling/publication,
-normal placement or the live resource guard; native activation remains gated.
+or normal placement; native activation remains gated.
+
+The separate `live_resource_guard` package feature binds the admitted
+`NativeMusicMemoryBudget` into the actual native process. A synchronous sample
+must pass before loading begins. The observer continues every half-second while
+loading, generating and idle, measuring the native leader's RSS, Torch reserved
+device allocation (MPS driver allocation on Metal), and raw physical capacity.
+The same portable fit policy is used by Core and the isolated process. Admission
+normalizes pressure headroom once before reservations: up to 512 MiB for host
+and shared memory and 256 MiB for the device, capped at 5% of each small pool.
+
+Once resident, the guard enforces process allocation ceilings and current
+pressure floors. It does not charge the whole future workspace against free
+memory again. RSS is not an exclusive allocation credit, nor is RSS plus GPU
+allocation a measurement of unique physical pages. Unified RSS uses the
+simultaneous physical phase ceiling; shared pressure is checked independently.
+Actual peak and sustained workload qualification still reassesses the estimate.
+
+The native process retires its private group if sensing, limits or control
+egress fail; closed diagnostics cannot prevent retirement. Core keeps only the
+latest private memory frame, validates its process, payload, device and sequence,
+requires a sample before readiness, and checks five-second freshness after
+waiting for a terminal. Startup allows thirty seconds for initial sensing.
+Native control writes are serialized and fail if the owning reader does not
+drain within two seconds. Resource frames carry no media and never enter State
+or the event log. Existing guardian custody remains until actual group drain.
+Current pre-guard candidates must be rebuilt before engine inventory activation;
+this process wiring alone does not enable Worker placement or music capacity.

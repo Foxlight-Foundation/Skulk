@@ -86,6 +86,37 @@ class NativeLifetimeTests(unittest.TestCase):
         self.assertEqual(child.returncode, -signal.SIGKILL)
         self.assertIn(b"BrokenPipe", diagnostics)
 
+    def test_full_control_pipe_cannot_block_native_retirement(self) -> None:
+        """A live owner that stops reading cannot strand the guard's output thread."""
+        with tempfile.TemporaryDirectory(prefix="native-full-pipe-") as root:
+            config = Path(root) / "invalid.json"
+            config.write_text("{}")
+            read, write = os.pipe()
+            os.set_blocking(write, False)
+            try:
+                while True:
+                    try:
+                        os.write(write, b"x" * 4096)
+                    except BlockingIOError:
+                        break
+                child = subprocess.Popen(
+                    self.command(config),
+                    start_new_session=True,
+                    stdout=write,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    _, diagnostic = child.communicate(timeout=15)
+                    self.assertEqual(child.returncode, -signal.SIGKILL)
+                    self.assertIn(b"control egress stopped draining", diagnostic)
+                finally:
+                    if child.poll() is None:
+                        os.killpg(child.pid, signal.SIGKILL)
+                        child.communicate()
+            finally:
+                os.close(read)
+                os.close(write)
+
     def test_actual_parent_death_retires_its_native_session(self) -> None:
         """The guardian is armed before its real supervising parent exits."""
         child_code = 'import sys,time;sys.path.insert(0,sys.argv[1]);from skulk_ace_step.lifetime import start_parent_guardian;start_parent_guardian(int(sys.argv[2]));print("ARMED",flush=True);time.sleep(60)'

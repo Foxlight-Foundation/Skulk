@@ -6,7 +6,8 @@ import io
 import os
 import tempfile
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +27,17 @@ from skulk_ace_step.contracts import (
     NativeMusicWav,
 )
 from skulk_ace_step.server import serve
+
+
+@contextmanager
+def controlled_memory(
+    configuration: NativeMusicServeConfig,
+    payload_sha256: str,
+    emit: Callable[[NativeMusicFrame], None],
+) -> Iterator[None]:
+    """Keep these protocol tests independent of physical/native resource effects."""
+    del configuration, payload_sha256, emit
+    yield
 
 
 @dataclass
@@ -143,6 +155,7 @@ class NativeServerTests(unittest.TestCase):
             self.frames.append,
             payload_sha256="b" * 64,
             load=self.load,
+            resource_monitor=controlled_memory,
         )
 
     def test_two_requests_load_once_and_publish_only_retained_results(self) -> None:

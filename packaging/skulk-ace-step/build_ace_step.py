@@ -625,6 +625,7 @@ def assemble_wheel(
             "resident_model",
             "library_probe",
             "memory_probe",
+            "live_resource_guard",
         ],
     }
     identity = hashlib.sha256(

@@ -30,8 +30,10 @@ from skulk.shared.types.native_music import (
     NATIVE_MUSIC_MAX_FRAMES,
     NATIVE_MUSIC_MIN_DECODE_FRAMES,
     NativeMusicDevice,
+    NativeMusicMemoryBudget,
     NativeMusicMemoryCapacity,
     native_music_conditioning_frames,
+    native_music_memory_budget_error,
 )
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -40,8 +42,6 @@ _NATIVE_LIBRARIES: Final = 2 * _GIB
 _FULL_WORKSPACE: Final = 8 * _GIB
 _MIN_WORKSPACE: Final = 2 * _GIB
 _ROUNDING: Final = 64 * 1024**2
-_CAPACITY_MAX_AGE_MS: Final = 120_000
-_CAPACITY_CLOCK_SKEW_MS: Final = 30_000
 NativeMusicMemoryAssumption = Literal[
     "workspace_allowance_unqualified",
     "tensor_layout_unknown",
@@ -108,6 +108,14 @@ class NativeMusicMemoryEstimate(FrozenModel):
         return max(
             self.host_load_bytes + self.device_load_bytes,
             self.host_forward_bytes + self.device_forward_bytes,
+        )
+
+    def process_budget(self) -> NativeMusicMemoryBudget:
+        """Bind the same admitted phase ceilings into the isolated live guard."""
+        return NativeMusicMemoryBudget(
+            host_peak_bytes=self.host_peak_bytes,
+            device_peak_bytes=self.device_peak_bytes,
+            shared_peak_bytes=self.unified_peak_bytes,
         )
 
 
@@ -244,37 +252,9 @@ def native_music_memory_error(
     unified memory additionally satisfies the physical combined phase peak.
     Missing device observations are unknown capacity, never an invented sum.
     """
-    sampled = capacity.sampled_at_unix_ms
-    if now_unix_ms <= 0 or sampled <= 0:
-        return "Native music needs a timestamped current memory observation"
-    if sampled - now_unix_ms > _CAPACITY_CLOCK_SKEW_MS:
-        return "Native music memory observation is ahead of the local clock; check node clocks and refresh resources"
-    if now_unix_ms - sampled > _CAPACITY_MAX_AGE_MS:
-        return "Native music memory observation is stale; refresh native resources before placement"
-    if estimate.host_peak_bytes > capacity.host_available_bytes:
-        return "Native music needs more host memory for loading, media and forward execution"
-    if (
-        capacity.shared_available_bytes is not None
-        and estimate.unified_peak_bytes > capacity.shared_available_bytes
-    ):
-        return "Native music needs more unified physical memory for simultaneous host/device work"
-    if device == "cpu":
-        if estimate.device_peak_bytes != 0:
-            return "Native music CPU admission received a GPU execution estimate"
-        return None
-    if estimate.device_peak_bytes == 0:
-        return "Native music GPU admission received a CPU execution estimate"
-    if capacity.device_index != 0 or capacity.device_available_bytes is None:
-        return "Native music needs current memory for its actual selected device zero"
-    if capacity.device_memory_kind is None:
-        return (
-            "Native music needs the actual device's discrete or unified memory topology"
-        )
-    if device == "mps" and capacity.device_memory_kind != "unified":
-        return "Native music Metal requires its unified physical-memory observation"
-    if estimate.device_peak_bytes > capacity.device_available_bytes:
-        return "Native music needs more memory on its actual selected device zero"
-    return None
+    return native_music_memory_budget_error(
+        estimate.process_budget(), capacity, device=device, now_unix_ms=now_unix_ms
+    )
 
 
 def _round_up(value: int) -> int:

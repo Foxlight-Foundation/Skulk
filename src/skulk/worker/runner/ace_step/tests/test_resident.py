@@ -18,7 +18,11 @@ import psutil
 import pytest
 
 from skulk.shared.types.common import CommandId
-from skulk.shared.types.native_music import NativeMusicRequest, NativeMusicServeConfig
+from skulk.shared.types.native_music import (
+    NativeMusicMemoryBudget,
+    NativeMusicRequest,
+    NativeMusicServeConfig,
+)
 from skulk.utils.runtime_files import RuntimeLock
 from skulk.worker.runner.ace_step import resident as resident_module
 from skulk.worker.runner.ace_step.resident import (
@@ -85,6 +89,16 @@ if mode=='oversized':
     while True:time.sleep(.01)
 if mode=='premature':emit(dict(kind='progress',request_id='take',stage='generating'))
 emit(dict(kind='progress',request_id=None,stage='loading'))
+if cfg.get('memory_budget') is not None and mode!='memory-absent':
+    total=2**40
+    capacity=dict(sampled_at_unix_ms=time.time_ns()//1000000,host_total_bytes=total,host_available_bytes=total)
+    observed_device=cfg['device']
+    if observed_device!='cpu':
+        capacity.update(device_index=0,device_memory_kind='unified' if observed_device=='mps' else 'discrete',device_total_bytes=total,device_available_bytes=total)
+        if observed_device=='mps':capacity.update(shared_total_bytes=total,shared_available_bytes=total)
+    observation=dict(process_id=os.getpid()+1 if mode=='memory-owner' else os.getpid(),payload_sha256='f'*64 if mode=='memory-payload' else 'c'*64,device=observed_device,capacity=capacity,host_resident_bytes=cfg['memory_budget']['host_peak_bytes']+1 if mode=='memory-limit' else 1,device_allocated_bytes=0)
+    if mode=='memory-stale':capacity['sampled_at_unix_ms']-=10000
+    for sequence in range(1,2001 if mode=='memory-flood' else 2):emit(dict(kind='memory',sequence=sequence,observation=observation))
 execution=dict(device=cfg['device'],precision=cfg['precision'],text_encoder_device=cfg['device'],text_encoder_precision=cfg['precision'],autoencoder_device=cfg['device'],autoencoder_precision='float16' if cfg['device']=='mps' else cfg['precision'])
 ready=dict(protocol_version=1,model_identity='f'*64 if mode=='model' else cfg['model_identity'],payload_sha256='f'*64 if mode=='payload' else 'c'*64,execution=execution,load_seconds=.1)
 if mode=='dtype':ready['execution']['autoencoder_precision']='float16'
@@ -133,6 +147,7 @@ def resident(
     mode: str = "normal",
     resource_guard: Callable[[int], str | None] | None = None,
     source_fence: int | None = None,
+    memory_budget: NativeMusicMemoryBudget | None = None,
 ) -> ResidentMusic:
     """Prepare real private inodes around tiny metadata, never actual model weights."""
     selected = weights()
@@ -152,6 +167,7 @@ def resident(
         loader_identity=owner.loader_identity,
         device="cpu",
         precision="float32",
+        memory_budget=memory_budget,
     )
     return ResidentMusic(
         interpreter,
@@ -669,5 +685,52 @@ def test_repeated_readiness_withdraws_native_liveness(
                 time.sleep(0.01)
         assert owner.ready is None
         assert not process_alive(int((tmp_path / "native.pid").read_text()))
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["memory-absent", "memory-owner", "memory-payload", "memory-stale", "memory-limit"],
+)
+def test_live_memory_refusal_cannot_advertise_a_native_model(
+    tmp_path: Path, interpreter: Path, mode: str
+) -> None:
+    """Missing, foreign, stale and over-budget native facts retire actual groups."""
+    owner = resident(
+        tmp_path,
+        interpreter,
+        mode=mode,
+        memory_budget=NativeMusicMemoryBudget(
+            host_peak_bytes=1024, device_peak_bytes=0, shared_peak_bytes=1024
+        ),
+    )
+    try:
+        with pytest.raises(NativeMusicProcessError):
+            owner.start(is_cancelled=lambda: False, timeout_seconds=5)
+        assert not owner.is_ready()
+        pid = int((owner.workspace.root / "native.pid").read_text())
+        assert not process_alive(pid)
+    finally:
+        owner.close()
+
+
+def test_live_memory_flood_keeps_one_latest_sample_and_normal_terminals(
+    tmp_path: Path, interpreter: Path
+) -> None:
+    """Thousands of resource facts cannot fill the fixed generation-terminal queue."""
+    owner = resident(
+        tmp_path,
+        interpreter,
+        mode="memory-flood",
+        memory_budget=NativeMusicMemoryBudget(
+            host_peak_bytes=1024, device_peak_bytes=0, shared_peak_bytes=1024
+        ),
+    )
+    try:
+        owner.start(is_cancelled=lambda: False, timeout_seconds=5)
+        assert owner.is_ready()
+        result = owner.run(request(owner), progress=lambda _progress: None, is_cancelled=lambda: False)
+        assert result is not None and result.request_id == "take"
     finally:
         owner.close()

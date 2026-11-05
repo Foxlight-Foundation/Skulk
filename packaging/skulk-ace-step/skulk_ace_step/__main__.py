@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import select
 import stat
 import sys
+import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -53,15 +56,36 @@ def main() -> None:
     )
     protocol = sys.stdout
     failed = False
+    protocol_lock = threading.Lock()
 
     def emit(frame: NativeMusicFrame) -> None:
         nonlocal failed
         encoded = frame.model_dump_json()
         if len(encoded.encode("utf-8")) + 1 > MAX_NATIVE_MUSIC_RECORD_BYTES:
             raise ValueError("native music response exceeds its control bound")
-        if isinstance(frame, NativeMusicFailed):
-            failed = True
-        print(encoded, file=protocol, flush=True)
+        with protocol_lock:
+            if isinstance(frame, NativeMusicFailed):
+                failed = True
+            # A stopped Core reader must retire the native group, not block the
+            # live resource observer forever behind a full control pipe.
+            descriptor = protocol.fileno()
+            os.set_blocking(descriptor, False)
+            data = memoryview((encoded + "\n").encode("utf-8"))
+            deadline = time.monotonic() + 2
+            while data:
+                remaining = deadline - time.monotonic()
+                if (
+                    remaining <= 0
+                    or not select.select([], [descriptor], [], remaining)[1]
+                ):
+                    raise TimeoutError("native music control egress stopped draining")
+                try:
+                    count = os.write(descriptor, data)
+                except BlockingIOError:
+                    continue
+                if count <= 0:
+                    raise BrokenPipeError("native music control egress closed")
+                data = data[count:]
 
     try:
         if arguments.probe is not None:

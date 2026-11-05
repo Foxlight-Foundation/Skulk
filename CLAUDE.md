@@ -2934,3 +2934,26 @@ adds other GPUs. Cache preparation refuses a missing/unsampled receipt. Shared
 admission refuses observations older than two minutes or over thirty seconds
 ahead of the caller clock. Worker sampling/publication and placement consumers
 must still be connected before native capacity can be advertised.
+
+Native package `live_resource_guard` is also required. The prepared model binds
+its exact `NativeMusicMemoryBudget` phase ceilings into the isolated process.
+`resources.py` samples its actual leader RSS, Torch reserved/MPS driver allocation
+and raw host/device/shared availability before load and every half-second across
+loading, inference and idle residency. Initial fit and all admission owners use
+the same pure budget fit and pressure-headroom normalization: reserve up to
+512 MiB of host/shared and 256 MiB of device capacity, each capped at 5% for
+small pools. Normalize once before charging held/pending reservations.
+
+Live checks enforce allocation ceilings and pressure floors, not a second full
+workspace reservation on every poll. RSS earns no exclusive-allocation credit;
+on unified memory its ceiling is the simultaneous phase peak, and RSS plus GPU
+allocation is never presented as measured unique physical usage. Peak/soak
+qualification remains required. The native observer retires its private group
+on sensing or egress failure, even with closed diagnostics. Core retains one
+latest private memory frame, verifies leader/payload/device/sequence, refuses
+readiness before the first sample and checks five-second freshness after a
+blocking terminal dequeue. Initial sensing has a 30-second startup budget;
+native control writes are serialized and have a two-second drain deadline.
+The independent guardian still owns file locks through actual group drain.
+Older candidate packages need rebuilding; actual Worker/placement/media
+activation remains gated.

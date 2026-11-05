@@ -222,6 +222,7 @@ def installed(
             "resident_model",
             "library_probe",
             "memory_probe",
+            "live_resource_guard",
         ],
     )
     payload = hashlib.sha256(

@@ -155,6 +155,253 @@ class NativeMusicMemoryCapacity(NativeMusicContract):
 
 
 @final
+class NativeMusicMemoryBudget(NativeMusicContract):
+    """The admitted phase peaks carried into the separately supervised process.
+
+    Admission owns complete simultaneous reservations. The live guard enforces
+    process allocation ceilings and actual physical-memory pressure; it does
+    not pretend that RSS plus GPU allocations measure unique shared pages.
+    """
+
+    policy_version: Literal[1] = Field(
+        default=1, description="Admitted memory-policy version."
+    )
+    host_peak_bytes: int = Field(
+        ge=0, le=2**53 - 1, description="Largest admitted host phase."
+    )
+    device_peak_bytes: int = Field(
+        ge=0,
+        le=2**53 - 1,
+        description="Largest admitted selected-device phase; zero for CPU.",
+    )
+    shared_peak_bytes: int = Field(
+        ge=0,
+        le=2**53 - 1,
+        description="Largest simultaneous host/device physical phase.",
+    )
+
+    @model_validator(mode="after")
+    def validate_phase_bounds(self) -> Self:
+        """Keep a simultaneous phase within the possible independent peak bounds."""
+        if (
+            not max(self.host_peak_bytes, self.device_peak_bytes)
+            <= self.shared_peak_bytes
+            <= self.host_peak_bytes + self.device_peak_bytes
+        ):
+            raise ValueError("native music shared budget contradicts its phase peaks")
+        return self
+
+
+@final
+class NativeMusicMemoryObservation(NativeMusicContract):
+    """Bounded live facts from the owned native process, never State or event data."""
+
+    process_id: int = Field(
+        gt=1,
+        le=2**31 - 1,
+        description="Actual native leader collecting the observation.",
+    )
+    payload_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="Independently verified native payload identity.",
+    )
+    device: NativeMusicDevice = Field(
+        description="Actual explicitly selected native lane."
+    )
+    capacity: NativeMusicMemoryCapacity = Field(
+        description="Fresh host and selected-device physical availability."
+    )
+    host_resident_bytes: int = Field(
+        ge=0,
+        le=2**53 - 1,
+        description="Actual process RSS; not an exclusive-allocation credit.",
+    )
+    device_allocated_bytes: int = Field(
+        ge=0,
+        le=2**53 - 1,
+        description="Actual Torch reserved device allocation, or MPS driver allocation; zero on CPU.",
+    )
+
+    @model_validator(mode="after")
+    def validate_selected_device(self) -> Self:
+        """Refuse a missing/foreign device and never let CPU borrow a GPU pool."""
+        if self.device == "cpu":
+            if self.capacity.device_index is not None or self.device_allocated_bytes:
+                raise ValueError(
+                    "native CPU observation cannot contain a GPU allocation"
+                )
+        elif (
+            self.capacity.device_index != 0 or self.capacity.device_memory_kind is None
+        ):
+            raise ValueError(
+                "native GPU observation requires actual selected device zero"
+            )
+        if self.device == "mps" and self.capacity.device_memory_kind != "unified":
+            raise ValueError(
+                "native Metal observation requires its physical shared pool"
+            )
+        return self
+
+
+def native_music_admission_capacity(
+    capacity: NativeMusicMemoryCapacity,
+) -> NativeMusicMemoryCapacity:
+    """Reserve physical pressure headroom once before pending/committed admission.
+
+    Keep telemetry and live observations raw. All admission owners normalize
+    those actual readings with this same policy before charging reservations.
+    The live process guard enforces these floors rather than double-charging
+    the complete future workspace every time resident memory is sampled.
+    """
+    host_floor = min(512 * 1024**2, capacity.host_total_bytes // 20)
+    device_floor = (
+        min(256 * 1024**2, capacity.device_total_bytes // 20)
+        if capacity.device_total_bytes is not None
+        else 0
+    )
+    shared_floor = (
+        min(512 * 1024**2, capacity.shared_total_bytes // 20)
+        if capacity.shared_total_bytes is not None
+        else 0
+    )
+    return capacity.model_copy(
+        update={
+            "host_total_bytes": capacity.host_total_bytes - host_floor,
+            "host_available_bytes": max(0, capacity.host_available_bytes - host_floor),
+            "device_total_bytes": capacity.device_total_bytes - device_floor
+            if capacity.device_total_bytes is not None
+            else None,
+            "device_available_bytes": max(
+                0, capacity.device_available_bytes - device_floor
+            )
+            if capacity.device_available_bytes is not None
+            else None,
+            "shared_total_bytes": capacity.shared_total_bytes - shared_floor
+            if capacity.shared_total_bytes is not None
+            else None,
+            "shared_available_bytes": max(
+                0, capacity.shared_available_bytes - shared_floor
+            )
+            if capacity.shared_available_bytes is not None
+            else None,
+        }
+    )
+
+
+def native_music_memory_budget_error(
+    budget: NativeMusicMemoryBudget,
+    capacity: NativeMusicMemoryCapacity,
+    *,
+    device: NativeMusicDevice,
+    now_unix_ms: int,
+) -> str | None:
+    """Compare complete admitted peaks against one fresh normalized capacity.
+
+    Core and the separately installed process execute this same pure fit policy.
+    Callers reserve pressure headroom once with native_music_admission_capacity
+    before charging pending and committed placements; no allocation is inferred
+    from a model merely being loaded.
+    """
+    sampled = capacity.sampled_at_unix_ms
+    if now_unix_ms <= 0 or sampled <= 0:
+        return "Native music needs a timestamped current memory observation"
+    if sampled - now_unix_ms > 30_000:
+        return "Native music memory observation is ahead of the local clock; check node clocks and refresh resources"
+    if now_unix_ms - sampled > 120_000:
+        return "Native music memory observation is stale; refresh native resources before placement"
+    if budget.host_peak_bytes > capacity.host_available_bytes:
+        return "Native music needs more host memory for loading, media and forward execution"
+    if (
+        capacity.shared_available_bytes is not None
+        and budget.shared_peak_bytes > capacity.shared_available_bytes
+    ):
+        return "Native music needs more unified physical memory for simultaneous host/device work"
+    if device == "cpu":
+        if budget.device_peak_bytes != 0:
+            return "Native music CPU admission received a GPU execution estimate"
+        return None
+    if budget.device_peak_bytes == 0:
+        return "Native music GPU admission received a CPU execution estimate"
+    if capacity.device_index != 0 or capacity.device_available_bytes is None:
+        return "Native music needs current memory for its actual selected device zero"
+    if capacity.device_memory_kind is None:
+        return (
+            "Native music needs the actual device's discrete or unified memory topology"
+        )
+    if device == "mps" and capacity.device_memory_kind != "unified":
+        return "Native music Metal requires its unified physical-memory observation"
+    if budget.device_peak_bytes > capacity.device_available_bytes:
+        return "Native music needs more memory on its actual selected device zero"
+    return None
+
+
+def native_music_live_memory_error(
+    budget: NativeMusicMemoryBudget,
+    observation: NativeMusicMemoryObservation,
+    *,
+    now_unix_ms: int,
+) -> str | None:
+    """Refuse stale sampling, allocation overruns or current physical pressure.
+
+    The immutable budget comes from the same complete phase policy as admission.
+    RSS may alias GPU pages on unified memory, so its ceiling is the simultaneous
+    physical peak there. No RSS/allocator value earns an availability credit.
+    Real unique physical peaks still require isolated workload qualification.
+    """
+    capacity = observation.capacity
+    sampled = capacity.sampled_at_unix_ms
+    if (
+        sampled <= 0
+        or now_unix_ms <= 0
+        or now_unix_ms - sampled > 5000
+        or sampled - now_unix_ms > 30000
+    ):
+        return "Native music live memory observation is missing, stale or clock-incompatible"
+    if (observation.device == "cpu") != (budget.device_peak_bytes == 0):
+        return "Native music live memory observation differs from its admitted compute policy"
+    if budget.host_peak_bytes > capacity.host_total_bytes:
+        return "Native music admitted host budget exceeds actual physical capacity"
+    if (
+        capacity.device_total_bytes is not None
+        and budget.device_peak_bytes > capacity.device_total_bytes
+    ):
+        return "Native music admitted device budget exceeds actual physical capacity"
+    if (
+        capacity.shared_total_bytes is not None
+        and budget.shared_peak_bytes > capacity.shared_total_bytes
+    ):
+        return "Native music admitted shared budget exceeds actual physical capacity"
+    host_limit = (
+        budget.shared_peak_bytes
+        if capacity.device_memory_kind == "unified"
+        else budget.host_peak_bytes
+    )
+    if observation.host_resident_bytes > host_limit:
+        return (
+            "Native music process exceeded its admitted host or shared memory ceiling"
+        )
+    if observation.device_allocated_bytes > budget.device_peak_bytes:
+        return "Native music process exceeded its admitted device allocation ceiling"
+    host_floor = min(512 * 1024**2, capacity.host_total_bytes // 20)
+    if capacity.host_available_bytes < host_floor:
+        return "Native music stopped for current host memory pressure"
+    if (
+        capacity.shared_available_bytes is not None
+        and capacity.shared_available_bytes
+        < min(512 * 1024**2, (capacity.shared_total_bytes or 0) // 20)
+    ):
+        return "Native music stopped for current shared physical memory pressure"
+    if (
+        capacity.device_available_bytes is not None
+        and capacity.device_total_bytes is not None
+        and capacity.device_available_bytes
+        < min(256 * 1024**2, capacity.device_total_bytes // 20)
+    ):
+        return "Native music stopped for current selected-device memory pressure"
+    return None
+
+
+@final
 class NativeMusicLibraryProbe(NativeMusicContract):
     """Measured package/device execution without weights or model readiness.
 
@@ -411,6 +658,10 @@ class NativeMusicServeConfig(NativeMusicContract):
     precision: NativeMusicPrecision = Field(
         description="Actual loaded tensor precision required by admission."
     )
+    memory_budget: NativeMusicMemoryBudget | None = Field(
+        default=None,
+        description="Admitted phase peaks. Production native serving requires this; an absent budget is reserved for controlled protocol fixtures.",
+    )
     threads: int = Field(
         ge=1,
         le=32,
@@ -430,6 +681,12 @@ class NativeMusicServeConfig(NativeMusicContract):
         _absolute(self.directory)
         if self.device != "cuda" and self.precision != "float32":
             raise ValueError("native music CPU, Metal and ROCm policy requires float32")
+        if self.memory_budget is not None and (self.device == "cpu") != (
+            self.memory_budget.device_peak_bytes == 0
+        ):
+            raise ValueError(
+                "native music budget differs from the configured compute lane"
+            )
         return self
 
 
@@ -768,6 +1025,23 @@ class NativeMusicReadyFrame(NativeMusicContract):
 
 
 @final
+class NativeMusicMemoryFrame(NativeMusicContract):
+    """Latest-value resource heartbeat; never a generation terminal or media."""
+
+    kind: Literal["memory"] = Field(
+        default="memory", description="Private resource discriminator."
+    )
+    sequence: int = Field(
+        ge=1,
+        le=2**53 - 1,
+        description="Strictly increasing observation sequence within this process.",
+    )
+    observation: NativeMusicMemoryObservation = Field(
+        description="Measured native leader and actual device resources."
+    )
+
+
+@final
 class NativeMusicCompleted(NativeMusicContract):
     """One complete durable private WAV and result record are ready for custody."""
 
@@ -801,6 +1075,7 @@ class NativeMusicFailed(NativeMusicContract):
 
 NativeMusicFrame = Annotated[
     NativeMusicProgress
+    | NativeMusicMemoryFrame
     | NativeMusicReadyFrame
     | NativeMusicCompleted
     | NativeMusicFailed,

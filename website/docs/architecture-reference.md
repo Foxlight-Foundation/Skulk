@@ -2972,4 +2972,22 @@ the original indexed owner, including companions reached through a cached base.
   free/total and driver topology, or MPS working-set/physical-host readings.
   Cache rejects missing/unsampled observations. Shared fit requires age at most
   120 seconds and forward clock skew at most 30 seconds. No aggregate GPU
-  capacity or tested-device allowlist. Worker/placement/live-guard wiring remains.
+  capacity or tested-device allowlist. Worker/placement wiring remains.
+- `NativeMusicMemoryBudget` / `native_music_memory_budget_error`: portable
+  admitted phase ceilings and the same Core/native pre-load fit. Normalize
+  pressure headroom once before reservations with
+  `native_music_admission_capacity`: host/shared up to 512 MiB, device up to
+  256 MiB, each capped at 5% of small totals.
+- Native `live_resource_guard`: required cache feature. Before load and every
+  0.5 seconds, sample own RSS, Torch reserved/MPS driver allocation and actual
+  host/device/shared availability. Enforce allocation ceilings and pressure;
+  do not double-charge resident workspace or credit RSS as exclusive pages.
+  Unified RSS uses simultaneous phase ceiling; unique physical peaks require
+  qualification. Sensing/egress failure retires the private native group even
+  with closed stderr. The independent guardian retains source/service locks.
+- Private `NativeMusicMemoryFrame`: latest-value local control only; no media,
+  State or event log. Core binds PID/payload/device/contiguous sequence, requires
+  a sample before ready, and rechecks after blocking dequeue. Freshness at most
+  5 seconds; first-sample startup grace 30 seconds. Serialized native control
+  egress has a 2-second drain deadline. Old candidates require rebuilding;
+  actual Worker preparation/placement/media activation remains gated.
