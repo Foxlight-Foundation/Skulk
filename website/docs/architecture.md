@@ -4367,8 +4367,12 @@ hardware compatibility ban.
 Unified admission combines distinct simultaneous allocations within each phase
 and takes the larger phase. It does not add independently timed host/device
 maxima. The shared reservation helper caps observed free capacity by total
-commitments and subtracts only unreflected pending work from the free reading;
-resident work is already reflected there. CPU never borrows VRAM, and GPU
+commitments and subtracts the still-unallocated peak of every pending or loaded
+instance from the free reading. A loaded state is not an allocation receipt:
+`NativeMusicMemoryReservation` credits only verified exclusive host/device or
+unique shared physical allocations included in the exact same capacity snapshot.
+Absent or stale allocation facts reserve the full peak conservatively; a
+resident model retains its future forward workspace even while idle. CPU never borrows VRAM, and GPU
 execution must satisfy host staging/fallback capacity too. Native model load
 recomputes the projection from verified selected files and refuses a larger
 phase before opening its workspace or starting native model allocation.

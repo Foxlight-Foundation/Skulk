@@ -2957,8 +2957,12 @@ the original indexed owner, including companions reached through a cached base.
   Include actual casts, FP32 load copies, bounded media, libraries and temporary
   CPU VAE fallback. Forward allowance: unqualified minimum 2 GiB, scaling to
   8 GiB at 120 seconds; explicit unknown-layout upper bounds can be reassessed.
-  Unified peak is the maximum of simultaneous phase sums. Only pending work
-  nets observed free memory; total commitments cap each domain. CPU cannot
+  Unified peak is the maximum of simultaneous phase sums. Reserve every
+  committed instance's still-unallocated peak against observed free memory,
+  including idle models' future workspace. `NativeMusicMemoryReservation`
+  credits only verified exclusive allocations in that exact capacity snapshot;
+  missing/stale allocation facts credit zero. Shared credit is unique physical
+  storage. Total commitments additionally cap each domain. CPU cannot
   borrow VRAM; GPU also needs host capacity. Native model start rechecks all
   observed phase costs before workspace/native allocation. Policy binds
   `memory_policy_version = 1`.

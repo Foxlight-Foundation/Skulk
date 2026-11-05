@@ -1,11 +1,14 @@
 """Admission and unreflected reservations use every actual native memory domain."""
 
+from typing import Literal
+
 import pytest
 from pydantic import ValidationError
 
 from skulk.shared.models.native_music_memory import (
     NativeMusicMemoryCapacity,
     NativeMusicMemoryEstimate,
+    NativeMusicMemoryReservation,
     native_music_memory_error,
     reserve_native_music_memory,
 )
@@ -88,22 +91,136 @@ def test_every_required_memory_domain_must_fit(
 
 
 def test_loaded_work_is_not_subtracted_from_observed_free_memory_twice() -> None:
-    """A loaded allocation affects the total ceiling, while only pending work nets free."""
+    """Only verified allocations in this exact snapshot avoid a second charge."""
     loaded, pending = estimate(host=20, device=30), estimate(host=10, device=20)
     observed = capacity(host=50, device=50)
     reserved = reserve_native_music_memory(
-        observed, [loaded, pending], pending=[pending]
+        observed,
+        [
+            NativeMusicMemoryReservation(
+                estimate=loaded,
+                reflected_at_unix_ms=observed.sampled_at_unix_ms,
+                reflected_host_bytes=20,
+                reflected_device_bytes=30,
+            ),
+            NativeMusicMemoryReservation(estimate=pending),
+        ],
     )
     assert reserved.host_available_bytes == 40
     assert reserved.device_available_bytes == 30
     assert observed.host_available_bytes == observed.device_available_bytes == 50
 
 
+@pytest.mark.parametrize("domain", ["host", "device", "shared"])
+def test_idle_model_retains_its_unallocated_forward_peak(
+    domain: Literal["host", "device", "shared"],
+) -> None:
+    """External use plus resident weights cannot consume a future workspace twice."""
+    device: NativeMusicDevice
+    if domain == "host":
+        observed = capacity(host=60)
+        reservation = NativeMusicMemoryReservation(
+            estimate=estimate(host=60),
+            reflected_at_unix_ms=1,
+            reflected_host_bytes=20,
+        )
+        candidate, device = estimate(host=30), "cpu"
+    elif domain == "device":
+        observed = capacity(device=60)
+        reservation = NativeMusicMemoryReservation(
+            estimate=estimate(host=0, device=60),
+            reflected_at_unix_ms=1,
+            reflected_device_bytes=20,
+        )
+        candidate, device = estimate(host=0, device=30), "cuda"
+    else:
+        observed = capacity(device=100, shared=60)
+        reservation = NativeMusicMemoryReservation(
+            estimate=estimate(host=10, device=50),
+            reflected_at_unix_ms=1,
+            reflected_host_bytes=5,
+            reflected_device_bytes=15,
+            reflected_shared_bytes=20,
+        )
+        candidate, device = estimate(host=0, device=30), "mps"
+    reserved = reserve_native_music_memory(observed, [reservation])
+    assert getattr(reserved, domain + "_available_bytes") == 20
+    assert (
+        native_music_memory_error(candidate, reserved, device=device, now_unix_ms=1)
+        is not None
+    )
+
+
+@pytest.mark.parametrize("sampled", [0, 2, 3])
+def test_unknown_or_other_snapshot_allocations_grant_no_credit(sampled: int) -> None:
+    """A loaded transition or a stale allocation receipt cannot credit current free."""
+    held = NativeMusicMemoryReservation(
+        estimate=estimate(host=30, device=30),
+        reflected_at_unix_ms=sampled,
+        reflected_host_bytes=20,
+        reflected_device_bytes=20,
+        reflected_shared_bytes=40,
+    )
+    reserved = reserve_native_music_memory(
+        capacity(host=60, device=60, shared=60), [held]
+    )
+    assert reserved.host_available_bytes == 30
+    assert reserved.device_available_bytes == 30
+    assert reserved.shared_available_bytes == 0
+
+
+def test_unsampled_capacity_cannot_credit_matching_zero_timestamp() -> None:
+    """Two unknown timestamps do not establish observed allocations."""
+    held = NativeMusicMemoryReservation(
+        estimate=estimate(host=30), reflected_host_bytes=30
+    )
+    observed = capacity(host=60).model_copy(update={"sampled_at_unix_ms": 0})
+    assert reserve_native_music_memory(observed, [held]).host_available_bytes == 30
+
+
+def test_allocation_credit_never_exceeds_the_reserved_domain_peak() -> None:
+    """A grown allocation cannot manufacture capacity for another instance."""
+    held = NativeMusicMemoryReservation(
+        estimate=estimate(host=20, device=30),
+        reflected_at_unix_ms=1,
+        reflected_host_bytes=200,
+        reflected_device_bytes=300,
+        reflected_shared_bytes=500,
+    )
+    reserved = reserve_native_music_memory(
+        capacity(host=40, device=40, shared=40), [held]
+    )
+    assert reserved.host_available_bytes == 40
+    assert reserved.device_available_bytes == 40
+    assert reserved.shared_available_bytes == 40
+
+
+def test_shared_credit_uses_unique_physical_storage_and_simultaneous_phase_peak() -> (
+    None
+):
+    """Independent host/device peaks and their credits cannot be added for UMA."""
+    projected = estimate(host=60, device=10).model_copy(
+        update={"host_forward_bytes": 10, "device_forward_bytes": 60}
+    )
+    held = NativeMusicMemoryReservation(
+        estimate=projected,
+        reflected_at_unix_ms=1,
+        reflected_host_bytes=20,
+        reflected_device_bytes=20,
+        reflected_shared_bytes=25,
+    )
+    reserved = reserve_native_music_memory(
+        capacity(host=80, device=80, shared=60), [held]
+    )
+    assert reserved.shared_available_bytes == 15
+
+
 def test_stale_free_telemetry_is_bounded_by_all_committed_capacity() -> None:
     """Two pending allocations cannot both spend an unchanged pre-load snapshot."""
     first, second = estimate(host=40, device=30), estimate(host=40, device=30)
     reserved = reserve_native_music_memory(
-        capacity(device=100), [first, second], pending=[first, second]
+        capacity(device=100),
+        [NativeMusicMemoryReservation(estimate=item) for item in (first, second)],
     )
     assert reserved.host_available_bytes == 20
     assert reserved.device_available_bytes == 40
@@ -121,7 +238,8 @@ def test_unified_pending_gpu_work_also_reserves_physical_capacity_for_cpu_work()
     """A CPU candidate cannot reuse host pages promised to an unstarted shared GPU."""
     pending_gpu = estimate(host=10, device=60)
     reserved = reserve_native_music_memory(
-        capacity(device=100, shared=100), [pending_gpu], pending=[pending_gpu]
+        capacity(device=100, shared=100),
+        [NativeMusicMemoryReservation(estimate=pending_gpu)],
     )
     assert reserved.host_available_bytes == 90
     assert reserved.device_available_bytes == 40
@@ -136,7 +254,8 @@ def test_overcommit_clamps_all_domains_to_zero_without_mutating_observation() ->
     """Restored reservations beyond capacity produce a clear refusal, not negatives."""
     held = estimate(host=150, device=150)
     reserved = reserve_native_music_memory(
-        capacity(device=100, shared=100), [held], pending=[held]
+        capacity(device=100, shared=100),
+        [NativeMusicMemoryReservation(estimate=held)],
     )
     assert (
         reserved.host_available_bytes

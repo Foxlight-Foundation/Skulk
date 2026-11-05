@@ -111,28 +111,76 @@ class NativeMusicMemoryEstimate(FrozenModel):
         )
 
 
+@final
+class NativeMusicMemoryReservation(FrozenModel):
+    """Hold the entire execution peak, crediting only verified current allocations.
+
+    A loaded model's weights do not stand for its future forward workspace.
+    Default zero credits are safe for pending work and missing observations.
+    A caller may credit only exclusive allocations already included in the same
+    capacity sample, never estimated tensor sizes or another instance's pages.
+    Shared credit measures unique physical storage, not a sum of aliases.
+    """
+
+    estimate: NativeMusicMemoryEstimate = Field(
+        description="The admitted complete loading/forward peak held by this instance."
+    )
+    reflected_at_unix_ms: int = Field(
+        default=0,
+        ge=0,
+        description="Exact capacity snapshot containing the verified allocations; zero grants no credit.",
+    )
+    reflected_host_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="Verified exclusive host allocation already reflected by that snapshot.",
+    )
+    reflected_device_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="Verified allocation on the selected logical device zero reflected by that snapshot.",
+    )
+    reflected_shared_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="Verified unique physical allocation in the shared pool reflected by that snapshot.",
+    )
+
+
 def reserve_native_music_memory(
     capacity: NativeMusicMemoryCapacity,
-    committed: Iterable[NativeMusicMemoryEstimate],
-    *,
-    pending: Iterable[NativeMusicMemoryEstimate] = (),
+    committed: Iterable[NativeMusicMemoryReservation],
 ) -> NativeMusicMemoryCapacity:
-    """Net current observations against committed ceilings and unreflected work.
+    """Reserve every still-unallocated peak against the current observed free pool.
 
-    ``committed`` includes every held reservation, including ``pending``. Only
-    pending allocations are subtracted from observed free memory; loaded work
-    is already reflected there. Each independent domain is also bounded by its
-    total minus every committed reservation. Unified charges use phase-coincident
-    unique storage, not a second charge for an already shared GPU weight.
-    The caller owns instance identity/deduplication and supplies one snapshot.
+    ``committed`` includes pending and loaded instances exactly once. A loaded
+    state alone earns no credit: only exclusive allocations verified in this
+    exact capacity snapshot reduce its outstanding reservation. Stale or unknown
+    allocation readings conservatively reserve the full peak. Each domain also
+    obeys total capacity minus all commitments, and no credit exceeds its peak.
+    The caller owns instance identity/deduplication and allocation attribution.
     """
-    held, waiting = tuple(committed), tuple(pending)
+    held = tuple(committed)
+
+    def credit(item: NativeMusicMemoryReservation, reflected: int, peak: int) -> int:
+        return (
+            min(reflected, peak)
+            if capacity.sampled_at_unix_ms > 0
+            and item.reflected_at_unix_ms == capacity.sampled_at_unix_ms
+            else 0
+        )
+
     host = max(
         0,
         min(
             capacity.host_available_bytes
-            - sum(item.host_peak_bytes for item in waiting),
-            capacity.host_total_bytes - sum(item.host_peak_bytes for item in held),
+            - sum(
+                item.estimate.host_peak_bytes
+                - credit(item, item.reflected_host_bytes, item.estimate.host_peak_bytes)
+                for item in held
+            ),
+            capacity.host_total_bytes
+            - sum(item.estimate.host_peak_bytes for item in held),
         ),
     )
     device = capacity.device_available_bytes
@@ -140,9 +188,18 @@ def reserve_native_music_memory(
         device = max(
             0,
             min(
-                device - sum(item.device_peak_bytes for item in waiting),
+                device
+                - sum(
+                    item.estimate.device_peak_bytes
+                    - credit(
+                        item,
+                        item.reflected_device_bytes,
+                        item.estimate.device_peak_bytes,
+                    )
+                    for item in held
+                ),
                 capacity.device_total_bytes
-                - sum(item.device_peak_bytes for item in held),
+                - sum(item.estimate.device_peak_bytes for item in held),
             ),
         )
     shared = capacity.shared_available_bytes
@@ -150,9 +207,18 @@ def reserve_native_music_memory(
         shared = max(
             0,
             min(
-                shared - sum(item.unified_peak_bytes for item in waiting),
+                shared
+                - sum(
+                    item.estimate.unified_peak_bytes
+                    - credit(
+                        item,
+                        item.reflected_shared_bytes,
+                        item.estimate.unified_peak_bytes,
+                    )
+                    for item in held
+                ),
                 capacity.shared_total_bytes
-                - sum(item.unified_peak_bytes for item in held),
+                - sum(item.estimate.unified_peak_bytes for item in held),
             ),
         )
     return capacity.model_copy(

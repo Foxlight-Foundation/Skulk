@@ -2918,8 +2918,11 @@ fallback. The forward allowance is an explicit unqualified estimate: 2 GiB
 minimum, scaling to 8 GiB at the 120-second mounted ceiling. Exact headers
 replace visible conservative unknown-layout bounds; neither grants support.
 Separate host/device peaks and simultaneous unified physical peaks feed the
-same pure fit/reservation functions. Only unreflected work nets observed free
-memory; all commitments bound the total ceiling. Native model load recomputes
+same pure fit/reservation functions. Every commitment retains its unallocated
+peak, including loaded idle models' future workspace. Only verified exclusive
+allocations in the exact capacity snapshot reduce that charge; unknown or stale
+allocation facts credit zero. Shared credits measure unique physical storage.
+All commitments also bound the total ceiling. Native model load recomputes
 the projection from verified files and refuses an increase in any phase before
 creating its workspace. Policies bind `memory_policy_version = 1`.
 
