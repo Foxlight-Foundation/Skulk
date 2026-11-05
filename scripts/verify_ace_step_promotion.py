@@ -1,4 +1,4 @@
-"""Select the complete fixed native ACE inventory for exact-byte publication.
+"""Select the complete fixed native archive inventory for exact-byte publication.
 
 Build success and hardware qualification do not select publication bytes. Core's
 reviewed inventory does. GitHub provenance and successful source-run verification
@@ -16,6 +16,7 @@ from typing import final
 
 from skulk.provisioning.ace_step_inventory import ACE_STEP_PACKAGES
 from skulk.provisioning.ace_step_runtime import AceStepWheel
+from skulk.provisioning.demucs_runtime import DemucsWheel
 
 
 @final
@@ -34,7 +35,7 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
 
 
 def verify_artifacts(
-    directory: Path, *, packages: tuple[AceStepWheel, ...] = ACE_STEP_PACKAGES
+    directory: Path, *, packages: tuple[AceStepWheel | DemucsWheel, ...] = ACE_STEP_PACKAGES
 ) -> tuple[Path, ...]:
     """Verify every selected profile before returning any publishable wheel path.
 
@@ -42,37 +43,38 @@ def verify_artifacts(
     producer output. Every wheel must match the trusted ``packages`` inventory
     by basename, exact size and SHA-256. Missing, duplicate, extra, symlinked or
     changed objects fail the entire selection before the caller uploads anything.
-    The package argument allows small isolated refusal tests; the CLI always uses
-    the complete built-in inventory and accepts no digest map or profile override.
+    The package argument admits the two built-in ACE/Demucs inventories and small
+    isolated refusal tests. Each CLI supplies its complete fixed family inventory
+    and accepts no digest map or profile override.
     """
     expected = {package.filename: package for package in packages}
     if not expected or len(expected) != len(packages):
-        raise ValueError("native ACE inventory is empty or contains duplicate names")
+        raise ValueError("native archive inventory is empty or contains duplicate names")
     if directory.is_symlink() or not directory.is_dir():
-        raise ValueError("native ACE artifact directory must be a real directory")
+        raise ValueError("native publication artifact directory must be a real directory")
     found: dict[str, Path] = {}
     # Do not follow artifact-directory links or special files. The bounded
-    # traversal also refuses archive contents unrelated to the six fixed wheels.
+    # traversal also refuses archive contents unrelated to the selected fixed wheels.
     count = 0
     for root, directories, filenames in os.walk(directory, followlinks=False):
         count += len(directories) + len(filenames)
         if count > 256:
-            raise ValueError("native ACE artifact inventory exceeds its file bound")
+            raise ValueError("native publication artifact inventory exceeds its file bound")
         for name in directories:
             if (Path(root) / name).is_symlink():
-                raise ValueError("native ACE artifact directory contains a symlink")
+                raise ValueError("native publication artifact directory contains a symlink")
         for name in filenames:
             path = Path(root) / name
             if not stat.S_ISREG(path.lstat().st_mode):
-                raise ValueError("native ACE artifacts must be regular files")
+                raise ValueError("native publication artifacts must be regular files")
             if not name.endswith(".whl"):
                 continue
             if name not in expected or name in found:
-                raise ValueError("native ACE artifact has an extra or duplicate wheel")
+                raise ValueError("native publication artifact has an extra or duplicate wheel")
             found[name] = path
     if found.keys() != expected.keys():
         raise ValueError(
-            "native ACE publication requires every fixed inventory profile"
+            "native archive publication requires every fixed inventory profile"
         )
     selected: list[Path] = []
     for name, package in sorted(expected.items()):
@@ -81,14 +83,14 @@ def verify_artifacts(
             before = os.fstat(source.fileno())
             if not stat.S_ISREG(before.st_mode) or before.st_size != package.size_bytes:
                 raise ValueError(
-                    "native ACE artifact size differs from the fixed inventory"
+                    "native publication artifact size differs from the fixed inventory"
                 )
             digest = hashlib.sha256()
             measured = 0
             while chunk := source.read(1024 * 1024):
                 measured += len(chunk)
                 if measured > package.size_bytes:
-                    raise ValueError("native ACE artifact grew during verification")
+                    raise ValueError("native publication artifact grew during verification")
                 digest.update(chunk)
             after = os.fstat(source.fileno())
         current = path.lstat()
@@ -99,7 +101,7 @@ def verify_artifacts(
             or _file_identity(after) != _file_identity(current)
         ):
             raise ValueError(
-                "native ACE artifact changed or differs from the fixed inventory"
+                "native publication artifact changed or differs from the fixed inventory"
             )
         selected.append(path)
     return tuple(selected)

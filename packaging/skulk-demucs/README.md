@@ -243,3 +243,33 @@ it never substitutes for package/interpreter/import verification. Close bounds
 waiting for another preparation at five seconds and retains ownership for retry.
 Download cancellation and total deadlines are checked on each raw transport
 read, without waiting to fill a large iterator buffer.
+
+## Exact fixed-inventory publication
+
+`demucs-native-boundary.yml` keeps its ordinary `verify-current` path and adds
+explicit `build-inventory` and `publish-inventory` dispatches. The inventory job
+reads the selected Core source; only an explicit inventory build checks out
+`DEMUCS_ADAPTER_REVISION` to reproduce all three original CPU archive identities.
+The producer revision is part of the payload, so a newer current-source archive
+cannot replace a fixed pin even when its adapter modules are unchanged. Separate
+producer/controller checkouts let current Core supervise and qualify the exact
+old-producer package, rather than accidentally testing an obsolete controller.
+
+Each fixed candidate must match every descriptor field and pass the existing
+fresh offline install, codec/math, verified cache reuse, pinned model load/export,
+resident cancellation/reload and owner-death checks. The weights remain a
+separate immutable download. Hosted provenance is emitted only for explicit
+inventory candidates; package availability does not advertise a ready model.
+
+After review and initiative merge, publish from the SAME reviewed source as the
+successful inventory run. The publisher refuses another workflow/repository/head,
+incomplete or substituted archives and non-hosted or wrong-source attestations.
+`scripts/verify_demucs_promotion.py` uses the shared bounded exact-byte selector
+with the complete three-object Demucs inventory; neither CLI nor dispatch accepts
+caller-selected hashes or platform subsets. The existing ACE CLI retains its
+six-object default. Publication uses the globally serialized append-only engine
+index writer and does not rebuild candidates. Complete public SHA/size and PEP503
+readback plus a same-session private engine-wheel ledger entry are still required.
+CPU and Mac Metal packages do not imply Linux CUDA/ROCm separator packages or
+qualified model/hardware/music behavior. Actual device probes, trust and live
+resources remain independent requirements.
