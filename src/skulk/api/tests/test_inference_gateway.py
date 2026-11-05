@@ -510,11 +510,8 @@ async def test_slow_catalogs_do_not_withdraw_a_healthy_provider(
         assert healthy.calls == 1
 
 
-@pytest.mark.parametrize("stream", [False, True])
-async def test_output_bound_precedes_forwarding_and_closes_the_provider(
-    stream: bool,
-) -> None:
-    """Oversized deltas fail in both wire modes without forwarding their content."""
+async def test_output_bound_precedes_forwarding_and_closes_the_provider() -> None:
+    """Collected responses stop before exceeding their aggregate memory guard."""
     closed = False
     cancelled = False
 
@@ -545,11 +542,13 @@ async def test_output_bound_precedes_forwarding_and_closes_the_provider(
         [
             part
             async for part in chat_response(
-                session, model="fixture", stream=stream, include_usage=True
+                session, model="fixture", stream=False, include_usage=True
             )
         ]
     )
-    assert "output_limit" in output and "[DONE]" not in output and len(output) < 1024
+    assert (
+        "response_too_large" in output and "[DONE]" not in output and len(output) < 1024
+    )
     assert closed and cancelled
 
 
@@ -581,9 +580,7 @@ async def test_close_after_role_cancels_without_reading_a_provider_frame() -> No
         frames=UnreadFrames(),
         cancel_output=cancel,
     )
-    response = chat_response(
-        session, model="fixture", stream=True, include_usage=False
-    )
+    response = chat_response(session, model="fixture", stream=True, include_usage=False)
     assert '"role": "assistant"' in await anext(response)
     await response.aclose()
     assert closed and cancelled

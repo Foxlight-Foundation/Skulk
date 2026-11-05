@@ -6491,6 +6491,97 @@ a recipient must still explicitly confirm the exact I2P policy to Resume.
 
 ### Experimental capability chat gateway
 
+#### Client-owned continuation (experimental)
+
+Continuation is an explicit opt-in on **POST** `/v1/chat/completions`. Ordinary
+full-history clients retain the existing gateway contract. A native model or a
+capability without an advertised continuation destination refuses this opt-in.
+
+`inference_capability.continuation` in **GET** `/v1/models` advertises the contract,
+authorization, exact `target`, callable version, proof header and receipt path.
+The destination must declare `chat.continuation@0.1.0`,
+`caller.ed25519@0.1.0`, and `inference.chat=<chat-id>@0.2.0`, and share the actual
+local provider instance with that exact chat callable. Ambiguous relationships
+refuse. Existing v1/v2 catalog serialization is unchanged.
+
+Each client generates its own Ed25519 key and separately obtains capability-owner
+approval of its **public** key, models and expiry. Core never generates this
+identity, reuses its gateway key for it, or receives the client's private key.
+Direct owner API access remains required; paired-device/LAN access does not
+inherit continuation authority.
+
+Send `Skulk-Continuation-Proof` as unpadded base64url of a UTF-8 JSON object
+`{caller_id, request, signature}` (at most 4,096 header characters). `caller_id`
+is the approved 32-character lowercase hexadecimal ID; `signature` is the
+128-character lowercase hexadecimal Ed25519 signature. Sign canonical JSON of
+`{caller_id, request}` with sorted object keys, ASCII escaping, no whitespace,
+and no nonfinite numbers. Expiry uses Python JSON float representation, including
+`.0` for whole values; browser clients use an exact fractional epoch timestamp
+to avoid an integer/float serialization mismatch. The `request` contains:
+
+| Field | Meaning |
+| --- | --- |
+| `contract` | Exactly `chat.continuation@0.1.0`. |
+| `mode`, `handle` | `start` with null/absent handle, or `continue` with the exact prior `ct1_` plus 64-hex handle. |
+| `conversation_id` | Explicit random 64-hex conversation identity. |
+| `target` | Exact advertised `target_node`, `callable_id`, 16-hex `descriptor_revision`, and provider model slug. Callable version is fixed to `0.1.0`. |
+| `body` | `size_bytes` (2 bytes–16 MiB), lowercase SHA-256 `sha256`, and `media_type: application/vnd.skulk.chat-request+json` of the **original HTTP body**, including its exact public `model` ID. |
+| `nonce`, `expires_at` | Fresh 64-hex attempt ID and finite Unix admission deadline within the next 60 seconds. |
+
+Serialize the HTTP body once, sign its byte digest and length, and send those same
+bytes. Whitespace and Unicode encoding are preserved. Full public message history
+is required, including matching earlier assistant text/tool calls and tool results.
+The API checks exact body/destination/deadline and hard inference policy; the
+capability independently verifies the registered client signature, current scope,
+revocation, history and storage before any provider request. No normalization,
+fallback, destination migration or automatic retry occurs.
+
+Successful collected JSON includes `skulk_continuation`. For SSE, that field is
+on the final successful finish chunk before optional usage and `[DONE]`. It
+contains only `contract`, `conversation_id`, opaque `handle`, public-history
+`{count, sha256}`, original `request_nonce`, and checkpoint `expires_at`. Success
+and this receipt are withheld until semantic commit and transport completion.
+Failures can include a fixed `error.continuation_error` category such as
+`scope_mismatch`, `history_mismatch` or `recovery_required`; no provider state is
+returned. An early authentication refusal survives input half-close races.
+
+**POST** `/v1/chat/continuation/receipt` accepts a fresh `{caller_id, request,
+signature}` JSON proof under the separate `chat.continuation.receipt@0.1.0`
+request contract. Its request contains the same `conversation_id` and exact
+`target`, original `request_nonce`, a fresh query `nonce`, and admission
+`expires_at`. Signing rules are identical. No media/body reference or generation
+parameters are accepted. It returns `{receipt, error}` with exactly one non-null:
+a current committed receipt or a bounded capability refusal. Invalid/changed
+destinations return 409; invalid deadlines return 400; uncertain/invalid transport
+returns 503. Direct owner access and independent client authorization still apply.
+A recovered receipt cannot recover lost assistant text. Do not invent that text
+or replay inference; continuation still requires the matching committed history.
+
+Streaming retains bounded frames and imposes no aggregate generation ceiling.
+Collected responses have a separate 262,144 serialized-delta-character memory
+guard and return `response_too_large` when exceeded; use streaming for larger
+responses. This guard is separate from capability-owner output allowances and
+provider limits. The existing whole-call deadline and provider frame bounds apply.
+
+In dashboard Chat, **Conversation continuity** appears for an advertised
+destination. **Get browser public key** creates or reads a nonextractable
+Ed25519 key in origin-local IndexedDB. Approve only its public key in the
+capability's management page, then paste the returned public enrollment JSON
+and select **Enable for this conversation**. The dashboard checks the approved
+key, model, destination and expiry. It does not proxy management cookies or CSRF
+across origins. Existing conversations can explicitly opt in using full history.
+
+Public grants, attempt IDs and receipts live with the conversation metadata;
+private keys and provider/account state do not. A pending attempt is durably
+recorded before dispatch. Chat preserves exact public assistant/tool turns and
+summaries separately from display text, checks their fingerprint before accepting
+a receipt, and requires a clean SSE terminal plus EOF. Reload, cancellation or
+missing delivery cannot silently replay an attempt. **Recover receipt** performs
+only the signed lookup and verifies retained public history; missing assistant
+text remains blocked. **Use full history instead** explicitly abandons this
+continuation and starts a fresh provider context on the next request. Editing or
+deleting committed messages likewise requires an explicit new context.
+
 **GET** `/v1/inference/gateway` returns `contract: chat.completions@0.1.0`
 and this API host's Ed25519 `public_key`. It accepts no parameters and exposes
 no private signing key or provider credential. The key grants no permission;

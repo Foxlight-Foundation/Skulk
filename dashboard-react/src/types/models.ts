@@ -129,6 +129,15 @@ export interface ModelInfo {
     expires_at: number;
     /** Provider-declared features narrowed by this integration's owner policy. */
     features?: Array<'image_input' | 'function_tools' | 'reasoning_toggle' | 'text_file_input' | 'pdf_input'>;
+    /** Explicit independently authorized continuation destination, separate from gateway chat. */
+    continuation?: {
+      contract: 'chat.continuation@0.1.0';
+      authorization: 'caller.ed25519@0.1.0';
+      callable_version: '0.1.0';
+      proof_header: 'Skulk-Continuation-Proof';
+      receipt_path: '/v1/chat/continuation/receipt';
+      target: import('../store/chatContinuation').ContinuationTarget;
+    };
   } | null;
   name?: string;
   context_length?: number;

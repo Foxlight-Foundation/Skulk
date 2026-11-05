@@ -17,7 +17,8 @@ export function buildApiMessages(
   messages: ChatMessage[], documents: { text: boolean; pdf: boolean } = { text: false, pdf: false },
 ): ApiMessagePayload[] {
   let documentCount = 0;
-  return messages.map((message) => {
+  return messages.flatMap((message): ApiMessagePayload[] => {
+    if (message.role === 'assistant' && message.continuationMessages) return message.continuationMessages;
     if (message.attachments?.length) {
       const parts: Array<Record<string, unknown>> = [];
       for (const attachment of message.attachments) {
@@ -34,8 +35,8 @@ export function buildApiMessages(
       if (message.content) {
         parts.push({ type: 'text', text: message.content });
       }
-      return { role: message.role, content: parts };
+      return [{ role: message.role, content: parts }];
     }
-    return { role: message.role, content: message.content };
+    return [{ role: message.role, content: message.content }];
   });
 }

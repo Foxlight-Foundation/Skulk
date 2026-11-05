@@ -33,6 +33,13 @@ from pydantic import (
     model_validator,
 )
 
+from skulk.api.inference_continuation import (
+    ContinuationEvent,
+    ContinuationProof,
+    ContinuationReceipt,
+    ReceiptOutcome,
+    ReceiptProof,
+)
 from skulk.extensions.streams import (
     CapabilityStreamFrame,
     CapabilityStreamSession,
@@ -44,6 +51,7 @@ CONTRACT = "chat.completions@0.1.0"
 STREAMED_CONTRACT = "chat.completions@0.2.0"
 MAX_CHAT_BODY_BYTES = 16 * 1024 * 1024
 CHAT_BODY_MEDIA_TYPE = "application/vnd.skulk.chat-request+json"
+MAX_COLLECTED_CHAT_CHARACTERS = 262144
 
 
 class ChatModel(BaseModel):
@@ -281,6 +289,11 @@ async def send_chat_body(
             for start in range(0, len(raw), 1024 * 1024):
                 if await disconnected():
                     raise HTTPException(499, "Caller disconnected during input upload")
+                if session.input.closed:
+                    # A provider may refuse authentication before consuming
+                    # media. Its queued output still needs semantic/schema and
+                    # terminal validation; upload closure must not erase it.
+                    return
                 await session.input.send_chunk(
                     payload={},
                     media=InlineMediaAttachment(
@@ -290,7 +303,15 @@ async def send_chat_body(
                 )
             if await disconnected():
                 raise HTTPException(499, "Caller disconnected during input upload")
-            await session.input.complete()
+            if not session.input.closed:
+                await session.input.complete()
+    except RuntimeError:
+        if session.input is None or not session.input.closed:
+            async with _owned_frames(session):
+                pass
+            raise
+        # close_locally() may race a send waiting on the sink lock. Continue
+        # into the output adapter, which alone decides whether output succeeded.
     except BaseException:
         # ASGI cancellation can interrupt the upload before a response iterator
         # exists. Enter the same bounded cleanup ownership used by chat output.
@@ -299,12 +320,15 @@ async def send_chat_body(
         raise
 
 
-def _failure(code: str) -> dict[str, JsonValue]:
+def _failure(code: str, continuation_error: str | None = None) -> dict[str, JsonValue]:
     return {
         "error": {
             "message": f"Capability inference failed: {code}",
             "type": "capability_error",
             "code": code,
+            **(
+                {"continuation_error": continuation_error} if continuation_error else {}
+            ),
         }
     }
 
@@ -341,6 +365,7 @@ async def chat_response(
     model: str,
     stream: bool,
     include_usage: bool,
+    continuation: ContinuationProof | None = None,
 ) -> AsyncGenerator[str]:
     """Adapt a cancellable capability stream to the existing chat wire format.
 
@@ -354,6 +379,8 @@ async def chat_response(
     output_characters = 0
     tools: dict[int, dict[str, JsonValue]] = {}
     terminal: dict[str, JsonValue] | None = None
+    terminal_failure: dict[str, JsonValue] | None = None
+    receipt: ContinuationReceipt | None = None
     finished = False
 
     def chunk(
@@ -383,7 +410,27 @@ async def chat_response(
                 break
             if frame.kind != "chunk" or frame.payload is None:
                 continue
-            event = _OBJECT.validate_python(frame.payload)
+            continuation_error: str | None = None
+            try:
+                if continuation is not None:
+                    wrapped = ContinuationEvent.model_validate_json(
+                        json.dumps(frame.payload)
+                    )
+                    event = wrapped.event
+                    continuation_error = wrapped.continuation_error
+                    if wrapped.receipt is not None:
+                        if not wrapped.receipt.matches(continuation):
+                            raise ValueError("receipt does not match attempt")
+                        receipt = wrapped.receipt
+                else:
+                    event = _OBJECT.validate_python(frame.payload)
+            except ValueError:
+                yield (
+                    _sse(_failure("invalid_stream"))
+                    if stream
+                    else json.dumps(_failure("invalid_stream"))
+                )
+                return
             kind = event.get("kind")
             if terminal is not None or kind not in ("delta", "completed", "failed"):
                 yield (
@@ -410,10 +457,18 @@ async def chat_response(
                     )
                     else "provider_error"
                 )
+                if continuation is not None:
+                    # A semantic refusal is still a normal SDK result. Closing
+                    # its socket before the terminal/cleanup acknowledgment
+                    # cancels a healthy child and can trigger fault recovery.
+                    # Drain the owned transport before publishing the refusal.
+                    terminal_failure = _failure(str(safe), continuation_error)
+                    terminal = event
+                    continue
                 yield (
-                    _sse(_failure(str(safe)))
+                    _sse(_failure(str(safe), continuation_error))
                     if stream
-                    else json.dumps(_failure(str(safe)))
+                    else json.dumps(_failure(str(safe), continuation_error))
                 )
                 return
             if kind == "completed":
@@ -434,14 +489,16 @@ async def chat_response(
                     else json.dumps(_failure("invalid_stream"))
                 )
                 return
-            # Bound forwarded streams as well as collected responses. Counting
-            # serialized deltas also covers tool fragments and unknown fields.
-            output_characters += len(json.dumps(delta, ensure_ascii=False))
-            if output_characters > 262144:
+            # Streaming retains one bounded provider frame at a time. Only
+            # collected JSON needs an aggregate memory guard; this is not a
+            # model generation limit or an owner-configured output allowance.
+            if not stream:
+                output_characters += len(json.dumps(delta, ensure_ascii=False))
+            if output_characters > MAX_COLLECTED_CHAT_CHARACTERS:
                 yield (
-                    _sse(_failure("output_limit"))
+                    _sse(_failure("response_too_large"))
                     if stream
-                    else json.dumps(_failure("output_limit"))
+                    else json.dumps(_failure("response_too_large"))
                 )
                 return
             if stream:
@@ -488,9 +545,17 @@ async def chat_response(
                 else json.dumps(_failure("interrupted"))
             )
             return
+        if terminal_failure is not None:
+            yield _sse(terminal_failure) if stream else json.dumps(terminal_failure)
+            return
         usage = terminal.get("usage")
+        committed: dict[str, JsonValue] = {}
+        if receipt is not None:
+            committed["skulk_continuation"] = _OBJECT.validate_json(
+                receipt.model_dump_json()
+            )
         if stream:
-            yield _sse(chunk({}, terminal["finish_reason"]))
+            yield _sse({**chunk({}, terminal["finish_reason"]), **committed})
             if include_usage and isinstance(usage, dict):
                 yield _sse(
                     {
@@ -513,6 +578,7 @@ async def chat_response(
             if tools:
                 message["tool_calls"] = [tools[index] for index in sorted(tools)]
             result: dict[str, JsonValue] = {
+                **committed,
                 "id": identifier,
                 "object": "chat.completion",
                 "created": created,
@@ -528,3 +594,42 @@ async def chat_response(
             if isinstance(usage, dict):
                 result["usage"] = usage
             yield json.dumps(result, allow_nan=False)
+
+
+async def continuation_receipt_response(
+    session: CapabilityStreamSession, proof: ReceiptProof
+) -> ReceiptOutcome:
+    """Collect exactly one lookup outcome after verified terminal and cleanup.
+
+    A transport failure is uncertainty, never permission to replay inference.
+    This returns only public receipt metadata, without assistant/provider state.
+    """
+    outcome: ReceiptOutcome | None = None
+    finished = False
+    async with _owned_frames(session) as frames:
+        async for frame in frames:
+            if frame.kind == "started":
+                continue
+            if frame.kind == "completed":
+                finished = frame.payload in (None, {}) and frame.media is None
+                break
+            if (
+                frame.kind != "chunk"
+                or frame.payload is None
+                or frame.media is not None
+                or outcome is not None
+            ):
+                raise HTTPException(503, "Continuation receipt delivery is uncertain")
+            try:
+                outcome = ReceiptOutcome.model_validate_json(json.dumps(frame.payload))
+            except ValueError:
+                raise HTTPException(
+                    503, "Invalid continuation receipt stream"
+                ) from None
+        if (
+            not finished
+            or outcome is None
+            or (outcome.receipt is not None and not outcome.receipt.matches(proof))
+        ):
+            raise HTTPException(503, "Continuation receipt delivery is uncertain")
+        return outcome
