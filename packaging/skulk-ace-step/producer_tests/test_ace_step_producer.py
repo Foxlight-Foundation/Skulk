@@ -281,6 +281,7 @@ class NativeProducerTests(unittest.TestCase):
         first, second = self.build("first"), self.build("second")
         self.assertEqual(first.read_bytes(), second.read_bytes())
         with zipfile.ZipFile(first) as archive:
+            self.assertIn("skulk_ace_step/resources.py", archive.namelist())
             for name in ("contracts.py", "audio_separation.py"):
                 info = archive.getinfo("skulk_ace_step/" + name)
                 self.assertTrue(stat.S_ISREG(info.external_attr >> 16))

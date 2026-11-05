@@ -48,6 +48,7 @@ ADAPTER_MODULES = frozenset(
         "lifetime.py",
         "media.py",
         "policy.py",
+        "resources.py",
         "server.py",
         "upstream_bindings.py",
         "weights.py",
