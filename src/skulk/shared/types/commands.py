@@ -23,6 +23,7 @@ from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.music_edits import MusicEditingTaskParams
+from skulk.shared.types.native_music import NativeMusicDevice
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
@@ -152,6 +153,24 @@ class PrepareDemucs(BaseCommand):
     )
     device: Literal["cpu", "mps"] = Field(
         description="Explicit compute lane implemented by this package profile.",
+    )
+
+
+@final
+class PrepareAceStep(BaseCommand):
+    """Verify one fixed native ACE library/device before ordinary placement."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    target_node: NodeId = Field(description="Chosen hardware-eligible worker.")
+    owner_node: NodeId = Field(description="Accepting API awaiting verified resources.")
+    package_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$", description="Exact built-in complete package digest."
+    )
+    device: NativeMusicDevice = Field(description="Explicit requested native math lane.")
+    expires_at: float = Field(
+        gt=0, allow_inf_nan=False,
+        description="Original absolute Unix mount deadline, including all candidate attempts and queue time; the master additionally caps work at thirty minutes.",
     )
 
 
@@ -430,6 +449,7 @@ Command = (
     | AudioSeparation
     | PrepareAudioCpp
     | PrepareDemucs
+    | PrepareAceStep
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription

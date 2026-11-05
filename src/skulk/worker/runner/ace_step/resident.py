@@ -23,6 +23,7 @@ from skulk.shared.types.native_music import (
     NativeMusicCompleted,
     NativeMusicFailed,
     NativeMusicFrame,
+    NativeMusicMemoryFrame,
     NativeMusicProgress,
     NativeMusicReady,
     NativeMusicReadyFrame,
@@ -30,6 +31,7 @@ from skulk.shared.types.native_music import (
     NativeMusicResult,
     NativeMusicServeConfig,
     NativeMusicServeRequest,
+    native_music_live_memory_error,
 )
 from skulk.utils.process_groups import observe_process_exit, terminate_process_group
 from skulk.utils.runtime_files import write_private
@@ -44,6 +46,7 @@ from skulk.worker.runner.ace_step.result_custody import (
 )
 from skulk.worker.runner.ace_step.workspace import NativeMusicWorkspace
 from skulk.worker.runner.demucs.process import separation_environment
+from skulk.worker.runner.diagnostics import record_native_music_memory
 
 _FRAME = TypeAdapter[NativeMusicFrame](NativeMusicFrame)
 
@@ -230,6 +233,9 @@ class ResidentMusic:
         self._threads: list[threading.Thread] = []
         self._diagnostics: deque[bytes] = deque(maxlen=24)
         self._last_resource_check = 0.0
+        self._memory_frame: tuple[NativeMusicMemoryFrame, float] | None = None
+        self._memory_sequence = 0
+        self._memory_started_at = 0.0
 
     @property
     def diagnostic_tail(self) -> str:
@@ -256,9 +262,34 @@ class ResidentMusic:
                             "native music response framing exceeded its bound"
                         )
                     frame = _FRAME.validate_json(line)
+                    if isinstance(frame, NativeMusicMemoryFrame):
+                        process = self._process
+                        observed = frame.observation
+                        if (
+                            process is None
+                            or observed.process_id != process.pid
+                            or observed.payload_sha256 != self.payload_sha256
+                            or observed.device != self.configuration.device
+                            or frame.sequence != self._memory_sequence + 1
+                        ):
+                            raise ValueError(
+                                "native music resource observation has foreign ownership or sequence"
+                            )
+                        with self._observations:
+                            self._memory_sequence = frame.sequence
+                            self._memory_frame = frame, time.monotonic()
+                        record_native_music_memory(observed)
+                        continue
                     if isinstance(frame, NativeMusicReadyFrame):
                         if initialized:
                             raise ValueError("native music repeated model readiness")
+                        if (
+                            self.configuration.memory_budget is not None
+                            and self._memory_frame is None
+                        ):
+                            raise ValueError(
+                                "native music readiness preceded its live memory observation"
+                            )
                         initialized = True
                         self._terminal(frame)
                         continue
@@ -342,6 +373,26 @@ class ResidentMusic:
         process = self._process
         if process is None:
             raise NativeMusicProcessError("native music is not running")
+        budget = self.configuration.memory_budget
+        if budget is not None:
+            with self._observations:
+                sample = self._memory_frame
+            if sample is None:
+                if now - self._memory_started_at > 30:
+                    raise NativeMusicProcessError(
+                        "native music emitted no initial live memory observation"
+                    )
+            else:
+                frame, received = sample
+                if now - received > 5:
+                    raise NativeMusicProcessError(
+                        "native music live memory heartbeat stopped"
+                    )
+                refusal = native_music_live_memory_error(
+                    budget, frame.observation, now_unix_ms=time.time_ns() // 1_000_000
+                )
+                if refusal is not None:
+                    raise NativeMusicProcessError(refusal)
         if self.resource_guard is not None and now - self._last_resource_check >= 0.5:
             self._last_resource_check = now
             refusal = self.resource_guard(process.pid)
@@ -381,6 +432,10 @@ class ResidentMusic:
                 raise NativeMusicProcessError(
                     "native music failed; inspect bounded runner diagnostics"
                 )
+            # The blocking dequeue can overlap a new resource sample, caller
+            # cancellation or process exit. Recheck before accepting readiness
+            # or a terminal result rather than spending the pre-wait snapshot.
+            self._checkpoint(deadline, is_cancelled)
             return frame
 
     def _send(
@@ -437,6 +492,7 @@ class ResidentMusic:
                 self.workspace.descriptor,
                 separation_environment(self.configuration.threads),
             )
+            self._memory_started_at = time.monotonic()
             process = self._process
             assert process.stdout is not None and process.stderr is not None
             self._threads = [

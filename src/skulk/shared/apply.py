@@ -6,6 +6,8 @@ from loguru import logger
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import (
+    AceStepPreparationCompleted,
+    AceStepPreparationRequested,
     AudioCppPreparationCompleted,
     AudioCppPreparationRequested,
     ChunkGenerated,
@@ -94,6 +96,8 @@ def event_apply(event: Event, state: State) -> State:
             | AudioCppPreparationCompleted()
             | DemucsPreparationRequested()
             | DemucsPreparationCompleted()
+            | AceStepPreparationRequested()
+            | AceStepPreparationCompleted()
             | ChunkGenerated()
             | TaskAcknowledged()
             | InputChunkReceived()

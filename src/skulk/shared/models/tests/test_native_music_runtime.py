@@ -77,7 +77,7 @@ def test_actual_component_math_projects_checkpoint_state_without_a_memory_floor(
     assert (
         NativeMusicModelPolicy.model_validate_json(policy.model_dump_json()) == policy
     )
-    assert not model_engine_requirements(card)
+    assert model_engine_requirements(card) == frozenset({"ace_step"})
     assert not card.placement.compatible_backends
     assert "required_memory" not in policy.model_dump()
 

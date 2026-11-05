@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import os
+import platform
+import subprocess
 import time
 from typing import Literal, Protocol, cast
 
@@ -18,6 +20,7 @@ from .contracts import (
     NativeMusicPrecision,
     NativeMusicServeConfig,
     NativeMusicTensorPrecision,
+    native_music_host_available_bytes,
 )
 from .upstream_bindings import LoadedHandler
 
@@ -69,12 +72,23 @@ def sample_memory_capacity(lane: NativeMusicDevice) -> NativeMusicMemoryCapacity
     A failed or incomplete query is a diagnostic, never invented capacity.
     """
     host = psutil.virtual_memory()
+    text: str | None = None
+    if platform.system() == "Darwin":
+        try:
+            snapshot = subprocess.run(
+                ["/usr/bin/vm_stat"], capture_output=True, check=False, timeout=1,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            snapshot = None
+        if snapshot is not None and snapshot.returncode == 0:
+            text = snapshot.stdout.decode("utf-8", errors="replace")
+    available_host = native_music_host_available_bytes(host.total, host.available, text)
     sampled = time.time_ns() // 1_000_000
     if lane == "cpu":
         return NativeMusicMemoryCapacity(
             sampled_at_unix_ms=sampled,
             host_total_bytes=host.total,
-            host_available_bytes=host.available,
+            host_available_bytes=available_host,
         )
     if lane == "mps":
         if not torch.backends.mps.is_available():
@@ -84,13 +98,13 @@ def sample_memory_capacity(lane: NativeMusicDevice) -> NativeMusicMemoryCapacity
         return NativeMusicMemoryCapacity(
             sampled_at_unix_ms=sampled,
             host_total_bytes=host.total,
-            host_available_bytes=host.available,
+            host_available_bytes=available_host,
             device_index=0,
             device_memory_kind="unified",
             device_total_bytes=ceiling,
             device_available_bytes=available,
             shared_total_bytes=host.total,
-            shared_available_bytes=host.available,
+            shared_available_bytes=available_host,
         )
     if not torch.cuda.is_available() or (hip is not None) != (lane == "rocm"):
         raise ValueError("native accelerator memory is unavailable in this runtime")
@@ -109,13 +123,13 @@ def sample_memory_capacity(lane: NativeMusicDevice) -> NativeMusicMemoryCapacity
     return NativeMusicMemoryCapacity(
         sampled_at_unix_ms=sampled,
         host_total_bytes=host.total,
-        host_available_bytes=host.available,
+        host_available_bytes=available_host,
         device_index=0,
         device_memory_kind="unified" if unified else "discrete",
         device_total_bytes=ceiling,
         device_available_bytes=available,
         shared_total_bytes=host.total if unified else None,
-        shared_available_bytes=host.available if unified else None,
+        shared_available_bytes=available_host if unified else None,
     )
 
 

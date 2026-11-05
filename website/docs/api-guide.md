@@ -2176,16 +2176,17 @@ weight/runtime overhead: 10 GiB for ACE-Step and 2 GiB for MiniMax. MiniMax Meta
 reserves 5 GiB beyond weight/runtime overhead against its system-RAM ceiling.
 The same estimate governs mounting and worker admission; a matching hardware
 class with insufficient capacity cannot place the model.
-CUDA music preparation requires the package's compiled GPU class in both
-live node facts and the signed support claim: SM 8.9 for Linux amd64 and
-SM 12.1 for Linux arm64. The signed claim must name the platform's exact managed
-build. Managed packages require one observed NVIDIA device with a known matching
+Audio.cpp CUDA music preparation requires the package's compiled GPU class in
+live node facts: SM 8.9 for Linux amd64 and SM 12.1 for Linux arm64.
+Signed qualification records retain their exact tested build and hardware;
+missing qualification does not prohibit an otherwise compatible runtime.
+Managed packages require one observed NVIDIA device with a known matching
 compute class; multiple devices, mixed classes, and unknown classes cannot be
 admitted until execution and memory accounting can select the same physical
 device. Each published native build retains those restrictions when restored
 from cache. A generic NVIDIA claim cannot widen a managed package's compiled
 target, and package availability alone cannot place a model. A qualified
-operator-provided primary CUDA binary can use its own exact signed build claim.
+operator-provided primary CUDA binary uses its own verified build identity.
 When a dedicated CUDA wheel is already cached, configure
 `SKULK_AUDIO_CPP_CUDA_BIN` for that operator binary as well; startup cache
 rehydration otherwise prefers the dedicated build over a primary-only override.
@@ -2201,6 +2202,33 @@ required transfer. Missing components fail the download with an actionable reaso
 the node and its download command processor remain available for other work.
 Offline reuse and preservation require the complete recorded data closure.
 Downloaded native bytes alone do not establish a mounted or ready engine.
+
+Under the Music Studio initiative, `POST /place_instance` and `POST /instance`
+prepare native ACE libraries separately from audio.cpp. The ordinary request
+uses `model_id` and `excluded_nodes`; an exact request uses its single specified
+node and optional explicit `resolved_backend`. Native lanes are `ace_step-cpu`,
+`ace_step-metal`, `ace_step-cuda` and `ace_step-rocm`; native Vulkan is not
+implemented. A bare engine requirement identifies compatibility but never a
+ready device. Native safetensors and GGUF music use distinct loaders.
+
+Preparation selects an advertised fixed package matching the worker's OS/CPU
+and generic device requirements. At most four mount preparations can wait on an
+accepting API node. One thirty-minute budget includes every candidate attempt,
+command queue, verification and device probe; another candidate does not reset
+it. Offline workers may reuse independently verified cached bytes only. The
+worker's ordered completion must match the request, accepting API, worker,
+package digest and device before the API can forward placement. That response
+must include the actual ready build, math policy and a fresh actual device-zero
+memory observation. Installable package metadata alone is insufficient.
+
+Native memory admission accounts for complete model loading and forward phases,
+all existing placements and idle future workspace across host/device/shared
+physical pools. It does not reuse generic already-reserved memory inputs or
+borrow another GPU's capacity. Explicit backend overrides cannot silently fall
+back to another lane. Preparation failures return an actionable `503`; invalid
+explicit native lanes return `400`. Other engines and worker health remain
+available. Preparation does not itself load the model or establish qualification;
+installed acceptance and distribution remain separate from this source integration.
 
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
@@ -2271,8 +2299,9 @@ forgets its record. It returns
 ## Native music editing
 
 These routes describe the native edit service under the Music Studio initiative.
-Native ACE model mounting and execution remain gated on resident-runner and
-installed-platform acceptance. Downloading a native card or engine package alone
+Native ACE mounting and execution use the preparation and supervised native
+runner paths above; signed distribution and installed-platform acceptance remain
+separate initiative gates. Downloading a native card or engine package alone
 does not create an executable editing instance. Existing audio.cpp generation
 continues to use the music API above.
 

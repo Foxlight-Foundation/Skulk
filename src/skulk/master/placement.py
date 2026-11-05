@@ -1,5 +1,6 @@
 import random
 import re
+import time
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from copy import deepcopy
@@ -16,11 +17,14 @@ from skulk.master.placement_utils import (
     get_mlx_ring_hosts_by_node,
     get_shard_assignments,
     get_shard_assignments_for_llama_rpc,
+    get_single_host_native_music_shard_assignments,
     get_single_host_separation_shard_assignments,
     get_single_host_video_shard_assignments,
     get_smallest_cycles,
 )
+from skulk.provisioning.ace_step_inventory import ACE_STEP_PACKAGES
 from skulk.shared.backends import (
+    ACE_STEP_COMPUTE_BACKENDS,
     EngineType,
     backend_hardware_present,
     describe_backend_hardware,
@@ -56,6 +60,10 @@ from skulk.shared.models.model_cards import (
     model_engine_requirements,
     registry_compatible_backends_for_node,
     same_authorized_model_card,
+)
+from skulk.shared.models.native_music_admission import (
+    NativeMusicPlacementAssessment,
+    assess_native_music_placement,
 )
 from skulk.shared.models.remote_code_approval import (
     remote_code_approval_required,
@@ -244,6 +252,7 @@ def add_instance_to_placements(
     unified_memory_gpu_nodes: AbstractSet[NodeId] | None = None,
     approved_remote_code_identities: AbstractSet[str] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
+    native_music_commitments: Mapping[InstanceId, Instance] | None = None,
 ) -> Mapping[InstanceId, Instance]:
     """Validate and add one caller-specified exact instance placement.
 
@@ -257,6 +266,8 @@ def add_instance_to_placements(
         approved_remote_code_identities: Deprecated legacy approval set retained
             for compatibility with older call sites.
         node_resources: Advertised engines used to resolve unstamped exact shards.
+        native_music_commitments: Complete deduplicated pending and committed
+            native-admission owners; generic node_memory is already reserved.
 
     Returns:
         Existing placements plus the validated, memory-stamped instance.
@@ -281,6 +292,10 @@ def add_instance_to_placements(
     require_instance_model_card_identity(command.instance)
     music_instance = any(
         shard.model_card.music is not None
+        for shard in assignments.runner_to_shard.values()
+    )
+    native_music_instance = any(
+        shard.model_card.music is not None and shard.model_card.music.native is not None
         for shard in assignments.runner_to_shard.values()
     )
     separation_instance = any(
@@ -308,6 +323,13 @@ def add_instance_to_placements(
         raise PlacementError("Music instances cannot use llama.cpp RPC placement")
     if music_instance and len(assignments.runner_to_shard) != 1:
         raise PlacementError("Music instances require exactly one runner shard")
+    if native_music_instance and any(
+        shard.world_size != 1 or shard.device_rank != 0
+        or shard.start_layer != 0 or shard.end_layer != shard.model_card.n_layers
+        or shard.n_layers != shard.model_card.n_layers
+        for shard in assignments.runner_to_shard.values()
+    ):
+        raise PlacementError("Native music requires one complete model shard")
     require_instance_model_code_approval(
         command.instance,
         approved_remote_code_identities,
@@ -317,6 +339,24 @@ def add_instance_to_placements(
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = resolved_shards[runner_id]
             resources = (node_resources or {}).get(node_id)
+            if shard.model_card.music is not None and shard.model_card.music.native is not None:
+                assessment = _assess_native_music_node(
+                    shard.model_card, node_id, resources,
+                    current_instances if native_music_commitments is None else native_music_commitments,
+                    explicit_backend=shard.resolved_backend,
+                    node_is_unified=node_id in (unified_memory_gpu_nodes or ()) or None,
+                )
+                build = "ace_step@sha256:" + assessment.policy.payload_sha256
+                if shard.resolved_engine_build is not None and shard.resolved_engine_build != build:
+                    raise PlacementError("Explicit native music build differs from live verified resources")
+                if shard.native_music_policy is not None and shard.native_music_policy != assessment.policy:
+                    raise PlacementError("Explicit native music policy differs from the current card/library")
+                resolved_shards[runner_id] = shard.model_copy(update={
+                    "resolved_backend": assessment.policy.backend,
+                    "resolved_engine_build": build,
+                    "native_music_policy": assessment.policy,
+                })
+                continue
             if shard.model_card.separation is not None:
                 if resources is None:
                     raise PlacementInfoPendingError("Verified native separation backend telemetry is required before placement")
@@ -479,6 +519,11 @@ def add_instance_to_placements(
     if not isinstance(instance, LlamaRpcInstance):
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard[runner_id]
+            if shard.model_card.music is not None and shard.model_card.music.native is not None:
+                # The raw actual three-pool assessment above already admitted
+                # the full model and future workspace. Generic RAM/VRAM inputs
+                # are reserved and must not charge that same footprint again.
+                continue
             fraction = shard_fraction_of_model(shard)
             uses_vram = backend_offloads_to_vram(shard.resolved_backend)
             if not uses_vram and not music_instance and not separation_instance:
@@ -519,6 +564,54 @@ def add_instance_to_placements(
                 pool = "GPU memory" if uses_vram else "system memory"
                 raise PlacementError(f"Insufficient {pool} for the exact placement")
     return {**current_instances, instance.instance_id: instance}
+
+
+def _assess_native_music_node(
+    card: ModelCard,
+    node: NodeId,
+    resources: NodeResources | None,
+    commitments: Mapping[InstanceId, Instance],
+    *,
+    explicit_backend: str | None = None,
+    node_is_unified: bool | None = None,
+) -> NativeMusicPlacementAssessment:
+    """Choose a genuinely ready native lane with complete shared fit policy.
+
+    Installed package and actual memory are technical requirements; empirical
+    qualification is never a hardware permission list. All candidates use the
+    raw native observation rather than generic already-reserved pool inputs.
+    """
+    if resources is None or resources.participation != "full":
+        raise PlacementInfoPendingError("Prepare and publish native music resources before placement")
+    ready = _card_platform_backends(card, resources) & resources.backends - resources.on_demand_backends
+    if explicit_backend is not None:
+        if explicit_backend not in ready:
+            raise PlacementError("Explicit native music backend is not ready or compatible")
+        ready = frozenset({explicit_backend})
+    reasons: list[str] = []
+    refresh_needed = False
+    while ready:
+        backend = resolve_node_backend(ready, card.placement.backend_preference, ready)
+        assert backend is not None
+        try:
+            assessed = assess_native_music_placement(
+                card, backend, node, resources, commitments,
+                now_unix_ms=int(time.time() * 1000), node_is_unified=node_is_unified,
+            )
+        except ValueError as error:
+            reasons.append(str(error))
+        else:
+            if assessed.refusal is None:
+                return assessed
+            reasons.append(assessed.refusal)
+            sampled_age = int(time.time() * 1000) - assessed.capacity.sampled_at_unix_ms
+            refresh_needed |= assessed.capacity.sampled_at_unix_ms <= 0 or sampled_age > 120_000 or sampled_age < -30_000
+        ready = ready - {backend}
+    if reasons:
+        if refresh_needed:
+            raise PlacementInfoPendingError("Native music resources need refresh through mount preparation before placement/repair: " + "; ".join(dict.fromkeys(reasons)))
+        raise PlacementError("Native music cannot fit this configuration: " + "; ".join(dict.fromkeys(reasons)))
+    raise PlacementInfoPendingError("Prepare a compatible native music package before placement")
 
 
 def _stamp_separation_policy(assignments: ShardAssignments) -> ShardAssignments:
@@ -754,6 +847,18 @@ def _card_platform_backends(
                 if tag in node_resources.backends
                 and tag not in node_resources.on_demand_backends
                 and re.fullmatch(r"demucs@sha256:[a-f0-9]{64}", node_resources.engine_builds.get(tag, "")) is not None
+            )
+        if card.music is not None and card.music.native is not None:
+            filtered = frozenset(
+                tag for tag in filtered
+                if tag in ACE_STEP_COMPUTE_BACKENDS
+                and tag in node_resources.backends and tag not in node_resources.on_demand_backends
+                and (probe := node_resources.native_music_probes.get(tag)) is not None
+                and node_resources.engine_builds.get(tag) == "ace_step@sha256:" + probe.payload_sha256
+                and any(package.payload_sha256 == probe.payload_sha256 and (
+                    package.variant == probe.device
+                    or package.variant == "cpu" and probe.device == "mps" and package.platform_tag.startswith("macosx_")
+                ) for package in ACE_STEP_PACKAGES)
             )
     return (
         filtered
@@ -1032,7 +1137,11 @@ def place_instance(
     approved_remote_code_identities: AbstractSet[str] | None = None,
     served_context_default: int | None = None,
     node_install_ids: Mapping[NodeId, UUID] | None = None,
+    native_music_commitments: Mapping[InstanceId, Instance] | None = None,
 ) -> dict[InstanceId, Instance]:
+    native_music = command.model_card.music is not None and command.model_card.music.native is not None
+    if native_music and command.sharding != Sharding.Pipeline:
+        raise PlacementError("Native music requires single-host pipeline placement")
     if command.model_card.image is not None and (
         command.min_nodes != 1 or command.sharding != Sharding.Pipeline
     ):
@@ -1065,6 +1174,15 @@ def place_instance(
         ]
         if not candidate_cycles:
             raise PlacementInfoPendingError("Prepare and publish verified native separation resources before placement")
+    if native_music:
+        observations = node_resources or {}
+        candidate_cycles = [
+            cycle for cycle in candidate_cycles
+            if (resources := observations.get(cycle.node_ids[0])) is not None
+            and _card_platform_backends(command.model_card, resources)
+        ]
+        if not candidate_cycles:
+            raise PlacementInfoPendingError("Native ACE placement/repair requires mount preparation and published verified library resources; an installable package is not ready")
     if not candidate_cycles:
         if command.model_card.music is not None:
             raise PlacementError(
@@ -1362,11 +1480,29 @@ def place_instance(
         if _is_llama_rpc_cycle(cycle, command.model_card, resolved_node_resources)
     ]
     cycles_with_sufficient_memory: list[Cycle] = []
+    native_assessments: dict[NodeId, NativeMusicPlacementAssessment] = {}
+    native_pending_reasons: list[str] = []
     memory_diagnostics = CycleMemoryDiagnostics()
     # Filter with the requested workload before ranking. A fixed 8k floor can
     # pick a small host that later refuses a larger window while another fits,
     # or reject a valid smaller requested window before it is considered.
     for standard_cycle in standard_candidates:
+        if native_music:
+            node = standard_cycle.node_ids[0]
+            try:
+                native_assessments[node] = _assess_native_music_node(
+                    command.model_card, node, resolved_node_resources.get(node),
+                    current_instances if native_music_commitments is None else native_music_commitments,
+                    node_is_unified=node in (unified_memory_gpu_nodes or ()) or None,
+                )
+            except PlacementInfoPendingError as error:
+                memory_diagnostics.pending_info_node_ids.append(node)
+                native_pending_reasons.append(str(error))
+            except PlacementError as error:
+                memory_diagnostics.rejection_reasons.append(str(error))
+            else:
+                cycles_with_sufficient_memory.append(standard_cycle)
+            continue
         standard_fixed = (
             {standard_cycle.node_ids[0]: projector_memory}
             if len(standard_cycle) == 1 and projector_memory.in_bytes > 0
@@ -1491,6 +1627,8 @@ def place_instance(
         )
     if len(cycles_with_sufficient_memory) == 0:
         if memory_diagnostics.pending_info_node_ids:
+            if native_music and native_pending_reasons:
+                raise PlacementInfoPendingError("; ".join(dict.fromkeys(native_pending_reasons))[:2048])
             raise PlacementInfoPendingError(
                 "Memory info has not been gathered yet for node(s) "
                 f"[{', '.join(str(n) for n in memory_diagnostics.pending_info_node_ids)}] "
@@ -1603,6 +1741,8 @@ def place_instance(
             _card_platform_backends(command.model_card, single_resources),
             backend_preference, single_resources.backends,
         )
+    if native_music:
+        single_node_backend = native_assessments[selected_cycle.node_ids[0]].policy.backend
     if command.instance_meta == InstanceMeta.LlamaRpc and not selected_is_rpc:
         raise PlacementError(
             "Requested a multi-node llama.cpp (RPC) placement, but the "
@@ -1635,6 +1775,10 @@ def place_instance(
             )
         shard_assignments = get_shard_assignments_for_llama_rpc(
             command.model_card, selected_cycle, driver_node
+        )
+    elif native_music:
+        shard_assignments = get_single_host_native_music_shard_assignments(
+            command.model_card, selected_cycle.node_ids[0]
         )
     elif command.model_card.separation is not None:
         # The cycle filter admitted the complete native workload on the actual
@@ -1685,9 +1829,13 @@ def place_instance(
             if resources is not None
             else None
         )
+        if native_music:
+            resolved_backend = native_assessments[node_id].policy.backend
         if resolved_backend is not None:
             shard = stamped_runner_to_shard[runner_id]
-            updates: dict[str, str] = {"resolved_backend": resolved_backend}
+            updates: dict[str, object] = {"resolved_backend": resolved_backend}
+            if native_music:
+                updates["native_music_policy"] = native_assessments[node_id].policy
             if (
                 command.model_card.music is not None
                 or command.model_card.separation is not None

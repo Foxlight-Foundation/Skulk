@@ -64,6 +64,9 @@ async def fixture(
         offline=offline,
     )
     worker._demucs_platforms = frozenset({"macosx_14_0_arm64"})
+    # This fixture isolates separator inventory; native ACE has its own actual
+    # Worker/cache/resource bridge tests and no prepared library in this one.
+    worker._ace_step_platforms = frozenset()
     manager = Manager(root)
     manager.release.set()
     worker._demucs_preparation = DemucsPreparationController(manager, offline=offline)

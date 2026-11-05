@@ -49,6 +49,7 @@ EngineType = Literal[
     "test_video",
     "comfy",
     "audio_cpp",
+    "ace_step",
     "demucs",
     "stable_diffusion_cpp", "mlx_video",
 ]
@@ -107,6 +108,7 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "test_video",
     "comfy",
     "audio_cpp",
+    "ace_step",
     "demucs",
     "stable_diffusion_cpp",
     "mlx_video",
@@ -443,6 +445,10 @@ AUDIO_CPP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
         "audio_cpp-rocm",
     }
 )
+ACE_STEP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
+    {"ace_step-cpu", "ace_step-metal", "ace_step-cuda", "ace_step-rocm"}
+)
+"""Implemented native ACE device vocabulary; package availability is separate."""
 
 # Engines whose runner binding cannot LOAD a family the served sibling serves
 # fine. The in-process ``llama_cpp`` engine runs whatever llama.cpp build the
@@ -511,11 +517,13 @@ def platform_compatible_backends(
     Returns:
         The subset of tags whose engine can serve everything the card declares.
     """
-    # Native ACE has a distinct artifact and execution contract. Until its
-    # runner is implemented, no existing engine can load it; this limitation
-    # belongs here rather than deleting intrinsic generation/editing truth.
+    # Native ACE has a distinct safetensors/component and execution contract.
+    # Never let a generic music or text engine reinterpret those exact files.
+    # Actual fixed package/probe/phase admission is enforced by the placer.
     if card_has_native_music_profile:
-        return frozenset()
+        if not card_serves_music or card_serves_vision or card_serves_speech or card_serves_embeddings or card_serves_separation or card_has_native_image_profile:
+            return frozenset()
+        return expand_engine_backends(compatible_backends) & ACE_STEP_COMPUTE_BACKENDS
     # Legacy image runners do not yet consume the immutable component profile.
     if card_has_native_image_profile:
         filtered = frozenset(
@@ -531,7 +539,7 @@ def platform_compatible_backends(
         filtered = frozenset(
             tag
             for tag in compatible_backends
-            if engine_of(tag) != "stable_diffusion_cpp"
+            if engine_of(tag) not in {"stable_diffusion_cpp", "ace_step"}
         )
     if card_serves_vision:
         vision_engines = (
@@ -643,6 +651,9 @@ def expand_engine_backends(compatible_backends: AbstractSet[str]) -> frozenset[s
     expanded = set(compatible_backends)
     for tag in compatible_backends:
         if engine_of(tag) == tag:
+            if tag == "ace_step":
+                expanded.update(ACE_STEP_COMPUTE_BACKENDS)
+                continue
             # An embedding-only lane is never implied by a bare engine tag:
             # a card names it, or the embedding gate in
             # ``platform_compatible_backends`` opts embedding cards in.

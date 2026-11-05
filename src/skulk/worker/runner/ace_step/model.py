@@ -275,6 +275,7 @@ class NativeMusicModel:
                     loader_identity=workspace.loader_identity,
                     device=self.policy.execution.device,
                     precision=self.policy.execution.precision,
+                    memory_budget=self.memory_estimate.process_budget(),
                     threads=self.policy.threads,
                 )
                 try:

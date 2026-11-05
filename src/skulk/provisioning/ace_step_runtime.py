@@ -54,6 +54,7 @@ _FEATURES = frozenset(
         "resident_model",
         "library_probe",
         "memory_probe",
+        "live_resource_guard",
     }
 )
 

@@ -2856,8 +2856,9 @@ verification and cancellation joined. `MusicEditingChunk` carries path-free DATA
 provenance; `music_edit_source` and `music_edit` are addressed input/output media
 roles. API queues, cancellation, failure and session reset include edits. Reverse
 controls send outside the actor lock, retain admission until drained and filter
-same-node ACK echoes. Native worker/Studio activation remains gated on complete
-execution and installed acceptance.
+same-node ACK echoes. Native Worker execution joins explicit preparation and
+complete admission. Studio edit creation and installed acceptance remain
+separate integration/product gates.
 Edit cancellation submission precedes TaskFinished stream finalization. A
 durable-index uncertainty fence aborts accepted native work, retires only this
 service's sweeper and returns actionable HTTP 503 without crashing host tasks.
@@ -2934,3 +2935,96 @@ adds other GPUs. Cache preparation refuses a missing/unsampled receipt. Shared
 admission refuses observations older than two minutes or over thirty seconds
 ahead of the caller clock. Worker sampling/publication and placement consumers
 must still be connected before native capacity can be advertised.
+
+Native package `live_resource_guard` is also required. The prepared model binds
+its exact `NativeMusicMemoryBudget` phase ceilings into the isolated process.
+`resources.py` samples its actual leader RSS, Torch reserved/MPS driver allocation
+and raw host/device/shared availability before load and every half-second across
+loading, inference and idle residency. Initial fit and all admission owners use
+the same pure budget fit and pressure-headroom normalization: reserve up to
+512 MiB of host/shared and 256 MiB of device capacity, each capped at 5% for
+small pools. Normalize once before charging held/pending reservations.
+
+Live checks enforce allocation ceilings and pressure floors, not a second full
+workspace reservation on every poll. RSS earns no exclusive-allocation credit;
+on unified memory its ceiling is the simultaneous phase peak, and RSS plus GPU
+allocation is never presented as measured unique physical usage. Peak/soak
+qualification remains required. The native observer retires its private group
+on sensing or egress failure, even with closed diagnostics. Core retains one
+latest private memory frame, verifies leader/payload/device/sequence, refuses
+readiness before the first sample and checks five-second freshness after a
+blocking terminal dequeue. Initial sensing has a 30-second startup budget;
+native control writes are serialized and have a two-second drain deadline.
+The independent guardian still owns file locks through actual group drain.
+Inventory requires the memory-probe and live-resource-guard features; candidates
+from before those features cannot activate. Current Worker package preparation
+and native placement consume those same contracts.
+
+Worker `NativeMusicMediaOwner` connects authoritative native task creation,
+snapshot recovery, addressed source/result ingress and shutdown. The planner
+waits for a durable generation writer intent or verified edit original. Four
+serialized source/result journal slots include generations without input WAVs;
+recovery fails uncertain local work and waits for inherited reader drain.
+`NativeMusicOutputProducer` verifies native PCM24/48 kHz stereo output, streams
+`music`/`music_edit` and retains files through exact terminal ACK and sender join.
+Failed cleanup keeps its slot. Audio.cpp/speech/separation contracts are separate.
+`NativeMusicHostGuard` is an immutable picklable local process callback using
+fresh actual child/host/RSS checks without capturing Worker State or Torch.
+Private native sensing still owns actual device allocation and heartbeat facts.
+Core and native share portable Mach wired/anonymous/compressor accounting with
+a bounded one-second vm_stat snapshot and psutil fallback on macOS. Native
+platform filtering selects only the explicit ACE device lanes with the required
+artifact profile; current fixed package/probe and full phase fit remain required.
+
+`PrepareAceStep` selects one fixed complete-package digest and explicit native
+device. The master orders `AceStepPreparationRequested` with a thirty-minute
+absolute budget; the Worker runs its existing cache/controller off-loop.
+`AceStepPreparationCompleted` binds that request/package/device, carries fresh
+verified resources only on success, and otherwise supplies a bounded diagnostic.
+The master checks those facts against its fixed inventory before updating the
+live resource view. Worker periodic gathering derives build IDs and native
+probes from one locked observation snapshot; installable packages never enter
+ready backends. The Worker drains this controller during shutdown.
+`api/ace_step_preparation.py::AceStepMountPreparer` connects ordinary/exact
+public mounts to this barrier: four pending requests maximum, one absolute
+thirty-minute budget across all candidates and command queues, exact
+request/owner/node/package/device completion correlation, then shared actual
+phase/memory admission before forwarding request-scoped prepared resources.
+The Master refuses expired/unknown-profile requests and cannot renew their
+original budget. Genuine OS/CPU and generic device requirements select
+candidates; empirical qualification is never a permission gate. Native profile
+compatibility infers `ace_step` without mutating immutable card bytes; its four
+device lanes exclude Vulkan and cannot load GGUF or text artifacts. Installed
+acceptance remains separate from these source connections.
+
+`shared/models/native_music_admission.py` provides the pure common assessment:
+current fixed-profile library proof, actual timestamped device-zero capacity,
+one pressure floor and complete deduplicated pending/committed costs. Native
+idle workspace remains held; a CPU-only target includes a shared GPU's physical
+peak. Other engines use their existing concrete-shard footprint contract.
+Unknown topology earns no host-memory saving, and unknown RPC partitions refuse
+native admission. Only the exact unchanged Worker creation owner may exclude
+itself. Raw capacity is retained separately from reserved capacity for the live
+guard's physical identity. Ordinary and exact Master placement now use this
+assessment against raw native observations and the complete pending/Steward/
+indexed instance map, independent of already-reserved generic pool inputs.
+Exact callers cannot supply a cheaper policy or partial native shard. Ordinary
+placements beside native work retain its full phase costs, including discrete
+GPU host staging and shared physical peaks; missing restored policy closes the
+affected pools, and GPU coexistence cannot borrow another device's capacity.
+
+Worker native creation runs before the generic text fit guard and remains
+tracked while package verification runs off-loop. It refreshes the actual
+library/memory probe, acquires the native media reader fence, then rechecks
+authoritative placement, repository trust, exact runtime, math and complete
+memory commitments under the staging transition lock. The supervisor receives
+a real lazy NativeMusicRunnerContext and immutable NativeMusicHostGuard; no
+model source is required until normal DownloadModel/LoadModel. Failed/cancelled
+transfer closes the fence, and removal/snapshot replacement cancels an owned
+preparation request. Validated resident memory frames use bounded local
+diagnostic IPC to retain one current supervisor observation without changing
+phase/history. Worker resource gathering refreshes only the same exact library
+and physical pools from a live current owner; stale/dead/foreign/withdrawn
+observations grant no capacity or allocation credit. Cold/expired repairs
+return actionable preparation-pending diagnostics. Signed distribution and
+installed platform/music acceptance remain separate gates.

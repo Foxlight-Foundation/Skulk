@@ -26,6 +26,7 @@ from .contracts import (
     NativeMusicServeRequest,
 )
 from .custody import verify_lifetime, verify_request_directory
+from .resources import MusicMemoryMonitor, observe_music_memory
 
 Progress = Callable[[NativeMusicProgress], None]
 
@@ -107,6 +108,7 @@ def serve(
     *,
     payload_sha256: str,
     load: Callable[[NativeMusicServeConfig, str, Progress], MusicModel] = load_resident,
+    resource_monitor: MusicMemoryMonitor = observe_music_memory,
 ) -> None:
     """Load once and serialize framed requests until clean EOF or the first failure.
 
@@ -127,78 +129,85 @@ def serve(
             emit(record)
 
         verify_lifetime(configuration, initial=True)
-        model = load(configuration, payload_sha256, initialization_progress)
-        ready = model.ready
-        expected_execution = NativeMusicExecution(
-            device=configuration.device,
-            precision=configuration.precision,
-            text_encoder_device=configuration.device,
-            text_encoder_precision=configuration.precision,
-            autoencoder_device=configuration.device,
-            autoencoder_precision="float16"
-            if configuration.device == "mps"
-            else configuration.precision,
-        )
-        if (
-            model.configuration != configuration
-            or ready.model_identity != configuration.model_identity
-            or ready.payload_sha256 != payload_sha256
-            or ready.execution != expected_execution
-        ):
-            raise ValueError("native music loaded a different model/runtime policy")
-        emit(NativeMusicReadyFrame(ready=ready))
-        sequence = 0
-        while line := requests.readline(MAX_NATIVE_MUSIC_RECORD_BYTES + 1):
-            request_id = None
-            if len(line) > MAX_NATIVE_MUSIC_RECORD_BYTES or not line.endswith(b"\n"):
-                raise ValueError("native music request framing exceeds its bound")
-            envelope = NativeMusicServeRequest.model_validate_json(line)
-            request = envelope.request
-            request_id = request.request_id
-            if envelope.sequence != sequence + 1:
-                raise ValueError("native music request sequence is not contiguous")
-            sequence = envelope.sequence
-
-            def progress(
-                record: NativeMusicProgress, *, owner: str = request.request_id
-            ) -> None:
-                if record.request_id != owner or record.stage not in (
-                    "conditioning",
-                    "generating",
-                    "writing",
+        with resource_monitor(configuration, payload_sha256, emit):
+            model = load(configuration, payload_sha256, initialization_progress)
+            ready = model.ready
+            expected_execution = NativeMusicExecution(
+                device=configuration.device,
+                precision=configuration.precision,
+                text_encoder_device=configuration.device,
+                text_encoder_precision=configuration.precision,
+                autoencoder_device=configuration.device,
+                autoencoder_precision="float16"
+                if configuration.device == "mps"
+                else configuration.precision,
+            )
+            if (
+                model.configuration != configuration
+                or ready.model_identity != configuration.model_identity
+                or ready.payload_sha256 != payload_sha256
+                or ready.execution != expected_execution
+            ):
+                raise ValueError("native music loaded a different model/runtime policy")
+            emit(NativeMusicReadyFrame(ready=ready))
+            sequence = 0
+            while line := requests.readline(MAX_NATIVE_MUSIC_RECORD_BYTES + 1):
+                request_id = None
+                if len(line) > MAX_NATIVE_MUSIC_RECORD_BYTES or not line.endswith(
+                    b"\n"
                 ):
-                    raise ValueError("native music request emitted foreign progress")
-                emit(record)
+                    raise ValueError("native music request framing exceeds its bound")
+                envelope = NativeMusicServeRequest.model_validate_json(line)
+                request = envelope.request
+                request_id = request.request_id
+                if envelope.sequence != sequence + 1:
+                    raise ValueError("native music request sequence is not contiguous")
+                sequence = envelope.sequence
 
-            verify_request_directory(configuration, request, empty=True)
-            result = model.run(request, progress)
-            if (
-                result.request_id,
-                result.model_identity,
-                result.payload_sha256,
-                result.operation,
-                result.seed,
-                result.source_sha256,
-                result.execution,
-            ) != (
-                request.request_id,
-                ready.model_identity,
-                payload_sha256,
-                request.operation,
-                request.seed,
-                request.source.sha256 if request.source is not None else None,
-                ready.execution,
-            ):
-                raise ValueError(
-                    "native music result belongs to a different request or model"
-                )
-            if (
-                request.operation != "generate"
-                and result.output.frames != request.target_frames
-            ):
-                raise ValueError("native music edited output changed timeline geometry")
-            _retained_result(request, result, configuration)
-            emit(NativeMusicCompleted(result=result))
+                def progress(
+                    record: NativeMusicProgress, *, owner: str = request.request_id
+                ) -> None:
+                    if record.request_id != owner or record.stage not in (
+                        "conditioning",
+                        "generating",
+                        "writing",
+                    ):
+                        raise ValueError(
+                            "native music request emitted foreign progress"
+                        )
+                    emit(record)
+
+                verify_request_directory(configuration, request, empty=True)
+                result = model.run(request, progress)
+                if (
+                    result.request_id,
+                    result.model_identity,
+                    result.payload_sha256,
+                    result.operation,
+                    result.seed,
+                    result.source_sha256,
+                    result.execution,
+                ) != (
+                    request.request_id,
+                    ready.model_identity,
+                    payload_sha256,
+                    request.operation,
+                    request.seed,
+                    request.source.sha256 if request.source is not None else None,
+                    ready.execution,
+                ):
+                    raise ValueError(
+                        "native music result belongs to a different request or model"
+                    )
+                if (
+                    request.operation != "generate"
+                    and result.output.frames != request.target_frames
+                ):
+                    raise ValueError(
+                        "native music edited output changed timeline geometry"
+                    )
+                _retained_result(request, result, configuration)
+                emit(NativeMusicCompleted(result=result))
     except Exception:
         emit(NativeMusicFailed(request_id=request_id))
         raise

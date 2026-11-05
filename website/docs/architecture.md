@@ -4349,7 +4349,8 @@ with its ready backend or engine payload. A library probe supplies math facts
 for later admission. Empty observations are omitted from telemetry so inactive
 native support does not introduce an unknown field to older strict readers.
 The probe is neither a loaded-model receipt nor a memory-fit decision. Worker
-publication and native placement remain gated.
+publication and placement consume it through the explicit preparation and full
+phase-admission paths below.
 
 ### Native music memory policy
 
@@ -4383,6 +4384,129 @@ the native runtime's actual device zero and its driver-reported memory topology;
 another GPU's maximum or total cannot fund this model. MPS reports its own
 working-set limit and the single physical host pool. Cache preparation requires
 a sampled receipt. Shared admission requires data no more than two minutes old
-and allows at most thirty seconds of forward clock skew. These definitions and
-the model's pre-load check do not yet connect Worker memory sampling/publication,
-normal placement or the live resource guard; native activation remains gated.
+and allows at most thirty seconds of forward clock skew. Worker preparation and
+ordinary/exact placement consume this actual observation. Continuous resident
+resource publication uses the owned native process's existing memory frames.
+
+The separate `live_resource_guard` package feature binds the admitted
+`NativeMusicMemoryBudget` into the actual native process. A synchronous sample
+must pass before loading begins. The observer continues every half-second while
+loading, generating and idle, measuring the native leader's RSS, Torch reserved
+device allocation (MPS driver allocation on Metal), and raw physical capacity.
+The same portable fit policy is used by Core and the isolated process. Admission
+normalizes pressure headroom once before reservations: up to 512 MiB for host
+and shared memory and 256 MiB for the device, capped at 5% of each small pool.
+
+Once resident, the guard enforces process allocation ceilings and current
+pressure floors. It does not charge the whole future workspace against free
+memory again. RSS is not an exclusive allocation credit, nor is RSS plus GPU
+allocation a measurement of unique physical pages. Unified RSS uses the
+simultaneous physical phase ceiling; shared pressure is checked independently.
+Actual peak and sustained workload qualification still reassesses the estimate.
+
+The native process retires its private group if sensing, limits or control
+egress fail; closed diagnostics cannot prevent retirement. Core keeps only the
+latest private memory frame, validates its process, payload, device and sequence,
+requires a sample before readiness, and checks five-second freshness after
+waiting for a terminal. Startup allows thirty seconds for initial sensing.
+Native control writes are serialized and fail if the owning reader does not
+drain within two seconds. Resource frames carry no media and never enter State
+or the event log. Existing guardian custody remains until actual group drain.
+Current pre-guard candidates must be rebuilt before engine inventory activation;
+this process wiring alone does not enable Worker placement or music capacity.
+
+The Worker now connects a separate `NativeMusicMediaOwner` to task creation,
+snapshot recovery, addressed input/output and shutdown. Before native generation
+can dispatch, it reserves a durable writer intent even though there is no
+uploaded original. Edits wait for the verified `music_edit_source` handshake.
+Both use four shared source/result journal slots and captured local reader roots.
+A replacement Worker fails uncertain jobs instead of silently repeating an edit;
+old originals and results remain until their inherited reader fence drains.
+
+The native result producer verifies complete PCM24 stereo 48 kHz WAVs, then sends
+bounded `music` or `music_edit` frames. Reverse acknowledgements must match the
+owner, model, role and an emitted terminal. Even a synchronous same-node ACK
+cannot remove files before the sender returns. Failed cleanup keeps its slot.
+This path preserves the existing audio.cpp, speech and separation contracts.
+
+`NativeMusicHostGuard` is the spawn-safe outer callback: immutable admitted
+ceilings and physical host identity, with fresh child/host/RSS checks on every
+bounded poll. It captures no Worker State and imports no native libraries.
+The private native observer remains responsible for actual GPU allocation and
+heartbeat observations. Both owners use Core's reclaimable file-cache Mach
+semantics on macOS, from a one-second-bounded `vm_stat` snapshot with psutil
+fallback. RSS still earns no exclusive physical allocation credit.
+
+Native library preparation uses an explicit ordered barrier. `PrepareAceStep`
+names a fixed complete-package digest and device; the master emits
+`AceStepPreparationRequested` with a thirty-minute absolute budget. The Worker
+verifies the package and actual compute lane off its event loop through its
+persistent cache/controller. Offline mode reuses verified cached bytes only.
+Completion binds the original request/package/device and carries either fresh
+verified resources or an actionable bounded failure. The master checks the
+fixed payload before making those resources available to placement.
+
+Periodic Worker advertisements use the same owner and derive builds and native
+probes from one locked observation snapshot. Merely installable CPU/Metal,
+CUDA or ROCm packages never become ready backends. Failure leaves unrelated
+engines intact, and shutdown drains both native preparation controllers.
+
+`AceStepMountPreparer` connects the public ordinary/exact mount routes to this
+ordered barrier. Genuine OS/CPU and generic device requirements choose fixed
+package candidates. Installability never counts as readiness. Four requests may
+wait per accepting API, with one absolute thirty-minute deadline across every
+candidate, send, command queue and verification. The Master refuses expired or
+unknown-profile requests and caps long direct requests without renewing an
+earlier deadline. The result must match request, API, worker, package digest and
+device, then pass the shared actual complete memory assessment. Placement gets
+these ordered resources even if a lossy older telemetry packet arrived later.
+Failures return actionable mount diagnostics and retain other worker engines.
+
+Typed native ACE profiles identify intrinsic `ace_step` compatibility without
+changing immutable card bytes or requiring empirical qualifications. Engine
+vocabulary has exactly CPU, Metal, CUDA and ROCm lanes; native Vulkan is absent.
+GGUF music stays on audio.cpp, and native ACE cannot receive unrelated cards.
+Native platform filtering admits only these explicit lanes for the exact native
+artifact contract, with current fixed payload/probe and full phase admission.
+Installed platform and music acceptance remain separate from these connections.
+
+The pure shared native assessment now combines the current pinned library's
+actual math and timestamped device-zero observations with all existing placement
+commitments. It applies physical pressure headroom once, holds an idle native
+model's complete future workspace, and charges shared GPU storage when assessing
+a CPU-only target. Other engines retain their concrete-shard footprint policy;
+unknown topology earns no host-memory saving and unknown RPC partitions cannot
+be invented. The exact unchanged Worker creation may exclude itself to avoid a
+duplicate reservation. Raw physical capacity remains separate from reserved
+capacity so the live guard does not compare a reduced ceiling to host identity.
+Automatic and exact Master placement use this assessment against raw native
+observations and all pending, Steward and indexed commitments. Generic reserved
+RAM/VRAM inputs cannot charge the native workload again. Exact callers cannot
+invent a smaller policy or split an unshardable native model. Other model
+placements reserve full native phase costs, including idle future workspace and
+discrete-GPU host staging. Missing restored policy refuses the affected pools;
+GPU coexistence is capped by the native runtime's actual device zero rather
+than another/larger GPU or an additive shared-memory carve estimate.
+
+Worker creation refreshes the exact library/math/memory observation off-loop
+before acquiring the native media reader fence. Under the staging transition
+lock it rechecks current authoritative placement, trust, runtime ownership,
+policy and complete commitments, excluding only this exact creation owner.
+The real supervisor receives an immutable live host guard and lazy native
+context, so a first mount can still download model sources through the normal
+lifecycle. Failure or cancellation before custody transfer closes the fence.
+Removal or snapshot replacement cancels its owned preparation request.
+These source connections do not establish installed music/platform acceptance.
+
+The resident reader forwards each validated memory frame through bounded,
+non-blocking local diagnostic IPC. A full channel drops a sample without
+blocking inference; later samples can refresh it. The supervisor requires its
+actual runner identity, native payload/device, fresh native and local clocks,
+and a live runner process. It retains one transient observation, with no phase
+transition, flight-recorder entry or replicated event. Periodic Worker gathering
+uses it only while the same authoritative instance and verified library remain
+owned, and only when physical host/device/shared totals and topology are
+unchanged. RSS and allocator counters never grant allocation credit. A dead,
+stale, foreign or withdrawn owner cannot republish native capacity. Cold or
+expired placement repairs require the mount preparation barrier and return
+actionable pending diagnostics instead of promoting installable packages.

@@ -48,6 +48,7 @@ ADAPTER_MODULES = frozenset(
         "lifetime.py",
         "media.py",
         "policy.py",
+        "resources.py",
         "server.py",
         "upstream_bindings.py",
         "weights.py",
@@ -625,6 +626,7 @@ def assemble_wheel(
             "resident_model",
             "library_probe",
             "memory_probe",
+            "live_resource_guard",
         ],
     }
     identity = hashlib.sha256(

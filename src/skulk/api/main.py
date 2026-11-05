@@ -75,6 +75,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.types import Scope
 
 import skulk.shared.types.tasks as task_types
+from skulk.api.ace_step_preparation import AceStepMountPreparer
 from skulk.api.adapters.chat_completions import (
     chat_request_to_text_generation,
     collect_chat_response,
@@ -600,6 +601,7 @@ from skulk.shared.types.diagnostics import (
     VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
+    AceStepPreparationCompleted,
     AudioCppPreparationCompleted,
     CustomModelCardAdded,
     CustomModelCardDeleted,
@@ -2474,6 +2476,9 @@ class API:
             self._telemetry_view,
             self._send,
         )
+        self._ace_step_mount_preparer = AceStepMountPreparer(
+            self.node_id, lambda: self.state, self._telemetry_view, self._send,
+        )
 
     def set_runner_diagnostics_provider(
         self,
@@ -3998,6 +4003,11 @@ class API:
 
         if ModelTask.TextToMusic not in card.tasks:
             return
+        if card.music is not None and card.music.native is not None:
+            return await self._ace_step_mount_preparer.prepare(
+                card, excluded_nodes, required_nodes=required_nodes,
+                requested_backend=requested_backend,
+            )
         if (
             requested_backend is not None
             and requested_backend not in AUDIO_CPP_COMPUTE_BACKENDS
@@ -4010,6 +4020,7 @@ class API:
             self._telemetry_view.node_system,
             node_memory=self._telemetry_view.node_memory,
             current_instances=self.state.instances,
+            node_resources=self._telemetry_view.node_resources,
         )
         node_ram = reserve_system_ram_usage(
             self._telemetry_view.node_memory,
@@ -4020,6 +4031,7 @@ class API:
                 self._telemetry_view.node_resources,
                 node_memory=self._telemetry_view.node_memory,
             ),
+            node_resources=self._telemetry_view.node_resources,
         )
 
         def supports_with_capacity(node_id: NodeId, backends: frozenset[str]) -> bool:
@@ -12305,6 +12317,8 @@ class API:
 
                 if isinstance(event, DemucsPreparationCompleted):
                     self._demucs_mount_preparer.record(event)
+                if isinstance(event, AceStepPreparationCompleted):
+                    self._ace_step_mount_preparer.record(event)
 
                 # Output chunks no longer travel the event log — they arrive on
                 # the data plane (#279 Phase 2), demuxed by _apply_data.
