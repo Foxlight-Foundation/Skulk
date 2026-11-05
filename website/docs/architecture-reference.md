@@ -2811,6 +2811,15 @@ the original indexed owner, including companions reached through a cached base.
   inventories, explicit namespace override, runtime-owned model-code identities,
   streamed/rehashed objects, deterministic regular ZIP members and SHA descriptors.
   No model weights, publication or machine paths enter the sealed object.
+- Native ACE workflow: default current-source checks remain separate from
+  explicit `build-inventory` reproduction of `ACE_STEP_ADAPTER_REVISION` and
+  all six exact package pins. Adapter Git revision participates in payload
+  identity. A separate `publish-inventory` requires initiative-merged source,
+  successful same-workflow/repository/source candidate, complete size/SHA-256
+  selection and hosted attestations, then uses the shared append-only R2 index
+  publisher without rebuilding. `verify_ace_step_promotion.py` rejects missing,
+  extra, duplicate, linked or changed archives before uploads. Publication,
+  verified device readiness and installed model/music acceptance stay distinct.
 - `provisioning/demucs_package.py`: shared verification/bootstrap for exactly the
   built-in Demucs and ACE layouts. Source repository, namespace and metadata root
   must agree; the existing Demucs cache also enforces its own family ownership.
