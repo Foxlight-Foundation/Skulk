@@ -102,6 +102,7 @@ from skulk.api.adapters.responses import (
     responses_request_to_text_generation,
 )
 from skulk.api.data_plane import DataPlaneObserver
+from skulk.api.demucs_preparation import DemucsMountPreparer
 from skulk.api.diagnostics_compatibility import (
     aggregate_diagnostics_version_status,
     compare_diagnostics_builds,
@@ -132,6 +133,7 @@ from skulk.api.model_search import (
     list_gguf_quant_options,
     search_hugging_face_models,
 )
+from skulk.api.music_edit_api import MusicEditAPI
 from skulk.api.music_jobs import (
     MAX_ACTIVE_MUSIC_JOBS,
     MAX_RETAINED_MUSIC_JOBS,
@@ -173,6 +175,7 @@ from skulk.api.realtime import (
     RealtimeTranscriptionBridge,
 )
 from skulk.api.remote_pairing import RelayLink, RemotePairingController
+from skulk.api.separation_api import SeparationAPI
 from skulk.api.steward import (
     MAX_TOOL_RESULT_CHARS,
     STEWARD_NOT_READY_MESSAGES,
@@ -271,6 +274,7 @@ from skulk.api.types import (
     RemoteCodeApprovalView,
     ResolvedModelCapabilities,
     RuntimeCapabilitySection,
+    SeparationCapabilitySection,
     StartDownloadParams,
     StartDownloadResponse,
     StoreDownloadRequest,
@@ -422,7 +426,9 @@ from skulk.shared.constants import (
     SKULK_IMAGE_TRANSPORT_DEBUG,
     SKULK_MAX_CHUNK_SIZE,
     SKULK_MODELS_DIR,
+    SKULK_MUSIC_EDIT_STORE_DIR,
     SKULK_MUSIC_STORE_DIR,
+    SKULK_SEPARATION_STORE_DIR,
     SKULK_TRACING_CACHE_DIR,
     SKULK_VIDEO_STORE_DIR,
     SKULK_VIDEO_STORE_MAX_BYTES,
@@ -523,7 +529,9 @@ from skulk.shared.types.chunks import (
     GenerationChunk,
     ImageChunk,
     MusicChunk,
+    MusicEditingChunk,
     PrefillProgressChunk,
+    SeparationChunk,
     TokenChunk,
     ToolCallChunk,
     TranscriptionChunk,
@@ -595,6 +603,7 @@ from skulk.shared.types.events import (
     AudioCppPreparationCompleted,
     CustomModelCardAdded,
     CustomModelCardDeleted,
+    DemucsPreparationCompleted,
     Event,
     IndexedEvent,
     InstanceCreated,
@@ -994,8 +1003,9 @@ def _artifact_inventory_is_tombstoned(
 ) -> bool:
     """Return whether an inventory item belongs to an operator-deleted alias.
 
-    Companion artifacts inherit suppression from their owning base-card alias,
-    while independently deleted artifact aliases are suppressed directly.
+    Native music sources are independent data candidates. Their historical
+    owner's deletion does not suppress them; actual import still verifies the
+    complete native record. Other companions inherit base-owner suppression.
 
     Args:
         item: Camel-case node inventory entry.
@@ -1009,6 +1019,7 @@ def _artifact_inventory_is_tombstoned(
     owner_model_id = item.get("ownerModelId")
     return (isinstance(model_id, str) and model_id in tombstones) or (
         isinstance(owner_model_id, str) and owner_model_id in tombstones
+        and item.get("artifactRole") != "music_component"
     )
 
 
@@ -1613,6 +1624,10 @@ API_TAGS_METADATA = [
         "description": "Administrative operations such as node restart.",
     },
     {
+        "name": "Audio Separation",
+        "description": "Asynchronous four-stem jobs, verified WAV content, cancellation and node-local retention.",
+    },
+    {
         "name": "Authentication",
         "description": "Host-authorized device pairing and operator credential lifecycle.",
     },
@@ -2207,6 +2222,21 @@ class API:
         self.app.middleware("http")(log_requests_middleware)
         self._setup_exception_handlers()
         self._setup_cors()
+        self._tg: TaskGroup = TaskGroup()
+        self._music_edit_generation_queues: dict[CommandId, Sender[MusicEditingChunk | ErrorChunk]] = {}
+        self._music_edit_service = MusicEditAPI(
+            self.node_id, SKULK_MUSIC_EDIT_STORE_DIR, lambda: self.state, self._tg,
+            self._load_authorized_model_card, self._send_music_edit_command,
+            lambda: self._system_id, self._send_separation_source, self._send_separation_output_terminal,
+            self._open_music_edit_queue, self._finalize_music_edit_command, self._close_command_queue,
+        )
+        self._separation_generation_queues: dict[CommandId, Sender[SeparationChunk | ErrorChunk]] = {}
+        self._separation_service = SeparationAPI(
+            self.node_id, SKULK_SEPARATION_STORE_DIR, lambda: self.state, self._tg,
+            self._load_authorized_model_card, self._send_separation_command,
+            lambda: self._system_id, self._send_separation_source, self._send_separation_output_terminal,
+            self._open_separation_queue, self._finalize_separation_command, self._close_command_queue,
+        )
         self._setup_routes()
         self.app.include_router(
             create_preservation_router(
@@ -2438,7 +2468,12 @@ class API:
         self._music_output_sources: dict[CommandId, NodeId] = {}
         self._audio_cpp_prepare_events: dict[CommandId, anyio.Event] = {}
         self._audio_cpp_prepare_results: dict[CommandId, AudioCppPreparationCompleted] = {}
-        self._tg: TaskGroup = TaskGroup()
+        self._demucs_mount_preparer = DemucsMountPreparer(
+            self.node_id,
+            lambda: self.state,
+            self._telemetry_view,
+            self._send,
+        )
 
     def set_runner_diagnostics_provider(
         self,
@@ -2505,6 +2540,12 @@ class API:
         self._image_generation_queues = {}
         self._video_generation_queues = {}
         self._music_generation_queues = {}
+        self._music_edit_generation_queues = {}
+        if (edit_service := self._music_edit_api()) is not None:
+            self._tg.start_soon(edit_service.interrupt)
+        self._separation_generation_queues = {}
+        if (separation_service := self._separation_api()) is not None:
+            self._tg.start_soon(separation_service.interrupt)
         self._embedding_queues = {}
         self._audio_speech_queues = {}
         self._audio_transcription_queues = {}
@@ -2586,6 +2627,8 @@ class API:
             self._image_generation_queues,
             self._video_generation_queues,
             self._music_generation_queues,
+            self._music_edit_queues(),
+            self._separation_queues(),
             self._embedding_queues,
             self._audio_speech_queues,
             self._audio_transcription_queues,
@@ -3165,6 +3208,7 @@ class API:
                 "job is a no-op that returns the job unchanged."
             ),
         )(self.cancel_video)
+        self._music_edit_service.register(self.app)
         self.app.post(
             "/v1/music", response_model=MusicResource, tags=["Music"],
             summary="Create a music generation job",
@@ -3195,6 +3239,7 @@ class API:
             summary="Delete a music generation job",
             description="Cancel the job if needed, delete its stored WAV, and forget its record.",
         )(self.delete_music)
+        self._separation_service.register(self.app)
         self.app.post(
             "/v1/messages",
             response_model=None,
@@ -4214,6 +4259,10 @@ class API:
         prepared = await self._prepare_music_engine_for_mount(
             card, set(payload.excluded_nodes)
         )
+        if ModelTask.AudioSeparation in card.tasks:
+            prepared = await self._demucs_mount_preparer.prepare(
+                card, set(payload.excluded_nodes)
+            )
         # Preparation's indexed completion can beat or outlive a lossy node
         # telemetry update. Use its verified facts in this request's dry-run;
         # the master has already applied the same ordered snapshot.
@@ -4375,7 +4424,25 @@ class API:
             )
         else:
             prepared = None
-        if ModelTask.TextToMusic not in model_card.tasks:
+        if ModelTask.AudioSeparation in model_card.tasks:
+            if (
+                isinstance(instance, LlamaRpcInstance)
+                or len(instance.shard_assignments.runner_to_shard) != 1
+                or len(instance.shard_assignments.node_to_runner) != 1
+            ):
+                raise HTTPException(
+                    400, "Separation instances require one complete single-host runner"
+                )
+            shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+            prepared = await self._demucs_mount_preparer.prepare(
+                model_card,
+                set(),
+                required_nodes=set(instance.shard_assignments.node_to_runner),
+                requested_backend=shard.resolved_backend,
+            )
+        if not {ModelTask.TextToMusic, ModelTask.AudioSeparation}.intersection(
+            model_card.tasks
+        ):
             required_memory = model_card.storage_size
             available_memory = self._calculate_total_available_memory()
 
@@ -5629,6 +5696,12 @@ class API:
             HTTPException: 404 when the command is unknown on this node or
                 already completed.
         """
+        if (edit_service := self._music_edit_api()) is not None and command_id in edit_service.active:
+            await edit_service.cancel(str(command_id))
+            return CancelCommandResponse(message="Command cancelled.", command_id=command_id)
+        if (service := self._separation_api()) is not None and command_id in service.active:
+            await service.cancel(str(command_id))
+            return CancelCommandResponse(message="Command cancelled.", command_id=command_id)
         music_job = self._music_jobs.get(command_id)
         if music_job is not None and not music_job.is_terminal:
             await self._cancel_music_job(command_id)
@@ -10632,6 +10705,7 @@ class API:
             modalities=ModalitiesCapabilitySection.from_model_card(card),
             audio=AudioCapabilitySection.from_model_card(card),
             music=MusicCapabilitySection.from_model_card(card),
+            separation=SeparationCapabilitySection.from_model_card(card),
             tooling=ToolingCapabilitySection.from_model_card(card),
             runtime=RuntimeCapabilitySection.from_model_card(card),
             video=VideoCapabilitySection.from_model_card(card),
@@ -11887,6 +11961,8 @@ class API:
                 tg.start_soon(self._apply_vision_media_transport)
                 tg.start_soon(self._apply_output_media)
                 tg.start_soon(self._sweep_video_jobs)
+                tg.start_soon(self._music_edit_service.sweep)
+                tg.start_soon(self._separation_service.sweep)
                 tg.start_soon(self._sweep_pending_speech_media)
                 tg.start_soon(self._sweep_pending_trace_data)
                 tg.start_soon(self._sweep_pending_vision_media)
@@ -11917,6 +11993,9 @@ class API:
                     with anyio.CancelScope(shield=True):
                         shutdown_ev.set()
         finally:
+            with anyio.CancelScope(shield=True):
+                await self._music_edit_service.close()
+                await self._separation_service.close()
             if self._extensions is not None:
                 await self._extensions.run_shutdown_hooks()
             if self._event_log is not None:
@@ -12180,6 +12259,10 @@ class API:
                     self._mark_realtime_task_released(released_task.command_id)
                 if released_task is not None:
                     self._note_music_task_terminal(released_task)
+                    if isinstance(released_task, task_types.MusicEditing) and released_task.task_status in {task_types.TaskStatus.Failed, task_types.TaskStatus.Cancelled}:
+                        await self._music_edit_service.fail(released_task.command_id, "Music edit task failed or was cancelled.", cancel=released_task.task_status == task_types.TaskStatus.Cancelled)
+                    if isinstance(released_task, task_types.AudioSeparation) and released_task.task_status in {task_types.TaskStatus.Failed, task_types.TaskStatus.Cancelled}:
+                        await self._separation_service.fail(released_task.command_id, "Separation task failed or was cancelled.", cancel=released_task.task_status == task_types.TaskStatus.Cancelled)
 
                 if isinstance(
                     event,
@@ -12198,10 +12281,16 @@ class API:
                 record_membership_from_event(self._telemetry_view, event)
 
                 if isinstance(event, TaskCreated):
+                    if isinstance(event.task, task_types.MusicEditing):
+                        await self._music_edit_service.observe_task(event.task)
+                    if isinstance(event.task, task_types.AudioSeparation):
+                        await self._separation_service.observe_task(event.task)
                     self._record_video_output_source(event.task)
                     self._record_music_output_source(event.task)
                     if isinstance(event.task, task_types.MusicGeneration):
-                        self._music_jobs.update(event.task.command_id, status="in_progress")
+                        self._music_jobs.update(
+                            event.task.command_id, status="in_progress"
+                        )
                     self._dispatch_pending_speech_media(event.task)
                     self._dispatch_pending_vision_media(event.task)
 
@@ -12213,6 +12302,9 @@ class API:
                     if waiter is not None:
                         self._audio_cpp_prepare_results[event.request_id] = event
                         waiter.set()
+
+                if isinstance(event, DemucsPreparationCompleted):
+                    self._demucs_mount_preparer.record(event)
 
                 # Output chunks no longer travel the event log — they arrive on
                 # the data plane (#279 Phase 2), demuxed by _apply_data.
@@ -13692,6 +13784,14 @@ class API:
                     "cancelled",
                 ):
                     continue
+                if packet.purpose == "music_edit":
+                    if (edit_service := self._music_edit_api()) is not None:
+                        await edit_service.receive_output(packet)
+                    continue
+                if packet.purpose.startswith("separation_"):
+                    if (service := self._separation_api()) is not None:
+                        await service.receive_output(packet)
+                    continue
                 if packet.purpose == "music":
                     await self._receive_music_output_media(packet)
                     continue
@@ -13839,8 +13939,16 @@ class API:
     async def _apply_output_media_packet(self, packet: OutputMediaPacket) -> None:
         """Apply one lifecycle frame to the job's assembly and settlement."""
 
+        purpose = packet.purpose
+        if purpose not in ("video", "thumbnail", "music"):
+            # Native stem streams have their own complete-set owner. They must
+            # never mutate the existing video/music assembly on a reused ID.
+            await self._send_output_media_terminal(
+                packet.transport_failure("output purpose does not belong to this assembly")
+            )
+            return
         command_id = packet.command_id
-        key = (command_id, packet.purpose)
+        key = (command_id, purpose)
         try:
             if packet.kind == "opened":
                 assert packet.total_bytes is not None
@@ -13854,7 +13962,7 @@ class API:
                 )
                 evicted = self._video_store.open_assembly(
                     command_id,
-                    packet.purpose,
+                    purpose,
                     content_type=packet.content_type,
                     total_bytes=packet.total_bytes,
                     total_chunks=packet.total_chunks,
@@ -13878,11 +13986,11 @@ class API:
                     await self._apply_output_media_packet(held)
             elif packet.kind == "chunk":
                 self._video_store.append(
-                    command_id, packet.purpose, packet.sequence, packet.data
+                    command_id, purpose, packet.sequence, packet.data
                 )
                 completion = self._pending_output_completions.get(key)
                 if completion is not None and self._video_store.assembly_complete(
-                    command_id, packet.purpose
+                    command_id, purpose
                 ):
                     self._pending_output_completions.pop(key, None)
                     await self._apply_output_media_packet(completion)
@@ -13890,9 +13998,9 @@ class API:
                 assert packet.sha256 is not None
                 assert packet.total_chunks is not None
                 if self._video_store.has_open_assembly(
-                    command_id, packet.purpose
+                    command_id, purpose
                 ) and not self._video_store.assembly_complete(
-                    command_id, packet.purpose
+                    command_id, purpose
                 ):
                     # The gossipsub fallback can deliver the completion ahead
                     # of a chunk. Hold it until the assembly fills; the media
@@ -13901,7 +14009,7 @@ class API:
                     return
                 stored = self._video_store.commit(
                     command_id,
-                    packet.purpose,
+                    purpose,
                     sha256=packet.sha256,
                     total_chunks=packet.total_chunks,
                 )
@@ -13963,6 +14071,18 @@ class API:
 
         return self._video_output_sources.get(command_id)
 
+    async def _send_separation_output_terminal(self, packet: OutputMediaPacket) -> None:
+        """Admit separation control or propagate failure to its bounded owner.
+
+        Separation completion and quota release depend on ACK admission. Its
+        control task owns the deadline, so neither channel errors nor caller
+        cancellation may become a successful best-effort return here.
+        """
+        sender = self._output_media_packet_sender
+        if sender is None:
+            raise ClosedResourceError
+        await sender.send(packet)
+
     async def _send_output_media_terminal(self, packet: OutputMediaPacket) -> None:
         """Send one reverse terminal without letting a stuck peer pin the loop."""
 
@@ -14001,6 +14121,14 @@ class API:
             return
         with self._vision_media_packet_receiver as packets:
             async for packet in packets:
+                if packet.payload == "music_edit_source":
+                    if (edit_service := self._music_edit_api()) is not None:
+                        await edit_service.receive_source(packet)
+                    continue
+                if packet.payload == "separation_source":
+                    if (service := self._separation_api()) is not None:
+                        await service.receive_source(packet)
+                    continue
                 if (
                     packet.target_node != self.node_id
                     or packet.command_id not in self._vision_media_commands
@@ -14215,12 +14343,76 @@ class API:
                     ),
                 )
 
+    def _music_edit_queues(self) -> dict[CommandId, Sender[MusicEditingChunk | ErrorChunk]]:
+        """Return only native edit metadata queues, including lightweight host fixtures."""
+        queues: dict[CommandId, Sender[MusicEditingChunk | ErrorChunk]] = getattr(self, "_music_edit_generation_queues", {})
+        return queues
+
+    def _music_edit_api(self) -> MusicEditAPI | None:
+        """Observe the native edit owner without creating files or execution."""
+        service: MusicEditAPI | None = getattr(self, "_music_edit_service", None)
+        return service
+
+    async def _send_music_edit_command(self, command: Command, session: SystemId) -> None:
+        """Keep accepted edits in their original session; cancellation never replays."""
+        if isinstance(command, TaskCancelled) and command.cancelled_command_id in self._music_edit_queues():
+            self._cancelled_command_ids.add(command.cancelled_command_id)
+        await self._send(command, expected_session=session)
+
+    def _open_music_edit_queue(self, identifier: CommandId) -> Receiver[MusicEditingChunk | ErrorChunk]:
+        """Register edit DATA before submitting its immutable command."""
+        return self._open_stream_queue(self._music_edit_queues(), identifier)
+
+    async def _finalize_music_edit_command(self, identifier: CommandId, session: SystemId) -> None:
+        """Retire an edit stream without finishing it against a replacement master."""
+        queues = self._music_edit_queues()
+        if self._system_id != session:
+            queues.pop(identifier, None)
+            return
+        await self._finalize_command_stream(identifier, cast(dict[CommandId, Sender[object]], queues))
+
+    def _separation_queues(self) -> dict[CommandId, Sender[SeparationChunk | ErrorChunk]]:
+        """Return this endpoint family's queues, including lightweight API fixtures."""
+        queues: dict[CommandId, Sender[SeparationChunk | ErrorChunk]] = getattr(self, "_separation_generation_queues", {})
+        return queues
+
+    def _separation_api(self) -> SeparationAPI | None:
+        """Observe the installed separation owner without creating file effects."""
+        service: SeparationAPI | None = getattr(self, "_separation_service", None)
+        return service
+
+    async def _send_separation_command(self, command: Command, session: SystemId) -> None:
+        """Keep a submitted edit bound to its original cluster session."""
+        if isinstance(command, TaskCancelled) and command.cancelled_command_id in self._separation_queues():
+            self._cancelled_command_ids.add(command.cancelled_command_id)
+        await self._send(command, expected_session=session)
+
+    async def _send_separation_source(self, packet: VisionMediaPacket) -> None:
+        """Publish bounded source bytes on the existing addressed input plane."""
+        if self._vision_media_packet_sender is None:
+            raise ClosedResourceError
+        await self._vision_media_packet_sender.send(packet)
+
+    def _open_separation_queue(self, identifier: CommandId) -> Receiver[SeparationChunk | ErrorChunk]:
+        """Register metadata output before publishing the separation command."""
+        return self._open_stream_queue(self._separation_queues(), identifier)
+
+    async def _finalize_separation_command(self, identifier: CommandId, session: SystemId) -> None:
+        """Close one metadata stream without finishing it in a replacement session."""
+        queues = self._separation_queues()
+        if self._system_id != session:
+            queues.pop(identifier, None)
+            return
+        await self._finalize_command_stream(identifier, cast(dict[CommandId, Sender[object]], queues))
+
     def _command_has_queue(self, command_id: CommandId) -> bool:
         return (
             command_id in self._text_generation_queues
             or command_id in self._image_generation_queues
             or command_id in self._video_generation_queues
             or command_id in self._music_generation_queues
+            or command_id in self._music_edit_queues()
+            or command_id in self._separation_queues()
             or command_id in self._embedding_queues
             or command_id in self._audio_speech_queues
             or command_id in self._audio_transcription_queues
@@ -14386,6 +14578,8 @@ class API:
             self._image_generation_queues,
             self._video_generation_queues,
             self._music_generation_queues,
+            self._music_edit_queues(),
+            self._separation_queues(),
             self._embedding_queues,
             self._audio_speech_queues,
             self._audio_transcription_queues,
@@ -14424,6 +14618,20 @@ class API:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
                 self._video_generation_queues.pop(command_id, None)
+        if queue := self._music_edit_queues().get(command_id):
+            if not isinstance(chunk, (MusicEditingChunk, ErrorChunk)):
+                return
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._music_edit_queues().pop(command_id, None)
+        if queue := self._separation_queues().get(command_id):
+            if not isinstance(chunk, (SeparationChunk, ErrorChunk)):
+                return
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._separation_queues().pop(command_id, None)
         if queue := self._music_generation_queues.get(command_id, None):
             if not isinstance(chunk, (MusicChunk, ErrorChunk)):
                 logger.warning(
@@ -14521,6 +14729,8 @@ class API:
                 task_types.ImageEdits,
                 task_types.VideoGeneration,
                 task_types.MusicGeneration,
+                task_types.MusicEditing,
+                task_types.AudioSeparation,
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
                 task_types.AudioTranscription,
@@ -14552,6 +14762,8 @@ class API:
             self._image_generation_queues,
             self._video_generation_queues,
             self._music_generation_queues,
+            self._music_edit_queues(),
+            self._separation_queues(),
             self._embedding_queues,
             self._audio_speech_queues,
             self._audio_transcription_queues,
@@ -14582,6 +14794,14 @@ class API:
                     error_message,
                     cancelled=task.task_status == task_types.TaskStatus.Cancelled,
                 )
+            return
+        if isinstance(task, task_types.MusicEditing) and not delivered:
+            if (edit_service := self._music_edit_api()) is not None:
+                await edit_service.fail(task.command_id, "Native music edit execution failed.", cancel=task.task_status == task_types.TaskStatus.Cancelled)
+            return
+        if isinstance(task, task_types.AudioSeparation) and not delivered:
+            if (service := self._separation_api()) is not None:
+                await service.fail(task.command_id, "Native separation execution failed.", cancel=task.task_status == task_types.TaskStatus.Cancelled)
             return
         owner = getattr(task, "owner_node", None)
         if not delivered and (owner is None or owner == self.node_id):
@@ -15085,6 +15305,8 @@ class API:
                 task_types.ImageEdits,
                 task_types.VideoGeneration,
                 task_types.MusicGeneration,
+                task_types.MusicEditing,
+                task_types.AudioSeparation,
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
                 task_types.AudioTranscription,

@@ -36,6 +36,8 @@ _BODYLESS_MUTATIONS = {
     ("POST", "/v1/plugins/managed/service/setup"),
     ("POST", "/v1/videos/{video_id}/cancel"),
     ("POST", "/v1/music/{music_id}/cancel"),
+    ("POST", "/v1/music/edits/{edit_id}/cancel"),
+    ("POST", "/v1/audio/separations/{separation_id}/cancel"),
     ("POST", "/v1/cancel/{command_id}"),
     ("POST", "/onboarding"),
     ("POST", "/store/reconciliation/rescan"),

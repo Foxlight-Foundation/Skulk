@@ -1,4 +1,4 @@
-"""Build-time resource closure for Skulk's public preservation dependency."""
+"""Build-time resource closure for Skulk's independent helpers and dependencies."""
 
 from importlib.metadata import distribution
 from pathlib import Path
@@ -7,6 +7,19 @@ from pathlib import Path
 def get_hook_dirs() -> list[str]:
     """Expose Skulk's dependency hooks to ordinary PyInstaller builds."""
     return [str(Path(__file__).parent)]
+
+
+def native_installer_data_files() -> list[tuple[str, str]]:
+    """Retain executable guardian source for an independently verified Python.
+
+    Frozen bytecode inside PYZ is not a script that the native interpreter can
+    execute. Return its exact source/destination pair, failing the build when
+    that source is absent instead of shipping an unusable bootstrap supervisor.
+    """
+    guardian = Path(__file__).parents[1] / "provisioning/_native_install_guard.py"
+    if not guardian.is_file():
+        raise FileNotFoundError("native installer guardian source is missing")
+    return [(str(guardian), "skulk/provisioning")]
 
 
 def preservation_data_files() -> list[tuple[str, str]]:

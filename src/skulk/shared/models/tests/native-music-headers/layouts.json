@@ -1,0 +1,35 @@
+{
+  "base": {
+    "header_bytes": 80568,
+    "header_sha256": "1b5ffdcb5660c9ca5bf91ad3867afc266b2697ba962e6580fd5675f82ca344f1",
+    "dtypes": [
+      {
+        "dtype": "BF16",
+        "tensor_count": 677,
+        "element_count": 2393872518
+      }
+    ]
+  },
+  "text_encoder": {
+    "header_bytes": 33392,
+    "header_sha256": "1ff013283b0190994f5557f04301841482bcba6c006dd557fcb15563d4f1768b",
+    "dtypes": [
+      {
+        "dtype": "BF16",
+        "tensor_count": 310,
+        "element_count": 595776512
+      }
+    ]
+  },
+  "autoencoder": {
+    "header_bytes": 40536,
+    "header_sha256": "ee65a4b1609150f6be18b8b164c77f340a326c3a5912acc686ea5227f60c9528",
+    "dtypes": [
+      {
+        "dtype": "BF16",
+        "tensor_count": 365,
+        "element_count": 168695426
+      }
+    ]
+  }
+}

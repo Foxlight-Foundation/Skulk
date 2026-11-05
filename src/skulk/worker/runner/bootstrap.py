@@ -33,6 +33,7 @@ from skulk.shared.types.worker.runners import RunnerFailed
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.utils.channels import ClosedResourceError, MpReceiver, MpSender
 from skulk.utils.stack_dump import install_stack_dump_signal
+from skulk.worker.runner.demucs.context import SeparationRunnerContext
 from skulk.worker.runner.diagnostics import (
     configure_runner_diagnostics,
     record_runner_phase,
@@ -433,6 +434,10 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
 
     shard = bound_instance.bound_shard
     require_remote_code_approval(shard.model_card)
+    if shard.model_card.music is not None and shard.model_card.music.native is not None:
+        # A missing engine must fail explicitly even for legacy/manual assignments;
+        # returning None would fall through to MLX with incompatible native files.
+        raise RuntimeError("Native ACE-Step execution requires the native music runner")
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
 
@@ -474,6 +479,8 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
             card_serves_music=shard.model_card.music is not None,
+            card_has_native_music_profile=(shard.model_card.music is not None and shard.model_card.music.native is not None),
+            card_serves_separation=shard.model_card.separation is not None,
             card_serves_embeddings=card_serves_embeddings(shard.model_card),
             card_has_native_image_profile=shard.model_card.image is not None,
             card_has_pinned_projector=(
@@ -518,6 +525,7 @@ def entrypoint(
     realtime_audio_receiver: MpReceiver[RealtimeAudioInputFrame],
     _logger: "loguru.Logger",
     context_token_limit: int | None = None,
+    separation_context: SeparationRunnerContext | None = None,
 ) -> None:
     global logger
     logger = _logger
@@ -570,21 +578,43 @@ def entrypoint(
         # failure-reporting boundary so a denied card becomes an actionable
         # RunnerFailed state rather than an unreported process-exit retry loop.
         require_remote_code_approval(shard.model_card)
-        if bound_instance.is_music_model:
-            from skulk.shared.backends import engine_of
-            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
+        if bound_instance.is_separation_model:
+            from skulk.worker.runner.demucs.runner import Runner as SeparationRunner
 
+            if separation_context is None:
+                raise RuntimeError(
+                    "native separation placement has no prepared worker context"
+                )
+            model = separation_context.model(bound_instance)
+            try:
+                SeparationRunner(
+                    bound_instance,
+                    event_sender,
+                    task_receiver,
+                    cancel_receiver,
+                    model,
+                ).main()
+            finally:
+                # A failed drain leaves the inherited descriptor in the native
+                # process. Replacement-worker cleanup must still acquire its
+                # independent reader fence before touching the original.
+                try:
+                    model.close()
+                finally:
+                    separation_context.source_fence.close()
+            return
+        if bound_instance.is_music_model:
             resolved = shard.resolved_backend
-            music_engine = (
-                engine_of(resolved)
-                if resolved is not None
-                else _resolve_text_engine(bound_instance)
-            )
+            # Validate the artifact contract for stamped and fallback music
+            # assignments before importing the specialized runner.
+            music_engine = _resolve_text_engine(bound_instance)
             if music_engine != "audio_cpp":
                 raise RuntimeError(
                     "no audio.cpp engine serves this music placement on this node "
                     f"(resolved backend {resolved!r})"
                 )
+            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
+
             runner = AudioCppRunner(
                 bound_instance, event_sender, task_receiver, cancel_receiver
             )
@@ -626,7 +656,9 @@ def entrypoint(
                     Runner as MlxVideoRunner,
                 )
 
-                MlxVideoRunner(bound_instance, event_sender, task_receiver, cancel_receiver).main()
+                MlxVideoRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                ).main()
                 return
             # Fail loudly with the reason instead of letting a text runner
             # try to load a diffusion stack and report something unrelated.
@@ -642,10 +674,14 @@ def entrypoint(
                     Runner as NativeImageRunner,
                 )
 
-                NativeImageRunner(bound_instance, event_sender, task_receiver, cancel_receiver).main()
+                NativeImageRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                ).main()
                 return
             if shard.model_card.image is not None:
-                raise RuntimeError("no qualified native image engine serves this placement")
+                raise RuntimeError(
+                    "no qualified native image engine serves this placement"
+                )
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner
 
             runner = ImageRunner(

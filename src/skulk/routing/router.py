@@ -218,6 +218,7 @@ class TopicRouter[T: CamelCaseModel]:
     ):
         self.topic: TypedTopic[T] = topic
         self.senders: set[Sender[T]] = set()
+        self.receiver_predicates: dict[Sender[T], Callable[[T], bool]] = {}
         self.origin_senders: set[Sender[tuple[str | None, T]]] = set()
         receiver_buffer_size = (
             0
@@ -283,11 +284,16 @@ class TopicRouter[T: CamelCaseModel]:
         """
         to_clear: set[Sender[T]] = set()
         for sender in copy(self.senders):
+            predicate = self.receiver_predicates.get(sender)
+            if predicate is not None and not predicate(item):
+                continue
             try:
                 await sender.send(item)
             except (ClosedResourceError, BrokenResourceError):
                 to_clear.add(sender)
         self.senders -= to_clear
+        for sender in to_clear:
+            self.receiver_predicates.pop(sender, None)
 
         origin_to_clear: set[Sender[tuple[str | None, T]]] = set()
         for sender in copy(self.origin_senders):
@@ -327,6 +333,25 @@ class TopicRouter[T: CamelCaseModel]:
 
     def new_sender(self) -> Sender[T]:
         return self._sender.clone()
+
+    def new_receiver(
+        self,
+        *,
+        max_buffer_size: float = inf,
+        accept: Callable[[T], bool] | None = None,
+    ) -> Receiver[T]:
+        """Subscribe after a pure packet predicate, retaining bulk rendezvous bounds."""
+        receiver_buffer_size = (
+            0
+            if self.topic.topic in (VISION_MEDIA.topic, OUTPUT_MEDIA.topic)
+            and max_buffer_size == inf
+            else max_buffer_size
+        )
+        send, receive = channel[T](receiver_buffer_size)
+        self.senders.add(send)
+        if accept is not None:
+            self.receiver_predicates[send] = accept
+        return receive
 
     def _routes_to_local_node(self, item: T) -> bool:
         if self.local_routing_key is None or self.topic.routing_key is None:
@@ -777,7 +802,14 @@ class Router:
         topic: TypedTopic[T],
         *,
         max_buffer_size: float = inf,
+        accept: Callable[[T], bool] | None = None,
     ) -> Receiver[T]:
+        """Subscribe with bounded admission and an optional pure packet predicate.
+
+        Predicates run before the receiver's queue. This lets consumers share a
+        rendezvous topic without an ignored reverse packet waiting on the
+        consumer that is still sending it.
+        """
         router = self.topic_routers.get(topic.topic, None)
         # There's gotta be a way to do this without THIS many asserts
 
@@ -785,16 +817,9 @@ class Router:
         assert router.topic == topic
         assert router.topic.model_type == topic.model_type
 
-        receiver_buffer_size = (
-            0
-            if topic.topic in (VISION_MEDIA.topic, OUTPUT_MEDIA.topic)
-            and max_buffer_size == inf
-            else max_buffer_size
+        return cast(TopicRouter[T], router).new_receiver(
+            max_buffer_size=max_buffer_size, accept=accept
         )
-        send, recv = channel[T](receiver_buffer_size)
-        router.senders.add(cast(Sender[CamelCaseModel], send))
-
-        return recv
 
     def receiver_with_origin[T: CamelCaseModel](
         self, topic: TypedTopic[T]

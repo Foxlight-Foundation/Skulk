@@ -245,6 +245,10 @@ SKULK_VIDEO_OUTPUT_DIR = SKULK_CACHE_HOME / "video_output"
 SKULK_VIDEO_STORE_DIR = SKULK_CACHE_HOME / "videos"
 SKULK_MUSIC_OUTPUT_DIR = SKULK_CACHE_HOME / "music_output"
 SKULK_MUSIC_STORE_DIR = SKULK_CACHE_HOME / "music"
+SKULK_MUSIC_EDIT_STORE_DIR = SKULK_CACHE_HOME / "music_edits"
+SKULK_SEPARATION_INPUT_DIR = SKULK_CACHE_HOME / "separation_input"
+SKULK_SEPARATION_OUTPUT_DIR = SKULK_CACHE_HOME / "separation_output"
+SKULK_SEPARATION_STORE_DIR = SKULK_CACHE_HOME / "separations"
 # Ceiling on finished video artifacts one API node keeps on disk; the store
 # evicts the oldest completed jobs when a new artifact would exceed it.
 SKULK_VIDEO_STORE_MAX_BYTES = int(
@@ -285,6 +289,7 @@ def set_offline_mode() -> None:
 
     global _offline_flag  # noqa: PLW0603
     _offline_flag = True
+
 
 SKULK_TRACING_ENABLED = (
     _env("SKULK_TRACING_ENABLED", "false") or "false"

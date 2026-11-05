@@ -17,6 +17,7 @@ from skulk.download.download_utils import (
     map_repo_download_progress_to_download_progress_data,
     model_companions_present_on_disk,
     resolve_model_in_path,
+    resolve_native_music_source_directory,
 )
 from skulk.download.shard_downloader import ShardDownloader
 from skulk.routing.router import TelemetrySender
@@ -152,6 +153,31 @@ class DownloadCoordinator:
         """
 
         card = shard.model_card
+        if card.native_music_artifact_sources():
+            if card.source_revision is None:
+                return None
+            # Ordinary store generations include source/bundle suffixes that
+            # the legacy model-layout lookup cannot discover. Native readiness
+            # must use recorded complete selections and exact owning policy.
+            native = await asyncio.to_thread(resolve_native_music_source_directory,
+                card, str(card.artifact_repository), card.source_revision,
+                require_card_identity=True,
+            )
+            if native is not None:
+                return native
+            if card.registry_card_id is not None:
+                retained = await asyncio.to_thread(resolve_native_music_source_directory,
+                    card, str(card.artifact_repository), card.source_revision,
+                )
+                if retained is not None:
+                    refreshed = await asyncio.to_thread(
+                        refresh_registry_installed_card_if_same_artifact,
+                        retained, card,
+                    )
+                    if refreshed is not None:
+                        register_installed_card_record(refreshed)
+                        return retained
+            return None
         exact = resolve_model_in_path(
             card.model_id,
             card.source_revision,
@@ -625,6 +651,19 @@ class DownloadCoordinator:
             )
             return
 
+        # Validate grouped native selection before a status probe: malformed
+        # selection must fail this request, not the coordinator's task group.
+        try:
+            native_sources = shard.model_card.native_music_artifact_sources()
+        except ValueError as error:
+            self._begin_attempt(model_id)
+            self._reset_progress_throttle(model_id)
+            await self._emit_status(DownloadFailed(
+                shard_metadata=shard, node_id=self.node_id,
+                error_message=str(error), model_directory=self._model_dir(model_id),
+            ))
+            return
+
         # Check if already downloading, complete, or recently failed
         if status is not None:
             if artifact_changed:
@@ -638,9 +677,14 @@ class DownloadCoordinator:
             # clear the stale status and re-download from scratch.
             elif isinstance(status, DownloadCompleted) and status.model_directory:
                 model_dir = Path(status.model_directory)
+                native_path = await self._resolve_or_refresh_complete_artifact(shard) if native_sources else None
                 if (
                     not model_dir.is_dir()
                     or not (model_dir / "config.json").exists()
+                    or (native_sources and (
+                        native_path != model_dir
+                        or not await asyncio.to_thread(model_companions_present_on_disk, shard.model_card, self.offline)
+                    ))
                 ):
                     logger.info(
                         f"DownloadCoordinator: {model_id} was DownloadCompleted but "
@@ -677,7 +721,7 @@ class DownloadCoordinator:
         # hiding a loadable base behind a doomed download would produce
         # DownloadFailed for a usable model, but advertising a vision model
         # without its weights would hand out a broken one.
-        if found_path is not None and not model_companions_present_on_disk(
+        if found_path is not None and not await asyncio.to_thread(model_companions_present_on_disk,
             shard.model_card, required_only=self.offline
         ):
             logger.info(
@@ -709,9 +753,19 @@ class DownloadCoordinator:
         await self._emit_status(progress)
 
         # Check initial status from downloader
-        initial_progress = (
-            await self.shard_downloader.get_shard_download_status_for_shard(shard)
-        )
+        try:
+            initial_progress = (
+                await self.shard_downloader.get_shard_download_status_for_shard(shard)
+            )
+        except (FileNotFoundError, ValueError) as error:
+            # A successful listing can still contradict its exact selection.
+            # This request must fail without retiring the shared command loop.
+            self._reset_progress_throttle(model_id)
+            await self._emit_status(DownloadFailed(
+                shard_metadata=shard, node_id=self.node_id,
+                error_message=str(error), model_directory=self._model_dir(model_id),
+            ))
+            return
 
         completed_path = (
             await self._resolve_or_refresh_complete_artifact(

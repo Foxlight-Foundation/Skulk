@@ -6,6 +6,8 @@ from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules
 
+from skulk._pyinstaller import native_installer_data_files
+
 PROJECT_ROOT = Path.cwd()
 SOURCE_ROOT = PROJECT_ROOT / "src"
 ENTRYPOINT = SOURCE_ROOT / "skulk" / "__main__.py"
@@ -68,6 +70,7 @@ DATAS: list[tuple[str, str]] = [
     (str(MLX_LIB_DIR), "mlx/lib"),
     (str(SKULK_SHARED_MODELS_DIR), "skulk/shared/models"),
     (str(TEST_VIDEO_CARD), "skulk/worker/runner/test_video"),
+    *native_installer_data_files(),
 ]
 
 MACTOP_PATH = shutil.which("mactop")

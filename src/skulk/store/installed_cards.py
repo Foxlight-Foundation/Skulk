@@ -41,6 +41,9 @@ from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 INSTALLED_CARD_RELATIVE_PATH = Path(".skulk") / "installed-card.json"
 """Reserved sidecar path copied with canonical and staged artifacts."""
 
+PRESERVATION_CAPTURE_NOTICE = b"Private owner capture. Original license/attribution may be incomplete. No redistribution rights, upstream authorship or runtime qualification are granted.\n"
+"""Exact receiver-owned notice allowed beside a preserved native data selection."""
+
 
 def installed_artifact_directory(model_id: ModelId, downloaded_path: Path) -> Path:
     """Return the identity root for a completed direct or staged download.
@@ -80,6 +83,7 @@ InstalledArtifactRole = Literal[
     "vllm_draft",
     "video_companion",
     "image_component",
+    "music_component",
 ]
 
 
@@ -194,7 +198,7 @@ class InstalledCardRecord(BaseModel):
         default=None,
         min_length=3,
         max_length=512,
-        description="Owning base-model alias for a companion artifact.",
+        description="Owning base-model alias; historical provenance, not exclusive ownership, for a shared native music data source.",
     )
     owner_card_id: str | None = Field(
         default=None,
@@ -521,6 +525,10 @@ def companion_artifact_role(
         component.repository == repository for component in owner_card.image.components
     ):
         return "image_component"
+    if repository != str(owner_card.artifact_repository) and any(
+        source.repository == repository for source in owner_card.native_music_artifact_sources()
+    ):
+        return "music_component"
     runtime = owner_card.runtime
     if runtime is not None:
         if runtime.mtp_sidecar_repo == repository:
@@ -539,6 +547,50 @@ def companion_artifact_role(
     raise ValueError(
         f"{repository} is not a declared companion of {owner_card.model_id}"
     )
+
+
+def _native_manifest_matches(
+    files: tuple[InstalledFileManifestEntry, ...],
+    card: ModelCard,
+    repository: str,
+    revision: str | None,
+) -> bool:
+    """Require the complete exact source selection, including original tensor pins."""
+    if not card.native_music_artifact_sources():
+        return True
+    expected = card.native_music_files_for_source(repository, revision)
+    observed = {item.path: item for item in files}
+    # Recovery adds this one fixed receiver-owned notice. It must not broaden
+    # the native selection to arbitrary repository files or executable code.
+    notice = observed.pop(".foxlight-capture-notice.txt", None)
+    if notice is not None and (
+        notice.size_bytes != len(PRESERVATION_CAPTURE_NOTICE)
+        or notice.sha256 != hashlib.sha256(PRESERVATION_CAPTURE_NOTICE).hexdigest()
+    ):
+        return False
+    return bool(expected) and set(observed) == {item.path for item in expected} and all(
+        observed[item.path].size_bytes == item.size_bytes
+        and (item.object_id is None or not item.object_id.startswith("sha256:")
+            or item.object_id == "sha256:" + observed[item.path].sha256)
+        for item in expected
+    )
+
+
+def _native_git_objects_match(
+    directory: Path, card: ModelCard, repository: str, revision: str | None
+) -> bool:
+    """Bind small Hub Git blobs when first capturing or independently receiving bytes."""
+    for item in card.native_music_files_for_source(repository, revision):
+        if item.object_id is None or not item.object_id.startswith("git-sha1:"):
+            continue
+        digest = hashlib.sha1(usedforsecurity=False)
+        digest.update(f"blob {item.size_bytes}\0".encode())
+        with (directory / item.path).open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        if item.object_id != "git-sha1:" + digest.hexdigest():
+            return False
+    return True
 
 
 def build_installed_card_record(
@@ -577,6 +629,14 @@ def build_installed_card_record(
         if artifact_revision is _ArtifactRevisionDefault.OMITTED
         else artifact_revision
     )
+    if model_card.native_music_artifact_sources():
+        expected_role = "base" if effective_repository == str(model_card.artifact_repository) else "music_component"
+        if artifact_role != expected_role:
+            raise ValueError("native music installed artifact role disagrees with its owning card")
+    if not _native_manifest_matches(files, model_card, effective_repository, effective_revision) or not _native_git_objects_match(
+        model_directory, model_card, effective_repository, effective_revision
+    ):
+        raise ValueError("native music installed artifact lacks its complete exact source selection")
     revision_verified = (
         model_card.registry_card_id is not None
         and effective_revision is not None
@@ -930,6 +990,25 @@ def require_registry_installed_artifact(
         )
 
 
+def installed_artifact_deleted(record: InstalledCardRecord, deleted: frozenset[str]) -> bool:
+    """Apply deletion intent without revoking independently shared native data.
+
+    Args:
+        record: Complete retained source/card association.
+        deleted: Durable aliases explicitly removed by the operator.
+
+    Native source records retain a historical owner for provenance. Deleting
+    that model does not delete a data-only source serving other exact owners;
+    deleting the source alias itself still prevents automatic resurrection.
+    """
+    shared_native = record.artifact_role == "music_component" and bool(
+        record.model_card.native_music_files_for_source(record.artifact_repository, record.artifact_revision)
+    )
+    return record.artifact_model_id in deleted or (
+        record.owner_model_id in deleted and not shared_native
+    )
+
+
 def companion_owner_matches(record: InstalledCardRecord, owner_card: ModelCard) -> bool:
     """Whether an installed companion record serves ``owner_card``.
 
@@ -945,6 +1024,13 @@ def companion_owner_matches(record: InstalledCardRecord, owner_card: ModelCard) 
             record.artifact_repository,
             record.artifact_revision,
         ) in owner_card.external_video_companions()
+    if record.artifact_role == "music_component":
+        expected = owner_card.native_music_files_for_source(record.artifact_repository, record.artifact_revision)
+        return (
+            bool(expected)
+            and record.artifact_repository != str(owner_card.artifact_repository)
+            and expected == record.model_card.native_music_files_for_source(record.artifact_repository, record.artifact_revision)
+        )
     if owner_card.registry_card_id is not None:
         return record.owner_card_id == owner_card.registry_card_id
     return record.model_card == owner_card
@@ -994,6 +1080,18 @@ def verify_installed_card(
 ) -> bool:
     """Verify path boundaries, sizes and optionally hashes for one sidecar."""
 
+    if not _native_manifest_matches(record.files, record.model_card, record.artifact_repository, record.artifact_revision):
+        return False
+    if record.model_card.native_music_artifact_sources():
+        expected_role = "base" if record.artifact_repository == str(record.model_card.artifact_repository) else "music_component"
+        if record.artifact_role != expected_role:
+            return False
+        aliases = {str(record.model_card.model_id)} if expected_role == "base" else {
+            record.artifact_repository, *(str(source.model_id()) for source in record.model_card.native_music_artifact_sources()
+                if (source.repository, source.revision) == (record.artifact_repository, record.artifact_revision))
+        }
+        if record.artifact_model_id not in aliases:
+            return False
     resolved_root = model_directory.resolve()
     for entry in record.files:
         candidate = (resolved_root / entry.path).resolve()
@@ -1003,6 +1101,12 @@ def verify_installed_card(
             if candidate.stat().st_size != entry.size_bytes:
                 return False
             if verify_hashes and _sha256_file(candidate) != entry.sha256:
+                return False
+        except OSError:
+            return False
+    if verify_hashes:
+        try:
+            if not _native_git_objects_match(resolved_root, record.model_card, record.artifact_repository, record.artifact_revision):
                 return False
         except OSError:
             return False
@@ -1072,6 +1176,7 @@ def refresh_registry_installed_card_if_same_artifact(
         )
     if model_card.image is not None:
         required_files.extend((item.path, item.size_bytes) for item in model_card.image.files_for_source(str(model_card.artifact_repository), model_card.source_revision))
+    required_files.extend((item.path, item.size_bytes) for item in model_card.native_music_files_for_source(str(model_card.artifact_repository), model_card.source_revision))
     if model_card.gguf_file is not None:
         required_files.append((model_card.gguf_file, None))
     if model_card.vision is not None and model_card.vision.projector_file is not None:
@@ -1181,8 +1286,7 @@ def indexed_recovery_artifact(root: Path, model_id: ModelId) -> Path | None:
         if (
             record.artifact_model_id != str(model_id)
             or record.preservation is None
-            or record.artifact_model_id in deleted
-            or record.owner_model_id in deleted
+            or installed_artifact_deleted(record, deleted)
             or not path.resolve().is_relative_to(root.resolve())
             or read_installed_card(path) != record
             or not verify_installed_card(path, record)
@@ -1235,10 +1339,7 @@ def discover_installed_cards(roots: Iterable[Path]) -> list[InstalledCardRecord]
                 continue
             if record is None or not verify_installed_card(model_directory, record):
                 continue
-            if (
-                record.artifact_model_id in tombstones
-                or record.owner_model_id in tombstones
-            ):
+            if installed_artifact_deleted(record, tombstones):
                 continue
             records_by_identity.setdefault(record.installed_identity, record)
     return list(records_by_identity.values())
@@ -1302,6 +1403,11 @@ def associate_installed_card(
                 ]
             )
         companion_candidates.extend(card.external_video_companions())
+        companion_candidates.extend(
+            (source.repository, source.revision)
+            for source in card.native_music_artifact_sources()
+            if source.repository != str(card.artifact_repository)
+        )
         for repository, revision in companion_candidates:
             if repository is None or not _artifact_directory_matches(
                 directory_name, ModelId(repository), revision
@@ -1408,6 +1514,11 @@ def _legacy_companion_artifact_is_complete(
         expected = [item for component in (card.image.components if card.image is not None else ())
             if _artifact_directory_matches(model_directory.name, ModelId(component.repository), component.revision)
             for item in component.files]
+        return bool(expected) and all((model_directory / item.path).is_file() and (model_directory / item.path).stat().st_size == item.size_bytes for item in expected)
+    if artifact_role == "music_component":
+        expected = [item for source in card.native_music_artifact_sources()
+            if _artifact_directory_matches(model_directory.name, ModelId(source.repository), source.revision)
+            for item in source.files]
         return bool(expected) and all((model_directory / item.path).is_file() and (model_directory / item.path).stat().st_size == item.size_bytes for item in expected)
     if artifact_role == "video_companion":
         # A video companion repository is staged as exactly the files the
