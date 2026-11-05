@@ -251,6 +251,47 @@ The ROCm job independently reproduces its pure metapackage before collection.
 The workflow does not download music weights or qualify music generation,
 accelerator performance or installed Core admission.
 
+### Reproduce and publish the fixed inventory
+
+The workflow's default `verify-current` mode retains the current-source boundary
+checks. Explicit `build-inventory` mode instead reads Core's reviewed
+`ACE_STEP_ADAPTER_REVISION` and six `ACE_STEP_PACKAGES`, checks out that exact
+producer revision, builds each archive twice and compares its descriptor with
+the fixed inventory. This distinction matters: `adapter_revision` is part of the
+sealed payload identity, so a newer Core commit produces different archive bytes
+even when the native module files are unchanged.
+
+Only a complete successful inventory build produces releasable candidates, with
+GitHub hosted-build attestations for the actual archives. It still loads no model
+and grants no hardware qualification. Use the same reviewed source branch/tag
+for the separate publication attempt:
+
+```sh
+gh workflow run ace-step-native-boundary.yml --ref <reviewed-source-ref> -f mode=build-inventory
+# Wait for the complete candidate run and verify its recorded source/objects.
+gh workflow run ace-step-native-boundary.yml --ref <same-reviewed-source-ref> -f mode=publish-inventory -f source_run_id=<successful-inventory-run>
+```
+
+Dispatch availability must be verified on the repository before relying on these
+commands; registration is separate from merging experimental runtime code to a
+release branch. Publication requires that exact source to be merged into the
+music initiative. The candidate must be a successful manual run of this same
+workflow/repository and source digest. No build occurs in the publication job.
+
+`scripts/verify_ace_step_promotion.py` accepts no caller digest or target override.
+It requires every fixed profile, verifies complete archive sizes and SHA-256,
+and rejects missing, duplicate, extra, linked or changed files before any upload.
+The workflow separately verifies hosted provenance and then invokes the existing
+append-only R2 index publisher under its shared publication lock. Existing names
+with different bytes are refused. Do not substitute a current-source check's
+artifacts for a fixed-inventory build or overwrite a previous version.
+
+After publication, independently read back every object and verify its original
+size/digest, update the private wheel ledger in the same session, and perform
+normal cold/cached/offline Core installation and actual device probes. Publishing
+an archive establishes neither loaded capacity nor final installed/music
+acceptance; original model weights remain a separate download.
+
 The disabled `enable_normalization` option is the optional native postprocessor.
 Pinned native decode still attenuates peaks above one before returning its tensor.
 `output.gain` describes only additional PCM export attenuation; it is not a full

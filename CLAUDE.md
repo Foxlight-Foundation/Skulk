@@ -2731,6 +2731,16 @@ required. `provisioning/demucs_package.py` verifies/bootstrap exactly two built-
 audio layouts; Demucs runtime preparation retains an independent source-family
 fence. This is not an engine plugin ABI or ready-backend registration.
 
+The native ACE workflow keeps current-source checks separate from explicit
+`build-inventory` reproduction of `ACE_STEP_ADAPTER_REVISION` and all six fixed
+archives. The adapter Git revision participates in payload identity. Publication
+uses a successful same-workflow/repository/source candidate, verifies all six
+fixed sizes/digests with `scripts/verify_ace_step_promotion.py` and hosted
+attestations, requires initiative-merged source, and invokes the shared append-only
+R2 publisher without rebuilding. Verify public readback and update the private
+wheel ledger in the same session. Workflow dispatch registration, package
+availability, runtime/device probing and installed model acceptance are distinct.
+
 Native library preparation uses `provisioning/ace_step_runtime.py` and
 `ace_step_manager.py`. They retain exact package/payload pins, verify the complete
 cached interpreter and import tree before execution, and run the same weights-free

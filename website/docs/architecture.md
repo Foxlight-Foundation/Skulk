@@ -4152,6 +4152,16 @@ shared `provisioning/demucs_package.py` verifier/bootstrap recognizes the two
 built-in audio layouts and checks their source/namespace ownership. Demucs cache
 preparation independently refuses an ACE package even when feature names match.
 
+Native package publication reproduces the fixed inventory's adapter Git revision,
+not whichever newer Core reader is being validated. That revision is part of
+the sealed payload identity. Explicit inventory builds compare both independent
+archives with the six reviewed package pins and retain hosted provenance. A
+separate same-source publication operation requires the complete fixed set,
+original sizes/digests, successful trusted workflow and hosted attestations,
+then reuses the append-only engine index publisher without rebuilding. New
+package availability does not advertise a ready device, load a model or grant
+hardware qualification. Model artifacts remain independent downloads.
+
 Before loading a model, the native CLI's distinct `--probe` mode executes native
 library math without model configuration, paths or downloads. Its strict
 `NativeMusicLibraryProbe` receipt identifies the actual installed payload and
