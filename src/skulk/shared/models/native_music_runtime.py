@@ -98,6 +98,10 @@ class NativeMusicModelPolicy(FrozenModel):
     """Pure admitted data/execution binding; no package install or model is ready."""
 
     backend: NativeMusicBackend = Field(description="Resolved explicit compute lane.")
+    memory_policy_version: Literal[1] = Field(
+        default=1,
+        description="Shared native host/device loading and forward reservation policy assessed at placement; a changed policy requires re-admission.",
+    )
     model_identity: str = Field(
         pattern=r"^[a-f0-9]{64}$", description="Exact data/loader selection identity."
     )

@@ -7,12 +7,17 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from skulk.provisioning.ace_step_runtime import AceStepWheel, PreparedAceStepRuntime
 from skulk.shared.models.model_cards import ModelCard
-from skulk.shared.models.native_music_runtime import resolve_native_music_policy
+from skulk.shared.models.native_music_memory import NativeMusicMemoryEstimate
+from skulk.shared.models.native_music_runtime import (
+    NativeMusicModelPolicy,
+    resolve_native_music_policy,
+)
 from skulk.shared.models.tests.test_native_music_runtime import probe
 from skulk.shared.types.audio_separation import source_from_wav
 from skulk.shared.types.common import CommandId, NodeId
@@ -418,6 +423,48 @@ def test_changed_complete_file_blocks_start_before_native_or_workspace(
     with pytest.raises(ValueError, match="object identity"):
         model.start(is_cancelled=lambda: False)
     assert factory.calls == 0 and not model.root.exists() and not model.is_ready()
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "host_load_bytes",
+        "host_forward_bytes",
+        "device_load_bytes",
+        "device_forward_bytes",
+    ],
+)
+def test_larger_observed_phase_requires_readmission_before_native_or_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: Literal[
+        "host_load_bytes",
+        "host_forward_bytes",
+        "device_load_bytes",
+        "device_forward_bytes",
+    ],
+) -> None:
+    """A refined observation cannot spend more of any domain than placement reserved."""
+    model, factory, _ = fixture(tmp_path)
+    project = model_module.estimate_native_music_peak
+
+    def larger(
+        card: ModelCard, policy: NativeMusicModelPolicy
+    ) -> NativeMusicMemoryEstimate:
+        observed = project(card, policy)
+        values = {
+            "host_load_bytes": observed.host_load_bytes,
+            "host_forward_bytes": observed.host_forward_bytes,
+            "device_load_bytes": observed.device_load_bytes,
+            "device_forward_bytes": observed.device_forward_bytes,
+        }
+        return observed.model_copy(update={phase: values[phase] + 1})
+
+    monkeypatch.setattr(model_module, "estimate_native_music_peak", larger)
+    with pytest.raises(ValueError, match="phase reservations"):
+        model.start(is_cancelled=lambda: False)
+    assert factory.calls == 0 and not model.root.exists() and not model.is_ready()
+    model.close()
 
 
 def test_foreign_loaded_receipt_is_retired_and_cannot_be_ready(tmp_path: Path) -> None:

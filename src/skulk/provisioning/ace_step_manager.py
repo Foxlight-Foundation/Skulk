@@ -14,7 +14,7 @@ from skulk.provisioning.ace_step_runtime import (
     PreparedAceStepRuntime,
 )
 from skulk.provisioning.native_runtime_manager import NativeRuntimeManager, RuntimeCache
-from skulk.shared.types.native_music import NativeMusicDevice
+from skulk.shared.types.native_music import NativeMusicDevice, NativeMusicLibraryProbe
 
 
 def _eligible(package: AceStepWheel, device: NativeMusicDevice) -> bool:
@@ -43,7 +43,8 @@ class AceStepRuntimeManager(
         compatible_platforms: AbstractSet[str],
         *,
         create_cache: Callable[
-            [Path], RuntimeCache[AceStepWheel, NativeMusicDevice, PreparedAceStepRuntime]
+            [Path],
+            RuntimeCache[AceStepWheel, NativeMusicDevice, PreparedAceStepRuntime],
         ] = AceStepRuntimeCache,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -66,3 +67,20 @@ class AceStepRuntimeManager(
             ),
             monotonic=monotonic,
         )
+
+    def library_probes(self) -> dict[str, NativeMusicLibraryProbe]:
+        """Snapshot path-free executed precision facts for the current libraries.
+
+        Hold the manager's observation lock while copying so a concurrent failed
+        revalidation or shutdown cannot republish a withdrawn receipt. These
+        library observations grant neither a loaded model nor memory admission.
+        """
+        with self._state:
+            return (
+                {
+                    self._backend_for_device[device]: prepared.probe
+                    for device, prepared in self._prepared.items()
+                }
+                if not self._stopped.is_set()
+                else {}
+            )

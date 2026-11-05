@@ -238,7 +238,10 @@ class NativeProducerTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def build(
-        self, name: str = "output", *, variant: NativePackageVariant = "cpu",
+        self,
+        name: str = "output",
+        *,
+        variant: NativePackageVariant = "cpu",
         target: str = "macosx_14_0_arm64",
     ) -> Path:
         """Seal the actual fixture bytes through the production entry point."""
@@ -496,24 +499,31 @@ class NativeProducerTests(unittest.TestCase):
                 interpreter_target = (
                     "manylinux_2_28_x86_64" if target == "linux_x86_64" else target
                 )
-                pin = catalog.for_target(interpreter_target).model_copy(update={
-                    "sha256": hashlib.sha256(self.inputs.interpreter.read_bytes()).hexdigest(),
-                    "size_bytes": self.inputs.interpreter.stat().st_size,
-                })
+                pin = catalog.for_target(interpreter_target).model_copy(
+                    update={
+                        "sha256": hashlib.sha256(
+                            self.inputs.interpreter.read_bytes()
+                        ).hexdigest(),
+                        "size_bytes": self.inputs.interpreter.stat().st_size,
+                    }
+                )
                 interpreter = self.inputs.root / pin.filename
                 interpreter.write_bytes(self.inputs.interpreter.read_bytes())
-                updated = catalog.model_copy(update={
-                    "archives": tuple(
-                        pin if item.profile == pin.profile else item
-                        for item in catalog.archives
-                    )
-                })
+                updated = catalog.model_copy(
+                    update={
+                        "archives": tuple(
+                            pin if item.profile == pin.profile else item
+                            for item in catalog.archives
+                        )
+                    }
+                )
                 (owned / "python.json").write_text(updated.model_dump_json())
                 inventory = document(owned / "archives/macos-arm64-cpu-py312.json")
                 lock = owned / f"locks/{pin.profile}-{variant}-py312.lock"
                 lock.write_bytes(self.inputs.lock.read_bytes())
                 inventory.update(
-                    variant=variant, target=target,
+                    variant=variant,
+                    target=target,
                     python_archive=pin.model_dump(mode="json"),
                     lock_sha256=hashlib.sha256(lock.read_bytes()).hexdigest(),
                 )
@@ -522,14 +532,21 @@ class NativeProducerTests(unittest.TestCase):
                 )
                 commit(self.inputs.repository)
                 self.inputs = replace(self.inputs, lock=lock, interpreter=interpreter)
-                wheel = self.build(f"{variant}-{target}", variant=variant, target=target)
+                wheel = self.build(
+                    f"{variant}-{target}", variant=variant, target=target
+                )
                 digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
                 manifest = inspect_candidate(
                     wheel, digest, limits=native_package_limits(variant)
                 )
-                self.assertEqual((manifest.variant, manifest.platform_tag), (variant, target))
-                self.assertEqual(manifest.python_archive.platform_tag, interpreter_target)
+                self.assertEqual(
+                    (manifest.variant, manifest.platform_tag), (variant, target)
+                )
+                self.assertEqual(
+                    manifest.python_archive.platform_tag, interpreter_target
+                )
                 self.assertIn("library_probe", manifest.features)
+                self.assertIn("memory_probe", manifest.features)
                 with self.assertRaises(ValueError):
                     inspect_candidate(wheel, digest)
 
@@ -538,7 +555,9 @@ class NativeProducerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target"):
             self.build(variant="cuda", target="macosx_14_0_arm64")
 
-    def test_actual_gpu_inputs_bind_all_archives_and_complete_selected_locks(self) -> None:
+    def test_actual_gpu_inputs_bind_all_archives_and_complete_selected_locks(
+        self,
+    ) -> None:
         """The real GPU inventories must satisfy the same source schema as fixtures."""
         root = Path(__file__).parents[1]
         profiles: tuple[tuple[str, NativePackageVariant, str, int], ...] = (
@@ -556,7 +575,9 @@ class NativeProducerTests(unittest.TestCase):
             self.assertEqual((inventory.variant, inventory.target), (variant, target))
             self.assertEqual(len(inventory.objects), count)
             self.assertEqual(inventory.lock_sha256, hashlib.sha256(lock).hexdigest())
-            self.assertEqual(set(required), {item.distribution for item in inventory.objects})
+            self.assertEqual(
+                set(required), {item.distribution for item in inventory.objects}
+            )
             limits = native_package_limits(variant)
             for item in inventory.objects:
                 version, hashes = required[item.distribution]

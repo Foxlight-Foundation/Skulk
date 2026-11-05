@@ -4272,7 +4272,7 @@ replacement directories or new content are preserved. This adapter is
 responsible for retaining that empty-result fallback until successful resident
 completion; early resident refusal cannot leave a handover gap. Close drains the
 resident before attempting fallback reclamation. This adapter is not yet
-registered with Worker/bootstrap. Native placement guards remain until
+activated by Worker placement. Native placement guards remain until
 shared peak-memory admission, resource publication and media execution are wired.
 
 The separate `ace_step/runner.py::Runner` connects a validated model binding to
@@ -4284,9 +4284,9 @@ for the same placement. Failed replacement withdraws readiness after the task's
 terminal event, preserving completed renders already handed to output custody.
 The runner independently checks completion correlation, operation, seed and
 model/payload identity, and publishes only typed metadata. Closing a model never
-recursively removes completed result files. This lifecycle adapter remains
-unregistered with Worker/bootstrap until preparation, shared peak-memory
-admission and end-to-end media execution are connected and accepted.
+recursively removes completed result files. Worker placement does not yet supply this lifecycle adapter with its private
+prepared context. Preparation, shared peak-memory
+admission and end-to-end media execution remain required before activation.
 
 The native CLI arms a detached custody guardian before importing Torch or
 starting native threads. It retains the inherited service/source locks even if
@@ -4319,3 +4319,70 @@ builds and library/process checks do not register a ready Core engine, remove
 native placement/startup guards, or add an HTTP editing route. Native model-byte
 custody has the separate source-group lifecycle above; engine preparation and
 runner integration remain separate boundaries from this package format.
+
+### Native music load context
+
+`ace_step/context.py::NativeMusicRunnerContext` retains the prepared package,
+private roots, inherited source-reader fence and required live resource guard
+for local spawning. Its unloaded wrapper resolves complete installed source
+groups only at `LoadModel`, after ordinary downloads, and requires the primary
+installation to match the exact card. Source resolution and native loading
+share one bounded cancellation/deadline budget. The actual native process and
+its guardian inherit the existing reader lock; closing Core's duplicate cannot
+release files while those descendants still run. Close permanently retires a
+wrapper and retains failed cleanup for retry; the runner must create a fresh
+unloaded replacement. Bootstrap accepts this private context only for native music; the supervisor
+retains its reader until process exit and routes edit completion alongside
+generation on addressed DATA and media callbacks. MusicEditing participates in
+the same acknowledgement, cancellation and terminal lifecycle as generation.
+Worker preparation does not yet supply this context or advertise native
+capacity. Existing audio.cpp execution remains separate.
+
+The built-in ACE and Demucs preparation controllers share one bounded
+asynchronous lifetime in `worker/native_runtime_preparation.py`. Queue time
+consumes the original deadline; cancellation joins the native thread, and a
+failed drain remains owned for retry. The ACE manager's `library_probes()`
+snapshot exposes current path-free device/precision receipts and withdraws
+them on failed revalidation or shutdown. The additive
+`NodeResources.native_music_probes` contract rejects a receipt that disagrees
+with its ready backend or engine payload. A library probe supplies math facts
+for later admission. Empty observations are omitted from telemetry so inactive
+native support does not introduce an unknown field to older strict readers.
+The probe is neither a loaded-model receipt nor a memory-fit decision. Worker
+publication and native placement remain gated.
+
+### Native music memory policy
+
+The native policy binds `memory_policy_version = 1`.
+`shared/models/native_music_memory.py` computes separate loading and forward
+reservations for host memory and one selected device. It includes all three
+component casts, temporary FP32 encoder/VAE copies, libraries, bounded original
+and result buffers, and upstream's temporary CPU VAE decode fallback. The forward
+workspace allowance is unqualified conservative policy: at least 2 GiB, scaling
+to 8 GiB at the mounted 120-second ceiling. It requires measured peak validation
+before release claims. Missing or nonfloating header facts retain explicit upper
+bounds and can be reassessed from complete verified objects without a model or
+hardware compatibility ban.
+
+Unified admission combines distinct simultaneous allocations within each phase
+and takes the larger phase. It does not add independently timed host/device
+maxima. The shared reservation helper caps observed free capacity by total
+commitments and subtracts the still-unallocated peak of every pending or loaded
+instance from the free reading. A loaded state is not an allocation receipt:
+`NativeMusicMemoryReservation` credits only verified exclusive host/device or
+unique shared physical allocations included in the exact same capacity snapshot.
+Absent or stale allocation facts reserve the full peak conservatively; a
+resident model retains its future forward workspace even while idle. CPU never borrows VRAM, and GPU
+execution must satisfy host staging/fallback capacity too. Native model load
+recomputes the projection from verified selected files and refuses a larger
+phase before opening its workspace or starting native model allocation.
+
+The package's `memory_probe` reports a timestamped
+`NativeMusicMemoryCapacity` alongside its library math receipt. CUDA/HIP query
+the native runtime's actual device zero and its driver-reported memory topology;
+another GPU's maximum or total cannot fund this model. MPS reports its own
+working-set limit and the single physical host pool. Cache preparation requires
+a sampled receipt. Shared admission requires data no more than two minutes old
+and allows at most thirty seconds of forward clock skew. These definitions and
+the model's pre-load check do not yet connect Worker memory sampling/publication,
+normal placement or the live resource guard; native activation remains gated.

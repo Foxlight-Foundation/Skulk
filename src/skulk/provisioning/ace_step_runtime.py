@@ -53,6 +53,7 @@ _FEATURES = frozenset(
         "bundled_python",
         "resident_model",
         "library_probe",
+        "memory_probe",
     }
 )
 
@@ -96,11 +97,16 @@ class AceStepWheel(FrozenModel):
             self.filename
             != f"skulk_ace_step_{self.variant}-0.1.0-cp312-cp312-{self.platform_tag}.whl"
             or self.size_bytes > native_package_limits(self.variant).package_bytes
-            or self.variant == "cpu" and self.platform_tag == "linux_x86_64"
-            or self.variant == "cuda" and not self.platform_tag.startswith("manylinux_")
-            or self.variant == "rocm" and self.platform_tag != "linux_x86_64"
+            or self.variant == "cpu"
+            and self.platform_tag == "linux_x86_64"
+            or self.variant == "cuda"
+            and not self.platform_tag.startswith("manylinux_")
+            or self.variant == "rocm"
+            and self.platform_tag != "linux_x86_64"
         ):
-            raise ValueError("native ACE package identity differs from its built-in profile")
+            raise ValueError(
+                "native ACE package identity differs from its built-in profile"
+            )
         return self
 
     @property
@@ -143,7 +149,9 @@ class PreparedAceStepRuntime(FrozenModel):
             or not self.generation.is_absolute()
             or not self.interpreter.is_relative_to(self.generation)
         ):
-            raise ValueError("native ACE preparation receipt does not bind its installation")
+            raise ValueError(
+                "native ACE preparation receipt does not bind its installation"
+            )
         return self
 
     @property
@@ -257,6 +265,13 @@ class _AceStepPreparationPolicy:
             raise DemucsBuildMismatchError(
                 "native ACE probe selected a different payload or compute device"
             )
+        if (
+            receipt.memory_capacity is None
+            or receipt.memory_capacity.sampled_at_unix_ms <= 0
+        ):
+            raise DemucsBuildMismatchError(
+                "native ACE probe has no actual device memory observation"
+            )
         return receipt
 
     def prepared(
@@ -269,9 +284,14 @@ class _AceStepPreparationPolicy:
     ) -> PreparedAceStepRuntime:
         """Return the verified package and its correlated actual library receipt."""
         if observation.device != device:
-            raise DemucsBuildMismatchError("native ACE probe differs from requested lane")
+            raise DemucsBuildMismatchError(
+                "native ACE probe differs from requested lane"
+            )
         return PreparedAceStepRuntime(
-            wheel=package, generation=generation, interpreter=interpreter, probe=observation
+            wheel=package,
+            generation=generation,
+            interpreter=interpreter,
+            probe=observation,
         )
 
     def download(
@@ -297,7 +317,10 @@ class AceStepRuntimeCache:
         self._caches: dict[
             NativePackageVariant,
             SealedRuntimeCache[
-                AceStepWheel, NativeMusicDevice, PreparedAceStepRuntime, NativeMusicLibraryProbe
+                AceStepWheel,
+                NativeMusicDevice,
+                PreparedAceStepRuntime,
+                NativeMusicLibraryProbe,
             ],
         ] = {}
 
@@ -321,7 +344,9 @@ class AceStepRuntimeCache:
         with self._guard:
             cache = self._caches.get(wheel.variant)
             if cache is None:
-                cache = SealedRuntimeCache(self.root, _AceStepPreparationPolicy(wheel.variant))
+                cache = SealedRuntimeCache(
+                    self.root, _AceStepPreparationPolicy(wheel.variant)
+                )
                 self._caches[wheel.variant] = cache
         return cache.prepare(
             wheel,

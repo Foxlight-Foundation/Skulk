@@ -26,6 +26,7 @@ from skulk.shared.types.chunks import (
     ErrorChunk,
     GenerationChunk,
     MusicChunk,
+    MusicEditingChunk,
     SeparationChunk,
     VideoChunk,
 )
@@ -57,6 +58,7 @@ from skulk.shared.types.tasks import (
     AudioTranscription,
     ImageEdits,
     ImageGeneration,
+    MusicEditing,
     MusicGeneration,
     RealtimeAudioTranscription,
     SpeechSynthesis,
@@ -81,6 +83,7 @@ from skulk.shared.types.worker.runners import (
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata, ShardMetadata
 from skulk.utils.channels import MpReceiver, MpSender, Sender, mp_channel
 from skulk.utils.task_group import TaskGroup
+from skulk.worker.runner.ace_step.context import NativeMusicRunnerContext
 from skulk.worker.runner.bootstrap import (
     WEDGE_EXIT_CODE,
     WEDGE_FAILURE_MARKER,
@@ -156,8 +159,10 @@ class RunnerSupervisor:
     _data_sender: "Sender[DataChunk] | None" = None
     _on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None
     _on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None
+    _on_music_edit_output: "Callable[[CommandId, NodeId | None, MusicEditingChunk], None] | None" = None
     _on_separation_output: "Callable[[CommandId, NodeId | None, SeparationChunk], None] | None" = None
     _separation_context: SeparationRunnerContext | None = None
+    _native_music_context: NativeMusicRunnerContext | None = None
     _trace_sender: "Sender[TraceDataPacket] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
@@ -258,8 +263,10 @@ class RunnerSupervisor:
         trace_sender: "Sender[TraceDataPacket] | None" = None,
         on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None,
         on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None,
+        on_music_edit_output: "Callable[[CommandId, NodeId | None, MusicEditingChunk], None] | None" = None,
         on_separation_output: "Callable[[CommandId, NodeId | None, SeparationChunk], None] | None" = None,
         separation_context: SeparationRunnerContext | None = None,
+        native_music_context: NativeMusicRunnerContext | None = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -267,6 +274,16 @@ class RunnerSupervisor:
         ceiling (#145), threaded through the local (same-binary) process
         boundary precisely so no gossiped type needs a new field.
         """
+        if separation_context is not None and native_music_context is not None:
+            raise ValueError("one runner cannot own both native model contexts")
+        if native_music_context is not None and (
+            data_sender is None
+            or on_music_output is None
+            or on_music_edit_output is None
+        ):
+            raise ValueError(
+                "native music requires addressed generation and edit media delivery"
+            )
         ev_send, ev_recv = mp_channel[Event]()
         diag_send, diag_recv = mp_channel[RunnerDiagnosticUpdate](max_buffer_size=256)
         # Bounded like the sibling channels (#692): cluster-level admission keeps
@@ -291,7 +308,13 @@ class RunnerSupervisor:
                 logger,
                 context_token_limit,
             )
-            + ((separation_context,) if separation_context is not None else ()),
+            + (
+                (separation_context, native_music_context)
+                if native_music_context is not None
+                else (separation_context,)
+                if separation_context is not None
+                else ()
+            ),
             daemon=True,
         )
 
@@ -312,8 +335,10 @@ class RunnerSupervisor:
             _trace_sender=trace_sender,
             _on_video_output=on_video_output,
             _on_music_output=on_music_output,
+            _on_music_edit_output=on_music_edit_output,
             _on_separation_output=on_separation_output,
             _separation_context=separation_context,
+            _native_music_context=native_music_context,
         )
 
         return self
@@ -388,6 +413,16 @@ class RunnerSupervisor:
                     self._command_owner.get(event.command_id),
                     event.chunk,
                 )
+            if (
+                isinstance(event.chunk, MusicEditingChunk)
+                and event.chunk.output is not None
+                and self._on_music_edit_output is not None
+            ):
+                self._on_music_edit_output(
+                    event.command_id,
+                    self._command_owner.get(event.command_id),
+                    event.chunk,
+                )
             await self._send_data_frame(
                 event.command_id,
                 _stream_frame_kind(event.chunk),
@@ -435,6 +470,7 @@ class RunnerSupervisor:
                     ImageEdits,
                     VideoGeneration,
                     MusicGeneration,
+                    MusicEditing,
                     AudioSeparation,
                     TextEmbedding,
                     SpeechSynthesis,
@@ -498,6 +534,8 @@ class RunnerSupervisor:
         except BaseException:
             if self._separation_context is not None:
                 self._separation_context.source_fence.close()
+            if self._native_music_context is not None:
+                self._native_music_context.source_fence.close()
             raise
         self._record_milestone(
             "process_started",
@@ -582,14 +620,14 @@ class RunnerSupervisor:
                         # Native descendants retain their own duplicate until
                         # actual exit, even if this runner was forcibly killed.
                         self._separation_context.source_fence.close()
+                    if self._native_music_context is not None:
+                        self._native_music_context.source_fence.close()
 
     def shutdown(self):
         self._record_milestone("shutdown_requested")
         self._tg.cancel_tasks()
 
-    async def start_task(
-        self, task: Task, *, wait_for_terminal: bool = False
-    ) -> None:
+    async def start_task(self, task: Task, *, wait_for_terminal: bool = False) -> None:
         """Submit a task and wait for its acknowledgement or terminal status.
 
         Args:
@@ -630,6 +668,7 @@ class RunnerSupervisor:
                     ImageEdits,
                     VideoGeneration,
                     MusicGeneration,
+                    MusicEditing,
                     AudioSeparation,
                     TextEmbedding,
                     SpeechSynthesis,
@@ -641,20 +680,24 @@ class RunnerSupervisor:
             and self._owns_data_stream()
         ):
             self._command_owner[task.command_id] = task.owner_node
-        if isinstance(
-            task,
-            (
-                TextGeneration,
-                ImageGeneration,
-                ImageEdits,
-                VideoGeneration,
-                MusicGeneration,
-                AudioSeparation,
-                TextEmbedding,
-                SpeechSynthesis,
-                AudioTranscription,
-            ),
-        ) and task.trace_enabled:
+        if (
+            isinstance(
+                task,
+                (
+                    TextGeneration,
+                    ImageGeneration,
+                    ImageEdits,
+                    VideoGeneration,
+                    MusicGeneration,
+                    MusicEditing,
+                    AudioSeparation,
+                    TextEmbedding,
+                    SpeechSynthesis,
+                    AudioTranscription,
+                ),
+            )
+            and task.trace_enabled
+        ):
             now = time.monotonic()
             for stale_task_id in [
                 task_id
@@ -796,6 +839,7 @@ class RunnerSupervisor:
                                 ImageEdits,
                                 VideoGeneration,
                                 MusicGeneration,
+                                MusicEditing,
                                 AudioSeparation,
                                 TextEmbedding,
                                 SpeechSynthesis,
@@ -905,6 +949,7 @@ class RunnerSupervisor:
                     ImageEdits,
                     VideoGeneration,
                     MusicGeneration,
+                    MusicEditing,
                     AudioSeparation,
                     TextEmbedding,
                     SpeechSynthesis,
@@ -1056,6 +1101,7 @@ class RunnerSupervisor:
                 ImageEdits,
                 VideoGeneration,
                 MusicGeneration,
+                MusicEditing,
                 AudioSeparation,
                 TextEmbedding,
                 SpeechSynthesis,

@@ -46,8 +46,12 @@ class LocalCache:
     ) -> PreparedAceStepRuntime:
         """Retain actual identity/tree/probe validation and every lifetime fence."""
         return self.cache.prepare(
-            wheel, device=device, offline=offline, is_cancelled=is_cancelled,
-            progress=progress, timeout_seconds=timeout_seconds,
+            wheel,
+            device=device,
+            offline=offline,
+            is_cancelled=is_cancelled,
+            progress=progress,
+            timeout_seconds=timeout_seconds,
             download=self.controlled.download,
         )
 
@@ -56,46 +60,68 @@ class LocalCache:
         self.cache.close()
 
 
-def manager(root: Path, installed: cache_fixtures.NativeInstall) -> AceStepRuntimeManager:
+def manager(
+    root: Path, installed: cache_fixtures.NativeInstall
+) -> AceStepRuntimeManager:
     """Construct the production manager over real verification and a local transport."""
     return AceStepRuntimeManager(
-        root, (installed.wheel,), installed.wheel.required_platform_tags,
+        root,
+        (installed.wheel,),
+        installed.wheel.required_platform_tags,
         create_cache=lambda path: LocalCache(path, installed),
     )
 
 
 def prepare(
-    manager: AceStepRuntimeManager, installed: cache_fixtures.NativeInstall,
-    *, offline: bool = False,
+    manager: AceStepRuntimeManager,
+    installed: cache_fixtures.NativeInstall,
+    *,
+    offline: bool = False,
 ) -> PreparedAceStepRuntime:
     """Prepare this exact pinned build and lane with its real cancellation owner."""
     return manager.prepare(
-        installed.wheel, device=installed.device, offline=offline,
-        is_cancelled=lambda: installed.cancelled, progress=lambda _: None,
+        installed.wheel,
+        device=installed.device,
+        offline=offline,
+        is_cancelled=lambda: installed.cancelled,
+        progress=lambda _: None,
     )
 
 
 def test_installable_is_not_ready_and_verified_observation_is_exact(
-    tmp_path: Path, installed: cache_fixtures.NativeInstall,
+    tmp_path: Path,
+    installed: cache_fixtures.NativeInstall,
 ) -> None:
     """Available pins have no side effects/resources until actual preparation."""
     root = tmp_path / "cache"
     runtime = manager(root, installed)
-    assert runtime.engine_builds() == {} and not root.exists()
+    assert (
+        runtime.engine_builds() == {}
+        and runtime.library_probes() == {}
+        and not root.exists()
+    )
     backend = "ace_step-" + installed.device
     with pytest.raises(DemucsBuildMismatchError, match="no longer prepared"):
         runtime.prepared_runtime(backend, installed.wheel.build_identity)
     prepared = prepare(runtime, installed)
     assert runtime.engine_builds() == {backend: installed.wheel.build_identity}
+    assert runtime.library_probes() == {backend: prepared.probe}
+    assert "generation" not in prepared.probe.model_dump()
+    assert "interpreter" not in prepared.probe.model_dump()
     assert runtime.prepared_runtime(backend, installed.wheel.build_identity) == prepared
     assert prepare(runtime, installed, offline=True) == prepared
     assert installed.installs == 1 and installed.probes == 2
     runtime.close()
-    assert runtime.engine_builds() == {} and prepared.generation.is_dir()
+    assert (
+        runtime.engine_builds() == {}
+        and runtime.library_probes() == {}
+        and prepared.generation.is_dir()
+    )
 
 
 def test_failed_revalidation_withdraws_previous_resources(
-    tmp_path: Path, installed: cache_fixtures.NativeInstall,
+    tmp_path: Path,
+    installed: cache_fixtures.NativeInstall,
 ) -> None:
     """A prior successful probe cannot conceal a new mismatched observation."""
     runtime = manager(tmp_path / "cache", installed)
@@ -103,7 +129,11 @@ def test_failed_revalidation_withdraws_previous_resources(
     installed.foreign_payload = True
     with pytest.raises(DemucsBuildMismatchError, match="different payload"):
         prepare(runtime, installed, offline=True)
-    assert runtime.engine_builds() == {} and previous.generation.is_dir()
+    assert (
+        runtime.engine_builds() == {}
+        and runtime.library_probes() == {}
+        and previous.generation.is_dir()
+    )
     installed.foreign_payload = False
     recovered = prepare(runtime, installed, offline=True)
     assert recovered.generation == previous.generation
@@ -112,7 +142,8 @@ def test_failed_revalidation_withdraws_previous_resources(
 
 
 def test_foreign_build_and_incompatible_lane_never_enter_cache(
-    tmp_path: Path, installed: cache_fixtures.NativeInstall,
+    tmp_path: Path,
+    installed: cache_fixtures.NativeInstall,
 ) -> None:
     """A caller cannot promote a different package or turn a profile into another lane."""
     root = tmp_path / "cache"
@@ -120,14 +151,19 @@ def test_foreign_build_and_incompatible_lane_never_enter_cache(
     wrong = installed.wheel.model_copy(update={"payload_sha256": "f" * 64})
     with pytest.raises(DemucsBuildMismatchError, match="fixed inventory"):
         runtime.prepare(
-            wrong, device=installed.device, offline=False,
-            is_cancelled=lambda: False, progress=lambda _: None,
+            wrong,
+            device=installed.device,
+            offline=False,
+            is_cancelled=lambda: False,
+            progress=lambda _: None,
         )
     with pytest.raises(DemucsBuildMismatchError, match="fixed inventory"):
         runtime.prepare(
             installed.wheel,
             device="cpu" if installed.device != "cpu" else "cuda",
-            offline=False, is_cancelled=lambda: False, progress=lambda _: None,
+            offline=False,
+            is_cancelled=lambda: False,
+            progress=lambda _: None,
         )
     assert not root.exists() and runtime.engine_builds() == {}
     assert (installed.downloads, installed.installs, installed.probes) == (0, 0, 0)
@@ -135,19 +171,25 @@ def test_foreign_build_and_incompatible_lane_never_enter_cache(
 
 
 def test_cancelled_probe_cannot_create_late_node_resources(
-    tmp_path: Path, installed: cache_fixtures.NativeInstall,
+    tmp_path: Path,
+    installed: cache_fixtures.NativeInstall,
 ) -> None:
     """A valid observation after cancellation cannot bypass owner settlement."""
     runtime = manager(tmp_path / "cache", installed)
     installed.cancel_after_probe = True
     with pytest.raises(DemucsPreparationCancelledError):
         prepare(runtime, installed)
-    assert installed.probes == 1 and runtime.engine_builds() == {}
+    assert (
+        installed.probes == 1
+        and runtime.engine_builds() == {}
+        and runtime.library_probes() == {}
+    )
     runtime.close()
 
 
 def test_shutdown_refuses_new_preparation_and_stale_build_lookup(
-    tmp_path: Path, installed: cache_fixtures.NativeInstall,
+    tmp_path: Path,
+    installed: cache_fixtures.NativeInstall,
 ) -> None:
     """Shutdown withdraws observations without deleting an existing installation."""
     runtime = manager(tmp_path / "cache", installed)
