@@ -18,6 +18,7 @@ from typing import Protocol, final
 
 from skulk.provisioning.ace_step_runtime import PreparedAceStepRuntime
 from skulk.shared.models.model_cards import MusicLyricRequirement
+from skulk.shared.models.native_music_memory import estimate_native_music_peak
 from skulk.shared.models.native_music_runtime import resolve_native_music_policy
 from skulk.shared.types.native_music import (
     NativeMusicProgress,
@@ -161,6 +162,7 @@ class NativeMusicModel:
         if not root.is_absolute() or not source_root.is_absolute():
             raise ValueError("native music requires worker-owned absolute roots")
         self.bound, self.runtime, self.policy = bound, runtime, policy
+        self.memory_estimate = estimate_native_music_peak(shard.model_card, policy)
         self.sources, self.root, self.source_root = dict(sources), root, source_root
         self._create_resident, self._resource_guard = create_resident, resource_guard
         self._resident: MusicModelResident | None = None
@@ -230,6 +232,36 @@ class NativeMusicModel:
                 if comparison != self.policy:
                     raise ValueError(
                         "observed native music files differ from admitted tensor policy"
+                    )
+                observed_memory = estimate_native_music_peak(
+                    self.bound.bound_shard.model_card, actual
+                )
+                if any(
+                    measured > admitted
+                    for measured, admitted in (
+                        (
+                            observed_memory.host_load_bytes,
+                            self.memory_estimate.host_load_bytes,
+                        ),
+                        (
+                            observed_memory.host_forward_bytes,
+                            self.memory_estimate.host_forward_bytes,
+                        ),
+                        (
+                            observed_memory.device_load_bytes,
+                            self.memory_estimate.device_load_bytes,
+                        ),
+                        (
+                            observed_memory.device_forward_bytes,
+                            self.memory_estimate.device_forward_bytes,
+                        ),
+                    )
+                ):
+                    # Refining an assessed unknown may lower a reservation;
+                    # it cannot spend more than placement held. Re-admit before
+                    # creating a loader view or allocating native model state.
+                    raise ValueError(
+                        "observed native music memory exceeds admitted phase reservations"
                     )
                 workspace = NativeMusicWorkspace(self.root, observed.weights)
                 workspace.open()

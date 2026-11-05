@@ -60,6 +60,101 @@ class NativeMusicContract(BaseModel):
 
 
 @final
+class NativeMusicMemoryCapacity(NativeMusicContract):
+    """Current measured capacity for host and the actual selected native device.
+
+    The collector must supply device zero from the native runtime's own visible
+    ordering. A maximum or aggregate across accelerators is not this contract.
+    Shared capacity is a separate physical pool observation, not host plus
+    device availability; omit it if unified memory has not been established.
+    """
+
+    sampled_at_unix_ms: int = Field(
+        default=0,
+        ge=0,
+        le=2**53 - 1,
+        description="Actual collection time; zero is an unsampled contract and cannot authorize production placement.",
+    )
+    host_total_bytes: int = Field(
+        gt=0, description="Physical usable host-memory ceiling."
+    )
+    host_available_bytes: int = Field(
+        ge=0,
+        description="Current host availability, already net of resident allocations.",
+    )
+    device_index: Literal[0] | None = Field(
+        default=None,
+        description="Actual runtime-visible selected device; never an aggregate.",
+    )
+    device_memory_kind: Literal["discrete", "unified"] | None = Field(
+        default=None,
+        description="Established physical-memory topology; unknown cannot authorize GPU admission.",
+    )
+    device_total_bytes: int | None = Field(
+        default=None, gt=0, description="Usable ceiling for that one selected device."
+    )
+    device_available_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Current availability for that one selected device.",
+    )
+    shared_total_bytes: int | None = Field(
+        default=None,
+        gt=0,
+        description="Established unified physical-memory ceiling, counted once.",
+    )
+    shared_available_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Current combined physical availability, without summing shared host/device pages.",
+    )
+
+    @model_validator(mode="after")
+    def validate_capacity(self) -> Self:
+        """Keep complete observed domains, selected ordinal and physical ceilings bound."""
+        if self.host_available_bytes > self.host_total_bytes:
+            raise ValueError("native music host availability exceeds its ceiling")
+        if (self.device_total_bytes is None) != (self.device_available_bytes is None):
+            raise ValueError(
+                "native music device capacity requires both measured values"
+            )
+        if (self.device_index is None) != (self.device_total_bytes is None):
+            raise ValueError(
+                "native music device capacity requires the actual selected ordinal"
+            )
+        if self.device_memory_kind is not None and self.device_index is None:
+            raise ValueError("native music memory topology requires its actual device")
+        if (
+            self.device_available_bytes is not None
+            and self.device_total_bytes is not None
+            and self.device_available_bytes > self.device_total_bytes
+        ):
+            raise ValueError("native music device availability exceeds its ceiling")
+        if (self.shared_total_bytes is None) != (self.shared_available_bytes is None):
+            raise ValueError(
+                "native music shared capacity requires both measured values"
+            )
+        if (self.device_memory_kind == "unified") != (
+            self.shared_total_bytes is not None
+        ):
+            raise ValueError(
+                "native music unified topology requires its measured physical pool"
+            )
+        if (
+            self.shared_available_bytes is not None
+            and self.shared_total_bytes is not None
+            and (
+                self.device_index is None
+                or self.shared_available_bytes > self.shared_total_bytes
+            )
+        ):
+            raise ValueError(
+                "native music shared capacity requires its actual device and physical ceiling"
+            )
+        return self
+
+
+@final
 class NativeMusicLibraryProbe(NativeMusicContract):
     """Measured package/device execution without weights or model readiness.
 
@@ -99,6 +194,10 @@ class NativeMusicLibraryProbe(NativeMusicContract):
         max_length=128,
         description="Imported Torch build version, not a driver compatibility claim.",
     )
+    memory_capacity: NativeMusicMemoryCapacity | None = Field(
+        default=None,
+        description="Timestamped host and actual runtime-visible device-zero capacity; a sample, not permanently ready memory or model qualification.",
+    )
 
     @model_validator(mode="after")
     def validate_policy(self) -> Self:
@@ -122,6 +221,18 @@ class NativeMusicLibraryProbe(NativeMusicContract):
             raise ValueError(
                 "native library probe precision differs from its compute policy"
             )
+        memory = self.memory_capacity
+        if memory is not None:
+            if self.device == "cpu" and memory.device_index is not None:
+                raise ValueError("native CPU probe cannot borrow GPU memory")
+            if self.device != "cpu" and memory.device_index != 0:
+                raise ValueError(
+                    "native accelerator probe requires its actual device-zero memory"
+                )
+            if self.device == "mps" and memory.device_memory_kind != "unified":
+                raise ValueError(
+                    "native Metal probe requires its unified memory observation"
+                )
         return self
 
 

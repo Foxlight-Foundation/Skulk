@@ -2907,8 +2907,9 @@ the original indexed owner, including companions reached through a cached base.
   failure drains the retired model before a fresh unloaded lifetime for the same
   placement; failed replacement withdraws readiness after task terminal. Verify
   completion task/operation/seed/model/payload correlation; emit typed metadata
-  only and preserve independently owned completed WAVs on close. Not registered
-  with Worker/bootstrap; no resource advertisement or support claim is granted.
+  only and preserve independently owned completed WAVs on close. Worker placement
+  does not yet supply its private context; no resource advertisement or support
+  claim is granted.
 - Native resident: complete data/code verification, explicit runtime math probe,
   observed per-component loaded precision, exact canonical source-tensor equality,
   one active request, contiguous sequence/correlation checks, 0600 PCM24/result
@@ -2930,3 +2931,41 @@ the original indexed owner, including companions reached through a cached base.
 - Native placement/startup guards remain until worker integration exists. Model
   byte custody follows the complete source-group lifecycle above. No editing
   route is introduced by these package/process definitions.
+- `ace_step/context.py::NativeMusicRunnerContext`: prepared private spawn data,
+  inherited reader custody and required live resource guard. Resolve complete
+  installed source groups only at LoadModel, with exact primary-card identity
+  and one resolution/load deadline. Native leader/guardian retain the existing
+  reader lock independently of Core. Close retires the wrapper permanently;
+  failed drain remains owned for retry, and replacement uses a new wrapper.
+  Bootstrap accepts the explicit context only for native music. The supervisor
+  retains its reader through process exit, includes MusicEditing in generation
+  lifecycle bookkeeping, and routes complete edit metadata through DATA and an
+  addressed-media callback. Native creation requires both generation and edit
+  delivery callbacks. Worker preparation and capacity publication remain gated.
+- `worker/native_runtime_preparation.py`: shared asynchronous preparation
+  lifetime for built-in ACE/Demucs facades; bounded requests/replay fence,
+  absolute queue/work deadline, cancellation join and retained failed close.
+  ACE manager/controller `library_probes()` publishes only current path-free
+  library math observations and withdraws them on revalidation/shutdown.
+- `NodeResources.native_music_probes`: additive per-lane device/precision
+  receipts; each must match its ready backend and exact engine payload.
+  Omit the field when empty for older strict telemetry readers.
+  No loaded-model or peak-memory admission follows from these facts alone;
+  Worker publication and the native placement guard remain unconnected.
+- `shared/models/native_music_memory.py`: version-one complete-component phase
+  projection, pure host/device/unified fit and committed/pending reservations.
+  Include actual casts, FP32 load copies, bounded media, libraries and temporary
+  CPU VAE fallback. Forward allowance: unqualified minimum 2 GiB, scaling to
+  8 GiB at 120 seconds; explicit unknown-layout upper bounds can be reassessed.
+  Unified peak is the maximum of simultaneous phase sums. Only pending work
+  nets observed free memory; total commitments cap each domain. CPU cannot
+  borrow VRAM; GPU also needs host capacity. Native model start rechecks all
+  observed phase costs before workspace/native allocation. Policy binds
+  `memory_policy_version = 1`.
+- `NativeMusicMemoryCapacity`: canonical independent native contract; collection
+  time, host and actual logical device zero, explicit discrete/unified topology
+  and shared physical pool. Package `memory_probe` uses native CUDA/HIP device-zero
+  free/total and driver topology, or MPS working-set/physical-host readings.
+  Cache rejects missing/unsampled observations. Shared fit requires age at most
+  120 seconds and forward clock skew at most 30 seconds. No aggregate GPU
+  capacity or tested-device allowlist. Worker/placement/live-guard wiring remains.

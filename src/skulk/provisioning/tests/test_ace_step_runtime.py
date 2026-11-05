@@ -33,7 +33,11 @@ from skulk.provisioning.demucs_package import (
 )
 from skulk.provisioning.native_install_process import NativeInstallCommandRunner
 from skulk.provisioning.tests import test_demucs_package as package_fixtures
-from skulk.shared.types.native_music import NativeMusicDevice, NativeMusicLibraryProbe
+from skulk.shared.types.native_music import (
+    NativeMusicDevice,
+    NativeMusicLibraryProbe,
+    NativeMusicMemoryCapacity,
+)
 
 interpreter_fixture = package_fixtures.interpreter_fixture
 pytestmark = pytest.mark.parametrize("variant", ("cpu", "cuda", "rocm"))
@@ -63,6 +67,8 @@ class NativeInstall:
     cancel_after_probe: bool = False
     foreign_payload: bool = False
     foreign_device: bool = False
+    missing_memory: bool = False
+    unsampled_memory: bool = False
 
     def download(
         self, wheel: ace.AceStepWheel, destination: Path, checkpoint: Checkpoint
@@ -123,15 +129,39 @@ class NativeInstall:
             self.cancelled = True
         device = "mps" if self.foreign_device else self.device
         return NativeMusicLibraryProbe(
-            payload_sha256="f" * 64 if self.foreign_payload else self.wheel.payload_sha256,
+            payload_sha256="f" * 64
+            if self.foreign_payload
+            else self.wheel.payload_sha256,
             device=device,
             precision="bfloat16" if device == "cuda" else "float32",
             autoencoder_precision=(
-                "float16" if device == "mps" else
-                "bfloat16" if device == "cuda" else "float32"
+                "float16"
+                if device == "mps"
+                else "bfloat16"
+                if device == "cuda"
+                else "float32"
             ),
             cuda_compute_capability=(12, 1) if device == "cuda" else None,
             torch_version="2.10.0",
+            memory_capacity=None
+            if self.missing_memory
+            else NativeMusicMemoryCapacity(
+                sampled_at_unix_ms=0 if self.unsampled_memory else 1,
+                host_total_bytes=8 * 1024**3,
+                host_available_bytes=6 * 1024**3,
+                device_index=None if device == "cpu" else 0,
+                device_memory_kind=None
+                if device == "cpu"
+                else "unified"
+                if device in {"mps", "rocm"}
+                else "discrete",
+                device_total_bytes=None if device == "cpu" else 8 * 1024**3,
+                device_available_bytes=None if device == "cpu" else 6 * 1024**3,
+                shared_total_bytes=8 * 1024**3 if device in {"mps", "rocm"} else None,
+                shared_available_bytes=6 * 1024**3
+                if device in {"mps", "rocm"}
+                else None,
+            ),
         ).model_dump_json()
 
 
@@ -144,18 +174,25 @@ def installed(
 ) -> NativeInstall:
     """Build independent sealed fixtures for all three dependency profiles."""
     platform: ace.AceStepPlatform = (
-        "macosx_14_0_arm64" if variant == "cpu" else
-        "manylinux_2_28_aarch64" if variant == "cuda" else "linux_x86_64"
+        "macosx_14_0_arm64"
+        if variant == "cpu"
+        else "manylinux_2_28_aarch64"
+        if variant == "cuda"
+        else "linux_x86_64"
     )
     device: NativeMusicDevice = "cpu" if variant == "cpu" else variant
     python_archive, expanded, _ = interpreter_fixture
-    catalog = read_python_catalog(Path(__file__).parents[4] / "packaging/skulk-ace-step")
+    catalog = read_python_catalog(
+        Path(__file__).parents[4] / "packaging/skulk-ace-step"
+    )
     pin = catalog.for_target(
         "manylinux_2_28_x86_64" if platform == "linux_x86_64" else platform
-    ).model_copy(update={
-        "sha256": hashlib.sha256(python_archive.read_bytes()).hexdigest(),
-        "size_bytes": python_archive.stat().st_size,
-    })
+    ).model_copy(
+        update={
+            "sha256": hashlib.sha256(python_archive.read_bytes()).hexdigest(),
+            "size_bytes": python_archive.stat().st_size,
+        }
+    )
     template = tmp_path / "native-template"
     template.mkdir()
     expanded.rename(template / "interpreter")
@@ -172,10 +209,19 @@ def installed(
         source_repository="https://github.com/ace-step/ACE-Step-1.5.git",
         platform_tag=platform,
         variant=variant,
-        members={name: hashlib.sha256(data).hexdigest() for name, data in members.items()},
+        members={
+            name: hashlib.sha256(data).hexdigest() for name, data in members.items()
+        },
         features=[
-            "music.generate", "music.edit", "source_conditioning", "pcm24",
-            "offline_loader", "bundled_python", "resident_model", "library_probe",
+            "music.generate",
+            "music.edit",
+            "source_conditioning",
+            "pcm24",
+            "offline_loader",
+            "bundled_python",
+            "resident_model",
+            "library_probe",
+            "memory_probe",
         ],
     )
     payload = hashlib.sha256(
@@ -185,7 +231,9 @@ def installed(
         content | {"payload_sha256": payload}
     ).encode()
     for name in ("METADATA", "WHEEL", "RECORD"):
-        members[f"skulk_ace_step_{variant}-0.1.0.dist-info/{name}"] = b"fixture metadata"
+        members[f"skulk_ace_step_{variant}-0.1.0.dist-info/{name}"] = (
+            b"fixture metadata"
+        )
     source = tmp_path / "native-fixture.whl"
     with zipfile.ZipFile(source, "w") as archive:
         for name, data in members.items():
@@ -210,17 +258,24 @@ def installed(
         f"version = 3.12.13\nexecutable = {base}\n"
     )
     wheel = ace.AceStepWheel(
-        variant=variant, platform_tag=platform,
+        variant=variant,
+        platform_tag=platform,
         filename=f"skulk_ace_step_{variant}-0.1.0-cp312-cp312-{platform}.whl",
-        sha256=digest, payload_sha256=payload, size_bytes=source.stat().st_size,
+        sha256=digest,
+        payload_sha256=payload,
+        size_bytes=source.stat().st_size,
     )
     controlled = NativeInstall(source, template, wheel, device)
-    monkeypatch.setattr(ace, "platform_tags", lambda: iter(wheel.required_platform_tags))
+    monkeypatch.setattr(
+        ace, "platform_tags", lambda: iter(wheel.required_platform_tags)
+    )
+
     def capacity(_path: Path) -> DiskUsage:
         return DiskUsage(200 * 1024**3, 0, controlled.free_bytes)
 
     monkeypatch.setattr(
-        cache_runtime, "shutil",
+        cache_runtime,
+        "shutil",
         SimpleNamespace(
             disk_usage=capacity,
             rmtree=shutil.rmtree,
@@ -237,8 +292,10 @@ def installed(
         capture: bool,
     ) -> str:
         return controlled.probe(
-            arguments, environment=environment,
-            timeout_seconds=timeout_seconds, capture=capture,
+            arguments,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            capture=capture,
         )
 
     monkeypatch.setattr(NativeInstallCommandRunner, "__call__", probe)
@@ -250,8 +307,11 @@ def prepare(
 ) -> ace.PreparedAceStepRuntime:
     """Use the actual cache and exact bytes with controlled native execution."""
     return cache.prepare(
-        installed.wheel, device=installed.device, offline=offline,
-        is_cancelled=lambda: installed.cancelled, progress=lambda _: None,
+        installed.wheel,
+        device=installed.device,
+        offline=offline,
+        is_cancelled=lambda: installed.cancelled,
+        progress=lambda _: None,
         download=installed.download,
     )
 
@@ -285,7 +345,10 @@ def test_same_size_changed_code_is_not_reused_offline(
     """A complete local receipt cannot authorize modified cached executable bytes."""
     cache = ace.AceStepRuntimeCache(tmp_path / "cache")
     first = prepare(cache, installed)
-    code = first.generation / "runtime/lib/python3.12/site-packages/skulk_ace_step/__init__.py"
+    code = (
+        first.generation
+        / "runtime/lib/python3.12/site-packages/skulk_ace_step/__init__.py"
+    )
     original = code.read_bytes()
     code.write_bytes(bytes((original[0] ^ 1,)) + original[1:])
     second = prepare(cache, installed, offline=True)
@@ -303,7 +366,27 @@ def test_foreign_probe_never_publishes_a_generation(
     installed.foreign_device = foreign == "device"
     root = tmp_path / "cache"
     with pytest.raises(
-        cache_runtime.DemucsBuildMismatchError, match="different payload or compute device"
+        cache_runtime.DemucsBuildMismatchError,
+        match="different payload or compute device",
+    ):
+        prepare(ace.AceStepRuntimeCache(root), installed)
+    build = root / installed.wheel.sha256
+    assert not (build / "selected.json").exists()
+    assert not tuple((build / "generations").iterdir())
+
+
+@pytest.mark.parametrize("observation", ["missing", "unsampled"])
+def test_incomplete_memory_probe_never_publishes_a_generation(
+    tmp_path: Path,
+    installed: NativeInstall,
+    observation: str,
+) -> None:
+    """A declared feature and successful math cannot substitute for a real sample."""
+    installed.missing_memory = observation == "missing"
+    installed.unsampled_memory = observation == "unsampled"
+    root = tmp_path / "cache"
+    with pytest.raises(
+        cache_runtime.DemucsBuildMismatchError, match="memory observation"
     ):
         prepare(ace.AceStepRuntimeCache(root), installed)
     build = root / installed.wheel.sha256
@@ -332,8 +415,12 @@ def test_profile_reservation_precedes_expensive_install(
     """GPU expansion cannot slip through the smaller former CPU disk allowance."""
     limits = native_package_limits(installed.wheel.variant)
     installed.free_bytes = (
-        10 * 1024**3 + limits.package_bytes + 512 * 1024**2
-        + limits.installed_bytes + 256 * 1024**2 - 1
+        10 * 1024**3
+        + limits.package_bytes
+        + 512 * 1024**2
+        + limits.installed_bytes
+        + 256 * 1024**2
+        - 1
     )
     with pytest.raises(cache_runtime.DemucsStorageError, match="fresh isolated"):
         prepare(ace.AceStepRuntimeCache(tmp_path / "cache"), installed)
@@ -345,7 +432,9 @@ def test_incompatible_host_fails_without_cache_effects(
 ) -> None:
     """Real ABI availability is distinct from package publication/qualification."""
     # A raw ROCm wheel tag alone cannot bypass its known interpreter ABI.
-    unavailable = (installed.wheel.platform_tag,) if installed.wheel.variant == "rocm" else ()
+    unavailable = (
+        (installed.wheel.platform_tag,) if installed.wheel.variant == "rocm" else ()
+    )
     monkeypatch.setattr(ace, "platform_tags", lambda: iter(unavailable))
     root = tmp_path / "cache"
     with pytest.raises(cache_runtime.DemucsBuildMismatchError, match="host/device"):

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
 import os
+import time
+from typing import Literal, Protocol, cast
 
 import torch
 from torch.version import hip
@@ -11,11 +14,109 @@ from .contracts import (
     NativeMusicDevice,
     NativeMusicExecution,
     NativeMusicLibraryProbe,
+    NativeMusicMemoryCapacity,
     NativeMusicPrecision,
     NativeMusicServeConfig,
     NativeMusicTensorPrecision,
 )
 from .upstream_bindings import LoadedHandler
+
+
+class _DeviceProperties(Protocol):
+    """Pinned Torch 2.10 CUDA/HIP properties exposed by its native binding."""
+
+    is_integrated: int
+
+
+class _HostMemory(Protocol):
+    """Read-only physical fields from psutil's platform-specific memory tuple."""
+
+    total: int
+    available: int
+
+
+class _HostMemoryAPI(Protocol):
+    """Narrow pinned psutil sampling signature where its return stub is untyped."""
+
+    def virtual_memory(self) -> _HostMemory:
+        """Return actual physical total and currently available host bytes."""
+        ...
+
+
+class _DeviceMemoryAPI(Protocol):
+    """Pinned CUDA/HIP memory binding without its incomplete property stub."""
+
+    def get_device_properties(self, device: Literal[0]) -> _DeviceProperties:
+        """Return the driver's properties for exactly the selected device."""
+        ...
+
+    def mem_get_info(self, device: Literal[0]) -> tuple[int, int]:
+        """Return current free and total bytes for exactly that selected device."""
+        ...
+
+
+# Fixed owned-module bindings keep the audited interfaces strict despite the
+# libraries' incomplete tuple/property stubs. No module name is caller supplied.
+psutil = cast(_HostMemoryAPI, cast(object, importlib.import_module("psutil")))
+
+
+def sample_memory_capacity(lane: NativeMusicDevice) -> NativeMusicMemoryCapacity:
+    """Observe host and exactly the device this private runtime will use.
+
+    No GPU sum, largest-device selection or model loading occurs. Torch 2.10's
+    CUDA/HIP binding exposes the actual driver's integrated flag for device zero:
+    https://github.com/pytorch/pytorch/blob/v2.10.0/torch/csrc/cuda/Module.cpp
+    A failed or incomplete query is a diagnostic, never invented capacity.
+    """
+    host = psutil.virtual_memory()
+    sampled = time.time_ns() // 1_000_000
+    if lane == "cpu":
+        return NativeMusicMemoryCapacity(
+            sampled_at_unix_ms=sampled,
+            host_total_bytes=host.total,
+            host_available_bytes=host.available,
+        )
+    if lane == "mps":
+        if not torch.backends.mps.is_available():
+            raise ValueError("native Metal memory is unavailable")
+        ceiling = torch.mps.recommended_max_memory()
+        available = max(0, ceiling - torch.mps.driver_allocated_memory())
+        return NativeMusicMemoryCapacity(
+            sampled_at_unix_ms=sampled,
+            host_total_bytes=host.total,
+            host_available_bytes=host.available,
+            device_index=0,
+            device_memory_kind="unified",
+            device_total_bytes=ceiling,
+            device_available_bytes=available,
+            shared_total_bytes=host.total,
+            shared_available_bytes=host.available,
+        )
+    if not torch.cuda.is_available() or (hip is not None) != (lane == "rocm"):
+        raise ValueError("native accelerator memory is unavailable in this runtime")
+    if torch.cuda.current_device() != 0:
+        raise ValueError(
+            "native music must use its admitted runtime-visible device zero"
+        )
+    device_memory = cast(
+        _DeviceMemoryAPI, cast(object, importlib.import_module("torch.cuda"))
+    )
+    properties = device_memory.get_device_properties(0)
+    if properties.is_integrated not in (0, 1):
+        raise ValueError("native accelerator reported an unknown memory topology")
+    available, ceiling = device_memory.mem_get_info(0)
+    unified = properties.is_integrated == 1
+    return NativeMusicMemoryCapacity(
+        sampled_at_unix_ms=sampled,
+        host_total_bytes=host.total,
+        host_available_bytes=host.available,
+        device_index=0,
+        device_memory_kind="unified" if unified else "discrete",
+        device_total_bytes=ceiling,
+        device_available_bytes=available,
+        shared_total_bytes=host.total if unified else None,
+        shared_available_bytes=host.available if unified else None,
+    )
 
 
 def _library_policy(
@@ -86,6 +187,7 @@ def probe_libraries(
         autoencoder_precision=autoencoder_precision,
         cuda_compute_capability=capability,
         torch_version=str(torch.__version__),
+        memory_capacity=sample_memory_capacity(lane),
     )
 
 

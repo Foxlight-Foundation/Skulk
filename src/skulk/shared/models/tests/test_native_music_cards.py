@@ -268,7 +268,7 @@ def _skip_process_setup(*_arguments: object, **_keywords: object) -> None:
 def test_actual_entrypoint_refuses_native_before_audio_cpp_dispatch(
     monkeypatch: pytest.MonkeyPatch, native: bool, backend: str | None,
 ) -> None:
-    """Both stamped and fallback paths report failure; an existing GGUF still dispatches."""
+    """Unprepared native paths fail; an existing GGUF still dispatches unchanged."""
     card = ModelCard.model_validate(_body() if native else tomllib.loads(
         fixture_card_path("audio-cpp/ACE-Step1.5-Turbo-BF16").read_text()
     ))
@@ -328,7 +328,7 @@ def test_actual_entrypoint_refuses_native_before_audio_cpp_dispatch(
             assert dispatched == []
             assert len(failures) == 1
             assert isinstance(failures[0], RunnerFailed)
-            assert failures[0].error_message == "Native ACE-Step execution requires the native music runner"
+            assert failures[0].error_message == "native music placement has no prepared worker context"
         else:
             assert dispatched == ["constructed", "main"]
             assert failures == []

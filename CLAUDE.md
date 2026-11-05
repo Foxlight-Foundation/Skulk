@@ -2828,8 +2828,8 @@ factory creates a fresh unloaded lifetime for the same placement. A failed
 replacement withdraws readiness after the admitted task's terminal event.
 Complete results are checked against task, operation, seed and model/payload
 identity, then emitted as path-free music metadata. Closing a model preserves
-journal-owned completed WAVs. This runner adapter is not yet registered with
-Worker/bootstrap and does not grant a package, model or hardware support claim.
+journal-owned completed WAVs. Worker placement does not yet supply this runner adapter with its prepared
+private context; no package, model or hardware support claim is granted.
 
 Native editing job contracts live in `shared/types/music_edits.py`: closed
 task-discriminated inputs, source-clock integer floor/ceil conversion to 48 kHz,
@@ -2886,3 +2886,48 @@ x86_64 and Linux ARM64. These checks do not load music weights or qualify a mode
 Package evidence alone must not remove native placement/startup guards,
 advertise capacity or establish public editing availability. Model-byte custody
 has its separate complete download/store/preservation contract above.
+
+`ace_step/context.py::NativeMusicRunnerContext` retains prepared runtime, private
+roots, source-reader custody and a required live resource guard for local spawn.
+Its unloaded wrapper resolves complete installed sources only at LoadModel,
+after normal downloads, with exact primary-card identity and a shared finite
+load budget. Native processes and their guardian inherit the existing reader
+lock. Close permanently retires a wrapper; a failed drain retains the model for
+retry, and normal runner recovery needs a fresh wrapper. Bootstrap requires the
+explicit context for native music. Its supervisor retains the reader through
+process exit, carries MusicEditing through normal lifecycle bookkeeping and
+routes complete metadata via DATA plus a dedicated media callback. Native
+creation requires both generation and edit delivery callbacks. Worker
+preparation and native resource publication remain unconnected.
+
+`worker/native_runtime_preparation.py` shares the bounded asynchronous
+preparation lifetime between the built-in Demucs and ACE facades: executor
+queue time consumes the original deadline, cancellation joins native work,
+and failed close remains owned for retry. ACE's path-free `library_probes()`
+snapshot contains only current verified device/precision observations.
+`NodeResources.native_music_probes` is additive and requires each receipt to
+match an advertised ready backend and exact engine payload. Empty observations
+are omitted for older strict telemetry readers. Worker publication, model
+readiness and shared peak-memory admission remain unconnected; the native
+placement guard still applies.
+
+`shared/models/native_music_memory.py` is the version-one shared phase policy.
+It projects all three components at actual precision, FP32 encoder/VAE loading
+copies, libraries, bounded media and the pinned decoder's temporary CPU VAE
+fallback. The forward allowance is an explicit unqualified estimate: 2 GiB
+minimum, scaling to 8 GiB at the 120-second mounted ceiling. Exact headers
+replace visible conservative unknown-layout bounds; neither grants support.
+Separate host/device peaks and simultaneous unified physical peaks feed the
+same pure fit/reservation functions. Only unreflected work nets observed free
+memory; all commitments bound the total ceiling. Native model load recomputes
+the projection from verified files and refuses an increase in any phase before
+creating its workspace. Policies bind `memory_policy_version = 1`.
+
+The canonical `NativeMusicMemoryCapacity` contract records a collection time,
+host capacity and the native runtime's actual device zero. Native package
+`memory_probe` samples CUDA/HIP free/total and driver topology on that device;
+MPS records its working-set ceiling and the single host physical pool. It never
+adds other GPUs. Cache preparation refuses a missing/unsampled receipt. Shared
+admission refuses observations older than two minutes or over thirty seconds
+ahead of the caller clock. Worker sampling/publication and placement consumers
+must still be connected before native capacity can be advertised.

@@ -103,6 +103,16 @@ paths and cannot emit loaded-model readiness. The normal private serve path
 separately verifies model identity and observes all loaded components. Neither
 probe mode downloads weights or starts a planner.
 
+The separate `memory_probe` feature adds timestamped host and actual selected
+device-zero readings to that receipt. CUDA/HIP use the selected runtime device's
+free/total bytes and driver integrated-memory flag; MPS reports its working-set
+limit and the single host physical pool. No GPU sum or largest-device capacity
+is inferred. The cache requires a real sampled observation; memory availability
+must be refreshed for admission and cannot remain ready merely because a package
+was prepared earlier. Older candidates without this feature need rebuilding.
+These observations do not measure the model's loading/forward peak or qualify
+its sound output.
+
 Core's canonical `shared/types/native_music.py` is linked into this source tree
 and copied as ordinary bytes into the eventual package. It defines strict
 generation, Add a part, Rework and Continue requests, contiguous resident

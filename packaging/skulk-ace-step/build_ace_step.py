@@ -624,6 +624,7 @@ def assemble_wheel(
             "bundled_python",
             "resident_model",
             "library_probe",
+            "memory_probe",
         ],
     }
     identity = hashlib.sha256(

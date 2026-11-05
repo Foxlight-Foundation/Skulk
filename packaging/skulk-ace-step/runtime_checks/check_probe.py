@@ -7,16 +7,130 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import skulk_ace_step
 import torch
-from skulk_ace_step.contracts import NativeMusicLibraryProbe
-from skulk_ace_step.policy import probe_libraries
+from skulk_ace_step.contracts import (
+    NativeMusicDevice,
+    NativeMusicLibraryProbe,
+    NativeMusicMemoryCapacity,
+)
+from skulk_ace_step.policy import probe_libraries, sample_memory_capacity
+
+
+def controlled_gpu_capacity() -> NativeMusicMemoryCapacity:
+    """Separate synthetic capacity from precision tests; never hardware evidence."""
+    return NativeMusicMemoryCapacity(
+        sampled_at_unix_ms=1,
+        host_total_bytes=100,
+        host_available_bytes=80,
+        device_index=0,
+        device_memory_kind="discrete",
+        device_total_bytes=100,
+        device_available_bytes=80,
+    )
 
 
 class NativeLibraryProbeTests(unittest.TestCase):
     """Exercise real CPU math and exact accelerator-policy refusal/selection."""
+
+    def test_actual_cpu_capacity_needs_no_accelerator_library(self) -> None:
+        """Read actual host memory while proving CPU sampling never touches GPU APIs."""
+        with patch(
+            "torch.cuda.is_available",
+            side_effect=AssertionError("CPU does not borrow VRAM"),
+        ):
+            observed = sample_memory_capacity("cpu")
+        self.assertGreater(observed.sampled_at_unix_ms, 0)
+        self.assertGreater(observed.host_total_bytes, 0)
+        self.assertLessEqual(observed.host_available_bytes, observed.host_total_bytes)
+        self.assertIsNone(observed.device_index)
+        self.assertIsNone(observed.device_available_bytes)
+
+    def test_selected_gpu_zero_uses_actual_free_and_driver_topology(self) -> None:
+        """A larger second GPU cannot fund the implicit selected GPU's allocation."""
+        lanes: tuple[NativeMusicDevice, ...] = ("cuda", "rocm")
+        for lane in lanes:
+            for integrated in (0, 1):
+                with (
+                    self.subTest(lane=lane, integrated=integrated),
+                    patch(
+                        "skulk_ace_step.policy.hip",
+                        "controlled-HIP" if lane == "rocm" else None,
+                    ),
+                    patch(
+                        "skulk_ace_step.policy.psutil.virtual_memory",
+                        return_value=SimpleNamespace(total=1000, available=700),
+                    ),
+                    patch("torch.cuda.is_available", return_value=True),
+                    patch("torch.cuda.current_device", return_value=0),
+                    patch("torch.cuda.device_count", return_value=2),
+                    patch(
+                        "torch.cuda.get_device_properties",
+                        return_value=SimpleNamespace(is_integrated=integrated),
+                    ) as properties,
+                    patch("torch.cuda.mem_get_info", return_value=(17, 25)) as memory,
+                ):
+                    observed = sample_memory_capacity(lane)
+                properties.assert_called_once_with(0)
+                memory.assert_called_once_with(0)
+                self.assertEqual(observed.device_total_bytes, 25)
+                self.assertEqual(observed.device_available_bytes, 17)
+                self.assertEqual(
+                    observed.device_memory_kind, "unified" if integrated else "discrete"
+                )
+                self.assertEqual(
+                    observed.shared_available_bytes, 700 if integrated else None
+                )
+
+    def test_foreign_current_gpu_is_refused_without_sampling_another_device(
+        self,
+    ) -> None:
+        """A hidden current-device switch cannot silently alter the admitted target."""
+        with (
+            patch("skulk_ace_step.policy.hip", None),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.current_device", return_value=1),
+            patch(
+                "torch.cuda.mem_get_info", side_effect=AssertionError("no foreign read")
+            ),
+            self.assertRaisesRegex(ValueError, "device zero"),
+        ):
+            sample_memory_capacity("cuda")
+
+    def test_metal_capacity_preserves_the_single_physical_host_pool(self) -> None:
+        """MPS driver allocation and host availability are separate constraints."""
+        with (
+            patch(
+                "skulk_ace_step.policy.psutil.virtual_memory",
+                return_value=SimpleNamespace(total=1000, available=700),
+            ),
+            patch("torch.backends.mps.is_available", return_value=True),
+            patch("torch.mps.recommended_max_memory", return_value=750),
+            patch("torch.mps.driver_allocated_memory", return_value=200),
+        ):
+            observed = sample_memory_capacity("mps")
+        self.assertEqual(observed.device_available_bytes, 550)
+        self.assertEqual(observed.shared_total_bytes, 1000)
+        self.assertEqual(observed.shared_available_bytes, 700)
+        self.assertNotEqual(observed.shared_available_bytes, 700 + 550)
+
+    def test_invalid_driver_reading_is_not_invented_capacity(self) -> None:
+        """Negative/over-total free values fail the shared strict observation contract."""
+        with (
+            patch("skulk_ace_step.policy.hip", None),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.current_device", return_value=0),
+            patch(
+                "torch.cuda.get_device_properties",
+                return_value=SimpleNamespace(is_integrated=0),
+            ),
+            patch("torch.cuda.mem_get_info", return_value=(26, 25)),
+            self.assertRaises(ValueError),
+        ):
+            sample_memory_capacity("cuda")
 
     def test_cpu_probe_needs_no_model_configuration_or_upstream_loader(self) -> None:
         """Library readiness has no invented model identity, path or weight read."""
@@ -69,6 +183,10 @@ class NativeLibraryProbeTests(unittest.TestCase):
             patch("torch.cuda.get_device_capability", return_value=(7, 5)),
             patch("torch.cuda.is_bf16_supported", return_value=True),
             patch("torch.ones", side_effect=cpu_math),
+            patch(
+                "skulk_ace_step.policy.sample_memory_capacity",
+                return_value=controlled_gpu_capacity(),
+            ),
         ):
             receipt = probe_libraries("cuda", "b" * 64)
         self.assertEqual(receipt.precision, "float16")
@@ -92,6 +210,10 @@ class NativeLibraryProbeTests(unittest.TestCase):
                 patch("torch.cuda.is_available", return_value=True),
                 patch("torch.cuda.get_device_capability", return_value=capability),
                 patch("torch.ones", side_effect=cpu_math),
+                patch(
+                    "skulk_ace_step.policy.sample_memory_capacity",
+                    return_value=controlled_gpu_capacity(),
+                ),
             ):
                 receipt = probe_libraries("cuda", "b" * 64)
             self.assertEqual(receipt.precision, "bfloat16")
