@@ -2636,6 +2636,42 @@ with synthetic complete recovery, native-only startup and precise descendant
 checks after abrupt worker loss. No physical fleet or public privacy qualification
 is implied by those local configured-runtime cases.
 
+
+### Managed declaration metadata bounds
+
+`extensions/managed_limits.py` separates rich declaration metadata from ordinary
+calls: one managed application may declare sixteen capabilities, descriptions
+and exact selected contract reads use 512 KiB response envelopes, and an
+individual selected descriptor is bounded to 256 KiB. Signed runtime metadata
+uses a separate 512 KiB bound consistently through download, review, staging,
+recovery and installed inventory. Catalog and registration summaries accept
+sixteen declared operations. Ordinary invocation frames, settings, credentials,
+manager requests and binary media retain their own existing limits.
+
+One owner may report at most sixteen application nodes and 128 total capability
+contracts, within the discovery byte bound. Refresh refuses an oversized
+aggregate before reporting availability and withdraws readiness until a valid
+inventory returns. Discovery, dynamic dispatch and host callbacks share this
+aggregate bound, preventing a ready owner whose contracts cannot be dispatched.
+
+Expanded SDK manifests require a compatible Skulk 2.0.3 reader. Deploy readers
+before publishing larger signed records; declared contracts and successful
+metadata verification do not establish live provider readiness or authorize
+execution. Legacy descriptor revisions and signed identities remain unchanged.
+
+Catalog protocol 3 carries the expanded identifier count at the separate
+`catalog/catalog-v3.json` address. Protocols 1 and 2 keep their original eight
+identifiers, and the publisher maintains a signed legacy `catalog/catalog.json`
+projection. Version filtering follows whole-catalog validation, so a release's
+version requirement cannot protect an older catalog parser. Updated built-in
+Store readers prefer v3 and fall back only on an initial 404 before accepting
+it. Invalid signatures, malformed data and other failures never downgrade.
+Acceptance atomically switches the source and retains both histories; a v3
+revision below the accepted legacy revision is refused. Restart, a failed
+retained-document write or returning from a private catalog cannot restore
+legacy fallback. Introduce both catalogs using existing releases, deploy the
+reader, then publish expanded releases.
+
 Native ACE base cards additionally declare `MusicEditing` and `[music.native]`.
 The profile preserves generation/editing model truth and exact primary, text
 encoder/tokenizer and autoencoder artifact closures, independent of runtime
@@ -2783,6 +2819,17 @@ completion; close drains the resident before reclaiming it. Worker preparation,
 bootstrap/media activation and shared peak-memory admission are still required;
 keep native placement guards until
 those are connected and accepted.
+
+`ace_step/runner.py::Runner` adapts that binding to the shared bounded runner
+dispatcher. Generation and editing share one active slot and at most four
+admitted waiters. Actual load/warmup and current resident liveness gate readiness;
+cancellation or failure drains the retired model before a bootstrap-supplied
+factory creates a fresh unloaded lifetime for the same placement. A failed
+replacement withdraws readiness after the admitted task's terminal event.
+Complete results are checked against task, operation, seed and model/payload
+identity, then emitted as path-free music metadata. Closing a model preserves
+journal-owned completed WAVs. This runner adapter is not yet registered with
+Worker/bootstrap and does not grant a package, model or hardware support claim.
 
 Native editing job contracts live in `shared/types/music_edits.py`: closed
 task-discriminated inputs, source-clock integer floor/ceil conversion to 48 kHz,

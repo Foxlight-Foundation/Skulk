@@ -31,6 +31,7 @@ from pydantic import (
     model_validator,
 )
 
+from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.runtime_files import is_desktop_metadata, read_private
 
 Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
@@ -393,7 +394,7 @@ def verify_runtime(
     Plugin-specific manifest fields are signed opaque data. No plugin package,
     provider policy or private dependency is imported to inspect a release.
     """
-    if len(metadata) > 131072:
+    if len(metadata) > MAX_RUNTIME_METADATA_BYTES:
         raise ValueError("runtime metadata exceeds bound")
     signed = _Signed.model_validate_json(metadata)
     payload = canonical_json(signed.runtime)

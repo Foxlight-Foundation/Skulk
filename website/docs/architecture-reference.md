@@ -926,7 +926,7 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
 
 - **Role:** load separately installed packages and call them at serving-path hooks; deployment-specific behavior without forking Skulk
 - **Lives in:** `src/skulk/extensions/` (`types.py` contract, `loader.py` discovery + guarded dispatch, `managed.py` isolated-owner adapter); call sites in `API.chat_completions` and `API._steward_chat_completions`
-- **Runtime artifacts and staging:** `runtime_artifacts.py` verifies the complete canonical v2 envelope, owner-provisioned `RuntimeTrust`, the manifest's Skulk version range (the recorded `skulk_build_sha256` is provenance, never a fit requirement, so a Skulk update keeps installed releases running; catalog protocol 2 listings carry the same range as `skulk_requires`, and `entry_review` fits them by host version, while protocol 1 listings keep their exact-build rule; `ACCEPTED_CATALOG_PROTOCOLS = (1, 2)`), platform/Python compatibility, bundle/wheel hashes, safe archive paths and full wheel dependencies. Provider manifest policy is signed opaque data. `runtime_install.py:RuntimeInstaller` stages under protected service storage using isolated venv + offline hashed wheels, and journals `RuntimeOperation` IDs (`staging`, `staged`, `recovery_required`), release-sequence binding and monotonic trust. Waiter cancellation retains ownership until completion is durably recorded. Cached completion is reverified; interrupted generations are retained without replay. `runtime_integrity.py` seals installed files, permissions and interpreter identity; verify before private Python starts and disable bytecode writes with `-B`. Missing or changed seals require explicit recovery. Exception: `verify_or_adopt_installed_runtime` (every cached verification, under the installer lock) runs `adopt_current_interpreter` only after ordinary verification fails; it re-points the interpreter links and `pyvenv.cfg` at the running interpreter and reseals when only the base interpreter moved or changed, every other sealed member matches exactly, `pyvenv.cfg` is the sealed bytes and the Python minor version is unchanged; `interpreter-rebase.json` lets an interrupted adoption resume. `runtime_files.py` supplies protected atomic files and fixed local locks. This path does not activate services or alter logical/cleanup state.
+- **Runtime artifacts and staging:** `runtime_artifacts.py` verifies the complete canonical v2 envelope, owner-provisioned `RuntimeTrust`, the manifest's Skulk version range (the recorded `skulk_build_sha256` is provenance, never a fit requirement, so a Skulk update keeps installed releases running; catalog protocol 2 listings carry the same range as `skulk_requires`, and `entry_review` fits them by host version, while protocol 1 listings keep their exact-build rule; `ACCEPTED_CATALOG_PROTOCOLS = (1, 2, 3)`), platform/Python compatibility, bundle/wheel hashes, safe archive paths and full wheel dependencies. Provider manifest policy is signed opaque data. `runtime_install.py:RuntimeInstaller` stages under protected service storage using isolated venv + offline hashed wheels, and journals `RuntimeOperation` IDs (`staging`, `staged`, `recovery_required`), release-sequence binding and monotonic trust. Waiter cancellation retains ownership until completion is durably recorded. Cached completion is reverified; interrupted generations are retained without replay. `runtime_integrity.py` seals installed files, permissions and interpreter identity; verify before private Python starts and disable bytecode writes with `-B`. Missing or changed seals require explicit recovery. Exception: `verify_or_adopt_installed_runtime` (every cached verification, under the installer lock) runs `adopt_current_interpreter` only after ordinary verification fails; it re-points the interpreter links and `pyvenv.cfg` at the running interpreter and reseals when only the base interpreter moved or changed, every other sealed member matches exactly, `pyvenv.cfg` is the sealed bytes and the Python minor version is unchanged; `interpreter-rebase.json` lets an interrupted adoption resume. `runtime_files.py` supplies protected atomic files and fixed local locks. This path does not activate services or alter logical/cleanup state.
 - **Runtime selection:** `runtime_selection.py:RuntimeSelector` holds installer and stopped-supervisor ownership, revalidates the signed staged generation and installed seal, journals exact intent, and atomically publishes `RuntimeSelection`. `SelectionOperation` retains pending/completed/recovery/superseded state. Explicit disable can withdraw stalled local activation/selection, with `withdraws_operation_id` retained through both journals and restart; it never runs the withdrawn release. Live work and pending withdrawal cannot be superseded. Explicit rollback preserves the highest selected sequence; expanded permissions require acceptance; incompatible state or configuration schemas require migration. A changed configuration schema is compatible only when the candidate's manifest speaks plugin protocol 3 or later (`CARRYING_PROTOCOL`: its owner validates stored settings against the new schema once and rebinds them) and `configuration_schema_compatible` finds that the new schema still accepts everything the old one did. That comparison is structural and never evaluates a schema: annotations (`title`, `description`, `default`, `examples`, `$comment`, `deprecated`) may change anywhere; a closed object without `patternProperties` may gain optional properties; and required properties may become optional. Loosening is followed only through keywords where a schema accepting more makes its parent accept more (`properties`, `items`, `prefixItems`, `additionalItems`, `additionalProperties`, `allOf`, `anyOf`). Under `not`, `if`/`then`/`else`, `oneOf`, `contains`, `propertyNames`, `dependentSchemas` and existing definitions, which a `$ref` can reach from anywhere, only annotations may change. Any other change needs migration. Disable/uninstall retains selected files and logical/cleanup state even when trust is invalid. Recovery completes only local selection, never provider acquisition. Selection is desired state, not service health; the launcher must revalidate the live core before execution.
 - **Runtime service:** `runtime_service.py:RuntimeService` runs separately from inference and executes only the freshly verified selected generation's owner, through the archive's fixed `__owner__` entrypoint or the `owner` launcher a signed wheel declares under `skulk.capability_runtime` with isolated Python and bytecode writes disabled. It owns `service.lock`, repeats trust/core/artifact/seal checks, passes a launcher lifetime pipe and persists payload-free `RuntimeServiceStatus`. Running means process existence, not readiness. Shutdown checks `supervisor.lock` after bounded owner teardown; surviving children must retain that fence. Unexpected owner exit ends this launcher lifetime without replay. Fixed OS registration remains separate from this primitive.
 - **Runtime management:** `runtime_controller.py` journals immutable `LifecycleRequest` and `LifecycleOperation` for revision-fenced activate/disable. Preview happens before stopping; accepted work outlives callers; boot recovery finishes only recorded local selection. `runtime_manager.py` owns a protected bounded local socket and up to sixteen controllers, automatically provisions the locally established transport binding and retains unavailable installations in inventory. Fixed operations are list/register/get/submit/operation/recover; no caller-supplied commands, paths, credentials or paid approvals. Terminal JSON control uses the same socket. HTTP lifecycle and OS registration are not yet wired to this primitive. The controller supervises `RuntimeService` with restarts after `_RESTART_DELAYS_SECONDS` 5/15/45/120/300 and then every 300 s while failures continue (a lifetime of `_STABLE_LIFETIME_SECONDS` 600 starts the waits over; a launcher raising `OSError`/`ValueError` after its teardown is a failed lifetime; a stop during a wait starts nothing; each restart is a new lifetime, never a replay; the supervisor fence refuses a new owner while an old one survives). `runtime_files.is_desktop_metadata` (regular `.DS_Store` and `._*` files) is skipped by the manager's installation scan, `measure_host`, the core runtime copy, the installed seal and, restated standard-library-only, `service_bootstrap.runtime_tree`.
@@ -2087,7 +2087,7 @@ Ordinary Chat also pins asynchronous user and assistant writes to their originat
 
 - `extensions/capabilities.py`: bounded `InstalledCapabilityRegistration` summaries bind declared operation purpose, id/version, descriptor revision, I/O mode and runtime prerequisites. They contain no credential values or configuration. `runtime_manager.installed_release` projects selected staged metadata; unreadable optional registration never hides installed identity. Aggregate inventory sheds optional registration before exceeding its frame budget.
 - `extensions/installed_capabilities.py`: `InstalledCapabilities` combines current local manager selections with separate owner reachability and exact live contract readiness. Readiness requires the selected bundle/version/digest-compatible descriptor and current manager/child admission. A ready provisioner does not prove acquired inference capacity.
-- `GET /v1/plugins/managed/capabilities` reads only this API host's configured manager. `GET /v1/plugins/managed/{plugin_id}/capabilities/{qualified_id}?revision=<digest>` reads one exact selected full descriptor, bounded to 64 KiB. Both require direct owner authority or `plugins:read`; neither attaches, repairs setup, enables children or invokes providers. Unknown metadata and retained uninstalled selections remain distinct from usable capacity.
+- `GET /v1/plugins/managed/capabilities` reads only this API host's configured manager. `GET /v1/plugins/managed/{plugin_id}/capabilities/{qualified_id}?revision=<digest>` reads one exact selected full descriptor, bounded to 256 KiB. Both require direct owner authority or `plugins:read`; neither attaches, repairs setup, enables children or invokes providers. Unknown metadata and retained uninstalled selections remain distinct from usable capacity.
 - Steward exposes `get_installed_capabilities` only through a request-bound authorized reader that checks `plugins:read` again on every invocation. No-argument reads give bounded installed summaries; an exact plugin/id@version/revision selection reads its schema. Oversized model results disclose omission and retain the authorized full-detail endpoint. Ordinary general Steward access grants no installation-read permission.
 
 
@@ -2656,6 +2656,42 @@ Direct public PMF transport, public replica health and native desktop distributi
 are not implied by these controls. Standalone core use remains independent of
 Skulk; existing PMF kit/recovery and model/registry/code authority stay separate.
 
+
+### Managed declaration metadata bounds
+
+`extensions/managed_limits.py` separates rich declaration metadata from ordinary
+calls: one managed application may declare sixteen capabilities, descriptions
+and exact selected contract reads use 512 KiB response envelopes, and an
+individual selected descriptor is bounded to 256 KiB. Signed runtime metadata
+uses a separate 512 KiB bound consistently through download, review, staging,
+recovery and installed inventory. Catalog and registration summaries accept
+sixteen declared operations. Ordinary invocation frames, settings, credentials,
+manager requests and binary media retain their own existing limits.
+
+One owner may report at most sixteen application nodes and 128 total capability
+contracts, within the discovery byte bound. Refresh refuses an oversized
+aggregate before reporting availability and withdraws readiness until a valid
+inventory returns. Discovery, dynamic dispatch and host callbacks share this
+aggregate bound, preventing a ready owner whose contracts cannot be dispatched.
+
+Expanded SDK manifests require a compatible Skulk 2.0.3 reader. Deploy readers
+before publishing larger signed records; declared contracts and successful
+metadata verification do not establish live provider readiness or authorize
+execution. Legacy descriptor revisions and signed identities remain unchanged.
+
+Catalog protocol 3 carries the expanded identifier count at the separate
+`catalog/catalog-v3.json` address. Protocols 1 and 2 keep their original eight
+identifiers, and the publisher maintains a signed legacy `catalog/catalog.json`
+projection. Version filtering follows whole-catalog validation, so a release's
+version requirement cannot protect an older catalog parser. Updated built-in
+Store readers prefer v3 and fall back only on an initial 404 before accepting
+it. Invalid signatures, malformed data and other failures never downgrade.
+Acceptance atomically switches the source and retains both histories; a v3
+revision below the accepted legacy revision is refused. Restart, a failed
+retained-document write or returning from a private catalog cannot restore
+legacy fallback. Introduce both catalogs using existing releases, deploy the
+reader, then publish expanded releases.
+
 ## Native ACE music metadata
 
 - `ModelTask.MusicEditing` accompanies `TextToMusic` only on native ACE base cards.
@@ -2866,6 +2902,13 @@ the original indexed owner, including companions reached through a cached base.
   Retain empty-result fallback custody until successful resident completion;
   early resident refusal cannot orphan a prepared directory/receipt. Drain the
   resident before reclaiming that fallback.
+- `ace_step/runner.py::Runner`: shared bounded dispatcher, one active generation
+  or edit, four admitted waiters, actual load/warmup/liveness readiness. Cancel or
+  failure drains the retired model before a fresh unloaded lifetime for the same
+  placement; failed replacement withdraws readiness after task terminal. Verify
+  completion task/operation/seed/model/payload correlation; emit typed metadata
+  only and preserve independently owned completed WAVs on close. Not registered
+  with Worker/bootstrap; no resource advertisement or support claim is granted.
 - Native resident: complete data/code verification, explicit runtime math probe,
   observed per-component loaded precision, exact canonical source-tensor equality,
   one active request, contiguous sequence/correlation checks, 0600 PCM24/result

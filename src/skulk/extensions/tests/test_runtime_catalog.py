@@ -102,7 +102,9 @@ def test_a_catalog_verifies_against_discovery_trust_and_names_refusals() -> None
     assert verified.sha256 == hashlib.sha256(document).hexdigest()
     assert verified.entry("example.plugin", 2, None) is not None
     assert verified.entry("example.plugin", 3, None) is None
-    review = verified.review(skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64")
+    review = verified.review(
+        skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64"
+    )
     assert [e.sequence for e in review.entries] == [1, 2]
     assert all(e.matches_host for e in review.entries)
     assert "feed_url" not in review.model_dump_json()
@@ -248,7 +250,9 @@ async def test_the_host_catalog_configures_fetches_and_retains_without_disclosur
     with pytest.raises(ValueError, match="digest required"):
         catalog.retained("../catalog-state")
     assert "hidden-catalog-token" not in json.dumps(
-        verified.review(skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64").model_dump()
+        verified.review(
+            skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64"
+        ).model_dump()
     )
     # The accepted revision only moves forward: another document at the
     # same revision, or an older revision, is refused; a newer one accepted.
@@ -414,7 +418,9 @@ def test_a_revoked_release_or_artifact_is_not_offered() -> None:
     )
     assert [e.sequence for e in verified.entries] == [3]
     assert verified.entry("example.plugin", 1, None) is None
-    review = verified.review(skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64")
+    review = verified.review(
+        skulk_version="2.0.1", skulk_build_sha256="a" * 64, platform="macos-arm64"
+    )
     assert [e.sequence for e in review.entries] == [3]
 
 
@@ -440,8 +446,8 @@ def test_the_floor_map_refuses_a_new_history_at_the_bound() -> None:
         },
     }
     assert bounded_floors(with_trust, f"{prefix}publisher-3", prefix) == with_trust
-    with_trust["trust\nhttps://one-more.example.test/\ncatalog.json"] = (
-        AcceptedFloor(revision=1, sha256="d" * 64)
+    with_trust["trust\nhttps://one-more.example.test/\ncatalog.json"] = AcceptedFloor(
+        revision=1, sha256="d" * 64
     )
     with pytest.raises(ValueError, match="local maintenance"):
         bounded_floors(with_trust, f"{prefix}publisher-3", prefix)
@@ -622,7 +628,10 @@ def test_a_protocol_2_listing_fits_by_skulk_version_whatever_the_build() -> None
     )
     # The newer release needs a later Skulk: it is listed, but not as fitting,
     # so a consumer picking the newest fitting release picks the older one.
-    assert [(e.sequence, e.matches_host) for e in updated.entries] == [(1, True), (2, False)]
+    assert [(e.sequence, e.matches_host) for e in updated.entries] == [
+        (1, True),
+        (2, False),
+    ]
     assert updated.entries[0].skulk_requires == ">=2.0.0,<3"
     later = verified.review(
         skulk_version="2.4.0", skulk_build_sha256="e" * 64, platform="linux-x86_64"
@@ -652,3 +661,33 @@ def test_a_listing_states_its_skulk_range_exactly_when_its_protocol_does(
         verify_catalog(document, _trust(key), now=int(time.time()))
     assert refused.value.code == "catalog_invalid"
 
+
+@pytest.mark.parametrize("protocol", [1, 2])
+def test_older_catalog_protocols_keep_their_original_descriptor_bound(
+    protocol: int,
+) -> None:
+    """An entry's version requirement cannot protect an older whole-document parser."""
+    key = Ed25519PrivateKey.generate()
+    entry = _entry(1, descriptors=[f"fixture.op{i}@1.0.0" for i in range(16)])
+    if protocol == 2:
+        entry["skulk_requires"] = ">=2.0.3,<3"
+    with pytest.raises(ValueError, match="requires protocol 3"):
+        verify_catalog(
+            _catalog(key, [entry], protocol=protocol), _trust(key), now=int(time.time())
+        )
+    entry["skulk_requires"] = ">=2.0.3,<3"
+    verified = verify_catalog(
+        _catalog(key, [entry], protocol=3), _trust(key), now=int(time.time())
+    )
+    assert (
+        len(
+            verified.review(
+                skulk_version="2.0.3",
+                skulk_build_sha256="a" * 64,
+                platform="linux-x86_64",
+            )
+            .entries[0]
+            .descriptors
+        )
+        == 16
+    )

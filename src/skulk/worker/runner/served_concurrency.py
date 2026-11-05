@@ -35,6 +35,7 @@ from skulk.shared.types.tasks import (
     AudioSeparation,
     ImageEdits,
     ImageGeneration,
+    MusicEditing,
     MusicGeneration,
     Shutdown,
     Task,
@@ -79,6 +80,7 @@ type GenerationTask = (
     | TextEmbedding
     | VideoGeneration
     | MusicGeneration
+    | MusicEditing
     | AudioSeparation
     | ImageGeneration
     | ImageEdits
@@ -309,6 +311,7 @@ class ServedConcurrentDispatch:
                             | TextEmbedding()
                             | VideoGeneration()
                             | MusicGeneration()
+                            | MusicEditing()
                             | AudioSeparation()
                             | ImageGeneration()
                             | ImageEdits()
@@ -530,7 +533,11 @@ class ServedConcurrentDispatch:
                 failed = task.task_id in self._failed_generation_ids
             self.send_task_status(
                 task,
-                TaskStatus.Cancelled if was_cancelled else TaskStatus.Failed if failed else TaskStatus.Complete,
+                TaskStatus.Cancelled
+                if was_cancelled
+                else TaskStatus.Failed
+                if failed
+                else TaskStatus.Complete,
             )
         finally:
             with self._admission_lock:
