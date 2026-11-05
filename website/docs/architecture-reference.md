@@ -2701,7 +2701,9 @@ reader, then publish expanded releases.
   storage accounting, immutable objects and loader roots; no repository Python.
 - `trust_remote_code=false`; reviewed implementation belongs to the runtime.
 - `platform_compatible_backends(card_has_native_music_profile=True)` excludes
-  current incompatible engines. The master passes this flag; worker bootstrap
+  incompatible engines and selects only explicit native ACE CPU/Metal/CUDA/ROCm
+  lanes. The master additionally requires current fixed payload/probe and full
+  phase admission; worker bootstrap
   also refuses native startup explicitly instead of falling back to MLX.
 - `/v1/models.music.native`: intrinsic variant/modes/classes/sample rate/channels;
   does not assert a native runner or HTTP editing endpoint exists.
@@ -2989,8 +2991,9 @@ the original indexed owner, including companions reached through a cached base.
   State or event log. Core binds PID/payload/device/contiguous sequence, requires
   a sample before ready, and rechecks after blocking dequeue. Freshness at most
   5 seconds; first-sample startup grace 30 seconds. Serialized native control
-  egress has a 2-second drain deadline. Old candidates require rebuilding;
-  actual Worker package preparation/placement activation remains gated.
+  egress has a 2-second drain deadline. Inventory requires memory-probe and
+  live-resource-guard features; older candidates without them cannot activate.
+  Current Worker preparation and native placement use these same contracts.
 - `worker/native_music_media.py::NativeMusicMediaOwner` is wired to Worker task,
   snapshot, input/output and shutdown lifecycles. It captures only complete
   local native assignments with their stamped policy/build. Generation reserves
@@ -3012,6 +3015,64 @@ the original indexed owner, including companions reached through a cached base.
   native use `native_music_host_available_bytes` for consistent macOS Mach
   wired/anonymous/compressor accounting with bounded one-second `vm_stat`
   effects and actual psutil fallback. No RSS allocation credit is inferred.
-- These media/guard connections do not open the native platform guard. Fixed
-  current packages, Worker preparation/resource publication, complete placement
-  admission and installed platform/music acceptance remain required.
+- `PrepareAceStep` / `AceStepPreparationRequested` bind one complete-package
+  digest, owner, selected worker and explicit CPU/Metal/CUDA/ROCm device. The
+  master supplies a thirty-minute absolute deadline. Worker preparation runs
+  off-loop through the existing persistent ACE controller/cache; offline mode
+  cannot download. `AceStepPreparationCompleted` returns the same identities
+  and either verified resources or a bounded failure diagnostic. Success needs
+  the actual executed lane probe; the master additionally checks the fixed
+  package/payload before refreshing its live view. Periodic Worker resources
+  derive native build IDs and probes from one locked snapshot and preserve
+  other engines. Package inventory alone is never a ready backend. Shutdown
+  drains both native audio preparation owners.
+- Native platform filtering and actual API/Worker/Master activation are
+  connected on this initiative. Signed distribution and installed platform/
+  music acceptance remain distinct requirements.
+- `api/ace_step_preparation.py::AceStepMountPreparer`: actual public ordinary/
+  exact mount barrier; fixed advertised OS/CPU/profile and generic hardware
+  candidates, maximum four pending API requests, one absolute thirty-minute
+  budget across all candidate attempts/send/queue/work, complete request/API/
+  worker/digest/device correlation, then shared actual native phase admission.
+  Scoped ordered resources reach Master admission despite stale telemetry.
+  `master/main.py::ace_step_preparation_event` refuses expired, departed and
+  unknown-profile requests and preserves the earlier deadline; long direct
+  requests are additionally capped at thirty minutes. Offline remains verified
+  cache reuse only. Transport loss returns actionable 503 and releases waiters.
+- `model_engine_requirements` derives intrinsic `ace_step` from the validated
+  native artifact profile without changing signed card bytes. EngineType knows
+  exactly CPU/Metal/CUDA/ROCm native lanes; expansion never invents Vulkan.
+  Non-native cards cannot select native ACE. Exact-build native qualification
+  lanes report evidence only, independently of placement eligibility.
+- `shared/models/native_music_admission.py`: pure current-package/library/math
+  assessment from actual timestamped device-zero observations and deduplicated
+  placement commitments. One physical pressure floor, full idle native phase
+  costs, ordinary concrete-shard footprints, shared GPU storage charged to CPU
+  targets, and zero attribution credit for loaded status. Unknown topology is
+  conservative; unrepresented RPC partitions refuse admission. Worker exclusion
+  requires its exact unchanged authoritative instance. Raw physical capacity
+  and reserved remaining capacity remain distinct. Ordinary/exact Master
+  placement calls it with raw native facts and complete deduplicated pending,
+  Steward and indexed commitments. Exact callers cannot invent cheaper math or
+  partial shards. Generic reservations hold native idle future phase peaks,
+  discrete GPU host costs and shared physical costs. Missing restored policy
+  refuses the affected pools; native GPU coexistence is capped by actual device
+  zero, never largest-GPU or additive-carve telemetry.
+- Worker `_complete_native_music_runner_creation`: explicit current package/
+  device refresh through the off-loop controller, native media reader fence,
+  staging-locked placement/trust/runtime/policy/full-memory recheck, exact self
+  exclusion, then supervisor custody of lazy `NativeMusicRunnerContext` with
+  immutable `NativeMusicHostGuard`. First-mount sources remain unresolved until
+  normal DownloadModel/LoadModel. Failure/cancellation closes untransferred
+  custody. Indexed owner removal or snapshot replacement cancels its preparation
+  request. Source integration does not establish distribution or qualification.
+- Resident `_read_output` forwards validated native memory frames through
+  `record_native_music_memory` and bounded non-blocking diagnostic IPC.
+  Supervisor ownership/context/payload/device/native/local freshness and process
+  liveness checks retain one transient sample; no phase/history/event entry.
+  Worker resource gathering overlays current free capacity only for the exact
+  authoritative owner, verified library and unchanged physical totals/topology.
+  RSS/allocator facts earn no credit. Dead/stale/foreign/withdrawn owners cannot
+  restore resources. Cold/expired repair returns actionable preparation pending;
+  installable-only metadata never becomes ready. No sealed adapter or portable
+  native protocol change is required for this Core-side observation forwarding.

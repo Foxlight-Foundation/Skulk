@@ -18,12 +18,18 @@ import psutil
 import pytest
 
 from skulk.shared.types.common import CommandId
+from skulk.shared.types.diagnostics import (
+    RunnerDiagnosticContext,
+    RunnerDiagnosticUpdate,
+)
 from skulk.shared.types.native_music import (
     NativeMusicMemoryBudget,
     NativeMusicRequest,
     NativeMusicServeConfig,
 )
+from skulk.utils.channels import mp_channel
 from skulk.utils.runtime_files import RuntimeLock
+from skulk.worker.runner import diagnostics as diagnostic_module
 from skulk.worker.runner.ace_step import resident as resident_module
 from skulk.worker.runner.ace_step.resident import (
     NativeMusicProcessError,
@@ -716,9 +722,15 @@ def test_live_memory_refusal_cannot_advertise_a_native_model(
 
 
 def test_live_memory_flood_keeps_one_latest_sample_and_normal_terminals(
-    tmp_path: Path, interpreter: Path
+    tmp_path: Path, interpreter: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Thousands of resource facts cannot fill the fixed generation-terminal queue."""
+    """Real stdout-to-diagnostic IPC drops pressure without filling generation terminals."""
+    sender, receiver = mp_channel[RunnerDiagnosticUpdate](max_buffer_size=1)
+    monkeypatch.setattr(diagnostic_module, "_diagnostic_sender", sender)
+    monkeypatch.setattr(diagnostic_module, "_diagnostic_context", RunnerDiagnosticContext(
+        node_id="node", runner_id="runner", instance_id="instance", model_id="controlled-native",
+        rank=0, world_size=1, start_layer=0, end_layer=1, n_layers=1,
+    ))
     owner = resident(
         tmp_path,
         interpreter,
@@ -732,5 +744,13 @@ def test_live_memory_flood_keeps_one_latest_sample_and_normal_terminals(
         assert owner.is_ready()
         result = owner.run(request(owner), progress=lambda _progress: None, is_cancelled=lambda: False)
         assert result is not None and result.request_id == "take"
+        update = receiver.receive()
+        assert update.native_music_memory is not None
+        assert update.native_music_memory.process_id == int((owner.workspace.root / "native.pid").read_text())
+        assert update.native_music_memory.payload_sha256 == "c" * 64
+        assert update.context.pid == os.getpid()
+        assert update.event == "native_music_memory" and not update.attrs
     finally:
         owner.close()
+        sender.close()
+        receiver.close()

@@ -135,7 +135,7 @@ def test_native_card_retains_generation_editing_and_public_metadata() -> None:
     assert entry.music.native.sample_rate == 48000
     assert entry.music.native.model_dump(by_alias=True)["editing_modes"] == native.editing_modes
     assert entry.engine_support == [] and not card.placement.compatible_backends
-    assert not model_engine_requirements(card)
+    assert model_engine_requirements(card) == frozenset({"ace_step"})
 
 
 @pytest.mark.parametrize(("name", "expected"), [

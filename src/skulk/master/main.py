@@ -41,6 +41,7 @@ from skulk.master.steward_staleness import (
     placement_card_staleness,
     steward_proposal_staleness,
 )
+from skulk.provisioning.ace_step_inventory import ACE_STEP_PACKAGES
 from skulk.recovery.fetch import RestartRecordFetcher, fetch_peer_record
 from skulk.recovery.record import (
     ClusterIntentRecord,
@@ -96,6 +97,7 @@ from skulk.shared.types.commands import (
     MusicEditing,
     MusicGeneration,
     PlaceInstance,
+    PrepareAceStep,
     PrepareAudioCpp,
     PrepareDemucs,
     ProposeStewardAction,
@@ -116,6 +118,8 @@ from skulk.shared.types.commands import (
 )
 from skulk.shared.types.common import CommandId, NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
+    AceStepPreparationCompleted,
+    AceStepPreparationRequested,
     AudioCppPreparationCompleted,
     AudioCppPreparationRequested,
     CustomModelCardAdded,
@@ -1219,6 +1223,44 @@ def _image_generation_events(state: State, command: ImageGeneration) -> tuple[li
     return result, identifier
 
 
+def ace_step_preparation_event(
+    state: State, command: PrepareAceStep, *, now_unix: float,
+) -> AceStepPreparationRequested | AceStepPreparationCompleted:
+    """Order one fixed package/device within the original mount deadline.
+
+    Args:
+        state: Authoritative current membership; no readiness is created here.
+        command: API-owned exact preparation and its total absolute deadline.
+        now_unix: Current wall-clock observation, injected by the command owner.
+
+    Returns:
+        A bounded worker request, or a correlated actionable refusal. Queue time
+        and later candidate attempts cannot renew the caller's original budget.
+    """
+    package = next((item for item in ACE_STEP_PACKAGES if item.sha256 == command.package_sha256), None)
+    error: str | None = None
+    if command.target_node not in state.topology.list_nodes():
+        error = "target worker is not a live cluster member"
+    elif command.expires_at <= now_unix:
+        error = "Native music mount preparation deadline expired"
+    elif package is None or not (
+        package.variant == command.device
+        or package.variant == "cpu" and command.device == "mps" and package.platform_tag.startswith("macosx_")
+    ):
+        error = "No fixed native music package implements that digest/device"
+    if error is not None:
+        return AceStepPreparationCompleted(
+            request_id=command.command_id, target_node=command.target_node,
+            owner_node=command.owner_node, package_sha256=command.package_sha256,
+            device=command.device, success=False, error=error,
+        )
+    return AceStepPreparationRequested(
+        request_id=command.command_id, target_node=command.target_node,
+        owner_node=command.owner_node, package_sha256=command.package_sha256,
+        device=command.device, expires_at=min(command.expires_at, now_unix + 30 * 60),
+    )
+
+
 class Master:
     def __init__(
         self,
@@ -1572,6 +1614,29 @@ class Master:
                 self._telemetry_view.node_resources[result.target_node] = resources
         if isinstance(indexed.event, AudioCppPreparationCompleted):
             self._record_audio_cpp_preparation(indexed.event)
+        if isinstance(indexed.event, AceStepPreparationCompleted):
+            result = indexed.event
+            resources = result.resources
+            package = next(
+                (package for package in ACE_STEP_PACKAGES
+                 if package.sha256 == result.package_sha256), None
+            )
+            backend = "ace_step-metal" if result.device == "mps" else f"ace_step-{result.device}"
+            if (
+                result.success and resources is not None and package is not None
+                and (
+                    package.variant == result.device
+                    or package.variant == "cpu" and result.device == "mps"
+                    and package.platform_tag.startswith("macosx_")
+                )
+                and result.target_node in self.state.topology.list_nodes()
+                and backend in resources.backends
+                and resources.engine_builds.get(backend) == package.build_identity
+                and (probe := resources.native_music_probes.get(backend)) is not None
+                and probe.payload_sha256 == package.payload_sha256
+                and probe.device == result.device
+            ):
+                self._telemetry_view.node_resources[result.target_node] = resources
 
     def _record_audio_cpp_preparation(
         self, event: AudioCppPreparationCompleted
@@ -1628,7 +1693,11 @@ class Master:
             raise ValueError(
                 "Prepared engine resources require one single-host media node"
             )
-        prefix = "demucs-" if ModelTask.AudioSeparation in card.tasks else "audio_cpp-"
+        prefix = (
+            "demucs-" if ModelTask.AudioSeparation in card.tasks
+            else "ace_step-" if card.music is not None and card.music.native is not None
+            else "audio_cpp-"
+        )
         node_id, resources = next(iter(prepared.items()))
         if node_id not in self.state.topology.list_nodes():
             raise ValueError("Prepared engine node is no longer a cluster member")
@@ -1676,6 +1745,7 @@ class Master:
             ),
             approved_remote_code_identities=self._model_trust_approvals,
             served_context_default=self._served_context_default(),
+            native_music_commitments=self._native_music_placement_commitments(command, self.state.instances),
         )
 
     def _create_requested_instance(
@@ -1701,6 +1771,7 @@ class Master:
             ),
             approved_remote_code_identities=self._model_trust_approvals,
             node_resources=resources,
+            native_music_commitments=self._native_music_placement_commitments(command, self.state.instances),
         )
 
     def _record_runner_loaded_transitions(
@@ -1951,6 +2022,27 @@ class Master:
         reservations.update(instances)
         return reservations
 
+    def _native_music_placement_commitments(
+        self,
+        command: PlaceInstance | CreateInstance,
+        instances: Mapping[InstanceId, Instance],
+    ) -> Mapping[InstanceId, Instance] | None:
+        """Supply raw native admission with complete identities only when needed.
+
+        Ordinary engine admission already uses reserved generic pool inputs.
+        Native admission independently reads its raw actual probe, so it also
+        needs this deduplicated pending/Steward/indexed map. Keeping that input
+        native-specific preserves the existing other-engine placement contract.
+        """
+        cards = (
+            (command.model_card,)
+            if isinstance(command, PlaceInstance)
+            else tuple(shard.model_card for shard in command.instance.shard_assignments.runner_to_shard.values())
+        )
+        if not any(card.music is not None and card.music.native is not None for card in cards):
+            return None
+        return self._placement_reservations(instances)
+
     def _unreflected_placements(
         self, placements: Mapping[InstanceId, Instance]
     ) -> frozenset[InstanceId]:
@@ -2040,6 +2132,7 @@ class Master:
                 node_memory=node_memory,
             ),
             unreflected=self._unreflected_placements(placements),
+            node_resources=resources,
         )
         vram = usable_vram_by_node(
             self._telemetry_view.node_system,
@@ -2147,6 +2240,7 @@ class Master:
             ),
             approved_remote_code_identities=self._model_trust_approvals,
             served_context_default=self._served_context_default(),
+            native_music_commitments=self._native_music_placement_commitments(command, current_instances),
         )
 
     async def _execute_approved_steward_action(
@@ -3374,6 +3468,8 @@ class Master:
                                         expires_at=time.time() + 30 * 60,
                                     )
                                 )
+                        case PrepareAceStep():
+                            generated_events.append(ace_step_preparation_event(self.state, command, now_unix=time.time()))
                         case TextGeneration():
                             eligible = text_generation_instances(
                                 self.state, command.task_params.model
@@ -4180,6 +4276,7 @@ class Master:
                                         ),
                                         approved_remote_code_identities=self._model_trust_approvals,
                                         served_context_default=self._served_context_default(),
+                                        native_music_commitments=self._native_music_placement_commitments(replace_command, after_delete),
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -4246,6 +4343,7 @@ class Master:
                                             ),
                                             approved_remote_code_identities=self._model_trust_approvals,
                                             served_context_default=self._served_context_default(),
+                                            native_music_commitments=self._native_music_placement_commitments(fallback, after_delete),
                                         )
                                         for new_id in final_placement:
                                             if new_id not in after_delete:
@@ -4719,6 +4817,7 @@ class Master:
                     ),
                     approved_remote_code_identities=self._model_trust_approvals,
                     served_context_default=self._served_context_default(),
+                    native_music_commitments=self._native_music_placement_commitments(replace_command, after_delete),
                 )
                 self._download_failure_lineage[
                     InstanceId(str(replace_command.command_id))
@@ -4948,6 +5047,7 @@ class Master:
             ),
             approved_remote_code_identities=self._model_trust_approvals,
             served_context_default=self._served_context_default(),
+            native_music_commitments=self._native_music_placement_commitments(command, current_instances),
         )
 
     def _steward_replacement_memory_inputs(
@@ -5020,6 +5120,7 @@ class Master:
                 node_memory=memory,
             ),
             unreflected=self._unreflected_placements(remaining),
+            node_resources=self._telemetry_view.node_resources,
         )
         vram = dict(
             usable_vram_by_node(
@@ -5044,6 +5145,7 @@ class Master:
             self._telemetry_view.node_system,
             remaining,
             unified_memory_gpu_nodes=unified_nodes,
+            node_resources=self._telemetry_view.node_resources,
         )
 
     def _reset_steward_upgrade(self) -> None:

@@ -43,6 +43,7 @@ from pydantic import (
 from tomlkit.exceptions import TOMLKitError
 
 from skulk.shared.backends import (
+    ACE_STEP_COMPUTE_BACKENDS,
     AUDIO_CPP_COMPUTE_BACKENDS,
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
     audio_cpp_cuda_hardware_matches,
@@ -1005,16 +1006,17 @@ def get_model_required_capabilities(model_card: "ModelCard") -> frozenset[str]:
 def model_engine_requirements(model_card: "ModelCard") -> frozenset[str]:
     """Read engine requirements, including legacy typed native artifact profiles.
 
-    Early music/image cards left backends empty to defer to qualification. Their
-    validated GGUF component profiles already identify the implemented native
-    runtime; preserve that knowledge without inventing a hardware permission list
-    or changing the immutable signed card bytes.
+    Early music/image cards left backends empty. Their validated typed component
+    profiles identify the corresponding runtime: GGUF music uses audio.cpp and
+    native ACE safetensors use ace_step. Preserve that intrinsic compatibility
+    without a hardware permission list or changing immutable signed card bytes.
+    Actual installed packages, runner limitations and memory remain separate.
     """
     declared = model_card.placement.compatible_backends
     if declared:
         return declared
-    if model_card.music is not None and model_card.music.native is None:
-        return frozenset({"audio_cpp"})
+    if model_card.music is not None:
+        return frozenset({"ace_step" if model_card.music.native is not None else "audio_cpp"})
     if model_card.separation is not None:
         return frozenset({"demucs"})
     if model_card.image is not None:
@@ -1062,8 +1064,13 @@ def registry_supported_backends_for_node(
     for backend in node_backends:
         # A bare engine tag describes availability, not the compute lane whose
         # memory pool and device the music runner will actually use.
-        if model_card.music is not None and backend not in AUDIO_CPP_COMPUTE_BACKENDS:
-            continue
+        if model_card.music is not None:
+            music_backends = (
+                ACE_STEP_COMPUTE_BACKENDS
+                if model_card.music.native is not None else AUDIO_CPP_COMPUTE_BACKENDS
+            )
+            if backend not in music_backends:
+                continue
         supported_capabilities: set[str] = set()
         required_cuda_class = AUDIO_CPP_CUDA_TARGETS_BY_BUILD.get(
             engine_builds.get(backend, engine_builds.get("audio_cpp", ""))

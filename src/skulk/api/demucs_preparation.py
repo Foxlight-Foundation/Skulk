@@ -114,6 +114,7 @@ class DemucsMountPreparer:
                 resources,
                 node_memory=self.telemetry.node_memory,
             ),
+            node_resources=resources,
         ).get(node)
         if memory is None:
             return 0

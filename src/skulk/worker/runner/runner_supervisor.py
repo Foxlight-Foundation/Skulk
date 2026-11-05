@@ -51,6 +51,7 @@ from skulk.shared.types.events import (
     TaskStatusUpdated,
     TracesCollected,
 )
+from skulk.shared.types.native_music import NativeMusicMemoryObservation
 from skulk.shared.types.streaming import StreamFrameKind, is_terminal_stream_frame_kind
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
@@ -229,6 +230,7 @@ class RunnerSupervisor:
     _active_command_id: str | None = field(default=None, init=False)
     _phase_detail: str | None = field(default=None, init=False)
     _last_mlx_memory: MlxMemorySnapshot | None = field(default=None, init=False)
+    _native_music_memory: tuple[NativeMusicMemoryObservation, float] | None = field(default=None, init=False)
     _flight_recorder: deque[RunnerFlightRecorderEntry] = field(
         default_factory=lambda: deque(maxlen=128), init=False
     )
@@ -1055,9 +1057,58 @@ class RunnerSupervisor:
         )
         self._apply_diagnostic_update(update)
 
+    def native_music_memory_snapshot(self) -> NativeMusicMemoryObservation | None:
+        """Read one current owned native observation without probing or allocation credit.
+
+        Dead/closed runner processes and stale local receipt or native sample
+        clocks withdraw this transient view. Actual device/child sequence was
+        verified by the resident reader before emitting diagnostic IPC.
+        """
+        current = self._native_music_memory
+        if current is None or self._native_music_context is None:
+            return None
+        observation, received = current
+        if time.monotonic() - received > 5 or not -30_000 <= time.time_ns() // 1_000_000 - observation.capacity.sampled_at_unix_ms <= 5_000:
+            return None
+        try:
+            if not self.runner_process.is_alive():
+                return None
+        except ValueError:
+            return None
+        return observation
+
+    def _observe_native_music_memory(self, update: RunnerDiagnosticUpdate) -> None:
+        """Validate current local runner and immutable payload/lane before refresh."""
+        context = self._native_music_context
+        observed = update.native_music_memory
+        expected_context = self._diagnostic_context()
+        if (
+            context is None or observed is None or expected_context.pid is None
+            or update.context != expected_context
+        ):
+            return
+        try:
+            observed = NativeMusicMemoryObservation.model_validate_json(observed.model_dump_json())
+        except ValueError:
+            return
+        if (
+            observed.payload_sha256 != context.runtime.wheel.payload_sha256
+            or observed.device != context.runtime.device
+            or not -30_000 <= time.time_ns() // 1_000_000 - observed.capacity.sampled_at_unix_ms <= 5_000
+            or self._native_music_memory is not None
+            and observed.capacity.sampled_at_unix_ms <= self._native_music_memory[0].capacity.sampled_at_unix_ms
+        ):
+            return
+        self._native_music_memory = observed, time.monotonic()
+
     def _apply_diagnostic_update(self, update: RunnerDiagnosticUpdate) -> None:
         """Update live supervisor diagnostics from one runner diagnostic event."""
 
+        if update.native_music_memory is not None:
+            # Half-second native measurements are not phase transitions or a
+            # retained history. Keep one owned sample for periodic resources.
+            self._observe_native_music_memory(update)
+            return
         if update.phase != self._phase:
             self._phase = update.phase
             self._phase_started_at = update.at

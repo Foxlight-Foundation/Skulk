@@ -12,7 +12,7 @@ from skulk.shared.models.native_music_memory import (
     native_music_memory_error,
     reserve_native_music_memory,
 )
-from skulk.shared.types.native_music import NativeMusicDevice
+from skulk.shared.types.native_music import NativeMusicDevice, NativeMusicMemoryBudget
 
 
 def estimate(*, host: int, device: int = 0) -> NativeMusicMemoryEstimate:
@@ -45,6 +45,56 @@ def capacity(
         shared_total_bytes=100 if shared is not None else None,
         shared_available_bytes=shared,
     )
+
+
+def test_unattributed_budgets_reserve_every_pool_without_using_native_credits() -> None:
+    """Another engine cannot borrow the exact allocation receipt of a loaded native model."""
+    held = NativeMusicMemoryReservation(
+        estimate=estimate(host=20, device=30),
+        reflected_at_unix_ms=1,
+        reflected_host_bytes=10,
+        reflected_device_bytes=10,
+        reflected_shared_bytes=20,
+    )
+    extra = NativeMusicMemoryBudget(
+        host_peak_bytes=10, device_peak_bytes=15, shared_peak_bytes=25
+    )
+    remaining = reserve_native_music_memory(
+        capacity(host=90, device=80, shared=70), (held,), additional_budgets=(extra,)
+    )
+    assert remaining.host_available_bytes == 70
+    assert remaining.device_available_bytes == 45
+    assert remaining.shared_available_bytes == 15
+
+
+def test_cpu_capacity_holds_shared_gpu_future_work_as_physical_host_cost() -> None:
+    """CPU admission cannot overlook a shared GPU model merely because its sample has no GPU."""
+    shared_commitment = NativeMusicMemoryBudget(
+        host_peak_bytes=70, device_peak_bytes=0, shared_peak_bytes=70
+    )
+    remaining = reserve_native_music_memory(
+        capacity(), (), additional_budgets=(shared_commitment,)
+    )
+    assert remaining.host_available_bytes == 30
+    assert native_music_memory_error(
+        estimate(host=40), remaining, device="cpu", now_unix_ms=1
+    ) is not None
+
+
+def test_unattributed_cost_cannot_overflow_or_hide_total_capacity_exhaustion() -> None:
+    """Credits never let combined native and other commitments exceed physical totals."""
+    held = NativeMusicMemoryReservation(
+        estimate=estimate(host=80), reflected_at_unix_ms=1, reflected_host_bytes=80
+    )
+    extra = NativeMusicMemoryBudget(
+        host_peak_bytes=30, device_peak_bytes=120, shared_peak_bytes=120
+    )
+    remaining = reserve_native_music_memory(
+        capacity(host=99, device=99, shared=99), (held,), additional_budgets=(extra,)
+    )
+    assert remaining.host_available_bytes == 0
+    assert remaining.device_available_bytes == 0
+    assert remaining.shared_available_bytes == 0
 
 
 @pytest.mark.parametrize(

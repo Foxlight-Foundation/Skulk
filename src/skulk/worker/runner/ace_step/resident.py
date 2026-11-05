@@ -46,6 +46,7 @@ from skulk.worker.runner.ace_step.result_custody import (
 )
 from skulk.worker.runner.ace_step.workspace import NativeMusicWorkspace
 from skulk.worker.runner.demucs.process import separation_environment
+from skulk.worker.runner.diagnostics import record_native_music_memory
 
 _FRAME = TypeAdapter[NativeMusicFrame](NativeMusicFrame)
 
@@ -277,6 +278,7 @@ class ResidentMusic:
                         with self._observations:
                             self._memory_sequence = frame.sequence
                             self._memory_frame = frame, time.monotonic()
+                        record_native_music_memory(observed)
                         continue
                     if isinstance(frame, NativeMusicReadyFrame):
                         if initialized:

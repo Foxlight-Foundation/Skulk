@@ -158,6 +158,8 @@ class NativeMusicMemoryReservation(FrozenModel):
 def reserve_native_music_memory(
     capacity: NativeMusicMemoryCapacity,
     committed: Iterable[NativeMusicMemoryReservation],
+    *,
+    additional_budgets: Iterable[NativeMusicMemoryBudget] = (),
 ) -> NativeMusicMemoryCapacity:
     """Reserve every still-unallocated peak against the current observed free pool.
 
@@ -167,8 +169,17 @@ def reserve_native_music_memory(
     allocation readings conservatively reserve the full peak. Each domain also
     obeys total capacity minus all commitments, and no credit exceeds its peak.
     The caller owns instance identity/deduplication and allocation attribution.
+
+    ``additional_budgets`` reserves complete costs projected onto these same
+    physical pools, including other engines or a shared GPU commitment viewed
+    from a CPU-only sample. Such unattributed costs always earn zero credit;
+    they cannot be inferred from a loaded status or another device's free pool.
     """
     held = tuple(committed)
+    additional = tuple(additional_budgets)
+    host_additional = sum(item.host_peak_bytes for item in additional)
+    device_additional = sum(item.device_peak_bytes for item in additional)
+    shared_additional = sum(item.shared_peak_bytes for item in additional)
 
     def credit(item: NativeMusicMemoryReservation, reflected: int, peak: int) -> int:
         return (
@@ -182,12 +193,14 @@ def reserve_native_music_memory(
         0,
         min(
             capacity.host_available_bytes
+            - host_additional
             - sum(
                 item.estimate.host_peak_bytes
                 - credit(item, item.reflected_host_bytes, item.estimate.host_peak_bytes)
                 for item in held
             ),
             capacity.host_total_bytes
+            - host_additional
             - sum(item.estimate.host_peak_bytes for item in held),
         ),
     )
@@ -197,6 +210,7 @@ def reserve_native_music_memory(
             0,
             min(
                 device
+                - device_additional
                 - sum(
                     item.estimate.device_peak_bytes
                     - credit(
@@ -207,6 +221,7 @@ def reserve_native_music_memory(
                     for item in held
                 ),
                 capacity.device_total_bytes
+                - device_additional
                 - sum(item.estimate.device_peak_bytes for item in held),
             ),
         )
@@ -216,6 +231,7 @@ def reserve_native_music_memory(
             0,
             min(
                 shared
+                - shared_additional
                 - sum(
                     item.estimate.unified_peak_bytes
                     - credit(
@@ -226,6 +242,7 @@ def reserve_native_music_memory(
                     for item in held
                 ),
                 capacity.shared_total_bytes
+                - shared_additional
                 - sum(item.estimate.unified_peak_bytes for item in held),
             ),
         )
