@@ -36,6 +36,13 @@ class Manager:
         self.fail_close = False
         self.ignore_cancel = False
         self.lock = threading.Lock()
+        self.cached: tuple[tuple[DemucsWheel, DemucsDevice], ...] = ()
+        self.discovery_calls = 0
+
+    def cached_lanes(self) -> tuple[tuple[DemucsWheel, DemucsDevice], ...]:
+        """Return controlled fixed-inventory hints, without claiming verification."""
+        self.discovery_calls += 1
+        return self.cached
 
     def prepare(
         self, wheel: DemucsWheel, *, device: DemucsDevice, offline: bool,
@@ -117,6 +124,109 @@ async def test_prepare_runs_off_loop_with_worker_policy_and_finite_budget(tmp_pa
     assert controller.engine_builds() == {"demucs-cpu": DEMUCS_PACKAGES[0].build_identity}
     await controller.close()
     assert controller.engine_builds() == {} and manager.active == 0
+
+
+async def test_cached_recovery_is_single_owned_offline_verification(tmp_path: Path) -> None:
+    """An online worker rechecks cached libraries once without authorizing downloads."""
+    manager = Manager(tmp_path)
+    manager.cached = ((DEMUCS_PACKAGES[0], "cpu"),)
+    controller = DemucsPreparationController(manager, offline=False)
+    restoring = asyncio.create_task(controller.restore_cached())
+    await entered(manager)
+    assert not restoring.done() and controller.engine_builds() == {}
+    assert manager.calls[0][1] is True and 0 < manager.calls[0][2] <= 120
+    second = asyncio.create_task(controller.restore_cached())
+    manager.release.set()
+    await asyncio.gather(restoring, second)
+    await controller.restore_cached()
+    assert manager.discovery_calls == 1 and len(manager.calls) == 1
+    assert controller.engine_builds()
+    await controller.close()
+
+
+async def test_empty_cached_recovery_has_no_install_effect(tmp_path: Path) -> None:
+    """A first installation must remain engine-free after normal worker startup."""
+    manager = Manager(tmp_path)
+    controller = DemucsPreparationController(manager, offline=False)
+    await controller.restore_cached()
+    assert manager.discovery_calls == 1 and not manager.calls
+    assert controller.engine_builds() == {}
+    await controller.close()
+
+
+async def test_shutdown_drains_running_cached_verification(tmp_path: Path) -> None:
+    """Shutdown cancels and joins the startup owner before closing its native cache."""
+    manager = Manager(tmp_path)
+    manager.cached = ((DEMUCS_PACKAGES[0], "cpu"),)
+    controller = DemucsPreparationController(manager, offline=False)
+    restoring = asyncio.create_task(controller.restore_cached())
+    await entered(manager)
+    await controller.close()
+    with pytest.raises(asyncio.CancelledError):
+        await restoring
+    assert manager.stopped.is_set() and manager.active == 0 and manager.closed == 1
+    assert controller.engine_builds() == {}
+
+
+async def test_shutdown_joins_blocked_cache_discovery_before_return(tmp_path: Path) -> None:
+    """The initial filesystem read remains owned even before native work is admitted."""
+    reading, release = threading.Event(), threading.Event()
+
+    class DiscoveryManager(Manager):
+        """Expose an actual off-loop discovery read held across controller shutdown."""
+
+        def cached_lanes(self) -> tuple[tuple[DemucsWheel, DemucsDevice], ...]:
+            """Block briefly, then return one hint that shutdown must never prepare."""
+            reading.set()
+            assert release.wait(3)
+            return ((DEMUCS_PACKAGES[0], "cpu"),)
+
+    manager = DiscoveryManager(tmp_path)
+    controller = DemucsPreparationController(manager, offline=False)
+    restoring = asyncio.create_task(controller.restore_cached())
+    async with asyncio.timeout(2):
+        while not reading.is_set():
+            await asyncio.sleep(0.005)
+    closing = asyncio.create_task(controller.close())
+    try:
+        await asyncio.sleep(0.02)
+        assert not closing.done() and manager.closed == 0
+    finally:
+        release.set()
+    await closing
+    with pytest.raises(asyncio.CancelledError):
+        await restoring
+    assert not manager.calls and manager.closed == 1
+
+
+async def test_failed_metal_recheck_does_not_withdraw_final_cpu_fallback(tmp_path: Path) -> None:
+    """Shared archives verify accelerators before the last independent CPU probe."""
+    from skulk.provisioning.tests.test_demucs_manager import (
+        ControlledCache,
+        manager,
+        wheel,
+    )
+
+    root = tmp_path / "cache"
+    archive = root / wheel().sha256 / "objects" / wheel().filename
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"hint only; injected cache supplies verification")
+    cache = ControlledCache(root)
+
+    def reject_metal() -> None:
+        if cache.calls[-1][1] == "mps":
+            raise RuntimeError("injected unavailable Metal device")
+
+    cache.after_probe = reject_metal
+    owner = manager(root, cache)
+    controller = DemucsPreparationController(owner, offline=False)
+    try:
+        await controller.restore_cached()
+        assert [call[1] for call in cache.calls] == ["mps", "cpu"]
+        assert all(call[2] for call in cache.calls)
+        assert controller.engine_builds() == {"demucs-cpu": wheel().build_identity}
+    finally:
+        await controller.close()
 
 
 @pytest.mark.parametrize("expired", [False, True])

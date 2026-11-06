@@ -3042,6 +3042,25 @@ observations grant no capacity or allocation credit. Cold/expired repairs
 return actionable preparation-pending diagnostics. Signed distribution and
 installed platform/music acceptance remain separate gates.
 
+Cold Worker startup now owns a bounded cached-only native engine recheck, before
+ordinary restart placement can consume freshly verified library resources.
+`NativeRuntimeManager.cached_lanes` reads exact eligible fixed-inventory archive
+paths only; no hint or completion receipt is readiness. The existing controller
+revalidates original bytes and actual device offline, even on online nodes, with
+one 120-second attempt per engine. No cached archive means no engine install or
+download. Failures remain diagnostic/unready and do not stop the node. Shared
+CPU/Metal archives probe CPU last so a failed accelerator cannot withdraw the
+final CPU fallback. Resource publication follows verification; placement, actual
+model readiness and memory admission stay independent. Shutdown joins discovery
+and native work before cache close. Cover cold-cache restoration, corrupt/offline
+refusal, empty installations, shared-lane failures and cancellation/drain in tests.
+
+The pinned ACE service writes `.cache/acestep/progress_estimates.json` inside its
+private loader. Recovery permits only that exact timing file, at most1MiB and
+counted within the existing256MiB combined cache budget. Unknown sibling data
+still refuses cleanup before any deletion; live kernel fences, directory inode
+checks and separate retained audio/result receipts remain required.
+
 ## Exact fixed-inventory publication
 
 `demucs-native-boundary.yml` keeps its ordinary `verify-current` path and adds

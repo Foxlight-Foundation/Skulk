@@ -1549,6 +1549,18 @@ class Worker:
             }
         )
 
+    async def _restore_cached_native_runtimes(self) -> None:
+        """Recheck retained libraries off-loop before restart placement can use them.
+
+        A clean installation remains download-free. Each engine owns one bounded
+        cached-only attempt and publishes only its newly verified observations;
+        ordinary placement and actual model loading still provide later gates.
+        """
+        await self._ace_step_preparation.restore_cached()
+        await self._publish_fresh_node_resources()
+        await self._demucs_preparation.restore_cached()
+        await self._publish_fresh_node_resources()
+
     async def _prepare_ace_step_engine(self, request: AceStepPreparationRequested) -> None:
         """Verify fixed native libraries off-loop and publish their ordered barrier."""
         resources: NodeResources | None = None
@@ -2029,6 +2041,7 @@ class Worker:
             async with self._tg as tg:
                 tg.start_soon(info_gatherer.run)
                 tg.start_soon(self._forward_info, info_recv)
+                tg.start_soon(self._restore_cached_native_runtimes)
                 tg.start_soon(self.plan_step)
                 tg.start_soon(self._event_applier)
                 tg.start_soon(self._poll_connection_updates)

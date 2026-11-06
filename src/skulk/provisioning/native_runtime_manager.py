@@ -8,6 +8,7 @@ there is no dynamic plugin entry point or user-supplied native option.
 from __future__ import annotations
 
 import math
+import stat
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -104,6 +105,33 @@ class NativeRuntimeManager[
         self._cache: RuntimeCache[Package, Device, Prepared] | None = None
         self._cache_closed = False
         self._prepared: dict[Device, Prepared] = {}
+
+    def cached_lanes(self) -> tuple[tuple[Package, Device], ...]:
+        """Read bounded fixed-inventory cache hints without preparing or publishing.
+
+        Only retained original archives for this host's eligible pins are hints.
+        No directory scan, download, install or receipt trust occurs here. A
+        caller must still run full offline byte/device verification. Shared
+        CPU/Metal archives put CPU last so a failed accelerator recheck cannot
+        withdraw the final working CPU observation of that same package.
+        """
+        if self._stopped.is_set():
+            return ()
+        candidates: list[tuple[Package, Device]] = []
+        for package in self._packages.values():
+            if package.platform_tag not in self._platforms:
+                continue
+            archive = self.root / package.sha256 / "objects" / package.filename
+            try:
+                retained = stat.S_ISREG(archive.lstat().st_mode)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if retained:
+                candidates.extend(
+                    (package, device) for device in self._backend_for_device
+                    if self._eligible(package, device)
+                )
+        return tuple(sorted(candidates, key=lambda item: item[1] == "cpu"))
 
     def engine_builds(self) -> dict[str, str]:
         """Snapshot verified libraries only; candidates and loaded models differ."""

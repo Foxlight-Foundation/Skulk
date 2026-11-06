@@ -3044,6 +3044,20 @@ the original indexed owner, including companions reached through a cached base.
   derive native build IDs and probes from one locked snapshot and preserve
   other engines. Package inventory alone is never a ready backend. Shutdown
   drains both native audio preparation owners.
+- Worker `_restore_cached_native_runtimes` runs once in its owned task group.
+  `NativePreparationController.restore_cached` owns one bounded 120-second
+  attempt per engine, joins discovery/preparation on cancellation and forces
+  offline verification even when the Worker is online. Manager `cached_lanes`
+  reads only eligible fixed-inventory original archive paths; hints never
+  publish readiness or authorize downloads. Shared CPU/Metal archives probe CPU
+  last. Fresh resources are published after each engine recheck for ordinary
+  restart placement; bad/missing/incompatible/capacity-blocked cache stays
+  unready with diagnostics. Empty base installations remain engine-free.
+- `ace_step/workspace.py` permits only the pinned timing-cache path
+  `.cache/acestep/progress_estimates.json` (1 MiB cap, counted in the shared
+  256 MiB loader cache bound). Unknown sibling files/directories still refuse
+  the whole cleanup before deletion; inherited fences, private inode checks
+  and independent retained-result custody are unchanged.
 - Native platform filtering and actual API/Worker/Master activation are
   connected on this initiative. Signed distribution and installed platform/
   music acceptance remain distinct requirements.

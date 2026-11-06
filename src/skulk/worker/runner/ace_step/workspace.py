@@ -36,6 +36,11 @@ _ROLE_ROOTS = {
     "autoencoder": "vae",
 }
 _CACHE_ROOTS = frozenset({"hf", "modules", "torch-cache"})
+# The pinned ACE service also writes its local timing estimates under cwd.
+# Recognize only that exact file, not arbitrary user data under .cache.
+_PROGRESS_CACHE_DIRECTORIES = frozenset({".cache", ".cache/acestep"})
+_PROGRESS_CACHE_FILE = ".cache/acestep/progress_estimates.json"
+_MAX_PROGRESS_CACHE_BYTES = 1024**2
 _CHECKPOINT_DIRECTORIES = frozenset(
     {"checkpoints"} | {"checkpoints/" + name for name in _ROLE_ROOTS.values()}
 )
@@ -186,7 +191,11 @@ def _clear_loader(root: int, files: tuple[_LoaderFile, ...]) -> None:
                 info = child.stat(follow_symlinks=False)
                 if stat.S_ISDIR(info.st_mode):
                     _identity(info)
-                    if path not in _CHECKPOINT_DIRECTORIES and top not in _CACHE_ROOTS:
+                    if (
+                        path not in _CHECKPOINT_DIRECTORIES
+                        and path not in _PROGRESS_CACHE_DIRECTORIES
+                        and top not in _CACHE_ROOTS
+                    ):
                         raise ValueError("native music loader has an unknown directory")
                     nested = os.open(
                         child.name,
@@ -212,9 +221,13 @@ def _clear_loader(root: int, files: tuple[_LoaderFile, ...]) -> None:
                     raise ValueError(
                         "native music loader contains a foreign file or link"
                     )
-                if top in _CACHE_ROOTS and "/" in path:
+                if (top in _CACHE_ROOTS and "/" in path) or path == _PROGRESS_CACHE_FILE:
                     cache_bytes += info.st_size
-                    if cache_bytes > MAX_MUSIC_LOADER_CACHE_BYTES:
+                    if (
+                        cache_bytes > MAX_MUSIC_LOADER_CACHE_BYTES
+                        or path == _PROGRESS_CACHE_FILE
+                        and info.st_size > _MAX_PROGRESS_CACHE_BYTES
+                    ):
                         raise ValueError(
                             "native music loader cache exceeds its byte budget"
                         )

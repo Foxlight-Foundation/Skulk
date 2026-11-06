@@ -4468,6 +4468,25 @@ probes from one locked observation snapshot. Merely installable CPU/Metal,
 CUDA or ROCm packages never become ready backends. Failure leaves unrelated
 engines intact, and shutdown drains both native preparation controllers.
 
+At Worker startup, one owned background task rechecks retained ACE and Demucs
+libraries so ordinary restart restoration can see freshly verified backends.
+Each engine has a 120-second total budget. Discovery reads only exact eligible
+fixed-inventory archive paths; it neither scans arbitrary installations nor
+trusts completion receipts. Full byte and actual-device verification always runs
+offline, including on online nodes. A clean base installation therefore remains
+engine-free. Missing, corrupt, incompatible or capacity-blocked caches produce
+diagnostics and remain unready; startup never downloads an engine to repair them.
+CPU is rechecked after Metal when they share one archive, so a failed Metal probe
+cannot withdraw the final CPU fallback. Resource publication follows verification;
+ordinary placement, model loading and native memory admission remain required.
+Shutdown joins cache discovery and native work before releasing their owners.
+
+Native loader recovery recognizes the pinned service's exact timing-cache file
+`.cache/acestep/progress_estimates.json`, with a 1 MiB file cap inside the existing
+256 MiB combined cache allowance. Other `.cache` contents remain unknown and
+block cleanup before deletion. Inherited reader/service locks and inode checks
+still protect live loaders; request results and their receipts remain separate.
+
 `AceStepMountPreparer` connects the public ordinary/exact mount routes to this
 ordered barrier. Genuine OS/CPU and generic device requirements choose fixed
 package candidates. Installability never counts as readiness. Four requests may
