@@ -2833,6 +2833,10 @@ the original indexed owner, including companions reached through a cached base.
 - `provisioning/demucs_package.py`: shared verification/bootstrap for exactly the
   built-in Demucs and ACE layouts. Source repository, namespace and metadata root
   must agree; the existing Demucs cache also enforces its own family ownership.
+- Native install guardians and resident Demucs/ACE process environments enforce
+  `PYTHONDONTWRITEBYTECODE=1` in addition to the explicit interpreter's `-I -B`.
+  Console helpers that re-exec plain Python inherit bytecode suppression; sealed
+  interpreter/import verification continues rejecting modified or injected files.
 - `shared/types/native_music.py`: canonical strict private request/component/
   precision/result/control contracts; copied into the native package as bytes.
   Frames are bounded to 256 KiB and carry no audio or public local-file choices.

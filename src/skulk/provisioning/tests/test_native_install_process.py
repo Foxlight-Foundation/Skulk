@@ -102,6 +102,38 @@ def test_capture_and_diagnostics_survive_serial_commands(tmp_path: Path) -> None
     assert all(path.stat().st_mode & 0o077 == 0 for path in records)
 
 
+def test_plain_python_descendant_cannot_rewrite_the_verified_tree(
+    tmp_path: Path,
+) -> None:
+    """A console helper's second interpreter inherits no-bytecode policy.
+
+    The explicit interpreter already uses -B. A plain child must also avoid
+    writing import caches, including when the caller supplied a conflicting
+    environment value. Otherwise library probes invalidate their own cache.
+    """
+    module = tmp_path / "native_helper_fixture.py"
+    module.write_text("observation = 42\n")
+    child = (
+        f"import sys; sys.path.insert(0, {str(tmp_path)!r}); "
+        "import native_helper_fixture; print(native_helper_fixture.observation)"
+    )
+    parent = (
+        "import subprocess,sys; "
+        f"subprocess.run([sys.executable, '-c', {child!r}], check=True)"
+    )
+    runner = NativeInstallCommandRunner(tmp_path / "logs", checkpoint=_checkpoint)
+    assert (
+        runner(
+            [sys.executable, "-I", "-B", "-c", parent],
+            environment=_environment() | {"PYTHONDONTWRITEBYTECODE": "0"},
+            timeout_seconds=10,
+            capture=True,
+        )
+        == "42\n"
+    )
+    assert not (tmp_path / "__pycache__").exists()
+
+
 def test_frozen_controller_never_reexecutes_its_app_launcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

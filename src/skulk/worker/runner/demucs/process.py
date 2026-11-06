@@ -50,6 +50,9 @@ def separation_environment(threads: int) -> dict[str, str]:
         {
             "HF_HUB_OFFLINE": "1",
             "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+            # Console helpers may start their own Python without our -B flag.
+            # Their bytecode must not modify the verified native runtime either.
+            "PYTHONDONTWRITEBYTECODE": "1",
             "PYTORCH_ENABLE_MPS_FALLBACK": "0",
             "OMP_NUM_THREADS": str(threads),
             "MKL_NUM_THREADS": str(threads),
