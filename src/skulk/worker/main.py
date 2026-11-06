@@ -24,6 +24,7 @@ from anyio import (
     fail_after,
     to_thread,
 )
+from anyio.lowlevel import checkpoint, checkpoint_if_cancelled
 from loguru import logger
 from packaging.tags import platform_tags
 from PIL import Image
@@ -1359,6 +1360,11 @@ class Worker:
         # that the already-snapshotted eviction pass still considers idle.
         self._staging_runner_transition_lock = anyio.Lock()
         self._tg: TaskGroup = TaskGroup()
+        # Elections can retire a queued worker or interrupt off-loop startup
+        # before its task group exists. Own cancellation for the entire run,
+        # then join cleanup before the replacement worker can take over.
+        self._run_scope: anyio.CancelScope | None = None
+        self._shutdown_requested = False
 
         self._system_id = SystemId()
 
@@ -1996,80 +2002,21 @@ class Worker:
             return ()
         return tuple(self._telemetry_view.local_capability_nodes.values())
 
-    async def run(self):
-        logger.info("Starting Worker")
-        self._reconcile_staging_on_startup()
-        # A vLLM engine core orphaned by an abrupt previous shutdown holds
-        # its GPU allocation invisibly and blocks placement admission until
-        # someone kills it (#653); reap exactly that shape before this
-        # incarnation starts advertising capacity. No-op off Linux.
-        sweep_orphaned_vllm_engines()
-        # Same shape for the video engine: a ComfyUI server whose runner died
-        # keeps the diffusion weights resident on the GPU.
-        sweep_orphaned_comfy_servers()
-        # Planning reads which advertised engines still install on demand; the
-        # facts snapshot was gathered at startup, so this is a cached read.
-        from skulk.facts import current_backend_derivation
+    async def run(self) -> None:
+        """Run startup and worker tasks until cancellation, then join owned cleanup.
 
-        self._on_demand_backends = (
-            await to_thread.run_sync(current_backend_derivation)
-        ).on_demand_backends
-
-        info_send, info_recv = channel[GatheredInfo]()
-        info_gatherer: InfoGatherer = InfoGatherer(
-            info_send,
-            api_available=self._api_available,
-            data_transport=self._data_transport,
-            node_resources_provider=self._gather_node_resources,
-            # Fabric-citizenship: the gatherer publishes whatever the API-side
-            # extension surface has advertised on the shared TelemetryView. The
-            # provider snapshots the outbound set each poll (empty -> nothing
-            # published), so a plugin advertising a capability rides the same
-            # telemetry emit path as native node readings.
-            capabilities_provider=self._local_capabilities_provider,
-            capability_nodes_provider=self._local_capability_nodes_provider,
-            # The API sets this on the shared view when this node holds the
-            # phone-pairing relay route.
-            pairing_gateway_provider=self._local_pairing_gateway_provider,
-            zenoh_peer_sampler=self._zenoh_peer_sampler,
-        )
-
+        A shutdown requested before this coroutine starts prevents startup work.
+        Off-loop startup effects and native owners drain before shutdown returns.
+        """
         try:
-            # Reference files and unacknowledged containers from a previous
-            # process have no tracking record; nothing can ever release them.
-            _purge_stale_video_directories()
-            await _provision_test_video_engine()
-            async with self._tg as tg:
-                tg.start_soon(info_gatherer.run)
-                tg.start_soon(self._forward_info, info_recv)
-                tg.start_soon(self._restore_cached_native_runtimes)
-                tg.start_soon(self.plan_step)
-                tg.start_soon(self._event_applier)
-                tg.start_soon(self._poll_connection_updates)
-                if self._connection_message_receiver is not None:
-                    tg.start_soon(self._session_edge_ingress)
-                if self._realtime_audio_receiver is not None:
-                    tg.start_soon(self._realtime_audio_ingress)
-                if self._realtime_audio_packet_receiver is not None:
-                    tg.start_soon(self._realtime_audio_packet_ingress)
-                if self._speech_media_packet_receiver is not None:
-                    tg.start_soon(self._speech_media_packet_ingress)
-                    tg.start_soon(self._speech_media_janitor)
-                if self._vision_media_packet_receiver is not None:
-                    tg.start_soon(self._vision_media_packet_ingress)
-                    tg.start_soon(self._vision_media_janitor)
-                    tg.start_soon(self._reference_media_janitor)
-                    tg.start_soon(self._separation_janitor)
-                    tg.start_soon(self._native_music_janitor)
-                if self._output_media_packet_receiver is not None:
-                    tg.start_soon(self._output_media_packet_ingress)
-                    tg.start_soon(self._output_media_janitor)
-                if (
-                    self._realtime_audio_receiver is not None
-                    or self._realtime_audio_packet_receiver is not None
-                ):
-                    tg.start_soon(self._realtime_audio_janitor)
+            with anyio.CancelScope() as run_scope:
+                self._run_scope = run_scope
+                if self._shutdown_requested:
+                    run_scope.cancel()
+                await checkpoint()
+                await self._run_tasks()
         finally:
+            self._run_scope = None
             # Actual shutdown code - waits for all tasks to complete before executing.
             logger.info("Stopping Worker")
             try:
@@ -2091,6 +2038,84 @@ class Worker:
                 for runner in self.runners.values():
                     runner.shutdown()
                 self._stopped.set()
+
+
+    async def _run_tasks(self) -> None:
+        """Prepare runtime resources and start the worker's supervised task group."""
+        logger.info("Starting Worker")
+        self._reconcile_staging_on_startup()
+        # A vLLM engine core orphaned by an abrupt previous shutdown holds
+        # its GPU allocation invisibly and blocks placement admission until
+        # someone kills it (#653); reap exactly that shape before this
+        # incarnation starts advertising capacity. No-op off Linux.
+        sweep_orphaned_vllm_engines()
+        # Same shape for the video engine: a ComfyUI server whose runner died
+        # keeps the diffusion weights resident on the GPU.
+        sweep_orphaned_comfy_servers()
+        # Planning reads which advertised engines still install on demand; the
+        # facts snapshot was gathered at startup, so this is a cached read.
+        from skulk.facts import current_backend_derivation
+
+        self._on_demand_backends = (
+            await to_thread.run_sync(current_backend_derivation)
+        ).on_demand_backends
+        await checkpoint_if_cancelled()
+
+        info_send, info_recv = channel[GatheredInfo]()
+        info_gatherer: InfoGatherer = InfoGatherer(
+            info_send,
+            api_available=self._api_available,
+            data_transport=self._data_transport,
+            node_resources_provider=self._gather_node_resources,
+            # Fabric-citizenship: the gatherer publishes whatever the API-side
+            # extension surface has advertised on the shared TelemetryView. The
+            # provider snapshots the outbound set each poll (empty -> nothing
+            # published), so a plugin advertising a capability rides the same
+            # telemetry emit path as native node readings.
+            capabilities_provider=self._local_capabilities_provider,
+            capability_nodes_provider=self._local_capability_nodes_provider,
+            # The API sets this on the shared view when this node holds the
+            # phone-pairing relay route.
+            pairing_gateway_provider=self._local_pairing_gateway_provider,
+            zenoh_peer_sampler=self._zenoh_peer_sampler,
+        )
+
+        # Reference files and unacknowledged containers from a previous
+        # process have no tracking record; nothing can ever release them.
+        _purge_stale_video_directories()
+        await _provision_test_video_engine()
+        await checkpoint_if_cancelled()
+        async with self._tg as tg:
+            tg.start_soon(info_gatherer.run)
+            tg.start_soon(self._forward_info, info_recv)
+            tg.start_soon(self._restore_cached_native_runtimes)
+            tg.start_soon(self.plan_step)
+            tg.start_soon(self._event_applier)
+            tg.start_soon(self._poll_connection_updates)
+            if self._connection_message_receiver is not None:
+                tg.start_soon(self._session_edge_ingress)
+            if self._realtime_audio_receiver is not None:
+                tg.start_soon(self._realtime_audio_ingress)
+            if self._realtime_audio_packet_receiver is not None:
+                tg.start_soon(self._realtime_audio_packet_ingress)
+            if self._speech_media_packet_receiver is not None:
+                tg.start_soon(self._speech_media_packet_ingress)
+                tg.start_soon(self._speech_media_janitor)
+            if self._vision_media_packet_receiver is not None:
+                tg.start_soon(self._vision_media_packet_ingress)
+                tg.start_soon(self._vision_media_janitor)
+                tg.start_soon(self._reference_media_janitor)
+                tg.start_soon(self._separation_janitor)
+                tg.start_soon(self._native_music_janitor)
+            if self._output_media_packet_receiver is not None:
+                tg.start_soon(self._output_media_packet_ingress)
+                tg.start_soon(self._output_media_janitor)
+            if (
+                self._realtime_audio_receiver is not None
+                or self._realtime_audio_packet_receiver is not None
+            ):
+                tg.start_soon(self._realtime_audio_janitor)
+
 
     async def _realtime_audio_ingress(self) -> None:
         """Route bounded non-event PCM frames to the selected local runner."""
@@ -4969,9 +4994,17 @@ class Worker:
                 context.source_fence.close()
             self._demucs_creations.pop(task.instance_id, None)
 
-    async def shutdown(self):
-        self._tg.cancel_tasks()
+    async def shutdown(self) -> None:
+        """Request retirement and wait for startup, tasks and owned cleanup to drain.
+
+        Safe before a scheduled run starts, during off-loop initialization and
+        after an earlier shutdown. No replacement may outlive this join boundary.
+        """
+        self._shutdown_requested = True
+        if self._run_scope is not None:
+            self._run_scope.cancel()
         await self._stopped.wait()
+
 
     async def _start_runner_task(self, task: Task):
         if (instance := self.state.instances.get(task.instance_id)) is not None:

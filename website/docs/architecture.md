@@ -168,6 +168,13 @@ has heard from, could never reap.
 
 ## Lifecycle of a request
 
+Worker replacement during an election joins the retiring worker's entire run,
+including startup before its task group exists. A pending retirement prevents a
+queued worker from starting; an in-flight startup read drains before cancellation
+finishes. Native owners and child tasks are cleaned up before the replacement
+can take over, so a fast cached startup cannot crash the node by cancelling an
+unstarted task group.
+
 This is the path a chat completion takes from HTTP through to SSE response:
 
 ```mermaid
