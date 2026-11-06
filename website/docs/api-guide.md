@@ -2463,6 +2463,9 @@ transport or acknowledgement deadline fails the job, including when every WAV
 has already verified; it cannot silently report completion.
 Repeated completion packets also require manifest verification; arrival of the
 manifest rechecks settlement after any previously admitted acknowledgements.
+The manifest's JSON `stems` array contains `drums`, `bass`, `other`, and `vocals`
+exactly once in that order. The same complete-set, strict field and WAV geometry
+checks apply when the worker and accepting API run on different nodes.
 The native task remains owned until every stem acknowledgement drains. Render
 metadata alone cannot retire the worker's result producer. Failure or cancellation
 submits task cancellation before finalizing its metadata stream.

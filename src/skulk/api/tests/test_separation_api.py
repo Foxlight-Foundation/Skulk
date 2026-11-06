@@ -35,11 +35,11 @@ from skulk.routing.output_media import (
     output_media_for_worker,
 )
 from skulk.routing.router import OutboundPacket, TopicRouter
-from skulk.routing.topics import OUTPUT_MEDIA
+from skulk.routing.topics import DATA, OUTPUT_MEDIA
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.types.audio_separation import MAX_SEPARATION_SOURCE_BYTES
-from skulk.shared.types.chunks import ErrorChunk, SeparationChunk
+from skulk.shared.types.chunks import DataChunk, ErrorChunk, SeparationChunk
 from skulk.shared.types.commands import AudioSeparation as SeparationCommand
 from skulk.shared.types.commands import Command, TaskCancelled
 from skulk.shared.types.common import CommandId, NodeId, SystemId
@@ -62,6 +62,20 @@ def json_object(value: object) -> dict[str, object]:
     candidate = cast(dict[object, object], value)
     assert all(isinstance(key, str) for key in candidate)
     return cast(dict[str, object], candidate)
+
+
+def wire_manifest(task: AudioSeparation, chunk: SeparationChunk) -> SeparationChunk:
+    """Decode actual addressed DATA metadata before it reaches the API queue."""
+    frame = DataChunk(
+        command_id=task.command_id,
+        owner_node=task.owner_node,
+        kind="completed",
+        sequence=1,
+        chunk=chunk,
+    )
+    restored = DATA.deserialize(DATA.serialize(frame))
+    assert isinstance(restored.chunk, SeparationChunk)
+    return restored.chunk
 
 
 @dataclass
@@ -169,13 +183,15 @@ class Harness:
             NodeId("node-0"), self.api.receive_output, fail
         )
         self.producer.register(task, self.root / "native", output)
-        await self.queues[identifier].send(
+        terminal = wire_manifest(
+            task,
             SeparationChunk(
                 model=ModelId(task.task_params.model),
                 finish_reason="stop",
                 output=output,
-            )
+            ),
         )
+        await self.queues[identifier].send(terminal)
         await self.producer.deliver(identifier)
         return task
 
@@ -437,8 +453,11 @@ async def test_replayed_completion_requires_verified_manifest_and_settles(
         )
         producer.register(task, tmp_path / "native", output)
         harness.producer = producer
-        manifest = SeparationChunk(
-            model=ModelId(task.task_params.model), finish_reason="stop", output=output
+        manifest = wire_manifest(
+            task,
+            SeparationChunk(
+                model=ModelId(task.task_params.model), finish_reason="stop", output=output
+            ),
         )
         if metadata_first:
             await harness.queues[identifier].send(manifest)
@@ -524,7 +543,7 @@ async def test_same_node_four_stem_rendezvous_routes_reverse_acknowledgments(
                     NodeId("node-0"), router.new_sender().send, fail, timeout_seconds=5
                 )
                 harness.producer.register(task, tmp_path / "native", output)
-                chunk = SeparationChunk(model=ModelId(task.task_params.model), finish_reason="stop", output=output)
+                chunk = wire_manifest(task, SeparationChunk(model=ModelId(task.task_params.model), finish_reason="stop", output=output))
                 if metadata_first:
                     await harness.queues[identifier].send(chunk)
                 sending = asyncio.create_task(harness.producer.deliver(identifier))
