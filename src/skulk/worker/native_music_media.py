@@ -261,7 +261,13 @@ class NativeMusicMediaOwner:
                 TaskStatus.Pending,
                 TaskStatus.Running,
             )
-            if terminal and (live is None or live.task_status != TaskStatus.Complete):
+            # Terminal DATA lets the API retire execution before the WAV sender
+            # finishes. A registered result has independent bounded ACK custody;
+            # ordinary task removal must not cancel that valid transfer.
+            if terminal and (
+                (live is None and command not in self._rendered)
+                or (live is not None and live.task_status != TaskStatus.Complete)
+            ):
                 self.outputs.cancel(command)
             if not terminal or self.outputs.pending(command):
                 continue

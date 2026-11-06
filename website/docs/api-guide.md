@@ -2275,6 +2275,10 @@ its expiration.
 If the ordered task terminates but its final music frame is lost, the API
 fails the job after a 45-second grace and the next 15-second sweep; it does
 not retain an active job indefinitely.
+For native ACE generation, execution-task cleanup after the terminal report
+does not cancel a registered WAV that is still being verified and delivered.
+The job remains in progress until both completion conditions hold; explicit
+cancellation or delivery failure still ends it without partial downloadable audio.
 
 ### Download music
 
@@ -2310,6 +2314,9 @@ for polling, cancellation and content. The existing API authentication policy
 applies; operator gateway access requires the inference (`chat:write`) scope.
 Raw source/result audio uses directed media transport and stays outside
 replicated State and event logs.
+After a verified native result is registered, ordinary execution-task cleanup
+does not cancel its pending media delivery. Explicit cancellation, failure and
+the bounded delivery deadline still apply.
 
 ### Create an edit
 

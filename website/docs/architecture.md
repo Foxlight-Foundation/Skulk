@@ -4478,6 +4478,10 @@ The native result producer verifies complete PCM24 stereo 48 kHz WAVs, then send
 bounded `music` or `music_edit` frames. Reverse acknowledgements must match the
 owner, model, role and an emitted terminal. Even a synchronous same-node ACK
 cannot remove files before the sender returns. Failed cleanup keeps its slot.
+The API may retire execution after terminal DATA while addressed WAV delivery
+is still pending. Removing that completed task does not cancel a registered
+result's independent bounded media custody; explicit failure, cancellation and
+verified reverse control still do.
 This path preserves the existing audio.cpp, speech and separation contracts.
 
 `NativeMusicHostGuard` is the spawn-safe outer callback: immutable admitted

@@ -3049,6 +3049,9 @@ the original indexed owner, including companions reached through a cached base.
   `music_edit` frames, correlate exact reverse ACKs only after emitted terminals,
   and join the sender before ownership-checked reclamation. Failed cleanup keeps
   its reservation. Native completion, media custody and task state are separate.
+  Once a valid result is registered, ordinary execution-task removal after
+  terminal DATA cannot cancel its bounded delivery. Explicit failure/cancellation
+  and correlated reverse control still abort it; ACK and sender join precede cleanup.
   Existing audio.cpp output, speech and separation paths retain their contracts.
 - `ace_step/resources.py::NativeMusicHostGuard`: immutable, picklable outer
   process callback; checks its actual child, current host capacity/pressure and
