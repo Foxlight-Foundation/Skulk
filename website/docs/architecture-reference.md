@@ -3125,6 +3125,10 @@ the original indexed owner, including companions reached through a cached base.
   normal DownloadModel/LoadModel. Failure/cancellation closes untransferred
   custody. Indexed owner removal or snapshot replacement cancels its preparation
   request. Source integration does not establish distribution or qualification.
+  Worker LoadModel preflight resolves the exact recorded native primary off-loop
+  through the same resolver as deferred binding, including indexed installed
+  generations without generic aliases. Missing/stale primaries refuse dispatch;
+  the deferred model still verifies every selected source before native loading.
 - Resident `_read_output` forwards validated native memory frames through
   `record_native_music_memory` and bounded non-blocking diagnostic IPC.
   Supervisor ownership/context/payload/device/native/local freshness and process

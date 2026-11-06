@@ -33,6 +33,7 @@ from skulk.download.download_utils import (
     build_model_path,
     companion_download_specs,
     installed_artifact_in_path,
+    resolve_native_music_source_directory,
 )
 from skulk.provisioning.ace_step_inventory import (
     ACE_STEP_PACKAGES,
@@ -4984,6 +4985,32 @@ class Worker:
                         self.state,
                     )
                     if (
+                        shard.model_card.music is not None
+                        and shard.model_card.music.native is not None
+                    ):
+                        # Native data can live in a recorded installed generation
+                        # with no generic normalized-name alias. Preflight must
+                        # use the same exact primary selection as deferred load;
+                        # otherwise a complete cold cache fails before binding.
+                        native_card = shard.model_card
+                        revision = native_card.source_revision
+                        if revision is None:
+                            raise FileNotFoundError(
+                                "native music primary source has no pinned revision"
+                            )
+                        model_directory = await to_thread.run_sync(
+                            lambda: resolve_native_music_source_directory(
+                                native_card,
+                                str(native_card.artifact_repository),
+                                revision,
+                                require_card_identity=True,
+                            )
+                        )
+                        if model_directory is None:
+                            raise FileNotFoundError(
+                                "native music primary source is not installed"
+                            )
+                    elif (
                         shard.model_card.separation is not None
                         and self._staging_config is not None
                         and not self._staging_config.enabled
