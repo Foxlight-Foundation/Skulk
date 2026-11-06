@@ -96,12 +96,16 @@ async def test_startup_vote_loss_converges_without_reconnection(
     async def collect(name: str) -> None:
         with peers[name].results as received:
             async for result in received:
+                # Election updates its session before its result is consumed.
+                # Exercise that observation gap rather than relying on task order.
+                await anyio.sleep(0.01)
                 results[name].append(result)
 
     def settled() -> bool:
         return all(
             results[name]
             and results[name][-1].won_clock == peer.election.clock
+            and results[name][-1].session_id == peer.election.current_session
             and peer.election.clock >= 1
             for name, peer in peers.items()
         )
