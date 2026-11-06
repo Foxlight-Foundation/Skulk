@@ -371,6 +371,12 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Worker
 
+- `run()` owns one cancellation scope across startup and supervised tasks.
+  `shutdown()` records retirement even before the scheduled coroutine enters,
+  cancels that scope when available, and joins `_stopped` after shielded native
+  cleanup. Off-loop startup reads drain before retirement returns; a cancelled
+  startup cannot later advertise capacity or start a replacement task group.
+
 - **Role:** receives indexed events, applies them locally, downloads model weights, spawns + supervises runner subprocesses, dispatches tasks
 - **Lives in:** `src/skulk/worker/main.py`; planning at `src/skulk/worker/plan.py`
 - **Owns:** local view of `State` (derived); per-model `RunnerSupervisor` instances
