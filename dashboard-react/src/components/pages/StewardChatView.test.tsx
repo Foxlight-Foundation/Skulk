@@ -1,3 +1,4 @@
+import { flushChatStorage } from '../../store/chatCoordination';
 // Copyright 2026 Foxlight Foundation
 
 import { act } from 'react';
@@ -547,7 +548,8 @@ it('saves drawer messages without selecting another chat and restores them after
   const id = store.getState().chat.modelToConversationId['skulk/steward'];
   expect(store.getState().chat.activeConversationId).toBe(ordinary);
   expect(store.getState().chat.conversations[id].messages).toHaveLength(2);
-  expect(JSON.parse(localStorage.getItem('skulk-chat')!).state.conversations[id].messages).toHaveLength(2);
+  await act(async () => { await flushChatStorage(); });
+  expect(JSON.parse(localStorage.getItem('skulk-chat-v2')!).state.conversations[id].messages).toHaveLength(2);
   await act(async () => root?.unmount());
   container?.remove();
   await renderPage();

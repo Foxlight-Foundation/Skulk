@@ -1,3 +1,4 @@
+import { flushChatStorage } from '../../store/chatCoordination';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
@@ -62,9 +63,11 @@ afterEach(async () => {
   await act(async () => { root?.unmount(); });
   root = null;
   container?.remove(); container = null;
+  for (const id of Object.keys(store.getState().chat.conversations)) await navigator.locks.request('skulk-chat-conversation-v2:' + id, () => {});
   const ids = chatDocumentIds(store.getState().chat.conversations);
   Object.keys(store.getState().chat.conversations).forEach(id => store.dispatch(chatActions.deleteConversation(id)));
   await removeChatDocuments(ids);
+  await act(async () => { await flushChatStorage().catch(() => {}); });
   vi.restoreAllMocks(); vi.unstubAllGlobals();
 });
 
@@ -108,13 +111,14 @@ describe('Chat document submission', () => {
     const fetch = vi.fn(async () => new Response('data: {"choices":[{"delta":{"content":"Saved"}}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } }));
     vi.stubGlobal('fetch', fetch);
     await renderChat();
-    const original = Storage.prototype.setItem;
-    const failure = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key, value) {
-      if (key === 'skulk-chat') throw new DOMException('Full', 'QuotaExceededError');
-      original.call(this, key, value);
+    const original = IDBObjectStore.prototype.put;
+    const failure = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+      if (this.name === 'snapshot') throw new DOMException('Full', 'QuotaExceededError');
+      return original.call(this, value, key!);
     });
     await select([new File(['JUNIPER'], 'notes.txt', { type: 'text/plain' })], 'Keep this document.');
     await waitFor(() => container!.textContent!.includes('Could not save conversation history'));
+    await waitFor(() => !container!.textContent!.includes('Preparing attachments…'));
     expect(fetch).not.toHaveBeenCalled();
     expect(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!.value).toBe('Keep this document.');
     expect(container!.querySelector('[title="notes.txt"]')).not.toBeNull();
@@ -123,7 +127,7 @@ describe('Chat document submission', () => {
     await waitFor(() => !container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.disabled);
     await act(async () => { await userEvent.click(container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!); });
     await waitFor(() => fetch.mock.calls.length === 1);
-    expect(window.localStorage.getItem('skulk-chat')).toContain('documentId');
+    expect(window.localStorage.getItem('skulk-chat-v2')).toContain('documentId');
   });
 
   it('keeps selected files visible when switching to an unsupported model and back', async () => {

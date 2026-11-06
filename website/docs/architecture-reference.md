@@ -30,6 +30,18 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   public tool/assistant turns separately from display trimming. Missing receipt,
   missing history or changed destination never triggers automatic replay/reset.
 
+  `store/chatCoordination.ts` owns browser Web Locks, changed-field CAS writes and
+  authoritative versioned IndexedDB `skulk-chat-history-v2` snapshots. The
+  `skulk-chat-v2` localStorage mirror is a bootstrap cache only; first migration
+  reads legacy history. Committed revisions fence stale asynchronous hydration. All ordinary
+  saves use the same merge boundary; a conversation writer spans preparation,
+  generation, tools and terminal storage. Independent conversations remain
+  concurrent; stale writes refuse without replacing saved history. Storage-event
+  hydration drains local intents before adopting committed state. Continuation
+  and document drafts clear only after preparation acknowledgment; canceled tool
+  rounds do not publish an unused nonce. Withdrawal retains reset/recovery UI.
+
+
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority

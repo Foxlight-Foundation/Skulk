@@ -1,7 +1,8 @@
 import { createSlice, nanoid, type PayloadAction } from '@reduxjs/toolkit';
 import { DEFAULT_CONVERSATION_NAME, type ChatMessage, type Conversation } from '../../types/chat';
-import { chatDocumentIds, pruneChatDocuments, removeChatDocuments } from '../chatDocuments';
+import { chatDocumentIds, removeChatDocuments } from '../chatDocuments';
 import type { ChatContinuation } from '../chatContinuation';
+import { chatStorageChanges, readChatStorage, readCommittedChatSnapshot, writeChatStorage, flushChatStorage, CHAT_STORAGE_KEY, ChatStorageUnavailable, hasUnsavedChatChanges, type ChatStorageObject } from '../chatCoordination';
 
 /* ── Helpers ──────────────────────────────────────────── */
 
@@ -42,11 +43,12 @@ function stripTransientFields(
 
 /* ── State ────────────────────────────────────────────── */
 
-const DURABLE_STORAGE_KEY = 'skulk-chat';
 const SESSION_STORAGE_KEY = 'skulk-chat-session';
 
 export interface ChatState {
   conversations: Record<string, Conversation>;
+  /** Visible persistence conflict/failure; no successful save is implied. */
+  persistenceError?: string;
   activeConversationId: string | null;
   selectedModelId: string | null;
   selectedTranscriptionModelId: string | null;
@@ -80,10 +82,7 @@ interface PersistedSession {
 function loadDurable(): PersistedDurable {
   if (typeof window === 'undefined') return {};
   try {
-    const raw = window.localStorage.getItem(DURABLE_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as { state?: PersistedDurable };
-    return parsed.state ?? {};
+    return readChatStorage() as PersistedDurable;
   } catch {
     return {};
   }
@@ -125,6 +124,24 @@ const slice = createSlice({
   name: 'chat',
   initialState: initialState(),
   reducers: {
+    /** Adopt committed browser data while retaining this tab's current selection. */
+    refreshDurable(state, action: PayloadAction<PersistedDurable>) {
+      const durable = action.payload;
+      const conversations = durable.conversations ?? {};
+      for (const id of Object.keys(state.conversations)) if (!conversations[id]) delete state.conversations[id];
+      for (const [id, conversation] of Object.entries(conversations)) {
+        if (JSON.stringify(stripTransientFields({ [id]: state.conversations[id] ?? conversation })[id]) !== JSON.stringify(conversation) || !state.conversations[id]) state.conversations[id] = conversation;
+      }
+      state.modelToConversationId = durable.modelToConversationId ?? {};
+      state.selectedVoice = durable.selectedVoice ?? null;
+      state.autoSpeakAssistant = durable.autoSpeakAssistant ?? false;
+      state.narrateCodeBlocks = durable.narrateCodeBlocks ?? true;
+      state.realtimeVoiceEnabled = durable.realtimeVoiceEnabled ?? true;
+      state.autoSubmitVoice = durable.autoSubmitVoice ?? false;
+      if (state.activeConversationId && !state.conversations[state.activeConversationId]) state.activeConversationId = null;
+    },
+    /** Surface failed custody without losing the saved browser snapshot. */
+    setPersistenceError(state, action: PayloadAction<string | undefined>) { state.persistenceError = action.payload; },
     selectModel(state, action: PayloadAction<string>) {
       const modelId = action.payload;
       const now = Date.now();
@@ -137,7 +154,7 @@ const slice = createSlice({
 
       // Empty current conversation — re-assign it to the new model rather
       // than leaving an unused conversation behind.
-      if (currentConvo && currentConvo.messages.length === 0 && !state.conversations[state.modelToConversationId[modelId]]) {
+      if (currentConvo && !currentConvo.continuation && currentConvo.messages.length === 0 && !state.conversations[state.modelToConversationId[modelId]]) {
         if (state.modelToConversationId[currentConvo.modelId] === currentConvo.id) {
           delete state.modelToConversationId[currentConvo.modelId];
         }
@@ -391,44 +408,33 @@ export const selectConversationsForModel =
 
 /* ── Persistence ──────────────────────────────────────── */
 
-function durableChatJson(chat: ChatState): string {
-  return JSON.stringify({
-    state: {
-      conversations: stripTransientFields(chat.conversations),
-      modelToConversationId: chat.modelToConversationId,
-      selectedVoice: chat.selectedVoice,
-      autoSpeakAssistant: chat.autoSpeakAssistant,
-      narrateCodeBlocks: chat.narrateCodeBlocks,
-      realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
-      autoSubmitVoice: chat.autoSubmitVoice,
-    },
-    version: 1,
-  });
+/** Normalize durable fields before comparison; transient data cannot cause a false conflict. */
+function durableChatState(chat: ChatState): ChatStorageObject {
+  return JSON.parse(JSON.stringify({
+    conversations: stripTransientFields(chat.conversations),
+    modelToConversationId: chat.modelToConversationId,
+    selectedVoice: chat.selectedVoice,
+    autoSpeakAssistant: chat.autoSpeakAssistant,
+    narrateCodeBlocks: chat.narrateCodeBlocks,
+    realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
+    autoSubmitVoice: chat.autoSubmitVoice,
+  })) as ChatStorageObject;
 }
 
-/** Persist a document message before accepting its draft or starting inference. */
-export function persistDocumentMessage(chat: ChatState, conversationId: string, message: ChatMessage): void {
+/** Persist a new message before accepting its draft or starting inference. */
+export async function persistDocumentMessage(chat: ChatState, conversationId: string, message: ChatMessage): Promise<void> {
   const conversation = chat.conversations[conversationId];
   if (!conversation) throw new Error('The conversation is no longer available.');
-  // The ordinary subscriber is best effort; document handles need an explicit
-  // acknowledged write so successful blob storage cannot hide lost history.
   const next: Conversation = {
-    ...conversation,
-    messages: [...conversation.messages, message],
+    ...conversation, messages: [...conversation.messages, message],
     name: conversation.name === DEFAULT_CONVERSATION_NAME ? autoName(message.content) : conversation.name,
     updatedAt: message.timestamp,
   };
-  try {
-    window.localStorage.setItem(DURABLE_STORAGE_KEY, durableChatJson({
-      ...chat, conversations: { ...chat.conversations, [conversationId]: next },
-    }));
-  } catch {
-    throw new Error('Could not save conversation history in this browser. Free browser storage and try again.');
-  }
+  await writeChatStorage(chatStorageChanges(durableChatState(chat), durableChatState({ ...chat, conversations: { ...chat.conversations, [conversationId]: next } })));
 }
 
-/** Atomically acknowledge continuation state and any associated public history. */
-export function persistChatContinuation(chat: ChatState, conversationId: string, continuation?: ChatContinuation, message?: ChatMessage): void {
+/** Atomically acknowledge continuation state and its exact public history. */
+export async function persistChatContinuation(chat: ChatState, conversationId: string, continuation?: ChatContinuation, message?: ChatMessage): Promise<void> {
   const conversation = chat.conversations[conversationId];
   if (!conversation) throw new Error('The conversation is no longer available.');
   const messages = message
@@ -436,70 +442,84 @@ export function persistChatContinuation(chat: ChatState, conversationId: string,
       ? conversation.messages.map(existing => existing.id === message.id ? message : existing)
       : [...conversation.messages, message]
     : conversation.messages;
-  try {
-    window.localStorage.setItem(DURABLE_STORAGE_KEY, durableChatJson({ ...chat,
-      conversations: { ...chat.conversations, [conversationId]: { ...conversation, continuation, messages } },
-    }));
-  } catch {
-    throw new Error('Could not save continuation state. Free browser storage before sending.');
-  }
+  await writeChatStorage(chatStorageChanges(durableChatState(chat), durableChatState({ ...chat,
+    conversations: { ...chat.conversations, [conversationId]: { ...conversation, continuation, messages } },
+  })));
 }
 
-/**
- * Wires localStorage (durable) and sessionStorage (per-tab) writes to the chat
- * slice. Strips transient message fields before writing to localStorage so
- * token counters and in-progress images don't bloat persisted state.
- *
- * Wraps writes with a dirty check so the subscriber doesn't hammer storage on
- * dispatches that don't affect chat state.
- */
+let refreshCommittedChat: (() => Promise<void>) | undefined;
+/** Flush queued writes and adopt the latest saved conversations before acquiring new work. */
+export async function synchronizeChatPersistence(): Promise<void> {
+  await flushChatStorage().catch(() => {});
+  await refreshCommittedChat?.();
+}
+
+/** Coordinate every ordinary and acknowledged save, preserving unrelated tab changes. */
 export function subscribeChatPersistence(
-  store: { subscribe: (listener: () => void) => () => void; getState: () => ChatRootState },
+  store: { subscribe: (listener: () => void) => () => void; getState: () => ChatRootState; dispatch: (action: ReturnType<typeof chatActions.refreshDurable> | ReturnType<typeof chatActions.setPersistenceError>) => unknown },
 ): () => void {
   if (typeof window === 'undefined') return () => {};
-  let lastDurableJson: string | null = null;
+  let previous = durableChatState(store.getState().chat);
   let lastSessionJson: string | null = null;
-  let documentReferences = chatDocumentIds(store.getState().chat.conversations);
-  void pruneChatDocuments(documentReferences).catch(() => {
-    console.warn('Abandoned chat document cleanup is unavailable.');
-  });
-
-  return store.subscribe(() => {
+  let adopting = false;
+  let localRevision = 0;
+  let committedRevision = 0;
+  const refresh = async () => {
+    // A refresh queued before a newer local action cannot discard that action.
+    // Recheck after draining so adoption and its revision share one JS turn.
+    let revision: number;
+    do {
+      revision = localRevision;
+      await flushChatStorage().catch(() => {});
+    } while (revision !== localRevision);
+    if (hasUnsavedChatChanges()) return;
+    const revisionBeforeRead = localRevision;
+    const snapshot = await readCommittedChatSnapshot();
+    if (revisionBeforeRead !== localRevision) return refresh();
+    if (snapshot.revision < committedRevision) return;
+    committedRevision = snapshot.revision;
+    const committed = snapshot.state;
+    adopting = true;
+    try {
+      store.dispatch(chatActions.refreshDurable(committed as PersistedDurable));
+      previous = durableChatState(store.getState().chat);
+    } finally { adopting = false; }
+  };
+  refreshCommittedChat = refresh;
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === CHAT_STORAGE_KEY) void refresh().catch(error => store.dispatch(chatActions.setPersistenceError(String(error))));
+  };
+  window.addEventListener('storage', onStorage);
+  const channel = typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel('skulk-chat-writers-v2');
+  if (channel) channel.onmessage = event => { if (event.data === 'committed') void refresh().catch(error => store.dispatch(chatActions.setPersistenceError(String(error)))); };
+  void refresh().catch(error => store.dispatch(chatActions.setPersistenceError(String(error))));
+  const unsubscribe = store.subscribe(() => {
     const chat = store.getState().chat;
-
-    const durableJson = durableChatJson(chat);
-    if (durableJson !== lastDurableJson) {
-      try {
-        window.localStorage.setItem(DURABLE_STORAGE_KEY, durableJson);
-        lastDurableJson = durableJson;
-        const current = chatDocumentIds(chat.conversations);
-        const removed = [...documentReferences].filter(id => !current.has(id));
-        documentReferences = current;
-        void removeChatDocuments(removed).catch(() => {
-          console.warn('Deleted chat document cleanup is unavailable.');
-        });
-      } catch {
-        /* ignore */
-      }
+    const current = durableChatState(chat);
+    const before = previous;
+    const changes = chatStorageChanges(before, current);
+    previous = current;
+    if (!adopting && changes.length) {
+      localRevision++;
+      void writeChatStorage(changes, true).then(committed => {
+        // Only delete blobs dropped by this successful mutation, after checking
+        // the merged snapshot. Never prune another tab's uncommitted uploads.
+        const oldReferences = chatDocumentIds((before.conversations ?? {}) as Record<string, Conversation>);
+        const retained = chatDocumentIds((committed.conversations ?? {}) as Record<string, Conversation>);
+        return removeChatDocuments([...oldReferences].filter(id => !retained.has(id)));
+      }).catch(async error => {
+        store.dispatch(chatActions.setPersistenceError(error instanceof Error ? error.message : 'Conversation storage is unavailable.'));
+        if (!(error instanceof ChatStorageUnavailable)) await refresh().catch(() => {});
+      });
     }
-
-    const session = {
-      state: {
-        activeConversationId: chat.activeConversationId,
-        selectedModelId: chat.selectedModelId,
-        selectedTranscriptionModelId: chat.selectedTranscriptionModelId,
-        selectedSpeechModelId: chat.selectedSpeechModelId,
-      },
-      version: 1,
-    };
-    const sessionJson = JSON.stringify(session);
+    const sessionJson = JSON.stringify({ state: {
+      activeConversationId: chat.activeConversationId, selectedModelId: chat.selectedModelId,
+      selectedTranscriptionModelId: chat.selectedTranscriptionModelId, selectedSpeechModelId: chat.selectedSpeechModelId,
+    }, version: 1 });
     if (sessionJson !== lastSessionJson) {
       lastSessionJson = sessionJson;
-      try {
-        window.sessionStorage.setItem(SESSION_STORAGE_KEY, sessionJson);
-      } catch {
-        /* ignore */
-      }
+      try { window.sessionStorage.setItem(SESSION_STORAGE_KEY, sessionJson); } catch { /* Per-tab selection is best effort. */ }
     }
   });
+  return () => { unsubscribe(); channel?.close(); window.removeEventListener('storage', onStorage); if (refreshCommittedChat === refresh) refreshCommittedChat = undefined; };
 }

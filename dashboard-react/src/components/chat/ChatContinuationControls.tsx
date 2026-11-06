@@ -7,6 +7,8 @@ import { useStore } from 'react-redux';
 import type { RootState } from '../../store';
 import { chatActions, persistChatContinuation } from '../../store/slices/chatSlice';
 import { browserContinuationPublicKey, continuationNonce, parseClientEnrollment, prepareReceiptLookup, readContinuationReceipt, verifyContinuationHistory, type ChatContinuation, type ContinuationTarget } from '../../store/chatContinuation';
+import { acquireChatConversation } from '../../store/chatCoordination';
+import { synchronizeChatPersistence } from '../../store/slices/chatSlice';
 import { hydrateChatDocuments } from '../../store/chatDocuments';
 import { buildApiMessages } from '../pages/chatApiPayload';
 import { operatorSession } from '../../auth/operatorSession';
@@ -33,7 +35,7 @@ export function ChatContinuationControls({ conversationId, target, disabled }: {
   /** Chat that owns this authority even while another model is selected. */
   conversationId: string;
   /** Current exact generic destination advertised by the selected model. */
-  target: ContinuationTarget;
+  target?: ContinuationTarget;
   /** Prevent authority changes while a generation owns its current scope. */
   disabled: boolean;
 }) {
@@ -42,9 +44,15 @@ export function ChatContinuationControls({ conversationId, target, disabled }: {
   const state = useAppSelector(root => root.chat.conversations[conversationId]?.continuation);
   const [publicKey, setPublicKey] = useState(''), [enrollment, setEnrollment] = useState('');
   const [message, setMessage] = useState(''), [busy, setBusy] = useState(false);
-  const save = (continuation?: ChatContinuation) => {
-    persistChatContinuation(store.getState().chat, conversationId, continuation);
-    dispatch(chatActions.setConversationContinuation({ conversationId, continuation }));
+  const save = async (continuation?: ChatContinuation) => {
+    const expected = store.getState().chat.conversations[conversationId]?.continuation;
+    const release = await acquireChatConversation(conversationId);
+    try {
+      await synchronizeChatPersistence();
+      if (JSON.stringify(store.getState().chat.conversations[conversationId]?.continuation) !== JSON.stringify(expected)) throw new Error('The conversation changed. Review its refreshed recovery state first.');
+      await persistChatContinuation(store.getState().chat, conversationId, continuation);
+      dispatch(chatActions.setConversationContinuation({ conversationId, continuation }));
+    } finally { await release(); }
   };
   const action = async (work: () => Promise<void>) => {
     if (busy || disabled) return;
@@ -57,7 +65,7 @@ export function ChatContinuationControls({ conversationId, target, disabled }: {
     : state ? t('chat.continuation.needsRecovery', 'Needs recovery') : t('chat.continuation.off', 'Off');
   return <Panel>
     <summary>{t('chat.continuation.title', 'Conversation continuity')} · {phaseLabel}</summary>
-    {!state && <>
+    {!state && target && <>
     <p>{t('chat.continuation.help', 'Opt in to protected continuation. Generate this browser’s public key, approve it under Continuation clients in the integration, then paste its public enrollment here. The private key stays in this browser.')}</p>
     <Button size="sm" disabled={disabled || busy} onClick={() => { void action(async () => { setPublicKey(await browserContinuationPublicKey(true) ?? ''); }); }}>{t('chat.continuation.key', 'Get browser public key')}</Button>
     {publicKey && <label>{t('chat.continuation.publicKey', 'Browser public key')}<input aria-label={t('chat.continuation.publicKey', 'Browser public key')} value={publicKey} readOnly /></label>}
@@ -65,7 +73,8 @@ export function ChatContinuationControls({ conversationId, target, disabled }: {
     <Button size="sm" disabled={disabled || busy || !enrollment || !!state} onClick={() => { void action(async () => {
       const key = await browserContinuationPublicKey();
       if (!key) throw new Error('Generate this browser’s key and obtain owner approval first.');
-      save({ enrollment: parseClientEnrollment(enrollment, target, key), target, conversation_id: continuationNonce(), phase: 'ready' });
+      if (!target) throw new Error('The destination no longer advertises continuation.');
+      await save({ enrollment: parseClientEnrollment(enrollment, target, key), target, conversation_id: continuationNonce(), phase: 'ready' });
       setEnrollment('');
       setMessage(t('chat.continuation.enabled', 'Continuation enabled for this conversation.'));
     }); }}>{t('chat.continuation.enable', 'Enable for this conversation')}</Button>
@@ -87,11 +96,11 @@ export function ChatContinuationControls({ conversationId, target, disabled }: {
         if (store.getState().chat.conversations[conversationId]?.continuation !== state) {
           throw new Error('The conversation changed during receipt lookup. Its current recovery state was preserved.');
         }
-        save({ ...recovered, phase: 'ready' });
+        await save({ ...recovered, phase: 'ready' });
         setMessage(t('chat.continuation.recovered', 'Receipt recovered and public history verified. No inference was retried.'));
       }); }}>{t('chat.continuation.recover', 'Recover receipt')}</Button>
       <Button size="sm" variant="outline" disabled={disabled || busy} onClick={() => { void action(async () => {
-        save();
+        await save();
         setMessage(t('chat.continuation.reset', 'Continuation disabled. The next request starts a fresh context with visible history. Client approval remains managed by the integration.'));
       }); }}>{t('chat.continuation.resetButton', 'Use full history instead')}</Button>
     </>}

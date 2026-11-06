@@ -7,6 +7,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Chat continuity
+
+- Coordinate conversation ownership across browser tabs and commit public history,
+  pending attempts and receipts through transactional browser storage. Preserve
+  drafts on refused submission, retain recovery/reset controls after a model
+  disappears, and keep the last submitted attempt when stopped during a tool.
+
+
 ### Offline model availability
 
 - Recognize complete installed artifact bundles without a safetensors shard

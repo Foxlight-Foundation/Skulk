@@ -3659,6 +3659,17 @@ checks exact public history, including complete tool rounds and summaries;
 uncertainty requires explicit recovery or abandonment. No management-session
 cookie or private key crosses between Chat and a capability surface.
 
+`store/chatCoordination.ts` serializes changed-field snapshot writes with a
+same-origin Web Lock and transactional IndexedDB compare-and-swap checks.
+`skulk-chat-history-v2` owns canonical public history/receipts and committed
+revisions; `skulk-chat-v2` localStorage is only a bootstrap cache, isolating
+current history from legacy whole-snapshot writers. A separate per-conversation lock spans
+preparation, generation, client tools and final persistence; brief writes and long
+writer presence are distinguished. Storage events adopt committed data after
+pending local changes settle. Draft acknowledgment and recovery/reset controls
+preserve explicit continuation custody across refusal and advertisement withdrawal.
+
+
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority

@@ -6588,6 +6588,32 @@ text remains blocked. **Use full history instead** explicitly abandons this
 continuation and starts a fresh provider context on the next request. Editing or
 deleting committed messages likewise requires an explicit new context.
 
+Chat coordinates same-origin tabs using browser Web Locks on HTTPS or localhost.
+One tab owns a conversation through preparation, streaming, client tools and final
+persistence; other conversations can proceed independently. Another tab shows
+that ownership and retains its draft. All durable saves atomically merge changed fields in an IndexedDB transaction,
+refusing stale history or receipt changes. Before sending,
+a tab adopts current saved state. Continuation and document preparation must be
+acknowledged before their drafts are cleared or inference is submitted; ordinary
+native image requests retain their existing storage-independent input bounds.
+
+The authoritative snapshot lives in browser-local IndexedDB
+`skulk-chat-history-v2`. A `skulk-chat-v2` localStorage mirror is a startup cache;
+its quota or delayed cross-renderer visibility cannot authorize a stale write.
+The first transaction imports legacy history if no current snapshot exists.
+Older tabs cannot replace the committed snapshot through legacy writes; reload
+all tabs after upgrading to share current history. Migration does not delete the
+legacy snapshot. Authoritative storage failure is visible and preserves the last
+saved transaction; new durable preparation is refused until it succeeds. Browser
+storage quota still applies. Committed revisions fence out-of-order refreshes;
+closed-tab ownership is detected without retrying inference.
+
+Recovery/reset controls remain visible for retained continuation state even after
+a destination withdraws its advertisement. New enrollment still requires a current
+advertisement. Stop during a client tool preserves the last submitted attempt;
+no following model nonce is published for an already canceled request.
+
+
 **GET** `/v1/inference/gateway` returns `contract: chat.completions@0.1.0`
 and this API host's Ed25519 `public_key`. It accepts no parameters and exposes
 no private signing key or provider credential. The key grants no permission;
