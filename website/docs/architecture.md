@@ -3678,6 +3678,8 @@ while failure to restore retains the pending fence.
 Conversation IDs keep their original model even when empty; substantive field
 writes also compare that model identity. Receipt recovery rechecks the refreshed
 public transcript while holding writer ownership before acknowledging custody.
+Durable metadata adoption retains transient images/tokens/file bytes only for
+unchanged messages in the same model; it does not persist those transient fields.
 
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`

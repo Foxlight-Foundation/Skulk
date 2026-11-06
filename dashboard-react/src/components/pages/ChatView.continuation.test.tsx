@@ -331,6 +331,21 @@ describe('Chat client continuation', () => {
     expect(chosen.conversations[chosen.activeConversationId!].modelId).toBe(model);
   });
 
+  it('preserves live generated images for unchanged messages during foreign metadata adoption', () => {
+    const chat = chatSliceReducer(store.getState().chat, chatActions.newConversation(model)), id = chat.activeConversationId!;
+    const publicMessage = { id: 'generated-image', role: 'assistant' as const, content: '', timestamp: 1 };
+    const localMessage = { ...publicMessage, generatedImages: ['blob:synthetic-generated-image'], tokens: [{ token: 'fixture', probability: 1, logprob: 0 }] };
+    const live = { ...chat, conversations: { ...chat.conversations, [id]: { ...chat.conversations[id], messages: [localMessage] } } };
+    const conversation = { ...chat.conversations[id], name: 'Renamed elsewhere', messages: [publicMessage] };
+    const refreshed = chatSliceReducer(live, chatActions.refreshDurable({ conversations: { ...chat.conversations, [id]: conversation } }));
+    expect(refreshed.conversations[id].name).toBe('Renamed elsewhere');
+    expect(refreshed.conversations[id].messages[0]).toEqual(localMessage);
+    const changed = chatSliceReducer(refreshed, chatActions.refreshDurable({ conversations: { [id]: { ...conversation, messages: [{ ...publicMessage, content: 'Edited public message' }] } } }));
+    expect(changed.conversations[id].messages[0].generatedImages).toBeUndefined();
+    const removed = chatSliceReducer(refreshed, chatActions.refreshDurable({ conversations: { [id]: { ...conversation, messages: [] } } }));
+    expect(removed.conversations[id].messages).toEqual([]);
+  });
+
   it('retains a draft after foreign deletion and explicitly starts a new context with its selected model', async () => {
     await renderAndEnroll();
     const id = store.getState().chat.activeConversationId!;

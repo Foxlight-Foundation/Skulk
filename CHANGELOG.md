@@ -17,7 +17,8 @@ This project records release notes here and mirrors public-facing notes in
   temporary database failures, and require an explicit selection after another
   tab deletes the active conversation or changes its model. Keep conversation
   model identity stable even while empty and recheck receipt recovery against
-  the history refreshed under writer ownership.
+  the history refreshed under writer ownership. Preserve live generated images
+  when another tab updates metadata without changing their messages.
 
 
 ### Offline model availability

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { applyChatStorageChanges, chatStorageChanges, writeChatStorage, readCommittedChatStorage, hasUnsavedChatChanges, acquireChatConversation, CHAT_STORAGE_KEY, type ChatStorageObject } from './chatCoordination';
 
 const base: ChatStorageObject = {
@@ -6,6 +6,21 @@ const base: ChatStorageObject = {
   modelToConversationId: { model: 'a' }, selectedVoice: null,
 };
 const copy = () => structuredClone(base) as { conversations: Record<string, { id: string; name: string; messages: unknown[]; continuation?: { phase: string; nonce: string }; updatedAt: number }>; modelToConversationId: Record<string, string>; selectedVoice: string | null };
+
+const openDatabase = IDBFactory.prototype.open, getStorageItem = Storage.prototype.getItem, setStorageItem = Storage.prototype.setItem;
+const isolatedKey = (key: string) => key === CHAT_STORAGE_KEY || key === 'skulk-chat' ? 'coordination-test:' + key : key;
+beforeAll(() => {
+  // Browser suites share an origin. Opaque CAS fixtures are intentionally not
+  // ChatState records and must never become another suite's startup history.
+  IDBFactory.prototype.open = function (name, version) { return openDatabase.call(this, name === 'skulk-chat-history-v2' ? name + '-coordination-test' : name, version); };
+  Storage.prototype.getItem = function (key) { return getStorageItem.call(this, isolatedKey(key)); };
+  Storage.prototype.setItem = function (key, value) { setStorageItem.call(this, isolatedKey(key), value); };
+});
+afterAll(() => {
+  IDBFactory.prototype.open = openDatabase;
+  Storage.prototype.getItem = getStorageItem;
+  Storage.prototype.setItem = setStorageItem;
+});
 
 describe('transactional chat snapshot merging', () => {
   it('preserves a newer nonce when an ordinary stale save changes another conversation', () => {

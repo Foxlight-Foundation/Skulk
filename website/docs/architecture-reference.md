@@ -48,7 +48,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   draft. Conversation model identity is immutable after creation, with an
   additional model precondition on substantive field writes. Recovery verifies
   refreshed public history under writer ownership before persisting a receipt.
-  Withdrawal retains reset/recovery UI.
+  Durable metadata adoption preserves transient fields for unchanged messages
+  in the same model. Withdrawal retains reset/recovery UI.
 
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`

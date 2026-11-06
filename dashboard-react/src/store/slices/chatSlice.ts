@@ -16,7 +16,7 @@ function autoName(content: string): string {
 /**
  * Drop transient per-message fields that should not survive a reload (token
  * counters, in-progress generated images). The persistence layer applies this
- * before writing to localStorage.
+ * before writing to durable browser storage.
  */
 function stripTransientFields(
   conversations: Record<string, Conversation>,
@@ -134,7 +134,17 @@ const slice = createSlice({
       const conversations = durable.conversations ?? {};
       for (const id of Object.keys(state.conversations)) if (!conversations[id]) delete state.conversations[id];
       for (const [id, conversation] of Object.entries(conversations)) {
-        if (JSON.stringify(stripTransientFields({ [id]: state.conversations[id] ?? conversation })[id]) !== JSON.stringify(conversation) || !state.conversations[id]) state.conversations[id] = conversation;
+        const live = state.conversations[id];
+        const durable = live ? stripTransientFields({ [id]: live })[id] : undefined;
+        if (!live || JSON.stringify(durable) !== JSON.stringify(conversation)) {
+          // Metadata adoption must not erase process-local image URLs, token
+          // counters or staged file bytes for unchanged public messages.
+          const previousMessages = new Map(live?.messages.map((message, index) => [message.id, { live: message, durable: durable!.messages[index] }]));
+          state.conversations[id] = { ...conversation, messages: conversation.messages.map(message => {
+            const previous = previousMessages.get(message.id);
+            return previous && live?.modelId === conversation.modelId && JSON.stringify(previous.durable) === JSON.stringify(message) ? previous.live : message;
+          }) };
+        }
       }
       state.modelToConversationId = durable.modelToConversationId ?? {};
       state.selectedVoice = durable.selectedVoice ?? null;
