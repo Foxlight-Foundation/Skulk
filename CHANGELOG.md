@@ -7,6 +7,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Chat continuity
+
+- Coordinate conversation ownership across browser tabs and commit public history,
+  pending attempts and receipts through transactional browser storage. Preserve
+  drafts on refused submission, retain recovery/reset controls after a model
+  disappears, and keep the last submitted attempt when stopped during a tool.
+  Keep ordinary private-network HTTP chat working, retain local edits across
+  temporary database failures, and require an explicit selection after another
+  tab deletes the active conversation or changes its model. Keep conversation
+  model identity stable even while empty and recheck receipt recovery against
+  the history refreshed under writer ownership. Preserve live generated images
+  when another tab updates metadata without changing their messages.
+
+
 ### Offline model availability
 
 - Recognize complete installed artifact bundles without a safetensors shard

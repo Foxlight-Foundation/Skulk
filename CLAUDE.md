@@ -34,6 +34,27 @@ fences enter conversation metadata. Preserve exact public tool rounds, summaries
 and whitespace separately from display content; verify committed fingerprints.
 Never silently recover missing assistant text or restart an uncertain request.
 
+All ordinary/acknowledged chat saves share `store/chatCoordination.ts`: changed-field
+CAS in authoritative versioned IndexedDB
+`skulk-chat-history-v2` snapshots. `skulk-chat-v2` localStorage is only a bootstrap
+cache; first migration imports legacy history. Fence asynchronous adoption by
+committed revision. Preserve per-conversation writer ownership through tools
+and final storage on HTTPS/localhost, while allowing other conversations to run.
+Ordinary HTTP keeps transactional saves/per-tab ownership; protected continuation
+requires a secure context. Retain ordered local edits across database-open failure.
+Foreign deletion/reassignment requires explicit selection and retains the draft.
+Keep conversation model identity immutable even while empty; substantive field
+writes compare it too. Reverify recovered receipts against refreshed public
+history under conversation writer ownership before acknowledging them.
+Refresh committed
+history before send; a stale subscriber must never replace a pending nonce.
+Require preparation acknowledgment for continuation/documents, retain drafts on
+refusal, keep reset controls after withdrawal, and check cancellation before
+creating another model attempt. Restore the preceding attempt if canceled before
+HTTP invocation; failed restoration keeps the pending fence. Native image input
+keeps its existing bounds.
+
+
 Native installed preservation lives in `store/preservation_export.py`; complete
 card-selected mappings live in `store/preservation_closure.py`. Offline recovery
 lives in `store/preservation.py` and

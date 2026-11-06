@@ -27,6 +27,8 @@ export interface ChatFormProps {
   /** Updates the owner-controlled draft. */
   onDraftChange?: (value: string) => void;
 
+  /** Sending resolves after durable preparation, allowing safe draft clearing for text too. */
+  acknowledgesSubmission?: boolean;
   onSend: (message: string, files: ChatUploadedFile[]) => void | Promise<void>;
   onCancel?: () => void;
   isLoading?: boolean;
@@ -421,6 +423,7 @@ export function ChatForm({
   draft,
   onDraftChange,
   onSend,
+  acknowledgesSubmission = false,
   onCancel,
   isLoading = false,
   placeholder,
@@ -1081,9 +1084,9 @@ export function ChatForm({
           realtimeConversationRef.current?.setInputPaused(true);
           realtimeCaptureRef.current?.setEnabled(false);
           const acceptance = onSend(draft.trim(), prepared);
-          // Only document submission negotiates durable preparation. Existing
-          // text/voice handlers may return the whole generation promise.
-          if (prepared.some(file => file.documentId)) await acceptance;
+          // Explicit preparation acknowledgments retain text drafts on lock or
+          // custody refusal. Legacy handlers may return the entire generation.
+          if (acknowledgesSubmission || prepared.some(file => file.documentId)) await acceptance;
           submitted = true;
           if (messageRef.current === draft) setMessage('');
           clearFiles();
@@ -1098,7 +1101,7 @@ export function ChatForm({
         }
       })();
     },
-    [isLoading, canSend, message, files, onSend, clearFiles, setMessage, attachmentContext],
+    [isLoading, canSend, message, files, onSend, acknowledgesSubmission, clearFiles, setMessage, attachmentContext],
   );
 
   useEffect(() => {

@@ -30,6 +30,28 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   public tool/assistant turns separately from display trimming. Missing receipt,
   missing history or changed destination never triggers automatic replay/reset.
 
+  `store/chatCoordination.ts` owns browser Web Locks, changed-field CAS writes and
+  authoritative versioned IndexedDB `skulk-chat-history-v2` snapshots. The
+  `skulk-chat-v2` localStorage mirror is a bootstrap cache only; first migration
+  reads legacy history. Committed revisions fence stale asynchronous hydration. All ordinary
+  saves use the same merge boundary; a conversation writer spans preparation,
+  generation, tools and terminal storage on HTTPS/localhost. Ordinary insecure
+  HTTP keeps transactional persistence and per-tab ownership; protected
+  continuation requires the secure path. Independent conversations remain
+  concurrent; stale writes refuse without replacing saved history. Storage-event
+  hydration drains local intents before adopting committed state. Continuation
+  and document drafts clear only after preparation acknowledgment; canceled tool
+  rounds do not publish an unused nonce. A Stop before HTTP invocation restores
+  the preceding attempt after successful storage; failed restoration retains the
+  pending fence. Ordinary database-open failures retain ordered local edits.
+  Foreign deletion/reassignment requires explicit selection while retaining the
+  draft. Conversation model identity is immutable after creation, with an
+  additional model precondition on substantive field writes. Recovery verifies
+  refreshed public history under writer ownership before persisting a receipt.
+  Durable metadata adoption preserves transient fields for unchanged messages
+  in the same model. Withdrawal retains reset/recovery UI.
+
+
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`
   adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
