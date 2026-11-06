@@ -127,6 +127,43 @@ def request(
     )
 
 
+@pytest.mark.parametrize("corrupt_archive", [False, True])
+async def test_cold_worker_recovers_only_freshly_verified_cached_libraries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    installed: fixtures.NativeInstall, corrupt_archive: bool,
+) -> None:
+    """A fresh worker owner restores readiness without downloading, including online mode."""
+    worker, _, observations = fixture(tmp_path, monkeypatch, installed, offline=False)
+    try:
+        await worker._prepare_ace_step_engine(request(worker, installed))
+        await observations.receive()
+        await worker._ace_step_preparation.close()
+        worker._ace_step_manager = manager(tmp_path / "cache", installed)
+        worker._ace_step_preparation = AceStepPreparationController(
+            worker._ace_step_manager, offline=False
+        )
+        if corrupt_archive:
+            archive = tmp_path / "cache" / installed.wheel.sha256 / "objects" / installed.wheel.filename
+            archive.write_bytes(b"corrupted retained original")
+        assert worker._ace_step_preparation.engine_builds() == {}
+        await worker._restore_cached_native_runtimes()
+        resources = (await observations.receive()).info
+        assert isinstance(resources, NodeResources)
+        assert resources.engine_builds["audio_cpp-cpu"] == "existing-music-build"
+        backend = "ace_step-" + installed.device
+        if corrupt_archive:
+            assert backend not in resources.backends
+            assert resources.native_music_probes == {}
+        else:
+            assert resources.engine_builds[backend] == installed.wheel.build_identity
+            assert resources.native_music_probes[backend].payload_sha256 == installed.wheel.payload_sha256
+            assert installed.probes >= 2
+        assert installed.downloads == installed.installs == 1
+    finally:
+        await worker._ace_step_preparation.close()
+        await worker._demucs_preparation.close()
+
+
 async def test_inventory_observation_has_no_install_or_probe_effect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

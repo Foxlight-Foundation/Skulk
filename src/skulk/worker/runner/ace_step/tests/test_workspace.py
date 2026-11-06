@@ -78,6 +78,7 @@ def loader_files(owner: NativeMusicWorkspace) -> tuple[Path, ...]:
         loader / "hf/hub/version.txt",
         loader / "modules/transformers_modules/model/__init__.py",
         loader / "torch-cache/kernel/test.bin",
+        loader / ".cache/acestep/progress_estimates.json",
     )
     for path in files:
         # Path.mkdir(parents=True) ignores mode for intermediate directories;
@@ -150,6 +151,24 @@ def test_restart_reclaims_loader_but_keeps_original_result_and_receipt(
         resumed.close()
 
 
+def test_oversized_progress_cache_preserves_all_loader_and_result_bytes(tmp_path: Path) -> None:
+    """The known timing file is bounded; recognition cannot authorize broad cache deletion."""
+    owner = NativeMusicWorkspace(tmp_path, weights())
+    owner.open()
+    try:
+        partial = loader_files(owner)
+        result, data = retained_result(owner)
+        cache = owner.directory / "loader/.cache/acestep/progress_estimates.json"
+        with cache.open("r+b") as output:
+            output.truncate(1024**2 + 1)
+        assert not owner.retire_loading()
+        assert all(path.exists() for path in partial) and result.read_bytes() == data
+        cache.write_bytes(b"{}")
+        assert owner.retire_loading() and result.read_bytes() == data
+    finally:
+        owner.close()
+
+
 @pytest.mark.parametrize("location", ["workspace", "requests", "loader"])
 def test_replaced_lifetime_inode_preserves_both_old_and_foreign_trees(
     tmp_path: Path, location: str
@@ -176,7 +195,10 @@ def test_replaced_lifetime_inode_preserves_both_old_and_foreign_trees(
 
 
 @pytest.mark.parametrize(
-    "foreign", ["note.txt", "checkpoints/acestep-v15-base/foreign.pt"]
+    "foreign", [
+        "note.txt", "checkpoints/acestep-v15-base/foreign.pt",
+        ".cache/operator-note.txt", ".cache/acestep/foreign.json",
+    ]
 )
 def test_unknown_loader_entry_preserves_all_partial_copies(
     tmp_path: Path, foreign: str

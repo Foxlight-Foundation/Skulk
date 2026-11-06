@@ -1,4 +1,4 @@
-"""Bounded asynchronous ownership of explicit native package preparation.
+"""Bounded asynchronous ownership of explicit preparation and cached recovery.
 
 This controller runs the existing byte/device-verifying manager off the worker
 loop. It starts no work on construction or inventory reads and registers no
@@ -15,6 +15,9 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from typing import Protocol
+from uuid import uuid4
+
+from loguru import logger
 
 from skulk.provisioning.demucs_runtime import (
     DemucsPreparationCancelledError,
@@ -26,6 +29,10 @@ from skulk.shared.types.common import CommandId
 
 class PreparationManager[Package: RuntimePackage, Device: str, Prepared](Protocol):
     """Inject preparation effects; production supplies its persistent verified manager."""
+
+    def cached_lanes(self) -> tuple[tuple[Package, Device], ...]:
+        """Read fixed eligible original-cache hints; no hint establishes readiness."""
+        ...
 
     def prepare(
         self,
@@ -62,7 +69,7 @@ async def _join[Value](task: asyncio.Task[Value]) -> Value:
 
 
 class NativePreparationController[Package: RuntimePackage, Device: str, Prepared]:
-    """Fence explicit requests, cancellation and shutdown around one worker manager.
+    """Fence preparation, cached recovery and shutdown around one worker manager.
 
     All effect methods run on the worker's asyncio loop. Native progress callbacks
     run on the preparation thread and must be thread-safe. At most four queued or
@@ -85,6 +92,7 @@ class NativePreparationController[Package: RuntimePackage, Device: str, Prepared
         self._recent: OrderedDict[CommandId, None] = OrderedDict()
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
+        self._restore_task: asyncio.Task[None] | None = None
 
     def engine_builds(self) -> dict[str, str]:
         """Publish only current verified libraries; shutdown withdraws immediately."""
@@ -119,6 +127,15 @@ class NativePreparationController[Package: RuntimePackage, Device: str, Prepared
         actual explicit device; this controller supplies no fallback or download
         authority beyond the worker's fixed offline policy.
         """
+        return await self._prepare(
+            request_id, wheel, device=device, expires_at=expires_at,
+            progress=progress, offline=self.offline,
+        )
+
+    async def _prepare(
+        self, request_id: CommandId, wheel: Package, *, device: Device,
+        expires_at: float, progress: Callable[[PreparationPhase], None], offline: bool,
+    ) -> Prepared:
         if self._closed or request_id in self._recent:
             raise DemucsPreparationCancelledError(
                 "native preparation is no longer active"
@@ -150,7 +167,7 @@ class NativePreparationController[Package: RuntimePackage, Device: str, Prepared
             return self.manager.prepare(
                 wheel,
                 device=device,
-                offline=self.offline,
+                offline=offline,
                 is_cancelled=stopped.is_set,
                 progress=progress,
                 timeout_seconds=remaining,
@@ -177,6 +194,61 @@ class NativePreparationController[Package: RuntimePackage, Device: str, Prepared
             self._active.pop(request_id, None)
             self._remember(request_id)
 
+    async def restore_cached(self, *, timeout_seconds: float = 120) -> None:
+        """Recheck retained native libraries once, with no startup download authority.
+
+        Cache discovery and normal byte/device verification run off-loop. Failures
+        leave unavailable lanes unadvertised and are logged without stopping the
+        node. Shutdown/cancellation joins discovery and native cleanup; a second
+        caller observes the original bounded task rather than starting it again.
+        """
+        if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 120:
+            raise ValueError("native cache recovery requires a finite budget up to 120 seconds")
+        if self._closed:
+            return
+        if self._restore_task is None:
+            self._restore_task = asyncio.create_task(
+                self._restore_cached(self.clock() + timeout_seconds)
+            )
+        task = self._restore_task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.cancel()
+            with contextlib.suppress(Exception):
+                await _join(task)
+            raise
+
+    async def _restore_cached(self, expires_at: float) -> None:
+        discovery = asyncio.create_task(asyncio.to_thread(self.manager.cached_lanes))
+        try:
+            try:
+                candidates = await asyncio.shield(discovery)
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await _join(discovery)
+                raise
+        except Exception as error:
+            logger.warning("Native engine cached inventory could not be read: {}", error)
+            return
+        for package, device in candidates:
+            if self._closed:
+                return
+            if self.clock() >= expires_at:
+                logger.warning("Native engine cached-library recovery exceeded its startup budget")
+                return
+            try:
+                await self._prepare(
+                    CommandId("native-cache-" + uuid4().hex), package,
+                    device=device, expires_at=expires_at, offline=True,
+                    progress=lambda _phase: None,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Cached native engine {} on {} is not ready: {}",
+                    package.build_identity, device, error,
+                )
+
     async def close(self) -> None:
         """Cancel and join all work before releasing the persistent manager's fences.
 
@@ -184,6 +256,8 @@ class NativePreparationController[Package: RuntimePackage, Device: str, Prepared
         cancellation cannot abandon the owned close thread or active preparations.
         """
         self._closed = True
+        if self._restore_task is not None:
+            self._restore_task.cancel()
         for stopped, _ in self._active.values():
             stopped.set()
         pending = tuple(task for _, task in self._active.values())
@@ -206,6 +280,9 @@ class NativePreparationController[Package: RuntimePackage, Device: str, Prepared
     async def _drain_and_close(
         self, pending: tuple[asyncio.Task[Prepared], ...]
     ) -> None:
+        if self._restore_task is not None:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await _join(self._restore_task)
         # The cache deliberately refuses close during installation: its retained
         # cleanup handle cannot be released until the preparation thread exits.
         # Keep this join inside the shielded close task so cancellation of the

@@ -141,6 +141,40 @@ def test_failed_revalidation_withdraws_previous_resources(
     runtime.close()
 
 
+def test_cold_cache_candidates_need_fresh_offline_byte_and_device_verification(
+    tmp_path: Path, installed: cache_fixtures.NativeInstall,
+) -> None:
+    """A cold manager can recover retained pins without treating cache hints as ready."""
+    root = tmp_path / "cache"
+    original = manager(root, installed)
+    prepared = prepare(original, installed)
+    original.close()
+    restarted = manager(root, installed)
+    candidates = restarted.cached_lanes()
+    assert (installed.wheel, installed.device) in candidates
+    assert restarted.engine_builds() == {} and restarted.library_probes() == {}
+    assert installed.probes == 1
+    recovered = prepare(restarted, installed, offline=True)
+    assert recovered.generation == prepared.generation
+    assert installed.probes == 2 and installed.downloads == installed.installs == 1
+    assert restarted.engine_builds()
+    restarted.close()
+
+
+def test_empty_or_foreign_cache_never_becomes_a_recovery_candidate(
+    tmp_path: Path, installed: cache_fixtures.NativeInstall,
+) -> None:
+    """Startup must neither install on a clean host nor scan arbitrary cache children."""
+    root = tmp_path / "cache"
+    runtime = manager(root, installed)
+    assert runtime.cached_lanes() == () and not root.exists()
+    (root / ("f" * 64) / "objects").mkdir(parents=True)
+    (root / ("f" * 64) / "objects" / installed.wheel.filename).write_bytes(b"foreign")
+    assert runtime.cached_lanes() == ()
+    assert installed.downloads == installed.installs == installed.probes == 0
+    runtime.close()
+
+
 def test_foreign_build_and_incompatible_lane_never_enter_cache(
     tmp_path: Path,
     installed: cache_fixtures.NativeInstall,
