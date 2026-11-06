@@ -108,6 +108,9 @@ class _Active:
     )
     acknowledging: set[SeparationStemName] = field(default_factory=set)
     acknowledged: set[SeparationStemName] = field(default_factory=set)
+    return_settled: anyio.Event = field(default_factory=anyio.Event)
+    cancel_started: bool = False
+    cancel_submitted: anyio.Event = field(default_factory=anyio.Event)
 
 
 class _ContentResponse(StreamingResponse):
@@ -456,7 +459,8 @@ class SeparationAPI:
                 await separation_file_effect(retain)
                 receiver = self.open_queue(identifier)
                 self.tasks.start_soon(
-                    self._drain, identifier, receiver, self.active[identifier].session
+                    self._drain, identifier, receiver,
+                    self.active[identifier].session, self.active[identifier],
                 )
             # Metadata only. A lost submission reply is terminal/uncertain;
             # neither this API nor Studio automatically resubmits the edit.
@@ -606,6 +610,7 @@ class SeparationAPI:
         identifier: CommandId,
         receiver: Receiver[SeparationChunk | ErrorChunk],
         session: SystemId,
+        accepted: _Active,
     ) -> None:
         try:
             with receiver:
@@ -644,6 +649,10 @@ class SeparationAPI:
                         )
                         entry.deadline = time.monotonic() + 300
                         await self._record_receipts(identifier, entry)
+                    # Metadata alone cannot release the worker's four result
+                    # files. Retire its task only after every role ACK settles.
+                    receiver.close()
+                    await accepted.return_settled.wait()
                     return
             await self.fail(
                 identifier,
@@ -660,6 +669,8 @@ class SeparationAPI:
                 cancel=False,
             )
         finally:
+            if accepted.cancel_started:
+                await accepted.cancel_submitted.wait()
             await self.finalize(identifier, session)
 
     async def _record_receipts(
@@ -778,6 +789,7 @@ class SeparationAPI:
         settled = await separation_file_effect(lambda: self.jobs.settle(identifier))
         if settled is not None and settled.status == "completed":
             self.active.pop(identifier, None)
+            entry.return_settled.set()
             if not entry.sending and not entry.source_released:
                 await separation_file_effect(lambda: self.sources.delete(identifier))
                 entry.source_released = True
@@ -904,6 +916,24 @@ class SeparationAPI:
             lambda: self.jobs.fail(identifier, message, cancelled=cancel)
         )
         entry = self.active.pop(identifier, None)
+        if entry is not None:
+            entry.cancel_started = True
+            try:
+                with contextlib.suppress(
+                    anyio.BrokenResourceError,
+                    anyio.ClosedResourceError,
+                    TimeoutError,
+                    HTTPException,
+                ):
+                    with anyio.fail_after(5):
+                        await self.send_command(
+                            TaskCancelled(cancelled_command_id=identifier),
+                            entry.session,
+                        )
+            finally:
+                entry.cancel_submitted.set()
+                entry.return_settled.set()
+                self.close_queue(identifier)
         assert self.media is not None
         await separation_file_effect(lambda: self.media.delete(identifier))
         if entry is not None:
@@ -911,18 +941,6 @@ class SeparationAPI:
                 assert self.sources is not None
                 await separation_file_effect(lambda: self.sources.delete(identifier))
                 entry.source_released = True
-            with contextlib.suppress(
-                anyio.BrokenResourceError,
-                anyio.ClosedResourceError,
-                TimeoutError,
-                HTTPException,
-            ):
-                with anyio.fail_after(5):
-                    await self.send_command(
-                        TaskCancelled(cancelled_command_id=identifier),
-                        entry.session,
-                    )
-            self.close_queue(identifier)
             if entry.producer is not None:
                 self._start_output_control(
                     identifier,

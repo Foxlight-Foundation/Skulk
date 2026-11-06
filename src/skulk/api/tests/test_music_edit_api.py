@@ -348,6 +348,46 @@ async def terminal(client: httpx.AsyncClient, identifier: str) -> MusicEditResou
 
 
 @pytest.mark.parametrize("media_first", [False, True])
+async def test_native_task_finalization_waits_for_return_acknowledgement(
+    tmp_path: Path, media_first: bool
+) -> None:
+    """TaskFinished cannot cancel a worker still returning its independently owned WAV."""
+    async with fixture(tmp_path) as (harness, client):
+        accepted = await create(client)
+        identifier = CommandId(accepted.id)
+        acknowledgement_started, release_acknowledgement = anyio.Event(), anyio.Event()
+
+        async def delayed_acknowledgement(packet: OutputMediaPacket) -> None:
+            if packet.kind == "accepted":
+                acknowledgement_started.set()
+                await release_acknowledgement.wait()
+            await harness.send_output(packet)
+
+        async def worker_return(packet: OutputMediaPacket) -> None:
+            # A real worker cancels its output owner when TaskFinished deletes
+            # the task, so finalization must not precede any of these frames.
+            assert identifier not in harness.finalized
+            await harness.api.receive_output(packet)
+
+        harness.api.send_output = delayed_acknowledgement
+        try:
+            await harness.render(
+                identifier, media_first=media_first, send=worker_return
+            )
+            with anyio.fail_after(3):
+                await acknowledgement_started.wait()
+            assert identifier not in harness.finalized
+            assert (await harness.api.job(identifier)).status != "completed"
+        finally:
+            release_acknowledgement.set()
+        assert (await terminal(client, accepted.id)).status == "completed"
+        with anyio.fail_after(3):
+            while identifier not in harness.finalized:
+                await anyio.sleep(0.01)
+        assert harness.finalized.count(identifier) == 1
+
+
+@pytest.mark.parametrize("media_first", [False, True])
 async def test_http_native_handshake_render_and_verified_download(
     tmp_path: Path, media_first: bool
 ) -> None:

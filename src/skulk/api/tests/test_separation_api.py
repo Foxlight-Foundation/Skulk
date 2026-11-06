@@ -243,6 +243,74 @@ async def create(client: httpx.AsyncClient) -> CommandId:
     return CommandId(SeparationResource.model_validate_json(response.content).id)
 
 
+@pytest.mark.parametrize("purpose", ["separation_drums", "separation_vocals"])
+async def test_task_finalization_waits_for_every_stem_acknowledgement(
+    tmp_path: Path, purpose: str
+) -> None:
+    """Natural task completion cannot delete a producer awaiting a stem receipt."""
+    async with fixture(tmp_path) as (harness, client):
+        identifier = await create(client)
+        acknowledgement_started, release_acknowledgement = anyio.Event(), anyio.Event()
+
+        async def delayed_acknowledgement(packet: OutputMediaPacket) -> None:
+            if packet.kind == "accepted" and packet.purpose == purpose:
+                acknowledgement_started.set()
+                await release_acknowledgement.wait()
+            await harness.send_output(packet)
+
+        harness.api.send_output = delayed_acknowledgement
+        async with anyio.create_task_group() as group:
+            group.start_soon(harness.render, identifier)
+            try:
+                with anyio.fail_after(3):
+                    await acknowledgement_started.wait()
+                assert identifier not in harness.finalizations
+                assert (await harness.api.job(identifier)).status != "completed"
+            finally:
+                release_acknowledgement.set()
+        with anyio.fail_after(3):
+            while identifier not in harness.finalizations:
+                await anyio.sleep(0.01)
+        assert (await harness.api.job(identifier)).status == "completed"
+        assert harness.finalizations.count(identifier) == 1
+
+
+async def test_cancellation_submission_precedes_stream_finalization(
+    tmp_path: Path,
+) -> None:
+    """A blocked cancellation keeps its task alive until submission is attempted."""
+    async with fixture(tmp_path) as (harness, client):
+        identifier = await create(client)
+        await harness.task(identifier)
+        started, release = anyio.Event(), anyio.Event()
+
+        async def delayed(command: Command, session: SystemId) -> None:
+            if isinstance(command, TaskCancelled):
+                started.set()
+                await release.wait()
+            await harness.send_command(command, session)
+
+        harness.api.send_command = delayed
+        await harness.queues[identifier].send(
+            ErrorChunk(
+                model=ModelId("adefossez/HTDemucs"),
+                error_message="fixture separation failure",
+            )
+        )
+        try:
+            with anyio.fail_after(3):
+                await started.wait()
+            assert identifier not in harness.finalizations
+        finally:
+            release.set()
+        with anyio.fail_after(3):
+            while identifier not in harness.finalizations:
+                await anyio.sleep(0.01)
+        assert harness.finalizations.count(identifier) == 1
+        assert any(isinstance(command, TaskCancelled) for command in harness.commands)
+        assert (await harness.api.job(identifier)).status == "failed"
+
+
 async def test_multipart_to_placed_worker_four_stems_and_download(
     tmp_path: Path,
 ) -> None:

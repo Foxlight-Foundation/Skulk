@@ -2373,7 +2373,9 @@ protected from implicit eviction to admit more work.
 **GET** `/v1/music/edits/{edit_id}` returns the accepted caption, lyrics, fixed
 seed, measured original, resolved native extent, status and terminal times.
 `output` remains null until native render completion, independently verified and
-synced WAV custody, and drained reverse acceptance all agree. Completed output
+synced WAV custody, and drained reverse acceptance all agree. The API
+retains its native task until that return acknowledgement has drained; render
+metadata alone cannot retire the worker's result producer. Completed output
 records exact source lineage, runtime/model identities, observed device/precision,
 conditioning gain/padding, render latency and WAV geometry/size/SHA-256/peak.
 Paths and raw audio bytes are excluded. A missing node-local job returns **404**.
@@ -2461,6 +2463,9 @@ transport or acknowledgement deadline fails the job, including when every WAV
 has already verified; it cannot silently report completion.
 Repeated completion packets also require manifest verification; arrival of the
 manifest rechecks settlement after any previously admitted acknowledgements.
+The native task remains owned until every stem acknowledgement drains. Render
+metadata alone cannot retire the worker's result producer. Failure or cancellation
+submits task cancellation before finalizing its metadata stream.
 
 Uploads have a three-minute deadline; a stalled body returns 408 and its partial
 spooled files are closed. Requests with invalid metadata or WAV data return 422; malformed multipart

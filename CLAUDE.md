@@ -2869,7 +2869,10 @@ controls send outside the actor lock, retain admission until drained and filter
 same-node ACK echoes. Native Worker execution joins explicit preparation and
 complete admission. Studio edit creation and installed acceptance remain
 separate integration/product gates.
-Edit cancellation submission precedes TaskFinished stream finalization. A
+Edit and separation render metadata close only their metadata receivers. Their
+accepted task remains live until verified WAV custody and drained return ACKs
+agree (all four stems for separation). Cancellation submission precedes
+TaskFinished stream finalization for both paths. A
 durable-index uncertainty fence aborts accepted native work, retires only this
 service's sweeper and returns actionable HTTP 503 without crashing host tasks.
 
