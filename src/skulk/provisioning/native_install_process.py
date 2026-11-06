@@ -144,7 +144,10 @@ class NativeInstallCommandRunner:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=environment,
+                # Native helpers can re-exec Python through console scripts;
+                # -B applies only to the explicit interpreter, not descendants.
+                # Keep their imports from changing the independently sealed tree.
+                env=environment | {"PYTHONDONTWRITEBYTECODE": "1"},
                 start_new_session=True,
                 pass_fds=descriptors,
             )

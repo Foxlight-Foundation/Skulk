@@ -1526,6 +1526,13 @@ Python and links, venv configuration and all installed import bytes before
 execution. A mutable completion receipt cannot authorize reuse. These helpers do
 not register production cache orchestration, host/device readiness or placement.
 
+Native bootstrap commands and resident Demucs/ACE processes pair isolated
+Python's `-B` with inherited `PYTHONDONTWRITEBYTECODE=1`. A dependency's console
+helper can start another interpreter without the parent's command-line flags;
+it must not rewrite or inject bytecode into the verified interpreter/import
+tree. Cache verification still rejects changed files and never trusts generated
+bytecode as an alternative authority.
+
 The `shared/types/audio_separation.py` contract and
 `worker/runner/demucs/process.py` supervisor define an isolated HTDemucs job
 boundary. This component is not registered in model mounting, placement or REST;

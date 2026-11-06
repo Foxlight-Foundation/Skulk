@@ -219,8 +219,10 @@ def test_runtime_environment_owns_offline_and_thread_policy(
     monkeypatch.setenv("PYTHONPATH", "/untrusted")
     monkeypatch.setenv("HF_TOKEN", "not-a-real-token")
     monkeypatch.setenv("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "0")
     value = separation_environment(3)
     assert "PYTHONPATH" not in value and "HF_TOKEN" not in value
+    assert value["PYTHONDONTWRITEBYTECODE"] == "1"
     assert (
         value["PYTORCH_ENABLE_MPS_FALLBACK"] == "0" and value["OMP_NUM_THREADS"] == "3"
     )

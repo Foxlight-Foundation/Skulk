@@ -2712,6 +2712,10 @@ files are checked against their original object identity during download reuse:
 online retries replace corrupt bytes; offline reuse refuses them.
 
 The built-in native ACE package/process family lives in `packaging/skulk-ace-step/`.
+Native install guardians and resident Demucs/ACE processes enforce inherited
+`PYTHONDONTWRITEBYTECODE=1` as well as `-I -B`: dependency console helpers can
+re-exec plain Python and must not invalidate the sealed runtime with bytecode.
+Keep strict interpreter/import verification; generated caches are not trusted.
 Its resident CLI forks a detached custody guardian before Torch/thread startup.
 That process retains inherited service/source fences after Core or native-leader
 death. An unreaped group anchor protects the original group identity; only actual
