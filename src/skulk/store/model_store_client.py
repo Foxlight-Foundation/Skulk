@@ -1919,6 +1919,33 @@ class ModelStoreDownloader(ShardDownloader):
             Callable[[ShardMetadata, RepoDownloadProgress], Awaitable[None]]
         ] = []
 
+    @property
+    def staging_enabled(self) -> bool:
+        """Return whether this downloader must stage Store bytes before loading."""
+        return self._staging_config.enabled
+
+    @property
+    def staging_cache_path(self) -> Path:
+        """Return the configured node cache root, even when staging is disabled."""
+        return Path(self._staging_config.node_cache_path).expanduser()
+
+    def is_store_owned_path(self, directory: Path) -> bool:
+        """Return whether a path belongs to this node's authoritative Store.
+
+        Args:
+            directory: Directory being classified for local cache deletion.
+
+        Returns:
+            True for the Store root or a resolved descendant, independently of
+            whether the artifact is complete. False on non-Store nodes.
+
+        This custody check does not grant artifact or loader readiness.
+        """
+        root = self._store_client.local_store_path
+        return root is not None and directory.expanduser().resolve().is_relative_to(
+            root.expanduser().resolve()
+        )
+
     def set_staging_capacity_callback(
         self,
         callback: StagingCapacityCallback,

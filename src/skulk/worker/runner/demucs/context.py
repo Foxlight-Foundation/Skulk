@@ -107,7 +107,7 @@ class PreparedSeparationModel:
     def start(
         self, *, is_cancelled: Callable[[], bool], timeout_seconds: float = 600.0
     ) -> NativeSeparationReady:
-        """Resolve staged weights and load only after the normal download gate."""
+        """Resolve staged or canonical Store weights after the normal download gate."""
         if is_cancelled():
             raise InterruptedError("native model load was cancelled")
         if self._model is None:
@@ -120,6 +120,7 @@ class PreparedSeparationModel:
                     card.artifact_bundle.root
                     if card.artifact_bundle is not None
                     else None,
+                    expected_card=card,
                 )
             self._model = self.context.bind(self.bound, directory)
         return self._model.start(

@@ -3729,6 +3729,16 @@ download.
 
 **DELETE** `/download/{node_id}/{model_id}`
 
+Path parameters select the target node and repository-form model ID; there is
+no request body. The response contains a `command_id` acknowledging dispatch,
+not confirmation that deletion has finished. Observe node download progress
+for the result.
+
+This removes the model's ordinary default or staging cache, including flat or
+nested GGUF files. Read-only external search roots and canonical Model Store
+artifacts are protected even if an older download status labels them writable.
+Canonical artifact removal uses the Model Store lifecycle instead.
+
 ## Model Store Endpoints
 
 These endpoints are available when the model store is configured.

@@ -1350,6 +1350,33 @@ Protected runtime file/lock helpers live in `utils/runtime_files.py`; the old
 preparation can use them without loading the plugin subsystem. There is no new
 engine plugin ABI or activation framework.
 
+Native separator load waits for the normal download gate and resolves the exact
+card against staged data or an installed-card-matched canonical Store location.
+With staging disabled, the Store index supplies a contained path hint for the
+bundle-qualified generation; a duplicate conventional alias is unnecessary.
+An index cannot admit a deleted alias, a different installed card or a path
+outside its Store root.
+Canonical Store paths remain read-only in download discovery and completion.
+Cache deletion independently permits only the default model directory and its descendants or a
+descendant of the actual downloader's node cache, even for an older writable
+status. Local Store ownership always overrides cache classification. Shared
+Store and other external search roots remain protected on non-Store workers
+too. Canonical removal uses the indexed Store lifecycle; ordinary default and
+staged caches remain deletable.
+The Worker's Store-direct separator preflight uses the same card-aware lookup
+before dispatching LoadModel. Default/staging fallbacks repeat the expected
+signed-card check, so they cannot undo a refused search result. Staged loading
+retains its existing current-catalog metadata-adoption transaction.
+Index access is an explicit loader opt-in. Both coordinator completion probes
+and the Worker's already-installed shortcut allow it only for separators whose
+actual downloader/Worker staging policy is disabled. This retains offline
+canonical reuse for that loader while staged and other cardless consumers must
+first enter the configured staging transaction. The coordinator reads the
+downloader's staging policy directly rather than retaining a separate flag.
+An explicit startup-completion candidate must also be discoverable in the
+loader's existing layout or use that Store-direct policy; byte completeness
+alone cannot bypass staging.
+
 `shared/models/separation.py` defines immutable native separator card metadata.
 `AudioSeparation` and `[separation]` must agree, selecting one exact safetensors
 object and real transformer geometry, with speech and music sections excluded.

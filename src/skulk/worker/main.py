@@ -4030,7 +4030,14 @@ class Worker:
                     # Only a base whose declared companions are on disk too
                     # is already installed; otherwise the coordinator's
                     # download path fetches what is missing.
-                    found_path = installed_artifact_in_path(shard.model_card)
+                    found_path = installed_artifact_in_path(
+                        shard.model_card,
+                        include_store_index=(
+                            shard.model_card.separation is not None
+                            and self._staging_config is not None
+                            and not self._staging_config.enabled
+                        ),
+                    )
                     if found_path is not None:
                         logger.info(
                             f"Model {model_id} found in SKULK_MODELS_PATH at {found_path}"
@@ -4976,10 +4983,25 @@ class Worker:
                         shard.model_card,
                         self.state,
                     )
-                    model_directory = build_model_path(
-                        shard.model_card.model_id,
-                        shard.model_card.source_revision,
-                    )
+                    if (
+                        shard.model_card.separation is not None
+                        and self._staging_config is not None
+                        and not self._staging_config.enabled
+                    ):
+                        # The separator can load directly from a canonical
+                        # bundle generation; preflight must resolve the same
+                        # exact card as its deferred runner loader. Staged
+                        # copies retain the current-catalog adoption below.
+                        model_directory = build_model_path(
+                            shard.model_card.model_id,
+                            shard.model_card.source_revision,
+                            expected_card=shard.model_card,
+                        )
+                    else:
+                        model_directory = build_model_path(
+                            shard.model_card.model_id,
+                            shard.model_card.source_revision,
+                        )
                     await _require_installed_artifact_for_load(
                         model_directory,
                         shard.model_card,

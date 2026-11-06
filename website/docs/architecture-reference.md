@@ -177,7 +177,26 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   cancellation, without retroactively failing a verified complete render.
   Private bootstrap context and background exact-runtime revalidation connect
   this adapter to Worker supervisors without blocking unrelated planning.
-  First-mount staged weights resolve only at LoadModel.
+  First-mount weights resolve only at LoadModel. The exact card permits a
+  contained, installed-card-matched canonical Store-index location when staging
+  is disabled, including bundle-qualified directory names. Tombstoned aliases,
+  mismatched cards and escaping index paths do not gain a candidate.
+  Store-owned paths are read-only in completion/discovery. Download cache
+  deletion independently permits only the default model directory and its descendants or an actual
+  downloader node-cache descendant, even for a stale writable status. Local
+  Store ownership always overrides cache classification; shared/external roots
+  stay protected on non-Store workers. Canonical removal belongs to the indexed
+  Store lifecycle. Default and staged caches remain deletable.
+  Worker Store-direct separator preflight passes the same exact card before
+  runner dispatch. Signed identity checks also guard default/staging fallbacks;
+  staged Worker metadata adoption retains its existing current-catalog proof.
+  Index lookup defaults off; exact loaders explicitly opt in. Both coordinator
+  completion probes and the Worker shortcut allow canonical separator reuse
+  only with staging disabled, including offline cached operation. The
+  coordinator reads the actual downloader's staging policy. Staged/cardless
+  consumers retain their normal transfer and current-catalog adoption paths.
+  Startup-completion candidates must already match a loader-discoverable copy
+  or the Store-direct policy; complete bytes alone do not skip staging.
 
 - **Native result producer (initiative):** `worker/separation_output.py` verifies
   fixed private WAVs and emits bounded four-role OUTPUT_MEDIA frames. At most

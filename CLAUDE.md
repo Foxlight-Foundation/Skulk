@@ -607,7 +607,26 @@ remain separate activation work; constructing this adapter starts no model.
 The initiative Worker lazily admits source custody from actual local tasks and
 routes raw source packets to the acknowledged-input planner gate. Background
 exact-runtime revalidation supplies a private bootstrap context; weights resolve
-only at LoadModel. Recovered unowned native jobs fail without automatic replay.
+only at LoadModel. Separator resolution passes the exact card to the shared
+resolver, which can authenticate a contained canonical Store-index location
+when staging is disabled; bundle-qualified names do not require a copied alias.
+The Worker applies that lookup at its Store-direct separator preflight before
+dispatch. Default/staging fallbacks with an expected signed card repeat the
+same installed-identity check; a stale fallback cannot undo a search refusal.
+Index hints default off and exact loaders explicitly opt in. Both coordinator
+completion probes and the Worker shortcut permit canonical separator reuse only
+with staging disabled, including offline cached use. Coordinator policy comes
+from its actual downloader; staged/cardless consumers cannot skip transfer.
+Startup-completion candidates must also be loader-discoverable or use that
+Store-direct policy; byte completeness alone cannot bypass staging.
+Deleted aliases, mismatched installed cards and paths outside the Store do not
+gain eligibility from the index. Recovered unowned native jobs fail without automatic replay.
+Store-owned paths are read-only in discovery/completion; download deletion
+independently permits only the default model directory and its descendants or an actual downloader
+node-cache descendant even for an older writable status. Local Store ownership
+always overrides cache classification; shared/external roots stay protected on
+non-Store workers. Canonical removal belongs to the Store lifecycle;
+default/staged cache deletion remains available.
 `worker/separation_output.py` retains four result sets through bounded verification,
 OUTPUT_MEDIA delivery, exact reverse ACKs and joined sender/file cleanup.
 Each role waits for its own ACK before the next role is emitted.
